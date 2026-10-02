@@ -151,7 +151,7 @@ pub const ACP_AGENTS: &[AcpAgent] = &[
     AcpAgent { id: "gemini", name: "Gemini CLI", binary: "gemini", args: &["--acp"], version_marker: None, install_hint: "npm i -g @google/gemini-cli" },
     AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: "uv tool install kimi-cli" },
     AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: "npm i -g @qwen-code/qwen-code" },
-    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["acp"], version_marker: None, install_hint: "see x.ai/cli" },
+    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["agent", "stdio"], version_marker: None, install_hint: "see x.ai/cli" },
     AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: "see devin.ai/cli" },
     AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: "brew install block-goose-cli" },
     AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: "npm i -g amp-acp" },

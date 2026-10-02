@@ -2,10 +2,12 @@
 //! same channel pair: the UI sends [`Command`]s and receives normalized [`AgentEvent`]s.
 //! Sessions run on `trek_core::runtime()`; channels are executor-agnostic.
 
+mod acp;
 mod claude;
 mod codex;
 mod direct;
 
+pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
 
 use std::path::PathBuf;
@@ -75,7 +77,7 @@ pub fn start(config: SessionConfig) -> SessionHandle {
             AgentId::ClaudeCode => claude::run(config, cmd_rx, ev_tx.clone()).await,
             AgentId::Codex => codex::run(config, cmd_rx, ev_tx.clone()).await,
             AgentId::Direct(_) => direct::run(config, cmd_rx, ev_tx.clone()).await,
-            other => Err(anyhow::anyhow!("{} isn't wired up yet — coming with ACP support", other.display_name())),
+            AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, ev_tx.clone()).await,
         };
         if let Err(e) = result {
             let _ = ev_tx.send(AgentEvent::Error(format!("{e:#}"))).await;
