@@ -156,6 +156,17 @@ pub async fn run(
                         });
                         write_line(&mut stdin, &msg).await?;
                     }
+                    Command::Answer { request_id, answers } => {
+                        let request = pending.remove(&request_id).unwrap_or(json!({}));
+                        let mut input = request["input"].clone();
+                        // AskUserQuestion reads its answers from the input it gets back.
+                        input["answers"] = Value::Object(answers.into_iter().map(|(q, a)| (q, Value::String(a))).collect());
+                        let msg = json!({
+                            "type": "control_response",
+                            "response": { "subtype": "success", "request_id": request_id, "response": { "behavior": "allow", "updatedInput": input } }
+                        });
+                        write_line(&mut stdin, &msg).await?;
+                    }
                     Command::Shutdown => break,
                 }
             }
@@ -346,10 +357,33 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
             let tool = r["tool_name"].as_str().unwrap_or("tool");
             let (title, detail) = tool_title(tool, &r["input"]);
             pending.insert(request_id.clone(), r.clone());
+            let prompt = match tool {
+                "AskUserQuestion" => Some(crate::Prompt::Questions(
+                    r["input"]["questions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|q| crate::Question {
+                            question: q["question"].as_str().unwrap_or_default().to_string(),
+                            header: q["header"].as_str().unwrap_or_default().to_string(),
+                            options: q["options"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|o| (o["label"].as_str().unwrap_or_default().to_string(), o["description"].as_str().unwrap_or_default().to_string()))
+                                .collect(),
+                            multi: q["multiSelect"] == true,
+                        })
+                        .collect(),
+                )),
+                "ExitPlanMode" => Some(crate::Prompt::Plan(r["input"]["plan"].as_str().unwrap_or_default().to_string())),
+                _ => None,
+            };
             out.push(AgentEvent::PermissionRequest {
                 request_id,
                 title: r["title"].as_str().map(String::from).unwrap_or(title),
                 detail: r["description"].as_str().map(String::from).unwrap_or(detail),
+                prompt,
             });
         }
         _ => {}

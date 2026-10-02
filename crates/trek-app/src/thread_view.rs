@@ -8,7 +8,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -105,6 +105,10 @@ pub struct ThreadView {
     expanded: HashSet<usize>,
     /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes,
     /// not on every animation frame.
+    /// Picks so far for the question card on screen: (request, question index) → chosen labels.
+    picks: HashMap<(String, usize), Vec<String>>,
+    /// Rendered plan for the plan card on screen (request id, markdown).
+    plan_md: Option<(String, Entity<TextViewState>)>,
     rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, usize), std::rc::Rc<Vec<Row>>)>>,
     expanded_gen: u64,
     /// (transcript, UI) font sizes the rows were measured at; a change remeasures every row.
@@ -133,6 +137,8 @@ impl ThreadView {
             count: 0,
             md: HashMap::new(),
             expanded: HashSet::new(),
+            picks: HashMap::new(),
+            plan_md: None,
             rows_cache: Default::default(),
             expanded_gen: 0,
             fonts: (0., 0.),
@@ -603,9 +609,147 @@ impl ThreadView {
         }
     }
 
-    fn live_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let ws = self.workspace.read(cx);
+    /// The agent asked something only a person can answer: multiple-choice questions.
+    fn question_card(&mut self, id: String, request_id: String, questions: Vec<trek_agents::Question>, agent: String, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ember = palette::ember(cx);
+        let complete = questions.iter().enumerate().all(|(i, _)| self.picks.get(&(request_id.clone(), i)).is_some_and(|v| !v.is_empty()));
+        let answers: Vec<(String, String)> =
+            questions.iter().enumerate().map(|(i, q)| (q.question.clone(), self.picks.get(&(request_id.clone(), i)).map(|v| v.join(", ")).unwrap_or_default())).collect();
+        let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
+        let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id.clone(), request_id.clone());
+        let body = v_flex().gap(px(14.)).children(questions.iter().enumerate().map(|(qi, q)| {
+            let picked = self.picks.get(&(request_id.clone(), qi)).cloned().unwrap_or_default();
+            v_flex()
+                .gap(px(6.))
+                .child(div().text_size(px(13.5)).font_medium().child(q.question.clone()))
+                .when(q.multi, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("Choose any that apply.")))
+                .children(q.options.iter().enumerate().map(|(oi, (label, desc))| {
+                    let on = picked.contains(label);
+                    let (rid, label2, multi) = (request_id.clone(), label.clone(), q.multi);
+                    h_flex()
+                        .id(SharedString::from(format!("q-{request_id}-{qi}-{oi}")))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .gap(px(10.))
+                        .items_start()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(if on { ember.opacity(0.7) } else { theme.foreground.opacity(0.1) })
+                        .when(on, |el| el.bg(ember.opacity(0.08)))
+                        .when(!on, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.04))))
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .mt(px(3.))
+                                .size(px(14.))
+                                .flex_none()
+                                .when(!multi, |el| el.rounded_full())
+                                .when(multi, |el| el.rounded(px(3.)))
+                                .border_1()
+                                .border_color(if on { ember } else { theme.foreground.opacity(0.3) })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(on, |el| el.child(div().size(px(7.)).when(!multi, |d| d.rounded_full()).when(multi, |d| d.rounded(px(1.))).bg(ember))),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_size(px(13.)).child(label.clone()))
+                                .when(!desc.is_empty(), |el| el.child(div().text_xs().line_height(relative(1.45)).text_color(theme.muted_foreground).child(desc.clone()))),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let entry = this.picks.entry((rid.clone(), qi)).or_default();
+                            if multi {
+                                if let Some(pos) = entry.iter().position(|l| *l == label2) {
+                                    entry.remove(pos);
+                                } else {
+                                    entry.push(label2.clone());
+                                }
+                            } else {
+                                *entry = vec![label2.clone()];
+                            }
+                            cx.notify();
+                        }))
+                }))
+        }));
+        v_flex()
+            .w_full()
+            .max_w(px(COLUMN))
+            .max_h(px(420.))
+            .gap(px(12.))
+            .p(px(14.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.foreground.opacity(0.12))
+            .bg(theme.secondary)
+            .child(h_flex().gap_2().text_sm().child(Icon::new(crate::assets::Lucide::MessageSquare).small().text_color(theme.muted_foreground)).child(div().font_semibold().child(format!("{agent} has a question"))))
+            .child(div().id("question-scroll").flex_1().min_h_0().overflow_y_scroll().child(body))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child("Or type your own answer below and send it."))
+                    .child(Button::new("q-skip").small().ghost().label("Skip").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx))))
+                    .child(Button::new("q-send").small().primary().label("Answer").disabled(!complete).on_click(move |_, _, cx| {
+                        let answers = answers.clone();
+                        ws2.update(cx, |ws, cx| ws.answer(&id3, &rid3, answers, cx))
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The agent finished planning and wants a go-ahead before changing anything.
+    fn plan_card(&mut self, id: String, request_id: String, plan: String, agent: String, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        if self.plan_md.as_ref().is_none_or(|(rid, _)| *rid != request_id) {
+            let text = plan.clone();
+            self.plan_md = Some((request_id.clone(), cx.new(|cx| TextViewState::markdown(&text, cx))));
+        }
+        let md = self.plan_md.as_ref().map(|(_, m)| m.clone());
+        let cwd = self.workspace.read(cx).current_cwd();
+        let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
+        let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id, request_id);
+        v_flex()
+            .w_full()
+            .max_w(px(COLUMN))
+            .max_h(px(440.))
+            .gap(px(10.))
+            .p(px(14.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(palette::indigo(cx).opacity(0.45))
+            .bg(theme.secondary)
+            .child(h_flex().gap_2().text_sm().child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(palette::indigo(cx))).child(div().font_semibold().child(format!("{agent}'s plan"))))
+            .child(div().id("plan-scroll").flex_1().min_h_0().overflow_y_scroll().text_size(px(13.5)).line_height(relative(1.55)).children(md.map(|m| crate::md::view(&m, cwd, cx))))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child("Nothing has been changed yet."))
+                    .child(Button::new("plan-revise").small().outline().label("Keep planning").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx))))
+                    .child(Button::new("plan-approve").small().primary().label("Approve and start").on_click(move |_, _, cx| ws2.update(cx, |ws, cx| ws.approve_plan(&id3, &rid3, cx)))),
+            )
+            .into_any_element()
+    }
+
+    fn live_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.current.clone()?;
+        // Questions and plans get their own cards.
+        let special = {
+            let ws = self.workspace.read(cx);
+            let live = ws.live.get(&id)?;
+            let agent = ws.thread(&id)?.agent.display_name();
+            live.permissions.first().and_then(|p| p.prompt.clone().map(|prompt| (p.request_id.clone(), prompt, agent)))
+        };
+        if let Some((request_id, prompt, agent)) = special {
+            let card = match prompt {
+                trek_agents::Prompt::Questions(q) => self.question_card(id.clone(), request_id, q, agent, cx),
+                trek_agents::Prompt::Plan(plan) => self.plan_card(id.clone(), request_id, plan, agent, cx),
+            };
+            return Some(h_flex().w_full().justify_center().px_6().pb_2().child(card).into_any_element());
+        }
+        let ws = self.workspace.read(cx);
         let live = ws.live.get(&id)?;
         let thread = ws.thread(&id)?;
         let theme = cx.theme().clone();

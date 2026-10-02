@@ -78,6 +78,8 @@ pub struct PendingPermission {
     pub request_id: String,
     pub title: String,
     pub detail: String,
+    /// A question or a plan, when the agent asked for more than yes/no.
+    pub prompt: Option<trek_agents::Prompt>,
 }
 
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
@@ -1010,6 +1012,19 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // The agent is waiting on a question: what the user types is their answer, in their own words.
+        let question = self.live.get(&id).and_then(|l| l.permissions.first()).and_then(|p| match &p.prompt {
+            Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+            _ => None,
+        });
+        if let Some((request_id, questions)) = question {
+            if let Some(live) = self.live.get_mut(&id) {
+                live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()) });
+            }
+            self.answer(&id, &request_id, questions.iter().map(|q| (q.question.clone(), text.clone())).collect(), cx);
+            self.persist_items(&id);
+            return;
+        }
         // Queue mode: hold follow-ups until the running turn finishes (see `apply_events`).
         let running = self.live.get(&id).is_some_and(|l| l.turn_started.is_some() && l.commands.is_some());
         if running && self.settings.general.follow_up == FollowUp::Queue {
@@ -1247,10 +1262,14 @@ impl Workspace {
                             }
                         }
                     }
-                    AgentEvent::PermissionRequest { request_id, title, detail } => {
-                        live.permissions.push(PendingPermission { request_id, title: title.clone(), detail });
+                    AgentEvent::PermissionRequest { request_id, title, detail, prompt } => {
+                        notify_text = Some(match &prompt {
+                            Some(trek_agents::Prompt::Questions(_)) => "Needs your approval: a question for you".to_string(),
+                            Some(trek_agents::Prompt::Plan(_)) => "Needs your approval: a plan to review".to_string(),
+                            None => format!("Needs your approval: {title}"),
+                        });
+                        live.permissions.push(PendingPermission { request_id, title, detail, prompt });
                         run_state = Some(RunState::NeedsYou);
-                        notify_text = Some(format!("Needs your approval: {title}"));
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
@@ -1414,6 +1433,31 @@ impl Workspace {
             self.mutate_thread(id, cx, |t| t.run_state = RunState::Working);
         }
         cx.notify();
+    }
+
+    /// Answer the agent's questions: `(question, chosen labels)`.
+    pub fn answer(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let mut still_waiting = false;
+        if let Some(live) = self.live.get_mut(id) {
+            live.permissions.retain(|p| p.request_id != request_id);
+            still_waiting = !live.permissions.is_empty();
+            if let Some(tx) = &live.commands {
+                let _ = tx.try_send(Command::Answer { request_id: request_id.to_string(), answers });
+            }
+            live.revision += 1;
+        }
+        if !still_waiting {
+            self.mutate_thread(id, cx, |t| t.run_state = RunState::Working);
+        }
+        cx.notify();
+    }
+
+    /// Approve the agent's plan: it leaves plan mode and starts the work.
+    pub fn approve_plan(&mut self, id: &str, request_id: &str, cx: &mut Context<Self>) {
+        if let Some(live) = self.live.get_mut(id) {
+            live.plan = false;
+        }
+        self.respond(id, request_id, Decision::Allow, cx);
     }
 
     pub fn interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1852,6 +1896,8 @@ impl Workspace {
             .map(|l| {
                 l.permissions
                     .iter()
+                    // Questions and plans always need a person, whatever the level.
+                    .filter(|p| p.prompt.is_none())
                     .filter(|p| match level {
                         HandHolding::FullAccess => true,
                         HandHolding::AutoAcceptEdits | HandHolding::Auto => matches!(p.title.as_str(), "Edit" | "Write"),
@@ -2025,6 +2071,12 @@ impl Workspace {
 
     pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
         if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. }) {
+            return;
+        }
+        // A local build has no signing key and no release channel: never ask the network for one.
+        if !trek_core::update::can_update() {
+            self.update = if user_initiated { UpdateStatus::Failed("this is a local build, which updates when you rebuild it".into()) } else { UpdateStatus::Idle };
+            cx.notify();
             return;
         }
         self.update = UpdateStatus::Checking;

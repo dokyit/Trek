@@ -646,6 +646,7 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let status = self.workspace.read(cx).update.clone();
         let (line, busy) = match &status {
+            _ if !trek_core::update::can_update() => ("A local build. It doesn't update itself; rebuild to update.".to_string(), false),
             UpdateStatus::Idle => ("You're on the latest version you've checked for.".to_string(), false),
             UpdateStatus::Checking => ("Checking for updates…".into(), true),
             UpdateStatus::UpToDate => ("Trek is up to date.".into(), false),
@@ -663,6 +664,7 @@ impl SettingsView {
                 .small()
                 .outline()
                 .loading(busy)
+                .disabled(!trek_core::update::can_update())
                 .label("Check now")
                 .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_for_updates(true, cx))))
         };

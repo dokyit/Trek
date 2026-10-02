@@ -666,6 +666,7 @@ impl Sidebar {
         let status = ws.update.clone();
         let channel = format!("{:?}", ws.settings.updates.channel);
         let (line, action): (String, Option<(&'static str, bool)>) = match &status {
+            _ if !trek_core::update::can_update() => ("This is a local build. It updates when you rebuild it.".to_string(), None),
             UpdateStatus::Idle | UpdateStatus::UpToDate => (format!("Trek {} is up to date.", trek_core::VERSION), Some(("Check for updates", false))),
             UpdateStatus::Checking => ("Checking for updates…".into(), None),
             UpdateStatus::Available { version, .. } => (format!("Trek {version} is available."), Some(("Download", false))),

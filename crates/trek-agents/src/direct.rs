@@ -60,7 +60,8 @@ pub async fn run(
                 model = m;
                 effort = e;
             }
-            Command::Shutdown => break,
+            Command::Answer { .. } => {}
+                    Command::Shutdown => break,
             Command::Interrupt | Command::Respond { .. } | Command::SetHandHolding(_) => {}
         }
     }

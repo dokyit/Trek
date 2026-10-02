@@ -207,6 +207,7 @@ pub async fn run(
                             rpc.send(&json!({ "id": rpc_id, "result": { "decision": d } })).await?;
                         }
                     }
+                    Command::Answer { .. } => {}
                     Command::Shutdown => break,
                 }
             }
@@ -256,7 +257,7 @@ async fn handle_incoming(
                     ("Run command".to_string(), p["command"].as_str().unwrap_or_default().to_string())
                 };
                 pending.insert(request_id.clone(), rpc_id);
-                events.send(AgentEvent::PermissionRequest { request_id, title, detail }).await?;
+                events.send(AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }).await?;
             }
             _ => {
                 // Unsupported request types (user-input questions, MCP elicitation): decline politely.

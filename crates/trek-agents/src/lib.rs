@@ -63,8 +63,28 @@ pub enum Decision {
     Deny,
 }
 
+/// Something richer than allow/deny that the agent put to the user.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Prompt {
+    /// Multiple-choice questions (Claude's AskUserQuestion).
+    Questions(Vec<Question>),
+    /// A plan to approve before the agent starts changing things (Claude's ExitPlanMode), as Markdown.
+    Plan(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Question {
+    pub question: String,
+    pub header: String,
+    /// `(label, description)`
+    pub options: Vec<(String, String)>,
+    pub multi: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
+    /// Answers to a `Prompt::Questions` request: `(question, chosen labels or free text)`.
+    Answer { request_id: String, answers: Vec<(String, String)> },
     /// A user message; `images` are local image files attached before the text.
     Prompt { text: String, images: Vec<PathBuf> },
     Interrupt,
@@ -85,7 +105,8 @@ pub enum AgentEvent {
     ReasoningDelta(String),
     ToolStarted { id: String, title: String, detail: String },
     ToolFinished { id: String, output: String, ok: bool },
-    PermissionRequest { request_id: String, title: String, detail: String },
+    /// The agent needs the user: a yes/no approval, or (`prompt`) a question or a plan to review.
+    PermissionRequest { request_id: String, title: String, detail: String, prompt: Option<Prompt> },
     /// A diff stat for the turn, when the agent reports one.
     DiffStat { additions: i64, deletions: i64 },
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },

@@ -14,8 +14,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Minisign public key for release artifacts. Empty in dev builds → signature check is skipped
-/// but SHA-256 is still enforced.
+/// Minisign public key for release artifacts. Builds without one (local builds) never check for
+/// or install updates: an unsigned update from the network must not replace the app.
 pub const PUBLIC_KEY: &str = match option_env!("TREK_UPDATE_PUBKEY") {
     Some(k) => k,
     None => "",
@@ -52,6 +52,11 @@ pub fn platform_key() -> String {
         other => other,
     };
     format!("{os}-{}", std::env::consts::ARCH)
+}
+
+/// Whether this build can update itself (it was compiled with the release signing key).
+pub fn can_update() -> bool {
+    !PUBLIC_KEY.is_empty()
 }
 
 pub fn current_version() -> semver::Version {
@@ -122,8 +127,7 @@ pub async fn download(update: &AvailableUpdate, mut progress: impl FnMut(f32)) -
 
 fn verify_signature(path: &Path, signature: &str) -> Result<()> {
     if PUBLIC_KEY.is_empty() {
-        tracing::warn!("no update public key compiled in; skipping signature check");
-        return Ok(());
+        bail!("this build has no update signing key; refusing an unsigned update");
     }
     let pk = minisign_verify::PublicKey::from_base64(PUBLIC_KEY).context("bad public key")?;
     let sig = minisign_verify::Signature::decode(signature).context("bad signature")?;

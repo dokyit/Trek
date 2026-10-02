@@ -686,6 +686,7 @@ pub async fn run(
                             agent.rpc.reply(rpc_id, Ok(permission_outcome(pick_option(&options, decision)))).await?;
                         }
                     }
+                    Command::Answer { .. } => {}
                     Command::Shutdown => break,
                 }
             }
@@ -790,7 +791,7 @@ impl Live {
         let detail = Some(tool_detail(tc)).filter(|d| !d.is_empty()).or(known.map(|t| t.detail.clone())).unwrap_or_default();
         let request_id = format!("acp-{rpc_id}");
         self.perms.insert(request_id.clone(), (rpc_id, options));
-        Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail }])
+        Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }])
     }
 }
 
