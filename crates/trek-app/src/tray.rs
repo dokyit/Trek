@@ -127,14 +127,24 @@ struct TrayGlobal(#[allow(dead_code)] Entity<Tray>);
 impl Global for TrayGlobal {}
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
-    if !workspace.read(cx).settings.notifications.menu_bar_icon {
-        return;
-    }
-    match build() {
-        Ok(parts) => {
-            let tray = cx.new(|cx| Tray::new(parts, workspace, cx));
-            cx.set_global(TrayGlobal(tray));
+    let on = workspace.read(cx).settings.notifications.menu_bar_icon;
+    set_enabled(workspace, on, cx);
+}
+
+/// Add or remove the menu bar item (`notifications.menu_bar_icon`). Dropping the tray entity
+/// drops its `TrayIcon`, which removes the status item.
+pub fn set_enabled(workspace: Entity<Workspace>, on: bool, cx: &mut App) {
+    match (on, cx.has_global::<TrayGlobal>()) {
+        (true, false) => match build() {
+            Ok(parts) => {
+                let tray = cx.new(|cx| Tray::new(parts, workspace, cx));
+                cx.set_global(TrayGlobal(tray));
+            }
+            Err(e) => tracing::warn!("menu bar icon unavailable: {e}"),
+        },
+        (false, true) => {
+            cx.remove_global::<TrayGlobal>();
         }
-        Err(e) => tracing::warn!("menu bar icon unavailable: {e}"),
+        _ => {}
     }
 }

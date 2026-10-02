@@ -6,7 +6,7 @@ use crate::palette;
 use crate::ui::{self, Pill};
 use crate::workspace::{PanelTool, Prefs, Route, Workspace, WorkspaceEvent};
 use crate::TogglePlan;
-use gpui_kit::component::input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
@@ -53,6 +53,8 @@ pub struct Composer {
     snapshotting: bool,
     /// Set when Enter picked a row, so the same keypress doesn't also send.
     swallow_enter: Option<std::time::Instant>,
+    /// `general.send_with_cmd_enter`: ↩ inserts a newline and ⌘↩ sends (else ↩ sends, ⇧↩ newline).
+    cmd_enter: bool,
     picker_scroll: ScrollHandle,
     /// Width of the composer card at last layout; narrow cards get compact pills.
     width: std::rc::Rc<std::cell::Cell<Pixels>>,
@@ -89,16 +91,18 @@ fn hand_icon(level: HandHolding) -> Icon {
 
 impl Composer {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(true).placeholder("Ask, build, / for commands, @ for files")
+            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder("Ask, build, / for commands, @ for files")
         });
         let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models"));
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
+                if let InputEvent::PressEnter { shift, secondary } = event {
+                    let send = if this.cmd_enter { *secondary } else { !*shift };
                     let swallowed = this.swallow_enter.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250));
-                    if this.trigger.is_none() && !swallowed {
+                    if send && this.trigger.is_none() && !swallowed {
                         this.submit(state.clone(), window, cx);
                     }
                 } else if matches!(event, InputEvent::Change) {
@@ -106,7 +110,14 @@ impl Composer {
                     cx.notify();
                 }
             }),
-            cx.observe(&workspace, |_, _, cx| cx.notify()),
+            cx.observe(&workspace, |this, ws, cx| {
+                let cmd_enter = ws.read(cx).settings.general.send_with_cmd_enter;
+                if cmd_enter != this.cmd_enter {
+                    this.cmd_enter = cmd_enter;
+                    this.input.update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
+                }
+                cx.notify()
+            }),
             cx.observe(&model_search, |_, _, cx| cx.notify()),
         ];
         Self {
@@ -125,6 +136,7 @@ impl Composer {
             indexing: None,
             snapshotting: false,
             swallow_enter: None,
+            cmd_enter,
             picker_scroll: ScrollHandle::new(),
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             _subscriptions: subscriptions,
@@ -401,6 +413,18 @@ impl Composer {
         self.picker_scroll.scroll_to_item(self.picked);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Enter reaches us before the textarea: it picks a row while a picker is open, and sends on
+    /// ⌘↩ in "send with ⌘↩" mode (the textarea would otherwise insert a newline first).
+    fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.trigger.is_some() && !action.shift && !action.secondary {
+            self.picker_action("enter", window, cx);
+        } else if self.cmd_enter && action.secondary && !action.shift {
+            cx.stop_propagation();
+            let input = self.input.clone();
+            self.submit(input, window, cx);
+        }
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1050,6 +1074,7 @@ impl Render for Composer {
         let is_draft = matches!(ws.route, Route::Draft { .. });
         let running = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
         let cost = thread.as_ref().and_then(|t| ws.live.get(&t.id)).map(|l| l.cost_usd).unwrap_or(0.0);
+        let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let models = ws.models_for(&prefs.agent);
         let model_label = prefs
             .model
@@ -1233,6 +1258,7 @@ impl Render for Composer {
                 .text_color(theme.muted_foreground)
                 .child(h_flex().gap(px(6.)).child(ui::agent_glyph(&prefs.agent, cx)).child(prefs.agent.display_name()))
                 .when(cost >= 0.005, |el| el.child(format!("${cost:.2} this thread")))
+                .when(queued > 0, |el| el.child(format!("{queued} queued")))
                 .child(div().flex_1())
                 .child(
                     h_flex()
@@ -1258,6 +1284,7 @@ impl Render for Composer {
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| this.picker_action("down", window, cx)))
             .capture_action(cx.listener(|this, _: &Escape, window, cx| this.picker_action("escape", window, cx)))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.picker_action("tab", window, cx)))
+            .capture_action(cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)))
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
             .child(v_flex().w_full().max_w(px(760.)).children(chips).child(card).children(status))
     }

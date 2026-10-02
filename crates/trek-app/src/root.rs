@@ -43,6 +43,7 @@ impl TrekWindow {
             }),
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
                 WorkspaceEvent::Toast { message, undo } => this.toast(message.clone(), undo.clone(), window, cx),
+                WorkspaceEvent::Attention { message, viewing } => this.attention(message.clone(), *viewing, window, cx),
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 WorkspaceEvent::OpenTool(tool) => {
                     let tool = *tool;
@@ -75,12 +76,25 @@ impl TrekWindow {
         Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, _subscriptions: subscriptions }
     }
 
-    fn toast(&mut self, message: String, undo: Option<UndoAction>, window: &mut Window, cx: &mut Context<Self>) {
-        let system = message.starts_with("Needs your approval") || message.starts_with("Finished:");
-        let mut note = Notification::new().message(message);
-        if system && !window.is_window_active() {
-            note = note.in_app_and_system();
+    /// A thread needs the user or finished: toast, banner and sound per the notification settings.
+    fn attention(&mut self, message: String, viewing: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.workspace.read(cx).settings.notifications.clone();
+        let alert = crate::system::alert_for(&settings, window.is_window_active(), viewing);
+        if alert.sound {
+            crate::system::play_alert_sound();
         }
+        let note = Notification::new().message(message);
+        let note = match (alert.toast, alert.banner) {
+            (true, true) => note.in_app_and_system(),
+            (false, true) => note.system(),
+            (true, false) => note,
+            (false, false) => return,
+        };
+        window.push_notification(note, cx);
+    }
+
+    fn toast(&mut self, message: String, undo: Option<UndoAction>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut note = Notification::new().message(message);
         if let Some(action) = undo {
             let ws = self.workspace.downgrade();
             note = note.action(move |_, _, _| {

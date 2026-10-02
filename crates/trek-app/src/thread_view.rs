@@ -97,6 +97,8 @@ pub struct ThreadView {
     /// Markdown state per transcript index, with the byte length already pushed.
     md: HashMap<usize, (Entity<TextViewState>, usize)>,
     expanded: HashSet<usize>,
+    /// (transcript, UI) font sizes the rows were measured at; a change remeasures every row.
+    fonts: (f32, f32),
     _subscriptions: Vec<Subscription>,
     _ticker: Option<Task<()>>,
 }
@@ -113,6 +115,7 @@ impl ThreadView {
             count: 0,
             md: HashMap::new(),
             expanded: HashSet::new(),
+            fonts: (0., 0.),
             _subscriptions: subscriptions,
             _ticker: None,
         };
@@ -131,6 +134,14 @@ impl ThreadView {
             Some(l) => (l.items.clone(), l.revision, l.turn_started.is_some()),
             None => (vec![], 0, false),
         };
+        let fonts = (ws.settings.appearance.transcript_font_size(), ws.settings.appearance.ui_font_size());
+        if fonts != self.fonts {
+            self.fonts = fonts;
+            let count = self.count;
+            if count > 0 {
+                self.scroller.update(cx, |s, cx| _ = s.remeasure_items(0..count, cx));
+            }
+        }
         let switched = id != self.current;
         if switched {
             self.current = id;
@@ -271,7 +282,7 @@ impl ThreadView {
         out
     }
 
-    fn render_row(row: Row, view: WeakEntity<ThreadView>, cx: &App) -> AnyElement {
+    fn render_row(row: Row, view: WeakEntity<ThreadView>, text_size: Pixels, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let child_view = view.clone();
         let column = |el: Div| h_flex().w_full().justify_center().px_6().child(el.w_full().max_w(px(COLUMN)));
@@ -317,7 +328,7 @@ impl ThreadView {
                             .gap_1()
                             .rounded(px(18.))
                             .bg(theme.secondary)
-                            .text_size(px(14.5))
+                            .text_size(text_size)
                             .line_height(relative(1.5))
                             .child(div().when(long && !open, |el| el.line_clamp(10)).child(text))
                             .when(long, |el| {
@@ -337,7 +348,7 @@ impl ThreadView {
             }
             .into_any_element(),
             Row::Assistant(md) => column(
-                div().py_2().text_size(px(14.5)).line_height(relative(1.6)).child(TextView::new(&md).selectable(true).stream_fade(true)),
+                div().py_2().text_size(text_size).line_height(relative(1.6)).child(TextView::new(&md).selectable(true).stream_fade(true)),
             )
                 .into_any_element(),
             Row::Reasoning { ix, md, live, open } => column(
@@ -402,7 +413,7 @@ impl ThreadView {
                                     .pl_4()
                                     .border_l_1()
                                     .border_color(theme.border)
-                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), cx))),
+                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), text_size, cx))),
                             )
                         }),
                 )
@@ -611,12 +622,13 @@ impl Render for ThreadView {
             return v_flex().size_full().child(self.empty_state(cx)).children(footer);
         }
         let view = cx.entity().downgrade();
+        let text_size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
         v_flex()
             .size_full()
             .child(
                 div().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.get(ix).cloned() {
-                        Some(row) => ThreadView::render_row(row, view.clone(), cx),
+                        Some(row) => ThreadView::render_row(row, view.clone(), text_size, cx),
                         None => div().into_any_element(),
                     })
                     .with_list_style(StyleRefinement::default().pt_4().pb_6())
