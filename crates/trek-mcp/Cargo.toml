@@ -1,0 +1,16 @@
+[package]
+name = "trek-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model Context Protocol server (stdio) giving coding agents macOS computer use and iOS Simulator control"
+
+[[bin]]
+name = "trek-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+base64 = "0.22"
+core-graphics = { version = "0.24", features = ["highsierra"] }
+core-foundation = "0.10"
