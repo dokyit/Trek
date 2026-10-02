@@ -140,7 +140,7 @@ echo "• $OUT/$CHANNEL.json → ${BASE%/}/$NAME"
 ASSETS=("$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$CHANNEL.json")
 if (( DRY )); then
   echo "• dry run: built $OUT; not committing, tagging, pushing or publishing. Would publish:"
-  echo "    $REPO release $RELEASE_TAG ($CHANNEL): ${ASSETS[*]:t}"
+  echo "    $REPO release $RELEASE_TAG ($CHANNEL): ${(j:, :)${ASSETS[@]:t}}"
   exit 0
 fi
 

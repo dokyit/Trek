@@ -158,12 +158,26 @@ fn http() -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// A network failure in a sentence, without reqwest's URL-and-cause chain.
+fn net_error(e: reqwest::Error) -> anyhow::Error {
+    let host = e.url().and_then(|u| u.host_str()).unwrap_or("the update server").to_string();
+    if e.is_connect() {
+        anyhow!("couldn't connect to {host}")
+    } else if e.is_timeout() {
+        anyhow!("{host} took too long to answer")
+    } else if let Some(status) = e.status() {
+        anyhow!("{host} answered {status}")
+    } else {
+        anyhow!("{}", e.without_url())
+    }
+}
+
 async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest> {
-    let resp = client.get(url).timeout(std::time::Duration::from_secs(20)).send().await?;
+    let resp = client.get(url).timeout(std::time::Duration::from_secs(20)).send().await.map_err(net_error)?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         bail!("no release has been published on this channel yet");
     }
-    let bytes = resp.error_for_status()?.bytes().await?;
+    let bytes = resp.error_for_status().map_err(net_error)?.bytes().await.map_err(net_error)?;
     serde_json::from_slice(&bytes).with_context(|| format!("unreadable update manifest at {url}"))
 }
 
@@ -216,11 +230,11 @@ pub async fn download(update: &AvailableUpdate, mut progress: impl FnMut(f32)) -
     // Refuse before downloading anything if the release isn't signed for this version.
     let key = minisign_verify::PublicKey::from_base64(public_key()).context("this build's update key is invalid")?;
     let signature = signature_for(&update.artifact.signature, &update.version)?;
-    let mut verifier = key.verify_stream(&signature).context("the update is signed with another key")?;
+    let mut verifier = key.verify_stream(&signature).context("the update isn't signed with this build's release key")?;
 
     let dest = crate::paths::updates_dir().join(format!("Trek-{}.tar.gz", update.version));
     let partial = dest.with_extension("gz.part");
-    let resp = http()?.get(&update.artifact.url).send().await?.error_for_status()?;
+    let resp = http()?.get(&update.artifact.url).send().await.and_then(|r| r.error_for_status()).map_err(net_error)?;
     let total = resp.content_length().unwrap_or(0);
     let mut file = tokio::fs::File::create(&partial).await?;
     let mut hasher = sha2::Sha256::new();
@@ -228,7 +242,7 @@ pub async fn download(update: &AvailableUpdate, mut progress: impl FnMut(f32)) -
     let mut stream = resp.bytes_stream();
     let result: Result<()> = async {
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(net_error)?;
             hasher.update(&chunk);
             verifier.update(&chunk);
             file.write_all(&chunk).await?;

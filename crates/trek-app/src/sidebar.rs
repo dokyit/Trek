@@ -664,7 +664,7 @@ impl Sidebar {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
-        let notes = ws.update_notes();
+        let notes = ws.update_notes().map(|u| (u.version.to_string(), u.notes.clone()));
         let channel = format!("{:?}", ws.settings.updates.channel);
         ui::menu_surface(cx)
             .w(px(320.))

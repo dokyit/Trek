@@ -2130,33 +2130,16 @@ impl Workspace {
     // ---------- updates ----------
 
     pub fn update_view(&self) -> UpdateView {
-        let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, busy: false, progress: None };
-        if let Some(blocker) = trek_core::update::blocker() {
-            return view(blocker.message().into(), None);
-        }
-        match &self.update {
-            UpdateStatus::Idle if self.settings.updates.auto_check => view("Trek checks for updates once a day.".into(), Some(UpdateAction::Check)),
-            UpdateStatus::Idle => view("Automatic checks are off.".into(), Some(UpdateAction::Check)),
-            UpdateStatus::Checking => UpdateView { busy: true, ..view("Checking for updates…".into(), Some(UpdateAction::Check)) },
-            UpdateStatus::UpToDate => view(format!("Trek {} is up to date.", trek_core::VERSION), Some(UpdateAction::Check)),
-            UpdateStatus::Available { version } => view(format!("Trek {version} is available."), Some(UpdateAction::Download)),
-            UpdateStatus::Downloading { version, progress } => {
-                UpdateView { busy: true, progress: Some(*progress), ..view(format!("Downloading Trek {version} · {:.0}%", progress * 100.), None) }
-            }
-            UpdateStatus::Ready { version, .. } => view(format!("Trek {version} is ready. Restart now, or it installs when you quit."), Some(UpdateAction::Restart)),
-            UpdateStatus::RestartPending { version, .. } => view(format!("Trek restarts into {version} when your agents finish."), None),
-            UpdateStatus::Failed(e) => view(e.clone(), Some(UpdateAction::Check)),
-        }
+        describe_update(&self.update, self.settings.updates.auto_check, trek_core::update::blocker())
     }
 
-    /// Release notes of the update on offer, while it's on offer: `(version, notes)`.
-    pub fn update_notes(&self) -> Option<(String, String)> {
+    /// The update on offer, while it's on offer and has release notes.
+    pub fn update_notes(&self) -> Option<&trek_core::update::AvailableUpdate> {
         let offered = matches!(
             self.update,
             UpdateStatus::Available { .. } | UpdateStatus::Downloading { .. } | UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. }
         );
-        let offer = self.update_offer.as_ref().filter(|o| offered && !o.notes.is_empty())?;
-        Some((offer.version.to_string(), offer.notes.clone()))
+        self.update_offer.as_ref().filter(|o| offered && !o.notes.is_empty())
     }
 
     pub fn run_update_action(&mut self, action: UpdateAction, cx: &mut Context<Self>) {
@@ -2341,6 +2324,27 @@ impl Workspace {
     }
 }
 
+/// The updater's status line and next action for a state.
+fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<trek_core::update::Blocker>) -> UpdateView {
+    let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, busy: false, progress: None };
+    if let Some(blocker) = blocker {
+        return view(blocker.message().into(), None);
+    }
+    match status {
+        UpdateStatus::Idle if auto_check => view("Trek checks for updates once a day.".into(), Some(UpdateAction::Check)),
+        UpdateStatus::Idle => view("Automatic checks are off.".into(), Some(UpdateAction::Check)),
+        UpdateStatus::Checking => UpdateView { busy: true, ..view("Checking for updates…".into(), Some(UpdateAction::Check)) },
+        UpdateStatus::UpToDate => view(format!("Trek {} is up to date.", trek_core::VERSION), Some(UpdateAction::Check)),
+        UpdateStatus::Available { version } => view(format!("Trek {version} is available."), Some(UpdateAction::Download)),
+        UpdateStatus::Downloading { version, progress } => {
+            UpdateView { busy: true, progress: Some(*progress), ..view(format!("Downloading Trek {version} · {:.0}%", progress * 100.), None) }
+        }
+        UpdateStatus::Ready { version, .. } => view(format!("Trek {version} is ready. Restart now, or it installs when you quit."), Some(UpdateAction::Restart)),
+        UpdateStatus::RestartPending { version, .. } => view(format!("Trek restarts into {version} when your agents finish."), None),
+        UpdateStatus::Failed(e) => view(e.clone(), Some(UpdateAction::Check)),
+    }
+}
+
 /// The settings that seed a new thread's composer.
 fn default_prefs_key(s: &Settings) -> (String, Option<String>, Effort, HandHolding) {
     let g = &s.general;
@@ -2391,4 +2395,34 @@ pub fn trek_mcp_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     [dir.join("trek-mcp"), dir.join("../Resources/trek-mcp")].into_iter().find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import brings its own `test` attribute.
+    use super::{UpdateAction, UpdateStatus, describe_update};
+    use std::path::PathBuf;
+    use trek_core::update::Blocker;
+
+    #[test]
+    fn updater_offers_one_next_step_per_state() {
+        let action = |s: UpdateStatus| describe_update(&s, true, None).action;
+        let staged = PathBuf::from("/tmp/Trek.app");
+        assert_eq!(action(UpdateStatus::Idle), Some(UpdateAction::Check));
+        assert_eq!(action(UpdateStatus::Available { version: "0.2.1".into() }), Some(UpdateAction::Download));
+        assert_eq!(action(UpdateStatus::Downloading { version: "0.2.1".into(), progress: 0.5 }), None);
+        assert_eq!(action(UpdateStatus::Ready { version: "0.2.1".into(), staged: staged.clone() }), Some(UpdateAction::Restart));
+        assert_eq!(action(UpdateStatus::RestartPending { version: "0.2.1".into(), staged }), None);
+        assert_eq!(action(UpdateStatus::Failed("Couldn't check for updates: offline".into())), Some(UpdateAction::Check));
+        let downloading = describe_update(&UpdateStatus::Downloading { version: "0.2.1".into(), progress: 0.42 }, true, None);
+        assert_eq!((downloading.line.as_str(), downloading.busy, downloading.progress), ("Downloading Trek 0.2.1 · 42%", true, Some(0.42)));
+        assert_eq!(describe_update(&UpdateStatus::Idle, false, None).line, "Automatic checks are off.");
+    }
+
+    #[test]
+    fn builds_that_cant_replace_themselves_offer_nothing() {
+        let dev = describe_update(&UpdateStatus::Idle, true, Some(Blocker::DevBuild));
+        assert_eq!((dev.action, dev.line.as_str()), (None, Blocker::DevBuild.message()));
+        assert_eq!(describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::Translocated)).action, None);
+    }
 }

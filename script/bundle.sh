@@ -62,5 +62,7 @@ echo "• signed with \"$(trek_sign_identity)\" ($(trek_sign_identity_kind))"
 du -sh "$APP"
 
 if [[ "${1:-}" == "--install" ]]; then
-  rm -rf /Applications/Trek.app && cp -R "$APP" /Applications/ && echo "• installed to /Applications/Trek.app"
+  # ditto without extended attributes: Finder and file-provider metadata on a synced folder
+  # would otherwise follow the app and trip strict signature checks.
+  rm -rf /Applications/Trek.app && ditto --noextattr --norsrc "$APP" /Applications/Trek.app && echo "• installed to /Applications/Trek.app"
 fi

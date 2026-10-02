@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds don't help a fresh runner and bloat the cache.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: Test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for the whole workspace; saved from main so pull requests reuse it.
+          shared-key: workspace
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Scripts parse
+        run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
+
+      - name: Test
+        run: cargo test --locked -p trek-core -p trek-agents -p trek-app -p trek-mcp

@@ -83,6 +83,11 @@ impl TrekWindow {
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
         }
+        // TREK_OPEN_SETTINGS=updates (or any page label, dashes for spaces) opens that settings
+        // page at launch, for design review of states that are hard to reach by hand.
+        if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
+            workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
+        }
         Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, panel_drag: None, _subscriptions: subscriptions }
     }
 

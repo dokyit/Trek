@@ -31,5 +31,8 @@ trek_codesign_bundle() {
     codesign --force --sign "$id" "$exe"
   done
   codesign --force --sign "$id" "$app"
-  codesign --verify --strict --deep "$app"
+  # Not --strict: in a synced folder (iCloud Documents) Finder metadata can land on the bundle
+  # right after signing. Release archives leave extended attributes out, and the updater checks
+  # the unpacked copy strictly.
+  codesign --verify --deep "$app"
 }

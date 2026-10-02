@@ -646,7 +646,10 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
-        let notes = ws.update_notes();
+        let notes = ws.update_notes().map(|u| {
+            let date = chrono::DateTime::parse_from_rfc3339(&u.pub_date).ok().map(|d| d.format("%B %-d, %Y").to_string());
+            (u.version.to_string(), u.notes.clone(), date)
+        });
         let action = view.action.map(|action| {
             Button::new("update-action")
                 .small()
@@ -659,22 +662,30 @@ impl SettingsView {
         let header = h_flex()
             .gap(px(14.))
             .pb(px(24.))
-            .child(crate::brand::logo_mark(px(36.)))
+            .child(div().flex_none().child(crate::brand::logo_mark(px(36.))))
             .child(
                 v_flex()
                     .flex_1()
+                    .min_w_0()
                     .gap(px(2.))
                     .child(div().text_size(px(15.)).font_semibold().child(format!("Trek {}", trek_core::VERSION)))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(view.line))
+                    .child(div().text_size(px(12.5)).line_height(relative(1.5)).text_color(theme.muted_foreground).child(view.line))
                     .when_some(view.progress, |el, p| {
                         el.child(div().mt(px(6.)).h(px(4.)).max_w(px(280.)).rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(palette::ember(cx)).w(relative(p))))
                     }),
             )
-            .children(action)
+            .children(action.map(|b| div().flex_none().child(b)))
             .into_any_element();
         let mut page = vec![header];
-        if let Some((version, notes)) = notes {
-            page.push(div().pb(px(10.)).text_size(px(13.)).font_semibold().child(format!("What's new in Trek {version}")).into_any_element());
+        if let Some((version, notes, date)) = notes {
+            page.push(
+                h_flex()
+                    .pb(px(10.))
+                    .gap(px(8.))
+                    .child(div().text_size(px(13.)).font_semibold().child(format!("What's new in Trek {version}")))
+                    .when_some(date, |el, d| el.child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(d)))
+                    .into_any_element(),
+            );
             page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::release_notes("update-notes", notes, px(320.), cx)).into_any_element());
         }
         page.push(ui::group(

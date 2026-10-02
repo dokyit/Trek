@@ -47,6 +47,12 @@ const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
 
+/// A settings page by its label, case-insensitive with dashes for spaces ("updates", "api-keys").
+pub fn page_named(name: &str) -> Option<SettingsPage> {
+    let name = name.trim().to_lowercase();
+    NAV_GROUPS.iter().flat_map(|(_, pages)| pages.iter().copied()).find(|p| p.label().to_lowercase().replace(' ', "-") == name)
+}
+
 fn page_blurb(p: SettingsPage) -> &'static str {
     match p {
         SettingsPage::Project => "",
@@ -62,7 +68,7 @@ fn page_blurb(p: SettingsPage) -> &'static str {
         SettingsPage::LocalModels => "Model servers running on this Mac: Ollama, LM Studio, and llama.cpp or MLX. Trek finds them on their usual ports.",
         SettingsPage::Permissions => "How much each agent may do without asking.",
         SettingsPage::Import => "Trek reads, and never changes, the threads other agents keep on this Mac, so you can browse and continue them here.",
-        SettingsPage::Updates => "Trek checks for updates and installs them when you restart.",
+        SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.",
         SettingsPage::About => "",
     }
 }
@@ -717,5 +723,19 @@ impl Render for SettingsView {
                     .children(body),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import brings its own `test` attribute.
+    use super::{SettingsPage, page_named};
+
+    #[test]
+    fn pages_resolve_by_label() {
+        assert_eq!(page_named("updates"), Some(SettingsPage::Updates));
+        assert_eq!(page_named(" API-Keys "), Some(SettingsPage::ApiKeys));
+        assert_eq!(page_named("agents-&-subscriptions"), Some(SettingsPage::Agents));
+        assert_eq!(page_named("nowhere"), None);
     }
 }
