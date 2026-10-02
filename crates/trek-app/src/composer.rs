@@ -144,6 +144,27 @@ impl Composer {
         handle.focus(window, cx);
     }
 
+    /// Insert text at the cursor (on its own line if the cursor is mid-text) and focus the composer.
+    pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| {
+            let value = s.value().to_string();
+            let cursor = s.cursor().min(value.len());
+            let needs_break = cursor > 0 && !value[..cursor].ends_with('\n');
+            let text = if needs_break { format!("\n{text}") } else { text.to_string() };
+            s.insert(text, window, cx);
+        });
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Attach an image file (shown in the attachment strip, sent with the next message).
+    pub fn attach_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.attachments.contains(&path) {
+            self.attachments.push(path);
+        }
+        cx.notify();
+    }
+
     fn update_prefs(&self, cx: &mut App, f: impl FnOnce(&mut Prefs)) {
         self.workspace.update(cx, |ws, cx| {
             let mut p = ws.prefs();
