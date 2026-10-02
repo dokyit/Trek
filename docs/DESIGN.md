@@ -172,3 +172,25 @@ Keyboard Shortcuts · Updates · Advanced · About.
    what each will and won't do. Default: Auto-accept edits.
 5. **Open a project**: Open folder… · Clone from GitHub (via `gh` auth) · recent folders found from imported threads.
 6. **Done**: beacon ignites, "Start your trek."
+
+## v4 (request 3)
+- **Sidebar = T3 nightly.** Search row with three icons: *Filter by project* (popover: search, All projects,
+  monogram rows with a ⚙ menu: Reveal in Finder, New thread here), *Add project* (Open folder / Clone from
+  GitHub), *New thread*. Footer: ⚙ Settings · Source control · Usage · (spacer) · Updater. The updater is a
+  plain icon until an update is ready, then an ember "Update" pill; its popover shows version, channel,
+  progress and the one relevant action.
+- **Usage popover.** Live plan limits from the vendor CLIs without sending a prompt (Claude `get_usage`,
+  Codex `account/rateLimits/read`): 5-hour, weekly and per-model weekly (e.g. Fable) bars with reset
+  countdowns. Refreshed when opened (30 s throttle) and every 5 min; the icon turns amber ≥80 %, red ≥95 %.
+- **Composer.** Context ring (MonoCode) left of Send with "N% context used / used / window" tooltip.
+  Environment chips: project · Local · branch (with a *default* tag on the default branch, changed/ahead
+  counts in amber, and a branch switcher). `+` menu: photos & files, snapshot window/area/screen
+  (`screencapture`), and the three pickers. Pickers: `/` commands (Trek's own first: new, usage, context,
+  cost, model; then the agent's commands and skills), `@` project files + Claude sub-agents, `$` skills.
+  Images can also be dropped onto the composer; they're sent as image blocks to every backend.
+- **Agents & Subscriptions.** Real logos (Lobe icons), account email + plan + version, enable switch,
+  Sign in / Switch account (runs the vendor's login command in a Terminal tab), Manage plan link, and an
+  Install button per missing agent that runs the official install command and rescans when it exits.
+- **Tools & MCP.** Computer use and Simulator toggles (served by the bundled `trek-mcp`), live
+  Accessibility / Screen Recording status with deep links, AXe install, user MCP servers, and a read-only
+  list of the MCP servers, skills and plugins each agent already loads.

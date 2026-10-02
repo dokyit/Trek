@@ -354,7 +354,12 @@ impl Sidebar {
                 }
                 cx.notify();
             }))
-            .trigger(ui::icon_button("usage", crate::assets::Lucide::ChartNoAxesColumn, "Usage").selected(usage_open))
+            .trigger({
+                let peak = self.workspace.read(cx).agent_status.values().flat_map(|s| s.limits.iter().map(|l| l.percent)).fold(0.0f32, f32::max);
+                let tint = if peak >= 95. { Some(palette::red(cx)) } else if peak >= 80. { Some(palette::amber(cx)) } else { None };
+                let icon = Icon::new(crate::assets::Lucide::ChartNoAxesColumn);
+                ui::icon_button("usage", match tint { Some(c) => icon.text_color(c), None => icon }, "Usage").selected(usage_open)
+            })
             .content({
                 let this = this.clone();
                 move |_, _, cx| this.update(cx, |this, cx| this.usage_card(cx))
