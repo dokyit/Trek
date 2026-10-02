@@ -24,7 +24,24 @@ pub struct Settings {
     pub disabled_agents: Vec<String>,
     pub tools: Tools,
     pub snapshots: Snapshots,
+    pub layout: Layout,
 }
+
+/// Window layout the user adjusted by hand.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    /// Width of the right tools panel, in points.
+    pub right_panel_width: f32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self { right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH }
+    }
+}
+
+pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 440.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +125,7 @@ impl Default for Settings {
             disabled_agents: vec![],
             tools: Tools::default(),
             snapshots: Snapshots::default(),
+            layout: Layout::default(),
         }
     }
 }

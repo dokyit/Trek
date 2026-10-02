@@ -46,10 +46,14 @@ struct Tab {
     view: View,
 }
 
+pub const MIN_PANEL: f32 = 320.;
+pub const WIDE_PANEL: f32 = 720.;
+
 pub struct RightPanel {
     workspace: Entity<Workspace>,
     pub open: bool,
-    pub wide: bool,
+    /// Width in points (persisted in settings.layout); the root clamps it to the window.
+    pub width: f32,
     tabs: Vec<Tab>,
     active: Option<u64>,
     next_id: u64,
@@ -58,7 +62,18 @@ pub struct RightPanel {
 
 impl RightPanel {
     pub fn new(workspace: Entity<Workspace>) -> Self {
-        Self { workspace, open: false, wide: false, tabs: vec![], active: None, next_id: 1, launcher_open: false }
+        Self { workspace, open: false, width: trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH, tabs: vec![], active: None, next_id: 1, launcher_open: false }
+    }
+
+    /// Set and persist the width (the root clamps what's drawn to the window).
+    pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.width = width.max(MIN_PANEL);
+        let w = self.width;
+        self.workspace.update(cx, |ws, cx| {
+            ws.settings.layout.right_panel_width = w;
+            ws.save_settings(cx);
+        });
+        cx.notify();
     }
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
@@ -266,10 +281,15 @@ impl Render for RightPanel {
             .border_color(theme.border)
             .child(tabs)
             .child(launcher)
-            .child(ui::icon_button("panel-wide", if self.wide { IconName::Minimize } else { IconName::Maximize }, "Wider").on_click(cx.listener(|this, _, _, cx| {
-                this.wide = !this.wide;
-                cx.notify();
-            })))
+            .child({
+                let wide = self.width >= WIDE_PANEL - 1.;
+                ui::icon_button("panel-wide", if wide { IconName::Minimize } else { IconName::Maximize }, if wide { "Narrower" } else { "Wider" }).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        let w = if wide { trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH } else { WIDE_PANEL };
+                        this.set_width(w, cx);
+                    },
+                ))
+            })
             .child(ui::icon_button("panel-close", IconName::PanelRightClose, "Hide panel (⌘J)").on_click(cx.listener(|this, _, _, cx| this.toggle(cx))));
 
         let body = match self.active_tab() {

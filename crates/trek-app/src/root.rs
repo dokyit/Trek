@@ -24,8 +24,13 @@ pub struct TrekWindow {
     settings_nav: Entity<SettingsNav>,
     right_panel: Entity<RightPanel>,
     onboarding: Entity<Onboarding>,
+    /// Right-panel resize in progress: (pointer x at grab, width at grab).
+    panel_drag: Option<(Pixels, f32)>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// The chat column never gets narrower than this while the right panel is open.
+const MIN_CHAT: f32 = 440.;
 
 impl TrekWindow {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -35,7 +40,12 @@ impl TrekWindow {
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
-        let right_panel = cx.new(|_| RightPanel::new(workspace.clone()));
+        let saved_width = workspace.read(cx).settings.layout.right_panel_width;
+        let right_panel = cx.new(|_| {
+            let mut p = RightPanel::new(workspace.clone());
+            p.width = saved_width.max(crate::panels::MIN_PANEL);
+            p
+        });
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
@@ -73,7 +83,7 @@ impl TrekWindow {
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
         }
-        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, _subscriptions: subscriptions }
+        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, panel_drag: None, _subscriptions: subscriptions }
     }
 
     /// A thread needs the user or finished: toast, banner and sound per the notification settings.
@@ -210,6 +220,21 @@ fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
         })
 }
 
+impl TrekWindow {
+    fn end_panel_drag(&mut self, cx: &mut Context<Self>) {
+        if self.panel_drag.take().is_none() {
+            return;
+        }
+        let w = self.right_panel.read(cx).width;
+        self.right_panel.update(cx, |p, cx| p.set_width(w, cx));
+        self.workspace.update(cx, |ws, cx| {
+            ws.overlay_open = false;
+            cx.notify();
+        });
+        cx.notify();
+    }
+}
+
 impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let route = self.workspace.read(cx).route.clone();
@@ -225,10 +250,15 @@ impl Render for TrekWindow {
         }
         let in_settings = matches!(route, Route::Settings(_));
         let backdrop = self.workspace.read(cx).backdrop();
-        let (right_open, right_width) = {
+        let (right_open, wanted_width) = {
             let p = self.right_panel.read(cx);
-            (p.open, if p.wide { 720. } else { 440. })
+            (p.open, p.width)
         };
+        // Whatever the stored width, leave the chat column at least MIN_CHAT wide.
+        let side = if collapsed || in_settings { 8. } else { SIDEBAR_WIDTH };
+        let max_width = (window.viewport_size().width.as_f32() - side - MIN_CHAT - 16.).max(crate::panels::MIN_PANEL);
+        let right_width = wanted_width.clamp(crate::panels::MIN_PANEL, max_width);
+        let dragging = self.panel_drag.is_some();
         let content = match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
             Route::Draft { .. } => div()
@@ -253,9 +283,23 @@ impl Render for TrekWindow {
                 .child(self.composer.clone())
                 .into_any_element(),
         };
-        let _ = window;
         v_flex()
             .id("trek-window")
+            // Panel resizing: follow the pointer anywhere in the window until the button is released.
+            .when(dragging, |el| {
+                el.cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                        let Some((x0, w0)) = this.panel_drag else { return };
+                        let w = (w0 + (x0 - e.position.x).as_f32()).clamp(crate::panels::MIN_PANEL, max_width);
+                        this.right_panel.update(cx, |p, cx| {
+                            p.width = w;
+                            cx.notify();
+                        });
+                        cx.notify();
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_panel_drag(cx)))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_panel_drag(cx)))
+            })
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -343,8 +387,46 @@ impl Render for TrekWindow {
                             ),
                     )
                     .when(right_open && !in_settings, |el| {
+                        let theme = cx.theme().clone();
+                        // Grab strip on the panel's left edge: drag to resize, double-click to reset.
+                        let handle = div()
+                            .id("panel-resize")
+                            .absolute()
+                            .top_0()
+                            .bottom(px(8.))
+                            .left(px(-9.))
+                            .w(px(13.))
+                            .flex()
+                            .justify_center()
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .group("panel-resize")
+                            .child(
+                                div()
+                                    .w(px(2.))
+                                    .h_full()
+                                    .rounded_full()
+                                    .when(dragging, |el| el.bg(theme.foreground.opacity(0.35)))
+                                    .when(!dragging, |el| el.group_hover("panel-resize", |s| s.bg(theme.foreground.opacity(0.2)))),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                    if e.click_count >= 2 {
+                                        this.right_panel.update(cx, |p, cx| p.set_width(trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH, cx));
+                                        return;
+                                    }
+                                    this.panel_drag = Some((e.position.x, right_width));
+                                    // Native views (browser, simulator) would swallow the drag.
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.overlay_open = true;
+                                        cx.notify();
+                                    });
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            );
                         el.child(
-                            div().w(px(right_width)).flex_none().h_full().pr_2().pb_2().child(
+                            div().relative().w(px(right_width)).flex_none().h_full().pr_2().pb_2().child(handle).child(
                                 div()
                                     .size_full()
                                     .rounded(px(12.))
