@@ -391,7 +391,7 @@ impl SettingsView {
         let bundled = crate::workspace::trek_mcp_binary().is_some();
         let permission = |id: &'static str, label: &'static str, ok: bool, pane: &'static str, cx: &mut Context<Self>| -> AnyElement {
             if ok {
-                Self::status_dot(palette::emerald(cx), label)
+                Self::status_dot(palette::emerald(cx), "Allowed")
             } else {
                 Button::new(id).small().outline().label(format!("Allow {label}")).on_click(move |_, _, cx| cx.open_url(pane)).into_any_element()
             }

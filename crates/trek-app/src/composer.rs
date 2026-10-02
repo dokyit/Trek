@@ -1012,7 +1012,7 @@ impl Render for Composer {
             .or_else(|| default_model(&models).map(|m| m.name.clone()))
             .unwrap_or_else(|| prefs.agent.display_name());
         let theme = cx.theme().clone();
-        let empty = self.input.read(cx).value().trim().is_empty();
+        let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
         let thread_id = thread.as_ref().map(|t| t.id.clone());
         let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
         let plan = prefs.plan;

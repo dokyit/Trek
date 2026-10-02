@@ -23,7 +23,7 @@ const COLUMN: f32 = 760.;
 
 #[derive(Clone)]
 enum Row {
-    User { ix: usize, text: SharedString, open: bool },
+    User { ix: usize, text: SharedString, open: bool, images: Vec<String> },
     Assistant(Entity<TextViewState>),
     Reasoning { ix: usize, md: Entity<TextViewState>, live: bool, open: bool },
     Tool { ix: usize, title: SharedString, detail: SharedString, output: SharedString, status: ToolStatus, open: bool },
@@ -253,7 +253,7 @@ impl ThreadView {
             }
             flush(&mut pending, &mut out, &self.expanded);
             out.push(match item {
-                Item::User { text, .. } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix) },
+                Item::User { text, images } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix), images: images.clone() },
                 Item::Assistant { .. } => match self.md.get(&ix) {
                     Some((s, _)) => Row::Assistant(s.clone()),
                     None => Row::Notice("".into()),
@@ -288,10 +288,28 @@ impl ThreadView {
             }
         };
         match row {
-            Row::User { ix, text, open } => {
+            Row::User { ix, text, open, images } => {
                 let long = text.len() > 700 || text.lines().count() > 10;
+                let has_text = !text.trim().is_empty();
                 column(
-                    h_flex().justify_end().pt_4().pb_2().child(
+                    v_flex().items_end().pt_4().pb_2().gap_2()
+                    .when(!images.is_empty(), |el| {
+                        el.child(h_flex().gap_2().flex_wrap().justify_end().children(images.into_iter().enumerate().map(|(i, p)| {
+                            let path = std::path::PathBuf::from(&p);
+                            div()
+                                .id(("user-img", ix * 100 + i))
+                                .h(px(120.))
+                                .max_w(px(220.))
+                                .rounded(px(12.))
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(theme.border)
+                                .cursor_pointer()
+                                .child(img(path.clone()).h_full().object_fit(ObjectFit::Contain))
+                                .on_click(move |_, _, cx| cx.open_with_system(&path))
+                        })))
+                    })
+                    .when(has_text, |el| el.child(
                         v_flex()
                             .max_w(relative(0.78))
                             .px(px(16.))
@@ -314,7 +332,7 @@ impl ThreadView {
                                         .on_click(toggle(ix)),
                                 )
                             }),
-                    ),
+                    )),
                 )
             }
             .into_any_element(),

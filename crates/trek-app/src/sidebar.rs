@@ -371,6 +371,7 @@ impl Sidebar {
             }))
             .trigger(
                 ui::Pill::new("updater")
+                    .ghost(!ready)
                     .selected(updater_open)
                     .child(if busy {
                         Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()

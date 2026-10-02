@@ -165,12 +165,19 @@ pub struct Pill {
     id: ElementId,
     children: Vec<AnyElement>,
     selected: bool,
+    ghost: bool,
     on_click: Option<std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
 }
 
 impl Pill {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { id: id.into(), children: vec![], selected: false, on_click: None }
+        Self { id: id.into(), children: vec![], selected: false, ghost: false, on_click: None }
+    }
+
+    /// No fill until hovered or selected (toolbar style).
+    pub fn ghost(mut self, ghost: bool) -> Self {
+        self.ghost = ghost;
+        self
     }
 
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
@@ -206,7 +213,12 @@ impl RenderOnce for Pill {
             .rounded(px(8.))
             .text_sm()
             .cursor_pointer()
-            .bg(theme.foreground.opacity(if self.selected { 0.12 } else { 0.065 }))
+            .when(self.ghost, |el| el.px(px(7.)))
+            .bg(theme.foreground.opacity(match (self.selected, self.ghost) {
+                (true, _) => 0.12,
+                (false, true) => 0.0,
+                (false, false) => 0.065,
+            }))
             .hover(|s| s.bg(theme.foreground.opacity(0.11)))
             .children(self.children)
             .when_some(self.on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))

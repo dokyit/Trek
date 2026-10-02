@@ -25,7 +25,7 @@ pub struct Settings {
     pub tools: Tools,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tools {
     /// Give agents the computer-use MCP tools (screenshot, click, type).
@@ -34,6 +34,12 @@ pub struct Tools {
     pub simulator: bool,
     /// Extra MCP servers passed to every session.
     pub mcp_servers: Vec<McpServerConfig>,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        Self { computer_use: true, simulator: true, mcp_servers: vec![] }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

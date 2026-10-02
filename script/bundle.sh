@@ -8,7 +8,7 @@ OUT=dist; APP="$OUT/Trek.app"
 source "$HOME/.cargo/env" 2>/dev/null || true
 
 echo "• building release $VERSION"
-cargo build --release -p trek-app
+cargo build --release -p trek-app -p trek-mcp
 
 echo "• icon"
 ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
@@ -21,6 +21,7 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 echo "• bundle"
 cp target/release/trek "$APP/Contents/MacOS/trek"
+cp target/release/trek-mcp "$APP/Contents/MacOS/trek-mcp"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
