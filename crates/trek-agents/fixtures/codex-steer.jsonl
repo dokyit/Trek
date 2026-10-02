@@ -1,0 +1,6 @@
+{"id":3,"result":{"turn":{"id":"01a0fe4d-9675-7061-935d-d8b249eb41d6","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}
+{"method":"turn/started","params":{"threadId":"01a0fe4d-9485-79e2-8d9e-a4847ef074fc","turn":{"id":"01a0fe4d-9675-7061-935d-d8b249eb41d6","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1790972892,"completedAt":null,"durationMs":null}},"emittedAtMs":1790972892857}
+{"error":{"code":-32600,"message":"expected active turn id `nope` but found `01a0fe4d-9675-7061-935d-d8b249eb41d6`"},"id":4}
+{"id":5,"result":{"turnId":"01a0fe4d-9675-7061-935d-d8b249eb41d6"}}
+{"method":"turn/completed","params":{"threadId":"01a0fe4d-9485-79e2-8d9e-a4847ef074fc","turn":{"id":"01a0fe4d-9675-7061-935d-d8b249eb41d6","items":[{"type":"agentMessage","id":"msg_02ecc955aa774f79016ac013e85eac87d193f7e6eaa2972d6b","text":"Command completed successfully. BANANA","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}],"itemsView":"summary","status":"completed","error":null,"startedAt":1790972892,"completedAt":1790972904,"durationMs":12154}},"emittedAtMs":1790972904968}
+{"error":{"code":-32600,"message":"no active turn to steer"},"id":6}

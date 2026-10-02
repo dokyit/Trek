@@ -285,8 +285,8 @@ fn claude_limits(usage: &Value) -> Vec<UsageLimit> {
 /// Status of the user's Codex login. Sends no prompt.
 pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
     let mut backlog = Vec::new();
-    let (mut child, mut rpc, mut lines) =
-        tokio::time::timeout(TIMEOUT, start_app_server(cwd, &mut backlog)).await.context("codex app-server timed out")??;
+    let (mut child, mut rpc, mut lines, _) =
+        tokio::time::timeout(TIMEOUT, start_app_server(cwd, &[], &mut backlog)).await.context("codex app-server timed out")??;
     let mut status = AgentStatus::default();
     let deadline = tokio::time::Instant::now() + TIMEOUT;
 

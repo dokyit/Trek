@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, clip, load_image, mcp_servers_json};
+use crate::{AgentEvent, Command, Decision, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -22,9 +22,93 @@ fn tool_title(name: &str, input: &Value) -> (String, String) {
         "WebFetch" => ("Fetch".into(), s("url")),
         "WebSearch" => ("Search the web".into(), s("query")),
         "Agent" | "Task" => ("Subagent".into(), s("description")),
-        "TodoWrite" => ("Update plan".into(), String::new()),
+        "TodoWrite" => ("Update plan".into(), todo_detail(input)),
+        "ExitPlanMode" => ("Plan".into(), input["plan"].as_str().and_then(|p| p.lines().find(|l| !l.trim().is_empty())).unwrap_or_default().trim_start_matches('#').trim().to_string()),
+        "AskUserQuestion" => ("Question".into(), input["questions"][0]["question"].as_str().unwrap_or_default().to_string()),
         other => (other.to_string(), clip(&input.to_string(), 200)),
     }
+}
+
+/// The step a TodoWrite call is on, like the plan rows of the other agents.
+fn todo_detail(input: &Value) -> String {
+    let steps: Vec<(String, Step)> = input["todos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            let step = match t["status"].as_str() {
+                Some("completed") => Step::Done,
+                Some("in_progress") => Step::Active,
+                _ => Step::Pending,
+            };
+            (t["activeForm"].as_str().filter(|_| step == Step::Active).or(t["content"].as_str()).unwrap_or_default().to_string(), step)
+        })
+        .collect();
+    if steps.is_empty() { String::new() } else { plan_row(&steps).0 }
+}
+
+/// Numbered control requests to the CLI.
+struct Control {
+    next_id: u64,
+}
+
+impl Control {
+    fn request(&mut self, subtype: &str, extra: Value) -> Value {
+        self.next_id += 1;
+        let mut request = json!({ "subtype": subtype });
+        if let (Some(r), Some(e)) = (request.as_object_mut(), extra.as_object()) {
+            r.extend(e.clone());
+        }
+        json!({ "type": "control_request", "request_id": format!("trek-{}", self.next_id), "request": request })
+    }
+}
+
+fn control_response(request_id: &str, response: Value) -> Value {
+    json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": response } })
+}
+
+/// What Claude is told when the user says no, per tool.
+fn deny_message(tool: &str) -> &'static str {
+    match tool {
+        "ExitPlanMode" => {
+            "The user isn't ready to approve this plan and wants to keep planning. Stay in plan mode, don't change anything yet, and ask what they'd like to change."
+        }
+        "AskUserQuestion" => "The user skipped these questions. Carry on with your best judgment, or ask in plain words if you're truly stuck.",
+        _ => "The user declined this action.",
+    }
+}
+
+/// Messages answering the permission prompt `request`. Approving a plan also leaves plan mode
+/// for `mode` (the thread's own level): on its own, Claude would drop to "default".
+fn respond(ctl: &mut Control, request_id: &str, request: &Value, decision: Decision, mode: &str) -> Vec<Value> {
+    let tool = request["tool_name"].as_str().unwrap_or_default();
+    let input = request["input"].clone();
+    let response = match decision {
+        Decision::Allow => json!({ "behavior": "allow", "updatedInput": input }),
+        Decision::AllowForSession => {
+            let mut ok = json!({ "behavior": "allow", "updatedInput": input });
+            // Claude's own suggested rules (e.g. allow `gh issue list:*` in this
+            // session); applying them stops the same prompt from coming back.
+            if let Some(sug) = request["permission_suggestions"].as_array().filter(|a| !a.is_empty()) {
+                ok["updatedPermissions"] = Value::Array(sug.clone());
+            }
+            ok
+        }
+        Decision::Deny => json!({ "behavior": "deny", "message": deny_message(tool) }),
+    };
+    let mut out = vec![control_response(request_id, response)];
+    if tool == "ExitPlanMode" && decision != Decision::Deny {
+        out.push(ctl.request("set_permission_mode", json!({ "mode": mode })));
+    }
+    out
+}
+
+/// Answers to an AskUserQuestion prompt: `(question, chosen labels or the user's own words)`.
+fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> Value {
+    let mut input = request["input"].clone();
+    // AskUserQuestion reads its answers from the input it gets back.
+    input["answers"] = Value::Object(answers.into_iter().map(|(q, a)| (q, Value::String(a))).collect());
+    control_response(request_id, json!({ "behavior": "allow", "updatedInput": input }))
 }
 
 pub async fn run(
@@ -82,24 +166,10 @@ pub async fn run(
     let mut child = cmd.spawn().context("failed to start claude")?;
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-    let stderr = child.stderr.take().unwrap();
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(l)) = lines.next_line().await {
-            tracing::debug!("claude stderr: {l}");
-        }
-    });
+    let stderr = StderrTail::capture(child.stderr.take().unwrap(), "claude");
 
-    let mut next_id = 0u64;
-    let mut req = |subtype: &str, extra: Value| {
-        next_id += 1;
-        let mut request = json!({ "subtype": subtype });
-        if let (Some(r), Some(e)) = (request.as_object_mut(), extra.as_object()) {
-            r.extend(e.clone());
-        }
-        json!({ "type": "control_request", "request_id": format!("trek-{next_id}"), "request": request })
-    };
-    let init = req("initialize", json!({}));
+    let mut ctl = Control { next_id: 0 };
+    let init = ctl.request("initialize", json!({}));
     let init_id = init["request_id"].as_str().unwrap_or_default().to_string();
     write_line(&mut stdin, &init).await?;
     // Outstanding `get_context_usage` requests; their responses become `Context` events.
@@ -108,6 +178,10 @@ pub async fn run(
     // Inputs of pending permission requests, echoed back as `updatedInput` on allow.
     let mut pending: HashMap<String, Value> = HashMap::new();
     let mut streamed_text = false;
+    let mut hand_holding = config.hand_holding;
+    // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
+    let mut planning = config.plan;
+    let mut in_turn = false;
 
     loop {
         tokio::select! {
@@ -116,6 +190,7 @@ pub async fn run(
                 match cmd {
                     Command::Prompt { text, images } => {
                         streamed_text = false;
+                        in_turn = true;
                         let (content, errors) = user_content(&text, &images);
                         for e in errors {
                             let _ = events.send(AgentEvent::Error(e)).await;
@@ -127,58 +202,49 @@ pub async fn run(
                         });
                         write_line(&mut stdin, &msg).await?;
                     }
-                    Command::Interrupt => write_line(&mut stdin, &req("interrupt", json!({}))).await?,
+                    Command::Interrupt => write_line(&mut stdin, &ctl.request("interrupt", json!({}))).await?,
                     Command::SetHandHolding(h) => {
-                        write_line(&mut stdin, &req("set_permission_mode", json!({ "mode": h.claude_mode() }))).await?
+                        hand_holding = h;
+                        if !planning {
+                            write_line(&mut stdin, &ctl.request("set_permission_mode", json!({ "mode": h.claude_mode() }))).await?
+                        }
                     }
                     Command::SetModel { model, .. } => {
-                        write_line(&mut stdin, &req("set_model", json!({ "model": model }))).await?
+                        write_line(&mut stdin, &ctl.request("set_model", json!({ "model": model }))).await?
                     }
                     Command::Respond { request_id, decision } => {
                         let request = pending.remove(&request_id).unwrap_or(json!({}));
-                        let input = request["input"].clone();
-                        let response = match decision {
-                            Decision::Allow => json!({ "behavior": "allow", "updatedInput": input }),
-                            Decision::AllowForSession => {
-                                let mut ok = json!({ "behavior": "allow", "updatedInput": input });
-                                // Claude's own suggested rules (e.g. allow `gh issue list:*` in this
-                                // session); applying them stops the same prompt from coming back.
-                                if let Some(sug) = request["permission_suggestions"].as_array().filter(|a| !a.is_empty()) {
-                                    ok["updatedPermissions"] = Value::Array(sug.clone());
-                                }
-                                ok
-                            }
-                            Decision::Deny => json!({ "behavior": "deny", "message": "The user declined this action." }),
-                        };
-                        let msg = json!({
-                            "type": "control_response",
-                            "response": { "subtype": "success", "request_id": request_id, "response": response }
-                        });
-                        write_line(&mut stdin, &msg).await?;
+                        for msg in respond(&mut ctl, &request_id, &request, decision, hand_holding.claude_mode()) {
+                            write_line(&mut stdin, &msg).await?;
+                        }
+                        if request["tool_name"] == "ExitPlanMode" && decision != Decision::Deny {
+                            planning = false;
+                        }
                     }
                     Command::Answer { request_id, answers } => {
                         let request = pending.remove(&request_id).unwrap_or(json!({}));
-                        let mut input = request["input"].clone();
-                        // AskUserQuestion reads its answers from the input it gets back.
-                        input["answers"] = Value::Object(answers.into_iter().map(|(q, a)| (q, Value::String(a))).collect());
-                        let msg = json!({
-                            "type": "control_response",
-                            "response": { "subtype": "success", "request_id": request_id, "response": { "behavior": "allow", "updatedInput": input } }
-                        });
-                        write_line(&mut stdin, &msg).await?;
+                        write_line(&mut stdin, &answer(&request_id, &request, answers)).await?;
                     }
                     Command::Shutdown => break,
                 }
             }
             line = stdout.next_line() => {
-                let Some(line) = line? else { break };
+                let Some(line) = line? else {
+                    if in_turn {
+                        return Err(stderr.exited("Claude Code"));
+                    }
+                    break;
+                };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if let Some(mode) = permission_mode(&v) {
+                    planning = mode == "plan";
+                }
                 if v["type"] == "control_response" {
                     let r = &v["response"];
                     let id = r["request_id"].as_str().unwrap_or_default();
                     if id == init_id {
                         // Ask for context usage up front so the UI has data before the first prompt.
-                        let c = req("get_context_usage", json!({}));
+                        let c = ctl.request("get_context_usage", json!({}));
                         context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
                         write_line(&mut stdin, &c).await?;
                     } else if context_requests.remove(id) {
@@ -202,7 +268,8 @@ pub async fn run(
                     }
                 }
                 if v["type"] == "result" {
-                    let c = req("get_context_usage", json!({}));
+                    in_turn = false;
+                    let c = ctl.request("get_context_usage", json!({}));
                     context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
                     write_line(&mut stdin, &c).await?;
                 }
@@ -237,6 +304,23 @@ fn user_content(text: &str, images: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
     }
     content.push(json!({ "type": "text", "text": text }));
     (content, errors)
+}
+
+/// Why a turn failed: its result text, else the CLI's own errors (e.g. a session that can't be
+/// resumed).
+fn result_error(v: &Value) -> String {
+    let errors: Vec<&str> = v["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str()).collect();
+    v["result"]
+        .as_str()
+        .filter(|r| !r.trim().is_empty())
+        .map(String::from)
+        .or_else(|| (!errors.is_empty()).then(|| errors.join("\n")))
+        .unwrap_or_else(|| "The turn failed.".to_string())
+}
+
+/// The permission mode Claude reports in its `init` and `status` messages.
+fn permission_mode(v: &Value) -> Option<&str> {
+    (v["type"] == "system" && matches!(v["subtype"].as_str(), Some("init" | "status"))).then(|| v["permissionMode"].as_str()).flatten()
 }
 
 /// `Context` from a `get_context_usage` control response (`{subtype, request_id, response}`).
@@ -349,7 +433,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
         }
         Some("result") => out.push(AgentEvent::TurnComplete {
             cost_usd: v["total_cost_usd"].as_f64(),
-            error: (v["is_error"] == true).then(|| v["result"].as_str().unwrap_or("The turn failed.").to_string()),
+            error: (v["is_error"] == true).then(|| result_error(v)),
         }),
         Some("control_request") if v["request"]["subtype"] == "can_use_tool" => {
             let r = &v["request"];
@@ -394,6 +478,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trek_core::HandHolding;
 
     #[test]
     fn translates_core_stream_messages() {
@@ -438,6 +523,89 @@ mod tests {
         assert_eq!(content[0]["source"]["data"], "iVBORw==");
         assert_eq!(content[1], json!({"type":"text","text":"look"}));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Recorded stream-json output (Claude Code 2.1.287, claude-haiku-4-5), one message per line.
+    fn fixture(text: &str) -> Vec<Value> {
+        text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    #[test]
+    fn approving_a_plan_restores_the_threads_access_level() {
+        let lines = fixture(include_str!("../fixtures/claude-plan-approval.jsonl"));
+        let mut pending = HashMap::new();
+        let mut streamed = false;
+        let row = translate(&lines[0], &mut pending, &mut streamed);
+        assert!(matches!(&row[0], AgentEvent::ToolStarted { title, detail, .. } if title == "Plan" && detail.starts_with("Create plan_test.txt")));
+        let ev = translate(&lines[1], &mut pending, &mut streamed);
+        let AgentEvent::PermissionRequest { request_id, prompt: Some(crate::Prompt::Plan(plan)), .. } = &ev[0] else { panic!("{ev:?}") };
+        assert!(plan.starts_with("Create plan_test.txt"));
+        // Claude reports "default" after the approval; Trek sets the thread's own level.
+        assert_eq!(permission_mode(&lines[2]), Some("default"));
+
+        let request = pending.remove(request_id).unwrap();
+        let mut ctl = Control { next_id: 4 };
+        let msgs = respond(&mut ctl, request_id, &request, Decision::Allow, HandHolding::FullAccess.claude_mode());
+        assert_eq!(msgs[0]["response"]["request_id"], request_id.as_str());
+        assert_eq!(msgs[0]["response"]["response"]["behavior"], "allow");
+        assert_eq!(msgs[0]["response"]["response"]["updatedInput"]["plan"], request["input"]["plan"]);
+        assert_eq!(msgs[1], json!({"type":"control_request","request_id":"trek-5","request":{"subtype":"set_permission_mode","mode":"bypassPermissions"}}));
+    }
+
+    #[test]
+    fn keep_planning_stays_in_plan_mode_with_a_reason() {
+        let lines = fixture(include_str!("../fixtures/claude-plan-approval.jsonl"));
+        let request = &lines[1]["request"];
+        let msgs = respond(&mut Control { next_id: 0 }, "r", request, Decision::Deny, "default");
+        assert_eq!(msgs.len(), 1, "no mode change");
+        let r = &msgs[0]["response"]["response"];
+        assert_eq!(r["behavior"], "deny");
+        assert!(r["message"].as_str().unwrap().contains("keep planning"));
+    }
+
+    #[test]
+    fn other_tools_keep_their_suggested_rules() {
+        let lines = fixture(include_str!("../fixtures/claude-plan-approval.jsonl"));
+        let request = &lines[3]["request"];
+        let msgs = respond(&mut Control { next_id: 0 }, "w", request, Decision::AllowForSession, "default");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["response"]["response"]["updatedPermissions"], json!([{"type":"setMode","mode":"acceptEdits","destination":"session"}]));
+        let denied = respond(&mut Control { next_id: 0 }, "w", request, Decision::Deny, "default");
+        assert_eq!(denied[0]["response"]["response"]["message"], "The user declined this action.");
+    }
+
+    #[test]
+    fn questions_accept_the_users_own_words() {
+        let lines = fixture(include_str!("../fixtures/claude-question.jsonl"));
+        let mut pending = HashMap::new();
+        let ev = translate(&lines[0], &mut pending, &mut false);
+        let AgentEvent::PermissionRequest { request_id, prompt: Some(crate::Prompt::Questions(q)), .. } = &ev[0] else { panic!("{ev:?}") };
+        assert_eq!(q[0].options.iter().map(|o| o.0.as_str()).collect::<Vec<_>>(), vec!["Red", "Blue"]);
+        // "Other": typed text that matches no option goes back as the answer, verbatim.
+        let msg = answer(request_id, &pending[request_id], vec![(q[0].question.clone(), "teal with a hint of orange".into())]);
+        let input = &msg["response"]["response"]["updatedInput"];
+        assert_eq!(input["answers"], json!({"Which color do you like?":"teal with a hint of orange"}));
+        assert_eq!(input["questions"], lines[0]["request"]["input"]["questions"]);
+        let skipped = respond(&mut Control { next_id: 0 }, request_id, &pending[request_id], Decision::Deny, "default");
+        assert!(skipped[0]["response"]["response"]["message"].as_str().unwrap().contains("skipped"));
+    }
+
+    #[test]
+    fn failed_results_say_why() {
+        // Recorded: `claude --resume <unknown id>` answers with a result, not a turn.
+        let v: Value = serde_json::from_str(r#"{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"stop_reason":null,"session_id":"0b0b0b0b-0000-4000-8000-000000000000","total_cost_usd":0,"permission_denials":[],"errors":["No conversation found with session ID: 0b0b0b0b-0000-4000-8000-000000000000"]}"#).unwrap();
+        assert_eq!(
+            translate(&v, &mut HashMap::new(), &mut false),
+            vec![AgentEvent::TurnComplete { cost_usd: Some(0.0), error: Some("No conversation found with session ID: 0b0b0b0b-0000-4000-8000-000000000000".into()) }]
+        );
+        assert_eq!(result_error(&json!({"is_error":true,"result":"API Error: overloaded"})), "API Error: overloaded");
+        assert_eq!(result_error(&json!({"is_error":true})), "The turn failed.");
+    }
+
+    #[test]
+    fn todo_rows_name_the_active_step() {
+        let input = json!({"todos":[{"content":"Read code","status":"completed","activeForm":"Reading code"},{"content":"Fix bug","status":"in_progress","activeForm":"Fixing the bug"}]});
+        assert_eq!(tool_title("TodoWrite", &input), ("Update plan".into(), "Fixing the bug".into()));
     }
 
     #[test]

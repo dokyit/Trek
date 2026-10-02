@@ -267,6 +267,8 @@ pub struct Workspace {
     pub status_fetched_at: i64,
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
+    /// Slash commands an agent offered in its last session, keyed by `AgentId::key()`.
+    agent_commands: HashMap<String, Vec<SlashCommand>>,
     pub usage_loading: bool,
     /// The project open on Settings → Project (project id).
     pub settings_project: Option<String>,
@@ -322,6 +324,7 @@ impl Workspace {
             turns_finished: 0,
             git_info: HashMap::new(),
             agent_status: HashMap::new(),
+            agent_commands: HashMap::new(),
             status_fetched_at: 0,
             acp_info: HashMap::new(),
             usage_loading: false,
@@ -1159,6 +1162,7 @@ impl Workspace {
         // to the composer instead, so the user can rethink them.
         let mut continue_queue = false;
         let mut notify_text: Option<String> = None;
+        let mut commands: Option<Vec<SlashCommand>> = None;
         {
             let live = self.live.entry(id.to_string()).or_default();
             live.last_active = Some(Instant::now());
@@ -1202,6 +1206,7 @@ impl Workspace {
                         }
                     }
                     AgentEvent::Background(n) => live.background = n,
+                    AgentEvent::Commands(c) => commands = Some(c),
                     AgentEvent::Started { native_id, .. } => {
                         if !native_id.is_empty() {
                             native = Some(native_id);
@@ -1336,6 +1341,9 @@ impl Workspace {
             }
             live.revision += 1;
         }
+        if let (Some(c), Some(agent)) = (commands, self.thread(id).map(|t| t.agent.key())) {
+            self.agent_commands.insert(agent, c);
+        }
         let viewing = self.route == Route::Thread(id.to_string());
         // Streaming text changes nothing on the thread row: skip the database write (this runs
         // up to 60 times a second) unless something actually changed.
@@ -1421,16 +1429,21 @@ impl Workspace {
 
     pub fn respond(&mut self, id: &str, request_id: &str, decision: Decision, cx: &mut Context<Self>) {
         let mut still_waiting = false;
+        let mut running = false;
         if let Some(live) = self.live.get_mut(id) {
             live.permissions.retain(|p| p.request_id != request_id);
             still_waiting = !live.permissions.is_empty();
+            running = live.turn_started.is_some();
             if let Some(tx) = &live.commands {
                 let _ = tx.try_send(Command::Respond { request_id: request_id.to_string(), decision });
             }
             live.revision += 1;
         }
+        // A prompt can outlive its turn (Codex offers its plan once the turn is over): answering
+        // it then leaves the thread idle unless it starts new work.
         if !still_waiting {
-            self.mutate_thread(id, cx, |t| t.run_state = RunState::Working);
+            let state = if running { RunState::Working } else { RunState::Idle };
+            self.mutate_thread(id, cx, |t| t.run_state = state);
         }
         cx.notify();
     }
@@ -1456,6 +1469,11 @@ impl Workspace {
     pub fn approve_plan(&mut self, id: &str, request_id: &str, cx: &mut Context<Self>) {
         if let Some(live) = self.live.get_mut(id) {
             live.plan = false;
+            // Offered after its turn ended, the plan's approval starts a new one.
+            if live.turn_started.is_none() {
+                live.turn_started = Some(Instant::now());
+                live.tasks.clear();
+            }
         }
         self.respond(id, request_id, Decision::Allow, cx);
     }
@@ -1876,11 +1894,10 @@ impl Workspace {
             .iter()
             .map(|(n, d)| SlashCommand { name: n.to_string(), description: d.to_string(), kind: trek_agents::CommandKind::Command })
             .collect();
-        if let Some(st) = self.agent_status.get(&agent.key()) {
-            for c in &st.commands {
-                if !out.iter().any(|o| o.name == c.name) {
-                    out.push(c.clone());
-                }
+        let offered = self.agent_commands.get(&agent.key()).into_iter().flatten();
+        for c in self.agent_status.get(&agent.key()).into_iter().flat_map(|st| st.commands.iter()).chain(offered) {
+            if !out.iter().any(|o| o.name == c.name) {
+                out.push(c.clone());
             }
         }
         out

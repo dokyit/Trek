@@ -2,13 +2,12 @@
 //! Covers OpenCode, Droid and every ACP agent in the catalog. Trek acts as the ACP client:
 //! it answers permission prompts and `fs/*` requests; the agent keeps its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, clip};
+use crate::{AgentEvent, Command, CommandKind, Decision, SessionConfig, SlashCommand, StderrTail, Step, clip, plan_row};
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -40,11 +39,22 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
     Ok((path, args.into_iter().map(String::from).collect(), name))
 }
 
+/// OpenCode runs edits and commands without asking unless told to. Trek's access levels need
+/// the prompts; Trek then answers the ones the thread's level covers (see `auto_allow`).
+const OPENCODE_PERMISSION: &str = r#"{"edit":"ask","bash":"ask","webfetch":"ask"}"#;
+
+fn launch_env(agent: &AgentId) -> Vec<(&'static str, &'static str)> {
+    match agent {
+        AgentId::OpenCode => vec![("OPENCODE_PERMISSION", OPENCODE_PERMISSION)],
+        _ => vec![],
+    }
+}
+
 struct Agent {
     child: Child,
     rpc: Rpc,
     lines: Lines<BufReader<ChildStdout>>,
-    stderr: Arc<Mutex<Vec<String>>>,
+    stderr: StderrTail,
     name: String,
 }
 
@@ -54,6 +64,7 @@ impl Agent {
         args.extend(extra.iter().cloned());
         let mut child = tokio::process::Command::new(&bin)
             .args(&args)
+            .envs(launch_env(agent))
             .current_dir(cwd)
             .env("PATH", detect::login_path())
             .stdin(Stdio::piped())
@@ -62,31 +73,14 @@ impl Agent {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to start {}", bin.display()))?;
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let tail = stderr.clone();
-        let err = child.stderr.take().unwrap();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                tracing::debug!("acp stderr: {l}");
-                let mut t = tail.lock().unwrap();
-                t.push(l);
-                if t.len() > 20 {
-                    t.remove(0);
-                }
-            }
-        });
+        let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
         let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
         Ok(Agent { child, rpc, lines, stderr, name })
     }
 
     fn exited(&self) -> anyhow::Error {
-        let tail = self.stderr.lock().unwrap();
-        match tail.iter().rev().find(|l| !l.trim().is_empty()) {
-            Some(l) => anyhow!("{} exited: {}", self.name, l.trim()),
-            None => anyhow!("{} exited", self.name),
-        }
+        self.stderr.exited(&self.name)
     }
 
     /// Send a request and read until its response, answering `fs/*` requests inline and
@@ -333,8 +327,13 @@ fn kind_title(kind: &str) -> &'static str {
     }
 }
 
-fn tool_detail(tc: &Value) -> String {
+/// The row's detail: the command, else the file, else the most telling input. A command's
+/// location is just its working directory, so it doesn't count.
+fn tool_detail(tc: &Value, kind: &str) -> String {
     let input = &tc["rawInput"];
+    if let Some(steps) = todo_steps(input) {
+        return plan_row(&steps).0;
+    }
     let command = match &input["command"] {
         Value::String(s) => Some(s.clone()),
         Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")),
@@ -342,7 +341,7 @@ fn tool_detail(tc: &Value) -> String {
     };
     let location = tc["locations"].as_array().and_then(|l| l.first()).and_then(|l| l["path"].as_str()).map(String::from);
     command
-        .or(location)
+        .or(location.filter(|_| kind != "execute"))
         .or_else(|| {
             ["path", "file_path", "filePath", "filepath", "url", "query", "pattern", "description"]
                 .iter()
@@ -351,6 +350,31 @@ fn tool_detail(tc: &Value) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| clip(&s, 400))
         .unwrap_or_default()
+}
+
+/// A to-do tool's list (`rawInput.todos`, as OpenCode's todowrite sends it).
+fn todo_steps(input: &Value) -> Option<Vec<(String, Step)>> {
+    let todos = input["todos"].as_array().filter(|t| !t.is_empty())?;
+    Some(todos.iter().map(|t| (t["content"].as_str().unwrap_or_default().to_string(), step(t["status"].as_str()))).collect())
+}
+
+fn step(status: Option<&str>) -> Step {
+    match status {
+        Some("completed") => Step::Done,
+        Some("in_progress") => Step::Active,
+        _ => Step::Pending,
+    }
+}
+
+/// Rows read the same for every agent ("Run command", "Read", "Edit"); the agent's own title
+/// is kept for tools without a standard kind.
+fn row_title(tool: &Tool) -> String {
+    match tool.kind.as_str() {
+        _ if tool.todos.is_some() => "Update plan".to_string(),
+        k @ ("read" | "edit" | "delete" | "move" | "search" | "execute" | "fetch") => kind_title(k).to_string(),
+        k if tool.title.is_empty() => kind_title(k).to_string(),
+        _ => tool.title.clone(),
+    }
 }
 
 fn tool_output(tc: &Value) -> String {
@@ -384,6 +408,8 @@ struct Tool {
     title: String,
     kind: String,
     detail: String,
+    /// A to-do tool's list, shown as a checklist once it's done.
+    todos: Option<Vec<(String, Step)>>,
     started: bool,
 }
 
@@ -392,6 +418,10 @@ struct Tool {
 struct Turn {
     text: String,
     tools: HashMap<String, Tool>,
+    plan_updates: u32,
+    /// The session's running cost as last reported, and where it stood when the turn began.
+    cost: Option<f64>,
+    cost_before: Option<f64>,
 }
 
 impl Turn {
@@ -418,13 +448,19 @@ impl Turn {
             Some(kind @ ("tool_call" | "tool_call_update")) => {
                 let id = u["toolCallId"].as_str().unwrap_or_default().to_string();
                 let tool = self.tools.entry(id.clone()).or_default();
-                if let Some(t) = u["title"].as_str().filter(|t| !t.is_empty()) {
+                // The row shows the title the call had when it started.
+                if !tool.started
+                    && let Some(t) = u["title"].as_str().filter(|t| !t.is_empty())
+                {
                     tool.title = t.into();
                 }
                 if let Some(k) = u["kind"].as_str() {
                     tool.kind = k.into();
                 }
-                let detail = tool_detail(u);
+                if let Some(steps) = todo_steps(&u["rawInput"]) {
+                    tool.todos = Some(steps);
+                }
+                let detail = tool_detail(u, &tool.kind);
                 if !detail.is_empty() {
                     tool.detail = detail;
                 }
@@ -434,25 +470,75 @@ impl Turn {
                 let start = !tool.started && (done || status == "in_progress" || !tool.detail.is_empty());
                 if start {
                     tool.started = true;
-                    let title = if tool.title.is_empty() { kind_title(&tool.kind).to_string() } else { tool.title.clone() };
-                    let detail = tool.detail.clone();
+                    let (title, detail) = (row_title(tool), tool.detail.clone());
                     self.flush_text(&mut out);
                     out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail });
                 }
                 if done {
-                    self.tools.remove(&id);
-                    out.push(AgentEvent::ToolFinished { id, output: tool_output(u), ok: status == "completed" });
+                    let output = match self.tools.remove(&id).and_then(|t| t.todos) {
+                        Some(steps) if status == "completed" => plan_row(&steps).1,
+                        _ => tool_output(u),
+                    };
+                    out.push(AgentEvent::ToolFinished { id, output, ok: status == "completed" });
                 }
             }
+            // The agent's plan (ACP `plan` entries), as a checklist row.
+            Some("plan") => {
+                let steps: Vec<(String, Step)> = u["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str())))
+                    .collect();
+                if !steps.is_empty() {
+                    self.plan_updates += 1;
+                    let id = format!("plan-{}", self.plan_updates);
+                    let (detail, output) = plan_row(&steps);
+                    self.flush_text(&mut out);
+                    out.push(AgentEvent::ToolStarted { id: id.clone(), title: "Update plan".into(), detail });
+                    out.push(AgentEvent::ToolFinished { id, output, ok: true });
+                }
+            }
+            Some("usage_update") => {
+                if u["cost"]["currency"] == "USD"
+                    && let Some(c) = u["cost"]["amount"].as_f64()
+                {
+                    self.cost = Some(c);
+                }
+                // A cancelled turn reports 0 used; the window still holds the conversation.
+                if let (Some(used), Some(window)) = (u["used"].as_u64().filter(|u| *u > 0), u["size"].as_u64()) {
+                    out.push(AgentEvent::Context { used, window });
+                }
+            }
+            Some("available_commands_update") => out.push(AgentEvent::Commands(
+                u["availableCommands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| {
+                        Some(SlashCommand {
+                            name: c["name"].as_str()?.trim_start_matches('/').to_string(),
+                            description: c["description"].as_str().unwrap_or_default().to_string(),
+                            kind: CommandKind::Command,
+                        })
+                    })
+                    .collect(),
+            )),
             _ => {}
         }
         out
+    }
+
+    /// A prompt went out: the turn's cost counts from here.
+    fn begin(&mut self) {
+        self.cost_before = self.cost;
     }
 
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
+        let cost_usd = self.cost.map(|c| c - self.cost_before.unwrap_or(0.0)).filter(|c| *c > 0.0);
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
@@ -461,7 +547,7 @@ impl Turn {
             Ok(_) => None,
             Err(msg) => Some(msg),
         };
-        out.push(AgentEvent::TurnComplete { cost_usd: None, error });
+        out.push(AgentEvent::TurnComplete { cost_usd, error });
         out
     }
 }
@@ -476,6 +562,15 @@ enum ModelSwitch {
     Config(String),
 }
 
+/// How an agent enters and leaves plan mode.
+#[derive(Debug, Clone, PartialEq)]
+enum PlanSwitch {
+    /// `session/set_mode` (ACP `modes`): the plan mode id and the one to go back to.
+    Mode { plan: String, off: String },
+    /// `session/set_config_option` on a mode select (OpenCode's build/plan).
+    Config { id: String, plan: String, off: String },
+}
+
 /// Session controls advertised in a `session/new` or `session/load` result.
 #[derive(Debug, Clone)]
 struct Controls {
@@ -484,7 +579,9 @@ struct Controls {
     switch: ModelSwitch,
     /// Config option id and values for reasoning effort.
     effort: Option<(String, Vec<String>)>,
-    plan_mode: Option<String>,
+    plan_mode: Option<PlanSwitch>,
+    /// The session is in plan mode right now.
+    planning: bool,
 }
 
 fn select_options(opt: &Value) -> Vec<(String, String)> {
@@ -546,17 +643,47 @@ fn controls(result: &Value) -> Controls {
         (vec![], None, ModelSwitch::None)
     };
 
-    let plan_mode = result["modes"]["availableModes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| {
-            let id = m["id"].as_str().unwrap_or_default().to_lowercase();
-            id == "plan" || id.ends_with("#plan") || m["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("plan"))
-        })
-        .and_then(|m| m["id"].as_str().map(String::from));
+    let is_plan = |id: &str, name: Option<&str>| {
+        let id = id.to_lowercase();
+        id == "plan" || id.ends_with("#plan") || name.is_some_and(|n| n.eq_ignore_ascii_case("plan"))
+    };
+    let modes: Vec<&Value> = result["modes"]["availableModes"].as_array().into_iter().flatten().collect();
+    let (plan_mode, planning) = if let Some(plan) = modes.iter().find(|m| is_plan(m["id"].as_str().unwrap_or_default(), m["name"].as_str())) {
+        let plan = plan["id"].as_str().unwrap_or_default().to_string();
+        let current = result["modes"]["currentModeId"].as_str().unwrap_or_default();
+        let off = Some(current)
+            .filter(|c| !c.is_empty() && *c != plan)
+            .or_else(|| modes.iter().filter_map(|m| m["id"].as_str()).find(|id| *id != plan))
+            .unwrap_or_default()
+            .to_string();
+        (Some(PlanSwitch::Mode { plan: plan.clone(), off }), current == plan)
+    } else if let Some(o) = by_category("mode") {
+        let values = select_options(o);
+        match values.iter().find(|(v, n)| is_plan(v, Some(n))) {
+            Some((plan, _)) => {
+                let off = values.iter().map(|(v, _)| v.clone()).find(|v| v != plan).unwrap_or_default();
+                let id = o["id"].as_str().unwrap_or("mode").to_string();
+                (Some(PlanSwitch::Config { id, plan: plan.clone(), off }), o["currentValue"].as_str() == Some(plan.as_str()))
+            }
+            None => (None, false),
+        }
+    } else {
+        (None, false)
+    };
 
-    Controls { models, current_model, switch, effort, plan_mode }
+    Controls { models, current_model, switch, effort, plan_mode, planning }
+}
+
+/// Request params that turn plan mode on or off.
+fn plan_request(c: &Controls, session_id: &str, on: bool) -> Option<(&'static str, Value)> {
+    match c.plan_mode.as_ref()? {
+        PlanSwitch::Mode { plan, off } => {
+            Some(("session/set_mode", json!({ "sessionId": session_id, "modeId": if on { plan } else { off } })))
+        }
+        PlanSwitch::Config { id, plan, off } => {
+            Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": if on { plan } else { off } })))
+        }
+    }
 }
 
 /// Request params that switch to `model`, if the agent supports it.
@@ -601,8 +728,12 @@ pub async fn run(
         let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp });
         match agent.call("session/load", params, &fs, &mut backlog, setup).await? {
             Ok(r) => {
-                // The agent replays history as updates; the transcript already has it.
-                backlog.retain(|v| v["method"] != "session/update");
+                // The agent replays history as updates; the transcript already has it. Session
+                // state (commands, usage) still counts.
+                backlog.retain(|v| {
+                    v["method"] != "session/update"
+                        || matches!(v["params"]["update"]["sessionUpdate"].as_str(), Some("available_commands_update" | "usage_update"))
+                });
                 opened = Some((id.clone(), r));
             }
             Err(e) => tracing::warn!("session/load failed, starting fresh: {}", rpc_message(&e)),
@@ -631,11 +762,11 @@ pub async fn run(
     {
         let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
     }
-    if config.plan
-        && let Some(mode) = &ctl.plan_mode
+    // Into plan mode, or out of it when a resumed session was left there.
+    if config.plan != ctl.planning
+        && let Some((method, params)) = plan_request(&ctl, &session_id, config.plan)
     {
-        let params = json!({ "sessionId": session_id, "modeId": mode });
-        let _ = agent.call("session/set_mode", params, &fs, &mut backlog, setup).await?;
+        let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
     }
     events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
 
@@ -661,6 +792,7 @@ pub async fn run(
                         }
                         prompt.push(json!({ "type": "text", "text": text }));
                         let params = json!({ "sessionId": s.session_id, "prompt": prompt });
+                        s.turn.begin();
                         s.prompt = Some(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
@@ -772,26 +904,43 @@ impl Live {
             rpc.reply(rpc_id, reply).await?;
             return Ok(vec![]);
         }
+        match self.turn.permission(p, hand_holding) {
+            Ask::Answer(option) => {
+                rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
+                Ok(vec![])
+            }
+            Ask::User { title, detail, options } => {
+                let request_id = format!("acp-{rpc_id}");
+                self.perms.insert(request_id.clone(), (rpc_id, options));
+                Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }])
+            }
+        }
+    }
+}
+
+/// What to do with a `session/request_permission`.
+#[derive(Debug, PartialEq)]
+enum Ask {
+    /// The thread's access level covers it: pick this option.
+    Answer(String),
+    User { title: String, detail: String, options: Vec<Value> },
+}
+
+impl Turn {
+    fn permission(&self, p: &Value, hand_holding: HandHolding) -> Ask {
         let tc = &p["toolCall"];
-        let known = tc["toolCallId"].as_str().and_then(|id| self.turn.tools.get(id));
+        let known = tc["toolCallId"].as_str().and_then(|id| self.tools.get(id));
         let kind = tc["kind"].as_str().or(known.map(|t| t.kind.as_str())).unwrap_or("other").to_string();
         let options = p["options"].as_array().cloned().unwrap_or_default();
         if auto_allow(hand_holding, &kind)
             && let Some(option) = pick_option(&options, Decision::Allow)
         {
-            rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
-            return Ok(vec![]);
+            return Ask::Answer(option);
         }
-        let title = tc["title"]
-            .as_str()
-            .filter(|t| !t.is_empty())
-            .map(String::from)
-            .or(known.map(|t| t.title.clone()).filter(|t| !t.is_empty()))
-            .unwrap_or_else(|| kind_title(&kind).into());
-        let detail = Some(tool_detail(tc)).filter(|d| !d.is_empty()).or(known.map(|t| t.detail.clone())).unwrap_or_default();
-        let request_id = format!("acp-{rpc_id}");
-        self.perms.insert(request_id.clone(), (rpc_id, options));
-        Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }])
+        let title = tc["title"].as_str().filter(|t| !t.is_empty()).map(String::from).or(known.map(|t| t.title.clone())).unwrap_or_default();
+        let title = row_title(&Tool { title, kind: kind.clone(), ..Default::default() });
+        let detail = Some(tool_detail(tc, &kind)).filter(|d| !d.is_empty()).or(known.map(|t| t.detail.clone())).unwrap_or_default();
+        Ask::User { title, detail, options }
     }
 }
 
@@ -857,7 +1006,7 @@ mod tests {
             ev,
             vec![
                 AgentEvent::TextDone("Looking.".into()),
-                AgentEvent::ToolStarted { id: "t1".into(), title: "Read file".into(), detail: "/p/src/main.rs".into() },
+                AgentEvent::ToolStarted { id: "t1".into(), title: "Read".into(), detail: "/p/src/main.rs".into() },
             ]
         );
         let ev = t.update(&json!({
@@ -872,7 +1021,7 @@ mod tests {
         let mut t = Turn::default();
         assert!(t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"b","title":"bash","kind":"execute","status":"pending","rawInput":{}})).is_empty());
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"in_progress","rawInput":{"command":"ls -la"}}));
-        assert_eq!(ev, vec![AgentEvent::ToolStarted { id: "b".into(), title: "bash".into(), detail: "ls -la".into() }]);
+        assert_eq!(ev, vec![AgentEvent::ToolStarted { id: "b".into(), title: "Run command".into(), detail: "ls -la".into() }]);
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"failed","rawOutput":{"output":"boom"}}));
         assert_eq!(ev, vec![AgentEvent::ToolFinished { id: "b".into(), output: "boom".into(), ok: false }]);
     }
@@ -930,7 +1079,8 @@ mod tests {
         assert_eq!(c.switch, ModelSwitch::SetModel);
         assert_eq!(c.current_model.as_deref(), Some("b"));
         assert_eq!(c.models[0].efforts, vec![Effort::Low, Effort::High]);
-        assert_eq!(c.plan_mode.as_deref(), Some("plan"));
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Mode { plan: "plan".into(), off: "build".into() }));
+        assert!(!c.planning);
 
         let config = json!({"sessionId":"s","configOptions":[
             {"id":"model","category":"model","type":"select","currentValue":"x/1","options":[
@@ -958,6 +1108,119 @@ mod tests {
         assert!(within(&root.join("a/b.txt"), &root));
         assert!(!within(&root.join("../escape.txt"), &root));
         assert!(!within(Path::new("/etc/hosts"), &root));
+    }
+
+    /// Recorded ACP traffic (OpenCode 1.18.34, opencode/mimo-v2.6-flash-free), one message per line.
+    fn fixture(text: &str) -> Vec<Value> {
+        text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    fn updates(t: &mut Turn, lines: &[Value]) -> Vec<AgentEvent> {
+        lines.iter().filter(|v| v["method"] == "session/update").flat_map(|v| t.update(&v["params"]["update"])).collect()
+    }
+
+    #[test]
+    fn opencode_turn_maps_todos_reads_edits_usage_and_commands() {
+        let lines = fixture(include_str!("../fixtures/opencode-turn.jsonl"));
+        let mut t = Turn::default();
+        let ev = updates(&mut t, &lines);
+        assert_eq!(ev[0], AgentEvent::Commands(vec![
+            SlashCommand { name: "init".into(), description: "guided AGENTS.md setup".into(), kind: CommandKind::Command },
+            SlashCommand { name: "review".into(), description: "review changes [commit|branch|pr], defaults to uncommitted".into(), kind: CommandKind::Command },
+        ]));
+        let rows: Vec<(&str, &str)> =
+            ev.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, detail, .. } = e { Some((title.as_str(), detail.as_str())) } else { None }).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Update plan", "Read notes"),
+                ("Read", "/private/tmp/trek-agents-e2e/notes.txt"),
+                ("Update plan", "Edit notes"),
+                ("Edit", "/private/tmp/trek-agents-e2e/notes.txt"),
+                ("Update plan", "All 2 steps done"),
+            ]
+        );
+        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_a47ac35a1bd64360a32c5a34".into(), output: "→ Read notes\n○ Edit notes".into(), ok: true }));
+        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_339ea6bf075f4a0286098c91".into(), output: "Edit applied successfully.\nEdited /private/tmp/trek-agents-e2e/notes.txt".into(), ok: true }));
+        assert_eq!(ev.last(), Some(&AgentEvent::Context { used: 12761, window: 200000 }));
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("done".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }]);
+
+        // The edit prompt reads like the row it belongs to.
+        let ask = lines.iter().find(|v| v["method"] == "session/request_permission").unwrap();
+        let mut t = Turn::default();
+        let upto = lines.iter().position(|v| v == ask).unwrap();
+        updates(&mut t, &lines[..upto]);
+        let Ask::User { title, detail, .. } = t.permission(&ask["params"], HandHolding::Supervised) else { panic!() };
+        assert_eq!((title.as_str(), detail.as_str()), ("Edit", "/private/tmp/trek-agents-e2e/notes.txt"));
+        assert_eq!(t.permission(&ask["params"], HandHolding::AutoAcceptEdits), Ask::Answer("once".into()));
+    }
+
+    #[test]
+    fn opencode_command_waits_for_its_command_and_asks() {
+        let lines = fixture(include_str!("../fixtures/opencode-permission.jsonl"));
+        let mut t = Turn::default();
+        // The pending call only knows its working directory: no row yet.
+        assert!(t.update(&lines[0]["params"]["update"]).is_empty());
+        assert_eq!(
+            t.update(&lines[1]["params"]["update"]),
+            vec![AgentEvent::ToolStarted { id: "call_66c3b2d0ebfa47829d8d907f".into(), title: "Run command".into(), detail: "touch oc1.txt".into() }]
+        );
+        let ask = &lines[2]["params"];
+        let Ask::User { title, detail, options } = t.permission(ask, HandHolding::Supervised) else { panic!() };
+        assert_eq!((title.as_str(), detail.as_str()), ("Run command", "touch oc1.txt"));
+        assert_eq!(pick_option(&options, Decision::Deny).as_deref(), Some("reject"));
+        assert_eq!(pick_option(&options, Decision::AllowForSession).as_deref(), Some("always"));
+        assert!(matches!(t.permission(ask, HandHolding::Auto), Ask::User { .. }), "Auto still asks before commands");
+        assert_eq!(t.permission(ask, HandHolding::FullAccess), Ask::Answer("once".into()));
+        assert_eq!(
+            t.update(&lines[3]["params"]["update"]),
+            vec![AgentEvent::ToolFinished {
+                id: "call_66c3b2d0ebfa47829d8d907f".into(),
+                output: "The user rejected permission to use this specific tool call.".into(),
+                ok: false
+            }]
+        );
+    }
+
+    #[test]
+    fn opencode_plan_mode_is_a_config_option() {
+        let c = controls(&serde_json::from_str(include_str!("../fixtures/opencode-session-new.json")).unwrap());
+        assert_eq!(c.switch, ModelSwitch::Config("model".into()));
+        assert_eq!(c.current_model.as_deref(), Some("opencode/big-pickle"));
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Config { id: "mode".into(), plan: "plan".into(), off: "build".into() }));
+        assert!(!c.planning);
+        assert_eq!(plan_request(&c, "s", true), Some(("session/set_config_option", json!({"sessionId":"s","configId":"mode","value":"plan"}))));
+        assert_eq!(plan_request(&c, "s", false).unwrap().1["value"], "build");
+    }
+
+    #[test]
+    fn plan_entries_and_cost_per_turn() {
+        // ACP `plan` update shape (agent-client-protocol schema); OpenCode sends todos as a tool instead.
+        let mut t = Turn::default();
+        let ev = t.update(&json!({"sessionUpdate":"plan","entries":[
+            {"content":"Read","priority":"high","status":"completed"},{"content":"Write","priority":"high","status":"in_progress"}]}));
+        assert_eq!(
+            ev,
+            vec![
+                AgentEvent::ToolStarted { id: "plan-1".into(), title: "Update plan".into(), detail: "Write".into() },
+                AgentEvent::ToolFinished { id: "plan-1".into(), output: "✓ Read\n→ Write".into(), ok: true },
+            ]
+        );
+        // `cost` is the session's running total: a turn is charged the difference.
+        t.update(&json!({"sessionUpdate":"usage_update","used":10,"size":100,"cost":{"amount":0.5,"currency":"USD"}}));
+        assert!(t.update(&json!({"sessionUpdate":"usage_update","used":0,"size":100})).is_empty());
+        t.begin();
+        t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":0.75,"currency":"USD"}}));
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.25), error: None }]);
+    }
+
+    #[test]
+    fn opencode_is_told_to_ask() {
+        let env = launch_env(&AgentId::OpenCode);
+        let rules: Value = serde_json::from_str(env[0].1).unwrap();
+        assert_eq!(env[0].0, "OPENCODE_PERMISSION");
+        assert_eq!((rules["edit"].as_str(), rules["bash"].as_str()), (Some("ask"), Some("ask")));
+        assert!(launch_env(&AgentId::Droid).is_empty());
     }
 
     #[test]
