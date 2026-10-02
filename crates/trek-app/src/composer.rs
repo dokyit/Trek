@@ -213,6 +213,14 @@ impl Composer {
         .detach();
     }
 
+    /// Attach an image file (a screenshot from a tool panel) to the next message.
+    pub fn attach_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.attachments.contains(&path) {
+            self.attachments.push(path);
+        }
+        cx.notify();
+    }
+
     fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let (images, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.iter().cloned().partition(|p| mentions::is_image(p));
         self.attachments.extend(images);

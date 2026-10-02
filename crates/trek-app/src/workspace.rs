@@ -115,10 +115,11 @@ pub enum PanelTool {
     Terminal,
     Browser,
     SideChat,
+    Simulator,
 }
 
 impl PanelTool {
-    pub const ALL: [PanelTool; 5] = [PanelTool::Terminal, PanelTool::Browser, PanelTool::Explorer, PanelTool::SideChat, PanelTool::Git];
+    pub const ALL: [PanelTool; 6] = [PanelTool::Terminal, PanelTool::Browser, PanelTool::Simulator, PanelTool::Explorer, PanelTool::SideChat, PanelTool::Git];
     pub fn label(self) -> &'static str {
         match self {
             PanelTool::Git => "Git",
@@ -126,6 +127,7 @@ impl PanelTool {
             PanelTool::Terminal => "Terminal",
             PanelTool::Browser => "Browser",
             PanelTool::SideChat => "Side chat",
+            PanelTool::Simulator => "Simulator",
         }
     }
 }
@@ -138,6 +140,8 @@ pub enum WorkspaceEvent {
     FocusComposer,
     /// Run a shell command in a new terminal tab (agent install / sign in), then rescan agents.
     RunInTerminal(String),
+    /// Attach an image (e.g. a simulator screenshot) to the composer's next message.
+    AttachImage(PathBuf),
 }
 
 #[derive(Debug, Clone)]

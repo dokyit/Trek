@@ -49,6 +49,10 @@ impl TrekWindow {
                     let command = command.clone();
                     this.right_panel.update(cx, |p, cx| p.run_command(command, window, cx));
                 }
+                WorkspaceEvent::AttachImage(path) => {
+                    let path = path.clone();
+                    this.composer.update(cx, |c, cx| c.attach_image(path, cx));
+                }
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
@@ -56,6 +60,13 @@ impl TrekWindow {
                 }
             }),
         ];
+        // Debug hook: `TREK_OPEN_TOOL=simulator` opens a right-panel tool at launch.
+        if let Ok(name) = std::env::var("TREK_OPEN_TOOL") {
+            let name = name.trim().replace([' ', '-', '_'], "");
+            if let Some(tool) = crate::workspace::PanelTool::ALL.into_iter().find(|t| t.label().replace(' ', "").eq_ignore_ascii_case(&name)) {
+                right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
+            }
+        }
         Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, _subscriptions: subscriptions }
     }
 

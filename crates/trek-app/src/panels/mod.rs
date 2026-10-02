@@ -1,9 +1,10 @@
-//! Right panel (Synara-style): tabs of tools — Terminal, Browser, Explorer, Side chat, Git.
+//! Right panel (Synara-style): tabs of tools — Terminal, Browser, Simulator, Explorer, Side chat, Git.
 
 mod browser;
 mod explorer;
 mod git;
 mod side_chat;
+mod simulator;
 mod terminal;
 
 use crate::ui;
@@ -20,6 +21,7 @@ pub fn tool_icon(tool: PanelTool) -> Icon {
         PanelTool::Explorer => Icon::new(IconName::FolderOpen),
         PanelTool::SideChat => Icon::new(crate::assets::Lucide::MessageSquare),
         PanelTool::Git => Icon::new(crate::assets::Lucide::GitBranch),
+        PanelTool::Simulator => Icon::new(crate::assets::Lucide::Smartphone),
     }
 }
 
@@ -34,6 +36,7 @@ enum View {
     Terminal(Entity<terminal::TerminalPanel>),
     Browser(Entity<browser::BrowserPanel>),
     SideChat(Entity<side_chat::SideChatPanel>),
+    Simulator(Entity<simulator::SimulatorPanel>),
 }
 
 struct Tab {
@@ -85,6 +88,7 @@ impl RightPanel {
             }
             PanelTool::Browser => View::Browser(cx.new(|cx| browser::BrowserPanel::new(window, cx))),
             PanelTool::SideChat => View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx))),
+            PanelTool::Simulator => View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx))),
         };
         let id = self.next_id;
         self.next_id += 1;
@@ -122,8 +126,10 @@ impl RightPanel {
     }
 
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Tab { view: View::Browser(b), .. }) = self.tabs.iter().find(|t| t.id == id) {
-            b.update(cx, |b, cx| b.set_visible(false, cx));
+        match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
+            Some(View::Browser(b)) => b.update(cx, |b, cx| b.set_visible(false, cx)),
+            Some(View::Simulator(s)) => s.update(cx, |s, cx| s.release(window, cx)),
+            _ => {}
         }
         let ix = self.tabs.iter().position(|t| t.id == id);
         self.tabs.retain(|t| t.id != id);
@@ -134,15 +140,23 @@ impl RightPanel {
     }
 
     /// Native web views draw above GPUI, so only the visible Browser tab may show.
+    /// The Simulator only mirrors (and polls the device) while its tab is on screen.
     fn sync_native(&mut self, cx: &mut Context<Self>) {
         let active = self.active;
         let open = self.open;
         let menu_open = self.launcher_open;
         for t in &self.tabs {
-            if let View::Browser(b) = &t.view {
-                // Hidden while the launcher menu is open, or it would cover the menu.
-                let show = open && active == Some(t.id) && !menu_open;
-                b.update(cx, |b, cx| b.set_visible(show, cx));
+            match &t.view {
+                View::Browser(b) => {
+                    // Hidden while the launcher menu is open, or it would cover the menu.
+                    let show = open && active == Some(t.id) && !menu_open;
+                    b.update(cx, |b, cx| b.set_visible(show, cx));
+                }
+                View::Simulator(s) => {
+                    let show = open && active == Some(t.id);
+                    s.update(cx, |s, cx| s.set_visible(show, cx));
+                }
+                _ => {}
             }
         }
     }
@@ -259,6 +273,7 @@ impl Render for RightPanel {
                 View::Terminal(v) => v.clone().into_any_element(),
                 View::Browser(v) => v.clone().into_any_element(),
                 View::SideChat(v) => v.clone().into_any_element(),
+                View::Simulator(v) => v.clone().into_any_element(),
             },
             None => v_flex()
                 .size_full()
