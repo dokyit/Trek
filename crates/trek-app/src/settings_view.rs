@@ -679,10 +679,14 @@ impl SettingsView {
                                 .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.import_threads(cx)))),
                         )
                         .when_some(summary, |el, s| {
-                            el.child(div().text_sm().text_color(muted).child(format!(
-                                "{} Claude Code · {} Codex · {} OpenCode",
-                                s.claude_code, s.codex, s.opencode
-                            )))
+                            let mut line = format!("{} Claude Code · {} Codex · {} OpenCode", s.claude_code, s.codex, s.opencode);
+                            // Title generators, test runs and sub-agents never become threads.
+                            match s.skipped_total() {
+                                0 => {}
+                                1 => line.push_str(" · 1 helper session left out"),
+                                n => line.push_str(&format!(" · {n} helper sessions left out")),
+                            }
+                            el.child(div().text_sm().text_color(muted).child(line))
                         })
                         .into_any_element(),
                 );

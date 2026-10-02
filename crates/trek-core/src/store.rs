@@ -5,6 +5,7 @@ use crate::types::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -95,6 +96,11 @@ pub struct Thread {
     pub side_of: Option<String>,
     /// Exempt from auto-settle (set from the thread's context menu).
     pub never_settle: bool,
+    /// The title the last import gave it; a different current title is one the user typed.
+    pub imported_title: Option<String>,
+    /// Archived by an import: not a conversation (see `import::Skip`), or its session was
+    /// deleted. Brought back if a later import finds it as a conversation again.
+    pub hidden_by_import: bool,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -205,6 +211,15 @@ pub enum ToolStatus {
     Denied,
 }
 
+/// What an import did to one session's thread.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Upserted {
+    pub added: bool,
+    pub retitled: bool,
+    pub hidden: bool,
+    pub restored: bool,
+}
+
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -256,6 +271,22 @@ pub fn project_root(cwd: &Path) -> PathBuf {
 fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN side_of TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN never_settle INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN imported_title TEXT", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN hidden_by_import INTEGER NOT NULL DEFAULT 0", []);
+}
+
+fn project_in(c: &Connection, path: &Path) -> rusqlite::Result<Project> {
+    let root = project_root(path);
+    let path_str = root.display().to_string();
+    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path_str.clone());
+    c.execute(
+        "INSERT INTO projects(id, path, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(path) DO NOTHING",
+        params![uuid::Uuid::now_v7().to_string(), path_str, name, now_ms()],
+    )?;
+    c.query_row("SELECT id, path, name, updated_at FROM projects WHERE path = ?1", [&path_str], |r| {
+        Ok(Project::from_row(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })
 }
 
 impl Store {
@@ -285,20 +316,7 @@ impl Store {
     // ---- projects ----
 
     pub fn ensure_project(&self, path: &Path) -> Result<Project> {
-        let root = project_root(path);
-        let path_str = root.display().to_string();
-        let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path_str.clone());
-        let now = now_ms();
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO projects(id, path, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
-                 ON CONFLICT(path) DO NOTHING",
-                params![uuid::Uuid::now_v7().to_string(), path_str, name, now],
-            )?;
-            c.query_row("SELECT id, path, name, updated_at FROM projects WHERE path = ?1", [&path_str], |r| {
-                Ok(Project::from_row(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-        })
+        self.with(|c| project_in(c, path))
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
@@ -315,7 +333,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, hidden_by_import";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -342,6 +360,8 @@ impl Store {
             deletions: r.get(20)?,
             side_of: r.get(21)?,
             never_settle: r.get::<_, i64>(22)? != 0,
+            imported_title: r.get(23)?,
+            hidden_by_import: r.get::<_, i64>(24)? != 0,
         })
     }
 
@@ -397,46 +417,52 @@ impl Store {
             deletions: 0,
             side_of: None,
             never_settle: false,
+            imported_title: None,
+            hidden_by_import: false,
         };
         self.save_thread(&t)?;
         Ok(t)
     }
 
     pub fn save_thread(&self, t: &Thread) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                &format!(
-                    "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
-                    Self::THREAD_COLS
-                ),
-                params![
-                    t.id,
-                    t.project_id,
-                    t.title,
-                    t.agent.key(),
-                    t.model,
-                    t.effort.as_str(),
-                    enum_str(&t.hand_holding),
-                    t.source.key(),
-                    t.native_id,
-                    t.cwd.as_ref().map(|p| p.display().to_string()),
-                    t.branch,
-                    t.created_at,
-                    t.updated_at,
-                    t.last_seen_at,
-                    t.settled_at,
-                    t.pinned_at,
-                    t.snoozed_until,
-                    t.archived_at,
-                    enum_str(&t.run_state),
-                    t.additions,
-                    t.deletions,
-                    t.side_of,
-                    t.never_settle as i64
-                ],
-            )?;
-            Ok(())
-        })
+        self.with(|c| Self::save_thread_in(c, t))
+    }
+
+    fn save_thread_in(c: &Connection, t: &Thread) -> rusqlite::Result<()> {
+        c.execute(
+            &format!(
+                "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+                Self::THREAD_COLS
+            ),
+            params![
+                t.id,
+                t.project_id,
+                t.title,
+                t.agent.key(),
+                t.model,
+                t.effort.as_str(),
+                enum_str(&t.hand_holding),
+                t.source.key(),
+                t.native_id,
+                t.cwd.as_ref().map(|p| p.display().to_string()),
+                t.branch,
+                t.created_at,
+                t.updated_at,
+                t.last_seen_at,
+                t.settled_at,
+                t.pinned_at,
+                t.snoozed_until,
+                t.archived_at,
+                enum_str(&t.run_state),
+                t.additions,
+                t.deletions,
+                t.side_of,
+                t.never_settle as i64,
+                t.imported_title,
+                t.hidden_by_import as i64
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn update_thread(&self, id: &str, f: impl FnOnce(&mut Thread)) -> Result<Option<Thread>> {
@@ -446,38 +472,84 @@ impl Store {
         Ok(Some(t))
     }
 
-    /// Insert or refresh an imported thread. Imported history arrives settled so it
-    /// doesn't flood the Inbox. Returns true if it was new.
-    pub fn upsert_imported(&self, imp: &ImportedThread) -> Result<bool> {
-        let existing: Option<(String, i64)> = self.with(|c| {
-            c.query_row(
-                "SELECT id, updated_at FROM threads WHERE source = ?1 AND native_id = ?2",
+    /// Agent session ids of Trek's own threads, archived ones included.
+    pub fn trek_native_ids(&self) -> Result<HashSet<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT native_id FROM threads WHERE source = 'trek' AND native_id IS NOT NULL")?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Insert or refresh imported threads, in one transaction. Imported history arrives settled
+    /// so it doesn't flood the Inbox. Sessions that aren't conversations are never added, and
+    /// threads imported before a rule matched them are archived.
+    pub fn upsert_imported(&self, found: &[ImportedThread]) -> Result<Vec<Upserted>> {
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn.transaction()?;
+        let out = found.iter().map(|imp| Self::upsert_one(&tx, imp)).collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    fn upsert_one(c: &Connection, imp: &ImportedThread) -> rusqlite::Result<Upserted> {
+        let mut out = Upserted::default();
+        let existing = c
+            .query_row(
+                &format!("SELECT {} FROM threads WHERE source = ?1 AND native_id = ?2", Self::THREAD_COLS),
                 params![imp.source.key(), imp.native_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                Self::row_to_thread,
             )
-            .optional()
-        })?;
-        if let Some((id, updated)) = existing {
-            if updated < imp.updated_at {
-                // Activity that happened outside Trek isn't "unread" here.
-                self.update_thread(&id, |t| {
-                    let seen = t.last_seen_at >= t.updated_at;
-                    t.updated_at = imp.updated_at;
-                    t.title = imp.title.clone();
-                    if seen {
-                        t.last_seen_at = imp.updated_at;
-                    }
-                })?;
+            .optional()?;
+        let Some(mut t) = existing else {
+            if imp.skip.is_none() {
+                Self::save_thread_in(c, &Self::new_imported(c, imp)?)?;
+                out.added = true;
             }
-            return Ok(false);
+            return Ok(out);
+        };
+        let before = t.clone();
+        match imp.skip {
+            // Threads the user kept (pinned, or continued in Trek) stay where they are.
+            Some(_) if t.archived_at.is_none() && t.pinned_at.is_none() && !Self::has_items_in(c, &t.id)? => {
+                t.archived_at = Some(now_ms());
+                t.hidden_by_import = true;
+                out.hidden = true;
+            }
+            None if t.hidden_by_import => {
+                t.archived_at = None;
+                t.hidden_by_import = false;
+                out.restored = true;
+            }
+            _ => {}
         }
-        let project = imp.cwd.as_deref().filter(|p| p.exists()).map(|p| self.ensure_project(p)).transpose()?;
-        let agent = imp.source.agent().unwrap_or(AgentId::ClaudeCode);
-        let t = Thread {
+        // Automatic titles follow the source; a title the user typed in Trek stays.
+        let previous = t.imported_title.as_deref().or(imp.legacy_title.as_deref());
+        if previous.is_none_or(|p| p == t.title) && t.title != imp.title {
+            t.title = imp.title.clone();
+            out.retitled = true;
+        }
+        t.imported_title = Some(imp.title.clone());
+        if t.updated_at < imp.updated_at {
+            // Activity that happened outside Trek isn't "unread" here.
+            if t.last_seen_at >= t.updated_at {
+                t.last_seen_at = imp.updated_at;
+            }
+            t.updated_at = imp.updated_at;
+        }
+        if t != before {
+            Self::save_thread_in(c, &t)?;
+        }
+        Ok(out)
+    }
+
+    fn new_imported(c: &Connection, imp: &ImportedThread) -> rusqlite::Result<Thread> {
+        let project = imp.cwd.as_deref().filter(|p| p.exists()).map(|p| project_in(c, p)).transpose()?;
+        Ok(Thread {
             id: uuid::Uuid::now_v7().to_string(),
             project_id: project.map(|p| p.id),
             title: imp.title.clone(),
-            agent,
+            agent: imp.source.agent().unwrap_or(AgentId::ClaudeCode),
             model: imp.model.clone(),
             effort: imp.effort.unwrap_or_default(),
             hand_holding: HandHolding::default(),
@@ -497,9 +569,38 @@ impl Store {
             deletions: imp.deletions,
             side_of: None,
             never_settle: false,
+            imported_title: Some(imp.title.clone()),
+            hidden_by_import: false,
+        })
+    }
+
+    /// Archive imported threads of `source` whose session is no longer in the agent's history
+    /// (`known`), unless the user kept them: pinned, or continued here so Trek has the transcript.
+    pub fn hide_missing(&self, source: ThreadSource, known: &HashSet<String>) -> Result<usize> {
+        if source == ThreadSource::Trek {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn.transaction()?;
+        let candidates: Vec<(String, String)> = {
+            let mut st = tx.prepare(
+                "SELECT id, native_id FROM threads
+                 WHERE source = ?1 AND native_id IS NOT NULL AND archived_at IS NULL AND pinned_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM items WHERE items.thread_id = threads.id)",
+            )?;
+            st.query_map([source.key()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
         };
-        self.save_thread(&t)?;
-        Ok(true)
+        let now = now_ms();
+        let mut hidden = 0;
+        for (id, _) in candidates.iter().filter(|(_, native)| !known.contains(native)) {
+            hidden += tx.execute("UPDATE threads SET archived_at = ?2, hidden_by_import = 1 WHERE id = ?1", params![id, now])?;
+        }
+        tx.commit()?;
+        Ok(hidden)
+    }
+
+    fn has_items_in(c: &Connection, thread_id: &str) -> rusqlite::Result<bool> {
+        c.query_row("SELECT EXISTS (SELECT 1 FROM items WHERE thread_id = ?1)", [thread_id], |r| r.get(0))
     }
 
     /// Remove a thread and its transcript from Trek's database.
@@ -586,6 +687,107 @@ mod tests {
         assert_eq!(back, t);
         s.set_items(&t.id, &[Item::User { text: "hi".into(), images: vec![], at: None }, Item::Assistant { text: "hello".into() }]).unwrap();
         assert_eq!(s.items(&t.id).unwrap().len(), 2);
+    }
+
+    fn imported(id: &str, title: &str) -> ImportedThread {
+        ImportedThread {
+            source: ThreadSource::ClaudeCode,
+            native_id: id.into(),
+            title: title.into(),
+            cwd: None,
+            branch: None,
+            model: None,
+            effort: None,
+            created_at: 1,
+            updated_at: 10,
+            additions: 0,
+            deletions: 0,
+            skip: None,
+            legacy_title: None,
+        }
+    }
+
+    fn by_native(s: &Store, id: &str) -> Thread {
+        s.with(|c| c.query_row(&format!("SELECT {} FROM threads WHERE native_id = ?1", Store::THREAD_COLS), [id], Store::row_to_thread)).unwrap()
+    }
+
+    #[test]
+    fn imports_retitle_unless_the_user_renamed() {
+        let s = Store::in_memory().unwrap();
+        let out = s.upsert_imported(&[imported("a", "fix the login bug"), imported("b", "add dark mode")]).unwrap();
+        assert!(out.iter().all(|o| o.added));
+        s.update_thread(&by_native(&s, "b").id, |t| t.title = "Theme work".into()).unwrap();
+        let out = s.upsert_imported(&[imported("a", "Login redirect loop fix"), imported("b", "Dark mode toggle")]).unwrap();
+        assert_eq!(out.iter().map(|o| o.retitled).collect::<Vec<_>>(), [true, false]);
+        assert_eq!(by_native(&s, "a").title, "Login redirect loop fix");
+        assert_eq!(by_native(&s, "b").title, "Theme work");
+        // Nothing changed: nothing written.
+        assert_eq!(s.upsert_imported(&[imported("a", "Login redirect loop fix")]).unwrap(), [Upserted::default()]);
+    }
+
+    #[test]
+    fn threads_from_older_imports_are_retitled_by_their_old_title() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_imported(&[imported("auto", "x"), imported("mine", "x")]).unwrap();
+        // As earlier versions left them: no imported title on record.
+        for (id, title) in [("auto", "Base directory for this skill: /tmp/skills/review"), ("mine", "Stadium work")] {
+            s.update_thread(&by_native(&s, id).id, |t| {
+                t.title = title.into();
+                t.imported_title = None;
+            })
+            .unwrap();
+        }
+        let legacy = |id: &str| ImportedThread { legacy_title: Some("Base directory for this skill: /tmp/skills/review".into()), ..imported(id, "Stadium camera fix") };
+        s.upsert_imported(&[legacy("auto"), legacy("mine")]).unwrap();
+        assert_eq!(by_native(&s, "auto").title, "Stadium camera fix");
+        assert_eq!(by_native(&s, "mine").title, "Stadium work");
+        assert_eq!(by_native(&s, "mine").imported_title.as_deref(), Some("Stadium camera fix"));
+    }
+
+    #[test]
+    fn helper_sessions_are_never_added_and_old_ones_are_archived() {
+        let s = Store::in_memory().unwrap();
+        let skip = |id: &str| ImportedThread { skip: Some(crate::import::Skip::TempDir), ..imported(id, "say ok") };
+        assert_eq!(s.upsert_imported(&[skip("new")]).unwrap(), [Upserted::default()]);
+        assert!(s.threads().unwrap().is_empty());
+        s.upsert_imported(&[imported("old", "say ok"), imported("pinned", "say ok"), imported("used", "say ok")]).unwrap();
+        s.update_thread(&by_native(&s, "pinned").id, |t| t.pinned_at = Some(5)).unwrap();
+        s.set_items(&by_native(&s, "used").id, &[Item::User { text: "keep going".into(), images: vec![], at: None }]).unwrap();
+        let out = s.upsert_imported(&[skip("old"), skip("pinned"), skip("used")]).unwrap();
+        // Threads the user pinned or continued in Trek stay.
+        assert_eq!(out.iter().map(|o| o.hidden).collect::<Vec<_>>(), [true, false, false]);
+        let old = by_native(&s, "old");
+        assert!(old.archived_at.is_some() && old.hidden_by_import);
+        // A fork continued since: back in the sidebar. A thread the user archived stays archived.
+        s.update_thread(&by_native(&s, "pinned").id, |t| t.archived_at = Some(7)).unwrap();
+        let out = s.upsert_imported(&[imported("old", "say ok"), imported("pinned", "say ok")]).unwrap();
+        assert_eq!(out.iter().map(|o| o.restored).collect::<Vec<_>>(), [true, false]);
+        assert!(by_native(&s, "old").archived_at.is_none());
+        assert!(by_native(&s, "pinned").archived_at.is_some());
+    }
+
+    #[test]
+    fn threads_whose_session_was_deleted_are_archived() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_imported(&[imported("here", "t"), imported("deleted", "t"), imported("continued", "t")]).unwrap();
+        s.set_items(&by_native(&s, "continued").id, &[Item::Assistant { text: "kept in Trek".into() }]).unwrap();
+        let known = HashSet::from(["here".to_string()]);
+        assert_eq!(s.hide_missing(ThreadSource::ClaudeCode, &known).unwrap(), 1);
+        assert!(by_native(&s, "deleted").hidden_by_import);
+        assert!(by_native(&s, "continued").archived_at.is_none());
+        // Other sources' threads aren't judged by this source's history.
+        assert_eq!(s.hide_missing(ThreadSource::Codex, &HashSet::new()).unwrap(), 0);
+        // Back on disk (restored from a backup): back in the sidebar.
+        assert!(s.upsert_imported(&[imported("deleted", "t")]).unwrap()[0].restored);
+    }
+
+    #[test]
+    fn imported_activity_moves_threads_without_making_them_unread() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_imported(&[imported("a", "t")]).unwrap();
+        s.upsert_imported(&[ImportedThread { updated_at: 50, ..imported("a", "t") }]).unwrap();
+        let t = by_native(&s, "a");
+        assert_eq!((t.updated_at, t.last_seen_at), (50, 50));
     }
 
     #[test]
