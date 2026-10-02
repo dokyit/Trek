@@ -23,6 +23,7 @@ pub enum Route {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
+    Project,
     General,
     Appearance,
     Notifications,
@@ -42,6 +43,7 @@ pub enum SettingsPage {
 impl SettingsPage {
     pub fn label(self) -> &'static str {
         match self {
+            SettingsPage::Project => "Project",
             SettingsPage::General => "General",
             SettingsPage::Appearance => "Appearance",
             SettingsPage::Notifications => "Notifications",
@@ -99,8 +101,36 @@ pub struct LiveThread {
     pub revision: u64,
     /// Follow-ups held while a turn runs (`FollowUp::Queue`), sent one per finished turn.
     pub queued: Vec<(String, Vec<PathBuf>)>,
+    /// Sub-agents launched this turn, keyed by the tool call that started them.
+    pub tasks: Vec<SubTask>,
+    /// Background sub-agents still running; the turn isn't over until this reaches zero.
+    pub background: usize,
+    /// Last prompt or agent event (idle sessions are shut down; they resume on the next message).
+    pub last_active: Option<Instant>,
+    last_persist: Option<Instant>,
     _events: Option<Task<()>>,
 }
+
+/// A sub-agent's progress, shown on its tool row and in the working bar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubTask {
+    pub id: String,
+    pub description: String,
+    /// What it's doing right now ("Running grep …").
+    pub activity: String,
+    pub tool_uses: u64,
+    /// `Some(ok)` once finished.
+    pub done: Option<bool>,
+}
+
+impl LiveThread {
+    pub fn active_tasks(&self) -> usize {
+        self.tasks.iter().filter(|t| t.done.is_none()).count()
+    }
+}
+
+/// What a pre-warmed draft session was started with; it's used only if the draft still matches.
+type WarmKey = (AgentId, PathBuf, Option<String>, Effort, HandHolding, bool, bool);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateStatus {
@@ -236,6 +266,10 @@ pub struct Workspace {
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
     pub usage_loading: bool,
+    /// The project open on Settings → Project (project id).
+    pub settings_project: Option<String>,
+    /// An agent session started while the user was still typing a new thread's first message.
+    warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
@@ -289,6 +323,8 @@ impl Workspace {
             status_fetched_at: 0,
             acp_info: HashMap::new(),
             usage_loading: false,
+            settings_project: None,
+            warm: None,
             overlay_open: false,
             applied_defaults,
             tasks: vec![],
@@ -324,7 +360,6 @@ impl Workspace {
         self.threads.iter().find(|t| t.id == id)
     }
 
-    #[allow(dead_code)]
     pub fn project(&self, id: &str) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == id)
     }
@@ -493,7 +528,10 @@ impl Workspace {
 
     /// Projects worth offering in pickers: repos and folders the user added.
     pub fn workspace_projects(&self) -> Vec<&Project> {
-        self.projects.iter().filter(|p| p.is_workspace(&self.settings.user_projects)).collect()
+        self.projects
+            .iter()
+            .filter(|p| p.is_workspace(&self.settings.user_projects) && !self.settings.hidden_projects.contains(&p.path.display().to_string()))
+            .collect()
     }
 
     pub fn refresh_git(&mut self, cx: &mut Context<Self>) {
@@ -544,10 +582,129 @@ impl Workspace {
             self.mutate_thread(&id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
             self.ensure_loaded(&id, cx);
         }
+        if let Route::Draft { project: Some(p) } = &route {
+            if self.route != route {
+                self.apply_project_defaults(&p.clone());
+            }
+        }
         self.route = route;
         self.refresh_git(cx);
         cx.emit(WorkspaceEvent::FocusComposer);
         cx.notify();
+    }
+
+    // ---------- projects: preferences ----------
+
+    pub fn project_prefs(&self, path: &std::path::Path) -> trek_core::settings::ProjectPrefs {
+        self.settings.projects.get(&path.display().to_string()).cloned().unwrap_or_default()
+    }
+
+    /// `lucide:<name>` / `file:<path>` for a project folder, if the user chose one.
+    pub fn project_icon(&self, path: &std::path::Path) -> Option<String> {
+        self.settings.projects.get(&path.display().to_string()).and_then(|p| p.icon.clone())
+    }
+
+    /// Icon for the project a thread belongs to.
+    pub fn thread_project_icon(&self, t: &Thread) -> Option<String> {
+        let pid = t.project_id.as_ref()?;
+        let p = self.projects.iter().find(|p| &p.id == pid)?;
+        self.project_icon(&p.path)
+    }
+
+    pub fn update_project_prefs(&mut self, path: &std::path::Path, f: impl FnOnce(&mut trek_core::settings::ProjectPrefs), cx: &mut Context<Self>) {
+        let key = path.display().to_string();
+        let mut prefs = self.settings.projects.get(&key).cloned().unwrap_or_default();
+        f(&mut prefs);
+        if prefs.is_empty() {
+            self.settings.projects.remove(&key);
+        } else {
+            self.settings.projects.insert(key, prefs);
+        }
+        self.save_settings(cx);
+    }
+
+    /// A new thread in `project` starts from Trek's defaults, overridden by the project's own.
+    fn apply_project_defaults(&mut self, project: &std::path::Path) {
+        let g = &self.settings.general;
+        let prefs = self.project_prefs(project);
+        let agent = prefs.agent.as_deref().map(AgentId::from_key).filter(|a| self.ready_agents().contains(a));
+        let p = &mut self.draft_prefs;
+        match agent {
+            Some(a) => {
+                p.model = prefs.model.clone();
+                p.agent = a;
+            }
+            None => {
+                p.agent = AgentId::from_key(&g.default_agent);
+                p.model = g.default_model.clone();
+            }
+        }
+        p.effort = prefs.effort.unwrap_or(g.default_effort);
+        p.hand_holding = prefs.hand_holding.unwrap_or(g.hand_holding);
+        if p.hand_holding == HandHolding::FullAccess && !self.settings.permissions.full_access_unlocked {
+            p.hand_holding = HandHolding::Auto;
+        }
+    }
+
+    /// Run one of a project's actions in a terminal tab.
+    pub fn run_project_action(&mut self, command: String, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Settings(_)) {
+            self.new_thread(cx);
+        }
+        cx.emit(WorkspaceEvent::RunInTerminal(command));
+    }
+
+    pub fn open_project_settings(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        let current = self.current_cwd().and_then(|c| self.projects.iter().find(|p| p.path == trek_core::store::project_root(&c)).map(|p| p.id.clone()));
+        self.settings_project = project_id.or(current).or_else(|| self.workspace_projects().first().map(|p| p.id.clone()));
+        self.navigate(Route::Settings(SettingsPage::Project), cx);
+    }
+
+    pub fn rename_project(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Err(e) = self.store.rename_project(id, name) {
+            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't rename: {e}"), undo: None });
+        }
+        self.reload(cx);
+    }
+
+    /// Take a project out of Trek: its threads are archived and it leaves every list. Files on
+    /// disk and the agents' own history aren't touched; opening the folder again brings it back.
+    pub fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else { return };
+        let key = project.path.display().to_string();
+        let ids: Vec<String> = self.threads.iter().filter(|t| t.project_id.as_deref() == Some(id)).map(|t| t.id.clone()).collect();
+        for tid in &ids {
+            if let Some(tx) = self.live.get(tid).and_then(|l| l.commands.clone()) {
+                let _ = tx.try_send(Command::Shutdown);
+            }
+            self.live.remove(tid);
+        }
+        let _ = self.store.archive_project_threads(id);
+        self.settings.user_projects.retain(|p| *p != key);
+        self.settings.projects.remove(&key);
+        if !self.settings.hidden_projects.contains(&key) {
+            self.settings.hidden_projects.push(key);
+        }
+        self.save_settings(cx);
+        if self.project_filter.as_deref() == Some(id) {
+            self.project_filter = None;
+        }
+        self.settings_project = None;
+        self.reload(cx);
+        let gone = match &self.route {
+            Route::Thread(t) => ids.contains(t),
+            Route::Draft { project: Some(p) } => trek_core::store::project_root(p) == project.path,
+            _ => false,
+        };
+        if gone || matches!(self.route, Route::Settings(_)) {
+            let next = self.workspace_projects().first().map(|p| p.path.clone());
+            self.navigate(Route::Draft { project: next }, cx);
+        }
+        cx.emit(WorkspaceEvent::Toast { message: format!("Removed {} from Trek", project.name), undo: None });
     }
 
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
@@ -819,7 +976,14 @@ impl Workspace {
                 let live = self.live.entry(id.clone()).or_default();
                 live.loaded = true;
                 live.plan = p.plan;
+                live.fast = p.fast;
                 self.route = Route::Thread(id.clone());
+                // Use the session that was started while the message was being typed, if it still fits.
+                let key = self.draft_key(&cwd);
+                match self.warm.take() {
+                    Some((k, handle, _)) if k == key => self.attach(&id, handle, cx),
+                    _ => {}
+                }
                 id
             }
             _ => return,
@@ -839,7 +1003,7 @@ impl Workspace {
                 return;
             }
             let live = self.live.entry(id.clone()).or_default();
-            live.items.push(Item::User { text: text.clone(), images: vec![] });
+            live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()) });
             live.items.push(Item::Notice { text: reply });
             live.revision += 1;
             self.persist_items(&id);
@@ -857,10 +1021,12 @@ impl Workspace {
         }
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
-        live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect() });
+        live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()) });
         live.streaming = None;
         live.reasoning = None;
         live.turn_started = Some(Instant::now());
+        live.last_active = Some(Instant::now());
+        live.tasks.clear();
         live.revision += 1;
         if let Some(tx) = &live.commands {
             let _ = tx.try_send(Command::Prompt { text, images });
@@ -875,34 +1041,39 @@ impl Workspace {
         self.persist_items(&id);
     }
 
+    fn fast_tier(&self, agent: &AgentId, model: Option<&String>, fast_on: bool) -> Option<String> {
+        if !fast_on {
+            return None;
+        }
+        let models = self.models_for(agent);
+        model.and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id))).and_then(|m| m.fast.clone())
+    }
+
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
         if self.live.get(id).is_some_and(|l| l.commands.is_some()) {
             return;
         }
-        let fast_on = self.live.get(id).is_some_and(|l| l.fast);
-        let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
-        let fast_tier = if fast_on {
-            let models = self.models_for(&thread.agent);
-            let m = thread.model.as_ref().and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id)));
-            m.and_then(|m| m.fast.clone())
-        } else {
-            None
-        };
-        let mcp_servers = self.mcp_servers();
-        let live = self.live.entry(id.to_string()).or_default();
+        let (plan, fast_on) = self.live.get(id).map(|l| (l.plan, l.fast)).unwrap_or_default();
         let handle = trek_agents::start(SessionConfig {
             agent: thread.agent.clone(),
-            cwd,
+            cwd: thread.cwd.clone().unwrap_or_else(trek_core::paths::home),
             model: thread.model.clone(),
             effort: thread.effort,
             hand_holding: thread.hand_holding,
-            plan: live.plan,
+            plan,
             resume: thread.native_id.clone(),
-            fast: fast_tier,
-            mcp_servers,
+            fast: self.fast_tier(&thread.agent, thread.model.as_ref(), fast_on),
+            mcp_servers: self.mcp_servers(),
         });
+        self.attach(id, handle, cx);
+    }
+
+    /// Wire a running session to a thread: commands go out, events come back in batches.
+    fn attach(&mut self, id: &str, handle: trek_agents::SessionHandle, cx: &mut Context<Self>) {
+        let live = self.live.entry(id.to_string()).or_default();
         live.commands = Some(handle.commands);
+        live.last_active = Some(Instant::now());
         let events = handle.events;
         let id = id.to_string();
         live._events = Some(cx.spawn(async move |this, cx| {
@@ -921,6 +1092,49 @@ impl Workspace {
         }));
     }
 
+    fn draft_key(&self, cwd: &std::path::Path) -> WarmKey {
+        let p = &self.draft_prefs;
+        (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast)
+    }
+
+    /// Start the agent before the first message is sent (called when the user begins typing), so
+    /// the process, its login check and its MCP servers are ready by the time they hit Return.
+    /// Costs nothing with the provider: no request is made until a prompt is sent.
+    pub fn warm_up(&mut self, cx: &mut Context<Self>) {
+        match self.route.clone() {
+            Route::Thread(id) => {
+                let direct = self.thread(&id).is_some_and(|t| matches!(t.agent, AgentId::Direct(_)));
+                if !direct {
+                    self.ensure_session(&id, cx);
+                }
+            }
+            Route::Draft { project: Some(cwd) } => {
+                if matches!(self.draft_prefs.agent, AgentId::Direct(_)) {
+                    return;
+                }
+                let key = self.draft_key(&cwd);
+                if self.warm.as_ref().is_some_and(|(k, _, _)| *k == key) {
+                    return;
+                }
+                let p = self.draft_prefs.clone();
+                let handle = trek_agents::start(SessionConfig {
+                    agent: p.agent.clone(),
+                    cwd,
+                    model: p.model.clone(),
+                    effort: p.effort,
+                    hand_holding: p.hand_holding,
+                    plan: p.plan,
+                    resume: None,
+                    fast: self.fast_tier(&p.agent, p.model.as_ref(), p.fast),
+                    mcp_servers: self.mcp_servers(),
+                });
+                // Replacing the old one drops its command channel, which ends that process.
+                self.warm = Some((key, handle, Instant::now()));
+            }
+            _ => {}
+        }
+    }
+
     fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
         let mut run_state: Option<RunState> = None;
         let mut native: Option<String> = None;
@@ -932,8 +1146,47 @@ impl Workspace {
         let mut notify_text: Option<String> = None;
         {
             let live = self.live.entry(id.to_string()).or_default();
+            live.last_active = Some(Instant::now());
             for ev in events {
+                // Output with no turn open: the agent woke itself (a background sub-agent finished).
+                if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
+                    live.turn_started = Some(Instant::now());
+                    run_state = Some(RunState::Working);
+                }
                 match ev {
+                    AgentEvent::Task { id: tid, description, activity, tool_uses, done } => {
+                        let known = live.tasks.iter().position(|t| t.id == tid);
+                        let ix = match (known, &description) {
+                            (Some(ix), _) => Some(ix),
+                            (None, Some(d)) => {
+                                live.tasks.push(SubTask { id: tid.clone(), description: d.clone(), activity: String::new(), tool_uses: 0, done: None });
+                                Some(live.tasks.len() - 1)
+                            }
+                            // Progress for something we never saw start (a shell command): ignore.
+                            (None, None) => None,
+                        };
+                        if let Some(ix) = ix {
+                            let task = &mut live.tasks[ix];
+                            if let Some(a) = activity {
+                                task.activity = a;
+                            }
+                            if let Some(n) = tool_uses {
+                                task.tool_uses = n;
+                            }
+                            if done.is_some() {
+                                task.done = done;
+                            }
+                            let status = match task.done {
+                                None => ToolStatus::Running,
+                                Some(true) => ToolStatus::Done,
+                                Some(false) => ToolStatus::Failed,
+                            };
+                            if let Some(Item::Tool { status: st, .. }) = live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                                *st = status;
+                            }
+                        }
+                    }
+                    AgentEvent::Background(n) => live.background = n,
                     AgentEvent::Started { native_id, .. } => {
                         if !native_id.is_empty() {
                             native = Some(native_id);
@@ -988,7 +1241,10 @@ impl Workspace {
                             live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
                         {
                             *o = output;
-                            *status = if ok { ToolStatus::Done } else { ToolStatus::Failed };
+                            // A background sub-agent's tool call returns at once; it's done when its task is.
+                            if !live.tasks.iter().any(|t| t.id == tid && t.done.is_none()) {
+                                *status = if ok { ToolStatus::Done } else { ToolStatus::Failed };
+                            }
                         }
                     }
                     AgentEvent::PermissionRequest { request_id, title, detail } => {
@@ -1003,10 +1259,29 @@ impl Workspace {
                         live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
                         live.streaming = None;
                         live.reasoning = None;
-                        live.turn_started = None;
                         live.permissions.clear();
                         if let Some(c) = cost_usd {
                             live.cost_usd += c;
+                        }
+                        // Background sub-agents are still out: the agent will pick the turn back up
+                        // when they report, so the thread keeps working.
+                        if error.is_none() && live.background > 0 {
+                            continue;
+                        }
+                        let took = live.turn_started.take().map(|t| t.elapsed().as_secs() as u32).unwrap_or(0);
+                        for t in live.tasks.iter_mut().filter(|t| t.done.is_none()) {
+                            t.done = Some(error.is_none());
+                        }
+                        for i in live.items.iter_mut() {
+                            if let Item::Tool { status, .. } = i {
+                                if *status == ToolStatus::Running {
+                                    *status = if error.is_none() { ToolStatus::Done } else { ToolStatus::Failed };
+                                }
+                            }
+                        }
+                        live.background = 0;
+                        if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
+                            live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
                         }
                         if let Some(e) = error {
                             if e != "Interrupted" {
@@ -1043,24 +1318,38 @@ impl Workspace {
             live.revision += 1;
         }
         let viewing = self.route == Route::Thread(id.to_string());
-        self.mutate_thread(id, cx, |t| {
-            if let Some(n) = native {
-                t.native_id = Some(n);
-            }
-            if let Some(s) = run_state {
-                t.run_state = s;
-            }
-            if let Some((a, d)) = diff {
-                t.additions = a;
-                t.deletions = d;
-            }
-            if finished {
-                t.updated_at = now_ms();
-                if viewing {
-                    t.last_seen_at = t.updated_at;
+        // Streaming text changes nothing on the thread row: skip the database write (this runs
+        // up to 60 times a second) unless something actually changed.
+        let changed = finished
+            || diff.is_some()
+            || self.thread(id).is_some_and(|t| native.as_ref().is_some_and(|n| t.native_id.as_ref() != Some(n)) || run_state.is_some_and(|s| t.run_state != s));
+        if changed {
+            self.mutate_thread(id, cx, |t| {
+                if let Some(n) = native {
+                    t.native_id = Some(n);
                 }
+                if let Some(s) = run_state {
+                    t.run_state = s;
+                }
+                if let Some((a, d)) = diff {
+                    t.additions = a;
+                    t.deletions = d;
+                }
+                if finished {
+                    t.updated_at = now_ms();
+                    if viewing {
+                        t.last_seen_at = t.updated_at;
+                    }
+                }
+            });
+        }
+        // Save the transcript every so often mid-turn, so a quit or crash loses seconds, not the turn.
+        if !finished && self.live.get(id).is_some_and(|l| l.turn_started.is_some() && l.last_persist.is_none_or(|t| t.elapsed() > Duration::from_secs(10))) {
+            self.persist_items(id);
+            if let Some(l) = self.live.get_mut(id) {
+                l.last_persist = Some(Instant::now());
             }
-        });
+        }
         if finished {
             self.turns_finished += 1;
             self.refresh_git(cx);
@@ -1077,6 +1366,7 @@ impl Workspace {
                 // The thread keeps going with the user's queued follow-up: not "finished" yet.
                 self.send_to(id, text, images, cx);
             } else {
+                self.maybe_auto_title(id, cx);
                 if let Some(title) = self.thread(id).map(|t| t.title.clone()) {
                     notify_text.get_or_insert(format!("Finished: {title}"));
                 }
@@ -1158,6 +1448,10 @@ impl Workspace {
         cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed for {hours} h"), undo: None });
     }
 
+    pub fn unsnooze(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.snoozed_until = None);
+    }
+
     pub fn mark_unread(&mut self, id: &str, cx: &mut Context<Self>) {
         self.mutate_thread(id, cx, |t| t.last_seen_at = t.updated_at - 1);
     }
@@ -1171,9 +1465,126 @@ impl Workspace {
         cx.emit(WorkspaceEvent::Toast { message: "Archived".into(), undo: Some(UndoAction::Unarchive(id.into())) });
     }
 
-    #[allow(dead_code)]
     pub fn rename(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
-        self.mutate_thread(id, cx, |t| t.title = title);
+        let title = title.trim().to_string();
+        if !title.is_empty() {
+            self.mutate_thread(id, cx, |t| t.title = title);
+        }
+    }
+
+    /// Snooze until 9:00 on the day `days` from today.
+    pub fn snooze_until_morning(&mut self, id: &str, days: i64, cx: &mut Context<Self>) {
+        use chrono::{Duration as D, Local, TimeZone as _};
+        let day = Local::now().date_naive() + D::days(days);
+        let Some(at) = day.and_hms_opt(9, 0, 0).and_then(|t| Local.from_local_datetime(&t).single()) else { return };
+        self.mutate_thread(id, cx, |t| t.snoozed_until = Some(at.timestamp_millis()));
+        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {}", at.format("%a %-I:%M %p")), undo: None });
+    }
+
+    pub fn set_never_settle(&mut self, id: &str, never: bool, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.never_settle = never);
+    }
+
+    /// Delete a thread from Trek. A thread imported from another agent stays in that agent's own
+    /// history, so here it's archived and its copy of the transcript dropped (it won't come back).
+    pub fn delete_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread(id).cloned() else { return };
+        if let Some(tx) = self.live.get(id).and_then(|l| l.commands.clone()) {
+            let _ = tx.try_send(Command::Shutdown);
+        }
+        self.live.remove(id);
+        let result = if thread.source == ThreadSource::Trek {
+            self.store.delete_thread(id)
+        } else {
+            self.store.set_items(id, &[]).and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
+        };
+        if let Err(e) = result {
+            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't delete: {e}"), undo: None });
+        }
+        let was_open = self.route == Route::Thread(id.into());
+        self.reload(cx);
+        if was_open {
+            self.new_thread(cx);
+        }
+    }
+
+    /// The conversation as Markdown (your messages and the agent's answers; tool calls left out).
+    pub fn transcript_markdown(&self, id: &str) -> String {
+        let items = match self.live.get(id).filter(|l| l.loaded) {
+            Some(l) => l.items.clone(),
+            None => self.store.items(id).unwrap_or_default(),
+        };
+        let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
+        let mut out = format!("# {title}\n");
+        for item in items {
+            match item {
+                Item::User { text, .. } => out.push_str(&format!("\n## You\n\n{}\n", text.trim())),
+                Item::Assistant { text } if !text.trim().is_empty() => out.push_str(&format!("\n{}\n", text.trim())),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn title_inputs(&self, id: &str) -> Option<(String, String)> {
+        let items = match self.live.get(id).filter(|l| l.loaded) {
+            Some(l) => l.items.clone(),
+            None => self.store.items(id).unwrap_or_default(),
+        };
+        let request = items.iter().find_map(|i| match i {
+            Item::User { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })?;
+        let reply = items.iter().find_map(|i| match i {
+            Item::Assistant { text } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        });
+        Some((request, reply.unwrap_or_default()))
+    }
+
+    /// Ask a small model for a short title (through the user's Claude Code login).
+    pub fn regenerate_title(&mut self, id: &str, announce: bool, cx: &mut Context<Self>) {
+        let Some((request, reply)) = self.title_inputs(id) else { return };
+        let claude = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
+        if !claude {
+            if announce {
+                self.rename(id, trek_core::import_title(&request), cx);
+                cx.emit(WorkspaceEvent::Toast { message: "Titles are written with Claude Code, which isn't available. Used the first message instead.".into(), undo: None });
+            }
+            return;
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_agents::generate_title(&request, &reply).await.map_err(|e| format!("{e:#}"))).await;
+        });
+        let id = id.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(title) => this.rename(&id, title, cx),
+                Err(e) if announce => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't write a title: {e}"), undo: None }),
+                Err(e) => tracing::warn!("auto title: {e}"),
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    /// After a new Trek thread's first answer, replace the truncated first message with a real title.
+    fn maybe_auto_title(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.settings.general.auto_title {
+            return;
+        }
+        let Some(t) = self.thread(id) else { return };
+        if t.source != ThreadSource::Trek || t.side_of.is_some() {
+            return;
+        }
+        let Some(live) = self.live.get(id) else { return };
+        let users: Vec<&String> = live.items.iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).collect();
+        // Only on the first turn, and only if the title is still the automatic one.
+        if users.len() != 1 || t.title != trek_core::import_title(users[0]) || users[0].starts_with('/') {
+            return;
+        }
+        self.regenerate_title(id, false, cx);
     }
 
     pub fn undo(&mut self, action: UndoAction, cx: &mut Context<Self>) {
@@ -1197,6 +1608,22 @@ impl Workspace {
                     this.threads.iter().filter(|t| t.should_auto_settle(now, days)).map(|t| t.id.clone()).collect();
                 for id in due {
                     this.mutate_thread(&id, cx, |t| t.settled_at = Some(now));
+                }
+                // Agent processes idle for a while are shut down (150–250 MB each); they resume on the next message.
+                let viewing = match &this.route {
+                    Route::Thread(id) => Some(id.clone()),
+                    _ => None,
+                };
+                for (id, live) in this.live.iter_mut() {
+                    let idle = live.last_active.is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
+                    if idle && live.commands.is_some() && live.turn_started.is_none() && live.background == 0 && live.permissions.is_empty() && viewing.as_ref() != Some(id) {
+                        if let Some(tx) = live.commands.take() {
+                            let _ = tx.try_send(Command::Shutdown);
+                        }
+                    }
+                }
+                if this.warm.as_ref().is_some_and(|(_, _, at)| at.elapsed() > Duration::from_secs(10 * 60)) {
+                    this.warm = None;
                 }
                 // Snoozes that have expired fall back into the inbox on their own (section()).
                 if now - this.status_fetched_at > 5 * 60_000 {
@@ -1234,8 +1661,12 @@ impl Workspace {
         match self.store.ensure_project(&path) {
             Ok(p) => {
                 let key = p.path.display().to_string();
-                if !self.settings.user_projects.contains(&key) {
-                    self.settings.user_projects.push(key);
+                let was_hidden = self.settings.hidden_projects.contains(&key);
+                self.settings.hidden_projects.retain(|h| *h != key);
+                if !self.settings.user_projects.contains(&key) || was_hidden {
+                    if !self.settings.user_projects.contains(&key) {
+                        self.settings.user_projects.push(key);
+                    }
                     let _ = self.settings.save();
                 }
                 self.reload(cx);
@@ -1569,6 +2000,12 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.importing = false;
                 this.import_summary = Some(summary);
+                // Projects removed from Trek stay removed: archive anything the import brought back.
+                if let Ok(projects) = this.store.projects() {
+                    for p in projects.iter().filter(|p| this.settings.hidden_projects.contains(&p.path.display().to_string())) {
+                        let _ = this.store.archive_project_threads(&p.id);
+                    }
+                }
                 this.reload(cx);
             });
         });

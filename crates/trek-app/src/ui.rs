@@ -70,6 +70,47 @@ pub fn monogram(name: &str, cx: &App) -> impl IntoElement {
         .child(letters)
 }
 
+/// Icons a project can use instead of its monogram (stored as `lucide:<key>`).
+pub const PROJECT_ICONS: &[(&str, crate::assets::Lucide)] = {
+    use crate::assets::Lucide as L;
+    &[
+        ("rocket", L::Rocket), ("star", L::Star), ("heart", L::Heart), ("flame", L::Flame), ("zap", L::Zap), ("leaf", L::Leaf),
+        ("mountain", L::Mountain), ("tent", L::Tent), ("compass", L::Compass), ("map", L::Map), ("globe", L::Globe), ("cloud", L::Cloud),
+        ("sun", L::Sun), ("moon", L::Moon), ("code", L::Code), ("terminal", L::Terminal), ("database", L::Database), ("server", L::Server),
+        ("smartphone", L::Smartphone), ("gamepad", L::Gamepad2), ("music", L::Music), ("camera", L::Camera), ("book", L::BookOpen), ("box", L::Box),
+        ("package", L::Package), ("bug", L::Bug), ("flask", L::FlaskConical), ("brain", L::Brain), ("lightbulb", L::Lightbulb), ("hammer", L::Hammer),
+        ("wrench", L::Wrench), ("shield", L::Shield), ("key", L::Key),
+    ]
+};
+
+/// A project's badge: its chosen icon or image, else the two-letter monogram.
+pub fn project_badge(name: &str, icon: Option<&str>, cx: &App) -> AnyElement {
+    let hash = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+    let hue = (hash % 360) as f32 / 360.;
+    let dark = cx.theme().mode.is_dark();
+    match icon {
+        Some(spec) if spec.starts_with("file:") => {
+            let path = std::path::PathBuf::from(&spec[5..]);
+            img(path).flex_none().size(px(16.)).rounded(px(4.)).object_fit(ObjectFit::Cover).into_any_element()
+        }
+        Some(spec) => match PROJECT_ICONS.iter().find(|(k, _)| spec.strip_prefix("lucide:") == Some(k)) {
+            Some((_, icon)) => div()
+                .flex_none()
+                .h(px(16.))
+                .w(px(20.))
+                .rounded(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(hue, 0.35, if dark { 0.22 } else { 0.88 }, 1.))
+                .child(Icon::new(*icon).size(px(11.)).text_color(hsla(hue, 0.55, if dark { 0.75 } else { 0.35 }, 1.)))
+                .into_any_element(),
+            None => monogram(name, cx).into_any_element(),
+        },
+        None => monogram(name, cx).into_any_element(),
+    }
+}
+
 /// Logo file key for an agent or provider (assets/logos/{dark,light}/<key>.png).
 pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
     const KEYS: &[&str] = &[

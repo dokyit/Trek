@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 /// `~/Library/Application Support/Trek` on macOS (platform equivalent elsewhere).
 pub fn data_dir() -> PathBuf {
-    let dir = directories::ProjectDirs::from("dev", "trek", "Trek")
-        .map(|p| p.data_dir().to_path_buf())
-        .unwrap_or_else(|| home().join(".trek"));
+    // TREK_DATA_DIR points Trek at another data folder (testing a build without touching real data).
+    let dir = std::env::var_os("TREK_DATA_DIR").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| {
+        directories::ProjectDirs::from("dev", "trek", "Trek").map(|p| p.data_dir().to_path_buf()).unwrap_or_else(|| home().join(".trek"))
+    });
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

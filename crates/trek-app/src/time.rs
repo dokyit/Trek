@@ -36,3 +36,18 @@ pub fn until(ms: i64) -> String {
         }
     }
 }
+
+/// "3:42 PM" today, "Oct 1, 3:42 PM" otherwise.
+pub fn clock(ms: i64) -> String {
+    let Some(t) = chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local)) else { return String::new() };
+    if t.date_naive() == chrono::Local::now().date_naive() { t.format("%-I:%M %p").to_string() } else { t.format("%b %-d, %-I:%M %p").to_string() }
+}
+
+/// "42s", "4m 02s", "1h 05m".
+pub fn took(secs: u32) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3_599 => format!("{}m {:02}s", secs / 60, secs % 60),
+        _ => format!("{}h {:02}m", secs / 3_600, (secs % 3_600) / 60),
+    }
+}

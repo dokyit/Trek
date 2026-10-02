@@ -2,7 +2,6 @@
 
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
-use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -136,7 +135,7 @@ impl Render for SideChatPanel {
                                 Item::Error { text } => Some(div().text_xs().text_color(crate::palette::red(cx)).child(text).into_any_element()),
                                 _ => None,
                             }))
-                            .when(working, |el| el.child(ShimmerText::new("Working").id("side-working").highlight_color(theme.foreground))),
+                            .when(working, |el| el.child(div().text_color(theme.muted_foreground).child("Working…"))),
                     ),
             )
             .child(

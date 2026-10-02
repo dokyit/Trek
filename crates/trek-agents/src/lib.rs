@@ -2,6 +2,8 @@
 //! same channel pair: the UI sends [`Command`]s and receives normalized [`AgentEvent`]s.
 //! Sessions run on `trek_core::runtime()`; channels are executor-agnostic.
 
+mod title;
+pub use title::generate_title;
 mod acp;
 mod claude;
 mod codex;
@@ -89,6 +91,10 @@ pub enum AgentEvent {
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
     /// Tokens currently in the context window, and the window size.
     Context { used: u64, window: u64 },
+    /// A sub-agent (keyed by the tool call that launched it) started, moved on, or finished.
+    Task { id: String, description: Option<String>, activity: Option<String>, tool_uses: Option<u64>, done: Option<bool> },
+    /// How many background sub-agents are still running; the turn isn't really over until zero.
+    Background(usize),
     Error(String),
     Exited,
 }

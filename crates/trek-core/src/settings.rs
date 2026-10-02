@@ -25,6 +25,36 @@ pub struct Settings {
     pub tools: Tools,
     pub snapshots: Snapshots,
     pub layout: Layout,
+    /// Per-project preferences, keyed by the project's folder path.
+    pub projects: std::collections::BTreeMap<String, ProjectPrefs>,
+    /// Projects removed from Trek (paths); adding the folder again brings one back.
+    pub hidden_projects: Vec<String>,
+}
+
+/// A command a project can run from the title bar (build, test, dev server…).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectAction {
+    pub name: String,
+    pub command: String,
+}
+
+/// What new threads in a project start with, its icon, and its actions. `None` = Trek's default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectPrefs {
+    /// `lucide:<name>` or `file:<path>`; `None` shows the two-letter monogram.
+    pub icon: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub hand_holding: Option<HandHolding>,
+    pub actions: Vec<ProjectAction>,
+}
+
+impl ProjectPrefs {
+    pub fn is_empty(&self) -> bool {
+        *self == ProjectPrefs::default()
+    }
 }
 
 /// Window layout the user adjusted by hand.
@@ -126,6 +156,8 @@ impl Default for Settings {
             tools: Tools::default(),
             snapshots: Snapshots::default(),
             layout: Layout::default(),
+            projects: Default::default(),
+            hidden_projects: vec![],
         }
     }
 }
@@ -142,6 +174,8 @@ pub struct General {
     pub follow_up: FollowUp,
     /// Send with ⌘↩ instead of ↩.
     pub send_with_cmd_enter: bool,
+    /// Give new threads a short title with a small, fast model after the first message.
+    pub auto_title: bool,
     pub prevent_sleep_while_running: bool,
     /// Favorite models as `agent-key/model-id`.
     pub favorite_models: Vec<String>,
@@ -156,6 +190,7 @@ impl Default for General {
             hand_holding: HandHolding::AutoAcceptEdits,
             follow_up: FollowUp::Steer,
             send_with_cmd_enter: false,
+            auto_title: true,
             prevent_sleep_while_running: true,
             favorite_models: vec![],
         }

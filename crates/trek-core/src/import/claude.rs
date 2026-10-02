@@ -175,7 +175,7 @@ pub fn load(session_id: &str) -> anyhow::Result<Vec<Item>> {
         match v["type"].as_str() {
             Some("user") => {
                 if let Some(t) = content_text(content).filter(|t| !is_injected(t)) {
-                    items.push(Item::User { text: t, images: vec![] });
+                    items.push(Item::User { text: t, images: vec![], at: None });
                 }
                 for block in content.as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
                     let id = block["tool_use_id"].as_str().unwrap_or_default();

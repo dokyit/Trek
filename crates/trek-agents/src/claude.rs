@@ -262,6 +262,30 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
             native_id: v["session_id"].as_str().unwrap_or_default().to_string(),
             model: v["model"].as_str().map(String::from),
         }),
+        Some("system") if v["subtype"] == "task_started" && v["task_type"] == "local_agent" => out.push(AgentEvent::Task {
+            id: v["tool_use_id"].as_str().unwrap_or_default().to_string(),
+            description: v["description"].as_str().map(String::from),
+            activity: None,
+            tool_uses: None,
+            done: None,
+        }),
+        Some("system") if v["subtype"] == "task_progress" => out.push(AgentEvent::Task {
+            id: v["tool_use_id"].as_str().unwrap_or_default().to_string(),
+            description: None,
+            activity: v["description"].as_str().map(String::from),
+            tool_uses: v["usage"]["tool_uses"].as_u64(),
+            done: None,
+        }),
+        Some("system") if v["subtype"] == "task_notification" => out.push(AgentEvent::Task {
+            id: v["tool_use_id"].as_str().unwrap_or_default().to_string(),
+            description: None,
+            activity: None,
+            tool_uses: None,
+            done: Some(v["status"] == "completed"),
+        }),
+        Some("system") if v["subtype"] == "background_tasks_changed" => out.push(AgentEvent::Background(
+            v["tasks"].as_array().map(|t| t.iter().filter(|t| t["task_type"] == "local_agent").count()).unwrap_or(0),
+        )),
         Some("stream_event") => {
             let e = &v["event"];
             if e["type"] == "content_block_delta" && v["parent_tool_use_id"].is_null() {
@@ -296,7 +320,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                 }
             }
         }
-        Some("user") => {
+        Some("user") if v["parent_tool_use_id"].is_null() => {
             for block in v["message"]["content"].as_array().into_iter().flatten() {
                 if block["type"] == "tool_result" {
                     let output = match &block["content"] {

@@ -24,6 +24,11 @@ pub struct Sidebar {
     search: Entity<InputState>,
     project_search: Entity<InputState>,
     clone_input: Entity<InputState>,
+    rename_input: Entity<InputState>,
+    /// The thread being renamed while the dialog is open.
+    renaming: Option<String>,
+    /// The window is frontmost; spinners hold still when it isn't.
+    active: bool,
     open_projects: HashSet<String>,
     filter_open: bool,
     usage_open: bool,
@@ -36,6 +41,7 @@ impl Sidebar {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let project_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Thread title"));
         let subscriptions = vec![
             cx.observe(&workspace, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |this, state, event: &InputEvent, cx| {
@@ -50,11 +56,28 @@ impl Sidebar {
         ];
         let mut subscriptions = subscriptions;
         subscriptions.push(cx.observe(&project_search, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.subscribe_in(&rename_input, window, |this: &mut Self, input, event: &InputEvent, window, cx| {
+            if !matches!(event, InputEvent::PressEnter { .. }) {
+                return;
+            }
+            if let Some(id) = this.renaming.take() {
+                let title = input.read(cx).value().to_string();
+                this.workspace.update(cx, |ws, cx| ws.rename(&id, title, cx));
+                window.close_dialog(cx);
+            }
+        }));
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            this.active = window.is_window_active();
+            cx.notify();
+        }));
         Self {
             workspace,
             search,
             project_search,
             clone_input,
+            rename_input,
+            renaming: None,
+            active: window.is_window_active(),
             open_projects: Default::default(),
             filter_open: false,
             usage_open: false,
@@ -141,9 +164,10 @@ impl Sidebar {
                 v_flex().id("pf-list").max_h(px(320.)).overflow_y_scroll().children(projects.into_iter().map(|(id, name, remote, path)| {
                     let label = remote.clone().unwrap_or_else(|| name.clone());
                     let ws = self.workspace.clone();
+                    let gear_id = id.clone();
                     ui::menu_row(SharedString::from(format!("pf-{id}")), current.as_ref() == Some(&id), cx)
                         .group("pf-row")
-                        .child(ui::monogram(&name, cx))
+                        .child(ui::project_badge(&name, self.workspace.read(cx).project_icon(&path).as_deref(), cx))
                         .child(div().flex_1().min_w_0().truncate().child(label))
                         .child(
                             gpui_kit::component::button::Button::new(SharedString::from(format!("pf-gear-{id}")))
@@ -151,12 +175,16 @@ impl Sidebar {
                                 .xsmall()
                                 .icon(Icon::new(IconName::Settings).text_color(theme.muted_foreground))
                                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                    let (p1, p2, ws2) = (path.clone(), path.clone(), ws.clone());
-                                    menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&p1)))
-                                        .item(PopupMenuItem::new("New thread here").on_click(move |_, _, cx| {
-                                            let p = p2.clone();
-                                            ws2.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(p) }, cx))
-                                        }))
+                                    let (p1, p2, ws2, ws3, id3) = (path.clone(), path.clone(), ws.clone(), ws.clone(), gear_id.clone());
+                                    menu.item(PopupMenuItem::new("New thread here").on_click(move |_, _, cx| {
+                                        let p = p2.clone();
+                                        ws2.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(p) }, cx))
+                                    }))
+                                    .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p1)))
+                                    .item(PopupMenuItem::new("Project settings").on_click(move |_, _, cx| {
+                                        let id = id3.clone();
+                                        ws3.update(cx, |ws, cx| ws.open_project_settings(Some(id), cx))
+                                    }))
                                 }),
                         )
                         .on_click(pick(Some(id.clone()), cx))
@@ -198,7 +226,7 @@ impl Sidebar {
                     .gap_1()
                     .text_xs()
                     .text_color(palette::sky(cx))
-                    .child(Spinner::new().xsmall().color(palette::sky(cx)))
+                    .child(Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(palette::sky(cx)))
                     .child(format!("Working {elapsed}"))
                     .into_any_element()
             }
@@ -234,7 +262,7 @@ impl Sidebar {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(ui::monogram(project, cx))
+                    .child(ui::project_badge(project, self.workspace.read(cx).thread_project_icon(t).as_deref(), cx))
                     .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(project.to_string()))
                     .child(self.status(t, cx)),
             )
@@ -257,7 +285,7 @@ impl Sidebar {
                 let id = id.clone();
                 this.workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
             }));
-        self.with_menu(row, t).into_any_element()
+        self.with_menu(row, t, cx).into_any_element()
     }
 
     /// Codex-style compact row for settled history.
@@ -289,22 +317,29 @@ impl Sidebar {
                 let id = id.clone();
                 this.workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
             }));
-        self.with_menu(row, t).into_any_element()
+        self.with_menu(row, t, cx).into_any_element()
     }
 
-    fn with_menu<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static>(&self, row: E, t: &Thread) -> impl IntoElement {
+    /// Right-click menu for a thread (T3's set): pin, settle, snooze, rename, copy, project, archive, delete.
+    fn with_menu<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static>(&self, row: E, t: &Thread, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.downgrade();
+        let sidebar = cx.entity().downgrade();
         let tid = t.id.clone();
+        let title = t.title.clone();
         let pinned = t.pinned_at.is_some();
         let settled = t.settled_at.is_some();
-        let resume_cmd = match (t.source, &t.native_id) {
-            (ThreadSource::ClaudeCode, Some(n)) => Some(format!("claude --resume {n}")),
-            (ThreadSource::Codex, Some(n)) => Some(format!("codex resume {n}")),
-            (ThreadSource::OpenCode, Some(n)) => Some(format!("opencode -s {n}")),
+        let snoozed = t.snoozed_until.is_some_and(|u| u > trek_core::store::now_ms());
+        let never_settle = t.never_settle;
+        let imported = t.source != ThreadSource::Trek;
+        let resume_cmd = match (&t.agent, &t.native_id) {
+            (trek_core::AgentId::ClaudeCode, Some(n)) => Some(format!("claude --resume {n}")),
+            (trek_core::AgentId::Codex, Some(n)) => Some(format!("codex resume {n}")),
+            (trek_core::AgentId::OpenCode, Some(n)) => Some(format!("opencode -s {n}")),
             _ => None,
         };
         let cwd = t.cwd.clone();
-        row.context_menu(move |menu, _, _| {
+        let project = t.project_id.clone().and_then(|pid| self.workspace.read(cx).project(&pid).map(|p| (p.id.clone(), p.name.clone())));
+        row.context_menu(move |menu, window, cx| {
             let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
                 let ws = ws.clone();
                 let tid = tid.clone();
@@ -312,23 +347,191 @@ impl Sidebar {
                     let _ = ws.update(cx, |ws, cx| f(ws, &tid, cx));
                 })
             };
+            let copy = |label: &'static str, text: String| PopupMenuItem::new(label).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())));
             let mut menu = menu
-                .item(item(if pinned { "Unpin" } else { "Pin" }, |ws, id, cx| ws.toggle_pin(id, cx)))
-                .item(if settled { item("Move to Inbox", |ws, id, cx| ws.unsettle(id, cx)) } else { item("Settle", |ws, id, cx| ws.settle(id, cx)) })
-                .item(item("Snooze 1 hour", |ws, id, cx| ws.snooze(id, 1, cx)))
-                .item(item("Snooze until tomorrow", |ws, id, cx| ws.snooze(id, 16, cx)))
-                .item(item("Mark as unread", |ws, id, cx| ws.mark_unread(id, cx)))
-                .separator();
-            if let Some(cmd) = resume_cmd.clone() {
-                menu = menu.item(PopupMenuItem::new("Copy resume command").on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(cmd.clone()));
+                .min_w(px(210.))
+                .item(item(if pinned { "Unpin thread" } else { "Pin thread" }, |ws, id, cx| ws.toggle_pin(id, cx)))
+                .item(if settled { item("Move to inbox", |ws, id, cx| ws.unsettle(id, cx)) } else { item("Settle thread", |ws, id, cx| ws.settle(id, cx)) });
+            menu = menu.submenu("Snooze", window, cx, {
+                let (ws, tid) = (ws.clone(), tid.clone());
+                move |menu, _, _| {
+                    let snooze = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
+                        let (ws, tid) = (ws.clone(), tid.clone());
+                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            let _ = ws.update(cx, |ws, cx| f(ws, &tid, cx));
+                        })
+                    };
+                    let menu = menu
+                        .item(snooze("For 1 hour", |ws, id, cx| ws.snooze(id, 1, cx)))
+                        .item(snooze("For 3 hours", |ws, id, cx| ws.snooze(id, 3, cx)))
+                        .item(snooze("Until tomorrow morning", |ws, id, cx| ws.snooze_until_morning(id, 1, cx)))
+                        .item(snooze("Until next week", |ws, id, cx| ws.snooze_until_morning(id, 7, cx)));
+                    if snoozed { menu.separator().item(snooze("Wake now", |ws, id, cx| ws.unsnooze(id, cx))) } else { menu }
+                }
+            });
+            menu = menu.separator();
+            menu = menu.item(PopupMenuItem::new("Rename thread").on_click({
+                let (sidebar, tid, title) = (sidebar.clone(), tid.clone(), title.clone());
+                move |_, window, cx| {
+                    let _ = sidebar.update(cx, |s, cx| s.open_rename_dialog(tid.clone(), title.clone(), window, cx));
+                }
+            }));
+            menu = menu.item(item("Regenerate title", |ws, id, cx| ws.regenerate_title(id, true, cx))).item(item("Mark unread", |ws, id, cx| ws.mark_unread(id, cx)));
+            if let Some((pid, name)) = project.clone() {
+                let ws = ws.clone();
+                menu = menu.item(PopupMenuItem::new(format!("Filter by {name}")).on_click(move |_, _, cx| {
+                    let pid = pid.clone();
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.project_filter = Some(pid);
+                        cx.notify();
+                    });
                 }));
             }
+            menu = menu.submenu("Auto-settle behavior", window, cx, {
+                let (ws, tid) = (ws.clone(), tid.clone());
+                move |menu, _, _| {
+                    let set = |label: &'static str, never: bool| {
+                        let (ws, tid) = (ws.clone(), tid.clone());
+                        PopupMenuItem::new(label).checked(never_settle == never).on_click(move |_, _, cx| {
+                            let _ = ws.update(cx, |ws, cx| ws.set_never_settle(&tid, never, cx));
+                        })
+                    };
+                    menu.item(set("Follow Trek's setting", false)).item(set("Never settle this thread", true))
+                }
+            });
+            menu = menu.separator();
+            menu = menu.submenu("Copy", window, cx, {
+                let (ws, tid, title, resume_cmd, cwd) = (ws.clone(), tid.clone(), title.clone(), resume_cmd.clone(), cwd.clone());
+                move |menu, _, _| {
+                    let mut menu = menu.item(copy("Title", title.clone()));
+                    menu = menu.item(PopupMenuItem::new("Conversation as Markdown").on_click({
+                        let (ws, tid) = (ws.clone(), tid.clone());
+                        move |_, _, cx| {
+                            if let Ok(text) = ws.update(cx, |ws, _| ws.transcript_markdown(&tid)) {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            }
+                        }
+                    }));
+                    if let Some(cmd) = resume_cmd.clone() {
+                        menu = menu.item(copy("Resume command", cmd));
+                    }
+                    if let Some(dir) = cwd.clone() {
+                        menu = menu.item(copy("Folder path", dir.display().to_string()));
+                    }
+                    menu
+                }
+            });
             if let Some(dir) = cwd.clone() {
-                menu = menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&dir)));
+                menu = menu.item(PopupMenuItem::new("Show folder in Finder").on_click(move |_, _, cx| cx.reveal_path(&dir)));
             }
-            menu.separator().item(item("Archive", |ws, id, cx| ws.archive(id, cx)))
+            if let Some((pid, _)) = project.clone() {
+                let ws = ws.clone();
+                menu = menu.item(PopupMenuItem::new("Project settings").on_click(move |_, _, cx| {
+                    let pid = pid.clone();
+                    let _ = ws.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
+                }));
+            }
+            menu.separator().item(item("Archive thread", |ws, id, cx| ws.archive(id, cx))).item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
+                let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
+                move |_, window, cx| {
+                    let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
+                    window.open_alert_dialog(cx, move |alert, _, _| {
+                        let (ws, tid) = (ws.clone(), tid.clone());
+                        alert
+                            .title(format!("Delete “{title}”?"))
+                            .description(if imported {
+                                "It leaves Trek for good. The original stays in the agent's own history."
+                            } else {
+                                "The thread and its transcript are deleted from Trek. This can't be undone."
+                            })
+                            .confirm()
+                            .ok_text("Delete")
+                            .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                            .on_ok(move |_, _, cx| {
+                                let _ = ws.update(cx, |ws, cx| ws.delete_thread(&tid, cx));
+                                true
+                            })
+                    });
+                }
+            }))
         })
+    }
+
+    /// Right-click menu for a project (settled-history headers and the project filter).
+    fn with_project_menu<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static>(&self, row: E, id: String, name: String, path: std::path::PathBuf) -> impl IntoElement {
+        let ws = self.workspace.downgrade();
+        row.context_menu(move |menu, window, _| {
+            let _ = &window;
+            let act = |label: &'static str, f: fn(&mut Workspace, &str, &std::path::Path, &mut Context<Workspace>)| {
+                let (ws, id, path) = (ws.clone(), id.clone(), path.clone());
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    let _ = ws.update(cx, |ws, cx| f(ws, &id, &path, cx));
+                })
+            };
+            let (p1, p2) = (path.clone(), path.clone());
+            let (ws2, id2, name2) = (ws.clone(), id.clone(), name.clone());
+            menu.min_w(px(200.))
+                .item(act("New thread here", |ws, _, path, cx| ws.navigate(Route::Draft { project: Some(path.to_path_buf()) }, cx)))
+                .item(act("Show only this project", |ws, id, _, cx| {
+                    ws.project_filter = Some(id.to_string());
+                    cx.notify();
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p1)))
+                .item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))))
+                .item(act("Project settings", |ws, id, _, cx| ws.open_project_settings(Some(id.to_string()), cx)))
+                .separator()
+                .item(PopupMenuItem::new("Remove project…").icon(crate::assets::Lucide::Trash).on_click(move |_, window, cx| {
+                    let (ws, id, name) = (ws2.clone(), id2.clone(), name2.clone());
+                    window.open_alert_dialog(cx, move |alert, _, _| {
+                        let (ws, id) = (ws.clone(), id.clone());
+                        alert
+                            .title(format!("Remove “{name}” from Trek?"))
+                            .description("Its threads are archived and it leaves the sidebar. Files on disk and your agents' own history are not touched.")
+                            .confirm()
+                            .ok_text("Remove project")
+                            .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                            .on_ok(move |_, _, cx| {
+                                let _ = ws.update(cx, |ws, cx| ws.remove_project(&id, cx));
+                                true
+                            })
+                    });
+                }))
+        })
+    }
+
+    fn open_rename_dialog(&mut self, id: String, title: String, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.rename_input.clone();
+        input.update(cx, |s, cx| s.set_value(title, window, cx));
+        self.renaming = Some(id.clone());
+        // Put the cursor in the field once the dialog is up, with the old title selected.
+        let focus = input.clone();
+        window.defer(cx, move |window, cx| {
+            focus.update(cx, |s, cx| {
+                s.focus(window, cx);
+                let len = s.value().len();
+                s.set_selected_range(0..len, cx);
+            })
+        });
+        let ws = self.workspace.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (input2, ws, id) = (input.clone(), ws.clone(), id.clone());
+            dialog
+                .title("Rename thread")
+                .w(px(440.))
+                .child(Input::new(&input))
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new()
+                        .gap_2()
+                        .child(gpui_kit::component::dialog::DialogClose::new().child(gpui_kit::component::button::Button::new("cancel-rename").outline().label("Cancel")))
+                        .child(gpui_kit::component::dialog::DialogAction::new().child(
+                            gpui_kit::component::button::Button::new("do-rename").primary().label("Rename").on_click(move |_, _, cx| {
+                                let title = input2.read(cx).value().to_string();
+                                ws.update(cx, |ws, cx| ws.rename(&id, title, cx));
+                            }),
+                        )),
+                )
+        });
     }
 
     fn label(text: &str, cx: &App) -> impl IntoElement {
@@ -514,8 +717,24 @@ impl Render for Sidebar {
         let searching = !ws.search.is_empty();
         let settled_open = ws.settled_open || searching;
         let importing = ws.importing;
-        let sections: Vec<(Section, Vec<Thread>)> = ws.sections().into_iter().map(|(s, v)| (s, v.into_iter().cloned().collect())).collect();
+        // Settled history can be hundreds of threads; while it's folded only the count is needed.
+        let mut settled_count = 0;
+        let sections: Vec<(Section, Vec<Thread>)> = ws
+            .sections()
+            .into_iter()
+            .map(|(s, v)| {
+                if s == Section::Settled {
+                    settled_count = v.len();
+                    if !settled_open {
+                        return (s, vec![]);
+                    }
+                }
+                (s, v.into_iter().cloned().collect())
+            })
+            .collect();
         let names: HashMap<String, String> = ws.projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+        let paths: HashMap<String, std::path::PathBuf> = ws.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
+        let icons: HashMap<String, Option<String>> = ws.projects.iter().map(|p| (p.id.clone(), ws.project_icon(&p.path))).collect();
         let project_of = |t: &Thread| t.project_id.as_ref().and_then(|p| names.get(p).cloned()).unwrap_or_else(|| "No project".into());
         let theme = cx.theme().clone();
 
@@ -560,7 +779,7 @@ impl Render for Sidebar {
 
         // Settled history, grouped by project (Codex style).
         let mut history = v_flex();
-        if !settled.is_empty() {
+        if settled_count > 0 {
             let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
             for t in settled.iter().cloned() {
                 let pid = t.project_id.clone().unwrap_or_default();
@@ -584,7 +803,7 @@ impl Render for Sidebar {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .hover(|s| s.bg(theme.list_hover))
-                    .child(format!("Settled ({})", settled.len()))
+                    .child(format!("Settled ({settled_count})"))
                     .child(div().flex_1().h(px(1.)).bg(theme.border))
                     .child(Icon::new(if settled_open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall())
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -599,18 +818,22 @@ impl Render for Sidebar {
                     let open = self.open_projects.contains(&pid);
                     let shown = if open || searching { items.len() } else { items.len().min(5) };
                     let pid2 = pid.clone();
-                    history = history.child(
-                        h_flex()
-                            .mx_2()
-                            .px_3()
-                            .h(px(30.))
-                            .mt_1()
-                            .gap_2()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Folder).small())
-                            .child(div().truncate().child(name)),
-                    );
+                    let header = h_flex()
+                        .id(SharedString::from(format!("proj-head-{pid}")))
+                        .mx_2()
+                        .px_3()
+                        .h(px(30.))
+                        .mt_1()
+                        .gap_2()
+                        .rounded(px(8.))
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(ui::project_badge(&name, icons.get(&pid).cloned().flatten().as_deref(), cx))
+                        .child(div().truncate().child(name.clone()));
+                    history = match paths.get(&pid) {
+                        Some(path) => history.child(self.with_project_menu(header, pid.clone(), name.clone(), path.clone())),
+                        None => history.child(header),
+                    };
                     for t in items.iter().take(shown) {
                         history = history.child(self.line(t, selected.as_deref() == Some(&t.id), cx));
                     }

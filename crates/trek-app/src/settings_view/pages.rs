@@ -194,6 +194,11 @@ impl SettingsView {
             Self::heading("Inbox", cx),
             ui::group(
                 vec![Self::row(
+                    "Name threads automatically",
+                    "After the first answer, a small fast model writes a short title through your Claude Code login. Off, the title is the start of your first message.",
+                    self.switch("auto-title", s.general.auto_title, |s, v| s.general.auto_title = v),
+                    cx,
+                ), Self::row(
                     "Settle finished threads",
                     "Read threads leave the inbox after this long. Threads waiting on you never settle on their own.",
                     ui::segmented(
@@ -1050,4 +1055,309 @@ impl SettingsView {
                 )
         });
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Project
+
+impl SettingsView {
+    pub(super) fn project_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use trek_core::settings::ProjectAction;
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let projects: Vec<trek_core::store::Project> = ws.workspace_projects().into_iter().cloned().collect();
+        let selected = ws.settings_project.clone().and_then(|id| projects.iter().find(|p| p.id == id).cloned()).or_else(|| projects.first().cloned());
+        let Some(project) = selected else {
+            return vec![div().py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child("No projects yet. Add one from the sidebar's folder button.").into_any_element()];
+        };
+        let prefs = ws.project_prefs(&project.path);
+        let general = ws.settings.general.clone();
+        let agents = ws.ready_agents();
+        let unlocked = ws.settings.permissions.full_access_unlocked;
+        let agent = prefs.agent.as_deref().map(AgentId::from_key).filter(|a| agents.contains(a));
+        let effective_agent = agent.clone().unwrap_or_else(|| AgentId::from_key(&general.default_agent));
+        let models = ws.models_for(&effective_agent);
+        let threads = ws.threads.iter().filter(|t| t.project_id.as_deref() == Some(project.id.as_str())).count();
+        let path = project.path.clone();
+        let pid = project.id.clone();
+
+        // Which project these settings apply to.
+        let w = self.workspace.clone();
+        let chooser = h_flex()
+            .gap(px(8.))
+            .pb(px(24.))
+            .text_size(px(13.))
+            .text_color(theme.muted_foreground)
+            .child("Settings for")
+            .child(picker(
+                "project-chooser",
+                Some(ui::project_badge(&project.name, prefs.icon.as_deref(), cx)),
+                project.remote.clone().unwrap_or_else(|| project.name.clone()),
+                projects.iter().map(|p| (p.id.clone(), p.remote.clone().unwrap_or_else(|| p.name.clone()))).collect(),
+                Some(project.id.clone()),
+                move |id: String, cx| {
+                    w.update(cx, |ws, cx| {
+                        ws.settings_project = Some(id);
+                        cx.notify();
+                    })
+                },
+                cx,
+            ))
+            .into_any_element();
+
+        // Icon: monogram, one of Trek's icons, or an image file.
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let icon_menu = Button::new("project-icon").small().outline().label("Choose icon").dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+            menu = menu.min_w(px(190.)).max_h(px(320.)).scrollable(true);
+            for (key, icon) in ui::PROJECT_ICONS {
+                let (w, p) = (w.clone(), p2.clone());
+                let mut label: String = key.to_string();
+                if let Some(f) = label.get_mut(0..1) {
+                    f.make_ascii_uppercase();
+                }
+                menu = menu.item(PopupMenuItem::new(label).icon(Icon::new(*icon)).on_click(move |_, _, cx| {
+                    let spec = format!("lucide:{key}");
+                    w.update(cx, |ws, cx| ws.update_project_prefs(&p, |pr| pr.icon = Some(spec), cx))
+                }));
+            }
+            menu
+        });
+        let view = cx.entity();
+        let p2 = path.clone();
+        let icon_file = Button::new("project-icon-file").small().outline().label("Choose image…").on_click(move |_, _, cx| {
+            let p = p2.clone();
+            view.update(cx, |this, cx| this.pick_project_image(p, cx))
+        });
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let icon_reset = prefs.icon.is_some().then(|| {
+            Button::new("project-icon-reset").small().ghost().label("Reset").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p2, |pr| pr.icon = None, cx)))
+        });
+        let reveal = {
+            let p = path.clone();
+            Button::new("project-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p))
+        };
+
+        // New-thread defaults; "Trek default" clears the override.
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let mut agent_opts: Vec<(Option<AgentId>, String)> = vec![(None, format!("Trek default ({})", AgentId::from_key(&general.default_agent).display_name()))];
+        agent_opts.extend(agents.iter().map(|a| (Some(a.clone()), a.display_name())));
+        let agent_picker = picker(
+            "proj-agent",
+            Some(ui::agent_logo(&effective_agent, px(14.), cx)),
+            agent.as_ref().map(|a| a.display_name()).unwrap_or_else(|| "Trek default".into()),
+            agent_opts,
+            Some(agent.clone()),
+            move |a: Option<AgentId>, cx| {
+                w.update(cx, |ws, cx| {
+                    ws.update_project_prefs(
+                        &p2,
+                        |pr| {
+                            pr.agent = a.map(|a| a.key());
+                            pr.model = None;
+                        },
+                        cx,
+                    )
+                })
+            },
+            cx,
+        );
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let model_id = prefs.model.clone().filter(|m| models.iter().any(|i| crate::composer::same_model(m, &i.id)));
+        let mut model_opts: Vec<(Option<String>, String)> = vec![(None, "Agent's default".into())];
+        model_opts.extend(models.iter().map(|m| (Some(m.id.clone()), m.name.clone())));
+        let model_picker = picker(
+            "proj-model",
+            None,
+            model_id.as_ref().and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id))).map(|m| m.name.clone()).unwrap_or_else(|| "Agent's default".into()),
+            model_opts,
+            Some(model_id.clone()),
+            move |m: Option<String>, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p2, |pr| pr.model = m, cx)),
+            cx,
+        );
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let mut effort_opts: Vec<(Option<Effort>, String)> = vec![(None, format!("Trek default ({})", general.default_effort.label()))];
+        effort_opts.extend([Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max].into_iter().map(|e| (Some(e), e.label().to_string())));
+        let effort_picker = picker(
+            "proj-effort",
+            None,
+            prefs.effort.map(|e| e.label().to_string()).unwrap_or_else(|| "Trek default".into()),
+            effort_opts,
+            Some(prefs.effort),
+            move |e: Option<Effort>, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p2, |pr| pr.effort = e, cx)),
+            cx,
+        );
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let mut hh_opts: Vec<(Option<HandHolding>, String)> = vec![(None, format!("Trek default ({})", general.hand_holding.label()))];
+        hh_opts.extend(HandHolding::ALL.into_iter().filter(|h| unlocked || *h != HandHolding::FullAccess).map(|h| (Some(h), h.label().to_string())));
+        let hh_picker = picker(
+            "proj-hh",
+            None,
+            prefs.hand_holding.map(|h| h.label().to_string()).unwrap_or_else(|| "Trek default".into()),
+            hh_opts,
+            Some(prefs.hand_holding),
+            move |h: Option<HandHolding>, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p2, |pr| pr.hand_holding = h, cx)),
+            cx,
+        );
+
+        // Actions: named commands, run in a terminal tab from the title bar's Run menu.
+        let mut action_rows: Vec<AnyElement> = prefs
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let (w, p2) = (self.workspace.clone(), path.clone());
+                let (w2, cmd) = (self.workspace.clone(), a.command.clone());
+                let controls = h_flex()
+                    .gap(px(6.))
+                    .child(Button::new(SharedString::from(format!("action-run-{i}"))).small().outline().icon(crate::assets::Lucide::Play).label("Run").on_click(move |_, _, cx| {
+                        let cmd = cmd.clone();
+                        w2.update(cx, |ws, cx| ws.run_project_action(cmd, cx))
+                    }))
+                    .child(Button::new(SharedString::from(format!("action-del-{i}"))).small().ghost().label("Remove").on_click(move |_, _, cx| {
+                        w.update(cx, |ws, cx| {
+                            ws.update_project_prefs(
+                                &p2,
+                                |pr| {
+                                    if i < pr.actions.len() {
+                                        pr.actions.remove(i);
+                                    }
+                                },
+                                cx,
+                            )
+                        })
+                    }));
+                Self::row(a.name.clone(), a.command.clone(), controls, cx)
+            })
+            .collect();
+        let p2 = path.clone();
+        action_rows.push(
+            h_flex()
+                .w_full()
+                .py(px(12.))
+                .gap(px(8.))
+                .child(div().w(px(160.)).child(Input::new(&self.action_name).small()))
+                .child(div().flex_1().child(Input::new(&self.action_command).small()))
+                .child(Button::new("action-add").small().outline().icon(IconName::Plus).label("Add").on_click(cx.listener(move |this, _, window, cx| {
+                    let name = this.action_name.read(cx).value().trim().to_string();
+                    let command = this.action_command.read(cx).value().trim().to_string();
+                    if name.is_empty() || command.is_empty() {
+                        window.push_notification("Give the action a name and a command.", cx);
+                        return;
+                    }
+                    let p = p2.clone();
+                    this.workspace.update(cx, |ws, cx| ws.update_project_prefs(&p, |pr| pr.actions.push(ProjectAction { name, command }), cx));
+                    this.action_name.update(cx, |s, cx| s.set_value("", window, cx));
+                    this.action_command.update(cx, |s, cx| s.set_value("", window, cx));
+                })))
+                .into_any_element(),
+        );
+
+        // Danger.
+        let view = cx.entity().downgrade();
+        let name = project.name.clone();
+        let remove = Button::new("project-remove").small().outline().icon(crate::assets::Lucide::Trash).label("Remove project").on_click(move |_, window, cx| {
+            let (view, pid, name) = (view.clone(), pid.clone(), name.clone());
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let (view, pid) = (view.clone(), pid.clone());
+                alert
+                    .title(format!("Remove “{name}” from Trek?"))
+                    .description("Its threads are archived and the project leaves the sidebar. Files on disk and your agents' own history are not touched. Open the folder again to bring it back.")
+                    .confirm()
+                    .ok_text("Remove project")
+                    .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                    .on_ok(move |_, _, cx| {
+                        let _ = view.update(cx, |this, cx| this.workspace.update(cx, |ws, cx| ws.remove_project(&pid, cx)));
+                        true
+                    })
+            });
+        });
+
+        vec![
+            chooser,
+            ui::group(
+                vec![
+                    Self::row("Name", "Shown in the sidebar and thread lists. The folder isn't renamed.", div().w(px(240.)).child(Input::new(&self.project_name).small()), cx),
+                    Self::row(
+                        "Icon",
+                        match prefs.icon.as_deref() {
+                            None => "Automatic: two letters from the name.",
+                            Some(s) if s.starts_with("file:") => "Your image.",
+                            Some(_) => "One of Trek's icons.",
+                        },
+                        h_flex().gap(px(6.)).child(ui::project_badge(&project.name, prefs.icon.as_deref(), cx)).child(div().w(px(4.))).children(icon_reset).child(icon_menu).child(icon_file),
+                        cx,
+                    ),
+                    Self::row("Folder", trek_core::paths::tildify(&path), reveal, cx),
+                ],
+                cx,
+            ),
+            Self::heading("New threads", cx),
+            Self::note("What a new thread in this project starts with. Anything left on “Trek default” follows Settings → General and Permissions.", cx),
+            ui::group(
+                vec![
+                    Self::row("Agent", "", agent_picker, cx),
+                    Self::row("Model", "", model_picker, cx),
+                    Self::row("Reasoning effort", "", effort_picker, cx),
+                    Self::row("Hand-holding", "", hh_picker, cx),
+                ],
+                cx,
+            ),
+            Self::heading("Actions", cx),
+            Self::note("Commands you run often in this project: tests, a build, a dev server. They appear in the Run menu in the title bar and open in a terminal tab.", cx),
+            ui::group(action_rows, cx),
+            Self::heading("Remove", cx),
+            ui::group(
+                vec![Self::row(
+                    "Remove project",
+                    format!("Archives {} and takes the project out of Trek. Nothing on disk is deleted.", if threads == 1 { "its 1 thread".to_string() } else { format!("its {threads} threads") }),
+                    remove,
+                    cx,
+                )],
+                cx,
+            ),
+        ]
+    }
+
+    /// The name field follows the selected project (needs the window, so it runs from `render`).
+    pub(super) fn sync_project_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let projects = ws.workspace_projects();
+        let selected = ws.settings_project.as_ref().and_then(|id| projects.iter().find(|p| &p.id == id)).or(projects.first()).map(|p| (p.id.clone(), p.name.clone()));
+        let Some((id, name)) = selected else { return };
+        if self.project_name_for.as_deref() != Some(id.as_str()) {
+            self.project_name_for = Some(id);
+            self.project_name.update(cx, |s, cx| s.set_value(name, window, cx));
+        }
+    }
+
+    fn pick_project_image(&mut self, project: std::path::PathBuf, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use as Icon".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(src) = paths.into_iter().next() else { return };
+            // Keep a copy in Trek's data folder so the icon survives the original moving.
+            let dir = trek_core::paths::data_dir().join("project-icons");
+            let _ = std::fs::create_dir_all(&dir);
+            let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png").to_string();
+            let dest = dir.join(format!("{}.{ext}", uuid_like()));
+            if std::fs::copy(&src, &dest).is_err() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                let spec = format!("file:{}", dest.display());
+                this.workspace.update(cx, |ws, cx| ws.update_project_prefs(&project, |pr| pr.icon = Some(spec), cx));
+            });
+        })
+        .detach();
+    }
+}
+
+fn uuid_like() -> String {
+    format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0))
 }

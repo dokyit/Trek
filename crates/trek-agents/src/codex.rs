@@ -172,6 +172,11 @@ pub async fn run(
                 let Ok(cmd) = cmd else { break };
                 match cmd {
                     Command::Prompt { text, images } => {
+                        // A turn is running: steer it with the new message instead of starting another.
+                        if let Some(t) = &turn_id {
+                            rpc.request("turn/steer", json!({ "threadId": thread_id, "expectedTurnId": t, "input": user_input(&text, &images) })).await?;
+                            continue;
+                        }
                         let (_, approval, reviewer) = hand_holding.codex_policy();
                         let mut p = json!({
                             "threadId": thread_id,

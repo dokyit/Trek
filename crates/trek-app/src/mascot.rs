@@ -102,29 +102,53 @@ fn color(c: char) -> Option<u32> {
     })
 }
 
-/// A dotted trail the width of its parent with the hiker walking it.
-pub fn trail(id: impl Into<ElementId>, reduce_motion: bool, cx: &App) -> AnyElement {
+/// Frames per second for the working animation. Pixel art reads fine at this rate, and the whole
+/// window redraws on every frame, so 15 instead of 60 is a quarter of the CPU.
+pub const FPS: u64 = 15;
+
+/// A dotted trail the width of its parent with the hiker walking it. `clock` is seconds since the
+/// turn started; the caller re-renders at [`FPS`] while it wants motion (see `ThreadView`).
+pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
     let dots = cx.theme().foreground.opacity(0.16);
-    if reduce_motion {
-        return div()
-            .h(px(HEIGHT))
-            .w_full()
-            .child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, 0.06, 1, true, dots, window)).size_full())
-            .into_any_element();
+    let (pos, frame, right) = if still {
+        (0.06, 1, true)
+    } else {
+        let lap = LAP.as_secs_f32();
+        let t = (clock % lap) / lap;
+        // Triangle wave: walk right for half the lap, back left for the other half.
+        let (raw, right) = if t < 0.5 { (t * 2., true) } else { (2. - t * 2., false) };
+        // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
+        let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
+        let speed = (std::f32::consts::PI * raw).sin();
+        let frame = if speed < 0.15 { 1 } else { (clock * 7.) as usize % 4 };
+        (pos, frame, right)
+    };
+    div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full()).into_any_element()
+}
+
+/// The trail word with a soft highlight sweeping across it (a shimmer, at [`FPS`]).
+pub fn word_label(word: &str, clock: f32, still: bool, cx: &App) -> AnyElement {
+    let text = format!("{word}…");
+    let base = cx.theme().foreground.opacity(0.9);
+    if still {
+        return div().text_color(base).child(text).into_any_element();
     }
-    div()
-        .h(px(HEIGHT))
-        .w_full()
-        .with_animation(id, Animation::new(LAP).repeat(), move |el, t| {
-            // Triangle wave: walk right for half the lap, back left for the other half.
-            let (raw, right) = if t < 0.5 { (t * 2., true) } else { (2. - t * 2., false) };
-            // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
-            let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
-            let speed = (std::f32::consts::PI * raw).sin();
-            let frame = if speed < 0.15 { 1 } else { (t * LAP.as_secs_f32() * 7.) as usize % 4 };
-            el.child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full())
-        })
-        .into_any_element()
+    let hi = crate::palette::ember(cx);
+    // The highlight is three characters wide and crosses the word (plus a pause) every ~2 s.
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let n = chars.len() as f32;
+    let head = ((clock * 9.) % (n + 10.)) - 2.;
+    let mut highlights = vec![];
+    for (i, (start, ch)) in chars.iter().enumerate() {
+        let d = (i as f32 - head).abs();
+        if d < 2.5 {
+            let k = 1. - d / 2.5;
+            // Keep ember's hue and fade its saturation in: blending hues would pass through green.
+            let color = Hsla { h: hi.h, s: hi.s * k, l: base.l + (hi.l - base.l) * k, a: base.a + (1. - base.a) * k };
+            highlights.push((*start..*start + ch.len_utf8(), HighlightStyle { color: Some(color), ..Default::default() }));
+        }
+    }
+    div().text_color(base).child(StyledText::new(text).with_highlights(highlights)).into_any_element()
 }
 
 fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {

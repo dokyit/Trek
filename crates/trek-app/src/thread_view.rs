@@ -6,10 +6,9 @@ use crate::time;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,10 +22,12 @@ const COLUMN: f32 = 760.;
 
 #[derive(Clone)]
 enum Row {
-    User { ix: usize, text: SharedString, open: bool, images: Vec<String> },
+    User { ix: usize, text: SharedString, open: bool, images: Vec<String>, at: Option<i64> },
+    /// End of a response: copy the whole answer, when it finished, how long it took.
+    TurnEnd { ix: usize, text: SharedString, at: i64, took_secs: u32 },
     Assistant(Entity<TextViewState>),
     Reasoning { ix: usize, md: Entity<TextViewState>, live: bool, open: bool },
-    Tool { ix: usize, title: SharedString, detail: SharedString, output: SharedString, status: ToolStatus, open: bool },
+    Tool { ix: usize, title: SharedString, detail: SharedString, output: SharedString, status: ToolStatus, open: bool, activity: Option<SharedString> },
     /// Consecutive tool calls folded into one summary line ("Ran 3 commands and edited 2 files").
     ToolGroup { ix: usize, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
     Notice(SharedString),
@@ -40,6 +41,7 @@ enum ToolKind {
     Read,
     Search,
     Other,
+    Agent,
     Thought,
 }
 
@@ -49,6 +51,7 @@ fn tool_kind(title: &str) -> ToolKind {
         t if t.starts_with("Edit") || t.starts_with("Wr") || t.starts_with("Wrote") => ToolKind::Edit,
         t if t.starts_with("Read") || t.starts_with("Fetch") => ToolKind::Read,
         t if t.contains("Search") || t.starts_with("List") => ToolKind::Search,
+        "Subagent" => ToolKind::Agent,
         _ => ToolKind::Other,
     }
 }
@@ -60,6 +63,7 @@ fn kind_icon(kind: ToolKind) -> Icon {
         ToolKind::Read => Icon::new(IconName::FileText),
         ToolKind::Search => Icon::new(IconName::Search),
         ToolKind::Other => Icon::new(crate::assets::Lucide::Wrench),
+        ToolKind::Agent => Icon::new(crate::assets::Lucide::Users),
         ToolKind::Thought => Icon::new(crate::assets::Lucide::Sparkle),
     }
 }
@@ -75,6 +79,8 @@ fn summarize(kinds: &[ToolKind]) -> String {
     if r > 0 { parts.push(format!("read {}", plural(r, "file", "files"))); }
     if s > 0 { parts.push(format!("ran {}", plural(s, "search", "searches"))); }
     if o > 0 { parts.push(format!("used {}", plural(o, "tool", "tools"))); }
+    let a = count(ToolKind::Agent);
+    if a > 0 { parts.push(format!("started {}", plural(a, "agent", "agents"))); }
     let text = match parts.len() {
         0 => "thought it through".to_string(),
         1 => parts.remove(0),
@@ -97,16 +103,28 @@ pub struct ThreadView {
     /// Markdown state per transcript index, with the byte length already pushed.
     md: HashMap<usize, (Entity<TextViewState>, usize)>,
     expanded: HashSet<usize>,
+    /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes,
+    /// not on every animation frame.
+    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, usize), std::rc::Rc<Vec<Row>>)>>,
+    expanded_gen: u64,
     /// (transcript, UI) font sizes the rows were measured at; a change remeasures every row.
     fonts: (f32, f32),
+    /// The window is frontmost. Animations stop when it isn't (they'd redraw 60×/s for nobody).
+    active: bool,
     _subscriptions: Vec<Subscription>,
     _ticker: Option<Task<()>>,
 }
 
 impl ThreadView {
-    pub fn new(workspace: Entity<Workspace>, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
-        let subscriptions = vec![cx.observe(&workspace, |this, _, cx| this.sync(cx))];
+        let subscriptions = vec![
+            cx.observe(&workspace, |this, _, cx| this.sync(cx)),
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.active = window.is_window_active();
+                cx.notify();
+            }),
+        ];
         let mut this = Self {
             workspace,
             scroller,
@@ -115,12 +133,19 @@ impl ThreadView {
             count: 0,
             md: HashMap::new(),
             expanded: HashSet::new(),
+            rows_cache: Default::default(),
+            expanded_gen: 0,
             fonts: (0., 0.),
+            active: window.is_window_active(),
             _subscriptions: subscriptions,
             _ticker: None,
         };
         this.sync(cx);
         this
+    }
+
+    fn animate(&self, _: &Window, cx: &App) -> bool {
+        self.active && !self.workspace.read(cx).settings.appearance.reduce_motion
     }
 
     /// Bring row state in line with the workspace transcript without rebuilding everything.
@@ -147,6 +172,7 @@ impl ThreadView {
             self.current = id;
             self.md.clear();
             self.expanded.clear();
+            self.expanded_gen += 1;
             self.count = 0;
             self.revision = 0;
             self.scroller.update(cx, |s, cx| s.reset(0, cx));
@@ -200,11 +226,17 @@ impl ThreadView {
         });
         // Tick the elapsed-time label once a second while a turn runs.
         if working && self._ticker.is_none() {
+            // One ticker drives everything that moves while a turn runs: the hiker and the word
+            // sweep at mascot::FPS when the window is in front, the elapsed time once a second otherwise.
             self._ticker = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let Ok(fast) = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.active && !this.workspace.read(cx).settings.appearance.reduce_motion
+                }) else {
                     break;
-                }
+                };
+                let wait = if fast { std::time::Duration::from_millis(1000 / crate::mascot::FPS) } else { std::time::Duration::from_secs(1) };
+                cx.background_executor().timer(wait).await;
             }));
         } else if !working {
             self._ticker = None;
@@ -212,7 +244,20 @@ impl ThreadView {
         cx.notify();
     }
 
-    fn rows(&self, cx: &App) -> Vec<Row> {
+    fn rows(&self, cx: &App) -> std::rc::Rc<Vec<Row>> {
+        let revision = self.current.as_ref().and_then(|id| self.workspace.read(cx).live.get(id)).map(|l| l.revision).unwrap_or(0);
+        let key = (self.current.clone(), revision, self.expanded_gen, self.md.len());
+        if let Some((k, rows)) = self.rows_cache.borrow().as_ref() {
+            if *k == key {
+                return rows.clone();
+            }
+        }
+        let rows = std::rc::Rc::new(self.build_rows(cx));
+        *self.rows_cache.borrow_mut() = Some((key, rows.clone()));
+        rows
+    }
+
+    fn build_rows(&self, cx: &App) -> Vec<Row> {
         let ws = self.workspace.read(cx);
         let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return vec![] };
         let mut out: Vec<Row> = Vec::new();
@@ -236,7 +281,12 @@ impl ThreadView {
             });
         };
         for (ix, item) in live.items.iter().enumerate() {
-            if let Item::Tool { title, detail, output, status, .. } = item {
+            if let Item::Tool { id: tool_id, title, detail, output, status } = item {
+                // A running sub-agent shows what it's doing right now.
+                let activity = live.tasks.iter().find(|t| &t.id == tool_id && t.done.is_none()).map(|t| {
+                    let steps = if t.tool_uses == 1 { "1 step".to_string() } else { format!("{} steps", t.tool_uses) };
+                    SharedString::from(if t.activity.is_empty() { steps } else { format!("{} · {steps}", t.activity) })
+                });
                 pending.push((
                     ix,
                     Row::Tool {
@@ -246,6 +296,7 @@ impl ThreadView {
                         output: output.clone().into(),
                         status: *status,
                         open: self.expanded.contains(&ix),
+                        activity,
                     },
                     tool_kind(title),
                     *status == ToolStatus::Running,
@@ -253,27 +304,36 @@ impl ThreadView {
                 continue;
             }
             if let Item::Reasoning { text } = item {
-                if live.reasoning != Some(ix) {
-                    if !text.trim().is_empty() {
-                        if let Some((md, _)) = self.md.get(&ix) {
-                            pending.push((ix, Row::Reasoning { ix, md: md.clone(), live: false, open: self.expanded.contains(&ix) }, ToolKind::Thought, false));
-                        }
+                // Live thinking has no row of its own: the trail bar above the composer is the
+                // one "working" indicator. Finished thoughts fold into the tool group.
+                if live.reasoning != Some(ix) && !text.trim().is_empty() {
+                    if let Some((md, _)) = self.md.get(&ix) {
+                        pending.push((ix, Row::Reasoning { ix, md: md.clone(), live: false, open: self.expanded.contains(&ix) }, ToolKind::Thought, false));
                     }
-                    continue;
                 }
+                continue;
             }
             flush(&mut pending, &mut out, &self.expanded);
             out.push(match item {
-                Item::User { text, images } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix), images: images.clone() },
+                Item::User { text, images, at } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix), images: images.clone(), at: *at },
+                Item::TurnEnd { at, took_secs } => {
+                    // Everything the agent said since the last message of yours.
+                    let start = live.items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
+                    let text = live.items[start..ix]
+                        .iter()
+                        .filter_map(|i| if let Item::Assistant { text } = i { Some(text.trim()) } else { None })
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    Row::TurnEnd { ix, text: text.into(), at: *at, took_secs: *took_secs }
+                }
                 Item::Assistant { .. } => match self.md.get(&ix) {
                     Some((s, _)) => Row::Assistant(s.clone()),
                     None => Row::Notice("".into()),
                 },
-                Item::Reasoning { .. } => match self.md.get(&ix) {
-                    Some((s, _)) => Row::Reasoning { ix, md: s.clone(), live: live.reasoning == Some(ix), open: self.expanded.contains(&ix) },
-                    None => Row::Notice("".into()),
-                },
-                Item::Notice { text } => Row::Notice(text.clone().into()),
+                Item::Reasoning { .. } => unreachable!(),
+                // Notices are plain text; drop the light markdown the built-in commands use.
+                Item::Notice { text } => Row::Notice(text.replace("**", "").replace('`', "").into()),
                 Item::Error { text } => Row::Error(text.clone().into()),
                 Item::Tool { .. } => unreachable!(),
             });
@@ -282,7 +342,7 @@ impl ThreadView {
         out
     }
 
-    fn render_row(row: Row, view: WeakEntity<ThreadView>, text_size: Pixels, cwd: Option<std::path::PathBuf>, cx: &App) -> AnyElement {
+    fn render_row(row: Row, view: WeakEntity<ThreadView>, text_size: Pixels, cwd: Option<std::path::PathBuf>, animate: bool, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let child_view = view.clone();
         let column = |el: Div| h_flex().w_full().justify_center().px_6().child(el.w_full().max_w(px(COLUMN)));
@@ -293,17 +353,39 @@ impl ThreadView {
                     if !this.expanded.remove(&ix) {
                         this.expanded.insert(ix);
                     }
+                    this.expanded_gen += 1;
                     this.scroller.update(cx, |s, cx| _ = s.remeasure_items(ix..ix + 1, cx));
                     cx.notify();
                 });
             }
         };
         match row {
-            Row::User { ix, text, open, images } => {
+            Row::User { ix, text, open, images, at } => {
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
+                let copy_text = text.clone();
+                // Time sent and a copy button, shown while the pointer is over the message.
+                let meta = h_flex()
+                    .h(px(20.))
+                    .gap(px(6.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .invisible()
+                    .group_hover("user-msg", |s| s.visible())
+                    .children(at.map(crate::time::clock))
+                    .child(
+                        Button::new(("copy-user", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Copy).text_color(theme.muted_foreground))
+                            .tooltip("Copy message")
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
+                                window.push_notification("Copied", cx);
+                            }),
+                    );
                 column(
-                    v_flex().items_end().pt_4().pb_2().gap_2()
+                    v_flex().group("user-msg").items_end().pt_4().gap(px(4.))
                     .when(!images.is_empty(), |el| {
                         el.child(h_flex().gap_2().flex_wrap().justify_end().children(images.into_iter().enumerate().map(|(i, p)| {
                             let path = std::path::PathBuf::from(&p);
@@ -343,9 +425,32 @@ impl ThreadView {
                                         .on_click(toggle(ix)),
                                 )
                             }),
-                    )),
+                    ))
+                    .child(meta),
                 )
             }
+            .into_any_element(),
+            Row::TurnEnd { ix, text, at, took_secs } => column(
+                h_flex()
+                    .pt(px(2.))
+                    .pb(px(10.))
+                    .gap(px(6.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        Button::new(("copy-turn", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Copy).text_color(theme.muted_foreground))
+                            .tooltip("Copy response")
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                                window.push_notification("Copied", cx);
+                            }),
+                    )
+                    .child(crate::time::clock(at))
+                    .when(took_secs >= 1, |el| el.child(div().text_color(theme.muted_foreground.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs))))),
+            )
             .into_any_element(),
             Row::Assistant(md) => column(
                 div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, cwd.clone(), cx).stream_fade(true)),
@@ -362,17 +467,7 @@ impl ThreadView {
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
                             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
-                            .child(if live {
-                                {
-                                    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                                    ShimmerText::new(format!("{}…", crate::mascot::word(&format!("think-{ix}"), secs)))
-                                        .id(("thinking", ix))
-                                        .highlight_color(palette::ember(cx))
-                                        .into_any_element()
-                                }
-                            } else {
-                                div().child("Thought").into_any_element()
-                            })
+                            .child(div().child(if live { "Thinking" } else { "Thought" }))
                             .on_click(toggle(ix)),
                     )
                     .when(open, |el| {
@@ -404,11 +499,7 @@ impl ThreadView {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
                                 .child(kind_icon(kind).small())
-                                .child(if running {
-                                    ShimmerText::new(summary).id(("tool-shimmer", ix)).highlight_color(theme.foreground).into_any_element()
-                                } else {
-                                    div().child(summary).into_any_element()
-                                })
+                                .child(div().when(running, |el| el.text_color(theme.foreground.opacity(0.85))).child(summary))
                                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
                                 .on_click(toggle(ix)),
                         )
@@ -419,14 +510,15 @@ impl ThreadView {
                                     .pl_4()
                                     .border_l_1()
                                     .border_color(theme.border)
-                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), text_size, cwd.clone(), cx))),
+                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), text_size, cwd.clone(), animate, cx))),
                             )
                         }),
                 )
                 .into_any_element()
             }
-            Row::Tool { ix, title, detail, output, status, open } => {
+            Row::Tool { ix, title, detail, output, status, open, activity } => {
                 let icon = match title.as_ref() {
+                    "Subagent" => Icon::new(crate::assets::Lucide::Users),
                     t if t.starts_with("Run") || t.starts_with("Ran") => Icon::new(IconName::SquareTerminal),
                     t if t.starts_with("Edit") || t.starts_with("Wr") => Icon::new(crate::assets::Lucide::FilePen),
                     t if t.starts_with("Read") => Icon::new(IconName::FileText),
@@ -434,7 +526,7 @@ impl ThreadView {
                     _ => Icon::new(crate::assets::Lucide::Wrench),
                 };
                 let status_el = match status {
-                    ToolStatus::Running => Spinner::new().xsmall().into_any_element(),
+                    ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(theme.muted_foreground).into_any_element(),
                     ToolStatus::Done => Icon::new(IconName::Check).xsmall().text_color(theme.muted_foreground).into_any_element(),
                     ToolStatus::Failed | ToolStatus::Denied => {
                         Icon::new(IconName::CircleX).xsmall().text_color(palette::red(cx)).into_any_element()
@@ -454,16 +546,20 @@ impl ThreadView {
                                 .text_sm()
                                 .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(ix)))
                                 .child(icon.small().text_color(theme.muted_foreground))
-                                .child(div().font_medium().flex_none().child(title))
+                                .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(if title.as_ref() == "Subagent" { detail.clone() } else { title.clone() }))
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .font_family(theme.mono_font_family.clone())
+                                        .when(activity.is_none(), |el| el.font_family(theme.mono_font_family.clone()))
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
-                                        .child(detail),
+                                        .child(match (activity, title.as_ref()) {
+                                            (Some(a), _) => a,
+                                            (None, "Subagent") => SharedString::default(),
+                                            (None, _) => detail,
+                                        }),
                                 )
                                 .child(status_el),
                         )
@@ -589,7 +685,9 @@ impl ThreadView {
             let started = live.turn_started.map(|t| t.elapsed());
             let elapsed = started.map(time::elapsed).unwrap_or_default();
             let word = crate::mascot::word(&id, started.map(|d| d.as_secs()).unwrap_or(0));
-            let reduce = ws.settings.appearance.reduce_motion;
+            let still = ws.settings.appearance.reduce_motion || !self.active;
+            let clock = live.turn_started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.);
+            let agents = live.active_tasks().max(live.background);
             return Some(
                 h_flex()
                     .w_full()
@@ -607,14 +705,17 @@ impl ThreadView {
                                 h_flex()
                                     .flex_none()
                                     // Fixed width so the trail doesn't jump when the word changes.
-                                    .w(px(250.))
+                                    .w(px(330.))
                                     .pb(px(4.))
                                     .gap(px(8.))
                                     .text_size(px(13.))
-                                    .child(ShimmerText::new(format!("{word}…")).id(SharedString::from(format!("trail-word-{word}"))).highlight_color(palette::ember(cx)))
-                                    .when(!elapsed.is_empty(), |el| el.child(div().text_color(theme.muted_foreground.opacity(0.8)).child(elapsed))),
+                                    .child(crate::mascot::word_label(word, clock, still, cx))
+                                    .when(!elapsed.is_empty(), |el| el.child(div().text_color(theme.muted_foreground.opacity(0.8)).child(elapsed)))
+                                    .when(agents > 0, |el| {
+                                        el.child(div().text_color(theme.muted_foreground.opacity(0.8)).child(if agents == 1 { "· 1 agent out".to_string() } else { format!("· {agents} agents out") }))
+                                    }),
                             )
-                            .child(div().flex_1().min_w_0().child(crate::mascot::trail(SharedString::from(format!("hiker-{id}")), reduce, cx))),
+                            .child(div().flex_1().min_w_0().child(crate::mascot::trail(clock, still, cx))),
                     )
                     .into_any_element(),
             );
@@ -636,7 +737,7 @@ impl ThreadView {
 }
 
 impl Render for ThreadView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows(cx);
         let footer = self.live_footer(cx);
         if rows.is_empty() {
@@ -645,12 +746,13 @@ impl Render for ThreadView {
         let view = cx.entity().downgrade();
         let text_size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
         let cwd = self.workspace.read(cx).current_cwd();
+        let animate = self.animate(window, cx);
         v_flex()
             .size_full()
             .child(
                 div().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.get(ix).cloned() {
-                        Some(row) => ThreadView::render_row(row, view.clone(), text_size, cwd.clone(), cx),
+                        Some(row) => ThreadView::render_row(row, view.clone(), text_size, cwd.clone(), animate, cx),
                         None => div().into_any_element(),
                     })
                     .with_list_style(StyleRefinement::default().pt_4().pb_6())

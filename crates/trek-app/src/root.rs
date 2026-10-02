@@ -135,6 +135,13 @@ impl TrekWindow {
             Route::Onboarding => (None, String::new(), None),
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
+        // The project's icon and its actions (Settings → Project).
+        let root = folder.as_deref().map(trek_core::store::project_root);
+        let project_entry = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
+        let project = project_entry.map(|p| p.name.clone()).or(project);
+        let icon = root.as_ref().and_then(|r| ws.project_icon(r));
+        let actions = root.as_ref().map(|r| ws.project_prefs(r).actions).unwrap_or_default();
+        let project_id = project_entry.map(|p| p.id.clone());
         let transparent = self.workspace.read(cx).backdrop().is_some();
         TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
             h_flex()
@@ -167,12 +174,13 @@ impl TrekWindow {
                         .gap_2()
                         .text_sm()
                         .when_some(project.clone(), |el, p| {
-                            el.child(crate::ui::monogram(&p, cx))
+                            el.child(crate::ui::project_badge(&p, icon.as_deref(), cx))
                                 .child(div().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })
                         .child(div().truncate().font_medium().child(title)),
                 )
+                .when(folder.is_some(), |el| el.child(run_button(actions, project_id, self.workspace.clone())))
                 .when_some(folder, |el, dir| el.child(open_in_button(dir)))
                 .child(
                     crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)")
@@ -186,6 +194,31 @@ impl TrekWindow {
                 }),
         )
     }
+}
+
+/// "Run" menu: the project's actions, each opening in a terminal tab.
+fn run_button(actions: Vec<trek_core::settings::ProjectAction>, project_id: Option<String>, ws: Entity<Workspace>) -> impl IntoElement {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    use gpui_kit::component::Sizable as _;
+    Button::new("run-actions").ghost().small().icon(crate::assets::Lucide::Play).tooltip("Run a project action").dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+        menu = menu.min_w(px(220.));
+        if actions.is_empty() {
+            menu = menu.label("No actions for this project yet");
+        }
+        for a in actions.clone() {
+            let ws = ws.clone();
+            menu = menu.item(PopupMenuItem::new(a.name.clone()).icon(crate::assets::Lucide::Play).on_click(move |_, _, cx| {
+                let cmd = a.command.clone();
+                ws.update(cx, |ws, cx| ws.run_project_action(cmd, cx))
+            }));
+        }
+        let (ws, pid) = (ws.clone(), project_id.clone());
+        menu.separator().item(PopupMenuItem::new(if actions.is_empty() { "Add an action…" } else { "Edit actions…" }).on_click(move |_, _, cx| {
+            let pid = pid.clone();
+            ws.update(cx, |ws, cx| ws.open_project_settings(pid, cx))
+        }))
+    })
 }
 
 /// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.

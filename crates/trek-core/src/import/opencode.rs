@@ -63,7 +63,7 @@ pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
                     continue;
                 }
                 if role.as_deref() == Some("user") {
-                    items.push(Item::User { text, images: vec![] });
+                    items.push(Item::User { text, images: vec![], at: None });
                 } else {
                     items.push(Item::Assistant { text });
                 }

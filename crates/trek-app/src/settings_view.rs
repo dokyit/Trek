@@ -21,6 +21,7 @@ use trek_core::AgentId;
 
 fn page_icon(p: SettingsPage) -> Icon {
     match p {
+        SettingsPage::Project => Icon::new(crate::assets::Lucide::FolderCog),
         SettingsPage::General => Icon::new(IconName::Settings2),
         SettingsPage::Appearance => Icon::new(IconName::Palette),
         SettingsPage::Notifications => Icon::new(IconName::Bell),
@@ -39,6 +40,7 @@ fn page_icon(p: SettingsPage) -> Icon {
 }
 
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
+    ("Project", &[SettingsPage::Project]),
     ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Snapshots, SettingsPage::Shortcuts]),
     ("Agents", &[SettingsPage::Agents, SettingsPage::Skills, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
     ("Workflow", &[SettingsPage::Permissions, SettingsPage::Import]),
@@ -47,6 +49,7 @@ const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
 
 fn page_blurb(p: SettingsPage) -> &'static str {
     match p {
+        SettingsPage::Project => "",
         SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.",
         SettingsPage::Appearance => "Theme, text size, background art and motion.",
         SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.",
@@ -133,6 +136,11 @@ pub struct SettingsView {
     skill_name: Entity<InputState>,
     skill_desc: Entity<InputState>,
     skill_home: trek_core::skills::SkillHome,
+    /// Project page: the name field (and which project it currently shows), and the new-action fields.
+    project_name: Entity<InputState>,
+    project_name_for: Option<String>,
+    action_name: Entity<InputState>,
+    action_command: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -158,12 +166,31 @@ impl SettingsView {
                 this.skills = None;
             }
         }));
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        let action_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Test"));
+        let action_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. cargo test"));
+        subs.push(cx.subscribe_in(&project_name, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
+                let name = input.read(cx).value().to_string();
+                if let Some(id) = this.project_name_for.clone() {
+                    this.workspace.update(cx, |ws, cx| {
+                        if ws.project(&id).is_some_and(|p| p.name != name.trim()) {
+                            ws.rename_project(&id, &name, cx);
+                        }
+                    });
+                }
+            }
+        }));
         Self {
             workspace,
             key_inputs,
             saved_keys,
             mcp_name,
             mcp_command,
+            project_name,
+            project_name_for: None,
+            action_name,
+            action_command,
             skills: None,
             skill_filter,
             skill_name,
@@ -585,6 +612,7 @@ impl SettingsView {
         let muted = cx.theme().muted_foreground;
         let mut out: Vec<AnyElement> = vec![];
         match page {
+            SettingsPage::Project => out.extend(self.project_page(cx)),
             SettingsPage::General => out.extend(self.general_page(&s, cx)),
             SettingsPage::Appearance => out.extend(self.appearance_page(&s, cx)),
             SettingsPage::Notifications => out.extend(self.notifications_page(&s, cx)),
@@ -667,8 +695,11 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = self.page(cx);
+        if page == SettingsPage::Project {
+            self.sync_project_name(window, cx);
+        }
         let body = self.content(cx);
         div().id("settings-content").size_full().overflow_y_scroll().child(
             h_flex().w_full().justify_center().child(

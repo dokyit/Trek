@@ -107,6 +107,11 @@ impl Composer {
                     }
                 } else if matches!(event, InputEvent::Change) {
                     this.update_trigger(cx);
+                    // The user has started typing: get the agent process up before they hit Return.
+                    let typing = { let v = state.read(cx).value(); v.trim().len() >= 2 && !v.starts_with('/') };
+                    if typing {
+                        this.workspace.update(cx, |ws, cx| ws.warm_up(cx));
+                    }
                     cx.notify();
                 }
             }),
@@ -1237,7 +1242,7 @@ impl Render for Composer {
                         .child(self.env_chips(false, cx))
                         .when(plan, |el| el.child(h_flex().gap(px(6.)).text_color(palette::indigo(cx)).child(Icon::new(crate::assets::Lucide::ListChecks).small()).child("Plan mode")))
                         .child(div().flex_1())
-                        .when(running, |el| el.child(div().pr(px(6.)).child(Spinner::new().small().color(theme.muted_foreground)))),
+
                 )
             })
             .children(self.attachment_strip(cx))

@@ -93,6 +93,8 @@ pub struct Thread {
     pub deletions: i64,
     /// Set for side chats: the thread they were opened from. Hidden from the sidebar.
     pub side_of: Option<String>,
+    /// Exempt from auto-settle (set from the thread's context menu).
+    pub never_settle: bool,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -152,6 +154,7 @@ impl Thread {
     /// Whether auto-settle applies now.
     pub fn should_auto_settle(&self, now: i64, after_days: u32) -> bool {
         after_days > 0
+            && !self.never_settle
             && self.settled_at.is_none()
             && self.pinned_at.is_none()
             && self.run_state == RunState::Idle
@@ -180,8 +183,13 @@ pub enum Item {
         /// Attached image paths (screenshots, snapshots).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<String>,
+        /// When it was sent (unix ms); absent on imported history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<i64>,
     },
     Assistant { text: String },
+    /// Marks the end of a response: when it finished and how long the turn took.
+    TurnEnd { at: i64, took_secs: u32 },
     Reasoning { text: String },
     Tool { id: String, title: String, detail: String, output: String, status: ToolStatus },
     Notice { text: String },
@@ -247,6 +255,7 @@ pub fn project_root(cwd: &Path) -> PathBuf {
 /// Additive migrations; each is a no-op once applied.
 fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN side_of TEXT", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN never_settle INTEGER NOT NULL DEFAULT 0", []);
 }
 
 impl Store {
@@ -306,7 +315,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -332,6 +341,7 @@ impl Store {
             additions: r.get(19)?,
             deletions: r.get(20)?,
             side_of: r.get(21)?,
+            never_settle: r.get::<_, i64>(22)? != 0,
         })
     }
 
@@ -386,6 +396,7 @@ impl Store {
             additions: 0,
             deletions: 0,
             side_of: None,
+            never_settle: false,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -395,7 +406,7 @@ impl Store {
         self.with(|c| {
             c.execute(
                 &format!(
-                    "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                    "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
                     Self::THREAD_COLS
                 ),
                 params![
@@ -420,7 +431,8 @@ impl Store {
                     enum_str(&t.run_state),
                     t.additions,
                     t.deletions,
-                    t.side_of
+                    t.side_of,
+                    t.never_settle as i64
                 ],
             )?;
             Ok(())
@@ -484,9 +496,31 @@ impl Store {
             additions: imp.additions,
             deletions: imp.deletions,
             side_of: None,
+            never_settle: false,
         };
         self.save_thread(&t)?;
         Ok(true)
+    }
+
+    /// Remove a thread and its transcript from Trek's database.
+    pub fn delete_thread(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM items WHERE thread_id = ?1", [id])?;
+            c.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
+            Ok(())
+        })
+    }
+
+    pub fn rename_project(&self, id: &str, name: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("UPDATE projects SET name = ?2 WHERE id = ?1", params![id, name])?;
+            Ok(())
+        })
+    }
+
+    /// Archive every thread of a project (used when the project is removed from Trek).
+    pub fn archive_project_threads(&self, project_id: &str) -> Result<usize> {
+        self.with(|c| c.execute("UPDATE threads SET archived_at = ?2 WHERE project_id = ?1 AND archived_at IS NULL", params![project_id, now_ms()]))
     }
 
     // ---- items ----
@@ -550,7 +584,7 @@ mod tests {
         let t = s.create_thread(None, AgentId::Codex, Some("gpt-6-astra".into()), Effort::Max, HandHolding::FullAccess).unwrap();
         let back = s.thread(&t.id).unwrap().unwrap();
         assert_eq!(back, t);
-        s.set_items(&t.id, &[Item::User { text: "hi".into(), images: vec![] }, Item::Assistant { text: "hello".into() }]).unwrap();
+        s.set_items(&t.id, &[Item::User { text: "hi".into(), images: vec![], at: None }, Item::Assistant { text: "hello".into() }]).unwrap();
         assert_eq!(s.items(&t.id).unwrap().len(), 2);
     }
 
