@@ -1,5 +1,6 @@
 //! The main window: title bar, sidebar, and the routed content area.
 
+use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
@@ -24,6 +25,7 @@ pub struct TrekWindow {
     settings_nav: Entity<SettingsNav>,
     right_panel: Entity<RightPanel>,
     onboarding: Entity<Onboarding>,
+    palette: Entity<CommandPalette>,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
     _subscriptions: Vec<Subscription>,
@@ -46,6 +48,7 @@ impl TrekWindow {
             p.width = saved_width.max(crate::panels::MIN_PANEL);
             p
         });
+        let palette = cx.new(|cx| CommandPalette::new(workspace.clone(), right_panel.clone(), window, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
@@ -83,7 +86,7 @@ impl TrekWindow {
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
         }
-        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, panel_drag: None, _subscriptions: subscriptions }
+        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, palette, panel_drag: None, _subscriptions: subscriptions }
     }
 
     /// A thread needs the user or finished: toast, banner and sound per the notification settings.
@@ -386,6 +389,7 @@ impl Render for TrekWindow {
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
             .bg(cx.theme().sidebar)
             .when_some(backdrop.clone(), |el, (spec, dim)| {
                 let side = cx.theme().sidebar;
@@ -472,6 +476,8 @@ impl Render for TrekWindow {
                         )
                     }),
             )
+            // ⌘K, drawn over everything else in the window.
+            .child(self.palette.clone())
             .into_any_element()
     }
 }

@@ -9,7 +9,8 @@ use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
 use trek_core::settings::{FollowUp, Settings};
-use trek_core::store::{Item, Project, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::store::{Item, Project, SearchHit, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::transcript::Transcript;
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +86,9 @@ pub struct PendingPermission {
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
 #[derive(Default)]
 pub struct LiveThread {
-    pub items: Vec<Item>,
+    /// The transcript, with each item's stable id. Change it through `Transcript`'s methods so
+    /// saves (`persist_items`) write just the rows that changed.
+    pub items: Transcript,
     pub loaded: bool,
     pub loading: bool,
     /// Index of the assistant item currently streaming.
@@ -129,6 +132,38 @@ impl LiveThread {
     pub fn active_tasks(&self) -> usize {
         self.tasks.iter().filter(|t| t.done.is_none()).count()
     }
+
+    /// Stable ids of the transcript's items, parallel to `items` (they survive reloads once saved).
+    pub fn item_ids(&self) -> &[String] {
+        self.items.ids()
+    }
+}
+
+/// A message to bring into view: by stable id, or by position for history that isn't stored in
+/// Trek (an imported thread you haven't continued here).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ItemRef {
+    Id(String),
+    Position(usize),
+}
+
+impl ItemRef {
+    pub fn of_hit(hit: &SearchHit) -> Option<ItemRef> {
+        match (&hit.item_id, hit.position) {
+            (Some(id), _) => Some(ItemRef::Id(id.clone())),
+            (None, Some(p)) => Some(ItemRef::Position(p)),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Scroll the transcript to a message once the thread is on screen (search results).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reveal {
+    pub thread: String,
+    pub item: ItemRef,
+    /// Increases with every request, so the view can tell a new one from one it has handled.
+    pub seq: u64,
 }
 
 /// What a pre-warmed draft session was started with; it's used only if the draft still matches.
@@ -257,7 +292,15 @@ pub struct Workspace {
     pub update: UpdateStatus,
     pub sidebar_collapsed: bool,
     pub settled_open: bool,
+    /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
+    /// Threads whose messages match `search` (full-text), with the best match in each.
+    pub search_hits: HashMap<String, SearchHit>,
+    _search_task: Option<Task<()>>,
+    /// The message the transcript should scroll to next (`open_thread_at`).
+    pub reveal: Option<Reveal>,
+    /// Imported transcripts and older rows are being added to the search index.
+    indexing: bool,
     pub project_filter: Option<String>,
     /// Bumped whenever any agent turn finishes (tools refresh on it).
     pub turns_finished: u64,
@@ -318,6 +361,10 @@ impl Workspace {
             sidebar_collapsed: false,
             settled_open: false,
             search: String::new(),
+            search_hits: HashMap::new(),
+            _search_task: None,
+            reveal: None,
+            indexing: false,
             project_filter: None,
             turns_finished: 0,
             git_info: HashMap::new(),
@@ -340,6 +387,8 @@ impl Workspace {
         this.refresh_git(cx);
         if this.settings.onboarding.completed {
             this.import_threads(cx);
+        } else {
+            this.index_for_search(cx);
         }
         if this.settings.updates.auto_check {
             this.check_for_updates(false, cx);
@@ -465,10 +514,10 @@ impl Workspace {
     /// Threads grouped into sidebar sections, filtered by search and project.
     pub fn sections(&self) -> Vec<(Section, Vec<&Thread>)> {
         let now = now_ms();
-        let q = self.search.to_lowercase();
+        let q = self.search.trim().to_lowercase();
         let mut map: HashMap<Section, Vec<&Thread>> = HashMap::new();
         for t in &self.threads {
-            if !q.is_empty() && !t.title.to_lowercase().contains(&q) {
+            if !q.is_empty() && !t.title.to_lowercase().contains(&q) && !self.search_hits.contains_key(&t.id) {
                 continue;
             }
             if let Some(p) = &self.project_filter {
@@ -593,6 +642,96 @@ impl Workspace {
         self.refresh_git(cx);
         cx.emit(WorkspaceEvent::FocusComposer);
         cx.notify();
+    }
+
+    /// Open a thread scrolled to one of its messages (a search result).
+    pub fn open_thread_at(&mut self, id: &str, item: ItemRef, cx: &mut Context<Self>) {
+        let seq = self.reveal.as_ref().map_or(1, |r| r.seq + 1);
+        self.reveal = Some(Reveal { thread: id.to_string(), item, seq });
+        self.navigate(Route::Thread(id.to_string()), cx);
+    }
+
+    // ---------- search ----------
+
+    /// Set the sidebar's search text. Titles are matched as you type; messages are searched in
+    /// the background and their threads join the list when the results arrive.
+    pub fn set_search(&mut self, text: String, cx: &mut Context<Self>) {
+        if text == self.search {
+            return;
+        }
+        self.search = text;
+        let query = self.search.trim().to_string();
+        if trek_core::store::fts_query(&query).is_none() {
+            self.search_hits.clear();
+            self._search_task = None;
+            cx.notify();
+            return;
+        }
+        let store = self.store.clone();
+        self._search_task = Some(cx.spawn(async move |this, cx| {
+            let q = query.clone();
+            let hits = cx.background_executor().spawn(async move { store.search(&q, 500) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search.trim() != query {
+                    return;
+                }
+                match hits {
+                    Ok(hits) => this.search_hits = hits.into_iter().filter(|h| h.position.is_some()).map(|h| (h.thread_id.clone(), h)).collect(),
+                    Err(e) => tracing::warn!("search: {e}"),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Fill the search index in the background: rows saved before it existed, then imported
+    /// threads' transcripts that are new or changed since the last run (small ones only; bigger
+    /// ones are indexed when opened, see `ensure_loaded`). Runs after every import.
+    fn index_for_search(&mut self, cx: &mut Context<Self>) {
+        if self.indexing {
+            return;
+        }
+        self.indexing = true;
+        let store = self.store.clone();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    loop {
+                        match store.backfill_search(500) {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(e) => {
+                                tracing::warn!("search backfill: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    loop {
+                        let batch = match store.imported_to_index(16) {
+                            Ok(b) if !b.is_empty() => b,
+                            Ok(_) => break,
+                            Err(e) => {
+                                tracing::warn!("search index: {e}");
+                                break;
+                            }
+                        };
+                        for t in batch {
+                            let size = trek_core::import::transcript_bytes(t.source, &t.native_id);
+                            let items = match size {
+                                Some(n) if n > trek_core::store::INDEX_MAX_BYTES => None,
+                                _ => trek_core::import::load_transcript(t.source, &t.native_id).ok(),
+                            };
+                            if let Err(e) = store.index_imported(&t.thread_id, items.as_deref(), t.updated_at) {
+                                tracing::warn!("search index {}: {e}", t.thread_id);
+                                return;
+                            }
+                        }
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, _| this.indexing = false);
+        });
+        self.tasks.push(task);
     }
 
     // ---------- projects: preferences ----------
@@ -725,9 +864,9 @@ impl Workspace {
         if live.loaded || live.loading {
             return;
         }
-        let items = self.store.items(id).unwrap_or_default();
-        if !items.is_empty() {
-            live.items = items;
+        let rows = self.store.items_with_ids(id).unwrap_or_default();
+        if !rows.is_empty() {
+            live.items = Transcript::stored(rows);
             live.loaded = true;
             live.revision += 1;
             return;
@@ -739,20 +878,33 @@ impl Workspace {
         };
         live.loading = true;
         let id = id.to_string();
+        let store = self.store.clone();
         let task = cx.spawn(async move |this, cx| {
             let source = thread.source;
             let result = cx
                 .background_executor()
                 .spawn(async move { trek_core::import::load_transcript(source, &native) })
                 .await;
+            // History read from the agent's own files stays there until the thread is continued
+            // here. Index it for search as of now (the only way big transcripts get indexed).
+            if let Ok(items) = &result {
+                let (items, id) = (items.clone(), id.clone());
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = store.index_imported(&id, Some(&items), thread.updated_at) {
+                            tracing::warn!("search index {id}: {e}");
+                        }
+                    })
+                    .detach();
+            }
             let _ = this.update(cx, |this, cx| {
                 let live = this.live.entry(id.clone()).or_default();
                 live.loading = false;
                 live.loaded = true;
-                match result {
-                    Ok(items) => live.items = items,
-                    Err(e) => live.items = vec![Item::Error { text: format!("Couldn't load this thread: {e}") }],
-                }
+                live.items = match result {
+                    Ok(items) => Transcript::unsaved(items),
+                    Err(e) => Transcript::unsaved(vec![Item::Error { text: format!("Couldn't load this thread: {e}") }]),
+                };
                 live.revision += 1;
                 cx.notify();
             });
@@ -1196,7 +1348,7 @@ impl Workspace {
                                 Some(true) => ToolStatus::Done,
                                 Some(false) => ToolStatus::Failed,
                             };
-                            if let Some(Item::Tool { status: st, .. }) = live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                            if let Some(Item::Tool { status: st, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
                                 *st = status;
                             }
                         }
@@ -1211,9 +1363,9 @@ impl Workspace {
                         let ix = match live.streaming {
                             Some(ix) => ix,
                             None => {
-                                live.items.push(Item::Assistant { text: String::new() });
-                                live.streaming = Some(live.items.len() - 1);
-                                live.items.len() - 1
+                                let ix = live.items.push(Item::Assistant { text: String::new() });
+                                live.streaming = Some(ix);
+                                ix
                             }
                         };
                         if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
@@ -1228,7 +1380,9 @@ impl Workspace {
                                     *text = t;
                                 }
                             }
-                            None if !t.trim().is_empty() => live.items.push(Item::Assistant { text: t }),
+                            None if !t.trim().is_empty() => {
+                                live.items.push(Item::Assistant { text: t });
+                            }
                             None => {}
                         }
                         live.reasoning = None;
@@ -1237,9 +1391,9 @@ impl Workspace {
                         let ix = match live.reasoning {
                             Some(ix) => ix,
                             None => {
-                                live.items.push(Item::Reasoning { text: String::new() });
-                                live.reasoning = Some(live.items.len() - 1);
-                                live.items.len() - 1
+                                let ix = live.items.push(Item::Reasoning { text: String::new() });
+                                live.reasoning = Some(ix);
+                                ix
                             }
                         };
                         if let Some(Item::Reasoning { text }) = live.items.get_mut(ix) {
@@ -1252,9 +1406,7 @@ impl Workspace {
                         live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
                     }
                     AgentEvent::ToolFinished { id: tid, output, ok } => {
-                        if let Some(Item::Tool { output: o, status, .. }) =
-                            live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
-                        {
+                        if let Some(Item::Tool { output: o, status, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
                             *o = output;
                             // A background sub-agent's tool call returns at once; it's done when its task is.
                             if !live.tasks.iter().any(|t| t.id == tid && t.done.is_none()) {
@@ -1274,7 +1426,8 @@ impl Workspace {
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
                     AgentEvent::TurnComplete { cost_usd, error } => {
-                        // Models that hide their reasoning leave empty "Thought" rows behind.
+                        // Models that hide their reasoning leave empty "Thought" rows behind. Removing
+                        // them shifts positions; the rows' ids keep saves and views lined up.
                         live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
                         live.streaming = None;
                         live.reasoning = None;
@@ -1291,9 +1444,9 @@ impl Workspace {
                         for t in live.tasks.iter_mut().filter(|t| t.done.is_none()) {
                             t.done = Some(error.is_none());
                         }
-                        for i in live.items.iter_mut() {
-                            if let Item::Tool { status, .. } = i {
-                                if *status == ToolStatus::Running {
+                        for ix in 0..live.items.len() {
+                            if matches!(live.items[ix], Item::Tool { status: ToolStatus::Running, .. }) {
+                                if let Some(Item::Tool { status, .. }) = live.items.get_mut(ix) {
                                     *status = if error.is_none() { ToolStatus::Done } else { ToolStatus::Failed };
                                 }
                             }
@@ -1413,9 +1566,13 @@ impl Workspace {
         }
     }
 
-    fn persist_items(&self, id: &str) {
-        if let Some(live) = self.live.get(id) {
-            let _ = self.store.set_items(id, &live.items);
+    /// Save what changed in a thread's transcript: new rows, edited rows (streaming text, tool
+    /// status and output) and removed rows. Cheap enough to run mid-turn.
+    fn persist_items(&mut self, id: &str) {
+        if let Some(live) = self.live.get_mut(id) {
+            if let Err(e) = self.store.save_transcript(id, &mut live.items) {
+                tracing::warn!("save transcript: {e}");
+            }
         }
     }
 
@@ -1540,7 +1697,7 @@ impl Workspace {
         let result = if thread.source == ThreadSource::Trek {
             self.store.delete_thread(id)
         } else {
-            self.store.set_items(id, &[]).and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
+            self.store.clear_items(id).and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
         };
         if let Err(e) = result {
             cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't delete: {e}"), undo: None });
@@ -1555,7 +1712,7 @@ impl Workspace {
     /// The conversation as Markdown (your messages and the agent's answers; tool calls left out).
     pub fn transcript_markdown(&self, id: &str) -> String {
         let items = match self.live.get(id).filter(|l| l.loaded) {
-            Some(l) => l.items.clone(),
+            Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
         };
         let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
@@ -1572,7 +1729,7 @@ impl Workspace {
 
     fn title_inputs(&self, id: &str) -> Option<(String, String)> {
         let items = match self.live.get(id).filter(|l| l.loaded) {
-            Some(l) => l.items.clone(),
+            Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
         };
         let request = items.iter().find_map(|i| match i {
@@ -2053,6 +2210,7 @@ impl Workspace {
                     }
                 }
                 this.reload(cx);
+                this.index_for_search(cx);
             });
         });
         self.tasks.push(task);

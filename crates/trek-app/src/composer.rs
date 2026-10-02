@@ -80,7 +80,7 @@ fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
     models.iter().find(|m| m.id == "claude-opus-5-5").or_else(|| models.first())
 }
 
-fn hand_icon(level: HandHolding) -> Icon {
+pub(crate) fn hand_icon(level: HandHolding) -> Icon {
     match level {
         HandHolding::Supervised => Icon::new(crate::assets::Lucide::Lock),
         HandHolding::AutoAcceptEdits => Icon::new(crate::assets::Lucide::FilePen),

@@ -58,7 +58,7 @@ pub fn scan(min_updated: i64) -> Vec<ImportedThread> {
     }
 }
 
-fn rollout_path(id: &str) -> Option<PathBuf> {
+pub(super) fn rollout_path(id: &str) -> Option<PathBuf> {
     let conn = db()?;
     conn.query_row("SELECT rollout_path FROM threads WHERE id = ?1", [id], |r| r.get::<_, String>(0))
         .optional()

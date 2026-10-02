@@ -2,6 +2,7 @@
 
 mod assets;
 mod brand;
+mod command_palette;
 mod composer;
 mod integrations;
 mod mascot;
@@ -42,7 +43,8 @@ actions!(
         About,
         HideApp,
         Minimize,
-        ToggleRightPanel
+        ToggleRightPanel,
+        OpenPalette
     ]
 );
 
@@ -109,7 +111,12 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::action("Toggle Sidebar", ToggleSidebar), MenuItem::action("Toggle Tools Panel", ToggleRightPanel)],
+            items: vec![
+                MenuItem::action("Search and Commands…", OpenPalette),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Tools Panel", ToggleRightPanel),
+            ],
             disabled: false,
         },
         Menu {
@@ -143,6 +150,7 @@ fn main() {
             KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
             KeyBinding::new("cmd-.", Interrupt, None),
             KeyBinding::new("cmd-j", ToggleRightPanel, None),
+            KeyBinding::new("cmd-k", OpenPalette, None),
         ]);
         cx.on_action(|_: &Quit, cx| {
             workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
@@ -157,14 +165,20 @@ fn main() {
         apply_theme(theme, None, cx);
         system::init(ws.clone(), cx);
 
+        // TREK_BACKGROUND=1 opens the window without making Trek active or taking keyboard focus
+        // (screenshots and automation while someone keeps working in another app).
+        let background = std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1");
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
             window_min_size: Some(size(px(760.), px(520.))),
             app_id: Some("dev.trek.Trek".into()),
+            focus: !background,
             ..gpui_kit::component::TitleBar::window_options()
         };
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| root::TrekWindow::new(ws.clone(), window, cx)))
             .expect("open window");
-        cx.activate(true);
+        if !background {
+            cx.activate(true);
+        }
     });
 }

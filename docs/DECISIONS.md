@@ -91,3 +91,35 @@ minisign/ed25519 signature). Flow: check on launch + every 6 h → download in b
 "Restart to update" pill in the sidebar footer → **restart only when all agents are idle** (Conductor's
 pattern; Claude desktop's update-kills-sessions bug is the anti-pattern). Channels: Stable / Beta / Nightly.
 Swap in Sparkle (macOS) or Velopack later if delta updates are needed.
+
+## 6. Transcripts, search and ⌘K
+
+**Append-only transcript rows with stable ids.** Each item is a row (`items`: uuid v7 `id`, `thread_id`,
+`seq`, JSON `data`, `created_at`). The live transcript (`trek_core::transcript::Transcript`) carries the id of
+every item and records what changed (appended, edited, removed), so a save writes only those rows, in one
+transaction. Streaming text and tool status are edits to one row; empty thoughts dropped at turn end are
+deletes, and because views and saves key on ids, the shifted positions don't matter. Ids are what later
+features hang off: edit a message, retry or fork from a point (`Store::truncate_after(thread, id)`),
+per-turn checkpoints. Databases from before ids are migrated on open (rows keep their order and timestamps).
+
+**Full-text search is SQLite FTS5** (bundled SQLite has it compiled in), tokenizer `unicode61` with
+diacritics folded, prefix indexes for as-you-type queries. Every word typed must match, each as a prefix.
+- Titles and stored messages (yours and the agent's; not tool output or thinking) are indexed by triggers,
+  so every write keeps the index current. Rows from before the index existed are backfilled in the
+  background in small transactions; nothing blocks the window. Only a message's first 64K characters are
+  indexed (pasted logs otherwise dominate the index).
+- **Imported threads** keep their transcripts in the other agent's files until you continue them in Trek
+  (copying them would freeze them at import time). Their messages go into a separate index keyed by position
+  in `load_transcript`'s output: after each import, transcripts up to 16 MB are read in the background
+  (on this machine that is most Claude Code and Codex sessions, ~300 MB, a few seconds, once); bigger ones
+  are indexed the first time they are opened. A thread that changes outside Trek is re-indexed at the next
+  import; one continued in Trek switches to its stored, id-keyed rows.
+- `Store::search(query, limit)` returns title matches, then the best message match per thread (thread,
+  title, position, item id when stored, one-line snippet with match ranges).
+
+**⌘K palette** (`command_palette.rs`): threads (title matches, then message matches with the snippet),
+projects (new thread in it, its settings), commands (new thread, open folder, every settings page, tools
+panel and each tool, theme, hand-holding for the thread on screen, settle, check for updates). Commands
+rank by prefix, then word start, then all words, then substring, then keywords, then letters in order.
+Opening a message match opens its thread scrolled to that message, tinted for a moment. The sidebar's search
+field matches titles as you type and adds threads whose messages match, with the matching line.

@@ -3,7 +3,7 @@
 
 use crate::palette;
 use crate::time;
-use crate::workspace::{Route, Workspace};
+use crate::workspace::{ItemRef, Route, Workspace};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
@@ -19,19 +19,37 @@ use trek_core::RunState;
 use trek_core::store::{Item, ToolStatus};
 
 const COLUMN: f32 = 760.;
+/// How long a message a search result led to stays tinted (it holds, then fades).
+const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
 
+/// Rows that open and close carry their item's stable id (`key`): what's expanded follows the
+/// item, not its position, which shifts when empty thoughts are dropped at the end of a turn.
 #[derive(Clone)]
 enum Row {
-    User { ix: usize, text: SharedString, open: bool, images: Vec<String>, at: Option<i64> },
+    User { ix: usize, key: SharedString, text: SharedString, open: bool, images: Vec<String>, at: Option<i64> },
     /// End of a response: copy the whole answer, when it finished, how long it took.
     TurnEnd { ix: usize, text: SharedString, at: i64, took_secs: u32 },
     Assistant(Entity<TextViewState>),
-    Reasoning { ix: usize, md: Entity<TextViewState>, live: bool, open: bool },
-    Tool { ix: usize, title: SharedString, detail: SharedString, output: SharedString, status: ToolStatus, open: bool, activity: Option<SharedString> },
+    Reasoning { ix: usize, key: SharedString, md: Entity<TextViewState>, live: bool, open: bool },
+    Tool { ix: usize, key: SharedString, title: SharedString, detail: SharedString, output: SharedString, status: ToolStatus, open: bool, activity: Option<SharedString> },
     /// Consecutive tool calls folded into one summary line ("Ran 3 commands and edited 2 files").
-    ToolGroup { ix: usize, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
+    ToolGroup { ix: usize, key: SharedString, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
     Notice(SharedString),
     Error(SharedString),
+}
+
+/// The transcript as rows, and which row shows each item (items without a row of their own,
+/// like a live thought, map to the row after them).
+struct Rows {
+    rows: Vec<Row>,
+    item_row: Vec<usize>,
+}
+
+impl Rows {
+    fn row_of(&self, item: usize) -> Option<usize> {
+        let last = self.rows.len().checked_sub(1)?;
+        Some(self.item_row.get(item).copied().unwrap_or(last).min(last))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -100,17 +118,24 @@ pub struct ThreadView {
     current: Option<String>,
     revision: u64,
     count: usize,
-    /// Markdown state per transcript index, with the byte length already pushed.
-    md: HashMap<usize, (Entity<TextViewState>, usize)>,
-    expanded: HashSet<usize>,
+    /// Markdown state per item id, with the byte length already pushed.
+    md: HashMap<String, (Entity<TextViewState>, usize)>,
+    /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
+    expanded: HashSet<String>,
     /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes,
     /// not on every animation frame.
     /// Picks so far for the question card on screen: (request, question index) → chosen labels.
     picks: HashMap<(String, usize), Vec<String>>,
     /// Rendered plan for the plan card on screen (request id, markdown).
     plan_md: Option<(String, Entity<TextViewState>)>,
-    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, usize), std::rc::Rc<Vec<Row>>)>>,
+    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, usize), std::rc::Rc<Rows>)>>,
     expanded_gen: u64,
+    /// The last `Workspace::reveal` request handled.
+    revealed: u64,
+    /// The row a reveal scrolled to, tinted for a moment: (row, request).
+    flash: Option<(usize, u64)>,
+    /// Clears `flash` once its fade is over (a row scrolled back into view would replay it).
+    _flash_timer: Option<Task<()>>,
     /// (transcript, UI) font sizes the rows were measured at; a change remeasures every row.
     fonts: (f32, f32),
     /// The window is frontmost. Animations stop when it isn't (they'd redraw 60×/s for nobody).
@@ -141,6 +166,9 @@ impl ThreadView {
             plan_md: None,
             rows_cache: Default::default(),
             expanded_gen: 0,
+            revealed: 0,
+            flash: None,
+            _flash_timer: None,
             fonts: (0., 0.),
             active: window.is_window_active(),
             _subscriptions: subscriptions,
@@ -161,10 +189,23 @@ impl ThreadView {
             Route::Thread(id) => Some(id.clone()),
             _ => None,
         };
-        let (items, revision, working) = match id.as_ref().and_then(|id| ws.live.get(id)) {
-            Some(l) => (l.items.clone(), l.revision, l.turn_started.is_some()),
-            None => (vec![], 0, false),
-        };
+        let switched = id != self.current;
+        let live = id.as_ref().and_then(|id| ws.live.get(id));
+        let (revision, working) = live.map_or((0, false), |l| (l.revision, l.turn_started.is_some()));
+        // Markdown that's new or changed since the last sync, by item id. Only these texts are
+        // copied out; streaming touches one or two items per frame.
+        let mut texts: Vec<(String, String)> = Vec::new();
+        let mut text_items = 0;
+        if let Some(l) = live.filter(|_| switched || revision != self.revision) {
+            for (item, key) in l.items.iter().zip(l.item_ids()) {
+                let (Item::Assistant { text } | Item::Reasoning { text }) = item else { continue };
+                text_items += 1;
+                let known = if switched { None } else { self.md.get(key).map(|(_, pushed)| *pushed) };
+                if known != Some(text.len()) {
+                    texts.push((key.clone(), text.clone()));
+                }
+            }
+        }
         let fonts = (ws.settings.appearance.transcript_font_size(), ws.settings.appearance.ui_font_size());
         if fonts != self.fonts {
             self.fonts = fonts;
@@ -173,7 +214,6 @@ impl ThreadView {
                 self.scroller.update(cx, |s, cx| _ = s.remeasure_items(0..count, cx));
             }
         }
-        let switched = id != self.current;
         if switched {
             self.current = id;
             self.md.clear();
@@ -181,37 +221,39 @@ impl ThreadView {
             self.expanded_gen += 1;
             self.count = 0;
             self.revision = 0;
+            self.flash = None;
             self.scroller.update(cx, |s, cx| s.reset(0, cx));
         }
         if revision == self.revision && !switched {
+            self.reveal(cx);
             cx.notify();
             return;
         }
         self.revision = revision;
-        let mut changed: Vec<usize> = Vec::new();
-        for (ix, item) in items.iter().enumerate() {
-            let text = match item {
-                Item::Assistant { text } | Item::Reasoning { text } => text,
-                _ => continue,
-            };
-            match self.md.get_mut(&ix) {
+        for (key, text) in texts {
+            match self.md.get_mut(&key) {
                 None => {
-                    let t = text.clone();
-                    let state = cx.new(|cx| TextViewState::markdown(&t, cx));
-                    self.md.insert(ix, (state, text.len()));
+                    let len = text.len();
+                    let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+                    self.md.insert(key, (state, len));
                 }
-                Some((state, pushed)) if text.len() != *pushed => {
+                Some((state, pushed)) => {
                     let fits = text.len() > *pushed && text.is_char_boundary(*pushed);
                     let (state, from) = (state.clone(), *pushed);
-                    let t = text.clone();
-                    state.update(cx, |s, cx| if fits { s.push_str(&t[from..], cx) } else { s.set_text(&t, cx) });
                     *pushed = text.len();
-                    changed.push(ix);
+                    state.update(cx, |s, cx| if fits { s.push_str(&text[from..], cx) } else { s.set_text(&text, cx) });
                 }
-                _ => {}
             }
         }
-        let new_count = self.rows(cx).len();
+        // Items removed from the transcript leave their markdown behind; drop it.
+        if self.md.len() > text_items {
+            let ws = self.workspace.read(cx);
+            if let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) {
+                let ids: HashSet<&String> = l.item_ids().iter().collect();
+                self.md.retain(|k, _| ids.contains(k));
+            }
+        }
+        let new_count = self.rows(cx).rows.len();
         let old = self.count;
         self.count = new_count;
         self.scroller.update(cx, |s, cx| {
@@ -224,7 +266,6 @@ impl ThreadView {
                 let _ = s.append(new_count - old, cx);
             }
             // Streaming only ever changes the tail; remeasure the last couple of rows.
-            let _ = changed;
             if new_count > 0 {
                 let from = new_count.saturating_sub(2);
                 let _ = s.remeasure_items(from..new_count, cx);
@@ -247,10 +288,42 @@ impl ThreadView {
         } else if !working {
             self._ticker = None;
         }
+        self.reveal(cx);
         cx.notify();
     }
 
-    fn rows(&self, cx: &App) -> std::rc::Rc<Vec<Row>> {
+    /// Scroll to the message `Workspace::reveal` asks for, once its thread is on screen and loaded.
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let Some(r) = ws.reveal.clone().filter(|r| r.seq > self.revealed) else { return };
+        // Asked for another thread: the user has moved on before it loaded.
+        if self.current.as_ref() != Some(&r.thread) {
+            self.revealed = r.seq;
+            return;
+        }
+        let Some(live) = ws.live.get(&r.thread).filter(|l| l.loaded && !l.loading) else { return };
+        let item = match &r.item {
+            ItemRef::Id(id) => live.items.position(id),
+            ItemRef::Position(p) => Some(*p),
+        };
+        self.revealed = r.seq;
+        let Some(row) = item.and_then(|ix| self.rows(cx).row_of(ix)) else { return };
+        self.flash = Some((row, r.seq));
+        let seq = r.seq;
+        self._flash_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLASH).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.flash.is_some_and(|(_, s)| s == seq) {
+                    this.flash = None;
+                    cx.notify();
+                }
+            });
+        }));
+        self.scroller.update(cx, |s, cx| _ = s.scroll_to_item(row, cx));
+        cx.notify();
+    }
+
+    fn rows(&self, cx: &App) -> std::rc::Rc<Rows> {
         let revision = self.current.as_ref().and_then(|id| self.workspace.read(cx).live.get(id)).map(|l| l.revision).unwrap_or(0);
         let key = (self.current.clone(), revision, self.expanded_gen, self.md.len());
         if let Some((k, rows)) = self.rows_cache.borrow().as_ref() {
@@ -263,30 +336,38 @@ impl ThreadView {
         rows
     }
 
-    fn build_rows(&self, cx: &App) -> Vec<Row> {
+    fn build_rows(&self, cx: &App) -> Rows {
         let ws = self.workspace.read(cx);
-        let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return vec![] };
+        let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return Rows { rows: vec![], item_row: vec![] } };
+        let ids = live.item_ids();
         let mut out: Vec<Row> = Vec::new();
+        let mut item_row = vec![0; live.items.len()];
         let mut pending: Vec<(usize, Row, ToolKind, bool)> = Vec::new();
-        let flush = |pending: &mut Vec<(usize, Row, ToolKind, bool)>, out: &mut Vec<Row>, expanded: &HashSet<usize>| {
+        let flush = |pending: &mut Vec<(usize, Row, ToolKind, bool)>, out: &mut Vec<Row>, item_row: &mut [usize]| {
             if pending.is_empty() {
                 return;
             }
             let ix = pending[0].0;
+            let key: SharedString = ids[ix].clone().into();
             let kinds: Vec<ToolKind> = pending.iter().map(|p| p.2).collect();
             let tool_kinds: Vec<ToolKind> = kinds.iter().copied().filter(|k| *k != ToolKind::Thought).collect();
             let running = pending.iter().any(|p| p.3);
+            for p in pending.iter() {
+                item_row[p.0] = out.len();
+            }
             let tools: Vec<Row> = pending.drain(..).map(|p| p.1).collect();
             out.push(Row::ToolGroup {
                 ix,
+                open: self.expanded.contains(key.as_ref()),
+                key,
                 summary: summarize(&tool_kinds).into(),
                 kind: tool_kinds.last().copied().unwrap_or(ToolKind::Thought),
                 running,
-                open: expanded.contains(&ix),
                 tools,
             });
         };
         for (ix, item) in live.items.iter().enumerate() {
+            let key = &ids[ix];
             if let Item::Tool { id: tool_id, title, detail, output, status } = item {
                 // A running sub-agent shows what it's doing right now.
                 let activity = live.tasks.iter().find(|t| &t.id == tool_id && t.done.is_none()).map(|t| {
@@ -297,11 +378,12 @@ impl ThreadView {
                     ix,
                     Row::Tool {
                         ix,
+                        key: key.clone().into(),
                         title: title.clone().into(),
                         detail: detail.clone().into(),
                         output: output.clone().into(),
                         status: *status,
-                        open: self.expanded.contains(&ix),
+                        open: self.expanded.contains(key),
                         activity,
                     },
                     tool_kind(title),
@@ -312,16 +394,21 @@ impl ThreadView {
             if let Item::Reasoning { text } = item {
                 // Live thinking has no row of its own: the trail bar above the composer is the
                 // one "working" indicator. Finished thoughts fold into the tool group.
+                item_row[ix] = out.len();
                 if live.reasoning != Some(ix) && !text.trim().is_empty() {
-                    if let Some((md, _)) = self.md.get(&ix) {
-                        pending.push((ix, Row::Reasoning { ix, md: md.clone(), live: false, open: self.expanded.contains(&ix) }, ToolKind::Thought, false));
+                    if let Some((md, _)) = self.md.get(key) {
+                        let row = Row::Reasoning { ix, key: key.clone().into(), md: md.clone(), live: false, open: self.expanded.contains(key) };
+                        pending.push((ix, row, ToolKind::Thought, false));
                     }
                 }
                 continue;
             }
-            flush(&mut pending, &mut out, &self.expanded);
+            flush(&mut pending, &mut out, &mut item_row);
+            item_row[ix] = out.len();
             out.push(match item {
-                Item::User { text, images, at } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix), images: images.clone(), at: *at },
+                Item::User { text, images, at } => {
+                    Row::User { ix, key: key.clone().into(), text: text.clone().into(), open: self.expanded.contains(key), images: images.clone(), at: *at }
+                }
                 Item::TurnEnd { at, took_secs } => {
                     // Everything the agent said since the last message of yours.
                     let start = live.items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
@@ -333,7 +420,7 @@ impl ThreadView {
                         .join("\n\n");
                     Row::TurnEnd { ix, text: text.into(), at: *at, took_secs: *took_secs }
                 }
-                Item::Assistant { .. } => match self.md.get(&ix) {
+                Item::Assistant { .. } => match self.md.get(key) {
                     Some((s, _)) => Row::Assistant(s.clone()),
                     None => Row::Notice("".into()),
                 },
@@ -344,29 +431,58 @@ impl ThreadView {
                 Item::Tool { .. } => unreachable!(),
             });
         }
-        flush(&mut pending, &mut out, &self.expanded);
-        out
+        flush(&mut pending, &mut out, &mut item_row);
+        Rows { rows: out, item_row }
     }
 
-    fn render_row(row: Row, view: WeakEntity<ThreadView>, text_size: Pixels, cwd: Option<std::path::PathBuf>, animate: bool, cx: &App) -> AnyElement {
+    /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
+    /// group's); `flash` tints it for a moment after a search result scrolled to it.
+    #[allow(clippy::too_many_arguments)]
+    fn render_row(
+        row: Row,
+        row_ix: usize,
+        flash: Option<u64>,
+        view: WeakEntity<ThreadView>,
+        text_size: Pixels,
+        cwd: Option<std::path::PathBuf>,
+        animate: bool,
+        cx: &App,
+    ) -> AnyElement {
         let theme = cx.theme();
         let child_view = view.clone();
-        let column = |el: Div| h_flex().w_full().justify_center().px_6().child(el.w_full().max_w(px(COLUMN)));
-        let toggle = move |ix: usize| {
+        let tint = theme.foreground.opacity(0.07);
+        let column = |el: Div| {
+            let el = el.w_full().max_w(px(COLUMN));
+            let el = match flash {
+                // A soft band behind the message that holds briefly, then fades.
+                Some(seq) => {
+                    let band = div().absolute().top(px(-2.)).bottom(px(-2.)).left(px(-12.)).right(px(-12.)).rounded(px(10.)).bg(tint);
+                    let band = if animate {
+                        band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))).into_any_element()
+                    } else {
+                        band.into_any_element()
+                    };
+                    div().relative().w_full().max_w(px(COLUMN)).child(band).child(el)
+                }
+                None => el,
+            };
+            h_flex().w_full().justify_center().px_6().child(el)
+        };
+        let toggle = move |key: SharedString| {
             let view = view.clone();
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    if !this.expanded.remove(&ix) {
-                        this.expanded.insert(ix);
+                    if !this.expanded.remove(key.as_ref()) {
+                        this.expanded.insert(key.to_string());
                     }
                     this.expanded_gen += 1;
-                    this.scroller.update(cx, |s, cx| _ = s.remeasure_items(ix..ix + 1, cx));
+                    this.scroller.update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
                     cx.notify();
                 });
             }
         };
         match row {
-            Row::User { ix, text, open, images, at } => {
+            Row::User { ix, key, text, open, images, at } => {
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
                 let copy_text = text.clone();
@@ -428,7 +544,7 @@ impl ThreadView {
                                         .cursor_pointer()
                                         .hover(|s| s.text_color(theme.foreground))
                                         .child(if open { "Show less" } else { "Show more" })
-                                        .on_click(toggle(ix)),
+                                        .on_click(toggle(key.clone())),
                                 )
                             }),
                     ))
@@ -462,7 +578,7 @@ impl ThreadView {
                 div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, cwd.clone(), cx).stream_fade(true)),
             )
                 .into_any_element(),
-            Row::Reasoning { ix, md, live, open } => column(
+            Row::Reasoning { ix, key, md, live, open } => column(
                 v_flex()
                     .py_1()
                     .child(
@@ -474,7 +590,7 @@ impl ThreadView {
                             .cursor_pointer()
                             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
                             .child(div().child(if live { "Thinking" } else { "Thought" }))
-                            .on_click(toggle(ix)),
+                            .on_click(toggle(key.clone())),
                     )
                     .when(open, |el| {
                         el.child(
@@ -490,7 +606,7 @@ impl ThreadView {
                     }),
             )
             .into_any_element(),
-            Row::ToolGroup { ix, summary, kind, running, open, tools } => {
+            Row::ToolGroup { ix, key, summary, kind, running, open, tools } => {
                 let muted = theme.muted_foreground;
                 column(
                     v_flex()
@@ -507,7 +623,7 @@ impl ThreadView {
                                 .child(kind_icon(kind).small())
                                 .child(div().when(running, |el| el.text_color(theme.foreground.opacity(0.85))).child(summary))
                                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
-                                .on_click(toggle(ix)),
+                                .on_click(toggle(key.clone())),
                         )
                         .when(open, |el| {
                             el.child(
@@ -516,13 +632,13 @@ impl ThreadView {
                                     .pl_4()
                                     .border_l_1()
                                     .border_color(theme.border)
-                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), text_size, cwd.clone(), animate, cx))),
+                                    .children(tools.into_iter().map(|t| Self::render_row(t, row_ix, None, child_view.clone(), text_size, cwd.clone(), animate, cx))),
                             )
                         }),
                 )
                 .into_any_element()
             }
-            Row::Tool { ix, title, detail, output, status, open, activity } => {
+            Row::Tool { ix, key, title, detail, output, status, open, activity } => {
                 let icon = match title.as_ref() {
                     "Subagent" => Icon::new(crate::assets::Lucide::Users),
                     t if t.starts_with("Run") || t.starts_with("Ran") => Icon::new(IconName::SquareTerminal),
@@ -550,7 +666,7 @@ impl ThreadView {
                                 .py_1()
                                 .rounded(theme.radius)
                                 .text_sm()
-                                .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(ix)))
+                                .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
                                 .child(icon.small().text_color(theme.muted_foreground))
                                 .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(if title.as_ref() == "Subagent" { detail.clone() } else { title.clone() }))
                                 .child(
@@ -884,19 +1000,23 @@ impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows(cx);
         let footer = self.live_footer(cx);
-        if rows.is_empty() {
+        if rows.rows.is_empty() {
             return v_flex().size_full().child(self.empty_state(cx)).children(footer);
         }
         let view = cx.entity().downgrade();
         let text_size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
         let cwd = self.workspace.read(cx).current_cwd();
         let animate = self.animate(window, cx);
+        let flash = self.flash;
         v_flex()
             .size_full()
             .child(
                 div().flex_1().min_h_0().child(
-                    MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.get(ix).cloned() {
-                        Some(row) => ThreadView::render_row(row, view.clone(), text_size, cwd.clone(), animate, cx),
+                    MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
+                        Some(row) => {
+                            let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
+                            ThreadView::render_row(row, ix, flash, view.clone(), text_size, cwd.clone(), animate, cx)
+                        }
                         None => div().into_any_element(),
                     })
                     .with_list_style(StyleRefinement::default().pt_4().pb_6())

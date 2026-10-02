@@ -19,7 +19,7 @@ use trek_core::detect::Availability;
 use trek_core::settings::{Settings, secrets};
 use trek_core::AgentId;
 
-fn page_icon(p: SettingsPage) -> Icon {
+pub(crate) fn page_icon(p: SettingsPage) -> Icon {
     match p {
         SettingsPage::Project => Icon::new(crate::assets::Lucide::FolderCog),
         SettingsPage::General => Icon::new(IconName::Settings2),
@@ -47,7 +47,12 @@ const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
 
-fn page_blurb(p: SettingsPage) -> &'static str {
+/// Every settings page, in the order the navigation lists them.
+pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
+    NAV_GROUPS.iter().flat_map(|(_, pages)| pages.iter().copied())
+}
+
+pub(crate) fn page_blurb(p: SettingsPage) -> &'static str {
     match p {
         SettingsPage::Project => "",
         SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.",

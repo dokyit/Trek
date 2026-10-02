@@ -4,7 +4,7 @@
 use crate::palette;
 use crate::time;
 use crate::ui;
-use crate::workspace::{PanelTool, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
+use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::popover::Popover;
@@ -16,7 +16,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Siz
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
-use trek_core::store::{Section, Thread};
+use trek_core::store::{SearchHit, Section, Thread};
 use trek_core::{RunState, ThreadSource};
 
 pub struct Sidebar {
@@ -47,10 +47,7 @@ impl Sidebar {
             cx.subscribe(&search, |this, state, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     let q = state.read(cx).value().to_string();
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.search = q;
-                        cx.notify();
-                    });
+                    this.workspace.update(cx, |ws, cx| ws.set_search(q, cx));
                 }
             }),
         ];
@@ -243,11 +240,36 @@ impl Sidebar {
         }
     }
 
+    /// While searching, the message that put a thread in the list when its title didn't match.
+    fn content_hit(&self, t: &Thread, cx: &App) -> Option<SearchHit> {
+        let ws = self.workspace.read(cx);
+        let q = ws.search.trim().to_lowercase();
+        if q.is_empty() || t.title.to_lowercase().contains(&q) {
+            return None;
+        }
+        ws.search_hits.get(&t.id).cloned()
+    }
+
+    /// Open a thread from the list; a thread found by its messages opens at the match.
+    fn open(&mut self, id: String, hit: Option<SearchHit>, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| match hit.as_ref().and_then(ItemRef::of_hit) {
+            Some(at) => ws.open_thread_at(&id, at, cx),
+            None => ws.navigate(Route::Thread(id), cx),
+        })
+    }
+
+    /// The matching words of a content hit, on one quiet line.
+    fn hit_line(hit: &SearchHit, cx: &App) -> Div {
+        let (text, ranges) = ui::lead_to_match(&hit.snippet, &hit.ranges, 12);
+        div().min_w_0().truncate().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(ui::match_text(&text, &ranges, cx))
+    }
+
     /// T3-style card: project · status on top, title below, agent glyph at the end.
     fn card(&self, t: &Thread, project: &str, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let quiet = t.run_state == RunState::Idle && !t.is_unseen() && !selected;
         let id = t.id.clone();
+        let hit = self.content_hit(t, cx);
         let row = v_flex()
             .id(SharedString::from(format!("card-{}", t.id)))
             .mx_2()
@@ -281,10 +303,8 @@ impl Sidebar {
                     )
                     .child(ui::agent_glyph(&t.agent, cx)),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let id = id.clone();
-                this.workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
-            }));
+            .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-2.))))
+            .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }
 
@@ -292,18 +312,10 @@ impl Sidebar {
     fn line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let id = t.id.clone();
-        let row = h_flex()
-            .id(SharedString::from(format!("line-{}", t.id)))
-            .mx_2()
-            .pl(px(30.))
-            .pr_3()
+        let hit = self.content_hit(t, cx);
+        let title = h_flex()
             .h(px(30.))
             .gap_2()
-            .rounded(px(8.))
-            .cursor_pointer()
-            .text_sm()
-            .when(selected, |el| el.bg(theme.list_active))
-            .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
             .child(
                 div()
                     .flex_1()
@@ -312,11 +324,20 @@ impl Sidebar {
                     .text_color(if selected { theme.foreground } else { theme.foreground.opacity(0.78) })
                     .child(t.title.clone()),
             )
-            .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(time::relative(t.updated_at)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let id = id.clone();
-                this.workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
-            }));
+            .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(time::relative(t.updated_at)));
+        let row = v_flex()
+            .id(SharedString::from(format!("line-{}", t.id)))
+            .mx_2()
+            .pl(px(30.))
+            .pr_3()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .text_sm()
+            .when(selected, |el| el.bg(theme.list_active))
+            .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .child(title)
+            .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.))))
+            .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }
 

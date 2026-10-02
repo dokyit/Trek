@@ -1,12 +1,21 @@
 //! SQLite persistence for projects, threads and transcript items.
+//!
+//! Transcripts are append-only: every item is a row with a stable id (uuid v7) and a `seq` that
+//! orders it within its thread. Saving a live transcript writes only the rows that are new,
+//! changed or gone (`save_transcript`), so long threads stay cheap to save mid-turn.
+
+mod search;
+
+pub use search::{INDEX_MAX_BYTES, ImportedToIndex, SearchHit, fts_query};
 
 use crate::import::ImportedThread;
+use crate::transcript::Transcript;
 use crate::types::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -226,11 +235,14 @@ CREATE TABLE IF NOT EXISTS threads (
   UNIQUE(source, native_id)
 );
 CREATE INDEX IF NOT EXISTS threads_project ON threads(project_id, updated_at);
-CREATE TABLE IF NOT EXISTS items (
-  thread_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL,
-  PRIMARY KEY (thread_id, seq)
-);
 "#;
+
+/// Transcript rows. `pk` is the full-text index's rowid; `id` is the item's stable identity.
+const ITEMS_TABLE: &str = "CREATE TABLE IF NOT EXISTS items (
+  pk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  data TEXT NOT NULL, created_at INTEGER NOT NULL,
+  UNIQUE (thread_id, seq)
+)";
 
 fn enum_str<T: Serialize>(v: &T) -> String {
     serde_json::to_value(v).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
@@ -252,17 +264,46 @@ pub fn project_root(cwd: &Path) -> PathBuf {
     cwd.to_path_buf()
 }
 
-/// Additive migrations; each is a no-op once applied.
-fn migrate(conn: &Connection) {
+/// Migrations; each is a no-op once applied.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN side_of TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN never_settle INTEGER NOT NULL DEFAULT 0", []);
+    migrate_items(conn)?;
+    search::ensure_schema(conn)
+}
+
+/// Give every transcript row a stable id. Early databases keyed rows by (thread, seq) alone and
+/// rewrote whole transcripts on every save; their rows move into the new table as they are,
+/// keeping their order and timestamps.
+fn migrate_items(conn: &Connection) -> rusqlite::Result<()> {
+    let exists = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'")?.exists([])?;
+    if !exists {
+        return conn.execute_batch(ITEMS_TABLE);
+    }
+    if conn.prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'id'")?.exists([])? {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("ALTER TABLE items RENAME TO items_v1")?;
+    tx.execute_batch(ITEMS_TABLE)?;
+    {
+        let mut read = tx.prepare("SELECT thread_id, seq, data, created_at FROM items_v1 ORDER BY thread_id, seq")?;
+        let mut write = tx.prepare("INSERT INTO items (id, thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        let mut rows = read.query([])?;
+        while let Some(r) = rows.next()? {
+            let (thread, seq, data, at): (String, i64, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            write.execute(params![crate::transcript::new_id(), thread, seq, data, at])?;
+        }
+    }
+    tx.execute_batch("DROP TABLE items_v1")?;
+    tx.commit()
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
-        migrate(&conn);
+        migrate(&conn)?;
         Ok(Store { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -273,7 +314,7 @@ impl Store {
     pub fn in_memory() -> Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        migrate(&conn);
+        migrate(&conn)?;
         Ok(Store { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -403,12 +444,20 @@ impl Store {
     }
 
     pub fn save_thread(&self, t: &Thread) -> Result<()> {
+        // An upsert, not INSERT OR REPLACE: the row (and its rowid, which the title index uses)
+        // stays put. Another thread holding the same agent session is replaced, as before.
+        static SQL: LazyLock<String> = LazyLock::new(|| {
+            let cols: Vec<&str> = Store::THREAD_COLS.split(", ").collect();
+            let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+            let set: Vec<String> = cols[1..].iter().map(|c| format!("{c} = excluded.{c}")).collect();
+            format!("INSERT INTO threads ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}", cols.join(", "), marks.join(", "), set.join(", "))
+        });
         self.with(|c| {
+            if let Some(native) = &t.native_id {
+                c.execute("DELETE FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3", params![t.source.key(), native, t.id])?;
+            }
             c.execute(
-                &format!(
-                    "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
-                    Self::THREAD_COLS
-                ),
+                &SQL,
                 params![
                     t.id,
                     t.project_id,
@@ -526,28 +575,113 @@ impl Store {
     // ---- items ----
 
     pub fn items(&self, thread_id: &str) -> Result<Vec<Item>> {
+        Ok(self.items_with_ids(thread_id)?.into_iter().map(|(_, item)| item).collect())
+    }
+
+    /// The transcript with each item's stable id, in order.
+    pub fn items_with_ids(&self, thread_id: &str) -> Result<Vec<(String, Item)>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT data FROM items WHERE thread_id = ?1 ORDER BY seq")?;
-            let rows = st.query_map([thread_id], |r| r.get::<_, String>(0))?;
-            Ok(rows.filter_map(|r| r.ok()).filter_map(|s| serde_json::from_str(&s).ok()).collect())
+            let mut st = c.prepare_cached("SELECT id, data FROM items WHERE thread_id = ?1 ORDER BY seq")?;
+            let rows = st.query_map([thread_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            Ok(rows.filter_map(|r| r.ok()).filter_map(|(id, data)| Some((id, serde_json::from_str(&data).ok()?))).collect())
         })
     }
 
-    /// Replace the full transcript (used after a turn completes or after an import load).
-    pub fn set_items(&self, thread_id: &str, items: &[Item]) -> Result<()> {
+    /// Add items after the last one, under the given ids.
+    pub fn append_items<'a>(&self, thread_id: &str, items: impl IntoIterator<Item = (&'a str, &'a Item)>) -> Result<()> {
         let mut conn = self.conn.lock().expect("store lock");
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM items WHERE thread_id = ?1", [thread_id])?;
-        let now = now_ms();
-        for (i, item) in items.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO items(thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![thread_id, i as i64, serde_json::to_string(item).unwrap_or_default(), now],
-            )?;
-        }
+        append_rows(&tx, thread_id, items)?;
         tx.commit()?;
         Ok(())
     }
+
+    /// Rewrite one item. False if there's no row with that id.
+    pub fn update_item(&self, id: &str, item: &Item) -> Result<bool> {
+        self.with(|c| Ok(update_row(c, id, item)? > 0))
+    }
+
+    /// Delete items by id; returns how many rows went.
+    pub fn delete_items(&self, ids: &[String]) -> Result<usize> {
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn.transaction()?;
+        let n = delete_rows(&tx, ids)?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Keep the first `len` items of a thread; returns how many rows went.
+    pub fn truncate_items(&self, thread_id: &str, len: usize) -> Result<usize> {
+        self.with(|c| {
+            let cut: Option<i64> = c
+                .query_row("SELECT seq FROM items WHERE thread_id = ?1 ORDER BY seq LIMIT 1 OFFSET ?2", params![thread_id, len as i64], |r| r.get(0))
+                .optional()?;
+            match cut {
+                Some(seq) => c.execute("DELETE FROM items WHERE thread_id = ?1 AND seq >= ?2", params![thread_id, seq]),
+                None => Ok(0),
+            }
+        })
+    }
+
+    /// Delete everything after the item with this id (it stays); returns how many rows went.
+    /// The basis for editing a message, retrying a turn or forking from a point.
+    pub fn truncate_after(&self, thread_id: &str, id: &str) -> Result<usize> {
+        let removed = self.with(|c| {
+            let seq: Option<i64> = c.query_row("SELECT seq FROM items WHERE thread_id = ?1 AND id = ?2", params![thread_id, id], |r| r.get(0)).optional()?;
+            seq.map(|seq| c.execute("DELETE FROM items WHERE thread_id = ?1 AND seq > ?2", params![thread_id, seq])).transpose()
+        })?;
+        removed.ok_or_else(|| anyhow::anyhow!("no item {id} in thread {thread_id}"))
+    }
+
+    /// Delete a thread's whole transcript.
+    pub fn clear_items(&self, thread_id: &str) -> Result<usize> {
+        self.with(|c| c.execute("DELETE FROM items WHERE thread_id = ?1", [thread_id]))
+    }
+
+    /// Write what changed in a live transcript since its last save, in one transaction, and mark
+    /// it saved. Nothing is written when nothing changed.
+    pub fn save_transcript(&self, thread_id: &str, transcript: &mut Transcript) -> Result<()> {
+        let changes = transcript.changes();
+        if changes.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut conn = self.conn.lock().expect("store lock");
+            let tx = conn.transaction()?;
+            delete_rows(&tx, changes.removed)?;
+            for (id, item) in &changes.changed {
+                update_row(&tx, id, item)?;
+            }
+            append_rows(&tx, thread_id, changes.appended)?;
+            tx.commit()?;
+        }
+        transcript.mark_saved();
+        Ok(())
+    }
+}
+
+fn append_rows<'a>(c: &Connection, thread_id: &str, items: impl IntoIterator<Item = (&'a str, &'a Item)>) -> rusqlite::Result<()> {
+    let mut seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), -1) + 1 FROM items WHERE thread_id = ?1", [thread_id], |r| r.get(0))?;
+    let mut st = c.prepare_cached("INSERT INTO items (id, thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+    let now = now_ms();
+    for (id, item) in items {
+        st.execute(params![id, thread_id, seq, serde_json::to_string(item).unwrap_or_default(), now])?;
+        seq += 1;
+    }
+    Ok(())
+}
+
+fn update_row(c: &Connection, id: &str, item: &Item) -> rusqlite::Result<usize> {
+    c.prepare_cached("UPDATE items SET data = ?2 WHERE id = ?1")?.execute(params![id, serde_json::to_string(item).unwrap_or_default()])
+}
+
+fn delete_rows(c: &Connection, ids: &[String]) -> rusqlite::Result<usize> {
+    let mut st = c.prepare_cached("DELETE FROM items WHERE id = ?1")?;
+    let mut n = 0;
+    for id in ids {
+        n += st.execute([id])?;
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -584,8 +718,140 @@ mod tests {
         let t = s.create_thread(None, AgentId::Codex, Some("gpt-6-astra".into()), Effort::Max, HandHolding::FullAccess).unwrap();
         let back = s.thread(&t.id).unwrap().unwrap();
         assert_eq!(back, t);
-        s.set_items(&t.id, &[Item::User { text: "hi".into(), images: vec![], at: None }, Item::Assistant { text: "hello".into() }]).unwrap();
-        assert_eq!(s.items(&t.id).unwrap().len(), 2);
+        let hi = Item::User { text: "hi".into(), images: vec![], at: None };
+        let hello = Item::Assistant { text: "hello".into() };
+        s.append_items(&t.id, [("a", &hi), ("b", &hello)]).unwrap();
+        assert_eq!(s.items(&t.id).unwrap(), vec![hi, hello]);
+    }
+
+    fn said(t: &str) -> Item {
+        Item::Assistant { text: t.into() }
+    }
+
+    fn texts(s: &Store, thread: &str) -> Vec<String> {
+        s.items(thread).unwrap().into_iter().map(|i| if let Item::Assistant { text } = i { text } else { String::new() }).collect()
+    }
+
+    #[test]
+    fn items_append_update_delete_and_truncate_by_id() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let other = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        s.append_items(&t.id, [("1", &said("one")), ("2", &said("two"))]).unwrap();
+        s.append_items(&other.id, [("x", &said("elsewhere"))]).unwrap();
+        s.append_items(&t.id, [("3", &said("three")), ("4", &said("four"))]).unwrap();
+        assert_eq!(texts(&s, &t.id), ["one", "two", "three", "four"]);
+
+        assert!(s.update_item("2", &said("TWO")).unwrap());
+        assert!(!s.update_item("missing", &said("?")).unwrap());
+        assert_eq!(s.delete_items(&["3".into(), "missing".into()]).unwrap(), 1);
+        assert_eq!(texts(&s, &t.id), ["one", "TWO", "four"]);
+        let ids: Vec<String> = s.items_with_ids(&t.id).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["1", "2", "4"]);
+
+        // Appending after a delete continues the order.
+        s.append_items(&t.id, [("5", &said("five"))]).unwrap();
+        assert_eq!(s.truncate_after(&t.id, "2").unwrap(), 2);
+        assert_eq!(texts(&s, &t.id), ["one", "TWO"]);
+        assert!(s.truncate_after(&t.id, "x").is_err());
+        assert_eq!(s.truncate_items(&t.id, 1).unwrap(), 1);
+        assert_eq!(s.truncate_items(&t.id, 5).unwrap(), 0);
+        assert_eq!(texts(&s, &t.id), ["one"]);
+        assert_eq!(texts(&s, &other.id), ["elsewhere"]);
+        assert_eq!(s.clear_items(&t.id).unwrap(), 1);
+        assert!(s.items(&t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn saving_a_transcript_writes_only_what_changed() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let mut tr = Transcript::default();
+        tr.push(Item::User { text: "go".into(), images: vec![], at: Some(1) });
+        tr.push(Item::Reasoning { text: String::new() });
+        let answer = tr.push(said("work"));
+        s.save_transcript(&t.id, &mut tr).unwrap();
+        assert!(!tr.is_dirty());
+        let created: Vec<i64> = s.with(|c| c.prepare("SELECT created_at FROM items ORDER BY seq")?.query_map([], |r| r.get(0))?.collect()).unwrap();
+
+        // Mid-turn: the streaming answer grows, a tool starts; the empty thought goes at turn end.
+        if let Some(Item::Assistant { text }) = tr.get_mut(answer) {
+            text.push_str("ing on it");
+        }
+        tr.push(Item::Tool { id: "t1".into(), title: "Ran command".into(), detail: "ls".into(), output: String::new(), status: ToolStatus::Running });
+        tr.retain(|i| !matches!(i, Item::Reasoning { text } if text.is_empty()));
+        if let Some(Item::Tool { status, .. }) = tr.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if id == "t1")) {
+            *status = ToolStatus::Done;
+        }
+        let c = tr.changes();
+        assert_eq!((c.removed.len(), c.changed.len(), c.appended.len()), (1, 1, 1));
+        s.save_transcript(&t.id, &mut tr).unwrap();
+
+        let back = s.items_with_ids(&t.id).unwrap();
+        assert_eq!(back.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), tr.ids());
+        assert_eq!(back.into_iter().map(|(_, i)| i).collect::<Vec<_>>(), tr.to_vec());
+        // Rows that were there keep their created_at.
+        let first: i64 = s.with(|c| c.query_row("SELECT created_at FROM items WHERE id = ?1", [&tr.ids()[0]], |r| r.get(0))).unwrap();
+        assert_eq!(first, created[0]);
+        // Saving with nothing changed writes nothing.
+        let writes = |s: &Store| s.with(|c| Ok(c.total_changes())).unwrap();
+        let before = writes(&s);
+        s.save_transcript(&t.id, &mut tr).unwrap();
+        assert_eq!(writes(&s), before);
+    }
+
+    #[test]
+    fn old_transcripts_get_stable_ids_on_open() {
+        let dir = std::env::temp_dir().join(format!("trek-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        {
+            // The schema before stable ids: rows keyed by (thread, seq), rewritten on every save.
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE items (thread_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (thread_id, seq));",
+            )
+            .unwrap();
+            for (thread, seq, text) in [("a", 1, "a-second"), ("a", 0, "a-first"), ("b", 0, "b-only")] {
+                let data = serde_json::to_string(&said(text)).unwrap();
+                c.execute("INSERT INTO items VALUES (?1, ?2, ?3, ?4)", params![thread, seq, data, 42 + seq]).unwrap();
+            }
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(texts(&s, "a"), ["a-first", "a-second"]);
+        assert_eq!(texts(&s, "b"), ["b-only"]);
+        let rows = s.items_with_ids("a").unwrap();
+        assert!(rows.iter().all(|(id, _)| uuid::Uuid::parse_str(id).is_ok()));
+        assert_ne!(rows[0].0, rows[1].0);
+        let created: Vec<i64> = s.with(|c| c.prepare("SELECT created_at FROM items WHERE thread_id = 'a' ORDER BY seq")?.query_map([], |r| r.get(0))?.collect()).unwrap();
+        assert_eq!(created, [42, 43]);
+        // Ids survive reopening, and old rows become searchable once backfilled.
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.items_with_ids("a").unwrap(), rows);
+        while s.backfill_search(100).unwrap() {}
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        s.with(|c| c.execute("UPDATE items SET thread_id = ?1 WHERE thread_id = 'a'", [&t.id])).unwrap();
+        assert_eq!(s.search("second", 5).unwrap()[0].position, Some(1));
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn saving_a_thread_keeps_its_row() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let rowid = |s: &Store| -> i64 { s.with(|c| c.query_row("SELECT rowid FROM threads WHERE id = ?1", [&t.id], |r| r.get(0))).unwrap() };
+        let before = rowid(&s);
+        s.update_thread(&t.id, |t| t.title = "Renamed".into()).unwrap();
+        assert_eq!(rowid(&s), before);
+        // Another thread claiming the same agent session replaces it, as INSERT OR REPLACE did.
+        s.update_thread(&t.id, |t| t.native_id = Some("sess".into())).unwrap();
+        let mut b = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        b.native_id = Some("sess".into());
+        s.save_thread(&b).unwrap();
+        assert!(s.thread(&t.id).unwrap().is_none());
+        assert_eq!(s.threads().unwrap().len(), 1);
     }
 
     #[test]
