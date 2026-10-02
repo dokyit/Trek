@@ -1,7 +1,7 @@
 //! Side chat: a quick, separate conversation next to the main thread (same project, own session).
 
 use crate::workspace::Workspace;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -14,14 +14,22 @@ pub struct SideChatPanel {
     thread_id: Option<String>,
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
+    /// `general.send_with_cmd_enter`, as last applied to the textarea.
+    cmd_enter: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SideChatPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder("Ask on the side…"));
+        let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(!cmd_enter).placeholder("Ask on the side…"));
         let subs = vec![
-            cx.observe(&workspace, |this, _, cx| {
+            cx.observe(&workspace, |this, ws, cx| {
+                let cmd_enter = ws.read(cx).settings.general.send_with_cmd_enter;
+                if cmd_enter != this.cmd_enter {
+                    this.cmd_enter = cmd_enter;
+                    this.input.update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
+                }
                 this.scroll.scroll_to_bottom();
                 cx.notify();
             }),
@@ -29,17 +37,23 @@ impl SideChatPanel {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    let text = state.read(cx).value().to_string();
-                    if text.trim().is_empty() {
-                        return;
+                if let InputEvent::PressEnter { shift, secondary } = event {
+                    if if this.cmd_enter { *secondary } else { !*shift } {
+                        this.submit(state.clone(), window, cx);
                     }
-                    state.update(cx, |s, cx| s.set_value("", window, cx));
-                    this.send(text, cx);
                 }
             }),
         ];
-        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), _subscriptions: subs }
+        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), cmd_enter, _subscriptions: subs }
+    }
+
+    fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
+        let text = state.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        state.update(cx, |s, cx| s.set_value("", window, cx));
+        self.send(text, cx);
     }
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
@@ -136,6 +150,14 @@ impl Render for SideChatPanel {
                         .border_1()
                         .border_color(theme.input)
                         .cursor_text()
+                        // In "send with ⌘↩" mode, send before the textarea turns ⌘↩ into a newline.
+                        .capture_action(cx.listener(|this, action: &Enter, window, cx| {
+                            if this.cmd_enter && action.secondary && !action.shift {
+                                cx.stop_propagation();
+                                let input = this.input.clone();
+                                this.submit(input, window, cx);
+                            }
+                        }))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                             let handle = this.input.read(cx).focus_handle(cx);
                             handle.focus(window, cx);

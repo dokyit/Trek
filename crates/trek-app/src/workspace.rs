@@ -8,7 +8,7 @@ use trek_agents::{AcpInfo, AgentStatus, McpServer, SlashCommand, AgentEvent, Com
 use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
-use trek_core::settings::Settings;
+use trek_core::settings::{FollowUp, Settings};
 use trek_core::store::{Item, Project, Section, Store, Thread, ToolStatus, now_ms};
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
@@ -93,6 +93,8 @@ pub struct LiveThread {
     pub context: Option<(u64, u64)>,
     /// Bumped on every transcript change so views can resync cheaply.
     pub revision: u64,
+    /// Follow-ups held while a turn runs (`FollowUp::Queue`), sent one per finished turn.
+    pub queued: Vec<(String, Vec<PathBuf>)>,
     _events: Option<Task<()>>,
 }
 
@@ -139,6 +141,9 @@ pub enum WorkspaceEvent {
     OpenTool(PanelTool),
     /// A toast-worthy message with an optional undo.
     Toast { message: String, undo: Option<UndoAction> },
+    /// A thread needs the user or finished: an in-app toast when it's off screen, plus a system
+    /// banner / sound per the notification settings. `viewing` = the thread is on screen.
+    Attention { message: String, viewing: bool },
     FocusComposer,
     /// Run a shell command in a new terminal tab (agent install / sign in), then rescan agents.
     RunInTerminal(String),
@@ -229,6 +234,9 @@ pub struct Workspace {
     pub usage_loading: bool,
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
+    /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
+    /// so `save_settings` can tell when the user changed them.
+    applied_defaults: (String, Option<String>, Effort, HandHolding),
     tasks: Vec<Task<()>>,
 }
 
@@ -244,6 +252,7 @@ impl Workspace {
         // TREK_ONBOARDING=1 replays onboarding without resetting anything (design review, support).
         let replay = std::env::var("TREK_ONBOARDING").is_ok_and(|v| v == "1");
         let route = if settings.onboarding.completed && !replay { Route::Draft { project: None } } else { Route::Onboarding };
+        let applied_defaults = default_prefs_key(&settings);
         let draft_prefs = Prefs {
             agent: AgentId::from_key(&settings.general.default_agent),
             model: settings.general.default_model.clone(),
@@ -277,6 +286,7 @@ impl Workspace {
             acp_info: HashMap::new(),
             usage_loading: false,
             overlay_open: false,
+            applied_defaults,
             tasks: vec![],
         };
         this.reload(cx);
@@ -334,7 +344,79 @@ impl Workspace {
         if let Err(e) = self.settings.save() {
             tracing::warn!("save settings: {e}");
         }
+        if default_prefs_key(&self.settings) != self.applied_defaults {
+            self.apply_default_prefs(cx);
+        }
         cx.notify();
+    }
+
+    /// Copy the default agent, model, effort and hand-holding from settings into the draft
+    /// composer, so the next new thread starts with them. Only fields that changed in settings
+    /// since the last apply are copied; the draft's other picks (plan, fast) are kept.
+    /// `save_settings` calls this on its own when the defaults change.
+    pub fn apply_default_prefs(&mut self, cx: &mut Context<Self>) {
+        let (agent, model, effort, hand) = default_prefs_key(&self.settings);
+        let (old_agent, old_model, old_effort, old_hand) = std::mem::replace(&mut self.applied_defaults, (agent.clone(), model.clone(), effort, hand));
+        let p = &mut self.draft_prefs;
+        let agent_id = AgentId::from_key(&agent);
+        if agent != old_agent && p.agent != agent_id {
+            p.agent = agent_id;
+            p.model = model.clone();
+        }
+        if model != old_model {
+            p.model = model;
+        }
+        if effort != old_effort {
+            p.effort = effort;
+        }
+        if hand != old_hand {
+            p.hand_holding = hand;
+        }
+        cx.notify();
+    }
+
+    /// Open Trek's data folder (settings, database, backgrounds) in Finder.
+    #[allow(dead_code)] // for the settings / composer UI
+    pub fn reveal_data_folder(&self, cx: &App) {
+        cx.open_with_system(&trek_core::paths::data_dir());
+    }
+
+    /// Plain-text report for "Copy diagnostics": versions, detected agents, where settings live.
+    #[allow(dead_code)] // for the settings / composer UI
+    pub fn diagnostics(&self) -> String {
+        let sw = |flag: &str| {
+            std::process::Command::new("/usr/bin/sw_vers")
+                .arg(flag)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".into())
+        };
+        let mut out = vec![
+            format!("Trek {}", env!("CARGO_PKG_VERSION")),
+            format!("macOS {} ({}) · {}", sw("-productVersion"), sw("-buildVersion"), std::env::consts::ARCH),
+            format!("Settings: {}", trek_core::paths::settings_file().display()),
+            format!("Data: {}", trek_core::paths::data_dir().display()),
+            String::new(),
+            "Agents:".into(),
+        ];
+        if self.agents.is_empty() {
+            out.push(if self.detecting { "  (detecting…)".into() } else { "  (none detected)".into() });
+        }
+        for a in &self.agents {
+            let state = match a.availability {
+                Availability::Ready => "ready",
+                Availability::NotInstalled => "not installed",
+                Availability::NeedsLogin => "needs login",
+                Availability::Offline => "offline",
+            };
+            let disabled = if self.settings.disabled_agents.contains(&a.agent.key()) { ", disabled" } else { "" };
+            let version = a.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+            let path = a.path.as_ref().map(|p| format!(" · {}", p.display())).unwrap_or_default();
+            out.push(format!("  {}{version}: {state}{disabled}{path}", a.name));
+        }
+        out.join("\n")
     }
 
     /// Threads grouped into sidebar sections, filtered by search and project.
@@ -367,13 +449,38 @@ impl Workspace {
         out
     }
 
-    #[allow(dead_code)]
+    /// Threads waiting on the user (approval or failure), excluding settled and archived ones.
     pub fn needs_you_count(&self) -> usize {
-        self.threads.iter().filter(|t| t.needs_you()).count()
+        self.threads.iter().filter(|t| t.needs_you() && t.settled_at.is_none() && t.archived_at.is_none()).count()
+    }
+
+    /// Follow-ups waiting for the running turn of `id` to finish (`FollowUp::Queue`).
+    pub fn queued(&self, id: &str) -> usize {
+        self.live.get(id).map_or(0, |l| l.queued.len())
+    }
+
+    /// Drop the follow-ups queued on `id` without sending them.
+    #[allow(dead_code)] // for the settings / composer UI
+    pub fn clear_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(live) = self.live.get_mut(id) {
+            if !live.queued.is_empty() {
+                live.queued.clear();
+                live.revision += 1;
+                cx.notify();
+            }
+        }
     }
 
     pub fn any_working(&self) -> bool {
         self.threads.iter().any(|t| t.run_state == RunState::Working)
+    }
+
+    /// A thread is working with a live agent turn in this process. Unlike `any_working`, ignores
+    /// threads left marked Working by an earlier run that quit mid-turn.
+    pub fn any_turn_running(&self) -> bool {
+        self.threads
+            .iter()
+            .any(|t| t.run_state == RunState::Working && self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()))
     }
 
     // ---------- navigation ----------
@@ -721,6 +828,15 @@ impl Workspace {
             cx.notify();
             return;
         }
+        // Queue mode: hold follow-ups until the running turn finishes (see `apply_events`).
+        let running = self.live.get(&id).is_some_and(|l| l.turn_started.is_some() && l.commands.is_some());
+        if running && self.settings.general.follow_up == FollowUp::Queue {
+            let live = self.live.entry(id.clone()).or_default();
+            live.queued.push((text, images));
+            live.revision += 1;
+            cx.notify();
+            return;
+        }
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
         live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect() });
@@ -792,6 +908,9 @@ impl Workspace {
         let mut native: Option<String> = None;
         let mut diff: Option<(i64, i64)> = None;
         let mut finished = false;
+        // The turn ended cleanly: queued follow-ups may go out. After a stop or failure they go back
+        // to the composer instead, so the user can rethink them.
+        let mut continue_queue = false;
         let mut notify_text: Option<String> = None;
         {
             let live = self.live.entry(id.to_string()).or_default();
@@ -875,12 +994,15 @@ impl Workspace {
                             if e != "Interrupted" {
                                 live.items.push(Item::Error { text: e });
                                 run_state = Some(RunState::Failed);
+                                continue_queue = false;
                             } else {
                                 live.items.push(Item::Notice { text: "Interrupted".into() });
                                 run_state = Some(RunState::Idle);
+                                continue_queue = false;
                             }
                         } else {
                             run_state = Some(RunState::Idle);
+                            continue_queue = true;
                         }
                         finished = true;
                     }
@@ -889,8 +1011,10 @@ impl Workspace {
                         live.turn_started = None;
                         run_state = Some(RunState::Failed);
                         finished = true;
+                        continue_queue = false;
                     }
                     AgentEvent::Exited => {
+                        continue_queue = false;
                         live.commands = None;
                         if live.turn_started.take().is_some() {
                             run_state.get_or_insert(RunState::Failed);
@@ -923,19 +1047,43 @@ impl Workspace {
             self.turns_finished += 1;
             self.refresh_git(cx);
             self.persist_items(id);
-            if let Some(title) = self.thread(id).map(|t| t.title.clone()) {
-                if !viewing {
+            let next = if continue_queue {
+                self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
+            } else {
+                None
+            };
+            if !continue_queue && viewing {
+                self.restore_queued(id, cx);
+            }
+            if let Some((text, images)) = next {
+                // The thread keeps going with the user's queued follow-up: not "finished" yet.
+                self.send_to(id, text, images, cx);
+            } else {
+                if let Some(title) = self.thread(id).map(|t| t.title.clone()) {
                     notify_text.get_or_insert(format!("Finished: {title}"));
                 }
+                self.maybe_restart_for_update(cx);
             }
-            self.maybe_restart_for_update(cx);
         }
-        if let Some(text) = notify_text {
-            if !viewing {
-                cx.emit(WorkspaceEvent::Toast { message: text, undo: None });
-            }
+        if let Some(message) = notify_text {
+            cx.emit(WorkspaceEvent::Attention { message, viewing });
         }
         cx.notify();
+    }
+
+    /// Put queued follow-ups back into the composer (the thread must be on screen).
+    fn restore_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(queued) = self.live.get_mut(id).map(|l| std::mem::take(&mut l.queued)) else { return };
+        if queued.is_empty() {
+            return;
+        }
+        let text = queued.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+        if !text.is_empty() {
+            cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+        }
+        for path in queued.into_iter().flat_map(|(_, images)| images) {
+            cx.emit(WorkspaceEvent::AttachImage(path));
+        }
     }
 
     fn persist_items(&self, id: &str) {
@@ -1458,6 +1606,12 @@ impl Workspace {
             }
         }
     }
+}
+
+/// The settings that seed a new thread's composer.
+fn default_prefs_key(s: &Settings) -> (String, Option<String>, Effort, HandHolding) {
+    let g = &s.general;
+    (g.default_agent.clone(), g.default_model.clone(), g.default_effort, g.hand_holding)
 }
 
 /// Convenience for views.

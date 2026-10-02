@@ -11,6 +11,7 @@ mod palette;
 mod root;
 mod settings_view;
 mod sidebar;
+mod system;
 mod thread_view;
 mod time;
 mod trail_path;
@@ -58,6 +59,11 @@ fn apply_theme(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
         ThemeChoice::Night => Theme::change(ThemeMode::Dark, window, cx),
         ThemeChoice::Paper => Theme::change(ThemeMode::Light, window, cx),
         ThemeChoice::System => Theme::sync_system_appearance(window, cx),
+    }
+    // Loading a theme resets the rem to the theme file's size; put the user's back.
+    if let Some(ws) = cx.try_global::<workspace::GlobalWorkspace>().map(|g| g.0.clone()) {
+        let size = ws.read(cx).settings.appearance.ui_font_size();
+        system::apply_ui_font_size(size, cx);
     }
 }
 
@@ -145,6 +151,7 @@ fn main() {
         tray::init(ws.clone(), cx);
         let theme = ws.read(cx).settings.appearance.theme;
         apply_theme(theme, None, cx);
+        system::init(ws.clone(), cx);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),

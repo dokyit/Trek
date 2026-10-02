@@ -123,7 +123,9 @@ pub enum ThemeChoice {
 #[serde(default)]
 pub struct Appearance {
     pub theme: ThemeChoice,
+    /// Base UI text size in points (the theme's rem). Read through [`Appearance::ui_font_size`].
     pub ui_font_size: f32,
+    /// Message text in the transcript, in points. Read through [`Appearance::transcript_font_size`].
     pub transcript_font_size: f32,
     pub code_font_size: f32,
     pub reduce_motion: bool,
@@ -145,12 +147,34 @@ pub enum BackgroundPlacement {
     Everywhere,
 }
 
+/// The sizes Trek is designed at: the theme's 14 pt rem and 14.5 pt transcript text.
+pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
+pub const DEFAULT_TRANSCRIPT_FONT_SIZE: f32 = 14.5;
+/// Sizes outside this range are treated as unset (0 = default).
+const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 9.0..=32.0;
+
+fn font_size_or(v: f32, default: f32) -> f32 {
+    if v.is_finite() && FONT_SIZE_RANGE.contains(&v) { v } else { default }
+}
+
+impl Appearance {
+    /// The UI font size to apply: the stored value, or the default when unset or out of range.
+    pub fn ui_font_size(&self) -> f32 {
+        font_size_or(self.ui_font_size, DEFAULT_UI_FONT_SIZE)
+    }
+
+    /// The transcript font size to apply: the stored value, or the default when unset or out of range.
+    pub fn transcript_font_size(&self) -> f32 {
+        font_size_or(self.transcript_font_size, DEFAULT_TRANSCRIPT_FONT_SIZE)
+    }
+}
+
 impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::System,
-            ui_font_size: 13.0,
-            transcript_font_size: 14.0,
+            ui_font_size: DEFAULT_UI_FONT_SIZE,
+            transcript_font_size: DEFAULT_TRANSCRIPT_FONT_SIZE,
             code_font_size: 12.5,
             reduce_motion: false,
             motion_scale: 1.0,
@@ -275,10 +299,22 @@ pub struct CustomEndpoint {
 
 impl Settings {
     pub fn load() -> Settings {
-        std::fs::read_to_string(crate::paths::settings_file())
+        let mut s: Settings = std::fs::read_to_string(crate::paths::settings_file())
             .ok()
             .and_then(|s| toml::from_str(&s).map_err(|e| tracing::warn!("settings parse error: {e}")).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        s.migrate();
+        s
+    }
+
+    /// Bring older files up to date. Font sizes were saved (13 / 14) before Trek applied them; those
+    /// untouched defaults become the sizes the app actually renders at, so nothing shrinks.
+    pub fn migrate(&mut self) {
+        let a = &mut self.appearance;
+        if a.ui_font_size == 13.0 && a.transcript_font_size == 14.0 {
+            a.ui_font_size = DEFAULT_UI_FONT_SIZE;
+            a.transcript_font_size = DEFAULT_TRANSCRIPT_FONT_SIZE;
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -328,5 +364,19 @@ mod tests {
         let partial: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
         assert_eq!(partial.general.hand_holding, HandHolding::Auto);
         assert_eq!(partial.inbox.auto_settle_days, 3);
+    }
+
+    #[test]
+    fn font_sizes_fall_back_and_migrate() {
+        let mut s: Settings = toml::from_str("[appearance]\nui_font_size = 0.0\ntranscript_font_size = 16.0\n").unwrap();
+        assert_eq!(s.appearance.ui_font_size(), DEFAULT_UI_FONT_SIZE);
+        assert_eq!(s.appearance.transcript_font_size(), 16.0);
+        s.appearance.ui_font_size = 13.0;
+        s.appearance.transcript_font_size = 14.0;
+        s.migrate();
+        assert_eq!((s.appearance.ui_font_size, s.appearance.transcript_font_size), (DEFAULT_UI_FONT_SIZE, DEFAULT_TRANSCRIPT_FONT_SIZE));
+        s.appearance.ui_font_size = 13.0;
+        s.migrate();
+        assert_eq!(s.appearance.ui_font_size, 13.0);
     }
 }
