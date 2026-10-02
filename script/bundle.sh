@@ -1,11 +1,21 @@
 #!/bin/zsh
-# Build Trek.app (release), its icon, an update archive and the update manifest.
-# Usage: script/bundle.sh [--install]   (--install copies to /Applications)
+# Build and sign Trek.app (release) into dist/.
+#   script/bundle.sh [--install]   (--install also copies it to /Applications)
+#
+# Signing (script/lib/sign.sh): $TREK_SIGN_IDENTITY, else "Trek Local Signing" (create it once with
+# script/signing-identity.sh), else ad-hoc. A stable identity keeps macOS's Accessibility and
+# Screen Recording grants across rebuilds; ad-hoc signatures change every build.
+# Releases (archive, signature, manifest, GitHub) are script/release.sh.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-OUT=dist; APP="$OUT/Trek.app"
+cd "${0:A:h}/.."
+source script/lib/sign.sh
 source "$HOME/.cargo/env" 2>/dev/null || true
+
+VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+# CFBundleShortVersionString takes numbers only; CFBundleVersion carries the full semver, which
+# the updater checks before installing.
+SHORT=${VERSION%%-*}
+OUT=dist; APP="$OUT/Trek.app"
 
 echo "• building release $VERSION"
 cargo build --release -p trek-app -p trek-mcp
@@ -36,7 +46,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>trek</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$SHORT</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
@@ -44,20 +54,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 && echo "• signed (ad-hoc; use a Developer ID + notarytool for distribution)"
 
-echo "• update archive + manifest"
-ARCH=$(uname -m); [ "$ARCH" = arm64 ] && ARCH=aarch64
-TAR="$OUT/Trek-$VERSION-darwin-$ARCH.app.tar.gz"
-tar -czf "$TAR" -C "$OUT" Trek.app
-SHA=$(shasum -a 256 "$TAR" | cut -d' ' -f1)
-SIG=""; if [ -f "$HOME/.trek-signing/minisign.key" ] && command -v minisign >/dev/null; then
-  minisign -S -s "$HOME/.trek-signing/minisign.key" -m "$TAR" -x "$TAR.minisig" -W && SIG=$(cat "$TAR.minisig"); fi
-python3 - "$VERSION" "$(basename "$TAR")" "$SHA" "$SIG" "darwin-$ARCH" > "$OUT/stable.json" <<'PY'
-import json, sys
-v, name, sha, sig, plat = sys.argv[1:6]
-print(json.dumps({"version": v, "notes": "", "platforms": {plat: {
-  "url": f"https://github.com/trek-app/trek/releases/download/v{v}/{name}", "sha256": sha, "signature": sig}}}, indent=2))
-PY
-du -sh "$APP" "$TAR"
-if [[ "${1:-}" == "--install" ]]; then rm -rf /Applications/Trek.app && cp -R "$APP" /Applications/ && echo "• installed to /Applications/Trek.app"; fi
+echo "• signing"
+xattr -cr "$APP"
+trek_codesign_bundle "$APP"
+echo "• signed with \"$(trek_sign_identity)\" ($(trek_sign_identity_kind))"
+du -sh "$APP"
+
+if [[ "${1:-}" == "--install" ]]; then
+  rm -rf /Applications/Trek.app && cp -R "$APP" /Applications/ && echo "• installed to /Applications/Trek.app"
+fi
