@@ -121,6 +121,8 @@ pub enum AgentEvent {
     PermissionRequest { request_id: String, title: String, detail: String, prompt: Option<Prompt> },
     /// A diff stat for the turn, when the agent reports one.
     DiffStat { additions: i64, deletions: i64 },
+    /// A turn ended. `cost_usd`: what the session has cost so far, as a running total (a resumed
+    /// session may carry on from its saved total; it starts again from zero after a `/clear`).
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
     /// Tokens currently in the context window, and the window size.
     Context { used: u64, window: u64 },

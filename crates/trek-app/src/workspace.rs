@@ -104,8 +104,11 @@ pub struct LiveThread {
     pub turn_started: Option<Instant>,
     pub plan: bool,
     pub fast: bool,
+    /// Estimated spend on this thread's agent so far; money only when `billing` is metered.
     pub cost_usd: f64,
-    /// How the session is billed, once the agent has said; `cost_usd` is money only when metered.
+    /// The agent's running session total at its last report (see `cost_added`).
+    cost_total: f64,
+    /// How the current session is billed, once the agent has said.
     pub billing: Option<Billing>,
     /// Tokens in the context window and the window size, as last reported by the agent.
     pub context: Option<(u64, u64)>,
@@ -394,10 +397,7 @@ impl Workspace {
 
     /// The thread `scope` shows, if it shows one (the main window may be on a draft or settings).
     pub fn thread_id_in<'a>(&'a self, scope: &'a Scope) -> Option<&'a str> {
-        match (scope, &self.route) {
-            (Scope::Thread(id), _) | (Scope::Main, Route::Thread(id)) => Some(id),
-            _ => None,
-        }
+        scope_thread(scope, &self.route)
     }
 
     pub fn thread_in(&self, scope: &Scope) -> Option<&Thread> {
@@ -406,7 +406,7 @@ impl Workspace {
 
     /// `scope` is composing a new thread (only the main window does).
     pub fn is_draft_in(&self, scope: &Scope) -> bool {
-        *scope == Scope::Main && matches!(self.route, Route::Draft { .. })
+        scope_is_draft(scope, &self.route)
     }
 
     /// Working directory for `scope`: its thread's folder, or the main window's draft project.
@@ -421,15 +421,21 @@ impl Workspace {
         self.cwd_in(scope).and_then(|c| self.git_info.get(&c))
     }
 
+    /// Where `id` is on screen: its own window, else the main window when it shows the thread.
+    /// Its own window wins, so queued follow-ups go back to that window's composer.
+    pub fn shown_in(&self, id: &str) -> Option<Scope> {
+        shown_in(id, &self.route, self.thread_windows.contains_key(id), self.main_window.is_some())
+    }
+
     /// The thread is on screen somewhere: in the main window or a window of its own.
     pub fn on_screen(&self, id: &str) -> bool {
-        self.thread_windows.contains_key(id) || matches!(&self.route, Route::Thread(t) if t == id)
+        self.shown_in(id).is_some()
     }
 
     /// Whether the user is looking at `thread`: it's in the frontmost Trek window, or (when no
     /// Trek window is frontmost) in any of them.
     pub fn viewing(&self, thread: &str, active: Option<AnyWindowHandle>) -> bool {
-        let in_main = matches!(&self.route, Route::Thread(t) if t == thread);
+        let in_main = self.main_window.is_some() && matches!(&self.route, Route::Thread(t) if t == thread);
         viewing(in_main, self.thread_windows.get(thread).copied(), self.main_window, active)
     }
 
@@ -445,13 +451,21 @@ impl Workspace {
     }
 
     pub fn thread_window_closed(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
-        if self.thread_windows.get(id) == Some(&handle) {
-            self.thread_windows.remove(id);
+        if forget_window(&mut self.thread_windows, id, handle) {
             cx.notify();
         }
     }
 
-    /// Navigate the main window from a thread window, and bring it forward.
+    /// The main window closed (thread windows may still be open; it reopens on demand).
+    pub fn main_window_closed(&mut self, handle: AnyWindowHandle, cx: &mut Context<Self>) {
+        if self.main_window == Some(handle) {
+            self.main_window = None;
+            cx.notify();
+        }
+    }
+
+    /// Navigate the main window from a thread window, and bring it forward (reopening it if it
+    /// was closed).
     pub fn show_in_main(&mut self, route: Route, cx: &mut Context<Self>) {
         self.navigate(route, cx);
         cx.emit(WorkspaceEvent::ActivateMain);
@@ -884,6 +898,13 @@ impl Workspace {
                     }
                 });
                 let live = self.live.entry(id.clone()).or_default();
+                // Another agent means another login and a fresh session: what the old one cost
+                // and how it was billed say nothing about the new one.
+                if before.as_ref().is_some_and(|b| b.agent != prefs.agent) {
+                    live.billing = None;
+                    live.cost_usd = 0.0;
+                    live.cost_total = 0.0;
+                }
                 let fast_changed = live.fast != prefs.fast;
                 let plan_changed = live.plan != prefs.plan;
                 live.plan = prefs.plan;
@@ -1208,6 +1229,8 @@ impl Workspace {
         let live = self.live.entry(id.to_string()).or_default();
         live.commands = Some(handle.commands);
         live.last_active = Some(Instant::now());
+        // A new process says how it's billed again (the login may have changed since).
+        live.billing = None;
         let events = handle.events;
         let id = id.to_string();
         live._events = Some(cx.spawn(async move |this, cx| {
@@ -1402,20 +1425,15 @@ impl Workspace {
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
-                    // A later "some subscription" never replaces the plan the login already named.
-                    AgentEvent::Billing(b) => {
-                        if !(b == Billing::Plan(None) && live.billing.is_some()) {
-                            live.billing = Some(b);
-                        }
-                    }
+                    AgentEvent::Billing(b) => live.billing = Some(b),
                     AgentEvent::TurnComplete { cost_usd, error } => {
                         // Models that hide their reasoning leave empty "Thought" rows behind.
                         live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
                         live.streaming = None;
                         live.reasoning = None;
                         live.permissions.clear();
-                        if let Some(c) = cost_usd {
-                            live.cost_usd += c;
+                        if let Some(total) = cost_usd {
+                            live.cost_usd += cost_added(&mut live.cost_total, total);
                         }
                         // Background sub-agents are still out: the agent will pick the turn back up
                         // when they report, so the thread keeps working.
@@ -2369,6 +2387,40 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("permissions full", "No prompts and no sandbox"),
 ];
 
+/// The thread `scope` shows: a thread window's own, or whatever thread the main window is on.
+fn scope_thread<'a>(scope: &'a Scope, route: &'a Route) -> Option<&'a str> {
+    match (scope, route) {
+        (Scope::Thread(id), _) | (Scope::Main, Route::Thread(id)) => Some(id),
+        _ => None,
+    }
+}
+
+fn scope_is_draft(scope: &Scope, route: &Route) -> bool {
+    *scope == Scope::Main && matches!(route, Route::Draft { .. })
+}
+
+/// See `Workspace::shown_in`. `own_window`: the thread has a window of its own; `main_open`: the
+/// main window hasn't been closed.
+fn shown_in(id: &str, route: &Route, own_window: bool, main_open: bool) -> Option<Scope> {
+    if own_window {
+        Some(Scope::Thread(id.to_string()))
+    } else if main_open && matches!(route, Route::Thread(t) if t == id) {
+        Some(Scope::Main)
+    } else {
+        None
+    }
+}
+
+/// Drop `id`'s window from the registry if it's still `handle` (a newer window for the same
+/// thread may have replaced it). Returns whether anything changed.
+fn forget_window<W: PartialEq>(windows: &mut HashMap<String, W>, id: &str, handle: W) -> bool {
+    let current = windows.get(id) == Some(&handle);
+    if current {
+        windows.remove(id);
+    }
+    current
+}
+
 /// `scope`'s view of who's looking: shown in the main window (`in_main`) or its own `window`,
 /// against the frontmost Trek window (`active`, none when another app is in front).
 fn viewing<W: PartialEq + Copy>(in_main: bool, window: Option<W>, main: Option<W>, active: Option<W>) -> bool {
@@ -2376,6 +2428,20 @@ fn viewing<W: PartialEq + Copy>(in_main: bool, window: Option<W>, main: Option<W
         None => in_main || window.is_some(),
         Some(a) => (in_main && main == Some(a)) || window == Some(a),
     }
+}
+
+/// What a turn added to a thread's spend, given the agent's running session `total` and the
+/// total it reported last. A zero total (a failed start) is ignored. A total below the last one
+/// means the agent started counting again (a new process without a saved total, or `/clear`),
+/// so all of it is new. A resumed session that carries on from its saved total adds only the
+/// difference, which is why `last` outlives the process.
+fn cost_added(last: &mut f64, total: f64) -> f64 {
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let added = if total >= *last { total - *last } else { total };
+    *last = total;
+    added
 }
 
 /// "your Claude Max plan", or "your subscription" when the plan has no name.
@@ -2434,8 +2500,73 @@ pub fn trek_mcp_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cost_note, cost_reply, viewing};
+    use super::{Route, Scope, cost_added, cost_note, cost_reply, forget_window, scope_is_draft, scope_thread, shown_in, viewing};
+    use std::collections::HashMap;
     use trek_agents::Billing;
+
+    #[test]
+    fn claude_running_totals_are_not_summed() {
+        // Three $1 turns report running totals 1, 2, 3: the thread has spent $3, not $6.
+        let (mut last, mut spent) = (0.0, 0.0);
+        for total in [1.0, 2.0, 3.0] {
+            spent += cost_added(&mut last, total);
+        }
+        assert_eq!(spent, 3.0);
+        // A failed start reports zero: ignored, and the next total still counts from 3.
+        spent += cost_added(&mut last, 0.0);
+        spent += cost_added(&mut last, 3.5);
+        assert_eq!(spent, 3.5);
+        // A relaunched process that resumes from its saved total carries on from it.
+        spent += cost_added(&mut last, 4.0);
+        assert_eq!(spent, 4.0);
+        // One that starts again from zero (no saved total, or /clear) adds all of its total.
+        spent += cost_added(&mut last, 0.25);
+        spent += cost_added(&mut last, 0.75);
+        assert_eq!(spent, 4.75);
+    }
+
+    #[test]
+    fn scopes_resolve_against_the_main_route() {
+        let on_a = Route::Thread("a".into());
+        let draft = Route::Draft { project: None };
+        let settings = Route::Settings(super::SettingsPage::General);
+        let window_b = Scope::Thread("b".into());
+        // The main window follows its route.
+        assert_eq!(scope_thread(&Scope::Main, &on_a), Some("a"));
+        assert_eq!(scope_thread(&Scope::Main, &draft), None);
+        assert_eq!(scope_thread(&Scope::Main, &settings), None);
+        assert!(scope_is_draft(&Scope::Main, &draft));
+        assert!(!scope_is_draft(&Scope::Main, &on_a));
+        // A thread window stays on its thread whatever the main window shows.
+        assert_eq!(scope_thread(&window_b, &on_a), Some("b"));
+        assert_eq!(scope_thread(&window_b, &draft), Some("b"));
+        assert!(!scope_is_draft(&window_b, &draft));
+    }
+
+    #[test]
+    fn queued_follow_ups_go_where_the_thread_is_shown() {
+        let on_a = Route::Thread("a".into());
+        assert_eq!(shown_in("a", &on_a, false, true), Some(Scope::Main));
+        // Its own window wins over the main window showing it too.
+        assert_eq!(shown_in("a", &on_a, true, true), Some(Scope::Thread("a".into())));
+        assert_eq!(shown_in("b", &on_a, true, true), Some(Scope::Thread("b".into())));
+        assert_eq!(shown_in("b", &on_a, false, true), None);
+        // A closed main window shows nothing, whatever its route says.
+        assert_eq!(shown_in("a", &on_a, false, false), None);
+        assert_eq!(shown_in("a", &on_a, true, false), Some(Scope::Thread("a".into())));
+    }
+
+    #[test]
+    fn closing_a_thread_window_forgets_only_that_window() {
+        let mut windows = HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert!(forget_window(&mut windows, "a", 1));
+        assert!(!windows.contains_key("a"));
+        // A window released after the thread got a newer one leaves the newer one registered.
+        windows.insert("b".into(), 3);
+        assert!(!forget_window(&mut windows, "b", 2));
+        assert_eq!(windows.get("b"), Some(&3));
+        assert!(!forget_window(&mut windows, "c", 9));
+    }
 
     #[test]
     fn subscription_cost_is_an_estimate_in_the_tooltip() {

@@ -2,6 +2,7 @@
 //! model (Fast · Effort › · Model ›) and access level, plus attach and send.
 //! On a new thread it floats over the background hero with Capy-style context chips above it.
 
+use crate::attachments::{self, Attaching, Outbox};
 use crate::palette;
 use crate::ui::{self, Pill};
 use crate::workspace::{PanelTool, Prefs, Route, Scope, Workspace, WorkspaceEvent};
@@ -44,9 +45,7 @@ pub struct Composer {
     sub: Option<Sub>,
     rail: Option<Rail>,
     /// Images going out with the next message.
-    attachments: Vec<PathBuf>,
-    /// Pasted images still being written to disk.
-    pasting: usize,
+    outbox: Outbox,
     /// The `/`, `@` or `$` token being completed, and the highlighted row.
     trigger: Option<Trigger>,
     picked: usize,
@@ -139,8 +138,7 @@ impl Composer {
             access_open: false,
             sub: None,
             rail: None,
-            attachments: vec![],
-            pasting: 0,
+            outbox: Outbox::default(),
             trigger: None,
             picked: 0,
             file_index: None,
@@ -155,14 +153,18 @@ impl Composer {
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.outbox.hold_send() {
+            cx.notify();
+            return;
+        }
         let text = state.read(cx).value().to_string();
-        if text.trim().is_empty() && self.attachments.is_empty() {
+        if text.trim().is_empty() && self.outbox.paths.is_empty() {
             return;
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
         self.trigger = None;
         self.sync_overlay(cx);
-        let images = std::mem::take(&mut self.attachments);
+        let images = std::mem::take(&mut self.outbox.paths);
         let scope = self.scope.clone();
         self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx));
     }
@@ -202,9 +204,7 @@ impl Composer {
 
     /// Attach an image file (shown in the attachment strip, sent with the next message).
     pub fn attach_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if !self.attachments.contains(&path) {
-            self.attachments.push(path);
-        }
+        self.outbox.add([path]);
         cx.notify();
     }
 
@@ -233,11 +233,8 @@ impl Composer {
         let input = self.input.clone();
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                let (images, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| mentions::is_image(p));
-                let _ = this.update(cx, |this, cx| {
-                    this.attachments.extend(images);
-                    cx.notify();
-                });
+                let (images, files) = attachments::split_files(paths);
+                let _ = this.update_in(cx, |this, window, cx| attachments::attach_files(this, images, window, cx));
                 if files.is_empty() {
                     return;
                 }
@@ -310,7 +307,7 @@ impl Composer {
                     cx.activate(true);
                 }
                 if ok {
-                    this.attachments.push(path);
+                    this.outbox.add([path]);
                 }
                 cx.notify();
             });
@@ -319,8 +316,8 @@ impl Composer {
     }
 
     fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let (images, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.iter().cloned().partition(|p| mentions::is_image(p));
-        self.attachments.extend(images);
+        let (images, files) = attachments::split_files(paths.iter().cloned());
+        attachments::attach_files(self, images, window, cx);
         if !files.is_empty() {
             let refs: Vec<String> = files.iter().map(|p| format!("@{} ", p.display())).collect();
             self.input.update(cx, |s, cx| s.insert(refs.concat(), window, cx));
@@ -563,19 +560,19 @@ impl Composer {
     }
 
     fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.attachments.is_empty() && !self.snapshotting && self.pasting == 0 {
+        if self.outbox.paths.is_empty() && !self.snapshotting && self.outbox.saving == 0 {
             return None;
         }
         let me = cx.entity().downgrade();
         let remove = move |i: usize, _: &mut Window, cx: &mut App| {
             let _ = me.update(cx, |this, cx| {
-                if i < this.attachments.len() {
-                    this.attachments.remove(i);
+                if i < this.outbox.paths.len() {
+                    this.outbox.paths.remove(i);
                 }
                 cx.notify();
             });
         };
-        Some(div().px(px(14.)).pt(px(12.)).child(crate::attachments::thumbnails(&self.attachments, px(56.), self.snapshotting || self.pasting > 0, remove, cx)).into_any_element())
+        Some(div().px(px(14.)).pt(px(12.)).child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx)).into_any_element())
     }
 
     /// "+" menu: files and photos, snapshots, and the three pickers.
@@ -1079,6 +1076,17 @@ impl Composer {
     }
 }
 
+impl Attaching for Composer {
+    fn outbox(&mut self) -> &mut Outbox {
+        &mut self.outbox
+    }
+
+    fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.clone();
+        self.submit(input, window, cx);
+    }
+}
+
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
@@ -1098,7 +1106,7 @@ impl Render for Composer {
             .or_else(|| default_model(&models).map(|m| m.name.clone()))
             .unwrap_or_else(|| prefs.agent.display_name());
         let theme = cx.theme().clone();
-        let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
+        let empty = self.input.read(cx).value().trim().is_empty() && self.outbox.paths.is_empty() && self.outbox.saving == 0;
         let thread_id = thread.as_ref().map(|t| t.id.clone());
         let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
         let compact = self.width.get() < px(600.);
@@ -1226,13 +1234,13 @@ impl Render for Composer {
                 )
             })
             .children(self.attachment_strip(cx))
-            .child(div().px(px(14.)).pt(px(if is_draft || !self.attachments.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
+            .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
                 let me = cx.entity().downgrade();
-                move |item, window, cx| match crate::attachments::pasted(item) {
+                move |item, window, cx| match attachments::pasted(item) {
                     Some(p) => me
                         .update(cx, |this, cx| {
                             let input = this.input.clone();
-                            crate::attachments::paste(this, p, &input, |c: &mut Composer| (&mut c.attachments, &mut c.pasting), window, cx)
+                            attachments::paste(this, p, &input, window, cx)
                         })
                         .is_ok(),
                     None => false,

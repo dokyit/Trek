@@ -244,19 +244,23 @@ fn user_content(text: &str, images: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
     (content, errors)
 }
 
-/// How the login is billed, from the `account` in the `initialize` response. A subscription
-/// wins over an API key that's merely present (Claude Code reports such a key as "not in use").
+/// How the login is billed, from the `account` in the `initialize` response; `None` when it
+/// doesn't say. Claude Code names the subscription only while its login is the one in use, so a
+/// subscription wins over a key that's merely present. Without one, a key is what pays.
 fn account_billing(account: &Value) -> Option<Billing> {
     if let Some(plan) = account["subscriptionType"].as_str().filter(|s| !s.is_empty()) {
         let name = if plan.starts_with("Claude") { plan.to_string() } else { format!("Claude {}", crate::status::capitalize(plan)) };
         return Some(Billing::Plan(Some(name)));
     }
-    if account["apiKeySource"].is_string() {
+    // Bedrock, Vertex, Foundry and gateways bill the cloud account per token.
+    if account["apiProvider"].as_str().is_some_and(|p| p != "firstParty") || account["apiKeySource"].is_string() {
         return Some(Billing::Metered);
     }
-    match account["apiProvider"].as_str() {
-        // Bedrock, Vertex, Foundry and gateways bill the cloud account per token.
-        Some(p) if p != "firstParty" => Some(Billing::Metered),
+    match account["tokenSource"].as_str()? {
+        // A bearer token for a proxy or gateway (ANTHROPIC_AUTH_TOKEN), or a key from a helper script.
+        "ANTHROPIC_AUTH_TOKEN" | "apiKeyHelper" => Some(Billing::Metered),
+        // `claude setup-token` and hosted sessions: a subscription login whose plan isn't named.
+        "CLAUDE_CODE_OAUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR" | "CCR_OAUTH_TOKEN_FILE" => Some(Billing::Plan(None)),
         _ => None,
     }
 }
@@ -296,11 +300,6 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                 native_id: v["session_id"].as_str().unwrap_or_default().to_string(),
                 model: v["model"].as_str().map(String::from),
             });
-            // No API key at all means the session runs on a claude.ai login. A named key may still
-            // be unused (a subscription takes precedence), so only "none" says anything here.
-            if v["apiKeySource"] == "none" {
-                out.push(AgentEvent::Billing(Billing::Plan(None)));
-            }
         }
         Some("system") if v["subtype"] == "task_started" && v["task_type"] == "local_agent" => out.push(AgentEvent::Task {
             id: v["tool_use_id"].as_str().unwrap_or_default().to_string(),
@@ -459,11 +458,25 @@ mod tests {
         assert_eq!(account_billing(&json!({"apiProvider":"firstParty"})), None);
         assert_eq!(account_billing(&Value::Null), None);
 
+
+        // A proxy or gateway token (LiteLLM, OpenRouter): the init message says apiKeySource "none",
+        // but this is per-token usage, not a subscription.
+        let gateway = json!({"tokenSource":"ANTHROPIC_AUTH_TOKEN","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&gateway), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"tokenSource":"apiKeyHelper","apiKeySource":"apiKeyHelper","apiProvider":"firstParty"})), Some(Billing::Metered));
+        // A long-lived subscription token from `claude setup-token`, unless a key is the one in use.
+        let oauth = json!({"tokenSource":"CLAUDE_CODE_OAUTH_TOKEN","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&oauth), Some(Billing::Plan(None)));
+        let oauth_and_key = json!({"tokenSource":"CLAUDE_CODE_OAUTH_TOKEN","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&oauth_and_key), Some(Billing::Metered));
+        // No login at all, or one that isn't in use: unknown.
+        assert_eq!(account_billing(&json!({"tokenSource":"none","apiProvider":"firstParty"})), None);
+        assert_eq!(account_billing(&json!({"tokenSource":"claude.ai","apiProvider":"firstParty"})), None);
+
+        // The init message alone never claims a subscription: "none" is also what a gateway token reports.
         let (mut pending, mut streamed) = (HashMap::new(), false);
         let init = json!({"type":"system","subtype":"init","session_id":"s","model":"m","apiKeySource":"none"});
-        assert_eq!(translate(&init, &mut pending, &mut streamed)[1], AgentEvent::Billing(Billing::Plan(None)));
-        let keyed = json!({"type":"system","subtype":"init","session_id":"s","model":"m","apiKeySource":"ANTHROPIC_API_KEY"});
-        assert_eq!(translate(&keyed, &mut pending, &mut streamed).len(), 1);
+        assert_eq!(translate(&init, &mut pending, &mut streamed).len(), 1);
     }
 
     #[test]

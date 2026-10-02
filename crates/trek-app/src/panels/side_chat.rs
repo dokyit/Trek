@@ -1,6 +1,6 @@
 //! Side chat: a quick, separate conversation next to the main thread (same project, own session).
 
-use crate::attachments;
+use crate::attachments::{self, Attaching, Outbox};
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
@@ -16,9 +16,7 @@ pub struct SideChatPanel {
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
     /// Images going out with the next message (pasted with ⌘V).
-    attachments: Vec<PathBuf>,
-    /// Pasted images still being written to disk.
-    pasting: usize,
+    outbox: Outbox,
     /// `general.send_with_cmd_enter`, as last applied to the textarea.
     cmd_enter: bool,
     _subscriptions: Vec<Subscription>,
@@ -49,16 +47,20 @@ impl SideChatPanel {
                 }
             }),
         ];
-        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), attachments: vec![], pasting: 0, cmd_enter, _subscriptions: subs }
+        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), outbox: Outbox::default(), cmd_enter, _subscriptions: subs }
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.outbox.hold_send() {
+            cx.notify();
+            return;
+        }
         let text = state.read(cx).value().to_string();
-        if text.trim().is_empty() && self.attachments.is_empty() {
+        if text.trim().is_empty() && self.outbox.paths.is_empty() {
             return;
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
-        let images = std::mem::take(&mut self.attachments);
+        let images = std::mem::take(&mut self.outbox.paths);
         self.send(text, images, cx);
     }
 
@@ -69,6 +71,17 @@ impl SideChatPanel {
         if let Some(id) = self.thread_id.clone() {
             self.workspace.update(cx, |ws, cx| ws.send_to(&id, text, images, cx));
         }
+    }
+}
+
+impl Attaching for SideChatPanel {
+    fn outbox(&mut self) -> &mut Outbox {
+        &mut self.outbox
+    }
+
+    fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.clone();
+        self.submit(input, window, cx);
     }
 }
 
@@ -176,17 +189,17 @@ impl Render for SideChatPanel {
                             let handle = this.input.read(cx).focus_handle(cx);
                             handle.focus(window, cx);
                         }))
-                        .when(!self.attachments.is_empty() || self.pasting > 0, |el| {
+                        .when(!self.outbox.paths.is_empty() || self.outbox.saving > 0, |el| {
                             let me = cx.entity().downgrade();
                             let remove = move |i: usize, _: &mut Window, cx: &mut App| {
                                 let _ = me.update(cx, |this, cx| {
-                                    if i < this.attachments.len() {
-                                        this.attachments.remove(i);
+                                    if i < this.outbox.paths.len() {
+                                        this.outbox.paths.remove(i);
                                     }
                                     cx.notify();
                                 });
                             };
-                            el.child(div().pt_1().pb(px(6.)).child(attachments::thumbnails(&self.attachments, px(40.), self.pasting > 0, remove, cx)))
+                            el.child(div().pt_1().pb(px(6.)).child(attachments::thumbnails(&self.outbox.paths, px(40.), self.outbox.saving > 0, remove, cx)))
                         })
                         .child(Textarea::new(&self.input).appearance(false).on_paste({
                             let me = cx.entity().downgrade();
@@ -194,7 +207,7 @@ impl Render for SideChatPanel {
                                 Some(p) => me
                                     .update(cx, |this, cx| {
                                         let input = this.input.clone();
-                                        attachments::paste(this, p, &input, |c: &mut SideChatPanel| (&mut c.attachments, &mut c.pasting), window, cx)
+                                        attachments::paste(this, p, &input, window, cx)
                                     })
                                     .is_ok(),
                                 None => false,

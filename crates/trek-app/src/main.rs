@@ -131,7 +131,14 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,trek=info".into()))
         .init();
 
-    gpui_kit::application().with_assets(assets::Assets).run(|cx| {
+    let app = gpui_kit::application().with_assets(assets::Assets);
+    // Clicking the Dock icon with every window closed brings the main window back.
+    app.on_reopen(|cx| {
+        if cx.has_global::<workspace::GlobalWorkspace>() {
+            root::show_main(workspace::workspace_global(cx), cx);
+        }
+    });
+    app.run(|cx| {
         gpui_kit::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
@@ -158,6 +165,17 @@ fn main() {
             cx.quit();
         });
         cx.on_action(|_: &HideApp, cx| cx.hide());
+        // Windows handle these themselves; with none open, the menu and shortcuts reopen the main window.
+        cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
+        cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
+        cx.on_action(|_: &OpenSettings, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::General), cx)));
+        cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
+        cx.on_action(|_: &CheckForUpdates, cx| {
+            in_main(cx, |ws, cx| {
+                ws.check_for_updates(true, cx);
+                ws.navigate(workspace::Route::Settings(workspace::SettingsPage::Updates), cx)
+            })
+        });
         cx.set_menus(menus());
 
         let ws = workspace::init(cx);
@@ -165,15 +183,16 @@ fn main() {
         let theme = ws.read(cx).settings.appearance.theme;
         apply_theme(theme, None, cx);
         system::init(ws.clone(), cx);
-
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-            window_min_size: Some(size(px(760.), px(520.))),
-            app_id: Some("dev.trek.Trek".into()),
-            ..gpui_kit::component::TitleBar::window_options()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| root::TrekWindow::new(ws.clone(), window, cx)))
-            .expect("open window");
+        root::init(ws.clone(), cx);
+        root::open_main(ws, cx).expect("open window");
         cx.activate(true);
+    });
+}
+
+/// Act on the workspace, then bring the main window forward (reopening it if it was closed).
+fn in_main(cx: &mut App, f: impl FnOnce(&mut workspace::Workspace, &mut Context<workspace::Workspace>)) {
+    workspace::workspace_global(cx).update(cx, |ws, cx| {
+        f(ws, cx);
+        cx.emit(workspace::WorkspaceEvent::ActivateMain);
     });
 }
