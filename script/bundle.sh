@@ -22,6 +22,10 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 echo "• bundle"
 cp target/release/trek "$APP/Contents/MacOS/trek"
 cp target/release/trek-mcp "$APP/Contents/MacOS/trek-mcp"
+# Menu bar glyph as a bundle resource, so menu bar managers (Shelf, …) can show Trek's real
+# template icon instead of the colour app icon when they stand in for an evicted item.
+resvg -w 22 -h 22 assets/brand/menubar-idle.svg "$APP/Contents/Resources/MenuBarIconTemplate.png"
+resvg -w 44 -h 44 assets/brand/menubar-idle.svg "$APP/Contents/Resources/MenuBarIconTemplate@2x.png"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

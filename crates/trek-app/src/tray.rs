@@ -16,6 +16,8 @@ pub struct Tray {
     icon: TrayIcon,
     status: MenuItem,
     glyph: Glyph,
+    /// While agents work the summit beacon blinks between lit and ring.
+    blink: Option<Task<()>>,
     _subscription: Subscription,
     _events: Task<()>,
 }
@@ -89,15 +91,28 @@ impl Tray {
                 });
             }
         });
-        let subscription = cx.observe(&workspace, |this, ws, cx| this.sync(ws.read(cx)));
-        let mut this = Self { icon, status, glyph: Glyph::Idle, _subscription: subscription, _events: events };
-        this.sync(workspace.read(cx));
+        let subscription = cx.observe(&workspace, |this, ws, cx| {
+            let state = Self::read_state(ws.read(cx));
+            this.sync(state, cx)
+        });
+        let mut this = Self { icon, status, glyph: Glyph::Idle, blink: None, _subscription: subscription, _events: events };
+        let state = Self::read_state(workspace.read(cx));
+        this.sync(state, cx);
         this
     }
 
-    fn sync(&mut self, ws: &Workspace) {
+    /// (threads needing you, threads with a live turn, reduce motion)
+    fn read_state(ws: &Workspace) -> (usize, usize, bool) {
         let needs = ws.threads.iter().filter(|t| t.needs_you()).count();
-        let working = ws.threads.iter().filter(|t| t.run_state == trek_core::RunState::Working).count();
+        let working = if ws.any_turn_running() {
+            ws.threads.iter().filter(|t| t.run_state == trek_core::RunState::Working && ws.live.get(&t.id).is_some_and(|l| l.turn_started.is_some())).count().max(1)
+        } else {
+            0
+        };
+        (needs, working, ws.settings.appearance.reduce_motion)
+    }
+
+    fn sync(&mut self, (needs, working, reduce): (usize, usize, bool), cx: &mut Context<Self>) {
         let glyph = if needs > 0 {
             Glyph::Attention
         } else if working > 0 {
@@ -119,6 +134,21 @@ impl Tray {
                 Glyph::Attention => "attention",
             };
             let _ = self.icon.set_icon_templated(load_icon(name));
+            self.blink = (glyph == Glyph::Working && !reduce).then(|| {
+                cx.spawn(async move |this, cx| {
+                    let mut lit = false;
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+                        lit = !lit;
+                        let ok = this.update(cx, |this, _| {
+                            let _ = this.icon.set_icon_templated(load_icon(if lit { "idle" } else { "working" }));
+                        });
+                        if ok.is_err() {
+                            break;
+                        }
+                    }
+                })
+            });
         }
     }
 }
