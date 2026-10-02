@@ -23,6 +23,45 @@ pub struct Settings {
     /// Installed agents the user switched off (`AgentId::key()`).
     pub disabled_agents: Vec<String>,
     pub tools: Tools,
+    pub snapshots: Snapshots,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotMode {
+    Window,
+    Area,
+    Screen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotFormat {
+    Png,
+    Jpg,
+}
+
+/// App snapshots: screenshots taken from the composer (and ⌘⇧S) and attached to the message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Snapshots {
+    /// What ⌘⇧S captures.
+    pub default_mode: SnapshotMode,
+    /// Hide Trek while you pick, so it isn't in the shot.
+    pub hide_trek: bool,
+    /// Keep the window's drop shadow in window snapshots.
+    pub window_shadow: bool,
+    /// Play the camera shutter sound.
+    pub sound: bool,
+    pub format: SnapshotFormat,
+    /// Delete snapshots older than this many days (0 = keep).
+    pub keep_days: u32,
+}
+
+impl Default for Snapshots {
+    fn default() -> Self {
+        Self { default_mode: SnapshotMode::Window, hide_trek: true, window_shadow: false, sound: false, format: SnapshotFormat::Png, keep_days: 14 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +107,7 @@ impl Default for Settings {
             user_projects: vec![],
             disabled_agents: vec![],
             tools: Tools::default(),
+            snapshots: Snapshots::default(),
         }
     }
 }

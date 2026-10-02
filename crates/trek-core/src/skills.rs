@@ -1,0 +1,320 @@
+//! Agent skills on this Mac: folders holding a `SKILL.md` (front matter `name` + `description`).
+//!
+//! Turning a skill off moves its folder into Trek's data folder (with a note of where it came
+//! from), so every agent stops loading it; turning it back on moves it home. Skills that another
+//! tool manages — Claude.ai sync, Codex's built-ins, plugins — are listed read-only.
+
+use crate::paths;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SkillSource {
+    /// `~/.claude/skills`
+    ClaudeCode,
+    /// `~/.codex/skills`
+    Codex,
+    /// `~/.agents/skills`, read by several agents.
+    Shared,
+    /// `<project>/.claude/skills` or `<project>/.agents/skills`
+    Project,
+    /// `~/.claude/skills/synced/…`, managed by Claude.
+    Synced,
+    /// `~/.codex/skills/.system`, shipped with Codex.
+    CodexSystem,
+    /// A Claude Code plugin's `skills/` folder.
+    Plugin(String),
+}
+
+impl SkillSource {
+    pub fn label(&self) -> String {
+        match self {
+            SkillSource::ClaudeCode => "Claude Code".into(),
+            SkillSource::Codex => "Codex".into(),
+            SkillSource::Shared => "All agents".into(),
+            SkillSource::Project => "This project".into(),
+            SkillSource::Synced => "Synced from Claude".into(),
+            SkillSource::CodexSystem => "Built into Codex".into(),
+            SkillSource::Plugin(p) => format!("Plugin · {p}"),
+        }
+    }
+
+    /// Whether Trek may turn it off, edit or remove it.
+    pub fn editable(&self) -> bool {
+        matches!(self, SkillSource::ClaudeCode | SkillSource::Codex | SkillSource::Shared | SkillSource::Project)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    /// The skill's folder (where it is now: home, or Trek's disabled area).
+    pub dir: PathBuf,
+    pub source: SkillSource,
+    pub enabled: bool,
+}
+
+impl Skill {
+    pub fn skill_md(&self) -> PathBuf {
+        self.dir.join("SKILL.md")
+    }
+}
+
+/// Where a new or added skill goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillHome {
+    ClaudeCode,
+    Codex,
+    Shared,
+}
+
+impl SkillHome {
+    pub fn dir(self) -> PathBuf {
+        let home = paths::home();
+        match self {
+            SkillHome::ClaudeCode => home.join(".claude/skills"),
+            SkillHome::Codex => home.join(".codex/skills"),
+            SkillHome::Shared => home.join(".agents/skills"),
+        }
+    }
+}
+
+fn disabled_root() -> PathBuf {
+    paths::data_dir().join("disabled-skills")
+}
+
+const ORIGIN_FILE: &str = ".trek-origin";
+
+/// `(name, description)` from SKILL.md front matter; the folder name when it has none.
+pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(skill_md).ok()?;
+    let folder = skill_md.parent()?.file_name()?.to_string_lossy().to_string();
+    let mut name = None;
+    let mut desc = None;
+    if let Some(rest) = text.strip_prefix("---") {
+        for line in rest.lines().skip(1) {
+            if line.trim() == "---" {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                match k.trim() {
+                    "name" if !v.is_empty() => name = Some(v),
+                    "description" if !v.is_empty() => desc = Some(v),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let desc = desc.or_else(|| {
+        // No front matter: the first prose line.
+        text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---")).map(str::to_string)
+    });
+    Some((name.unwrap_or(folder), desc.unwrap_or_default()))
+}
+
+/// Skill folders directly inside `root` (following symlinks).
+fn scan(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let dir = e.path();
+        let file_name = e.file_name().to_string_lossy().to_string();
+        if file_name.starts_with('.') || !dir.is_dir() {
+            continue;
+        }
+        let md = dir.join("SKILL.md");
+        if let Some((name, description)) = md.exists().then(|| read_front_matter(&md)).flatten() {
+            out.push(Skill { name, description, dir, source: source.clone(), enabled: true });
+        }
+    }
+}
+
+/// Every skill Trek can see, enabled and disabled, for the given project.
+pub fn discover(project: Option<&Path>) -> Vec<Skill> {
+    let home = paths::home();
+    let mut out = vec![];
+    scan(&home.join(".claude/skills"), SkillSource::ClaudeCode, &mut out);
+    scan(&home.join(".codex/skills"), SkillSource::Codex, &mut out);
+    scan(&home.join(".agents/skills"), SkillSource::Shared, &mut out);
+    if let Some(p) = project.filter(|p| *p != home.as_path()) {
+        scan(&p.join(".claude/skills"), SkillSource::Project, &mut out);
+        scan(&p.join(".agents/skills"), SkillSource::Project, &mut out);
+    }
+    // Claude.ai-synced skills: synced/<bucket>/<skill>/SKILL.md
+    if let Ok(buckets) = std::fs::read_dir(home.join(".claude/skills/synced")) {
+        for b in buckets.flatten().filter(|b| b.path().is_dir()) {
+            scan(&b.path(), SkillSource::Synced, &mut out);
+        }
+    }
+    scan(&home.join(".codex/skills/.system"), SkillSource::CodexSystem, &mut out);
+    for (plugin, dir) in plugin_dirs() {
+        scan(&dir.join("skills"), SkillSource::Plugin(plugin), &mut out);
+    }
+    // Disabled ones, back under the source they came from.
+    if let Ok(entries) = std::fs::read_dir(disabled_root()) {
+        for e in entries.flatten() {
+            let dir = e.path();
+            let Ok(origin) = std::fs::read_to_string(dir.join(ORIGIN_FILE)) else { continue };
+            let origin = PathBuf::from(origin.trim());
+            let source = source_for(&origin, project);
+            if let Some((name, description)) = read_front_matter(&dir.join("SKILL.md")) {
+                out.push(Skill { name, description, dir, source, enabled: false });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
+    let home = paths::home();
+    if origin.starts_with(home.join(".claude/skills")) {
+        SkillSource::ClaudeCode
+    } else if origin.starts_with(home.join(".codex/skills")) {
+        SkillSource::Codex
+    } else if origin.starts_with(home.join(".agents/skills")) {
+        SkillSource::Shared
+    } else if project.is_some_and(|p| origin.starts_with(p)) {
+        SkillSource::Project
+    } else {
+        SkillSource::Project
+    }
+}
+
+/// Installed Claude Code plugins: `(name, install folder)`.
+fn plugin_dirs() -> Vec<(String, PathBuf)> {
+    let file = paths::home().join(".claude/plugins/installed_plugins.json");
+    let Ok(text) = std::fs::read_to_string(file) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
+    let mut out = vec![];
+    for (name, installs) in v["plugins"].as_object().into_iter().flatten() {
+        for i in installs.as_array().into_iter().flatten() {
+            if let Some(p) = i["installPath"].as_str() {
+                out.push((name.split('@').next().unwrap_or(name).to_string(), PathBuf::from(p)));
+            }
+        }
+    }
+    out
+}
+
+/// Turn a skill off (move it aside) or back on (move it home).
+pub fn set_enabled(skill: &Skill, on: bool) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(skill.source.editable(), "{} skills are managed elsewhere", skill.source.label());
+    if on == skill.enabled {
+        return Ok(skill.dir.clone());
+    }
+    if on {
+        let origin = PathBuf::from(std::fs::read_to_string(skill.dir.join(ORIGIN_FILE))?.trim());
+        anyhow::ensure!(!origin.exists(), "A skill already exists at {}", origin.display());
+        if let Some(parent) = origin.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _ = std::fs::remove_file(skill.dir.join(ORIGIN_FILE));
+        move_dir(&skill.dir, &origin)?;
+        Ok(origin)
+    } else {
+        let root = disabled_root();
+        std::fs::create_dir_all(&root)?;
+        let folder = skill.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| skill.name.clone());
+        let mut dest = root.join(&folder);
+        let mut n = 2;
+        while dest.exists() {
+            dest = root.join(format!("{folder}-{n}"));
+            n += 1;
+        }
+        // A symlinked skill: move the link, not what it points at.
+        move_dir(&skill.dir, &dest)?;
+        std::fs::write(dest.join(ORIGIN_FILE), skill.dir.display().to_string()).or_else(|e| {
+            // A moved symlink to a read-only target: keep the origin beside it instead.
+            let _ = move_dir(&dest, &skill.dir);
+            Err(e)
+        })?;
+        Ok(dest)
+    }
+}
+
+fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // Different volume: copy, then remove.
+        Err(_) => {
+            let status = std::process::Command::new("/bin/cp").arg("-R").arg(from).arg(to).status()?;
+            anyhow::ensure!(status.success(), "Couldn't move {}", from.display());
+            std::fs::remove_dir_all(from)?;
+            Ok(())
+        }
+    }
+}
+
+/// Move a skill folder to the Trash.
+pub fn trash(skill: &Skill) -> anyhow::Result<()> {
+    anyhow::ensure!(skill.source.editable(), "{} skills are managed elsewhere", skill.source.label());
+    let status = std::process::Command::new("/usr/bin/trash").arg(&skill.dir).status()?;
+    anyhow::ensure!(status.success(), "Couldn't move {} to the Trash", skill.dir.display());
+    Ok(())
+}
+
+/// Copy a skill folder (one containing SKILL.md) into `home`.
+pub fn install_from(folder: &Path, home: SkillHome) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(folder.join("SKILL.md").exists(), "That folder has no SKILL.md");
+    let name = folder.file_name().ok_or_else(|| anyhow::anyhow!("Not a folder"))?;
+    let root = home.dir();
+    std::fs::create_dir_all(&root)?;
+    let dest = root.join(name);
+    anyhow::ensure!(!dest.exists(), "A skill named {} is already there", name.to_string_lossy());
+    let status = std::process::Command::new("/bin/cp").arg("-R").arg(folder).arg(&dest).status()?;
+    anyhow::ensure!(status.success(), "Couldn't copy the skill");
+    Ok(dest)
+}
+
+/// "Review PRs" → "review-prs".
+pub fn slug(name: &str) -> String {
+    let mut s = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_lowercase());
+        } else if !s.ends_with('-') && !s.is_empty() {
+            s.push('-');
+        }
+    }
+    s.trim_end_matches('-').to_string()
+}
+
+/// Create a new skill with a starter SKILL.md; returns the file to open.
+pub fn create(name: &str, description: &str, home: SkillHome) -> anyhow::Result<PathBuf> {
+    let slug = slug(name);
+    anyhow::ensure!(!slug.is_empty(), "Give the skill a name");
+    let dir = home.dir().join(&slug);
+    anyhow::ensure!(!dir.exists(), "A skill named {slug} already exists");
+    std::fs::create_dir_all(&dir)?;
+    let description = if description.trim().is_empty() { "Describe when an agent should use this skill." } else { description.trim() };
+    let md = dir.join("SKILL.md");
+    std::fs::write(
+        &md,
+        format!("---\nname: {slug}\ndescription: {description}\n---\n\n# {}\n\nWrite the instructions the agent should follow here.\n", name.trim()),
+    )?;
+    Ok(md)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn front_matter_and_fallbacks() {
+        let dir = std::env::temp_dir().join(format!("trek-skill-test-{}", std::process::id()));
+        let s = dir.join("my-skill");
+        std::fs::create_dir_all(&s).unwrap();
+        std::fs::write(s.join("SKILL.md"), "---\nname: grill-me\ndescription: \"Ask hard questions.\"\n---\nbody").unwrap();
+        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("grill-me".into(), "Ask hard questions.".into())));
+        std::fs::write(s.join("SKILL.md"), "# Title\n\nDoes a thing.").unwrap();
+        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("my-skill".into(), "Does a thing.".into())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slug("Review PRs!"), "review-prs");
+        assert_eq!(slug("  a  b "), "a-b");
+    }
+}

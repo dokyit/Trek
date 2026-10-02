@@ -260,6 +260,7 @@ impl Render for TrekWindow {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &NewThread, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx))))
+            .on_action(cx.listener(|this, _: &crate::TakeSnapshot, _, cx| this.composer.update(cx, |c, cx| c.snapshot_default(cx))))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.workspace.update(cx, |ws, cx| ws.open_folder(cx))))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::General), cx))

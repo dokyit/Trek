@@ -26,8 +26,10 @@ pub enum SettingsPage {
     General,
     Appearance,
     Notifications,
+    Snapshots,
     Shortcuts,
     Agents,
+    Skills,
     Tools,
     ApiKeys,
     LocalModels,
@@ -43,6 +45,8 @@ impl SettingsPage {
             SettingsPage::General => "General",
             SettingsPage::Appearance => "Appearance",
             SettingsPage::Notifications => "Notifications",
+            SettingsPage::Snapshots => "App Snapshots",
+            SettingsPage::Skills => "Skills",
             SettingsPage::Shortcuts => "Keyboard Shortcuts",
             SettingsPage::Agents => "Agents & Subscriptions",
             SettingsPage::Tools => "Tools & MCP",
@@ -303,6 +307,8 @@ impl Workspace {
             this.check_for_updates(false, cx);
         }
         this.start_housekeeping(cx);
+        let keep = this.settings.snapshots.keep_days;
+        cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
         this
     }
 

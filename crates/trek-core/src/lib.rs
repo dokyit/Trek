@@ -6,6 +6,7 @@ pub mod detect;
 pub mod import;
 pub mod paths;
 pub mod settings;
+pub mod skills;
 pub mod store;
 pub mod types;
 pub mod update;

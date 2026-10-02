@@ -230,28 +230,58 @@ impl Composer {
     }
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
+    /// The snapshot ⌘⇧S takes (Settings → App Snapshots).
+    pub fn snapshot_default(&mut self, cx: &mut Context<Self>) {
+        let mode = match self.workspace.read(cx).settings.snapshots.default_mode {
+            trek_core::settings::SnapshotMode::Window => "window",
+            trek_core::settings::SnapshotMode::Area => "area",
+            trek_core::settings::SnapshotMode::Screen => "screen",
+        };
+        self.snapshot(mode, cx);
+    }
+
+    /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
     fn snapshot(&mut self, mode: &'static str, cx: &mut Context<Self>) {
         if self.snapshotting {
             return;
         }
         self.snapshotting = true;
-        let path = mentions::snapshot_path();
+        let prefs = self.workspace.read(cx).settings.snapshots.clone();
+        let jpg = prefs.format == trek_core::settings::SnapshotFormat::Jpg;
+        let path = mentions::snapshot_path().with_extension(if jpg { "jpg" } else { "png" });
         let out = path.clone();
+        if prefs.hide_trek {
+            cx.hide();
+        }
         cx.spawn(async move |this, cx| {
+            if prefs.hide_trek {
+                // Let the window finish hiding before the picker appears.
+                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+            }
             let ok = cx
                 .background_executor()
                 .spawn(async move {
                     let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
                     match mode {
-                        "window" => cmd.args(["-i", "-W", "-o", "-x"]),
-                        "area" => cmd.args(["-i", "-s", "-x"]),
-                        _ => cmd.args(["-m", "-x"]),
+                        "window" => cmd.args(["-i", "-W"]),
+                        "area" => cmd.args(["-i", "-s"]),
+                        _ => cmd.arg("-m"),
                     };
+                    if mode == "window" && !prefs.window_shadow {
+                        cmd.arg("-o");
+                    }
+                    if !prefs.sound {
+                        cmd.arg("-x");
+                    }
+                    cmd.args(["-t", if jpg { "jpg" } else { "png" }]);
                     cmd.arg(&out).status().map(|s| s.success()).unwrap_or(false) && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.snapshotting = false;
+                if prefs.hide_trek {
+                    cx.activate(true);
+                }
                 if ok {
                     this.attachments.push(path);
                 }

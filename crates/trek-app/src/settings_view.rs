@@ -24,6 +24,8 @@ fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::General => Icon::new(IconName::Settings2),
         SettingsPage::Appearance => Icon::new(IconName::Palette),
         SettingsPage::Notifications => Icon::new(IconName::Bell),
+        SettingsPage::Snapshots => Icon::new(crate::assets::Lucide::Camera),
+        SettingsPage::Skills => Icon::new(crate::assets::Lucide::Sparkle),
         SettingsPage::Shortcuts => Icon::new(crate::assets::Lucide::Keyboard),
         SettingsPage::Agents => Icon::new(IconName::Bot),
         SettingsPage::Tools => Icon::new(crate::assets::Lucide::Plug),
@@ -37,8 +39,8 @@ fn page_icon(p: SettingsPage) -> Icon {
 }
 
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
-    ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Shortcuts]),
-    ("Agents", &[SettingsPage::Agents, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
+    ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Snapshots, SettingsPage::Shortcuts]),
+    ("Agents", &[SettingsPage::Agents, SettingsPage::Skills, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
     ("Workflow", &[SettingsPage::Permissions, SettingsPage::Import]),
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
@@ -48,6 +50,8 @@ fn page_blurb(p: SettingsPage) -> &'static str {
         SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.",
         SettingsPage::Appearance => "Theme, text size, background art and motion.",
         SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.",
+        SettingsPage::Snapshots => "Screenshots you attach from the composer’s + menu or with ⌘⇧S.",
+        SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.",
         SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.",
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.",
@@ -123,6 +127,12 @@ pub struct SettingsView {
     saved_keys: HashMap<&'static str, bool>,
     mcp_name: Entity<InputState>,
     mcp_command: Entity<InputState>,
+    /// Skills page: the last scan (None = scan on next render), filter, and new-skill fields.
+    skills: Option<Vec<trek_core::skills::Skill>>,
+    skill_filter: Entity<InputState>,
+    skill_name: Entity<InputState>,
+    skill_desc: Entity<InputState>,
+    skill_home: trek_core::skills::SkillHome,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -137,7 +147,30 @@ impl SettingsView {
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
         let mcp_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. npx -y @modelcontextprotocol/server-github"));
-        Self { workspace, key_inputs, saved_keys, mcp_name, mcp_command, _subscriptions: subs }
+        let skill_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter skills"));
+        let skill_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Review pull requests"));
+        let skill_desc = cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
+        let mut subs = subs;
+        subs.push(cx.observe(&skill_filter, |_, _, cx| cx.notify()));
+        // Rescan skills whenever the Skills page is opened.
+        subs.push(cx.observe(&workspace, |this: &mut Self, ws, cx| {
+            if ws.read(cx).route != Route::Settings(SettingsPage::Skills) {
+                this.skills = None;
+            }
+        }));
+        Self {
+            workspace,
+            key_inputs,
+            saved_keys,
+            mcp_name,
+            mcp_command,
+            skills: None,
+            skill_filter,
+            skill_name,
+            skill_desc,
+            skill_home: trek_core::skills::SkillHome::ClaudeCode,
+            _subscriptions: subs,
+        }
     }
 
     fn page(&self, cx: &App) -> SettingsPage {
@@ -558,6 +591,8 @@ impl SettingsView {
             SettingsPage::Shortcuts => out.extend(self.shortcuts_page(cx)),
             SettingsPage::Agents => out.extend(self.agents_page(cx)),
             SettingsPage::Tools => out.extend(self.tools_page(cx)),
+            SettingsPage::Skills => out.extend(self.skills_page(cx)),
+            SettingsPage::Snapshots => out.extend(self.snapshots_page(&s, cx)),
             SettingsPage::ApiKeys => out.extend(self.api_keys_page(cx)),
             SettingsPage::LocalModels => {
                 let ws = self.workspace.read(cx);

@@ -135,6 +135,27 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 /// Where snapshots are written before they're attached.
+/// Delete snapshots older than `keep_days` (0 keeps everything).
+pub fn prune_snapshots(keep_days: u32) {
+    if keep_days == 0 {
+        return;
+    }
+    let max_age = std::time::Duration::from_secs(keep_days as u64 * 86_400);
+    let Ok(entries) = std::fs::read_dir(trek_core::paths::data_dir().join("snapshots")) else { return };
+    for e in entries.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > max_age));
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// (count, total bytes) of saved snapshots.
+pub fn snapshot_usage() -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(trek_core::paths::data_dir().join("snapshots")) else { return (0, 0) };
+    entries.flatten().filter_map(|e| e.metadata().ok().filter(|m| m.is_file())).fold((0, 0), |(n, b), m| (n + 1, b + m.len()))
+}
+
 pub fn snapshot_path() -> PathBuf {
     let dir = trek_core::paths::data_dir().join("snapshots");
     let _ = std::fs::create_dir_all(&dir);

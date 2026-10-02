@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::catalog::DIRECT_PROVIDERS;
@@ -413,7 +413,7 @@ impl SettingsView {
             ("Threads", &[("New thread", &["⌘", "N"]), ("Open a folder", &["⌘", "O"]), ("Settle the current thread", &["⌘", "E"]), ("Stop the agent", &["⌘", "."])]),
             (
                 "Composer",
-                &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"])],
+                &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Take a snapshot", &["⌘", "⇧", "S"])],
             ),
             ("Window", &[("Toggle the sidebar", &["⌘", "B"]), ("Toggle the tools panel", &["⌘", "J"]), ("Settings", &["⌘", ","]), ("Hide Trek", &["⌘", "H"]), ("Minimize", &["⌘", "M"]), ("Quit", &["⌘", "Q"])]),
         ];
@@ -752,5 +752,302 @@ impl SettingsView {
                 cx,
             ),
         ]
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// App Snapshots and Skills
+
+impl SettingsView {
+    pub(super) fn snapshots_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use trek_core::settings::{SnapshotFormat, SnapshotMode};
+        let theme = cx.theme().clone();
+        let p = &s.snapshots;
+        let (count, bytes) = crate::mentions::snapshot_usage();
+        let size = match bytes {
+            b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+            b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
+            b => format!("{} KB", b / 1024),
+        };
+        let folder = trek_core::paths::data_dir().join("snapshots");
+        let sr = crate::integrations::screen_recording_allowed();
+        let reveal = {
+            let f = folder.clone();
+            Button::new("snap-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| {
+                let _ = std::fs::create_dir_all(&f);
+                cx.open_with_system(&f)
+            })
+        };
+        let clear = Button::new("snap-clear").small().ghost().label("Clear").disabled(count == 0).on_click(cx.listener(|_, _, window, cx| {
+            if let Ok(entries) = std::fs::read_dir(trek_core::paths::data_dir().join("snapshots")) {
+                for e in entries.flatten() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+            window.push_notification("Snapshots cleared", cx);
+            cx.notify();
+        }));
+        let permission: AnyElement = if sr {
+            Self::status_dot(palette::emerald(cx), "Allowed")
+        } else {
+            Button::new("snap-perm").small().outline().label("Allow Screen Recording").on_click(|_, _, cx| cx.open_url(crate::integrations::SCREEN_RECORDING_PANE)).into_any_element()
+        };
+        vec![
+            ui::group(
+                vec![
+                    Self::row(
+                        "⌘⇧S takes",
+                        "The + menu in the composer offers all three.",
+                        ui::segmented(
+                            "snap-mode",
+                            vec![(SnapshotMode::Window, "A window"), (SnapshotMode::Area, "An area"), (SnapshotMode::Screen, "The screen")],
+                            p.default_mode,
+                            self.setter(|s, v| s.snapshots.default_mode = v),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    Self::row("Hide Trek while capturing", "Trek steps aside so you can pick the window behind it.", self.switch("snap-hide", p.hide_trek, |s, v| s.snapshots.hide_trek = v), cx),
+                    Self::row("Window shadow", "Keep macOS's drop shadow around window snapshots.", self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
+                    Self::row("Shutter sound", "", self.switch("snap-sound", p.sound, |s, v| s.snapshots.sound = v), cx),
+                    Self::row(
+                        "Format",
+                        "PNG is sharp for UI; JPEG is smaller for photos and busy screens.",
+                        ui::segmented("snap-format", vec![(SnapshotFormat::Png, "PNG"), (SnapshotFormat::Jpg, "JPEG")], p.format, self.setter(|s, v| s.snapshots.format = v), cx),
+                        cx,
+                    ),
+                ],
+                cx,
+            ),
+            Self::heading("Storage", cx),
+            ui::group(
+                vec![
+                    Self::row(
+                        "Keep snapshots",
+                        "Older ones are deleted when Trek starts. Messages that used them keep their text.",
+                        ui::segmented(
+                            "snap-keep",
+                            vec![(1u32, "1 day"), (7, "1 week"), (14, "2 weeks"), (30, "1 month"), (0, "Forever")],
+                            p.keep_days,
+                            self.setter(|s, v| s.snapshots.keep_days = v),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    Self::row(
+                        "Snapshot folder",
+                        if count == 0 { "Empty".to_string() } else { format!("{count} snapshot{} · {size}", if count == 1 { "" } else { "s" }) },
+                        h_flex().gap(px(6.)).child(clear).child(reveal),
+                        cx,
+                    ),
+                ],
+                cx,
+            ),
+            Self::heading("Permission", cx),
+            ui::group(vec![Self::row("Screen Recording", "macOS asks once; snapshots of other apps need it.", permission, cx)], cx),
+            div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element(),
+        ]
+    }
+
+    pub(super) fn skills_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use trek_core::skills::{self, SkillHome, SkillSource};
+        let theme = cx.theme().clone();
+        if self.skills.is_none() {
+            let project = self.workspace.read(cx).current_cwd();
+            self.skills = Some(skills::discover(project.as_deref()));
+        }
+        let all = self.skills.clone().unwrap_or_default();
+        let q = self.skill_filter.read(cx).value().to_lowercase();
+        let shown: Vec<_> = all.iter().filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)).cloned().collect();
+        let off = all.iter().filter(|s| !s.enabled).count();
+
+        // Toolbar: filter, add from a folder, new skill.
+        let view = cx.entity();
+        let add = Button::new("skill-add").small().outline().icon(IconName::FolderOpen).label("Add from folder").dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            let mut menu = menu.min_w(px(220.)).label("Copy the skill into…");
+            for (home, label) in [(SkillHome::ClaudeCode, "Claude Code"), (SkillHome::Codex, "Codex"), (SkillHome::Shared, "All agents (~/.agents)")] {
+                let view = view.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| view.update(cx, |this, cx| this.add_skill_from_folder(home, cx))));
+            }
+            menu
+        });
+        let new = Button::new("skill-new").small().primary().icon(IconName::Plus).label("New skill").on_click(cx.listener(|this, _, window, cx| this.open_new_skill(window, cx)));
+        let toolbar = h_flex()
+            .gap(px(8.))
+            .pb(px(20.))
+            .child(div().flex_1().child(Input::new(&self.skill_filter).small().prefix(Icon::new(IconName::Search).size(px(14.)).text_color(theme.muted_foreground))))
+            .child(add)
+            .child(new)
+            .into_any_element();
+
+        let mut out = vec![toolbar];
+        out.push(
+            div()
+                .pb(px(4.))
+                .text_size(px(12.5))
+                .text_color(theme.muted_foreground)
+                .child(format!("{} skills{}", all.len(), if off > 0 { format!(" · {off} off") } else { String::new() }))
+                .into_any_element(),
+        );
+        // Group by source, editable homes first.
+        let mut order: Vec<SkillSource> = vec![SkillSource::ClaudeCode, SkillSource::Codex, SkillSource::Shared, SkillSource::Project];
+        for s in &shown {
+            if !order.contains(&s.source) {
+                order.push(s.source.clone());
+            }
+        }
+        for source in order {
+            let group: Vec<_> = shown.iter().filter(|s| s.source == source).cloned().collect();
+            if group.is_empty() {
+                continue;
+            }
+            out.push(Self::heading(&source.label(), cx));
+            let rows = group.into_iter().enumerate().map(|(i, skill)| self.skill_row(i, skill, cx)).collect();
+            out.push(ui::group(rows, cx));
+        }
+        if shown.is_empty() {
+            out.push(div().py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child(if all.is_empty() { "No skills yet. Create one, or add a folder that contains a SKILL.md." } else { "No skills match." }).into_any_element());
+        }
+        out
+    }
+
+    fn skill_row(&mut self, i: usize, skill: trek_core::skills::Skill, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let key = format!("{}-{}", skill.source.label(), i);
+        let editable = skill.source.editable();
+        let title = h_flex()
+            .gap(px(8.))
+            .child(div().text_size(px(13.5)).font_medium().when(!skill.enabled, |el| el.text_color(theme.muted_foreground)).child(skill.name.clone()));
+        let desc: String = skill.description.chars().take(120).collect::<String>() + if skill.description.chars().count() > 120 { "…" } else { "" };
+        let md = skill.skill_md();
+        let dir = skill.dir.clone();
+        let view = cx.entity();
+        let s2 = skill.clone();
+        let more = Button::new(SharedString::from(format!("skill-more-{key}")))
+            .ghost()
+            .small()
+            .icon(Icon::new(IconName::Ellipsis).text_color(theme.muted_foreground))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let (md, dir, view, s2) = (md.clone(), dir.clone(), view.clone(), s2.clone());
+                let mut menu = menu
+                    .min_w(px(190.))
+                    .item(PopupMenuItem::new("Open SKILL.md").on_click(move |_, _, cx| cx.open_with_system(&md)))
+                    .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&dir)));
+                if s2.source.editable() {
+                    menu = menu.separator().item(PopupMenuItem::new("Move to Trash").icon(IconName::Delete).on_click(move |_, window, cx| {
+                        let s3 = s2.clone();
+                        let view = view.clone();
+                        window.open_alert_dialog(cx, move |alert, _, _| {
+                            let (s4, view) = (s3.clone(), view.clone());
+                            alert
+                                .title(format!("Move “{}” to the Trash?", s3.name))
+                                .description("Every agent stops loading it. You can restore it from the Trash.")
+                                .confirm()
+                                .ok_text("Move to Trash")
+                                .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                                .on_ok(move |_, window, cx| {
+                                    match trek_core::skills::trash(&s4) {
+                                        Ok(()) => window.push_notification(format!("Moved {} to the Trash", s4.name), cx),
+                                        Err(e) => window.push_notification(format!("{e}"), cx),
+                                    }
+                                    view.update(cx, |this, cx| this.skills_changed(cx));
+                                    true
+                                })
+                        });
+                    }));
+                }
+                menu
+            });
+        let trailing: AnyElement = if editable {
+            let s2 = skill.clone();
+            Switch::new(SharedString::from(format!("skill-on-{key}")))
+                .checked(skill.enabled)
+                .on_click(cx.listener(move |this, v: &bool, window, cx| {
+                    if let Err(e) = trek_core::skills::set_enabled(&s2, *v) {
+                        window.push_notification(format!("{e}"), cx);
+                    }
+                    this.skills_changed(cx);
+                }))
+                .into_any_element()
+        } else {
+            div().text_size(px(12.)).text_color(theme.muted_foreground).child("Read-only").into_any_element()
+        };
+        Self::row(title, desc, h_flex().gap(px(6.)).child(more).child(div().pl(px(4.)).child(trailing)), cx)
+    }
+
+    /// Rescan, and have the agents' command lists (the `$` picker) pick the change up.
+    fn skills_changed(&mut self, cx: &mut Context<Self>) {
+        self.skills = None;
+        self.workspace.update(cx, |ws, cx| {
+            ws.status_fetched_at = 0;
+            ws.refresh_usage(cx);
+        });
+        cx.notify();
+    }
+
+    fn add_skill_from_folder(&mut self, home: trek_core::skills::SkillHome, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: true, prompt: Some("Add Skill".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let errors: Vec<String> = paths.iter().filter_map(|p| trek_core::skills::install_from(p, home).err().map(|e| e.to_string())).collect();
+            let _ = this.update(cx, |this, cx| {
+                if let Some(e) = errors.first() {
+                    this.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: e.clone(), undo: None }));
+                }
+                this.skills_changed(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn open_new_skill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use trek_core::skills::SkillHome;
+        let (name, desc) = (self.skill_name.clone(), self.skill_desc.clone());
+        let view = cx.entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let home = view.read(cx).skill_home;
+            let (name2, desc2, view2) = (name.clone(), desc.clone(), view.clone());
+            let pick = {
+                let view = view.clone();
+                move |h: SkillHome, _: &mut Window, cx: &mut App| view.update(cx, |this, cx| {
+                    this.skill_home = h;
+                    cx.notify();
+                })
+            };
+            dialog
+                .title("New skill")
+                .w(px(480.))
+                .child(
+                    v_flex()
+                        .gap(px(12.))
+                        .child(Input::new(&name))
+                        .child(Input::new(&desc))
+                        .child(
+                            h_flex()
+                                .gap(px(10.))
+                                .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child("Save to"))
+                                .child(ui::segmented("skill-home", vec![(SkillHome::ClaudeCode, "Claude Code"), (SkillHome::Codex, "Codex"), (SkillHome::Shared, "All agents")], home, pick, cx)),
+                        ),
+                )
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new()
+                        .gap_2()
+                        .child(gpui_kit::component::dialog::DialogClose::new().child(Button::new("skill-cancel").outline().label("Cancel")))
+                        .child(gpui_kit::component::dialog::DialogAction::new().child(Button::new("skill-create").primary().label("Create and open").on_click(move |_, window, cx| {
+                            let n = name2.read(cx).value().to_string();
+                            let d = desc2.read(cx).value().to_string();
+                            let home = view2.read(cx).skill_home;
+                            match trek_core::skills::create(&n, &d, home) {
+                                Ok(md) => {
+                                    cx.open_with_system(&md);
+                                    name2.update(cx, |s, cx| s.set_value("", window, cx));
+                                    desc2.update(cx, |s, cx| s.set_value("", window, cx));
+                                }
+                                Err(e) => window.push_notification(format!("{e}"), cx),
+                            }
+                            view2.update(cx, |this, cx| this.skills_changed(cx));
+                        }))),
+                )
+        });
     }
 }
