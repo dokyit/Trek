@@ -61,6 +61,12 @@ fn color(c: vt100::Color) -> Option<Hsla> {
 
 impl TerminalPanel {
     pub fn new(cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+        Self::with_command(cwd, None, cx)
+    }
+
+    /// A terminal that runs one command in a login shell (agent install / sign-in), shows its output
+    /// and stays open after it exits.
+    pub fn with_command(cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> Self {
         let size = (30u16, 90u16);
         let mut this = Self {
             parser: vt100::Parser::new(size.0, size.1, 2000),
@@ -73,17 +79,24 @@ impl TerminalPanel {
             on_exit: None,
             _reader: None,
         };
-        if let Err(e) = this.spawn(cwd, cx) {
+        if let Err(e) = this.spawn(cwd, command, cx) {
             this.parser.process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
         }
         this
     }
 
-    fn spawn(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    fn spawn(&mut self, cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let pty = native_pty_system().openpty(PtySize { rows: self.size.0, cols: self.size.1, pixel_width: 0, pixel_height: 0 })?;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let mut cmd = CommandBuilder::new(shell);
         cmd.arg("-l");
+        if let Some(c) = &command {
+            let quoted = format!("'{}'", c.replace('\'', "'\\''"));
+            cmd.arg("-c");
+            cmd.arg(format!(
+                "printf '\\033[1m$ %s\\033[0m\\n\\n' {quoted}; {c}; code=$?; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $code; exit $code"
+            ));
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "Trek");
@@ -134,11 +147,9 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// Type a one-off command into the shell, which exits when it's done so `on_exit` fires.
-    pub fn run_once(&mut self, command: &str, on_exit: impl FnOnce(&mut App) + 'static) {
-        self.on_exit = Some(Box::new(on_exit));
-        let line = format!("{command}; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $?; exit\r");
-        self.write(line.as_bytes());
+    /// Runs once when the process exits.
+    pub fn on_exit(&mut self, f: impl FnOnce(&mut App) + 'static) {
+        self.on_exit = Some(Box::new(f));
     }
 
     fn write(&mut self, bytes: &[u8]) {
