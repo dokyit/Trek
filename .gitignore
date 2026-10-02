@@ -2,3 +2,7 @@ target/
 .ref/
 .DS_Store
 dist/
+
+# Private notes and research (kept local, not published)
+reports/
+research_notes/
