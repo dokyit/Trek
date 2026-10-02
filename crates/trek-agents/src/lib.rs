@@ -5,8 +5,10 @@
 mod claude;
 mod codex;
 mod direct;
+mod status;
 
 pub use codex::list_models as codex_models;
+pub use status::{AgentStatus, CommandKind, SlashCommand, UsageLimit, claude_status, codex_status};
 
 use std::path::PathBuf;
 use trek_core::{AgentId, Effort, HandHolding};
@@ -23,6 +25,31 @@ pub struct SessionConfig {
     pub resume: Option<String>,
     /// Fast mode: Claude `fastMode`, or the Codex service tier to use.
     pub fast: Option<String>,
+    /// Extra MCP servers (stdio) to attach to the session, on top of the agent's own config.
+    pub mcp_servers: Vec<McpServer>,
+}
+
+/// A stdio MCP server Trek adds to a session.
+#[derive(Debug, Clone)]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl McpServer {
+    /// `{command, args, env}` — the shape both Claude's `mcpServers` and Codex's `mcp_servers` use.
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        let env: serde_json::Map<String, serde_json::Value> =
+            self.env.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
+        serde_json::json!({ "command": self.command, "args": self.args, "env": env })
+    }
+}
+
+/// `{name: {command, args, env}, ...}` for a set of servers.
+pub(crate) fn mcp_servers_json(servers: &[McpServer]) -> serde_json::Value {
+    serde_json::Value::Object(servers.iter().map(|s| (s.name.clone(), s.to_json())).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +61,8 @@ pub enum Decision {
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    Prompt(String),
+    /// A user message; `images` are local image files attached before the text.
+    Prompt { text: String, images: Vec<PathBuf> },
     Interrupt,
     Respond { request_id: String, decision: Decision },
     SetHandHolding(HandHolding),
@@ -57,6 +85,8 @@ pub enum AgentEvent {
     /// A diff stat for the turn, when the agent reports one.
     DiffStat { additions: i64, deletions: i64 },
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
+    /// Tokens currently in the context window, and the window size.
+    Context { used: u64, window: u64 },
     Error(String),
     Exited,
 }
@@ -111,6 +141,21 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
+}
+
+/// Read a local image as `(media_type, base64 data)`.
+pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str, String)> {
+    use base64::Engine as _;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let media_type = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        other => anyhow::bail!("unsupported image type .{other} ({})", path.display()),
+    };
+    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("can't read image {}: {e}", path.display()))?;
+    Ok((media_type, base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 #[cfg(test)]

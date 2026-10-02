@@ -1,7 +1,8 @@
 //! Direct providers (API keys and local servers). Phase 1 is streaming chat with full history;
 //! Trek's own tool loop (read/edit/bash with the hand-holding gates) lands in phase 2.
 
-use crate::{AgentEvent, Command, SessionConfig};
+use crate::{AgentEvent, Command, SessionConfig, load_image};
+use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -34,8 +35,12 @@ pub async fn run(
 
     while let Ok(cmd) = commands.recv().await {
         match cmd {
-            Command::Prompt(text) => {
-                history.push(json!({ "role": "user", "content": text }));
+            Command::Prompt { text, images } => {
+                let (message, errors) = user_message(provider.wire, &text, &images);
+                for e in errors {
+                    events.send(AgentEvent::Error(e)).await?;
+                }
+                history.push(message);
                 let result = match provider.wire {
                     Wire::Anthropic => anthropic_turn(&client, key.as_deref().unwrap_or_default(), &model, effort, &history, &events, &commands).await,
                     _ => openai_turn(&client, provider.base_url, key.as_deref(), provider.local, &model, effort, &history, &events, &commands).await,
@@ -60,6 +65,37 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// A user message for `wire`. Without images the content is a plain string; with images it's
+/// Anthropic image blocks before the text, or OpenAI `image_url` data URLs after it.
+/// Unreadable images are skipped and reported.
+fn user_message(wire: Wire, text: &str, images: &[PathBuf]) -> (Value, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut loaded = Vec::new();
+    for path in images {
+        match load_image(path) {
+            Ok(img) => loaded.push(img),
+            Err(e) => errors.push(format!("{e:#}")),
+        }
+    }
+    if loaded.is_empty() {
+        return (json!({ "role": "user", "content": text }), errors);
+    }
+    let content: Vec<Value> = match wire {
+        Wire::Anthropic => loaded
+            .into_iter()
+            .map(|(media_type, data)| json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": data } }))
+            .chain([json!({ "type": "text", "text": text })])
+            .collect(),
+        _ => [json!({ "type": "text", "text": text })]
+            .into_iter()
+            .chain(loaded.into_iter().map(|(media_type, data)| {
+                json!({ "type": "image_url", "image_url": { "url": format!("data:{media_type};base64,{data}") } })
+            }))
+            .collect(),
+    };
+    (json!({ "role": "user", "content": content }), errors)
 }
 
 /// Split an SSE byte stream into `data:` payloads.
@@ -264,6 +300,25 @@ mod tests {
         let mut buf = "data: {\"a\":1}\n\ndata: [DONE]\n\ndata: {\"b\"".to_string();
         assert_eq!(sse_events(&mut buf), vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]);
         assert_eq!(buf, "data: {\"b\"");
+    }
+
+    #[test]
+    fn user_message_attaches_images_per_wire() {
+        let dir = std::env::temp_dir().join(format!("trek-direct-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jpg = dir.join("a.JPG");
+        std::fs::write(&jpg, b"abc").unwrap();
+        let (plain, _) = user_message(Wire::Anthropic, "hi", &[]);
+        assert_eq!(plain, json!({"role":"user","content":"hi"}));
+        let (a, errs) = user_message(Wire::Anthropic, "hi", &[jpg.clone()]);
+        assert!(errs.is_empty());
+        assert_eq!(a["content"][0], json!({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"YWJj"}}));
+        assert_eq!(a["content"][1], json!({"type":"text","text":"hi"}));
+        let (o, _) = user_message(Wire::OpenAiChat, "hi", &[jpg]);
+        assert_eq!(o["content"][1], json!({"type":"image_url","image_url":{"url":"data:image/jpeg;base64,YWJj"}}));
+        let (missing, errs) = user_message(Wire::OpenAiChat, "hi", &[dir.join("nope.png")]);
+        assert_eq!((missing["content"].as_str(), errs.len()), (Some("hi"), 1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

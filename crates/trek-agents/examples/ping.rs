@@ -1,4 +1,4 @@
-//! End-to-end: `cargo run -p trek-agents --example ping -- claude|codex`
+//! End-to-end: `cargo run -p trek-agents --example ping -- claude|codex [image.png]`
 use trek_agents::{AgentEvent, Command, SessionConfig, start};
 use trek_core::{AgentId, Effort, HandHolding};
 
@@ -10,10 +10,12 @@ fn main() {
     };
     let h = start(SessionConfig {
         agent, cwd: "/tmp/trek-e2e".into(), model: Some(model.into()), effort: Effort::Low,
-        hand_holding: HandHolding::Supervised, plan: false, resume: None, fast: None,
+        hand_holding: HandHolding::Supervised, plan: false, resume: None, fast: None, mcp_servers: vec![],
     });
     trek_core::runtime().block_on(async {
-        h.commands.send(Command::Prompt("Reply with just the word: pong".into())).await.unwrap();
+        let images: Vec<std::path::PathBuf> = std::env::args().skip(2).map(Into::into).collect();
+        let text = if images.is_empty() { "Reply with just the word: pong" } else { "Reply with just the main color of the image." };
+        h.commands.send(Command::Prompt { text: text.into(), images }).await.unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
         while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, h.events.recv()).await {
             match &ev {

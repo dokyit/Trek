@@ -1,10 +1,11 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, clip};
+use crate::{AgentEvent, Command, Decision, SessionConfig, clip, load_image, mcp_servers_json};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use trek_core::{Effort, detect};
@@ -59,6 +60,17 @@ pub async fn run(
     if config.fast.is_some() {
         cmd.args(["--settings", r#"{"fastMode":true}"#]);
     }
+    // Lives as long as the session; removed on drop.
+    let _mcp_file = if config.mcp_servers.is_empty() {
+        None
+    } else {
+        let file = TempFile::write(
+            "mcp",
+            &serde_json::to_string(&json!({ "mcpServers": mcp_servers_json(&config.mcp_servers) }))?,
+        )?;
+        cmd.arg("--mcp-config").arg(&file.0);
+        Some(file)
+    };
     cmd.current_dir(&config.cwd)
         .env("PATH", detect::login_path())
         .stdin(Stdio::piped())
@@ -85,7 +97,11 @@ pub async fn run(
         }
         json!({ "type": "control_request", "request_id": format!("trek-{next_id}"), "request": request })
     };
-    write_line(&mut stdin, &req("initialize", json!({}))).await?;
+    let init = req("initialize", json!({}));
+    let init_id = init["request_id"].as_str().unwrap_or_default().to_string();
+    write_line(&mut stdin, &init).await?;
+    // Outstanding `get_context_usage` requests; their responses become `Context` events.
+    let mut context_requests: HashSet<String> = HashSet::new();
 
     // Inputs of pending permission requests, echoed back as `updatedInput` on allow.
     let mut pending: HashMap<String, Value> = HashMap::new();
@@ -96,11 +112,15 @@ pub async fn run(
             cmd = commands.recv() => {
                 let Ok(cmd) = cmd else { break };
                 match cmd {
-                    Command::Prompt(text) => {
+                    Command::Prompt { text, images } => {
                         streamed_text = false;
+                        let (content, errors) = user_content(&text, &images);
+                        for e in errors {
+                            let _ = events.send(AgentEvent::Error(e)).await;
+                        }
                         let msg = json!({
                             "type": "user", "session_id": "",
-                            "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+                            "message": { "role": "user", "content": content },
                             "parent_tool_use_id": null
                         });
                         write_line(&mut stdin, &msg).await?;
@@ -130,10 +150,32 @@ pub async fn run(
             line = stdout.next_line() => {
                 let Some(line) = line? else { break };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if v["type"] == "control_response" {
+                    let r = &v["response"];
+                    let id = r["request_id"].as_str().unwrap_or_default();
+                    if id == init_id {
+                        // Ask for context usage up front so the UI has data before the first prompt.
+                        let c = req("get_context_usage", json!({}));
+                        context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
+                        write_line(&mut stdin, &c).await?;
+                    } else if context_requests.remove(id) {
+                        if let Some(ev) = context_event(r) {
+                            if events.send(ev).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    continue;
+                }
                 for ev in translate(&v, &mut pending, &mut streamed_text) {
                     if events.send(ev).await.is_err() {
                         return Ok(());
                     }
+                }
+                if v["type"] == "result" {
+                    let c = req("get_context_usage", json!({}));
+                    context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
+                    write_line(&mut stdin, &c).await?;
                 }
             }
         }
@@ -148,6 +190,51 @@ async fn write_line(stdin: &mut tokio::process::ChildStdin, v: &Value) -> Result
     stdin.write_all(s.as_bytes()).await?;
     stdin.flush().await?;
     Ok(())
+}
+
+/// Message content for a prompt: image blocks first, then the text. Unreadable images are
+/// skipped and reported.
+fn user_content(text: &str, images: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
+    let mut content = Vec::new();
+    let mut errors = Vec::new();
+    for path in images {
+        match load_image(path) {
+            Ok((media_type, data)) => content.push(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": media_type, "data": data }
+            })),
+            Err(e) => errors.push(format!("{e:#}")),
+        }
+    }
+    content.push(json!({ "type": "text", "text": text }));
+    (content, errors)
+}
+
+/// `Context` from a `get_context_usage` control response (`{subtype, request_id, response}`).
+fn context_event(r: &Value) -> Option<AgentEvent> {
+    if r["subtype"] != "success" {
+        return None;
+    }
+    let body = &r["response"];
+    Some(AgentEvent::Context { used: body["totalTokens"].as_u64()?, window: body["maxTokens"].as_u64()? })
+}
+
+/// A temp file removed on drop.
+struct TempFile(PathBuf);
+
+impl TempFile {
+    fn write(tag: &str, contents: &str) -> Result<Self> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("trek-{tag}-{}-{nanos}.json", std::process::id()));
+        std::fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mut bool) -> Vec<AgentEvent> {
@@ -251,6 +338,38 @@ mod tests {
         assert_eq!(
             translate(&result, &mut pending, &mut streamed),
             vec![AgentEvent::TurnComplete { cost_usd: Some(0.12), error: None }]
+        );
+    }
+
+    #[test]
+    fn context_usage_response_becomes_context_event() {
+        let r = json!({"subtype":"success","request_id":"trek-2","response":{"totalTokens":15568,"maxTokens":1000000,"percentage":2}});
+        assert_eq!(context_event(&r), Some(AgentEvent::Context { used: 15568, window: 1_000_000 }));
+        assert_eq!(context_event(&json!({"subtype":"error","request_id":"x","error":"nope"})), None);
+    }
+
+    #[test]
+    fn user_content_puts_images_before_text() {
+        let dir = std::env::temp_dir().join(format!("trek-img-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
+        let (content, errors) = user_content("look", &[png, dir.join("missing.png"), dir.join("x.bmp")]);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "iVBORw==");
+        assert_eq!(content[1], json!({"type":"text","text":"look"}));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mcp_config_shape() {
+        let servers = [crate::McpServer { name: "fs".into(), command: "npx".into(), args: vec!["-y".into(), "srv".into()], env: vec![("K".into(), "v".into())] }];
+        assert_eq!(
+            json!({ "mcpServers": mcp_servers_json(&servers) }),
+            json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})
         );
     }
 }
