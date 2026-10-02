@@ -8462,6 +8462,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-mcp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "serde_json",
+]
+
+[[package]]
 name = "triomphe"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
