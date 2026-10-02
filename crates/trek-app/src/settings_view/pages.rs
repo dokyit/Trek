@@ -284,42 +284,25 @@ impl SettingsView {
     }
 
     pub(super) fn appearance_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let ui_size = match s.appearance.ui_font_size {
-            v if v < 12.75 => 0u8,
-            v if v < 13.75 => 1,
-            _ => 2,
-        };
-        let text_size = match s.appearance.transcript_font_size {
-            v if v < 13.5 => 0u8,
-            v if v < 14.75 => 1,
-            v if v < 16.25 => 2,
+        let text_size = match s.appearance.transcript_font_size() {
+            v if v < 14.0 => 0u8,
+            v if v < 15.25 => 1,
+            v if v < 16.75 => 2,
             _ => 3,
         };
         vec![
             self.theme_tiles(s.appearance.theme, cx),
-            Self::heading("Text", cx),
+            Self::heading("Text size", cx),
             ui::group(
                 vec![
                     Self::row(
-                        "Interface",
-                        "Sidebar, menus and settings.",
-                        ui::segmented(
-                            "ui-size",
-                            vec![(0u8, "Small"), (1, "Default"), (2, "Large")],
-                            ui_size,
-                            self.setter(|s, v: u8| s.appearance.ui_font_size = [12.0, 13.0, 14.0][v as usize]),
-                            cx,
-                        ),
-                        cx,
-                    ),
-                    Self::row(
-                        "Conversation",
+                        "Conversation text",
                         "Messages from you and your agents.",
                         ui::segmented(
                             "text-size",
                             vec![(0u8, "Small"), (1, "Default"), (2, "Large"), (3, "Larger")],
                             text_size,
-                            self.setter(|s, v: u8| s.appearance.transcript_font_size = [13.0, 14.0, 15.5, 17.0][v as usize]),
+                            self.setter(|s, v: u8| s.appearance.transcript_font_size = [13.5, 14.5, 16.0, 17.5][v as usize]),
                             cx,
                         ),
                         cx,
