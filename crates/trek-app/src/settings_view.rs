@@ -1,9 +1,11 @@
-//! Settings. A nav column replaces the thread sidebar (as in Codex); pages are grouped cards.
+//! Settings. A nav column replaces the thread sidebar (as in Codex). Pages are flat sections of
+//! hairline-separated rows: a label and one-line explanation on the left, the control on the right.
 
-use crate::brand;
+mod pages;
+
 use crate::palette;
 use crate::ui;
-use crate::workspace::{Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
+use crate::workspace::{Route, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -14,13 +16,15 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use trek_core::catalog::DIRECT_PROVIDERS;
 use trek_core::detect::Availability;
-use trek_core::settings::{BackgroundPlacement, Channel, FollowUp, Settings, ThemeChoice, secrets};
-use trek_core::{AgentId, HandHolding};
+use trek_core::settings::{Settings, secrets};
+use trek_core::AgentId;
 
 fn page_icon(p: SettingsPage) -> Icon {
     match p {
         SettingsPage::General => Icon::new(IconName::Settings2),
         SettingsPage::Appearance => Icon::new(IconName::Palette),
+        SettingsPage::Notifications => Icon::new(IconName::Bell),
+        SettingsPage::Shortcuts => Icon::new(crate::assets::Lucide::Keyboard),
         SettingsPage::Agents => Icon::new(IconName::Bot),
         SettingsPage::Tools => Icon::new(crate::assets::Lucide::Plug),
         SettingsPage::ApiKeys => Icon::new(crate::assets::Lucide::Lock),
@@ -34,25 +38,26 @@ fn page_icon(p: SettingsPage) -> Icon {
 }
 
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
-    ("App", &[SettingsPage::General, SettingsPage::Appearance]),
-    ("Models", &[SettingsPage::Agents, SettingsPage::ApiKeys, SettingsPage::LocalModels]),
-    ("Tools", &[SettingsPage::Tools]),
+    ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Shortcuts]),
+    ("Agents", &[SettingsPage::Agents, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
     ("Workflow", &[SettingsPage::Permissions, SettingsPage::Inbox, SettingsPage::Import]),
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
 
 fn page_blurb(p: SettingsPage) -> &'static str {
     match p {
-        SettingsPage::General => "Defaults for new threads and how Trek behaves while agents work.",
-        SettingsPage::Appearance => "Theme, background art and motion.",
-        SettingsPage::Agents => "Coding agents on this Mac and the plans they're signed in with.",
+        SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.",
+        SettingsPage::Appearance => "Theme, text size, background art and motion.",
+        SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.",
+        SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.",
+        SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.",
-        SettingsPage::ApiKeys => "Use a provider directly with your own API key.",
+        SettingsPage::ApiKeys => "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically.",
         SettingsPage::LocalModels => "Models running on this Mac.",
         SettingsPage::Permissions => "How much each agent may do without asking.",
         SettingsPage::Inbox => "When finished threads leave the inbox.",
         SettingsPage::Import => "Bring in threads from other agents on this Mac.",
-        SettingsPage::Updates => "Trek updates itself in the background.",
+        SettingsPage::Updates => "Trek checks for updates and installs them when you restart.",
         SettingsPage::About => "",
     }
 }
@@ -81,31 +86,30 @@ impl Render for SettingsNav {
             .w(px(crate::root::SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
-            .px_2()
-            .pt_1()
-            .gap(px(2.))
+            .px(px(10.))
+            .pt(px(4.))
+            .gap(px(1.))
             .when(self.workspace.read(cx).backdrop().is_none(), |el| el.bg(theme.sidebar))
             .child(
                 h_flex()
                     .id("settings-back")
-                    .mx_1()
-                    .px_2()
-                    .h(px(32.))
-                    .gap_2()
-                    .rounded(px(8.))
+                    .px(px(10.))
+                    .h(px(30.))
+                    .gap(px(10.))
+                    .rounded(px(7.))
                     .cursor_pointer()
-                    .text_sm()
+                    .text_size(px(13.))
                     .text_color(theme.muted_foreground)
-                    .hover(|s| s.bg(theme.list_hover).text_color(theme.foreground))
-                    .child(Icon::new(IconName::ArrowLeft).small())
-                    .child("Back to app")
+                    .hover(|s| s.bg(theme.foreground.opacity(0.045)).text_color(theme.foreground))
+                    .child(Icon::new(IconName::ArrowLeft).size(px(15.)))
+                    .child("Back to threads")
                     .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx)))),
             )
             .children(NAV_GROUPS.iter().map(|(group, pages)| {
                 v_flex()
-                    .pt(px(16.))
-                    .gap(px(2.))
-                    .child(div().px(px(12.)).pb(px(4.)).text_xs().text_color(theme.muted_foreground).child(*group))
+                    .pt(px(20.))
+                    .gap(px(1.))
+                    .child(div().px(px(10.)).pb(px(6.)).text_size(px(11.5)).font_medium().text_color(theme.muted_foreground.opacity(0.8)).child(*group))
                     .children(pages.iter().map(|&p| {
                         let label: &'static str = p.label();
                         ui::nav_row(label, page_icon(p), label, None, p == current, cx)
@@ -160,17 +164,17 @@ impl SettingsView {
         let description: SharedString = description.into();
         h_flex()
             .w_full()
-            .min_h(px(56.))
-            .gap(px(24.))
-            .py(px(12.))
+            .min_h(px(52.))
+            .gap(px(32.))
+            .py(px(13.))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(2.))
-                    .child(div().text_size(px(14.)).font_medium().child(title))
+                    .gap(px(3.))
+                    .child(div().text_size(px(13.5)).font_medium().child(title))
                     .when(!description.is_empty(), |el| {
-                        el.child(div().text_size(px(12.5)).line_height(relative(1.45)).text_color(cx.theme().muted_foreground).child(description))
+                        el.child(div().max_w(px(460.)).text_size(px(12.5)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(description))
                     }),
             )
             .child(div().flex_none().child(control))
@@ -184,15 +188,15 @@ impl SettingsView {
 
     /// Section heading: more space above than below (rhythm), real weight instead of an eyebrow.
     fn heading(text: &str, cx: &App) -> AnyElement {
-        div().pt(px(32.)).pb(px(8.)).px(px(4.)).text_size(px(14.)).font_semibold().text_color(cx.theme().foreground).child(text.to_string()).into_any_element()
+        div().pt(px(36.)).pb(px(10.)).text_size(px(13.)).font_semibold().text_color(cx.theme().foreground).child(text.to_string()).into_any_element()
     }
 
     fn note(text: &str, cx: &App) -> AnyElement {
-        div().pb(px(12.)).px(px(4.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
+        div().pb(px(16.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.55)).text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
     }
 
     fn status_dot(color: Hsla, label: &'static str) -> AnyElement {
-        h_flex().gap_2().text_xs().child(div().size(px(7.)).rounded_full().bg(color)).child(label).into_any_element()
+        h_flex().gap(px(7.)).text_size(px(12.5)).child(div().size(px(6.)).rounded_full().bg(color)).child(label).into_any_element()
     }
 
     /// Thumbnails: None, the built-in art, the user's own image, and "Choose image…".
@@ -269,10 +273,7 @@ impl SettingsView {
         let disabled = ws.settings.disabled_agents.clone();
         let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
         let (installed, missing): (Vec<_>, Vec<_>) = agents.into_iter().partition(|a| a.availability != Availability::NotInstalled);
-        let mut out = vec![Self::note(
-            "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
-            cx,
-        )];
+        let mut out = vec![];
         let setup_key = |a: &AgentId| match a {
             AgentId::Acp(id) => id.clone(),
             other => other.key(),
@@ -315,21 +316,29 @@ impl SettingsView {
                 .child(v_flex().child(div().text_size(px(14.)).font_medium().child(a.name.clone())).child(
                     div().text_size(px(12.5)).text_color(if needs_login { palette::amber(cx) } else { muted }).child(account),
                 ));
-            let sign_in = setup.map(|s| {
+            let sign_in = setup.filter(|_| needs_login).map(|s| {
                 let cmd = s.login.to_string();
-                Button::new(SharedString::from(format!("login-{key}")))
-                    .small()
-                    .when(needs_login, |b| b.primary())
-                    .when(!needs_login, |b| b.ghost())
-                    .label(if needs_login { "Sign in" } else { "Switch account" })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let cmd = cmd.clone();
-                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
-                    }))
+                Button::new(SharedString::from(format!("login-{key}"))).small().outline().label("Sign in").on_click(cx.listener(move |this, _, _, cx| {
+                    let cmd = cmd.clone();
+                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                }))
             });
-            let manage = setup.map(|s| {
-                let url = s.account_url;
-                ui::icon_button(SharedString::from(format!("acct-{key}")), IconName::ExternalLink, "Manage plan").on_click(move |_, _, cx| cx.open_url(url))
+            let more = setup.map(|s| {
+                let (login, url) = (s.login.to_string(), s.account_url);
+                let ws = self.workspace.clone();
+                Button::new(SharedString::from(format!("more-{key}")))
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(IconName::Ellipsis).text_color(muted))
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                        let (login, ws) = (login.clone(), ws.clone());
+                        menu.min_w(px(180.))
+                            .item(PopupMenuItem::new("Switch account…").on_click(move |_, _, cx| {
+                                let cmd = login.clone();
+                                ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                            }))
+                            .item(PopupMenuItem::new("Manage plan").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(url)))
+                    })
             });
             let k2 = key.clone();
             let toggle = Switch::new(SharedString::from(format!("enable-{key}"))).checked(on).on_click(cx.listener(move |this, v: &bool, _, cx| {
@@ -342,7 +351,7 @@ impl SettingsView {
                     ws.save_settings(cx);
                 });
             }));
-            let controls = h_flex().gap_2().children(sign_in).children(manage).child(toggle);
+            let controls = h_flex().gap(px(6.)).children(sign_in).children(more).child(div().pl(px(4.)).child(toggle));
             rows.push(Self::row(title, "", controls, cx));
         }
         out.push(ui::group(rows, cx));
@@ -545,175 +554,13 @@ impl SettingsView {
         let muted = cx.theme().muted_foreground;
         let mut out: Vec<AnyElement> = vec![];
         match page {
-            SettingsPage::General => {
-                let agents = self.workspace.read(cx).ready_agents();
-                let current = AgentId::from_key(&s.general.default_agent);
-                let ws = self.workspace.clone();
-                let picker = Button::new("def-agent")
-                    .small()
-                    .outline()
-                    .child(h_flex().gap_2().child(ui::agent_logo(&current, px(14.), cx)).child(current.display_name()).child(Icon::new(IconName::ChevronDown).xsmall()))
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                        for a in agents.clone() {
-                            let ws = ws.clone();
-                            let checked = a == current;
-                            menu = menu.item(PopupMenuItem::new(a.display_name()).checked(checked).on_click(move |_, _, cx| {
-                                let a = a.clone();
-                                ws.update(cx, |ws, cx| {
-                                    ws.settings.general.default_agent = a.key();
-                                    ws.draft_prefs.agent = a;
-                                    ws.draft_prefs.model = None;
-                                    ws.save_settings(cx);
-                                });
-                            }));
-                        }
-                        menu.min_w(px(200.))
-                    });
-                out.push(ui::group(
-                    vec![
-                        Self::row(
-                            "Default agent",
-                            "Used for new threads. Every installed agent stays one click away in the composer.",
-                            picker,
-                            cx,
-                        ),
-                        Self::row(
-                            "While an agent is working, ↩",
-                            "Steer injects your message at the next step. Queue sends it when the turn ends.",
-                            ui::segmented(
-                                "follow-up",
-                                vec![(FollowUp::Steer, "Steers"), (FollowUp::Queue, "Queues")],
-                                s.general.follow_up,
-                                self.setter(|s, v| s.general.follow_up = v),
-                                cx,
-                            ),
-                            cx,
-                        ),
-                        Self::row(
-                            "Keep the Mac awake while agents run",
-                            "",
-                            self.switch("prevent-sleep", s.general.prevent_sleep_while_running, |s, v| s.general.prevent_sleep_while_running = v),
-                            cx,
-                        ),
-                    ],
-                    cx,
-                ));
-            }
-            SettingsPage::Appearance => {
-                let set = self.setter(|s, v| s.appearance.theme = v);
-                let pick = move |v: ThemeChoice, window: &mut Window, cx: &mut App| {
-                    set(v, window, cx);
-                    crate::set_theme(v, window, cx);
-                };
-                out.push(ui::group(
-                    vec![Self::row(
-                        "Theme",
-                        "System follows macOS light and dark.",
-                        ui::segmented("theme", vec![(ThemeChoice::System, "System"), (ThemeChoice::Night, "Night"), (ThemeChoice::Paper, "Paper")], s.appearance.theme, pick, cx),
-                        cx,
-                    )],
-                    cx,
-                ));
-                out.push(Self::heading("Background", cx));
-                out.push(self.background_gallery(&s, cx));
-                out.push(div().h(px(12.)).into_any_element());
-                out.push(ui::group(
-                    vec![
-                        Self::row(
-                            "Show on",
-                            "New thread puts the art behind the composer. Everywhere tints the whole window.",
-                            ui::segmented(
-                                "bg-place",
-                                vec![(BackgroundPlacement::NewThread, "New thread"), (BackgroundPlacement::Everywhere, "Everywhere")],
-                                s.appearance.background_placement,
-                                self.setter(|s, v| s.appearance.background_placement = v),
-                                cx,
-                            ),
-                            cx,
-                        ),
-                        Self::row(
-                            "Dim",
-                            "Darkens the image so text stays readable.",
-                            ui::segmented(
-                                "bg-dim",
-                                vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
-                                match s.appearance.background_dim {
-                                    d if d < 0.1 => 0u8,
-                                    d if d < 0.3 => 1,
-                                    d if d < 0.5 => 2,
-                                    _ => 3,
-                                },
-                                self.setter(|s, v: u8| s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]),
-                                cx,
-                            ),
-                            cx,
-                        ),
-                    ],
-                    cx,
-                ));
-                out.push(Self::heading("Motion", cx));
-                out.push(ui::group(
-                    vec![Self::row(
-                        "Reduce motion",
-                        "Use simple fades instead of movement.",
-                        self.switch("reduce-motion", s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v),
-                        cx,
-                    )],
-                    cx,
-                ));
-            }
+            SettingsPage::General => out.extend(self.general_page(&s, cx)),
+            SettingsPage::Appearance => out.extend(self.appearance_page(&s, cx)),
+            SettingsPage::Notifications => out.extend(self.notifications_page(&s, cx)),
+            SettingsPage::Shortcuts => out.extend(self.shortcuts_page(cx)),
             SettingsPage::Agents => out.extend(self.agents_page(cx)),
             SettingsPage::Tools => out.extend(self.tools_page(cx)),
-            SettingsPage::ApiKeys => {
-                out.push(Self::note("Keys are stored in your macOS Keychain. Keys already in your shell environment are picked up automatically.", cx));
-                let mut rows = vec![];
-                for p in DIRECT_PROVIDERS.iter().filter(|p| !p.local) {
-                    let Some(input) = self.key_inputs.get(p.id).cloned() else { continue };
-                    let saved = self.saved_keys.get(p.id).copied().unwrap_or(false);
-                    let id = p.id;
-                    let control = h_flex()
-                        .gap_1()
-                        .w(px(320.))
-                        .child(div().flex_1().child(Input::new(&input).small()))
-                        .child(Button::new(SharedString::from(format!("save-{id}"))).small().outline().label("Save").on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                let Some(input) = this.key_inputs.get(id).cloned() else { return };
-                                let key = input.read(cx).value().trim().to_string();
-                                if key.is_empty() {
-                                    return;
-                                }
-                                match secrets::set_api_key(id, &key) {
-                                    Ok(()) => {
-                                        this.saved_keys.insert(id, true);
-                                        input.update(cx, |s, cx| s.set_value("", window, cx));
-                                        this.workspace.update(cx, |ws, cx| {
-                                            if !ws.settings.api_providers.iter().any(|p| p == id) {
-                                                ws.settings.api_providers.push(id.to_string());
-                                            }
-                                            ws.save_settings(cx);
-                                        });
-                                        window.push_notification("Saved to Keychain", cx);
-                                    }
-                                    Err(e) => window.push_notification(format!("Couldn't save key: {e}"), cx),
-                                }
-                            },
-                        )))
-                        .when(saved, |el| {
-                            el.child(ui::icon_button(SharedString::from(format!("del-{id}")), IconName::Delete, "Remove key").on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    let _ = secrets::delete_api_key(id);
-                                    this.saved_keys.insert(id, false);
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.settings.api_providers.retain(|p| p != id);
-                                        ws.save_settings(cx);
-                                    });
-                                },
-                            )))
-                        });
-                    rows.push(Self::row(p.name, if saved { "Saved in Keychain" } else { "" }, control, cx));
-                }
-                out.push(ui::group(rows, cx));
-            }
+            SettingsPage::ApiKeys => out.extend(self.api_keys_page(cx)),
             SettingsPage::LocalModels => {
                 let ws = self.workspace.read(cx);
                 let locals: Vec<_> = ws.agents.iter().filter(|a| matches!(a.agent, AgentId::Direct(_))).cloned().collect();
@@ -733,74 +580,7 @@ impl SettingsView {
                     .collect();
                 out.push(ui::group(rows, cx));
             }
-            SettingsPage::Permissions => {
-                let view = cx.entity().downgrade();
-                let unlocked = s.permissions.full_access_unlocked;
-                let full_switch = Switch::new("full-access").checked(unlocked).on_click(move |v: &bool, window, cx| {
-                    let view = view.clone();
-                    if !*v {
-                        let _ = view.update(cx, |this, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.settings.permissions.full_access_unlocked = false;
-                                ws.save_settings(cx);
-                            })
-                        });
-                        return;
-                    }
-                    window.open_alert_dialog(cx, move |alert, _, _| {
-                        let view = view.clone();
-                        alert
-                            .title("Allow Full access?")
-                            .description("Agents will run commands and edit files anywhere without asking. Only use it for work you'd trust to run unattended.")
-                            .confirm()
-                            .ok_text("Allow Full access")
-                            .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                            .on_ok(move |_, _, cx| {
-                                let _ = view.update(cx, |this, cx| {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.settings.permissions.full_access_unlocked = true;
-                                        ws.save_settings(cx);
-                                    })
-                                });
-                                true
-                            })
-                    });
-                });
-                out.push(ui::group(
-                    vec![
-                        Self::row(
-                            "Default hand-holding",
-                            "How much the agent checks with you. Change it per thread from the composer.",
-                            ui::segmented(
-                                "default-hh",
-                                HandHolding::ALL.iter().filter(|h| unlocked || **h != HandHolding::FullAccess).map(|h| (*h, h.label())).collect(),
-                                s.general.hand_holding,
-                                self.setter(|s, v| s.general.hand_holding = v),
-                                cx,
-                            ),
-                            cx,
-                        ),
-                        Self::row("Allow Full access", "Adds the no-prompts, no-sandbox level to the composer.", full_switch, cx),
-                    ],
-                    cx,
-                ));
-                out.push(Self::heading("How each level maps to each agent", cx));
-                out.push(ui::group(
-                    HandHolding::ALL
-                        .into_iter()
-                        .map(|h| {
-                            let (sb, ap, rv) = h.codex_policy();
-                            Self::row(
-                                h.label(),
-                                format!("{} Claude Code: {} · Codex: {sb}, {ap}, reviewer {rv}", h.description(), h.claude_mode()),
-                                div().size(px(8.)).rounded_full().bg(palette::hand_holding(h, cx)),
-                                cx,
-                            )
-                        })
-                        .collect(),
-                    cx,
-                ));
-            }
+            SettingsPage::Permissions => out.extend(self.permissions_page(&s, cx)),
             SettingsPage::Inbox => {
                 out.push(ui::group(
                     vec![Self::row(
@@ -864,70 +644,8 @@ impl SettingsView {
                         .into_any_element(),
                 );
             }
-            SettingsPage::Updates => {
-                let status = self.workspace.read(cx).update.clone();
-                let status_text = match &status {
-                    UpdateStatus::Idle => format!("Version {}", trek_core::VERSION),
-                    UpdateStatus::Checking => "Checking…".into(),
-                    UpdateStatus::UpToDate => format!("Version {} is the latest", trek_core::VERSION),
-                    UpdateStatus::Available { version, .. } => format!("Version {version} is available"),
-                    UpdateStatus::Downloading { version, progress } => format!("Downloading {version} · {:.0}%", progress * 100.),
-                    UpdateStatus::Ready { version, .. } => format!("Version {version} is ready"),
-                    UpdateStatus::RestartPending { .. } => "Restarting when your agents finish".into(),
-                    UpdateStatus::Failed(e) => format!("Couldn't check: {e}"),
-                };
-                let ready = matches!(status, UpdateStatus::Ready { .. });
-                let action = if ready {
-                    Button::new("restart-update").small().primary().label("Restart to update").on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |ws, cx| ws.restart_to_update(cx))
-                    }))
-                } else {
-                    Button::new("check-now")
-                        .small()
-                        .outline()
-                        .loading(matches!(status, UpdateStatus::Checking))
-                        .label("Check now")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_for_updates(true, cx))))
-                };
-                out.push(ui::group(
-                    vec![
-                        Self::row("Trek", status_text, action, cx),
-                        Self::row(
-                            "Channel",
-                            "Beta and Nightly get new things first.",
-                            ui::segmented(
-                                "channel",
-                                vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
-                                s.updates.channel,
-                                self.setter(|s, v| s.updates.channel = v),
-                                cx,
-                            ),
-                            cx,
-                        ),
-                        Self::row("Check automatically", "", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
-                        Self::row(
-                            "Download in the background",
-                            "Updates install when you restart, never while an agent is working.",
-                            self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
-                            cx,
-                        ),
-                    ],
-                    cx,
-                ));
-            }
-            SettingsPage::About => {
-                out.push(
-                    v_flex()
-                        .items_center()
-                        .gap_3()
-                        .py_10()
-                        .child(brand::trail_draw("about-trail", px(120.), s.appearance.reduce_motion))
-                        .child(div().text_size(px(26.)).font_semibold().child("Trek"))
-                        .child(div().text_color(muted).child("Every agent. One trail."))
-                        .child(div().text_sm().text_color(muted).child(format!("Version {}", trek_core::VERSION)))
-                        .into_any_element(),
-                );
-            }
+            SettingsPage::Updates => out.extend(self.updates_page(&s, cx)),
+            SettingsPage::About => out.extend(self.about_page(&s, cx)),
         }
         out
     }
@@ -941,15 +659,15 @@ impl Render for SettingsView {
             h_flex().w_full().justify_center().child(
                 v_flex()
                     .w_full()
-                    .max_w(px(680.))
-                    .px(px(40.))
-                    .pt(px(40.))
-                    .pb(px(64.))
-                    .child(div().px(px(4.)).text_size(px(22.)).font_semibold().child(page.label()))
+                    .max_w(px(720.))
+                    .px(px(48.))
+                    .pt(px(44.))
+                    .pb(px(80.))
+                    .child(div().text_size(px(20.)).font_semibold().child(page.label()))
                     .when(!page_blurb(page).is_empty(), |el| {
-                        el.child(div().px(px(4.)).pt(px(4.)).text_size(px(13.)).text_color(cx.theme().muted_foreground).child(page_blurb(page)))
+                        el.child(div().pt(px(6.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(page_blurb(page)))
                     })
-                    .child(div().h(px(24.)))
+                    .child(div().h(px(28.)))
                     .children(body),
             ),
         )

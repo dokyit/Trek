@@ -25,6 +25,8 @@ pub enum Route {
 pub enum SettingsPage {
     General,
     Appearance,
+    Notifications,
+    Shortcuts,
     Agents,
     Tools,
     ApiKeys,
@@ -41,6 +43,8 @@ impl SettingsPage {
         match self {
             SettingsPage::General => "General",
             SettingsPage::Appearance => "Appearance",
+            SettingsPage::Notifications => "Notifications",
+            SettingsPage::Shortcuts => "Keyboard Shortcuts",
             SettingsPage::Agents => "Agents & Subscriptions",
             SettingsPage::Tools => "Tools & MCP",
             SettingsPage::ApiKeys => "API Keys",
@@ -49,7 +53,7 @@ impl SettingsPage {
             SettingsPage::Inbox => "Inbox",
             SettingsPage::Import => "Import Threads",
             SettingsPage::Updates => "Updates",
-            SettingsPage::About => "About Trek",
+            SettingsPage::About => "About",
         }
     }
 }

@@ -3,7 +3,6 @@
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{App, Hsla, rgb};
-use trek_core::HandHolding;
 
 fn pick(cx: &App, night: u32, paper: u32) -> Hsla {
     if cx.theme().mode.is_dark() { rgb(night).into() } else { rgb(paper).into() }
@@ -38,14 +37,4 @@ pub fn sunrise_at(t: f32) -> Hsla {
     let mix = |s: u32| ch(a, s) + (ch(b, s) - ch(a, s)) * u;
     let v = ((mix(16) as u32) << 16) | ((mix(8) as u32) << 8) | mix(0) as u32;
     rgb(v).into()
-}
-
-/// Composer ring tint per hand-holding level.
-pub fn hand_holding(level: HandHolding, cx: &App) -> Hsla {
-    match level {
-        HandHolding::Supervised => cx.theme().muted_foreground,
-        HandHolding::AutoAcceptEdits => sky(cx),
-        HandHolding::Auto => ember(cx),
-        HandHolding::FullAccess => red(cx),
-    }
 }

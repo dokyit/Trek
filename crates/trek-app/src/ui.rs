@@ -23,16 +23,15 @@ pub fn nav_row(
     let theme = cx.theme();
     h_flex()
         .id(id)
-        .mx_1()
-        .px_2()
-        .h(px(32.))
-        .gap_2()
-        .rounded(px(8.))
+        .px(px(10.))
+        .h(px(30.))
+        .gap(px(10.))
+        .rounded(px(7.))
         .cursor_pointer()
-        .text_sm()
-        .when(active, |el| el.bg(theme.list_active))
-        .when(!active, |el| el.hover(|s| s.bg(theme.list_hover)))
-        .child(icon.small().text_color(theme.muted_foreground))
+        .text_size(px(13.))
+        .when(active, |el| el.bg(theme.foreground.opacity(0.08)).font_weight(FontWeight::MEDIUM))
+        .when(!active, |el| el.text_color(theme.foreground.opacity(0.82)).hover(|s| s.bg(theme.foreground.opacity(0.045)).text_color(theme.foreground)))
+        .child(icon.size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
         .child(div().flex_1().child(label))
         .when_some(hint, |el, h| el.child(div().text_xs().text_color(theme.muted_foreground.opacity(0.7)).child(h)))
 }
@@ -109,7 +108,7 @@ pub fn divider(cx: &App) -> impl IntoElement {
     div().w(px(1.)).h(px(14.)).bg(cx.theme().border)
 }
 
-/// Segmented control: a muted track with the selected option raised.
+/// Segmented control: a quiet track; the chosen option is a filled chip, never an accent colour.
 pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
     id: &'static str,
     options: Vec<(T, L)>,
@@ -119,23 +118,26 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
 ) -> AnyElement {
     let theme = cx.theme().clone();
     h_flex()
+        .h(px(30.))
         .p(px(2.))
         .gap(px(2.))
         .rounded(px(8.))
-        .bg(theme.muted)
+        .bg(theme.foreground.opacity(0.05))
+        .border_1()
+        .border_color(theme.foreground.opacity(0.06))
         .children(options.into_iter().enumerate().map(move |(i, (value, label))| {
             let selected = value == current;
             let on_pick = on_pick.clone();
             div()
                 .id((id, i))
-                .px_3()
-                .h(px(26.))
+                .h_full()
+                .px(px(11.))
                 .flex()
                 .items_center()
                 .rounded(px(6.))
-                .text_sm()
+                .text_size(px(12.5))
                 .cursor_pointer()
-                .when(selected, |el| el.bg(theme.popover).text_color(theme.foreground).shadow_xs())
+                .when(selected, |el| el.bg(theme.foreground.opacity(0.12)).text_color(theme.foreground).font_weight(FontWeight::MEDIUM))
                 .when(!selected, |el| el.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
                 .child(label.into())
                 .on_click(move |_, window, cx| on_pick(value, window, cx))
@@ -143,19 +145,14 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
         .into_any_element()
 }
 
-/// A rounded group of settings rows separated by hairlines.
+/// A flat list of settings rows between hairlines (no enclosing card).
 pub fn group(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let n = rows.len();
+    let line = cx.theme().foreground.opacity(0.07);
     gpui_kit::component::v_flex()
         .w_full()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.sidebar)
-        .children(rows.into_iter().enumerate().map(move |(i, r)| {
-            div().px_4().when(i + 1 < n, |el| el.border_b_1().border_color(theme.border)).child(r)
-        }))
+        .border_t_1()
+        .border_color(line)
+        .children(rows.into_iter().map(move |r| div().border_b_1().border_color(line).child(r)))
         .into_any_element()
 }
 
