@@ -86,7 +86,8 @@ pub fn agent_glyph(agent: &AgentId, cx: &App) -> impl IntoElement {
     icon.xsmall().text_color(color)
 }
 
-/// Thin vertical divider between composer chips.
+/// Thin vertical divider between toolbar items.
+#[allow(dead_code)]
 pub fn divider(cx: &App) -> impl IntoElement {
     div().w(px(1.)).h(px(14.)).bg(cx.theme().border)
 }

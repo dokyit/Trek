@@ -1,7 +1,6 @@
 //! The transcript: user turns, streaming markdown answers, collapsible reasoning and tool rows,
 //! plus the live footer (thinking indicator, approval cards).
 
-use crate::brand;
 use crate::palette;
 use crate::time;
 use crate::workspace::{Route, Workspace};
