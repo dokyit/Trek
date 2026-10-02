@@ -453,7 +453,7 @@ mod tests {
         // A key in the environment doesn't matter while a subscription is signed in.
         let both = json!({"subscriptionType":"Claude Max","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"});
         assert_eq!(account_billing(&both), Some(Billing::Plan(Some("Claude Max".into()))));
-        assert_eq!(account_billing(&json!({"apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"tokenSource":"none","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"})), Some(Billing::Metered));
         assert_eq!(account_billing(&json!({"apiProvider":"bedrock"})), Some(Billing::Metered));
         assert_eq!(account_billing(&json!({"apiProvider":"firstParty"})), None);
         assert_eq!(account_billing(&Value::Null), None);
