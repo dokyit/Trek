@@ -30,7 +30,6 @@ fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::ApiKeys => Icon::new(crate::assets::Lucide::Lock),
         SettingsPage::LocalModels => Icon::new(IconName::Cpu),
         SettingsPage::Permissions => Icon::new(crate::assets::Lucide::ShieldCheck),
-        SettingsPage::Inbox => Icon::new(IconName::Inbox),
         SettingsPage::Import => Icon::new(IconName::ArrowDown),
         SettingsPage::Updates => Icon::new(IconName::RefreshCw),
         SettingsPage::About => Icon::new(IconName::Info),
@@ -40,7 +39,7 @@ fn page_icon(p: SettingsPage) -> Icon {
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
     ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Shortcuts]),
     ("Agents", &[SettingsPage::Agents, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
-    ("Workflow", &[SettingsPage::Permissions, SettingsPage::Inbox, SettingsPage::Import]),
+    ("Workflow", &[SettingsPage::Permissions, SettingsPage::Import]),
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
 
@@ -53,10 +52,9 @@ fn page_blurb(p: SettingsPage) -> &'static str {
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.",
         SettingsPage::ApiKeys => "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically.",
-        SettingsPage::LocalModels => "Models running on this Mac.",
+        SettingsPage::LocalModels => "Model servers running on this Mac: Ollama, LM Studio, and llama.cpp or MLX. Trek finds them on their usual ports.",
         SettingsPage::Permissions => "How much each agent may do without asking.",
-        SettingsPage::Inbox => "When finished threads leave the inbox.",
-        SettingsPage::Import => "Bring in threads from other agents on this Mac.",
+        SettingsPage::Import => "Trek reads, and never changes, the threads other agents keep on this Mac, so you can browse and continue them here.",
         SettingsPage::Updates => "Trek checks for updates and installs them when you restart.",
         SettingsPage::About => "",
     }
@@ -564,7 +562,6 @@ impl SettingsView {
             SettingsPage::LocalModels => {
                 let ws = self.workspace.read(cx);
                 let locals: Vec<_> = ws.agents.iter().filter(|a| matches!(a.agent, AgentId::Direct(_))).cloned().collect();
-                out.push(Self::note("Trek finds model servers on this Mac automatically: Ollama, LM Studio, and llama.cpp or MLX servers.", cx));
                 let rows = locals
                     .into_iter()
                     .map(|a| {
@@ -575,39 +572,22 @@ impl SettingsView {
                             Availability::Ready => (Self::status_dot(palette::emerald(cx), "Ready"), a.models.join(", ")),
                             _ => (Self::status_dot(muted.opacity(0.5), "Not running"), String::new()),
                         };
-                        Self::row(a.name.clone(), detail, status, cx)
+                        let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child(a.name.clone()));
+                        Self::row(title, detail, status, cx)
                     })
                     .collect();
                 out.push(ui::group(rows, cx));
             }
             SettingsPage::Permissions => out.extend(self.permissions_page(&s, cx)),
-            SettingsPage::Inbox => {
-                out.push(ui::group(
-                    vec![Self::row(
-                        "Settle finished threads",
-                        "Read threads leave the inbox after this long. Threads waiting on you never settle on their own.",
-                        ui::segmented(
-                            "auto-settle",
-                            vec![(0, "Never"), (1, "1 day"), (3, "3 days"), (7, "1 week")],
-                            s.inbox.auto_settle_days,
-                            self.setter(|s, v| s.inbox.auto_settle_days = v),
-                            cx,
-                        ),
-                        cx,
-                    )],
-                    cx,
-                ));
-            }
             SettingsPage::Import => {
                 let ws = self.workspace.read(cx);
                 let importing = ws.importing;
                 let summary = ws.import_summary.clone();
-                out.push(Self::note("Trek reads, and never changes, the threads other agents keep on this Mac, so you can browse and continue them here.", cx));
                 out.push(ui::group(
                     vec![
-                        Self::row("Claude Code", "~/.claude/projects", self.switch("imp-claude", s.import.claude_code, |s, v| s.import.claude_code = v), cx),
-                        Self::row("Codex", "~/.codex", self.switch("imp-codex", s.import.codex, |s, v| s.import.codex = v), cx),
-                        Self::row("OpenCode", "~/.local/share/opencode", self.switch("imp-opencode", s.import.opencode, |s, v| s.import.opencode = v), cx),
+                        Self::row(h_flex().gap(px(10.)).child(ui::agent_logo(&AgentId::ClaudeCode, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child("Claude Code")), "~/.claude/projects", self.switch("imp-claude", s.import.claude_code, |s, v| s.import.claude_code = v), cx),
+                        Self::row(h_flex().gap(px(10.)).child(ui::agent_logo(&AgentId::Codex, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child("Codex")), "~/.codex", self.switch("imp-codex", s.import.codex, |s, v| s.import.codex = v), cx),
+                        Self::row(h_flex().gap(px(10.)).child(ui::agent_logo(&AgentId::OpenCode, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child("OpenCode")), "~/.local/share/opencode", self.switch("imp-opencode", s.import.opencode, |s, v| s.import.opencode = v), cx),
                         Self::row(
                             "How far back",
                             "",

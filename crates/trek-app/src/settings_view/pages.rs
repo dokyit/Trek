@@ -191,6 +191,22 @@ impl SettingsView {
                 ],
                 cx,
             ),
+            Self::heading("Inbox", cx),
+            ui::group(
+                vec![Self::row(
+                    "Settle finished threads",
+                    "Read threads leave the inbox after this long. Threads waiting on you never settle on their own.",
+                    ui::segmented(
+                        "auto-settle",
+                        vec![(0, "Never"), (1, "1 day"), (3, "3 days"), (7, "1 week")],
+                        s.inbox.auto_settle_days,
+                        self.setter(|s, v| s.inbox.auto_settle_days = v),
+                        cx,
+                    ),
+                    cx,
+                )],
+                cx,
+            ),
             Self::heading("System", cx),
             ui::group(
                 vec![Self::row(
