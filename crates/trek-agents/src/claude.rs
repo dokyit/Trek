@@ -47,6 +47,8 @@ pub async fn run(
         "stdio",
         "--permission-mode",
         mode,
+        // Lets Trek switch a running session to Full access; it doesn't change the starting mode.
+        "--allow-dangerously-skip-permissions",
     ]);
     if let Some(model) = &config.model {
         cmd.args(["--model", model]);
@@ -133,9 +135,19 @@ pub async fn run(
                         write_line(&mut stdin, &req("set_model", json!({ "model": model }))).await?
                     }
                     Command::Respond { request_id, decision } => {
-                        let input = pending.remove(&request_id).unwrap_or(json!({}));
+                        let request = pending.remove(&request_id).unwrap_or(json!({}));
+                        let input = request["input"].clone();
                         let response = match decision {
-                            Decision::Allow | Decision::AllowForSession => json!({ "behavior": "allow", "updatedInput": input }),
+                            Decision::Allow => json!({ "behavior": "allow", "updatedInput": input }),
+                            Decision::AllowForSession => {
+                                let mut ok = json!({ "behavior": "allow", "updatedInput": input });
+                                // Claude's own suggested rules (e.g. allow `gh issue list:*` in this
+                                // session); applying them stops the same prompt from coming back.
+                                if let Some(sug) = request["permission_suggestions"].as_array().filter(|a| !a.is_empty()) {
+                                    ok["updatedPermissions"] = Value::Array(sug.clone());
+                                }
+                                ok
+                            }
                             Decision::Deny => json!({ "behavior": "deny", "message": "The user declined this action." }),
                         };
                         let msg = json!({
@@ -163,6 +175,12 @@ pub async fn run(
                             if events.send(ev).await.is_err() {
                                 return Ok(());
                             }
+                        }
+                    } else if r["subtype"] == "error" {
+                        let msg = r["error"].as_str().unwrap_or("Claude Code rejected the change.").to_string();
+                        tracing::warn!("claude control request {id} failed: {msg}");
+                        if events.send(AgentEvent::Error(msg)).await.is_err() {
+                            return Ok(());
                         }
                     }
                     continue;
@@ -303,7 +321,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
             let request_id = v["request_id"].as_str().unwrap_or_default().to_string();
             let tool = r["tool_name"].as_str().unwrap_or("tool");
             let (title, detail) = tool_title(tool, &r["input"]);
-            pending.insert(request_id.clone(), r["input"].clone());
+            pending.insert(request_id.clone(), r.clone());
             out.push(AgentEvent::PermissionRequest {
                 request_id,
                 title: r["title"].as_str().map(String::from).unwrap_or(title),

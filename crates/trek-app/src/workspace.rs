@@ -649,7 +649,10 @@ impl Workspace {
                     }
                 }
             }
-            _ => self.draft_prefs = prefs,
+            _ => self.draft_prefs = prefs.clone(),
+        }
+        if let Route::Thread(id) = self.route.clone() {
+            self.approve_covered_prompts(&id, prefs.hand_holding, cx);
         }
         cx.notify();
     }
@@ -778,6 +781,15 @@ impl Workspace {
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
             return;
+        }
+        if matches!(self.route, Route::Draft { .. }) {
+            let mut words = text.split_whitespace();
+            if matches!(words.next(), Some("/permissions" | "/access" | "/mode")) {
+                let arg = words.next().map(str::to_string);
+                let reply = self.permissions_command(None, arg.as_deref(), cx);
+                cx.emit(WorkspaceEvent::Toast { message: reply.replace("**", "").replace('`', ""), undo: None });
+                return;
+            }
         }
         let id = match self.route.clone() {
             Route::Thread(id) => id,
@@ -1394,10 +1406,85 @@ impl Workspace {
     }
 
     /// Commands Trek answers itself instead of sending to the agent.
+    /// Prompts already on screen when the user raises the level: approve the ones the new level
+    /// would never have asked about (everything for Full access, file edits for Auto-accept edits).
+    fn approve_covered_prompts(&mut self, id: &str, level: HandHolding, cx: &mut Context<Self>) {
+        let covered: Vec<String> = self
+            .live
+            .get(id)
+            .map(|l| {
+                l.permissions
+                    .iter()
+                    .filter(|p| match level {
+                        HandHolding::FullAccess => true,
+                        HandHolding::AutoAcceptEdits | HandHolding::Auto => matches!(p.title.as_str(), "Edit" | "Write"),
+                        HandHolding::Supervised => false,
+                    })
+                    .map(|p| p.request_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for rid in covered {
+            self.respond(id, &rid, Decision::Allow, cx);
+        }
+    }
+
+    /// Change a thread's hand-holding (or the draft's), as the composer menu does.
+    pub fn set_hand_holding(&mut self, id: Option<&str>, level: HandHolding, cx: &mut Context<Self>) -> Result<(), String> {
+        if level == HandHolding::FullAccess && !self.settings.permissions.full_access_unlocked {
+            return Err("Full access is off. Turn on “Allow Full access” in Settings → Permissions first.".into());
+        }
+        match id {
+            Some(id) if self.route == Route::Thread(id.to_string()) => {
+                let mut p = self.prefs();
+                p.hand_holding = level;
+                self.set_prefs(p, cx);
+            }
+            Some(id) => {
+                self.mutate_thread(id, cx, |t| t.hand_holding = level);
+                if let Some(tx) = self.live.get(id).and_then(|l| l.commands.clone()) {
+                    let _ = tx.try_send(Command::SetHandHolding(level));
+                }
+                self.approve_covered_prompts(id, level, cx);
+            }
+            None => self.draft_prefs.hand_holding = level,
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    /// `/permissions [supervised|edits|auto|full]` — shows or changes the level.
+    fn permissions_command(&mut self, id: Option<&str>, arg: Option<&str>, cx: &mut Context<Self>) -> String {
+        let current = id.and_then(|i| self.thread(i)).map(|t| t.hand_holding).unwrap_or(self.draft_prefs.hand_holding);
+        let level = match arg.map(|a| a.to_lowercase()) {
+            None => {
+                return format!(
+                    "Hand-holding is **{}**. Switch with `/permissions supervised`, `/permissions edits`, `/permissions auto` or `/permissions full`.",
+                    current.label()
+                )
+            }
+            Some(a) => match a.as_str() {
+                "supervised" | "ask" | "default" => HandHolding::Supervised,
+                "edits" | "accept-edits" | "auto-accept" | "auto-accept-edits" | "acceptedits" => HandHolding::AutoAcceptEdits,
+                "auto" => HandHolding::Auto,
+                "full" | "full-access" | "bypass" | "yolo" => HandHolding::FullAccess,
+                other => return format!("Unknown level “{other}”. Use supervised, edits, auto or full."),
+            },
+        };
+        match self.set_hand_holding(id, level, cx) {
+            Ok(()) => format!("Hand-holding set to **{}**. {}", level.label(), level.description()),
+            Err(e) => e,
+        }
+    }
+
     fn run_builtin_command(&mut self, id: &str, text: &str, cx: &mut Context<Self>) -> Option<String> {
         let cmd = text.strip_prefix('/')?.split_whitespace().next()?;
         let agent = self.thread(id).map(|t| t.agent.clone())?;
         match cmd {
+            "permissions" | "access" | "mode" => {
+                let arg = text.split_whitespace().nth(1).map(str::to_string);
+                Some(self.permissions_command(Some(id), arg.as_deref(), cx))
+            }
             "clear" | "new" => {
                 let project = self.thread(id).and_then(|t| t.cwd.clone());
                 self.navigate(Route::Draft { project }, cx);
@@ -1635,6 +1722,11 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("context", "Show how much of the context window is used"),
     ("cost", "Show this session's estimated cost"),
     ("model", "Show the model this thread uses"),
+    ("permissions", "Show or change how much the agent asks first"),
+    ("permissions supervised", "Ask before every edit and command"),
+    ("permissions edits", "Apply file edits; ask before commands"),
+    ("permissions auto", "Work on its own; check before risky actions"),
+    ("permissions full", "No prompts and no sandbox"),
 ];
 
 pub fn fmt_tokens(n: u64) -> String {

@@ -509,6 +509,7 @@ impl ThreadView {
         let theme = cx.theme().clone();
         if let Some(p) = live.permissions.first().cloned() {
             let agent = thread.agent.display_name();
+            let rid_anim = p.request_id.clone();
             let ws_handle = self.workspace.clone();
             let respond = move |decision: Decision| {
                 let ws = ws_handle.clone();
@@ -569,8 +570,9 @@ impl ThreadView {
                                     .child(Button::new("allow").small().primary().label("Allow").on_click(respond(Decision::Allow))),
                             ),
                     )
+                    // Keyed on the request, not the transcript revision, so streaming doesn't replay it.
                     .with_animation(
-                        ("perm-in", self.revision),
+                        SharedString::from(format!("perm-in-{rid_anim}")),
                         Animation::new(std::time::Duration::from_millis(220)).with_easing(ease_out_quint()),
                         |el, t| el.opacity(t).mt(px(10. * (1. - t))),
                     )
