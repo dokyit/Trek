@@ -21,3 +21,18 @@ pub fn elapsed(d: std::time::Duration) -> String {
         _ => format!("{}h {}m", s / 3_600, (s % 3_600) / 60),
     }
 }
+
+/// "in 2h 14m", "in 3d", "tomorrow 15:00"-style countdown to a unix-ms instant.
+pub fn until(ms: i64) -> String {
+    let now = trek_core::store::now_ms();
+    let s = ((ms - now) / 1000).max(0);
+    match s {
+        0..=59 => "in under a minute".into(),
+        60..=3_599 => format!("in {}m", s / 60),
+        3_600..=86_399 => format!("in {}h {}m", s / 3_600, (s % 3_600) / 60),
+        _ => {
+            let d = chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%a %-I:%M %p").to_string()).unwrap_or_default();
+            format!("{d} (in {}d)", s / 86_400)
+        }
+    }
+}

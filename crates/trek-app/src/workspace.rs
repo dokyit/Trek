@@ -4,7 +4,7 @@ use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Task};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use trek_agents::{AgentEvent, Command, Decision, SessionConfig};
+use trek_agents::{AgentStatus, McpServer, SlashCommand, AgentEvent, Command, Decision, SessionConfig};
 use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
@@ -97,6 +97,8 @@ pub struct LiveThread {
     pub plan: bool,
     pub fast: bool,
     pub cost_usd: f64,
+    /// Tokens in the context window and the window size, as last reported by the agent.
+    pub context: Option<(u64, u64)>,
     /// Bumped on every transcript change so views can resync cheaply.
     pub revision: u64,
     _events: Option<Task<()>>,
@@ -152,6 +154,30 @@ pub enum UndoAction {
     Unarchive(String),
 }
 
+/// Git state of the folder on screen, for the composer's branch chip.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GitInfo {
+    pub is_repo: bool,
+    pub branch: Option<String>,
+    pub changed: usize,
+    pub ahead: u32,
+}
+
+fn read_git_info(cwd: &std::path::Path) -> GitInfo {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(cwd).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    if run(&["rev-parse", "--is-inside-work-tree"]).is_none() {
+        return GitInfo::default();
+    }
+    GitInfo {
+        is_repo: true,
+        branch: run(&["branch", "--show-current"]).filter(|b| !b.is_empty()),
+        changed: run(&["status", "--porcelain"]).map(|s| s.lines().count()).unwrap_or(0),
+        ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
+    }
+}
+
 pub struct Workspace {
     pub store: Store,
     pub settings: Settings,
@@ -173,6 +199,11 @@ pub struct Workspace {
     pub project_filter: Option<String>,
     /// Bumped whenever any agent turn finishes (tools refresh on it).
     pub turns_finished: u64,
+    pub git_info: HashMap<PathBuf, GitInfo>,
+    /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
+    pub agent_status: HashMap<String, AgentStatus>,
+    pub status_fetched_at: i64,
+    pub usage_loading: bool,
     tasks: Vec<Task<()>>,
 }
 
@@ -213,11 +244,16 @@ impl Workspace {
             search: String::new(),
             project_filter: None,
             turns_finished: 0,
+            git_info: HashMap::new(),
+            agent_status: HashMap::new(),
+            status_fetched_at: 0,
+            usage_loading: false,
             tasks: vec![],
         };
         this.reload(cx);
         if this.route == (Route::Draft { project: None }) {
-            this.route = Route::Draft { project: this.projects.first().map(|p| p.path.clone()) };
+            let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
+            this.route = Route::Draft { project: first };
         }
         this.detect_agents(cx);
         if this.settings.onboarding.completed {
@@ -312,6 +348,30 @@ impl Workspace {
 
     // ---------- navigation ----------
 
+    /// Projects worth offering in pickers: repos and folders the user added.
+    pub fn workspace_projects(&self) -> Vec<&Project> {
+        self.projects.iter().filter(|p| p.is_workspace(&self.settings.user_projects)).collect()
+    }
+
+    pub fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let Some(cwd) = self.current_cwd() else { return };
+        let task = cx.spawn(async move |this, cx| {
+            let c = cwd.clone();
+            let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.git_info.get(&cwd) != Some(&info) {
+                    this.git_info.insert(cwd, info);
+                    cx.notify();
+                }
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    pub fn current_git(&self) -> Option<&GitInfo> {
+        self.current_cwd().and_then(|c| self.git_info.get(&c))
+    }
+
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
         if let Route::Thread(id) = &route {
             let id = id.clone();
@@ -319,6 +379,7 @@ impl Workspace {
             self.ensure_loaded(&id, cx);
         }
         self.route = route;
+        self.refresh_git(cx);
         cx.emit(WorkspaceEvent::FocusComposer);
         cx.notify();
     }
@@ -329,7 +390,7 @@ impl Workspace {
             Route::Draft { project } => project.clone(),
             _ => None,
         }
-        .or_else(|| self.projects.first().map(|p| p.path.clone()));
+        .or_else(|| self.workspace_projects().first().map(|p| p.path.clone()));
         self.navigate(Route::Draft { project }, cx);
     }
 
@@ -450,6 +511,11 @@ impl Workspace {
         if *agent == AgentId::Codex && !self.codex_models.is_empty() {
             return self.codex_models.clone();
         }
+        if *agent == AgentId::ClaudeCode {
+            if let Some(st) = self.agent_status.get(&agent.key()).filter(|s| !s.models.is_empty()) {
+                return st.models.clone();
+            }
+        }
         catalog::default_models(agent)
     }
 
@@ -529,6 +595,7 @@ impl Workspace {
                 out.push(id);
             }
         }
+        out.retain(|a| !self.settings.disabled_agents.contains(&a.key()));
         if out.is_empty() {
             out.push(AgentId::ClaudeCode);
         }
@@ -537,9 +604,9 @@ impl Workspace {
 
     // ---------- sending ----------
 
-    pub fn send(&mut self, text: String, cx: &mut Context<Self>) {
+    pub fn send(&mut self, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
             return;
         }
         let id = match self.route.clone() {
@@ -569,25 +636,37 @@ impl Workspace {
             }
             _ => return,
         };
-        self.send_to(&id, text, cx);
+        self.send_to(&id, text, images, cx);
     }
 
     /// Send a prompt to a specific thread (main view or a side chat).
-    pub fn send_to(&mut self, id: &str, text: String, cx: &mut Context<Self>) {
+    pub fn send_to(&mut self, id: &str, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         let id = id.to_string();
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
+            return;
+        }
+        if let Some(reply) = self.run_builtin_command(&id, &text, cx) {
+            if reply.is_empty() {
+                return;
+            }
+            let live = self.live.entry(id.clone()).or_default();
+            live.items.push(Item::User { text: text.clone(), images: vec![] });
+            live.items.push(Item::Notice { text: reply });
+            live.revision += 1;
+            self.persist_items(&id);
+            cx.notify();
             return;
         }
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
-        live.items.push(Item::User { text: text.clone() });
+        live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect() });
         live.streaming = None;
         live.reasoning = None;
         live.turn_started = Some(Instant::now());
         live.revision += 1;
         if let Some(tx) = &live.commands {
-            let _ = tx.try_send(Command::Prompt(text));
+            let _ = tx.try_send(Command::Prompt { text, images });
         }
         self.mutate_thread(&id, cx, |t| {
             t.run_state = RunState::Working;
@@ -613,6 +692,7 @@ impl Workspace {
         } else {
             None
         };
+        let mcp_servers = self.mcp_servers();
         let live = self.live.entry(id.to_string()).or_default();
         let handle = trek_agents::start(SessionConfig {
             agent: thread.agent.clone(),
@@ -623,6 +703,7 @@ impl Workspace {
             plan: live.plan,
             resume: thread.native_id.clone(),
             fast: fast_tier,
+            mcp_servers,
         });
         live.commands = Some(handle.commands);
         let events = handle.events;
@@ -716,6 +797,7 @@ impl Workspace {
                         notify_text = Some(format!("Needs your approval: {title}"));
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
+                    AgentEvent::Context { used, window } => live.context = Some((used, window)),
                     AgentEvent::TurnComplete { cost_usd, error } => {
                         // Models that hide their reasoning leave empty "Thought" rows behind.
                         live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
@@ -776,6 +858,7 @@ impl Workspace {
         });
         if finished {
             self.turns_finished += 1;
+            self.refresh_git(cx);
             self.persist_items(id);
             if let Some(title) = self.thread(id).map(|t| t.title.clone()) {
                 if !viewing {
@@ -887,6 +970,9 @@ impl Workspace {
                     this.mutate_thread(&id, cx, |t| t.settled_at = Some(now));
                 }
                 // Snoozes that have expired fall back into the inbox on their own (section()).
+                if now - this.status_fetched_at > 5 * 60_000 {
+                    this.refresh_usage(cx);
+                }
                 cx.notify();
             });
             if alive.is_err() {
@@ -918,6 +1004,11 @@ impl Workspace {
     pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match self.store.ensure_project(&path) {
             Ok(p) => {
+                let key = p.path.display().to_string();
+                if !self.settings.user_projects.contains(&key) {
+                    self.settings.user_projects.push(key);
+                    let _ = self.settings.save();
+                }
                 self.reload(cx);
                 self.navigate(Route::Draft { project: Some(p.path) }, cx);
             }
@@ -982,6 +1073,8 @@ impl Workspace {
                     if this.agents.iter().any(|a| a.agent == AgentId::Codex && a.availability == Availability::Ready) {
                         this.fetch_codex_models(cx);
                     }
+                    this.status_fetched_at = 0;
+                    this.refresh_usage(cx);
                     // Default to an agent that's actually installed.
                     let ready = this.ready_agents();
                     if !ready.contains(&this.draft_prefs.agent) {
@@ -995,6 +1088,128 @@ impl Workspace {
             }
         });
         self.tasks.push(task);
+    }
+
+    /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
+    /// no prompt is sent. Throttled to once every 30 seconds.
+    pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 {
+            return;
+        }
+        let ready = |id: AgentId| self.agents.iter().any(|a| a.agent == id && a.availability == Availability::Ready) && !self.settings.disabled_agents.contains(&id.key());
+        let (claude, codex) = (ready(AgentId::ClaudeCode), ready(AgentId::Codex));
+        if !claude && !codex {
+            return;
+        }
+        self.usage_loading = true;
+        let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let (a, b) = tokio::join!(
+                async { if claude { Some(trek_agents::claude_status(&cwd).await) } else { None } },
+                async { if codex { Some(trek_agents::codex_status(&cwd).await) } else { None } },
+            );
+            let _ = tx.send([(AgentId::ClaudeCode, a), (AgentId::Codex, b)]).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(results) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| {
+                for (agent, res) in results {
+                    match res {
+                        Some(Ok(st)) => {
+                            if agent == AgentId::Codex && !st.models.is_empty() {
+                                this.codex_models = st.models.clone();
+                            }
+                            this.agent_status.insert(agent.key(), st);
+                        }
+                        Some(Err(e)) => {
+                            let st = this.agent_status.entry(agent.key()).or_default();
+                            st.error = Some(e.to_string());
+                        }
+                        None => {}
+                    }
+                }
+                this.usage_loading = false;
+                this.status_fetched_at = now_ms();
+                cx.notify();
+            });
+        });
+        self.tasks.push(task);
+        cx.notify();
+    }
+
+    /// Slash commands for an agent: Trek's own first, then the agent's commands and skills.
+    pub fn slash_commands(&self, agent: &AgentId) -> Vec<SlashCommand> {
+        let mut out: Vec<SlashCommand> = BUILTIN_COMMANDS
+            .iter()
+            .map(|(n, d)| SlashCommand { name: n.to_string(), description: d.to_string(), kind: trek_agents::CommandKind::Command })
+            .collect();
+        if let Some(st) = self.agent_status.get(&agent.key()) {
+            for c in &st.commands {
+                if !out.iter().any(|o| o.name == c.name) {
+                    out.push(c.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Commands Trek answers itself instead of sending to the agent.
+    fn run_builtin_command(&mut self, id: &str, text: &str, cx: &mut Context<Self>) -> Option<String> {
+        let cmd = text.strip_prefix('/')?.split_whitespace().next()?;
+        let agent = self.thread(id).map(|t| t.agent.clone())?;
+        match cmd {
+            "clear" | "new" => {
+                let project = self.thread(id).and_then(|t| t.cwd.clone());
+                self.navigate(Route::Draft { project }, cx);
+                Some(String::new())
+            }
+            "usage" => {
+                self.status_fetched_at = 0;
+                self.refresh_usage(cx);
+                let st = self.agent_status.get(&agent.key())?;
+                let mut lines = vec![format!("**{}** · {}", agent.display_name(), st.plan.clone().unwrap_or_else(|| "no plan reported".into()))];
+                for l in &st.limits {
+                    lines.push(format!("- {}: {:.0}% used{}", l.label, l.percent, l.resets_at.map(|r| format!(", resets {}", crate::time::until(r))).unwrap_or_default()));
+                }
+                Some(lines.join("\n"))
+            }
+            "context" => {
+                let (used, window) = self.live.get(id).and_then(|l| l.context)?;
+                Some(format!("{} of {} tokens in context ({:.0}%).", fmt_tokens(used), fmt_tokens(window), used as f64 / window.max(1) as f64 * 100.))
+            }
+            "cost" => {
+                let c = self.live.get(id).map(|l| l.cost_usd).unwrap_or(0.0);
+                Some(format!("This session has cost ${c:.2} so far (API-priced estimate; subscriptions aren't billed per token)."))
+            }
+            "model" => {
+                let t = self.thread(id)?;
+                Some(format!("{} · {}", agent.display_name(), t.model.clone().unwrap_or_else(|| "default model".into())))
+            }
+            _ => None,
+        }
+    }
+
+    /// MCP servers handed to every new agent session: Trek's own tools plus the user's.
+    pub fn mcp_servers(&self) -> Vec<McpServer> {
+        let tools = &self.settings.tools;
+        let mut out = vec![];
+        if tools.computer_use || tools.simulator {
+            if let Some(bin) = trek_mcp_binary() {
+                let mut args = vec![];
+                if !tools.computer_use {
+                    args.push("--no-computer-use".to_string());
+                }
+                if !tools.simulator {
+                    args.push("--no-simulator".to_string());
+                }
+                out.push(McpServer { name: "trek".into(), command: bin.display().to_string(), args, env: vec![] });
+            }
+        }
+        for s in tools.mcp_servers.iter().filter(|s| s.enabled) {
+            out.push(McpServer { name: s.name.clone(), command: s.command.clone(), args: s.args.clone(), env: vec![] });
+        }
+        out
     }
 
     fn fetch_codex_models(&mut self, cx: &mut Context<Self>) {
@@ -1170,4 +1385,31 @@ pub fn init(cx: &mut App) -> Entity<Workspace> {
     let ws = cx.new(Workspace::new);
     cx.set_global(GlobalWorkspace(ws.clone()));
     ws
+}
+
+/// Commands Trek handles itself, shown first in the `/` menu.
+pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("new", "Start a new thread in this project"),
+    ("usage", "Show plan usage and reset times"),
+    ("context", "Show how much of the context window is used"),
+    ("cost", "Show this session's estimated cost"),
+    ("model", "Show the model this thread uses"),
+];
+
+pub fn fmt_tokens(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.0}K", n as f64 / 1_000.),
+        _ => {
+            let m = n as f64 / 1_000_000.;
+            if m.fract() < 0.05 { format!("{m:.0}M") } else { format!("{m:.1}M") }
+        }
+    }
+}
+
+/// The bundled `trek-mcp` server: next to the app binary, else a dev build.
+pub fn trek_mcp_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join("trek-mcp"), dir.join("../Resources/trek-mcp")].into_iter().find(|p| p.exists())
 }

@@ -93,7 +93,7 @@ pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
             Some("message") => {
                 let text = message_text(&p["content"]);
                 match p["role"].as_str() {
-                    Some("user") if !is_injected(&text) => items.push(Item::User { text }),
+                    Some("user") if !is_injected(&text) => items.push(Item::User { text, images: vec![] }),
                     Some("assistant") if !text.trim().is_empty() => items.push(Item::Assistant { text }),
                     _ => {}
                 }

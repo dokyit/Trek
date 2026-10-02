@@ -18,6 +18,53 @@ pub struct Project {
     pub path: PathBuf,
     pub name: String,
     pub updated_at: i64,
+    /// `owner/repo` from the origin remote, when there is one.
+    pub remote: Option<String>,
+    pub is_repo: bool,
+}
+
+/// `owner/repo` parsed from `.git/config`'s origin URL (https or ssh).
+pub fn git_remote(path: &Path) -> Option<String> {
+    let cfg = std::fs::read_to_string(path.join(".git/config")).ok()?;
+    let mut in_origin = false;
+    for line in cfg.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_origin = l == "[remote \"origin\"]";
+        } else if in_origin {
+            if let Some(url) = l.strip_prefix("url = ") {
+                let tail = url.trim_end_matches(".git").replace(':', "/");
+                let parts: Vec<&str> = tail.rsplit('/').take(2).collect();
+                if parts.len() == 2 {
+                    return Some(format!("{}/{}", parts[1], parts[0]));
+                }
+            }
+        }
+    }
+    None
+}
+
+impl Project {
+    fn from_row(id: String, path: String, name: String, updated_at: i64) -> Project {
+        let path = PathBuf::from(path);
+        Project { remote: git_remote(&path), is_repo: path.join(".git").exists(), id, path, name, updated_at }
+    }
+
+    /// Folders that look like real work (a repo, or one the user opened), not scratch or home.
+    pub fn is_workspace(&self, user_added: &[String]) -> bool {
+        if user_added.iter().any(|p| std::path::Path::new(p) == self.path) {
+            return true;
+        }
+        let home = crate::paths::home();
+        let junk = [home.clone(), home.join("Downloads"), home.join("Desktop"), home.join("Documents")];
+        if junk.contains(&self.path) || self.path.starts_with("/tmp") || self.path.starts_with("/private") {
+            return false;
+        }
+        if self.path.starts_with(home.join("Documents/Codex")) {
+            return false;
+        }
+        self.is_repo
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,7 +175,12 @@ impl Thread {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Item {
-    User { text: String },
+    User {
+        text: String,
+        /// Attached image paths (screenshots, snapshots).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
+    },
     Assistant { text: String },
     Reasoning { text: String },
     Tool { id: String, title: String, detail: String, output: String, status: ToolStatus },
@@ -235,7 +287,7 @@ impl Store {
                 params![uuid::Uuid::now_v7().to_string(), path_str, name, now],
             )?;
             c.query_row("SELECT id, path, name, updated_at FROM projects WHERE path = ?1", [&path_str], |r| {
-                Ok(Project { id: r.get(0)?, path: PathBuf::from(r.get::<_, String>(1)?), name: r.get(2)?, updated_at: r.get(3)? })
+                Ok(Project::from_row(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })
         })
     }
@@ -247,9 +299,7 @@ impl Store {
                  FROM projects p LEFT JOIN threads t ON t.project_id = p.id AND t.archived_at IS NULL
                  GROUP BY p.id ORDER BY u DESC",
             )?;
-            let rows = st.query_map([], |r| {
-                Ok(Project { id: r.get(0)?, path: PathBuf::from(r.get::<_, String>(1)?), name: r.get(2)?, updated_at: r.get(3)? })
-            })?;
+            let rows = st.query_map([], |r| Ok(Project::from_row(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect()
         })
     }
@@ -500,7 +550,7 @@ mod tests {
         let t = s.create_thread(None, AgentId::Codex, Some("gpt-6-astra".into()), Effort::Max, HandHolding::FullAccess).unwrap();
         let back = s.thread(&t.id).unwrap().unwrap();
         assert_eq!(back, t);
-        s.set_items(&t.id, &[Item::User { text: "hi".into() }, Item::Assistant { text: "hello".into() }]).unwrap();
+        s.set_items(&t.id, &[Item::User { text: "hi".into(), images: vec![] }, Item::Assistant { text: "hello".into() }]).unwrap();
         assert_eq!(s.items(&t.id).unwrap().len(), 2);
     }
 

@@ -253,7 +253,7 @@ impl ThreadView {
             }
             flush(&mut pending, &mut out, &self.expanded);
             out.push(match item {
-                Item::User { text } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix) },
+                Item::User { text, .. } => Row::User { ix, text: text.clone().into(), open: self.expanded.contains(&ix) },
                 Item::Assistant { .. } => match self.md.get(&ix) {
                     Some((s, _)) => Row::Assistant(s.clone()),
                     None => Row::Notice("".into()),

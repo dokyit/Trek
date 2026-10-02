@@ -4,7 +4,11 @@
 use crate::palette;
 use crate::time;
 use crate::ui;
-use crate::workspace::{Route, SettingsPage, UpdateStatus, Workspace};
+use crate::workspace::{PanelTool, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
+use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -18,13 +22,20 @@ use trek_core::{RunState, ThreadSource};
 pub struct Sidebar {
     workspace: Entity<Workspace>,
     search: Entity<InputState>,
+    project_search: Entity<InputState>,
+    clone_input: Entity<InputState>,
     open_projects: HashSet<String>,
+    filter_open: bool,
+    usage_open: bool,
+    updater_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Sidebar {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let project_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
+        let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let subscriptions = vec![
             cx.observe(&workspace, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |this, state, event: &InputEvent, cx| {
@@ -37,36 +48,144 @@ impl Sidebar {
                 }
             }),
         ];
-        Self { workspace, search, open_projects: Default::default(), _subscriptions: subscriptions }
+        let mut subscriptions = subscriptions;
+        subscriptions.push(cx.observe(&project_search, |_, _, cx| cx.notify()));
+        Self {
+            workspace,
+            search,
+            project_search,
+            clone_input,
+            open_projects: Default::default(),
+            filter_open: false,
+            usage_open: false,
+            updater_open: false,
+            _subscriptions: subscriptions,
+        }
     }
 
-    fn top(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn top(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let draft = matches!(self.workspace.read(cx).route, Route::Draft { .. });
-        v_flex()
-            .px_2()
+        let filtering = self.workspace.read(cx).project_filter.is_some();
+        let filter_open = self.filter_open;
+        let this = cx.entity();
+        let filter = Popover::new("project-filter")
+            .anchor(Anchor::TopLeft)
+            .appearance(false)
+            .open(filter_open)
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                this.filter_open = *open;
+                cx.notify();
+            }))
+            .trigger(ui::icon_button("filter-projects", IconName::Folder, "Filter threads by project").selected(filtering))
+            .content(move |_, _, cx| this.update(cx, |this, cx| this.project_menu(cx)));
+        let add = ui::icon_button("add-project", crate::assets::Lucide::FolderPlus, "Add project").dropdown_menu_with_anchor(Anchor::TopLeft, {
+            let ws = self.workspace.clone();
+            let sidebar = cx.entity();
+            move |menu, _, _| {
+                let ws = ws.clone();
+                let sb = sidebar.clone();
+                menu.min_w(px(200.))
+                    .item(PopupMenuItem::new("Open folder…").icon(IconName::FolderOpen).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))))
+                    .item(PopupMenuItem::new("Clone from GitHub…").icon(IconName::Github).on_click(move |_, window, cx| sb.update(cx, |s, cx| s.open_clone_dialog(window, cx))))
+            }
+        });
+        h_flex()
+            .px_3()
             .pt_1()
+            .pb_2()
             .gap(px(2.))
             .child(
-                h_flex()
-                    .px_1()
-                    .gap_1()
-                    .child(
-                        div().flex_1().child(
-                            Input::new(&self.search)
-                                .small()
-                                .appearance(false)
-                                .prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)),
-                        ),
-                    )
-                    .child(ui::icon_button("open-folder", IconName::FolderOpen, "Open folder (⌘O)").on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |ws, cx| ws.open_folder(cx))
-                    }))),
+                div().flex_1().min_w_0().child(
+                    Input::new(&self.search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)),
+                ),
+            )
+            .child(filter)
+            .child(add)
+            .child(ui::icon_button("new-thread", crate::assets::Lucide::SquarePen, "New thread (⌘N)").on_click(cx.listener(|this, _, _, cx| {
+                this.workspace.update(cx, |ws, cx| ws.new_thread(cx))
+            })))
+    }
+
+    fn project_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let q = self.project_search.read(cx).value().to_lowercase();
+        let current = ws.project_filter.clone();
+        let projects: Vec<(String, String, Option<String>, std::path::PathBuf)> = ws
+            .workspace_projects()
+            .into_iter()
+            .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q) || p.remote.as_deref().is_some_and(|r| r.to_lowercase().contains(&q)))
+            .map(|p| (p.id.clone(), p.name.clone(), p.remote.clone(), p.path.clone()))
+            .collect();
+        fn pick(id: Option<String>, cx: &mut Context<Sidebar>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+            cx.listener(move |this: &mut Sidebar, _: &ClickEvent, _, cx| {
+                let id = id.clone();
+                this.workspace.update(cx, |ws, cx| {
+                    ws.project_filter = id;
+                    cx.notify();
+                });
+                this.filter_open = false;
+                cx.notify();
+            })
+        }
+        ui::menu_surface(cx)
+            .w(px(280.))
+            .child(div().px(px(6.)).pb(px(4.)).child(Input::new(&self.project_search).small().prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground))))
+            .child(
+                ui::menu_row("pf-all", current.is_none(), cx)
+                    .child(Icon::new(IconName::Folder).small().text_color(theme.muted_foreground))
+                    .child("All projects")
+                    .on_click(pick(None, cx)),
             )
             .child(
-                ui::nav_row("new-thread", Icon::new(crate::assets::Lucide::SquarePen), "New thread", Some("⌘N"), draft, cx)
-                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx)))),
+                v_flex().id("pf-list").max_h(px(320.)).overflow_y_scroll().children(projects.into_iter().map(|(id, name, remote, path)| {
+                    let label = remote.clone().unwrap_or_else(|| name.clone());
+                    let ws = self.workspace.clone();
+                    ui::menu_row(SharedString::from(format!("pf-{id}")), current.as_ref() == Some(&id), cx)
+                        .group("pf-row")
+                        .child(ui::monogram(&name, cx))
+                        .child(div().flex_1().min_w_0().truncate().child(label))
+                        .child(
+                            gpui_kit::component::button::Button::new(SharedString::from(format!("pf-gear-{id}")))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Settings).text_color(theme.muted_foreground))
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                    let (p1, p2, ws2) = (path.clone(), path.clone(), ws.clone());
+                                    menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&p1)))
+                                        .item(PopupMenuItem::new("New thread here").on_click(move |_, _, cx| {
+                                            let p = p2.clone();
+                                            ws2.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(p) }, cx))
+                                        }))
+                                }),
+                        )
+                        .on_click(pick(Some(id.clone()), cx))
+                })),
             )
+            .into_any_element()
+    }
+
+    fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.clone_input.clone();
+        let ws = self.workspace.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input2 = input.clone();
+            let ws = ws.clone();
+            dialog
+                .title("Clone from GitHub")
+                .child(v_flex().gap_2().child("Uses your GitHub CLI login. Clones into ~/Developer.").child(Input::new(&input)))
+                .footer(
+                    gpui_kit::component::dialog::DialogFooter::new()
+                        .gap_2()
+                        .child(gpui_kit::component::dialog::DialogClose::new().child(gpui_kit::component::button::Button::new("cancel-clone").outline().label("Cancel")))
+                        .child(gpui_kit::component::dialog::DialogAction::new().child(
+                            gpui_kit::component::button::Button::new("do-clone").primary().label("Clone").on_click(move |_, _, cx| {
+                                let spec = input2.read(cx).value().to_string();
+                                ws.update(cx, |ws, cx| ws.clone_repo(spec, cx));
+                            }),
+                        )),
+                )
+        });
     }
 
     fn status(&self, t: &Thread, cx: &App) -> AnyElement {
@@ -104,10 +223,11 @@ impl Sidebar {
         let row = v_flex()
             .id(SharedString::from(format!("card-{}", t.id)))
             .mx_2()
-            .px_3()
-            .py(px(9.))
-            .gap(px(5.))
-            .rounded(px(10.))
+            .mb(px(2.))
+            .px(px(12.))
+            .py(px(10.))
+            .gap(px(6.))
+            .rounded(px(12.))
             .cursor_pointer()
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
@@ -126,7 +246,7 @@ impl Sidebar {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_sm()
+                            .text_size(px(14.))
                             .when(quiet, |el| el.text_color(theme.foreground.opacity(0.62)))
                             .when(t.is_unseen() && !selected, |el| el.font_medium())
                             .child(t.title.clone()),
@@ -215,60 +335,166 @@ impl Sidebar {
         div().px_5().pt_3().pb_1().text_xs().text_color(cx.theme().muted_foreground).child(text.to_string())
     }
 
-    fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let in_settings = matches!(ws.route, Route::Settings(_));
-        let pill = match &ws.update {
-            UpdateStatus::Downloading { version, progress } => Some((format!("Downloading {version} · {:.0}%", progress * 100.), false)),
-            UpdateStatus::Ready { version, .. } => Some((format!("Restart to update to {version}"), true)),
-            UpdateStatus::RestartPending { .. } => Some(("Restarting when agents finish".to_string(), false)),
-            _ => None,
-        };
-        let importing = ws.importing;
+        let update = ws.update.clone();
         let theme = cx.theme().clone();
-        v_flex()
-            .px_2()
-            .pb_2()
+        let importing = ws.importing;
+        let (usage_open, updater_open) = (self.usage_open, self.updater_open);
+        let this = cx.entity();
+        let usage = Popover::new("usage-popover")
+            .anchor(Anchor::BottomLeft)
+            .appearance(false)
+            .open(usage_open)
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                this.usage_open = *open;
+                if *open {
+                    this.workspace.update(cx, |ws, cx| ws.refresh_usage(cx));
+                }
+                cx.notify();
+            }))
+            .trigger(ui::icon_button("usage", crate::assets::Lucide::ChartNoAxesColumn, "Usage").selected(usage_open))
+            .content({
+                let this = this.clone();
+                move |_, _, cx| this.update(cx, |this, cx| this.usage_card(cx))
+            });
+        let busy = matches!(update, UpdateStatus::Checking | UpdateStatus::Downloading { .. });
+        let ready = matches!(update, UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. });
+        let updater = Popover::new("updater-popover")
+            .anchor(Anchor::BottomRight)
+            .appearance(false)
+            .open(updater_open)
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                this.updater_open = *open;
+                cx.notify();
+            }))
+            .trigger(
+                ui::Pill::new("updater")
+                    .selected(updater_open)
+                    .child(if busy {
+                        Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
+                    } else {
+                        Icon::new(IconName::RefreshCw).small().text_color(if ready { palette::ember(cx) } else { theme.muted_foreground }).into_any_element()
+                    })
+                    .when(ready, |el| el.child(div().text_xs().text_color(palette::ember(cx)).child("Update"))),
+            )
+            .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
+        h_flex()
+            .px_3()
+            .py_2()
             .gap_1()
-            .when_some(pill, |el, (label, ready)| {
-                el.child(
-                    h_flex()
-                        .id("update-pill")
-                        .mx_1()
-                        .px_3()
-                        .h(px(30.))
-                        .gap_2()
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .text_xs()
-                        .bg(if ready { palette::ember(cx).opacity(0.14) } else { theme.secondary })
-                        .text_color(if ready { palette::ember(cx) } else { theme.muted_foreground })
-                        .child(Icon::new(IconName::ArrowUp).xsmall())
-                        .child(label)
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.restart_to_update(cx))))
-                        .with_animation(
-                            "update-pill-in",
-                            Animation::new(std::time::Duration::from_millis(260)).with_easing(ease_out_quint()),
-                            |el, t| el.opacity(t).mt(px(6. * (1. - t))),
-                        ),
-                )
-            })
+            .child(ui::icon_button("open-settings", IconName::Settings, "Settings (⌘,)").selected(in_settings).on_click(cx.listener(|this, _, _, cx| {
+                this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::General), cx))
+            })))
+            .child(ui::icon_button("open-git", crate::assets::Lucide::GitCompare, "Source control").on_click(cx.listener(|this, _, _, cx| {
+                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenTool(PanelTool::Git)))
+            })))
+            .child(usage)
+            .child(div().flex_1())
+            .when(importing, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground)))
+            .child(updater)
+    }
+
+    /// Plan usage per agent: 5-hour, weekly and per-model windows with reset times.
+    fn usage_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let loading = ws.usage_loading;
+        let mut rows: Vec<(trek_core::AgentId, trek_agents::AgentStatus)> = ws
+            .ready_agents()
+            .into_iter()
+            .filter_map(|a| ws.agent_status.get(&a.key()).cloned().map(|u| (a, u)))
+            .collect();
+        rows.sort_by_key(|(a, _)| a.key());
+        let bar = |pct: f32, cx: &App| {
+            let color = if pct >= 90. { palette::red(cx) } else if pct >= 70. { palette::amber(cx) } else { cx.theme().foreground.opacity(0.85) };
+            div().h(px(5.)).w_full().rounded_full().bg(cx.theme().foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(color).w(relative((pct / 100.).clamp(0.0, 1.0))))
+        };
+        ui::menu_surface(cx)
+            .w(px(320.))
+            .p(px(14.))
+            .gap(px(14.))
             .child(
                 h_flex()
-                    .px_1()
-                    .gap_1()
-                    .child(ui::icon_button("open-settings", IconName::Settings, "Settings (⌘,)").selected(in_settings).on_click(cx.listener(
-                        |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::General), cx)),
-                    )))
-                    .child(ui::icon_button("rescan", IconName::RefreshCw, "Find threads from other agents").on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.import_threads(cx);
-                            ws.detect_agents(cx);
-                        })
-                    })))
-                    .child(div().flex_1())
-                    .when(importing, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground))),
+                    .child(div().flex_1().text_sm().font_semibold().child("Usage"))
+                    .when(loading, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground))),
             )
+            .when(rows.is_empty() && !loading, |el| el.child(div().text_sm().text_color(theme.muted_foreground).child("No plan usage reported by your agents.")))
+            .children(rows.into_iter().map(|(agent, u)| {
+                v_flex()
+                    .gap(px(10.))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(ui::agent_logo(&agent, px(16.), cx))
+                            .child(div().text_sm().font_medium().child(agent.display_name()))
+                            .child(div().flex_1())
+                            .when_some(u.plan.clone(), |el, p| el.child(div().text_xs().text_color(theme.muted_foreground).child(p))),
+                    )
+                    .when(u.limits.is_empty() && u.error.is_none(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("No usage limits on this plan.")))
+                    .when_some(u.error.clone(), |el, e| el.child(div().text_xs().text_color(palette::amber(cx)).child(e)))
+                    .children(u.limits.iter().map(|l| {
+                        let resets = l.resets_at.map(time::until).unwrap_or_default();
+                        v_flex()
+                            .gap(px(5.))
+                            .child(
+                                h_flex()
+                                    .text_xs()
+                                    .child(div().flex_1().child(l.label.clone()))
+                                    .child(div().text_color(theme.muted_foreground).child(format!("{:.0}%", l.percent))),
+                            )
+                            .child(bar(l.percent, cx))
+                            .when(!resets.is_empty(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(format!("Resets {resets}"))))
+                    }))
+            }))
+            .into_any_element()
+    }
+
+    fn updater_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let status = ws.update.clone();
+        let channel = format!("{:?}", ws.settings.updates.channel);
+        let (line, action): (String, Option<(&'static str, bool)>) = match &status {
+            UpdateStatus::Idle | UpdateStatus::UpToDate => (format!("Trek {} is up to date.", trek_core::VERSION), Some(("Check for updates", false))),
+            UpdateStatus::Checking => ("Checking for updates…".into(), None),
+            UpdateStatus::Available { version, .. } => (format!("Trek {version} is available."), Some(("Download", false))),
+            UpdateStatus::Downloading { version, progress } => (format!("Downloading {version} · {:.0}%", progress * 100.), None),
+            UpdateStatus::Ready { version, .. } => (format!("Trek {version} is ready to install."), Some(("Restart to update", true))),
+            UpdateStatus::RestartPending { .. } => ("Restarting when your agents finish.".into(), None),
+            UpdateStatus::Failed(e) => (format!("Couldn't check for updates: {e}"), Some(("Try again", false))),
+        };
+        let progress = match status {
+            UpdateStatus::Downloading { progress, .. } => Some(progress),
+            _ => None,
+        };
+        ui::menu_surface(cx)
+            .w(px(300.))
+            .p(px(14.))
+            .gap(px(10.))
+            .child(h_flex().gap_2().child(crate::brand::logo_mark(px(16.))).child(div().text_sm().font_semibold().child(format!("Trek {}", trek_core::VERSION))).child(div().flex_1()).child(div().text_xs().text_color(theme.muted_foreground).child(channel)))
+            .child(div().text_sm().text_color(theme.muted_foreground).child(line))
+            .when_some(progress, |el, p| {
+                el.child(div().h(px(5.)).w_full().rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(palette::ember(cx)).w(relative(p))))
+            })
+            .when_some(action, |el, (label, primary)| {
+                el.child(
+                    gpui_kit::component::button::Button::new("updater-action")
+                        .small()
+                        .w_full()
+                        .when(primary, |b| b.primary())
+                        .when(!primary, |b| b.outline())
+                        .label(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| match ws.update {
+                                UpdateStatus::Ready { .. } => ws.restart_to_update(cx),
+                                _ => ws.check_for_updates(true, cx),
+                            });
+                        })),
+                )
+            })
+            .into_any_element()
     }
 }
 

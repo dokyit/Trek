@@ -10,6 +10,7 @@ name = "trek"
 path = "src/main.rs"
 
 [dependencies]
+tokio.workspace = true
 trek-core.workspace = true
 trek-agents.workspace = true
 gpui-kit.workspace = true

@@ -47,7 +47,7 @@ impl SideChatPanel {
             self.thread_id = self.workspace.update(cx, |ws, cx| ws.create_side_chat(cx));
         }
         if let Some(id) = self.thread_id.clone() {
-            self.workspace.update(cx, |ws, cx| ws.send_to(&id, text, cx));
+            self.workspace.update(cx, |ws, cx| ws.send_to(&id, text, vec![], cx));
         }
     }
 }
@@ -101,7 +101,7 @@ impl Render for SideChatPanel {
                                 )
                             })
                             .children(items.into_iter().enumerate().filter_map(|(i, item)| match item {
-                                Item::User { text } => Some(
+                                Item::User { text, .. } => Some(
                                     h_flex()
                                         .justify_end()
                                         .child(div().max_w(relative(0.85)).px_3().py_2().rounded(px(14.)).bg(theme.secondary).text_sm().child(text))

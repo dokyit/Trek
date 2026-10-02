@@ -18,6 +18,32 @@ pub struct Settings {
     pub api_providers: Vec<String>,
     /// Custom OpenAI-compatible endpoints.
     pub custom_endpoints: Vec<CustomEndpoint>,
+    /// Folders the user added explicitly (always shown as projects).
+    pub user_projects: Vec<String>,
+    /// Installed agents the user switched off (`AgentId::key()`).
+    pub disabled_agents: Vec<String>,
+    pub tools: Tools,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Tools {
+    /// Give agents the computer-use MCP tools (screenshot, click, type).
+    pub computer_use: bool,
+    /// Give agents the iOS Simulator MCP tools.
+    pub simulator: bool,
+    /// Extra MCP servers passed to every session.
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +59,9 @@ impl Default for Settings {
             onboarding: Onboarding::default(),
             api_providers: vec![],
             custom_endpoints: vec![],
+            user_projects: vec![],
+            disabled_agents: vec![],
+            tools: Tools::default(),
         }
     }
 }

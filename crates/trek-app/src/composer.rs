@@ -97,7 +97,7 @@ impl Composer {
             return;
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
-        self.workspace.update(cx, |ws, cx| ws.send(text, cx));
+        self.workspace.update(cx, |ws, cx| ws.send(text, vec![], cx));
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {

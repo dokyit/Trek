@@ -6,7 +6,7 @@ use std::borrow::Cow;
 struct Embedded;
 
 // Extra Lucide icons beyond GPUI Kit's default set, embedded in the binary.
-gpui_kit::assets::icon_assets!(pub TrekIcons, [FilePen, Zap, Lock, ListChecks, Square, ShieldCheck, Wrench, MessageSquare, CircleDashed, Asterisk, SquarePen, Paperclip, GitBranch, LockOpen, Hand, ChevronsUpDown, Sparkle]);
+gpui_kit::assets::icon_assets!(pub TrekIcons, [FilePen, Zap, Lock, ListChecks, Square, ShieldCheck, Wrench, MessageSquare, CircleDashed, Asterisk, SquarePen, Paperclip, GitBranch, LockOpen, Hand, ChevronsUpDown, Sparkle, FolderPlus, ChartNoAxesColumn, GitCompare, Laptop, Camera, Crosshair, Code, Smartphone, Image, Monitor, Plug, Puzzle]);
 
 /// The full Lucide catalog (only icons listed in `TrekIcons` or the defaults are embedded).
 pub use gpui_kit::assets::IconName as Lucide;

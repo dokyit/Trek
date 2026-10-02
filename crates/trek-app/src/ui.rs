@@ -1,6 +1,5 @@
 //! Shared visual primitives so every surface uses the same quiet, consistent styling.
 
-use crate::palette;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -72,18 +71,36 @@ pub fn monogram(name: &str, cx: &App) -> impl IntoElement {
         .child(letters)
 }
 
-/// Small agent mark at the end of a row. Generic glyphs, not vendor logos.
-pub fn agent_glyph(agent: &AgentId, cx: &App) -> impl IntoElement {
-    let muted = cx.theme().muted_foreground;
-    let (icon, color): (Icon, Hsla) = match agent {
-        AgentId::ClaudeCode => (Icon::new(crate::assets::Lucide::Asterisk), rgb(0xD97757).into()),
-        AgentId::Codex => (Icon::new(IconName::SquareTerminal), muted),
-        AgentId::OpenCode => (Icon::new(IconName::Frame), muted),
-        AgentId::Droid => (Icon::new(IconName::Bot), muted),
-        AgentId::Acp(_) => (Icon::new(IconName::Bot), muted),
-        AgentId::Direct(_) => (Icon::new(IconName::Cpu), palette::sky(cx)),
+/// Logo file key for an agent or provider (assets/logos/{dark,light}/<key>.png).
+pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
+    const KEYS: &[&str] = &[
+        "claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "gemini", "kimi", "qwen-code", "grok", "devin", "goose", "amp",
+        "pi", "anthropic", "openai", "google", "openrouter", "deepseek", "xai", "mistral", "groq", "ollama", "lmstudio",
+    ];
+    let key = match agent {
+        AgentId::ClaudeCode => "claude-code".to_string(),
+        AgentId::Codex => "codex".to_string(),
+        AgentId::OpenCode => "opencode".to_string(),
+        AgentId::Droid => "droid".to_string(),
+        AgentId::Acp(id) | AgentId::Direct(id) => id.clone(),
     };
-    icon.xsmall().text_color(color)
+    KEYS.iter().find(|k| **k == key).copied()
+}
+
+/// The agent's real logo, theme-aware, falling back to a neutral glyph.
+pub fn agent_logo(agent: &AgentId, size: Pixels, cx: &App) -> AnyElement {
+    match logo_key(agent) {
+        Some(key) => {
+            let theme = if cx.theme().mode.is_dark() { "dark" } else { "light" };
+            img(SharedString::from(format!("logos/{theme}/{key}.png"))).size(size).flex_none().rounded(size * 0.22).into_any_element()
+        }
+        None => Icon::new(IconName::Cpu).size(size).text_color(cx.theme().muted_foreground).into_any_element(),
+    }
+}
+
+/// Small agent mark at the end of a row.
+pub fn agent_glyph(agent: &AgentId, cx: &App) -> impl IntoElement {
+    agent_logo(agent, px(14.), cx)
 }
 
 /// Thin vertical divider between toolbar items.
