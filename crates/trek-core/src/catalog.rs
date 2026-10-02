@@ -1,0 +1,169 @@
+//! Built-in knowledge about agents, providers and models. Live data (Codex `model/list`,
+//! ACP config options, models.dev) refines this at runtime; these are the offline defaults.
+
+use crate::types::{AgentId, Effort};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub efforts: Vec<Effort>,
+    /// 0 = fastest. Used to order the Power slider.
+    pub tier: u8,
+}
+
+impl ModelInfo {
+    fn new(id: &str, name: &str, tier: u8, efforts: &[Effort]) -> Self {
+        Self { id: id.into(), name: name.into(), efforts: efforts.to_vec(), tier }
+    }
+}
+
+/// One stop on the Power slider: a model plus an effort.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerPreset {
+    pub model: String,
+    pub model_name: String,
+    pub effort: Effort,
+}
+
+impl PowerPreset {
+    pub fn label(&self) -> String {
+        format!("{} · {}", self.model_name, self.effort.label())
+    }
+}
+
+use Effort::*;
+const CLAUDE_EFFORTS: &[Effort] = &[Low, Medium, High, XHigh, Max];
+const CODEX_EFFORTS: &[Effort] = &[Low, Medium, High, XHigh, Max];
+
+pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
+    match agent {
+        AgentId::ClaudeCode => vec![
+            ModelInfo::new("claude-haiku-4-5", "Haiku 4.5", 0, &[Off, Low, Medium, High]),
+            ModelInfo::new("claude-sonnet-5-5", "Sonnet 5.5", 1, CLAUDE_EFFORTS),
+            ModelInfo::new("claude-opus-5-5", "Opus 5.5", 2, CLAUDE_EFFORTS),
+            ModelInfo::new("claude-fable-5-1", "Fable 5.1", 3, CLAUDE_EFFORTS),
+        ],
+        AgentId::Codex => vec![
+            ModelInfo::new("gpt-5.6-luna", "Luna", 0, CODEX_EFFORTS),
+            ModelInfo::new("gpt-5.6-sol", "Sol", 1, CODEX_EFFORTS),
+            ModelInfo::new("gpt-5.6-terra", "Terra", 2, CODEX_EFFORTS),
+            ModelInfo::new("gpt-6-astra", "Astra", 3, CODEX_EFFORTS),
+        ],
+        AgentId::Direct(p) if p == "ollama" || p == "lmstudio" || p == "llamacpp" => vec![],
+        _ => vec![],
+    }
+}
+
+/// Slider stops ordered Faster → Smarter. Walks models by tier, using a low effort
+/// on fast models and climbing effort on the strongest one.
+pub fn power_presets(models: &[ModelInfo]) -> Vec<PowerPreset> {
+    let mut sorted: Vec<&ModelInfo> = models.iter().collect();
+    sorted.sort_by_key(|m| m.tier);
+    let mut out = Vec::new();
+    let n = sorted.len();
+    for (i, m) in sorted.iter().enumerate() {
+        let efforts: Vec<Effort> = if m.efforts.is_empty() { vec![Medium] } else { m.efforts.clone() };
+        let pick = |e: Effort| e.clamp_to(&efforts);
+        let stops: Vec<Effort> = if i + 1 == n {
+            // Strongest model: medium, high, max.
+            vec![pick(Medium), pick(High), pick(Max)]
+        } else if i == 0 {
+            vec![pick(Low)]
+        } else {
+            vec![pick(Medium)]
+        };
+        for e in stops {
+            let p = PowerPreset { model: m.id.clone(), model_name: m.name.clone(), effort: e };
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// A provider Trek talks to directly with its own agent loop.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectProvider {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub wire: Wire,
+    /// Environment variable commonly holding the key (used for detection only).
+    pub env_key: Option<&'static str>,
+    pub local: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wire {
+    Anthropic,
+    OpenAiChat,
+    Gemini,
+}
+
+pub const DIRECT_PROVIDERS: &[DirectProvider] = &[
+    DirectProvider { id: "anthropic", name: "Anthropic API", base_url: "https://api.anthropic.com", wire: Wire::Anthropic, env_key: Some("ANTHROPIC_API_KEY"), local: false },
+    DirectProvider { id: "openai", name: "OpenAI API", base_url: "https://api.openai.com/v1", wire: Wire::OpenAiChat, env_key: Some("OPENAI_API_KEY"), local: false },
+    DirectProvider { id: "google", name: "Google Gemini API", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", wire: Wire::OpenAiChat, env_key: Some("GEMINI_API_KEY"), local: false },
+    DirectProvider { id: "openrouter", name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", wire: Wire::OpenAiChat, env_key: Some("OPENROUTER_API_KEY"), local: false },
+    DirectProvider { id: "deepseek", name: "DeepSeek", base_url: "https://api.deepseek.com/v1", wire: Wire::OpenAiChat, env_key: Some("DEEPSEEK_API_KEY"), local: false },
+    DirectProvider { id: "xai", name: "xAI", base_url: "https://api.x.ai/v1", wire: Wire::OpenAiChat, env_key: Some("XAI_API_KEY"), local: false },
+    DirectProvider { id: "mistral", name: "Mistral", base_url: "https://api.mistral.ai/v1", wire: Wire::OpenAiChat, env_key: Some("MISTRAL_API_KEY"), local: false },
+    DirectProvider { id: "groq", name: "Groq", base_url: "https://api.groq.com/openai/v1", wire: Wire::OpenAiChat, env_key: Some("GROQ_API_KEY"), local: false },
+    DirectProvider { id: "ollama", name: "Ollama", base_url: "http://127.0.0.1:11434/v1", wire: Wire::OpenAiChat, env_key: None, local: true },
+    DirectProvider { id: "lmstudio", name: "LM Studio", base_url: "http://127.0.0.1:1234/v1", wire: Wire::OpenAiChat, env_key: None, local: true },
+    DirectProvider { id: "llamacpp", name: "llama.cpp / MLX", base_url: "http://127.0.0.1:8080/v1", wire: Wire::OpenAiChat, env_key: None, local: true },
+];
+
+pub fn direct_provider(id: &str) -> Option<&'static DirectProvider> {
+    DIRECT_PROVIDERS.iter().find(|p| p.id == id)
+}
+
+pub fn provider_display_name(id: &str) -> String {
+    direct_provider(id).map(|p| p.name.to_string()).unwrap_or_else(|| id.to_string())
+}
+
+/// ACP agents Trek knows how to launch. The registry adds more at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct AcpAgent {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub binary: &'static str,
+    pub args: &'static [&'static str],
+    /// Text that must appear in `<binary> --version` to confirm identity
+    /// (e.g. `agent` on PATH may be a different tool).
+    pub version_marker: Option<&'static str>,
+    pub install_hint: &'static str,
+}
+
+pub const ACP_AGENTS: &[AcpAgent] = &[
+    AcpAgent { id: "cursor", name: "Cursor", binary: "cursor-agent", args: &["acp"], version_marker: None, install_hint: "curl https://cursor.com/install -fsS | bash" },
+    AcpAgent { id: "github-copilot", name: "GitHub Copilot", binary: "copilot", args: &["--acp"], version_marker: None, install_hint: "npm i -g @github/copilot" },
+    AcpAgent { id: "gemini", name: "Gemini CLI", binary: "gemini", args: &["--acp"], version_marker: None, install_hint: "npm i -g @google/gemini-cli" },
+    AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: "uv tool install kimi-cli" },
+    AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: "npm i -g @qwen-code/qwen-code" },
+    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["acp"], version_marker: None, install_hint: "see x.ai/cli" },
+    AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: "see devin.ai/cli" },
+    AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: "brew install block-goose-cli" },
+    AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: "npm i -g amp-acp" },
+    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: "npm i -g pi-acp" },
+];
+
+pub fn acp_display_name(id: &str) -> String {
+    ACP_AGENTS.iter().find(|a| a.id == id).map(|a| a.name.to_string()).unwrap_or_else(|| id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_presets_run_fast_to_smart() {
+        let presets = power_presets(&default_models(&AgentId::ClaudeCode));
+        assert_eq!(presets.first().unwrap().model, "claude-haiku-4-5");
+        assert_eq!(presets.last().unwrap().effort, Effort::Max);
+        assert!(presets.len() >= 4);
+    }
+}

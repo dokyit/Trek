@@ -1,0 +1,1029 @@
+//! The application model: threads, live agent sessions, routing, updates. Views observe it.
+
+use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Task};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use trek_agents::{AgentEvent, Command, Decision, SessionConfig};
+use trek_core::catalog::{self, ModelInfo};
+use trek_core::detect::{Availability, DetectedAgent};
+use trek_core::import::ImportSummary;
+use trek_core::settings::Settings;
+use trek_core::store::{Item, Project, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Route {
+    /// Composing a new thread in a project.
+    Draft { project: Option<PathBuf> },
+    Thread(String),
+    Settings(SettingsPage),
+    Onboarding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    General,
+    Appearance,
+    Agents,
+    ApiKeys,
+    LocalModels,
+    Permissions,
+    Inbox,
+    Import,
+    Updates,
+    About,
+}
+
+impl SettingsPage {
+    pub const ALL: [SettingsPage; 10] = [
+        SettingsPage::General,
+        SettingsPage::Appearance,
+        SettingsPage::Agents,
+        SettingsPage::ApiKeys,
+        SettingsPage::LocalModels,
+        SettingsPage::Permissions,
+        SettingsPage::Inbox,
+        SettingsPage::Import,
+        SettingsPage::Updates,
+        SettingsPage::About,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsPage::General => "General",
+            SettingsPage::Appearance => "Appearance",
+            SettingsPage::Agents => "Agents & Subscriptions",
+            SettingsPage::ApiKeys => "API Keys",
+            SettingsPage::LocalModels => "Local Models",
+            SettingsPage::Permissions => "Permissions",
+            SettingsPage::Inbox => "Inbox",
+            SettingsPage::Import => "Import Threads",
+            SettingsPage::Updates => "Updates",
+            SettingsPage::About => "About Trek",
+        }
+    }
+}
+
+/// Composer choices: agent, model, effort, hand-holding, plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prefs {
+    pub agent: AgentId,
+    pub model: Option<String>,
+    pub effort: Effort,
+    pub hand_holding: HandHolding,
+    pub plan: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPermission {
+    pub request_id: String,
+    pub title: String,
+    pub detail: String,
+}
+
+/// In-memory state of an open thread: transcript plus its live agent session, if any.
+#[derive(Default)]
+pub struct LiveThread {
+    pub items: Vec<Item>,
+    pub loaded: bool,
+    pub loading: bool,
+    /// Index of the assistant item currently streaming.
+    pub streaming: Option<usize>,
+    pub reasoning: Option<usize>,
+    pub permissions: Vec<PendingPermission>,
+    pub commands: Option<async_channel::Sender<Command>>,
+    pub turn_started: Option<Instant>,
+    pub plan: bool,
+    pub cost_usd: f64,
+    /// Bumped on every transcript change so views can resync cheaply.
+    pub revision: u64,
+    _events: Option<Task<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate,
+    Available { version: String, notes: String },
+    Downloading { version: String, progress: f32 },
+    Ready { version: String, path: PathBuf },
+    /// Ready, waiting for running agents to finish.
+    RestartPending { version: String, path: PathBuf },
+    Failed(String),
+}
+
+pub enum WorkspaceEvent {
+    /// A toast-worthy message with an optional undo.
+    Toast { message: String, undo: Option<UndoAction> },
+    FocusComposer,
+}
+
+#[derive(Debug, Clone)]
+pub enum UndoAction {
+    Unsettle(String),
+    Unarchive(String),
+}
+
+pub struct Workspace {
+    pub store: Store,
+    pub settings: Settings,
+    pub threads: Vec<Thread>,
+    pub projects: Vec<Project>,
+    pub agents: Vec<DetectedAgent>,
+    pub detecting: bool,
+    pub importing: bool,
+    pub import_summary: Option<ImportSummary>,
+    pub live: HashMap<String, LiveThread>,
+    pub route: Route,
+    pub draft_prefs: Prefs,
+    pub update: UpdateStatus,
+    pub sidebar_collapsed: bool,
+    pub settled_open: bool,
+    pub search: String,
+    pub project_filter: Option<String>,
+    tasks: Vec<Task<()>>,
+}
+
+impl EventEmitter<WorkspaceEvent> for Workspace {}
+
+impl Workspace {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let settings = Settings::load();
+        let store = Store::open_default().unwrap_or_else(|e| {
+            tracing::error!("database: {e}; using in-memory store");
+            Store::in_memory().expect("in-memory store")
+        });
+        let route = if settings.onboarding.completed { Route::Draft { project: None } } else { Route::Onboarding };
+        let draft_prefs = Prefs {
+            agent: AgentId::from_key(&settings.general.default_agent),
+            model: settings.general.default_model.clone(),
+            effort: settings.general.default_effort,
+            hand_holding: settings.general.hand_holding,
+            plan: false,
+        };
+        let mut this = Self {
+            store,
+            settings,
+            threads: vec![],
+            projects: vec![],
+            agents: vec![],
+            detecting: false,
+            importing: false,
+            import_summary: None,
+            live: HashMap::new(),
+            route,
+            draft_prefs,
+            update: UpdateStatus::Idle,
+            sidebar_collapsed: false,
+            settled_open: false,
+            search: String::new(),
+            project_filter: None,
+            tasks: vec![],
+        };
+        this.reload(cx);
+        if this.route == (Route::Draft { project: None }) {
+            this.route = Route::Draft { project: this.projects.first().map(|p| p.path.clone()) };
+        }
+        this.detect_agents(cx);
+        if this.settings.onboarding.completed {
+            this.import_threads(cx);
+        }
+        if this.settings.updates.auto_check {
+            this.check_for_updates(false, cx);
+        }
+        this.start_housekeeping(cx);
+        this
+    }
+
+    // ---------- data ----------
+
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.threads = self.store.threads().unwrap_or_default();
+        self.projects = self.store.projects().unwrap_or_default();
+        cx.notify();
+    }
+
+    pub fn thread(&self, id: &str) -> Option<&Thread> {
+        self.threads.iter().find(|t| t.id == id)
+    }
+
+    #[allow(dead_code)]
+    pub fn project(&self, id: &str) -> Option<&Project> {
+        self.projects.iter().find(|p| p.id == id)
+    }
+
+    pub fn current_thread(&self) -> Option<&Thread> {
+        match &self.route {
+            Route::Thread(id) => self.thread(id),
+            _ => None,
+        }
+    }
+
+    fn mutate_thread(&mut self, id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut Thread)) {
+        if let Some(t) = self.threads.iter_mut().find(|t| t.id == id) {
+            f(t);
+            if let Err(e) = self.store.save_thread(t) {
+                tracing::warn!("save thread: {e}");
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn save_settings(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.settings.save() {
+            tracing::warn!("save settings: {e}");
+        }
+        cx.notify();
+    }
+
+    /// Threads grouped into sidebar sections, filtered by search and project.
+    pub fn sections(&self) -> Vec<(Section, Vec<&Thread>)> {
+        let now = now_ms();
+        let q = self.search.to_lowercase();
+        let mut map: HashMap<Section, Vec<&Thread>> = HashMap::new();
+        for t in &self.threads {
+            if !q.is_empty() && !t.title.to_lowercase().contains(&q) {
+                continue;
+            }
+            if let Some(p) = &self.project_filter {
+                if t.project_id.as_ref() != Some(p) {
+                    continue;
+                }
+            }
+            if let Some(s) = t.section(now) {
+                map.entry(s).or_default().push(t);
+            }
+        }
+        let mut out: Vec<(Section, Vec<&Thread>)> = map.into_iter().collect();
+        out.sort_by_key(|(s, _)| *s);
+        for (s, list) in &mut out {
+            match s {
+                Section::Inbox => list.sort_by_key(|t| t.inbox_rank()),
+                Section::Pinned => list.sort_by_key(|t| t.pinned_at),
+                _ => list.sort_by_key(|t| -t.updated_at),
+            }
+        }
+        out
+    }
+
+    #[allow(dead_code)]
+    pub fn needs_you_count(&self) -> usize {
+        self.threads.iter().filter(|t| t.needs_you()).count()
+    }
+
+    pub fn any_working(&self) -> bool {
+        self.threads.iter().any(|t| t.run_state == RunState::Working)
+    }
+
+    // ---------- navigation ----------
+
+    pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+        if let Route::Thread(id) = &route {
+            let id = id.clone();
+            self.mutate_thread(&id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
+            self.ensure_loaded(&id, cx);
+        }
+        self.route = route;
+        cx.emit(WorkspaceEvent::FocusComposer);
+        cx.notify();
+    }
+
+    pub fn new_thread(&mut self, cx: &mut Context<Self>) {
+        let project = match &self.route {
+            Route::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+            Route::Draft { project } => project.clone(),
+            _ => None,
+        }
+        .or_else(|| self.projects.first().map(|p| p.path.clone()));
+        self.navigate(Route::Draft { project }, cx);
+    }
+
+    fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
+        let thread = self.thread(id).cloned();
+        let live = self.live.entry(id.to_string()).or_default();
+        if live.loaded || live.loading {
+            return;
+        }
+        let items = self.store.items(id).unwrap_or_default();
+        if !items.is_empty() {
+            live.items = items;
+            live.loaded = true;
+            live.revision += 1;
+            return;
+        }
+        let Some(thread) = thread else { return };
+        let (Some(native), true) = (thread.native_id.clone(), thread.source != ThreadSource::Trek) else {
+            live.loaded = true;
+            return;
+        };
+        live.loading = true;
+        let id = id.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            let source = thread.source;
+            let result = cx
+                .background_executor()
+                .spawn(async move { trek_core::import::load_transcript(source, &native) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let live = this.live.entry(id.clone()).or_default();
+                live.loading = false;
+                live.loaded = true;
+                match result {
+                    Ok(items) => live.items = items,
+                    Err(e) => live.items = vec![Item::Error { text: format!("Couldn't load this thread: {e}") }],
+                }
+                live.revision += 1;
+                cx.notify();
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    // ---------- composer prefs ----------
+
+    pub fn prefs(&self) -> Prefs {
+        match self.current_thread() {
+            Some(t) => Prefs {
+                agent: t.agent.clone(),
+                model: t.model.clone(),
+                effort: t.effort,
+                hand_holding: t.hand_holding,
+                plan: self.live.get(&t.id).is_some_and(|l| l.plan),
+            },
+            None => self.draft_prefs.clone(),
+        }
+    }
+
+    pub fn set_prefs(&mut self, prefs: Prefs, cx: &mut Context<Self>) {
+        match self.route.clone() {
+            Route::Thread(id) => {
+                let before = self.thread(&id).cloned();
+                self.mutate_thread(&id, cx, |t| {
+                    t.model = prefs.model.clone();
+                    t.effort = prefs.effort;
+                    t.hand_holding = prefs.hand_holding;
+                    // Switching agent on an existing thread forks it into a new session.
+                    if t.agent != prefs.agent {
+                        t.agent = prefs.agent.clone();
+                        t.native_id = None;
+                    }
+                });
+                let live = self.live.entry(id.clone()).or_default();
+                live.plan = prefs.plan;
+                if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
+                    if before.agent != prefs.agent {
+                        let _ = tx.try_send(Command::Shutdown);
+                        live.commands = None;
+                    } else {
+                        if before.hand_holding != prefs.hand_holding {
+                            let _ = tx.try_send(Command::SetHandHolding(prefs.hand_holding));
+                        }
+                        if before.model != prefs.model || before.effort != prefs.effort {
+                            if let Some(m) = prefs.model.clone() {
+                                let _ = tx.try_send(Command::SetModel { model: m, effort: prefs.effort });
+                            }
+                        }
+                    }
+                }
+            }
+            _ => self.draft_prefs = prefs,
+        }
+        cx.notify();
+    }
+
+    /// Models for an agent: live data for local servers, catalog otherwise.
+    pub fn models_for(&self, agent: &AgentId) -> Vec<ModelInfo> {
+        if let AgentId::Direct(p) = agent {
+            if let Some(found) = self.agents.iter().find(|a| &a.agent == agent) {
+                if !found.models.is_empty() {
+                    return found.models.iter().map(|m| ModelInfo { id: m.clone(), name: m.clone(), efforts: vec![], tier: 0 }).collect();
+                }
+            }
+            return match p.as_str() {
+                "anthropic" => catalog::default_models(&AgentId::ClaudeCode),
+                "openai" => catalog::default_models(&AgentId::Codex),
+                _ => vec![],
+            };
+        }
+        catalog::default_models(agent)
+    }
+
+    /// Agents the user can pick right now.
+    pub fn ready_agents(&self) -> Vec<AgentId> {
+        let mut out: Vec<AgentId> = self
+            .agents
+            .iter()
+            .filter(|a| a.availability == Availability::Ready)
+            .filter(|a| matches!(a.agent, AgentId::ClaudeCode | AgentId::Codex) || matches!(&a.agent, AgentId::Direct(_)) && !a.models.is_empty())
+            .map(|a| a.agent.clone())
+            .collect();
+        for p in &self.settings.api_providers {
+            let id = AgentId::Direct(p.clone());
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        if out.is_empty() {
+            out.push(AgentId::ClaudeCode);
+        }
+        out
+    }
+
+    // ---------- sending ----------
+
+    pub fn send(&mut self, text: String, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let id = match self.route.clone() {
+            Route::Thread(id) => id,
+            Route::Draft { project } => {
+                let Some(cwd) = project else {
+                    cx.emit(WorkspaceEvent::Toast { message: "Pick a project folder first.".into(), undo: None });
+                    return;
+                };
+                let p = self.draft_prefs.clone();
+                let mut thread = match self.store.create_thread(Some(&cwd), p.agent, p.model, p.effort, p.hand_holding) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't create thread: {e}"), undo: None });
+                        return;
+                    }
+                };
+                thread.title = trek_core::import_title(&text);
+                let _ = self.store.save_thread(&thread);
+                let id = thread.id.clone();
+                self.reload(cx);
+                let live = self.live.entry(id.clone()).or_default();
+                live.loaded = true;
+                live.plan = p.plan;
+                self.route = Route::Thread(id.clone());
+                id
+            }
+            _ => return,
+        };
+        self.ensure_session(&id, cx);
+        let live = self.live.entry(id.clone()).or_default();
+        live.items.push(Item::User { text: text.clone() });
+        live.streaming = None;
+        live.reasoning = None;
+        live.turn_started = Some(Instant::now());
+        live.revision += 1;
+        if let Some(tx) = &live.commands {
+            let _ = tx.try_send(Command::Prompt(text));
+        }
+        self.mutate_thread(&id, cx, |t| {
+            t.run_state = RunState::Working;
+            t.settled_at = None;
+            t.snoozed_until = None;
+            t.updated_at = now_ms();
+            t.last_seen_at = t.updated_at;
+        });
+        self.persist_items(&id);
+    }
+
+    fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread(id).cloned() else { return };
+        let live = self.live.entry(id.to_string()).or_default();
+        if live.commands.is_some() {
+            return;
+        }
+        let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
+        let handle = trek_agents::start(SessionConfig {
+            agent: thread.agent.clone(),
+            cwd,
+            model: thread.model.clone(),
+            effort: thread.effort,
+            hand_holding: thread.hand_holding,
+            plan: live.plan,
+            resume: thread.native_id.clone(),
+        });
+        live.commands = Some(handle.commands);
+        let events = handle.events;
+        let id = id.to_string();
+        live._events = Some(cx.spawn(async move |this, cx| {
+            while let Ok(first) = events.recv().await {
+                // Batch everything already queued so a burst of tokens is one update.
+                let mut batch = vec![first];
+                while let Ok(more) = events.try_recv() {
+                    batch.push(more);
+                }
+                if this.update(cx, |this, cx| this.apply_events(&id, batch, cx)).is_err() {
+                    break;
+                }
+                // Cap UI updates at ~60 Hz while streaming.
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+            }
+        }));
+    }
+
+    fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
+        let mut run_state: Option<RunState> = None;
+        let mut native: Option<String> = None;
+        let mut diff: Option<(i64, i64)> = None;
+        let mut finished = false;
+        let mut notify_text: Option<String> = None;
+        {
+            let live = self.live.entry(id.to_string()).or_default();
+            for ev in events {
+                match ev {
+                    AgentEvent::Started { native_id, .. } => {
+                        if !native_id.is_empty() {
+                            native = Some(native_id);
+                        }
+                    }
+                    AgentEvent::TextDelta(t) => {
+                        let ix = match live.streaming {
+                            Some(ix) => ix,
+                            None => {
+                                live.items.push(Item::Assistant { text: String::new() });
+                                live.streaming = Some(live.items.len() - 1);
+                                live.items.len() - 1
+                            }
+                        };
+                        if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
+                            text.push_str(&t);
+                        }
+                        live.reasoning = None;
+                    }
+                    AgentEvent::TextDone(t) => {
+                        match live.streaming.take() {
+                            Some(ix) => {
+                                if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
+                                    *text = t;
+                                }
+                            }
+                            None if !t.trim().is_empty() => live.items.push(Item::Assistant { text: t }),
+                            None => {}
+                        }
+                        live.reasoning = None;
+                    }
+                    AgentEvent::ReasoningDelta(t) => {
+                        let ix = match live.reasoning {
+                            Some(ix) => ix,
+                            None => {
+                                live.items.push(Item::Reasoning { text: String::new() });
+                                live.reasoning = Some(live.items.len() - 1);
+                                live.items.len() - 1
+                            }
+                        };
+                        if let Some(Item::Reasoning { text }) = live.items.get_mut(ix) {
+                            text.push_str(&t);
+                        }
+                    }
+                    AgentEvent::ToolStarted { id: tid, title, detail } => {
+                        live.streaming = None;
+                        live.reasoning = None;
+                        live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
+                    }
+                    AgentEvent::ToolFinished { id: tid, output, ok } => {
+                        if let Some(Item::Tool { output: o, status, .. }) =
+                            live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
+                        {
+                            *o = output;
+                            *status = if ok { ToolStatus::Done } else { ToolStatus::Failed };
+                        }
+                    }
+                    AgentEvent::PermissionRequest { request_id, title, detail } => {
+                        live.permissions.push(PendingPermission { request_id, title: title.clone(), detail });
+                        run_state = Some(RunState::NeedsYou);
+                        notify_text = Some(format!("Needs your approval: {title}"));
+                    }
+                    AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
+                    AgentEvent::TurnComplete { cost_usd, error } => {
+                        // Models that hide their reasoning leave empty "Thought" rows behind.
+                        live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
+                        live.streaming = None;
+                        live.reasoning = None;
+                        live.turn_started = None;
+                        live.permissions.clear();
+                        if let Some(c) = cost_usd {
+                            live.cost_usd += c;
+                        }
+                        if let Some(e) = error {
+                            if e != "Interrupted" {
+                                live.items.push(Item::Error { text: e });
+                                run_state = Some(RunState::Failed);
+                            } else {
+                                live.items.push(Item::Notice { text: "Interrupted".into() });
+                                run_state = Some(RunState::Idle);
+                            }
+                        } else {
+                            run_state = Some(RunState::Idle);
+                        }
+                        finished = true;
+                    }
+                    AgentEvent::Error(e) => {
+                        live.items.push(Item::Error { text: e });
+                        live.turn_started = None;
+                        run_state = Some(RunState::Failed);
+                        finished = true;
+                    }
+                    AgentEvent::Exited => {
+                        live.commands = None;
+                        if live.turn_started.take().is_some() {
+                            run_state.get_or_insert(RunState::Failed);
+                        }
+                    }
+                }
+            }
+            live.revision += 1;
+        }
+        let viewing = self.route == Route::Thread(id.to_string());
+        self.mutate_thread(id, cx, |t| {
+            if let Some(n) = native {
+                t.native_id = Some(n);
+            }
+            if let Some(s) = run_state {
+                t.run_state = s;
+            }
+            if let Some((a, d)) = diff {
+                t.additions = a;
+                t.deletions = d;
+            }
+            if finished {
+                t.updated_at = now_ms();
+                if viewing {
+                    t.last_seen_at = t.updated_at;
+                }
+            }
+        });
+        if finished {
+            self.persist_items(id);
+            if let Some(title) = self.thread(id).map(|t| t.title.clone()) {
+                if !viewing {
+                    notify_text.get_or_insert(format!("Finished: {title}"));
+                }
+            }
+            self.maybe_restart_for_update(cx);
+        }
+        if let Some(text) = notify_text {
+            if !viewing {
+                cx.emit(WorkspaceEvent::Toast { message: text, undo: None });
+            }
+        }
+        cx.notify();
+    }
+
+    fn persist_items(&self, id: &str) {
+        if let Some(live) = self.live.get(id) {
+            let _ = self.store.set_items(id, &live.items);
+        }
+    }
+
+    pub fn respond(&mut self, id: &str, request_id: &str, decision: Decision, cx: &mut Context<Self>) {
+        let mut still_waiting = false;
+        if let Some(live) = self.live.get_mut(id) {
+            live.permissions.retain(|p| p.request_id != request_id);
+            still_waiting = !live.permissions.is_empty();
+            if let Some(tx) = &live.commands {
+                let _ = tx.try_send(Command::Respond { request_id: request_id.to_string(), decision });
+            }
+            live.revision += 1;
+        }
+        if !still_waiting {
+            self.mutate_thread(id, cx, |t| t.run_state = RunState::Working);
+        }
+        cx.notify();
+    }
+
+    pub fn interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(tx) = self.live.get(id).and_then(|l| l.commands.clone()) {
+            let _ = tx.try_send(Command::Interrupt);
+        }
+        cx.notify();
+    }
+
+    // ---------- inbox lifecycle ----------
+
+    pub fn settle(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| {
+            t.settled_at = Some(now_ms());
+            t.pinned_at = None;
+            t.snoozed_until = None;
+            t.last_seen_at = t.updated_at.max(t.last_seen_at);
+        });
+        cx.emit(WorkspaceEvent::Toast { message: "Settled".into(), undo: Some(UndoAction::Unsettle(id.into())) });
+    }
+
+    pub fn unsettle(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.settled_at = None);
+    }
+
+    pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.pinned_at = if t.pinned_at.is_some() { None } else { Some(now_ms()) });
+    }
+
+    pub fn snooze(&mut self, id: &str, hours: i64, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.snoozed_until = Some(now_ms() + hours * 3_600_000));
+        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed for {hours} h"), undo: None });
+    }
+
+    pub fn mark_unread(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.last_seen_at = t.updated_at - 1);
+    }
+
+    pub fn archive(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.archived_at = Some(now_ms()));
+        if self.route == Route::Thread(id.into()) {
+            self.new_thread(cx);
+        }
+        self.threads.retain(|t| t.archived_at.is_none());
+        cx.emit(WorkspaceEvent::Toast { message: "Archived".into(), undo: Some(UndoAction::Unarchive(id.into())) });
+    }
+
+    #[allow(dead_code)]
+    pub fn rename(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
+        self.mutate_thread(id, cx, |t| t.title = title);
+    }
+
+    pub fn undo(&mut self, action: UndoAction, cx: &mut Context<Self>) {
+        match action {
+            UndoAction::Unsettle(id) => self.unsettle(&id, cx),
+            UndoAction::Unarchive(id) => {
+                let _ = self.store.update_thread(&id, |t| t.archived_at = None);
+                self.reload(cx);
+            }
+        }
+    }
+
+    /// Auto-settle and snooze wake-ups, once a minute.
+    fn start_housekeeping(&mut self, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(60)).await;
+            let alive = this.update(cx, |this, cx| {
+                let now = now_ms();
+                let days = this.settings.inbox.auto_settle_days;
+                let due: Vec<String> =
+                    this.threads.iter().filter(|t| t.should_auto_settle(now, days)).map(|t| t.id.clone()).collect();
+                for id in due {
+                    this.mutate_thread(&id, cx, |t| t.settled_at = Some(now));
+                }
+                // Snoozes that have expired fall back into the inbox on their own (section()).
+                cx.notify();
+            });
+            if alive.is_err() {
+                break;
+            }
+        });
+        self.tasks.push(task);
+    }
+
+    // ---------- projects ----------
+
+    pub fn open_folder(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Project".into()),
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = this.update(cx, |this, cx| this.add_project(path, cx));
+                }
+            }
+        });
+        self.tasks.push(task);
+    }
+
+    pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match self.store.ensure_project(&path) {
+            Ok(p) => {
+                self.reload(cx);
+                self.navigate(Route::Draft { project: Some(p.path) }, cx);
+            }
+            Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't open folder: {e}"), undo: None }),
+        }
+    }
+
+    /// Clone `owner/repo` (or a URL) with the GitHub CLI, falling back to git.
+    pub fn clone_repo(&mut self, spec: String, cx: &mut Context<Self>) {
+        let spec = spec.trim().to_string();
+        if spec.is_empty() {
+            return;
+        }
+        let name = spec.trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("repo").to_string();
+        let dest = trek_core::paths::home().join("Developer").join(&name);
+        cx.emit(WorkspaceEvent::Toast { message: format!("Cloning {spec}…"), undo: None });
+        let task = cx.spawn(async move |this, cx| {
+            let dest2 = dest.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let _ = std::fs::create_dir_all(dest2.parent().unwrap());
+                    let path = trek_core::detect::login_path();
+                    let gh = trek_core::detect::which("gh");
+                    let status = if let (Some(gh), false) = (gh, spec.contains("://")) {
+                        std::process::Command::new(gh).args(["repo", "clone", &spec]).arg(&dest2).env("PATH", path).output()
+                    } else {
+                        let url = if spec.contains("://") || spec.starts_with("git@") { spec.clone() } else { format!("https://github.com/{spec}.git") };
+                        std::process::Command::new("git").args(["clone", &url]).arg(&dest2).env("PATH", path).output()
+                    };
+                    match status {
+                        Ok(o) if o.status.success() => Ok(()),
+                        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.add_project(dest, cx),
+                Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Clone failed: {e}"), undo: None }),
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    // ---------- discovery ----------
+
+    pub fn detect_agents(&mut self, cx: &mut Context<Self>) {
+        if self.detecting {
+            return;
+        }
+        self.detecting = true;
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_core::detect::detect_all().await).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(agents) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    this.agents = agents;
+                    this.detecting = false;
+                    // Default to an agent that's actually installed.
+                    let ready = this.ready_agents();
+                    if !ready.contains(&this.draft_prefs.agent) {
+                        if let Some(a) = ready.first() {
+                            this.draft_prefs.agent = a.clone();
+                            this.draft_prefs.model = None;
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        self.tasks.push(task);
+    }
+
+    pub fn import_threads(&mut self, cx: &mut Context<Self>) {
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        cx.notify();
+        let store = self.store.clone();
+        let settings = self.settings.import.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let summary = cx.background_executor().spawn(async move { trek_core::import::import_all(&store, &settings) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.importing = false;
+                this.import_summary = Some(summary);
+                this.reload(cx);
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    pub fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.settings.onboarding.completed = true;
+        self.settings.general.hand_holding = self.draft_prefs.hand_holding;
+        self.settings.general.default_agent = self.draft_prefs.agent.key();
+        self.save_settings(cx);
+        let project = self.projects.first().map(|p| p.path.clone());
+        self.navigate(Route::Draft { project }, cx);
+    }
+
+    // ---------- updates ----------
+
+    pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
+        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. }) {
+            return;
+        }
+        self.update = UpdateStatus::Checking;
+        cx.notify();
+        let feed = trek_core::update::feed_url(&self.settings.updates);
+        let auto_download = self.settings.updates.auto_download;
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_core::update::check(&feed).await.map_err(|e| e.to_string())).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.update = match result {
+                    Ok(Some(u)) => {
+                        let status = UpdateStatus::Available { version: u.version.to_string(), notes: u.notes.clone() };
+                        if auto_download {
+                            this.update = status;
+                            this.download_update(u, cx);
+                            return;
+                        }
+                        status
+                    }
+                    Ok(None) => UpdateStatus::UpToDate,
+                    // A failed background check stays quiet; a manual one reports.
+                    Err(e) if user_initiated => UpdateStatus::Failed(e),
+                    Err(_) => UpdateStatus::Idle,
+                };
+                cx.notify();
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    fn download_update(&mut self, update: trek_core::update::AvailableUpdate, cx: &mut Context<Self>) {
+        let version = update.version.to_string();
+        self.update = UpdateStatus::Downloading { version: version.clone(), progress: 0.0 };
+        let (tx, rx) = async_channel::unbounded::<Result<Option<PathBuf>, String>>();
+        let (ptx, prx) = async_channel::unbounded::<f32>();
+        trek_core::runtime().spawn(async move {
+            let r = trek_core::update::download(&update, |p| {
+                let _ = ptx.try_send(p);
+            })
+            .await;
+            let _ = tx.send(r.map(Some).map_err(|e| e.to_string())).await;
+        });
+        let v2 = version.clone();
+        let progress_task = cx.spawn(async move |this, cx| {
+            while let Ok(p) = prx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    if let UpdateStatus::Downloading { progress, .. } = &mut this.update {
+                        *progress = p;
+                        cx.notify();
+                    }
+                });
+            }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(result) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    this.update = match result {
+                        Ok(Some(path)) => UpdateStatus::Ready { version: v2, path },
+                        Ok(None) => UpdateStatus::Idle,
+                        Err(e) => UpdateStatus::Failed(e),
+                    };
+                    cx.notify();
+                });
+            }
+        });
+        self.tasks.push(progress_task);
+        self.tasks.push(task);
+    }
+
+    /// Install now if no agent is running; otherwise wait for them to finish.
+    pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        if let UpdateStatus::Ready { version, path } = self.update.clone() {
+            if self.any_working() {
+                self.update = UpdateStatus::RestartPending { version, path };
+                cx.emit(WorkspaceEvent::Toast { message: "Trek will restart when your agents finish.".into(), undo: None });
+                cx.notify();
+            } else {
+                self.install_update(path, cx);
+            }
+        }
+    }
+
+    fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
+        if let UpdateStatus::RestartPending { path, .. } = self.update.clone() {
+            if !self.any_working() {
+                self.install_update(path, cx);
+            }
+        }
+    }
+
+    fn install_update(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match trek_core::update::install_and_relaunch(&path) {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                self.update = UpdateStatus::Failed(format!("{e:#}"));
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn shutdown_sessions(&mut self) {
+        for live in self.live.values() {
+            if let Some(tx) = &live.commands {
+                let _ = tx.try_send(Command::Shutdown);
+            }
+        }
+    }
+}
+
+/// Convenience for views.
+pub fn workspace_global(cx: &App) -> Entity<Workspace> {
+    cx.global::<GlobalWorkspace>().0.clone()
+}
+
+pub struct GlobalWorkspace(pub Entity<Workspace>);
+impl gpui_kit::Global for GlobalWorkspace {}
+
+pub fn init(cx: &mut App) -> Entity<Workspace> {
+    let ws = cx.new(Workspace::new);
+    cx.set_global(GlobalWorkspace(ws.clone()));
+    ws
+}

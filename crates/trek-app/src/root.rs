@@ -1,0 +1,274 @@
+//! The main window: title bar, sidebar, and the routed content area.
+
+use crate::composer::Composer;
+use crate::onboarding::Onboarding;
+use crate::settings_view::{SettingsNav, SettingsView};
+use crate::sidebar::Sidebar;
+use crate::thread_view::ThreadView;
+use crate::workspace::{Route, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
+use crate::*;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, StyledExt as _, TitleBar, WindowExt as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+pub const SIDEBAR_WIDTH: f32 = 272.;
+
+pub struct TrekWindow {
+    workspace: Entity<Workspace>,
+    sidebar: Entity<Sidebar>,
+    thread_view: Entity<ThreadView>,
+    composer: Entity<Composer>,
+    settings: Entity<SettingsView>,
+    settings_nav: Entity<SettingsNav>,
+    onboarding: Entity<Onboarding>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl TrekWindow {
+    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
+        let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
+        let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), window, cx));
+        let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
+        let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
+        let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
+        let subscriptions = vec![
+            cx.observe(&workspace, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
+                WorkspaceEvent::Toast { message, undo } => this.toast(message.clone(), undo.clone(), window, cx),
+                WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
+            }),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
+                    crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
+                }
+            }),
+        ];
+        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, onboarding, _subscriptions: subscriptions }
+    }
+
+    fn toast(&mut self, message: String, undo: Option<UndoAction>, window: &mut Window, cx: &mut Context<Self>) {
+        let system = message.starts_with("Needs your approval") || message.starts_with("Finished:");
+        let mut note = Notification::new().message(message);
+        if system && !window.is_window_active() {
+            note = note.in_app_and_system();
+        }
+        if let Some(action) = undo {
+            let ws = self.workspace.downgrade();
+            note = note.action(move |_, _, _| {
+                let ws = ws.clone();
+                let action = action.clone();
+                gpui_kit::component::button::Button::new("undo").label("Undo").small().on_click(move |_, _, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.undo(action.clone(), cx));
+                })
+            })
+            .autohide(true);
+        }
+        window.push_notification(note, cx);
+    }
+
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ws = self.workspace.read(cx);
+        let collapsed = ws.sidebar_collapsed;
+        let theme = cx.theme().clone();
+        let thread = ws.current_thread().cloned();
+        let project_name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let (project, title, folder): (Option<String>, String, Option<std::path::PathBuf>) = match &ws.route {
+            Route::Thread(_) => match &thread {
+                Some(t) => (t.cwd.as_deref().map(project_name), t.title.clone(), t.cwd.clone()),
+                None => (None, "Trek".into(), None),
+            },
+            Route::Draft { project } => (project.as_deref().map(project_name), "New thread".into(), project.clone()),
+            Route::Settings(_) => (None, "Settings".into(), None),
+            Route::Onboarding => (None, String::new(), None),
+        };
+        let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
+        TitleBar::new().child(
+            h_flex()
+                .w_full()
+                .h_full()
+                .items_center()
+                .gap_2()
+                .pr_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .when(!collapsed, |el| el.w(px(SIDEBAR_WIDTH - 80.)))
+                        .flex_none()
+                        .child(
+                            crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, _, cx| {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.sidebar_collapsed = !ws.sidebar_collapsed;
+                                    cx.notify();
+                                })
+                            })),
+                        )
+                        .child(crate::brand::logo_mark(px(15.)))
+                        .child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")),
+                )
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .pl_2()
+                        .gap_2()
+                        .text_sm()
+                        .when_some(project.clone(), |el, p| {
+                            el.child(crate::ui::monogram(&p, cx))
+                                .child(div().text_color(theme.muted_foreground).child(p))
+                                .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
+                        })
+                        .child(div().truncate().font_medium().child(title)),
+                )
+                .when_some(folder, |el, dir| el.child(open_in_button(dir)))
+                .when_some(settle_id, |el, id| {
+                    el.child(crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
+                    })))
+                }),
+        )
+    }
+}
+
+/// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
+fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    let apps: Vec<(&'static str, &'static str)> = [
+        ("Finder", "Finder"),
+        ("Terminal", "Terminal"),
+        ("Ghostty", "Ghostty"),
+        ("Zed", "Zed"),
+        ("Cursor", "Cursor"),
+        ("VS Code", "Visual Studio Code"),
+        ("Xcode", "Xcode"),
+    ]
+    .into_iter()
+    .filter(|(_, app)| *app == "Finder" || std::path::Path::new(&format!("/Applications/{app}.app")).exists() || *app == "Terminal")
+    .collect();
+    gpui_kit::component::button::Button::new("open-in")
+        .outline()
+        .small()
+        .icon(IconName::FolderOpen)
+        .label("Open")
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            let mut menu = menu.min_w(px(180.));
+            for (label, app) in apps.clone() {
+                let dir = dir.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
+                    let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
+                }));
+            }
+            menu
+        })
+}
+
+impl Render for TrekWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let route = self.workspace.read(cx).route.clone();
+        let collapsed = self.workspace.read(cx).sidebar_collapsed;
+        if route == Route::Onboarding {
+            return v_flex()
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .child(TitleBar::new())
+                .child(self.onboarding.clone())
+                .into_any_element();
+        }
+        let in_settings = matches!(route, Route::Settings(_));
+        let content = match route {
+            Route::Settings(_) => self.settings.clone().into_any_element(),
+            _ => v_flex()
+                .size_full()
+                .min_w_0()
+                .child(div().flex_1().min_h_0().child(self.thread_view.clone()))
+                .child(self.composer.clone())
+                .into_any_element(),
+        };
+        let _ = window;
+        v_flex()
+            .id("trek-window")
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .on_action(cx.listener(|this, _: &NewThread, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx))))
+            .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.workspace.update(cx, |ws, cx| ws.open_folder(cx))))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::General), cx))
+            }))
+            .on_action(cx.listener(|this, _: &About, _, cx| {
+                this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::About), cx))
+            }))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    ws.check_for_updates(true, cx);
+                    ws.navigate(Route::Settings(SettingsPage::Updates), cx);
+                })
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    ws.sidebar_collapsed = !ws.sidebar_collapsed;
+                    cx.notify();
+                })
+            }))
+            .on_action(cx.listener(|this, _: &SettleThread, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    if let Route::Thread(id) = ws.route.clone() {
+                        ws.settle(&id, cx);
+                    }
+                })
+            }))
+            .on_action(cx.listener(|this, _: &Interrupt, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    if let Route::Thread(id) = ws.route.clone() {
+                        ws.interrupt(&id, cx);
+                    }
+                })
+            }))
+            .on_action(cx.listener(|this, _: &CycleHandHolding, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    let mut p = ws.prefs();
+                    let all = trek_core::HandHolding::ALL;
+                    let i = all.iter().position(|h| *h == p.hand_holding).unwrap_or(0);
+                    let mut next = all[(i + 1) % all.len()];
+                    if next == trek_core::HandHolding::FullAccess && !ws.settings.permissions.full_access_unlocked {
+                        next = all[0];
+                    }
+                    p.hand_holding = next;
+                    ws.set_prefs(p, cx);
+                })
+            }))
+            .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+            .bg(cx.theme().sidebar)
+            .child(self.title_bar(cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .when(!collapsed && !in_settings, |el| el.child(self.sidebar.clone()))
+                    .when(in_settings, |el| el.child(self.settings_nav.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .pr_2()
+                            .pb_2()
+                            .when(collapsed, |el| el.pl_2())
+                            .child(
+                                div()
+                                    .size_full()
+                                    .rounded(px(12.))
+                                    .border_1()
+                                    .border_color(cx.theme().sidebar_border)
+                                    .bg(cx.theme().background)
+                                    .overflow_hidden()
+                                    .child(content),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
