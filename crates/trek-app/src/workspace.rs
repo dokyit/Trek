@@ -239,7 +239,9 @@ impl Workspace {
             tracing::error!("database: {e}; using in-memory store");
             Store::in_memory().expect("in-memory store")
         });
-        let route = if settings.onboarding.completed { Route::Draft { project: None } } else { Route::Onboarding };
+        // TREK_ONBOARDING=1 replays onboarding without resetting anything (design review, support).
+        let replay = std::env::var("TREK_ONBOARDING").is_ok_and(|v| v == "1");
+        let route = if settings.onboarding.completed && !replay { Route::Draft { project: None } } else { Route::Onboarding };
         let draft_prefs = Prefs {
             agent: AgentId::from_key(&settings.general.default_agent),
             model: settings.general.default_model.clone(),
