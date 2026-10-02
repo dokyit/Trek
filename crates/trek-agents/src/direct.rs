@@ -1,7 +1,7 @@
 //! Direct providers (API keys and local servers). Phase 1 is streaming chat with full history;
 //! Trek's own tool loop (read/edit/bash with the hand-holding gates) lands in phase 2.
 
-use crate::{AgentEvent, Command, SessionConfig, load_image};
+use crate::{AgentEvent, Billing, Command, SessionConfig, load_image};
 use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
@@ -29,6 +29,7 @@ pub async fn run(
     events
         .send(AgentEvent::Started { native_id: config.resume.clone().unwrap_or_default(), model: Some(model.clone()) })
         .await?;
+    events.send(AgentEvent::Billing(if provider.local { Billing::Local } else { Billing::Metered })).await?;
 
     // Anthropic: raw assistant content blocks are kept and replayed unchanged (append-only).
     let mut history: Vec<Value> = Vec::new();

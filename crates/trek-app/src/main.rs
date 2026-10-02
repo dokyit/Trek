@@ -1,6 +1,7 @@
 //! Trek — every agent, one trail.
 
 mod assets;
+mod attachments;
 mod brand;
 mod composer;
 mod integrations;
@@ -15,6 +16,7 @@ mod settings_view;
 mod sidebar;
 mod system;
 mod thread_view;
+mod thread_window;
 mod time;
 mod trail_path;
 mod tray;
@@ -42,7 +44,9 @@ actions!(
         About,
         HideApp,
         Minimize,
-        ToggleRightPanel
+        ToggleRightPanel,
+        OpenInNewWindow,
+        CloseWindow
     ]
 );
 
@@ -100,6 +104,8 @@ fn menus() -> Vec<Menu> {
         Menu {
             name: "Thread".into(),
             items: vec![
+                MenuItem::action("Open in New Window", OpenInNewWindow),
+                MenuItem::separator(),
                 MenuItem::action("Settle", SettleThread),
                 MenuItem::action("Toggle Plan Mode", TogglePlan),
                 MenuItem::action("Cycle Hand-holding", CycleHandHolding),
@@ -114,7 +120,7 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "Window".into(),
-            items: vec![MenuItem::action("Minimize", Minimize)],
+            items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Close Window", CloseWindow)],
             disabled: false,
         },
     ]
@@ -143,6 +149,9 @@ fn main() {
             KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
             KeyBinding::new("cmd-.", Interrupt, None),
             KeyBinding::new("cmd-j", ToggleRightPanel, None),
+            KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
+            // Only thread windows close with ⌘W; the main window stays put.
+            KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
         ]);
         cx.on_action(|_: &Quit, cx| {
             workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());

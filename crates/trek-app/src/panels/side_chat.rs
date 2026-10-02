@@ -1,11 +1,13 @@
 //! Side chat: a quick, separate conversation next to the main thread (same project, own session).
 
+use crate::attachments;
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::path::PathBuf;
 use trek_core::store::Item;
 
 pub struct SideChatPanel {
@@ -13,6 +15,10 @@ pub struct SideChatPanel {
     thread_id: Option<String>,
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
+    /// Images going out with the next message (pasted with ⌘V).
+    attachments: Vec<PathBuf>,
+    /// Pasted images still being written to disk.
+    pasting: usize,
     /// `general.send_with_cmd_enter`, as last applied to the textarea.
     cmd_enter: bool,
     _subscriptions: Vec<Subscription>,
@@ -43,24 +49,25 @@ impl SideChatPanel {
                 }
             }),
         ];
-        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), cmd_enter, _subscriptions: subs }
+        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), attachments: vec![], pasting: 0, cmd_enter, _subscriptions: subs }
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
         let text = state.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
-        self.send(text, cx);
+        let images = std::mem::take(&mut self.attachments);
+        self.send(text, images, cx);
     }
 
-    fn send(&mut self, text: String, cx: &mut Context<Self>) {
+    fn send(&mut self, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         if self.thread_id.is_none() {
             self.thread_id = self.workspace.update(cx, |ws, cx| ws.create_side_chat(cx));
         }
         if let Some(id) = self.thread_id.clone() {
-            self.workspace.update(cx, |ws, cx| ws.send_to(&id, text, vec![], cx));
+            self.workspace.update(cx, |ws, cx| ws.send_to(&id, text, images, cx));
         }
     }
 }
@@ -114,10 +121,18 @@ impl Render for SideChatPanel {
                                 )
                             })
                             .children(items.into_iter().enumerate().filter_map(|(i, item)| match item {
-                                Item::User { text, .. } => Some(
-                                    h_flex()
-                                        .justify_end()
-                                        .child(div().max_w(relative(0.85)).px_3().py_2().rounded(px(14.)).bg(theme.secondary).text_sm().child(text))
+                                Item::User { text, images, .. } => Some(
+                                    v_flex()
+                                        .items_end()
+                                        .gap_1()
+                                        .when(!images.is_empty(), |el| {
+                                            el.child(h_flex().gap_1().flex_wrap().justify_end().children(images.into_iter().map(|p| {
+                                                img(PathBuf::from(p)).h(px(72.)).max_w(px(140.)).rounded(px(8.)).object_fit(ObjectFit::Contain)
+                                            })))
+                                        })
+                                        .when(!text.trim().is_empty(), |el| {
+                                            el.child(div().max_w(relative(0.85)).px_3().py_2().rounded(px(14.)).bg(theme.secondary).text_sm().child(text))
+                                        })
                                         .into_any_element(),
                                 ),
                                 Item::Assistant { text } if !text.is_empty() => {
@@ -161,7 +176,30 @@ impl Render for SideChatPanel {
                             let handle = this.input.read(cx).focus_handle(cx);
                             handle.focus(window, cx);
                         }))
-                        .child(Textarea::new(&self.input).appearance(false)),
+                        .when(!self.attachments.is_empty() || self.pasting > 0, |el| {
+                            let me = cx.entity().downgrade();
+                            let remove = move |i: usize, _: &mut Window, cx: &mut App| {
+                                let _ = me.update(cx, |this, cx| {
+                                    if i < this.attachments.len() {
+                                        this.attachments.remove(i);
+                                    }
+                                    cx.notify();
+                                });
+                            };
+                            el.child(div().pt_1().pb(px(6.)).child(attachments::thumbnails(&self.attachments, px(40.), self.pasting > 0, remove, cx)))
+                        })
+                        .child(Textarea::new(&self.input).appearance(false).on_paste({
+                            let me = cx.entity().downgrade();
+                            move |item, window, cx| match attachments::pasted(item) {
+                                Some(p) => me
+                                    .update(cx, |this, cx| {
+                                        let input = this.input.clone();
+                                        attachments::paste(this, p, &input, |c: &mut SideChatPanel| (&mut c.attachments, &mut c.pasting), window, cx)
+                                    })
+                                    .is_ok(),
+                                None => false,
+                            }
+                        })),
                 ),
             )
     }

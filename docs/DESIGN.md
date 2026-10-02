@@ -187,7 +187,17 @@ Keyboard Shortcuts · Updates · Advanced · About.
   counts in amber, and a branch switcher). `+` menu: photos & files, snapshot window/area/screen
   (`screencapture`), and the three pickers. Pickers: `/` commands (Trek's own first: new, usage, context,
   cost, model; then the agent's commands and skills), `@` project files + Claude sub-agents, `$` skills.
-  Images can also be dropped onto the composer; they're sent as image blocks to every backend.
+  Images can also be dropped onto the composer or pasted with ⌘V (a copied screenshot is saved to the
+  snapshots folder; image files copied in Finder attach as they are); they're sent as image blocks to every
+  backend. The side chat takes pasted images too.
+- **Cost, honestly.** Each session reports how it's billed (Claude's `initialize` account, Codex
+  `account/read`, API key vs local for direct providers). Only metered sessions show "$X this thread" under
+  the composer; on a subscription the API-price estimate lives in the agent label's tooltip ("≈$10.47 at API
+  prices — included in your Claude Max plan").
+- **Thread windows.** "Open in new window" (thread menu, title-bar button, ⇧⌘↩) shows one thread on its own:
+  title bar with project badge and title, its transcript and its own composer, bound to that thread rather
+  than the main window's route. One window per thread, ⌘W closes it, the session keeps running; archiving
+  or deleting the thread closes it. Toasts appear in whichever Trek window is in front.
 - **Agents & Subscriptions.** Real logos (Lobe icons), account email + plan + version, enable switch,
   Sign in / Switch account (runs the vendor's login command in a Terminal tab), Manage plan link, and an
   Install button per missing agent that runs the official install command and rescans when it exits.

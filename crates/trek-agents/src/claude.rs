@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, clip, load_image, mcp_servers_json};
+use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, clip, load_image, mcp_servers_json};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -177,6 +177,11 @@ pub async fn run(
                     let r = &v["response"];
                     let id = r["request_id"].as_str().unwrap_or_default();
                     if id == init_id {
+                        if let Some(b) = account_billing(&r["response"]["account"]) {
+                            if events.send(AgentEvent::Billing(b)).await.is_err() {
+                                return Ok(());
+                            }
+                        }
                         // Ask for context usage up front so the UI has data before the first prompt.
                         let c = req("get_context_usage", json!({}));
                         context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
@@ -239,6 +244,23 @@ fn user_content(text: &str, images: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
     (content, errors)
 }
 
+/// How the login is billed, from the `account` in the `initialize` response. A subscription
+/// wins over an API key that's merely present (Claude Code reports such a key as "not in use").
+fn account_billing(account: &Value) -> Option<Billing> {
+    if let Some(plan) = account["subscriptionType"].as_str().filter(|s| !s.is_empty()) {
+        let name = if plan.starts_with("Claude") { plan.to_string() } else { format!("Claude {}", crate::status::capitalize(plan)) };
+        return Some(Billing::Plan(Some(name)));
+    }
+    if account["apiKeySource"].is_string() {
+        return Some(Billing::Metered);
+    }
+    match account["apiProvider"].as_str() {
+        // Bedrock, Vertex, Foundry and gateways bill the cloud account per token.
+        Some(p) if p != "firstParty" => Some(Billing::Metered),
+        _ => None,
+    }
+}
+
 /// `Context` from a `get_context_usage` control response (`{subtype, request_id, response}`).
 fn context_event(r: &Value) -> Option<AgentEvent> {
     if r["subtype"] != "success" {
@@ -269,10 +291,17 @@ impl Drop for TempFile {
 fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mut bool) -> Vec<AgentEvent> {
     let mut out = Vec::new();
     match v["type"].as_str() {
-        Some("system") if v["subtype"] == "init" => out.push(AgentEvent::Started {
-            native_id: v["session_id"].as_str().unwrap_or_default().to_string(),
-            model: v["model"].as_str().map(String::from),
-        }),
+        Some("system") if v["subtype"] == "init" => {
+            out.push(AgentEvent::Started {
+                native_id: v["session_id"].as_str().unwrap_or_default().to_string(),
+                model: v["model"].as_str().map(String::from),
+            });
+            // No API key at all means the session runs on a claude.ai login. A named key may still
+            // be unused (a subscription takes precedence), so only "none" says anything here.
+            if v["apiKeySource"] == "none" {
+                out.push(AgentEvent::Billing(Billing::Plan(None)));
+            }
+        }
         Some("system") if v["subtype"] == "task_started" && v["task_type"] == "local_agent" => out.push(AgentEvent::Task {
             id: v["tool_use_id"].as_str().unwrap_or_default().to_string(),
             description: v["description"].as_str().map(String::from),
@@ -415,6 +444,26 @@ mod tests {
             translate(&result, &mut pending, &mut streamed),
             vec![AgentEvent::TurnComplete { cost_usd: Some(0.12), error: None }]
         );
+    }
+
+    #[test]
+    fn billing_from_account_and_init() {
+        let max = json!({"email":"me@example.com","subscriptionType":"Claude Max","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&max), Some(Billing::Plan(Some("Claude Max".into()))));
+        assert_eq!(account_billing(&json!({"subscriptionType":"pro"})), Some(Billing::Plan(Some("Claude Pro".into()))));
+        // A key in the environment doesn't matter while a subscription is signed in.
+        let both = json!({"subscriptionType":"Claude Max","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&both), Some(Billing::Plan(Some("Claude Max".into()))));
+        assert_eq!(account_billing(&json!({"apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"apiProvider":"bedrock"})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"apiProvider":"firstParty"})), None);
+        assert_eq!(account_billing(&Value::Null), None);
+
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let init = json!({"type":"system","subtype":"init","session_id":"s","model":"m","apiKeySource":"none"});
+        assert_eq!(translate(&init, &mut pending, &mut streamed)[1], AgentEvent::Billing(Billing::Plan(None)));
+        let keyed = json!({"type":"system","subtype":"init","session_id":"s","model":"m","apiKeySource":"ANTHROPIC_API_KEY"});
+        assert_eq!(translate(&keyed, &mut pending, &mut streamed).len(), 1);
     }
 
     #[test]

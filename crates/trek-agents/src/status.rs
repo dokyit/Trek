@@ -359,7 +359,7 @@ fn apply_codex_account(status: &mut AgentStatus, r: &Value) {
     }
 }
 
-fn codex_plan_name(plan: &str) -> String {
+pub(crate) fn codex_plan_name(plan: &str) -> String {
     match plan {
         "plus" => "ChatGPT Plus".into(),
         "pro" => "ChatGPT Pro".into(),
@@ -440,7 +440,7 @@ fn codex_skills(r: &Value) -> Vec<SlashCommand> {
     out
 }
 
-fn capitalize(s: &str) -> String {
+pub(crate) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),

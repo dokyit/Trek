@@ -81,6 +81,18 @@ pub struct Question {
     pub multi: bool,
 }
 
+/// Who pays for a session's tokens. Cost figures only mean money for `Metered` sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Billing {
+    /// A subscription login ("Claude Max", "ChatGPT Plus"; `None` when the plan isn't named):
+    /// usage counts against the plan's limits, and per-token costs are API-price estimates.
+    Plan(Option<String>),
+    /// Charged per token: an API key, or a cloud account (Bedrock, Vertex).
+    Metered,
+    /// A model running on this Mac.
+    Local,
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Answers to a `Prompt::Questions` request: `(question, chosen labels or free text)`.
@@ -112,6 +124,8 @@ pub enum AgentEvent {
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
     /// Tokens currently in the context window, and the window size.
     Context { used: u64, window: u64 },
+    /// How the session is billed, once the agent has said which login it uses.
+    Billing(Billing),
     /// A sub-agent (keyed by the tool call that launched it) started, moved on, or finished.
     Task { id: String, description: Option<String>, activity: Option<String>, tool_uses: Option<u64>, done: Option<bool> },
     /// How many background sub-agents are still running; the turn isn't really over until zero.

@@ -1,7 +1,7 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, clip, diff_stat, mcp_servers_json};
+use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, clip, diff_stat, mcp_servers_json};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -127,6 +127,8 @@ pub async fn run(
 ) -> Result<()> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines) = start_app_server(&config.cwd, &mut backlog).await?;
+    // Which login the session uses (ChatGPT plan or API key); answered alongside thread/start.
+    let account_req = rpc.request("account/read", json!({})).await?;
 
     let mut hand_holding = config.hand_holding;
     let (sandbox, approval, reviewer) = hand_holding.codex_policy();
@@ -163,6 +165,12 @@ pub async fn run(
     let mut pending: HashMap<String, Value> = HashMap::new();
 
     for v in std::mem::take(&mut backlog) {
+        if is_response(&v, account_req) {
+            if let Some(b) = account_billing(&v["result"]) {
+                events.send(AgentEvent::Billing(b)).await?;
+            }
+            continue;
+        }
         handle_incoming(&v, &mut rpc, &events, &mut turn_id, &mut pending, hand_holding).await?;
     }
 
@@ -214,12 +222,34 @@ pub async fn run(
             line = lines.next_line() => {
                 let Some(line) = line? else { break };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if is_response(&v, account_req) {
+                    if let Some(b) = account_billing(&v["result"]) {
+                        events.send(AgentEvent::Billing(b)).await?;
+                    }
+                    continue;
+                }
                 handle_incoming(&v, &mut rpc, &events, &mut turn_id, &mut pending, hand_holding).await?;
             }
         }
     }
     let _ = child.start_kill();
     Ok(())
+}
+
+/// `v` is the response to our request `id` (not a server request that reuses the number).
+fn is_response(v: &Value, id: i64) -> bool {
+    v["id"].as_i64() == Some(id) && v.get("method").is_none()
+}
+
+/// How the login is billed, from an `account/read` result. Older Codex builds without the
+/// method answer with an error, which leaves billing unknown.
+fn account_billing(r: &Value) -> Option<Billing> {
+    let a = &r["account"];
+    match a["type"].as_str()? {
+        "chatgpt" => Some(Billing::Plan(a["planType"].as_str().map(crate::status::codex_plan_name))),
+        "apiKey" | "amazonBedrock" => Some(Billing::Metered),
+        _ => None,
+    }
 }
 
 async fn handle_incoming(
@@ -411,6 +441,18 @@ mod tests {
         assert_eq!(context_event(&p), Some(AgentEvent::Context { used: 84104, window: 258400 }));
         let no_window = json!({"tokenUsage":{"last":{"totalTokens":1},"total":{},"modelContextWindow":null}});
         assert_eq!(context_event(&no_window), None);
+    }
+
+    #[test]
+    fn billing_from_account_read() {
+        let plus = json!({"account":{"type":"chatgpt","email":"me@example.com","planType":"plus"},"requiresOpenaiAuth":true});
+        assert_eq!(account_billing(&plus), Some(Billing::Plan(Some("ChatGPT Plus".into()))));
+        assert_eq!(account_billing(&json!({"account":{"type":"chatgpt","email":null}})), Some(Billing::Plan(None)));
+        assert_eq!(account_billing(&json!({"account":{"type":"apiKey"}})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"account":null,"requiresOpenaiAuth":true})), None);
+        assert_eq!(account_billing(&Value::Null), None);
+        assert!(is_response(&json!({"id":3,"result":{}}), 3));
+        assert!(!is_response(&json!({"id":3,"method":"item/commandExecution/requestApproval","params":{}}), 3));
     }
 
     #[test]

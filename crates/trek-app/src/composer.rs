@@ -4,12 +4,11 @@
 
 use crate::palette;
 use crate::ui::{self, Pill};
-use crate::workspace::{PanelTool, Prefs, Route, Workspace, WorkspaceEvent};
+use crate::workspace::{PanelTool, Prefs, Route, Scope, Workspace, WorkspaceEvent};
 use crate::TogglePlan;
 use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
@@ -35,6 +34,8 @@ enum Rail {
 
 pub struct Composer {
     workspace: Entity<Workspace>,
+    /// The main window's composer follows its route; a thread window's is bound to one thread.
+    scope: Scope,
     input: Entity<TextareaState>,
     model_search: Entity<InputState>,
     clone_input: Entity<InputState>,
@@ -44,6 +45,8 @@ pub struct Composer {
     rail: Option<Rail>,
     /// Images going out with the next message.
     attachments: Vec<PathBuf>,
+    /// Pasted images still being written to disk.
+    pasting: usize,
     /// The `/`, `@` or `$` token being completed, and the highlighted row.
     trigger: Option<Trigger>,
     picked: usize,
@@ -90,7 +93,7 @@ fn hand_icon(level: HandHolding) -> Icon {
 }
 
 impl Composer {
-    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
             TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder("Ask, build, / for commands, @ for files")
@@ -110,7 +113,8 @@ impl Composer {
                     // The user has started typing: get the agent process up before they hit Return.
                     let typing = { let v = state.read(cx).value(); v.trim().len() >= 2 && !v.starts_with('/') };
                     if typing {
-                        this.workspace.update(cx, |ws, cx| ws.warm_up(cx));
+                        let scope = this.scope.clone();
+                        this.workspace.update(cx, |ws, cx| ws.warm_up_in(&scope, cx));
                     }
                     cx.notify();
                 }
@@ -127,6 +131,7 @@ impl Composer {
         ];
         Self {
             workspace,
+            scope,
             input,
             model_search,
             clone_input,
@@ -135,6 +140,7 @@ impl Composer {
             sub: None,
             rail: None,
             attachments: vec![],
+            pasting: 0,
             trigger: None,
             picked: 0,
             file_index: None,
@@ -157,11 +163,16 @@ impl Composer {
         self.trigger = None;
         self.sync_overlay(cx);
         let images = std::mem::take(&mut self.attachments);
-        self.workspace.update(cx, |ws, cx| ws.send(text, images, cx));
+        let scope = self.scope.clone();
+        self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx));
     }
 
-    /// Tell the workspace whether one of our popovers is open (native views hide under it).
+    /// Tell the workspace whether one of our popovers is open (native views hide under it). Only
+    /// the main window has native views.
     fn sync_overlay(&self, cx: &mut Context<Self>) {
+        if self.scope != Scope::Main {
+            return;
+        }
         let open = self.model_open || self.access_open || self.trigger.is_some();
         self.workspace.update(cx, |ws, cx| {
             if ws.overlay_open != open {
@@ -197,11 +208,22 @@ impl Composer {
         cx.notify();
     }
 
+    /// Put follow-ups that never went out back into the composer.
+    pub fn restore(&mut self, text: &str, images: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if !text.is_empty() {
+            self.insert_text(text, window, cx);
+        }
+        for path in images {
+            self.attach_image(path.clone(), cx);
+        }
+    }
+
     fn update_prefs(&self, cx: &mut App, f: impl FnOnce(&mut Prefs)) {
+        let scope = self.scope.clone();
         self.workspace.update(cx, |ws, cx| {
-            let mut p = ws.prefs();
+            let mut p = ws.prefs_in(&scope);
             f(&mut p);
-            ws.set_prefs(p, cx);
+            ws.set_prefs_in(&scope, p, cx);
         });
     }
 
@@ -338,7 +360,7 @@ impl Composer {
     }
 
     fn ensure_file_index(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.workspace.read(cx).current_cwd() else { return };
+        let Some(root) = self.workspace.read(cx).cwd_in(&self.scope) else { return };
         if self.file_index.as_ref().is_some_and(|(r, _)| *r == root) || self.indexing.is_some() {
             return;
         }
@@ -356,7 +378,7 @@ impl Composer {
     fn picker_items(&self, cx: &App) -> Vec<PickItem> {
         let Some(t) = &self.trigger else { return vec![] };
         let ws = self.workspace.read(cx);
-        let agent = ws.prefs().agent;
+        let agent = ws.prefs_in(&self.scope).agent;
         let q = t.query.to_lowercase();
         let commands = ws.slash_commands(&agent);
         let matches = |name: &str, desc: &str| q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q);
@@ -541,68 +563,19 @@ impl Composer {
     }
 
     fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.attachments.is_empty() && !self.snapshotting {
+        if self.attachments.is_empty() && !self.snapshotting && self.pasting == 0 {
             return None;
         }
-        let theme = cx.theme().clone();
-        Some(
-            h_flex()
-                .px(px(14.))
-                .pt(px(12.))
-                .gap_2()
-                .children(self.attachments.iter().enumerate().map(|(i, p)| {
-                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    div()
-                        .id(("attachment", i))
-                        .group("att")
-                        .relative()
-                        .size(px(56.))
-                        .rounded(px(10.))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(theme.border)
-                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx))
-                        .child(img(p.clone()).size_full().object_fit(ObjectFit::Cover))
-                        .child(
-                            div()
-                                .id(("att-x", i))
-                                .absolute()
-                                .top(px(3.))
-                                .right(px(3.))
-                                .size(px(18.))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(gpui_kit::black().opacity(0.65))
-                                .invisible()
-                                .group_hover("att", |s| s.visible())
-                                .cursor_pointer()
-                                .child(Icon::new(IconName::Close).xsmall().text_color(gpui_kit::white()))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if i < this.attachments.len() {
-                                        this.attachments.remove(i);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                }))
-                .when(self.snapshotting, |el| {
-                    el.child(
-                        div()
-                            .size(px(56.))
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_dashed()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Spinner::new().small().color(theme.muted_foreground)),
-                    )
-                })
-                .into_any_element(),
-        )
+        let me = cx.entity().downgrade();
+        let remove = move |i: usize, _: &mut Window, cx: &mut App| {
+            let _ = me.update(cx, |this, cx| {
+                if i < this.attachments.len() {
+                    this.attachments.remove(i);
+                }
+                cx.notify();
+            });
+        };
+        Some(div().px(px(14.)).pt(px(12.)).child(crate::attachments::thumbnails(&self.attachments, px(56.), self.snapshotting || self.pasting > 0, remove, cx)).into_any_element())
     }
 
     /// "+" menu: files and photos, snapshots, and the three pickers.
@@ -687,7 +660,7 @@ impl Composer {
 
     fn model_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let prefs = ws.prefs();
+        let prefs = ws.prefs_in(&self.scope);
         let models = ws.models_for(&prefs.agent);
         let current = prefs.model.clone().or_else(|| default_model(&models).map(|m| m.id.clone()));
         let current_info = current.as_ref().and_then(|c| models.iter().find(|m| same_model(c, &m.id))).cloned();
@@ -918,7 +891,7 @@ impl Composer {
 
     fn access_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let current = ws.prefs().hand_holding;
+        let current = ws.prefs_in(&self.scope).hand_holding;
         let unlocked = ws.settings.permissions.full_access_unlocked;
         let theme = cx.theme().clone();
         ui::menu_surface(cx)
@@ -945,7 +918,9 @@ impl Composer {
                     .when(locked, |el| el.opacity(0.55))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if locked {
-                            this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(crate::workspace::SettingsPage::Permissions), cx));
+                            let route = Route::Settings(crate::workspace::SettingsPage::Permissions);
+                            let main = this.scope == Scope::Main;
+                            this.workspace.update(cx, |ws, cx| if main { ws.navigate(route, cx) } else { ws.show_in_main(route, cx) });
                         } else {
                             this.update_prefs(cx, |p| p.hand_holding = level);
                         }
@@ -1006,8 +981,9 @@ impl Composer {
     /// Where the agent runs (this Mac) and on which branch, with a branch switcher.
     fn env_chips(&self, with_project: bool, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let git = ws.current_git().cloned();
-        let has_cwd = ws.current_cwd().is_some();
+        let git = ws.git_in(&self.scope).cloned();
+        let cwd = ws.cwd_in(&self.scope);
+        let has_cwd = cwd.is_some();
         let theme = cx.theme().clone();
         let chip = |id: &'static str| {
             h_flex().id(id).h(px(26.)).px(px(8.)).gap(px(6.)).rounded(px(7.)).text_sm().text_color(theme.foreground.opacity(0.82))
@@ -1048,11 +1024,13 @@ impl Composer {
                         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
                             menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Switch branch");
                             for b in branches.clone() {
-                                let ws = ws_entity.clone();
+                                let (ws, cwd) = (ws_entity.clone(), cwd.clone());
                                 let label = if Some(&b) == default.as_ref() { format!("{b}  (default)") } else { b.clone() };
                                 menu = menu.item(PopupMenuItem::new(label).checked(Some(&b) == current.as_ref()).on_click(move |_, _, cx| {
                                     let b = b.clone();
-                                    ws.update(cx, |ws, cx| ws.switch_branch(b, cx))
+                                    if let Some(cwd) = cwd.clone() {
+                                        ws.update(cx, |ws, cx| ws.switch_branch(cwd, b, cx))
+                                    }
                                 }));
                             }
                             menu
@@ -1104,11 +1082,13 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
-        let prefs = ws.prefs();
-        let thread = ws.current_thread().cloned();
-        let is_draft = matches!(ws.route, Route::Draft { .. });
+        let prefs = ws.prefs_in(&self.scope);
+        let thread = ws.thread_in(&self.scope).cloned();
+        let is_draft = ws.is_draft_in(&self.scope);
+        let main = self.scope == Scope::Main;
         let running = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
-        let cost = thread.as_ref().and_then(|t| ws.live.get(&t.id)).map(|l| l.cost_usd).unwrap_or(0.0);
+        let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
+        let (cost_label, billing_tip) = crate::workspace::cost_note(live.and_then(|l| l.billing.as_ref()), live.map_or(0.0, |l| l.cost_usd));
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let models = ws.models_for(&prefs.agent);
         let model_label = prefs
@@ -1246,7 +1226,18 @@ impl Render for Composer {
                 )
             })
             .children(self.attachment_strip(cx))
-            .child(div().px(px(14.)).pt(px(if is_draft || !self.attachments.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false)))
+            .child(div().px(px(14.)).pt(px(if is_draft || !self.attachments.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
+                let me = cx.entity().downgrade();
+                move |item, window, cx| match crate::attachments::pasted(item) {
+                    Some(p) => me
+                        .update(cx, |this, cx| {
+                            let input = this.input.clone();
+                            crate::attachments::paste(this, p, &input, |c: &mut Composer| (&mut c.attachments, &mut c.pasting), window, cx)
+                        })
+                        .is_ok(),
+                    None => false,
+                }
+            })))
             .child(
                 h_flex()
                     .p(px(8.))
@@ -1291,20 +1282,31 @@ impl Render for Composer {
                 .gap_3()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(h_flex().gap(px(6.)).child(ui::agent_glyph(&prefs.agent, cx)).child(prefs.agent.display_name()))
-                .when(cost >= 0.005, |el| el.child(format!("${cost:.2} this thread")))
-                .when(queued > 0, |el| el.child(format!("{queued} queued")))
-                .child(div().flex_1())
                 .child(
                     h_flex()
-                        .id("open-terminal")
+                        .id("agent-label")
                         .gap(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(Icon::new(IconName::SquareTerminal).xsmall())
-                        .child("Terminal")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenTool(PanelTool::Terminal))))),
+                        .child(ui::agent_glyph(&prefs.agent, cx))
+                        .child(prefs.agent.display_name())
+                        // How the session is billed, and on a plan what its usage would cost at API prices.
+                        .when_some(billing_tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))),
                 )
+                .when_some(cost_label, |el, c| el.child(c))
+                .when(queued > 0, |el| el.child(format!("{queued} queued")))
+                .child(div().flex_1())
+                // The tools panel lives in the main window.
+                .when(main, |el| {
+                    el.child(
+                        h_flex()
+                            .id("open-terminal")
+                            .gap(px(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(Icon::new(IconName::SquareTerminal).xsmall())
+                            .child("Terminal")
+                            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenTool(PanelTool::Terminal))))),
+                    )
+                })
         });
 
         h_flex()

@@ -404,9 +404,13 @@ impl SettingsView {
                 this.workspace.update(cx, |ws, cx| {
                     ws.settings.disabled_agents.retain(|d| *d != k);
                     if !v {
-                        ws.settings.disabled_agents.push(k);
+                        ws.settings.disabled_agents.push(k.clone());
                     }
                     ws.save_settings(cx);
+                    // Disabled agents aren't probed; find out what one offers once it's back on.
+                    if v {
+                        ws.probe_acp_agent(&k, cx);
+                    }
                 });
             }));
             let controls = h_flex().gap(px(6.)).children(sign_in).children(more).child(div().pl(px(4.)).child(toggle));
