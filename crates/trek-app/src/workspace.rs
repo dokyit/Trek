@@ -72,6 +72,7 @@ pub struct Prefs {
     pub effort: Effort,
     pub hand_holding: HandHolding,
     pub plan: bool,
+    pub fast: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,7 @@ pub struct LiveThread {
     pub commands: Option<async_channel::Sender<Command>>,
     pub turn_started: Option<Instant>,
     pub plan: bool,
+    pub fast: bool,
     pub cost_usd: f64,
     /// Bumped on every transcript change so views can resync cheaply.
     pub revision: u64,
@@ -113,7 +115,32 @@ pub enum UpdateStatus {
     Failed(String),
 }
 
+/// Tools that open as tabs in the right panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelTool {
+    Git,
+    Explorer,
+    Terminal,
+    Browser,
+    SideChat,
+}
+
+impl PanelTool {
+    pub const ALL: [PanelTool; 5] = [PanelTool::Terminal, PanelTool::Browser, PanelTool::Explorer, PanelTool::SideChat, PanelTool::Git];
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelTool::Git => "Git",
+            PanelTool::Explorer => "Explorer",
+            PanelTool::Terminal => "Terminal",
+            PanelTool::Browser => "Browser",
+            PanelTool::SideChat => "Side chat",
+        }
+    }
+}
+
 pub enum WorkspaceEvent {
+    /// Open (or focus) a right-panel tool.
+    OpenTool(PanelTool),
     /// A toast-worthy message with an optional undo.
     Toast { message: String, undo: Option<UndoAction> },
     FocusComposer,
@@ -131,6 +158,8 @@ pub struct Workspace {
     pub threads: Vec<Thread>,
     pub projects: Vec<Project>,
     pub agents: Vec<DetectedAgent>,
+    /// Live models from the user's Codex setup (custom providers included).
+    pub codex_models: Vec<ModelInfo>,
     pub detecting: bool,
     pub importing: bool,
     pub import_summary: Option<ImportSummary>,
@@ -142,6 +171,8 @@ pub struct Workspace {
     pub settled_open: bool,
     pub search: String,
     pub project_filter: Option<String>,
+    /// Bumped whenever any agent turn finishes (tools refresh on it).
+    pub turns_finished: u64,
     tasks: Vec<Task<()>>,
 }
 
@@ -161,6 +192,7 @@ impl Workspace {
             effort: settings.general.default_effort,
             hand_holding: settings.general.hand_holding,
             plan: false,
+            fast: false,
         };
         let mut this = Self {
             store,
@@ -168,6 +200,7 @@ impl Workspace {
             threads: vec![],
             projects: vec![],
             agents: vec![],
+            codex_models: vec![],
             detecting: false,
             importing: false,
             import_summary: None,
@@ -179,6 +212,7 @@ impl Workspace {
             settled_open: false,
             search: String::new(),
             project_filter: None,
+            turns_finished: 0,
             tasks: vec![],
         };
         this.reload(cx);
@@ -350,6 +384,7 @@ impl Workspace {
                 effort: t.effort,
                 hand_holding: t.hand_holding,
                 plan: self.live.get(&t.id).is_some_and(|l| l.plan),
+                fast: self.live.get(&t.id).is_some_and(|l| l.fast),
             },
             None => self.draft_prefs.clone(),
         }
@@ -370,9 +405,15 @@ impl Workspace {
                     }
                 });
                 let live = self.live.entry(id.clone()).or_default();
+                let fast_changed = live.fast != prefs.fast;
+                let plan_changed = live.plan != prefs.plan;
                 live.plan = prefs.plan;
+                live.fast = prefs.fast;
                 if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
-                    if before.agent != prefs.agent {
+                    // Claude reads effort, fast mode and plan at launch: restart idle sessions (they resume).
+                    let relaunch = live.turn_started.is_none()
+                        && (fast_changed || plan_changed || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort));
+                    if before.agent != prefs.agent || relaunch {
                         let _ = tx.try_send(Command::Shutdown);
                         live.commands = None;
                     } else {
@@ -397,7 +438,7 @@ impl Workspace {
         if let AgentId::Direct(p) = agent {
             if let Some(found) = self.agents.iter().find(|a| &a.agent == agent) {
                 if !found.models.is_empty() {
-                    return found.models.iter().map(|m| ModelInfo { id: m.clone(), name: m.clone(), efforts: vec![], tier: 0 }).collect();
+                    return found.models.iter().map(|m| ModelInfo { id: m.clone(), name: m.clone(), efforts: vec![], tier: 0, fast: None }).collect();
                 }
             }
             return match p.as_str() {
@@ -406,7 +447,71 @@ impl Workspace {
                 _ => vec![],
             };
         }
+        if *agent == AgentId::Codex && !self.codex_models.is_empty() {
+            return self.codex_models.clone();
+        }
         catalog::default_models(agent)
+    }
+
+    /// The window-wide backdrop image, when the user chose "Everywhere".
+    pub fn backdrop(&self) -> Option<(String, f32)> {
+        let a = &self.settings.appearance;
+        (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere).then(|| a.background.clone().map(|b| (b, a.background_dim))).flatten()
+    }
+
+    /// Working directory for whatever is on screen: the thread's folder or the draft's project.
+    pub fn current_cwd(&self) -> Option<PathBuf> {
+        match &self.route {
+            Route::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+            Route::Draft { project } => project.clone(),
+            _ => None,
+        }
+    }
+
+    /// Copy a user-picked image into Trek's data folder and use it as the background.
+    pub fn set_background_image(&mut self, src: PathBuf, cx: &mut Context<Self>) {
+        let dir = trek_core::paths::data_dir().join("backgrounds");
+        let _ = std::fs::create_dir_all(&dir);
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "background".into());
+        let dest = dir.join(name);
+        match std::fs::copy(&src, &dest) {
+            Ok(_) => {
+                self.settings.appearance.background = Some(dest.display().to_string());
+                self.save_settings(cx);
+            }
+            Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use that image: {e}"), undo: None }),
+        }
+    }
+
+    pub fn pick_background_image(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use as Background".into()) });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(p) = paths.into_iter().next() {
+                    let _ = this.update(cx, |this, cx| this.set_background_image(p, cx));
+                }
+            }
+        });
+        self.tasks.push(task);
+    }
+
+    /// Start a side chat next to `parent` (or the current draft's project). Hidden from the sidebar.
+    pub fn create_side_chat(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let cwd = self.current_cwd();
+        let parent = match &self.route {
+            Route::Thread(id) => id.clone(),
+            _ => "draft".into(),
+        };
+        let p = self.prefs();
+        let mut t = self.store.create_thread(cwd.as_deref(), p.agent, p.model, p.effort, HandHolding::Supervised).ok()?;
+        t.title = "Side chat".into();
+        t.side_of = Some(parent);
+        let _ = self.store.save_thread(&t);
+        let id = t.id.clone();
+        self.threads.push(t);
+        self.live.entry(id.clone()).or_default().loaded = true;
+        cx.notify();
+        Some(id)
     }
 
     /// Agents the user can pick right now.
@@ -464,6 +569,16 @@ impl Workspace {
             }
             _ => return,
         };
+        self.send_to(&id, text, cx);
+    }
+
+    /// Send a prompt to a specific thread (main view or a side chat).
+    pub fn send_to(&mut self, id: &str, text: String, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
         live.items.push(Item::User { text: text.clone() });
@@ -486,11 +601,19 @@ impl Workspace {
 
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
-        let live = self.live.entry(id.to_string()).or_default();
-        if live.commands.is_some() {
+        if self.live.get(id).is_some_and(|l| l.commands.is_some()) {
             return;
         }
+        let fast_on = self.live.get(id).is_some_and(|l| l.fast);
         let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
+        let fast_tier = if fast_on {
+            let models = self.models_for(&thread.agent);
+            let m = thread.model.as_ref().and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id)));
+            m.and_then(|m| m.fast.clone())
+        } else {
+            None
+        };
+        let live = self.live.entry(id.to_string()).or_default();
         let handle = trek_agents::start(SessionConfig {
             agent: thread.agent.clone(),
             cwd,
@@ -499,6 +622,7 @@ impl Workspace {
             hand_holding: thread.hand_holding,
             plan: live.plan,
             resume: thread.native_id.clone(),
+            fast: fast_tier,
         });
         live.commands = Some(handle.commands);
         let events = handle.events;
@@ -651,6 +775,7 @@ impl Workspace {
             }
         });
         if finished {
+            self.turns_finished += 1;
             self.persist_items(id);
             if let Some(title) = self.thread(id).map(|t| t.title.clone()) {
                 if !viewing {
@@ -854,6 +979,9 @@ impl Workspace {
                 let _ = this.update(cx, |this, cx| {
                     this.agents = agents;
                     this.detecting = false;
+                    if this.agents.iter().any(|a| a.agent == AgentId::Codex && a.availability == Availability::Ready) {
+                        this.fetch_codex_models(cx);
+                    }
                     // Default to an agent that's actually installed.
                     let ready = this.ready_agents();
                     if !ready.contains(&this.draft_prefs.agent) {
@@ -862,6 +990,22 @@ impl Workspace {
                             this.draft_prefs.model = None;
                         }
                     }
+                    cx.notify();
+                });
+            }
+        });
+        self.tasks.push(task);
+    }
+
+    fn fetch_codex_models(&mut self, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_agents::codex_models().await.unwrap_or_default()).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(models) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    this.codex_models = models;
                     cx.notify();
                 });
             }

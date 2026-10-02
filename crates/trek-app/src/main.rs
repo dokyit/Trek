@@ -4,6 +4,7 @@ mod assets;
 mod brand;
 mod composer;
 mod onboarding;
+mod panels;
 mod palette;
 mod root;
 mod settings_view;
@@ -34,7 +35,8 @@ actions!(
         Interrupt,
         About,
         HideApp,
-        Minimize
+        Minimize,
+        ToggleRightPanel
     ]
 );
 
@@ -96,7 +98,7 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::action("Toggle Sidebar", ToggleSidebar)],
+            items: vec![MenuItem::action("Toggle Sidebar", ToggleSidebar), MenuItem::action("Toggle Tools Panel", ToggleRightPanel)],
             disabled: false,
         },
         Menu {
@@ -128,6 +130,7 @@ fn main() {
             KeyBinding::new("shift-tab", TogglePlan, Some("Composer")),
             KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
             KeyBinding::new("cmd-.", Interrupt, None),
+            KeyBinding::new("cmd-j", ToggleRightPanel, None),
         ]);
         cx.on_action(|_: &Quit, cx| {
             workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());

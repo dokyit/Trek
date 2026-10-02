@@ -44,6 +44,8 @@ pub struct Thread {
     pub run_state: RunState,
     pub additions: i64,
     pub deletions: i64,
+    /// Set for side chats: the thread they were opened from. Hidden from the sidebar.
+    pub side_of: Option<String>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -78,7 +80,7 @@ impl Thread {
     }
 
     pub fn section(&self, now: i64) -> Option<Section> {
-        if self.archived_at.is_some() {
+        if self.archived_at.is_some() || self.side_of.is_some() {
             return None;
         }
         if self.pinned_at.is_some() {
@@ -190,10 +192,16 @@ pub fn project_root(cwd: &Path) -> PathBuf {
     cwd.to_path_buf()
 }
 
+/// Additive migrations; each is a no-op once applied.
+fn migrate(conn: &Connection) {
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN side_of TEXT", []);
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn);
         Ok(Store { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -204,6 +212,7 @@ impl Store {
     pub fn in_memory() -> Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn);
         Ok(Store { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -247,7 +256,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -272,6 +281,7 @@ impl Store {
             run_state: enum_from(&r.get::<_, String>(18)?),
             additions: r.get(19)?,
             deletions: r.get(20)?,
+            side_of: r.get(21)?,
         })
     }
 
@@ -325,6 +335,7 @@ impl Store {
             run_state: RunState::Idle,
             additions: 0,
             deletions: 0,
+            side_of: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -334,7 +345,7 @@ impl Store {
         self.with(|c| {
             c.execute(
                 &format!(
-                    "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                    "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
                     Self::THREAD_COLS
                 ),
                 params![
@@ -358,7 +369,8 @@ impl Store {
                     t.archived_at,
                     enum_str(&t.run_state),
                     t.additions,
-                    t.deletions
+                    t.deletions,
+                    t.side_of
                 ],
             )?;
             Ok(())
@@ -421,6 +433,7 @@ impl Store {
             run_state: RunState::Idle,
             additions: imp.additions,
             deletions: imp.deletions,
+            side_of: None,
         };
         self.save_thread(&t)?;
         Ok(true)

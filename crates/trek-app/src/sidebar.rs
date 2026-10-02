@@ -412,7 +412,7 @@ impl Render for Sidebar {
             .w(px(crate::root::SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
-            .bg(theme.sidebar)
+            .when(self.workspace.read(cx).backdrop().is_none(), |el| el.bg(theme.sidebar))
             .child(self.top(cx))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().child(list).child(history))
             .child(self.footer(cx))

@@ -2,6 +2,7 @@
 
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
+use crate::panels::RightPanel;
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
@@ -21,6 +22,7 @@ pub struct TrekWindow {
     composer: Entity<Composer>,
     settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
+    right_panel: Entity<RightPanel>,
     onboarding: Entity<Onboarding>,
     _subscriptions: Vec<Subscription>,
 }
@@ -33,11 +35,16 @@ impl TrekWindow {
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
+        let right_panel = cx.new(|_| RightPanel::new(workspace.clone()));
         let subscriptions = vec![
             cx.observe(&workspace, |_, _, cx| cx.notify()),
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
                 WorkspaceEvent::Toast { message, undo } => this.toast(message.clone(), undo.clone(), window, cx),
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
+                WorkspaceEvent::OpenTool(tool) => {
+                    let tool = *tool;
+                    this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
+                }
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
@@ -45,7 +52,7 @@ impl TrekWindow {
                 }
             }),
         ];
-        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, onboarding, _subscriptions: subscriptions }
+        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, _subscriptions: subscriptions }
     }
 
     fn toast(&mut self, message: String, undo: Option<UndoAction>, window: &mut Window, cx: &mut Context<Self>) {
@@ -84,7 +91,8 @@ impl TrekWindow {
             Route::Onboarding => (None, String::new(), None),
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
-        TitleBar::new().child(
+        let transparent = self.workspace.read(cx).backdrop().is_some();
+        TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
             h_flex()
                 .w_full()
                 .h_full()
@@ -122,6 +130,10 @@ impl TrekWindow {
                         .child(div().truncate().font_medium().child(title)),
                 )
                 .when_some(folder, |el, dir| el.child(open_in_button(dir)))
+                .child(
+                    crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)")
+                        .on_click(cx.listener(|this, _, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx)))),
+                )
                 .when_some(settle_id, |el, id| {
                     el.child(crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
                         let id = id.clone();
@@ -178,8 +190,28 @@ impl Render for TrekWindow {
                 .into_any_element();
         }
         let in_settings = matches!(route, Route::Settings(_));
+        let backdrop = self.workspace.read(cx).backdrop();
+        let (right_open, right_width) = {
+            let p = self.right_panel.read(cx);
+            (p.open, if p.wide { 720. } else { 440. })
+        };
         let content = match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
+            Route::Draft { .. } => div()
+                .relative()
+                .size_full()
+                .child(div().absolute().top_0().left_0().size_full().child(self.thread_view.clone()))
+                .child(
+                    v_flex()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .justify_center()
+                        .pb(px(40.))
+                        .child(self.composer.clone()),
+                )
+                .into_any_element(),
             _ => v_flex()
                 .size_full()
                 .min_w_0()
@@ -241,7 +273,14 @@ impl Render for TrekWindow {
                 })
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))
             .bg(cx.theme().sidebar)
+            .when_some(backdrop.clone(), |el, (spec, dim)| {
+                let side = cx.theme().sidebar;
+                el.relative()
+                    .child(img(crate::ui::background_source(&spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
+                    .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
+            })
             .child(self.title_bar(cx))
             .child(
                 h_flex()
@@ -267,7 +306,21 @@ impl Render for TrekWindow {
                                     .overflow_hidden()
                                     .child(content),
                             ),
-                    ),
+                    )
+                    .when(right_open && !in_settings, |el| {
+                        el.child(
+                            div().w(px(right_width)).flex_none().h_full().pr_2().pb_2().child(
+                                div()
+                                    .size_full()
+                                    .rounded(px(12.))
+                                    .border_1()
+                                    .border_color(cx.theme().sidebar_border)
+                                    .bg(cx.theme().background)
+                                    .overflow_hidden()
+                                    .child(self.right_panel.clone()),
+                            ),
+                        )
+                    }),
             )
             .into_any_element()
     }

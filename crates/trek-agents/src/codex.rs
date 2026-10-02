@@ -145,6 +145,7 @@ pub async fn run(
                             "sandboxPolicy": sandbox_policy(hand_holding),
                         });
                         if let Some(e) = effort_str(effort) { p["effort"] = json!(e); }
+                        p["serviceTier"] = json!(config.fast.clone().unwrap_or_else(|| "default".into()));
                         if let Some(m) = &model { p["model"] = json!(m); }
                         rpc.request("turn/start", p).await?;
                     }
@@ -303,4 +304,61 @@ async fn handle_incoming(
         events.send(ev).await?;
     }
     Ok(())
+}
+
+/// Live model list from the user's Codex setup (includes custom providers), with efforts.
+pub async fn list_models() -> Result<Vec<trek_core::catalog::ModelInfo>> {
+    use trek_core::catalog::ModelInfo;
+    let bin = detect::which("codex").context("codex not installed")?;
+    let mut child = tokio::process::Command::new(bin)
+        .arg("app-server")
+        .current_dir(trek_core::paths::home())
+        .env("PATH", detect::login_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut backlog = Vec::new();
+    let id = rpc.request("initialize", json!({ "clientInfo": { "name": "trek", "version": trek_core::VERSION } })).await?;
+    await_response(&mut lines, id, &mut backlog).await?;
+    rpc.send(&json!({ "method": "initialized" })).await?;
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..8 {
+        let mut params = json!({});
+        if let Some(c) = &cursor {
+            params["cursor"] = json!(c);
+        }
+        let id = rpc.request("model/list", params).await?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), await_response(&mut lines, id, &mut backlog)).await??;
+        for m in result["data"].as_array().into_iter().flatten() {
+            if m["hidden"] == true {
+                continue;
+            }
+            let efforts: Vec<Effort> = m["supportedReasoningEfforts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e["reasoningEffort"].as_str().and_then(|s| if s == "none" { Some(Effort::Off) } else { Effort::parse(s) }))
+                .collect();
+            let fast = m["serviceTiers"].as_array().into_iter().flatten().filter_map(|t| t["id"].as_str()).find(|t| *t != "default").map(String::from);
+            let id = m["id"].as_str().or(m["model"].as_str()).unwrap_or_default().to_string();
+            out.push(ModelInfo {
+                name: m["displayName"].as_str().map(String::from).unwrap_or_else(|| id.clone()),
+                id,
+                efforts,
+                tier: out.len().min(255) as u8,
+                fast,
+            });
+        }
+        cursor = result["nextCursor"].as_str().map(String::from);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let _ = child.start_kill();
+    Ok(out)
 }

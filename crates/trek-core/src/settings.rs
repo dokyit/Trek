@@ -50,6 +50,8 @@ pub struct General {
     /// Send with ⌘↩ instead of ↩.
     pub send_with_cmd_enter: bool,
     pub prevent_sleep_while_running: bool,
+    /// Favorite models as `agent-key/model-id`.
+    pub favorite_models: Vec<String>,
 }
 
 impl Default for General {
@@ -62,6 +64,7 @@ impl Default for General {
             follow_up: FollowUp::Steer,
             send_with_cmd_enter: false,
             prevent_sleep_while_running: true,
+            favorite_models: vec![],
         }
     }
 }
@@ -91,6 +94,20 @@ pub struct Appearance {
     pub reduce_motion: bool,
     /// Scales every animation duration (0 = instant, 1 = designed timing).
     pub motion_scale: f32,
+    /// `builtin:<name>` or an absolute path to a copied image; `None` = no image.
+    pub background: Option<String>,
+    pub background_placement: BackgroundPlacement,
+    /// How strongly the image is darkened/lightened under content, 0.0–0.9.
+    pub background_dim: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundPlacement {
+    /// Behind the new-thread composer (Capy style).
+    NewThread,
+    /// Behind the whole window chrome.
+    Everywhere,
 }
 
 impl Default for Appearance {
@@ -102,6 +119,9 @@ impl Default for Appearance {
             code_font_size: 12.5,
             reduce_motion: false,
             motion_scale: 1.0,
+            background: Some("builtin:dawn".into()),
+            background_placement: BackgroundPlacement::NewThread,
+            background_dim: 0.35,
         }
     }
 }

@@ -56,6 +56,9 @@ pub async fn run(
     if let Some(id) = &config.resume {
         cmd.args(["--resume", id]);
     }
+    if config.fast.is_some() {
+        cmd.args(["--settings", r#"{"fastMode":true}"#]);
+    }
     cmd.current_dir(&config.cwd)
         .env("PATH", detect::login_path())
         .stdin(Stdio::piped())

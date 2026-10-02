@@ -576,38 +576,13 @@ impl ThreadView {
     fn empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
         let loading = self.current.as_ref().and_then(|id| ws.live.get(id)).is_some_and(|l| l.loading);
-        let reduce = ws.settings.appearance.reduce_motion;
-        let project = match &ws.route {
-            Route::Draft { project } => project.clone(),
-            _ => None,
-        };
-        let theme = cx.theme().clone();
         if loading {
             return v_flex().size_full().items_center().justify_center().child(Spinner::new()).into_any_element();
         }
-        let name = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_5()
-            .pb(px(60.))
-            .child(brand::trail_draw(SharedString::from(format!("hero-{}", name.clone().unwrap_or_default())), px(56.), reduce))
-            .child(
-                h_flex()
-                    .text_size(px(24.))
-                    .gap(px(7.))
-                    .child(div().text_color(theme.foreground.opacity(0.92)).child("What should we build"))
-                    .child(match name {
-                        Some(n) => h_flex()
-                            .gap(px(7.))
-                            .child(div().text_color(theme.foreground.opacity(0.92)).child("in"))
-                            .child(div().border_b_1().border_dashed().border_color(theme.muted_foreground).child(format!("{n}?")))
-                            .into_any_element(),
-                        None => div().ml(px(-7.)).child("?").into_any_element(),
-                    }),
-            )
-            .into_any_element()
+        let a = &ws.settings.appearance;
+        let show = a.background_placement == trek_core::settings::BackgroundPlacement::NewThread && matches!(ws.route, Route::Draft { .. });
+        let spec = if show { a.background.clone() } else { None };
+        div().relative().size_full().child(crate::ui::hero_background(spec.as_deref(), a.background_dim, cx)).into_any_element()
     }
 }
 

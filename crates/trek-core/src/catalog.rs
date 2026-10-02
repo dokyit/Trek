@@ -11,11 +11,14 @@ pub struct ModelInfo {
     pub efforts: Vec<Effort>,
     /// 0 = fastest. Used to order the Power slider.
     pub tier: u8,
+    /// Service tier that means "fast" for this model (Codex), or `"settings"` for Claude's fastMode.
+    #[serde(default)]
+    pub fast: Option<String>,
 }
 
 impl ModelInfo {
     fn new(id: &str, name: &str, tier: u8, efforts: &[Effort]) -> Self {
-        Self { id: id.into(), name: name.into(), efforts: efforts.to_vec(), tier }
+        Self { id: id.into(), name: name.into(), efforts: efforts.to_vec(), tier, fast: None }
     }
 }
 
@@ -42,8 +45,12 @@ pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
         AgentId::ClaudeCode => vec![
             ModelInfo::new("claude-haiku-4-5", "Haiku 4.5", 0, &[Off, Low, Medium, High]),
             ModelInfo::new("claude-sonnet-5-5", "Sonnet 5.5", 1, CLAUDE_EFFORTS),
-            ModelInfo::new("claude-opus-5-5", "Opus 5.5", 2, CLAUDE_EFFORTS),
+            ModelInfo { fast: Some("settings".into()), ..ModelInfo::new("claude-opus-5-5", "Opus 5.5", 2, CLAUDE_EFFORTS) },
             ModelInfo::new("claude-fable-5-1", "Fable 5.1", 3, CLAUDE_EFFORTS),
+            ModelInfo::new("claude-sonnet-5", "Sonnet 5", 1, CLAUDE_EFFORTS),
+            ModelInfo { fast: Some("settings".into()), ..ModelInfo::new("claude-opus-5", "Opus 5", 2, CLAUDE_EFFORTS) },
+            ModelInfo::new("claude-fable-5", "Fable 5", 3, CLAUDE_EFFORTS),
+            ModelInfo { fast: Some("settings".into()), ..ModelInfo::new("claude-opus-4-8", "Opus 4.8", 2, CLAUDE_EFFORTS) },
         ],
         AgentId::Codex => vec![
             ModelInfo::new("gpt-5.6-luna", "Luna", 0, CODEX_EFFORTS),

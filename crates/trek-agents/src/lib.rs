@@ -6,6 +6,8 @@ mod claude;
 mod codex;
 mod direct;
 
+pub use codex::list_models as codex_models;
+
 use std::path::PathBuf;
 use trek_core::{AgentId, Effort, HandHolding};
 
@@ -19,6 +21,8 @@ pub struct SessionConfig {
     pub plan: bool,
     /// The agent's own session id to resume.
     pub resume: Option<String>,
+    /// Fast mode: Claude `fastMode`, or the Codex service tier to use.
+    pub fast: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

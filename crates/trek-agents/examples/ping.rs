@@ -10,7 +10,7 @@ fn main() {
     };
     let h = start(SessionConfig {
         agent, cwd: "/tmp/trek-e2e".into(), model: Some(model.into()), effort: Effort::Low,
-        hand_holding: HandHolding::Supervised, plan: false, resume: None,
+        hand_holding: HandHolding::Supervised, plan: false, resume: None, fast: None,
     });
     trek_core::runtime().block_on(async {
         h.commands.send(Command::Prompt("Reply with just the word: pong".into())).await.unwrap();

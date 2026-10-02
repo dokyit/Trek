@@ -140,3 +140,109 @@ pub fn group(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         }))
         .into_any_element()
 }
+
+/// MonoCode-style composer pill: a soft filled chip that can trigger a popover.
+#[derive(IntoElement)]
+pub struct Pill {
+    id: ElementId,
+    children: Vec<AnyElement>,
+    selected: bool,
+    on_click: Option<std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+}
+
+impl Pill {
+    pub fn new(id: impl Into<ElementId>) -> Self {
+        Self { id: id.into(), children: vec![], selected: false, on_click: None }
+    }
+
+    pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(std::rc::Rc::new(f));
+        self
+    }
+}
+
+impl ParentElement for Pill {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl gpui_kit::component::Selectable for Pill {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for Pill {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id(self.id)
+            .h(px(28.))
+            .px(px(10.))
+            .gap(px(6.))
+            .rounded(px(8.))
+            .text_sm()
+            .cursor_pointer()
+            .bg(theme.foreground.opacity(if self.selected { 0.12 } else { 0.065 }))
+            .hover(|s| s.bg(theme.foreground.opacity(0.11)))
+            .children(self.children)
+            .when_some(self.on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
+    }
+}
+
+/// A floating menu surface (popover body) drawn by Trek rather than the default chrome.
+pub fn menu_surface(cx: &App) -> Div {
+    let theme = cx.theme();
+    gpui_kit::component::v_flex()
+        .p(px(5.))
+        .rounded(px(12.))
+        .bg(theme.popover)
+        .border_1()
+        .border_color(theme.border)
+        .shadow_lg()
+}
+
+/// A row inside a menu surface.
+pub fn menu_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    h_flex()
+        .id(id)
+        .px(px(10.))
+        .min_h(px(34.))
+        .gap(px(10.))
+        .rounded(px(8.))
+        .text_sm()
+        .cursor_pointer()
+        .when(active, |el| el.bg(theme.list_active))
+        .hover(|s| s.bg(theme.list_active))
+}
+
+/// Resolve the configured background (`builtin:<name>` or a file path) into an image source.
+pub fn background_source(spec: &str) -> ImageSource {
+    match spec.strip_prefix("builtin:") {
+        Some(name) => ImageSource::from(SharedString::from(format!("backgrounds/{name}.png"))),
+        None => ImageSource::from(std::sync::Arc::<std::path::Path>::from(std::path::Path::new(spec))),
+    }
+}
+
+/// Full-bleed background art that fades into the surface below (Capy-style hero).
+pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
+    let bg = cx.theme().background;
+    let mut el = div().absolute().top_0().left_0().size_full().overflow_hidden();
+    if let Some(spec) = spec {
+        el = el
+            .child(img(background_source(spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
+            .child(div().absolute().top_0().left_0().size_full().bg(bg.opacity(dim.clamp(0.0, 0.9))))
+            .child(div().absolute().top_0().left_0().size_full().bg(linear_gradient(
+                180.,
+                linear_color_stop(bg.opacity(0.0), 0.30),
+                linear_color_stop(bg, 0.78),
+            )));
+    }
+    el
+}

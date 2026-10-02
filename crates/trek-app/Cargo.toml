@@ -22,3 +22,8 @@ tracing-subscriber.workspace = true
 rust-embed = "8"
 tray-icon = "0.26"
 png = "0.18"
+portable-pty = "0.9"
+vt100 = "0.16"
+gpui-wry = "=0.7.0"
+wry = { version = "0.53.3", package = "lb-wry" }
+raw-window-handle = "0.6.2"

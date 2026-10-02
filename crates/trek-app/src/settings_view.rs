@@ -13,7 +13,7 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use trek_core::catalog::DIRECT_PROVIDERS;
 use trek_core::detect::Availability;
-use trek_core::settings::{Channel, FollowUp, Settings, ThemeChoice, secrets};
+use trek_core::settings::{BackgroundPlacement, Channel, FollowUp, Settings, ThemeChoice, secrets};
 use trek_core::{AgentId, HandHolding};
 
 fn page_icon(p: SettingsPage) -> Icon {
@@ -28,6 +28,28 @@ fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::Import => Icon::new(IconName::ArrowDown),
         SettingsPage::Updates => Icon::new(IconName::RefreshCw),
         SettingsPage::About => Icon::new(IconName::Info),
+    }
+}
+
+const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
+    ("App", &[SettingsPage::General, SettingsPage::Appearance]),
+    ("Models", &[SettingsPage::Agents, SettingsPage::ApiKeys, SettingsPage::LocalModels]),
+    ("Workflow", &[SettingsPage::Permissions, SettingsPage::Inbox, SettingsPage::Import]),
+    ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
+];
+
+fn page_blurb(p: SettingsPage) -> &'static str {
+    match p {
+        SettingsPage::General => "Defaults for new threads and how Trek behaves while agents work.",
+        SettingsPage::Appearance => "Theme, background art and motion.",
+        SettingsPage::Agents => "Coding agents found on this Mac. Trek uses your existing logins.",
+        SettingsPage::ApiKeys => "Use a provider directly with your own API key.",
+        SettingsPage::LocalModels => "Models running on this Mac.",
+        SettingsPage::Permissions => "How much each agent may do without asking.",
+        SettingsPage::Inbox => "When finished threads leave the inbox.",
+        SettingsPage::Import => "Bring in threads from other agents on this Mac.",
+        SettingsPage::Updates => "Trek updates itself in the background.",
+        SettingsPage::About => "",
     }
 }
 
@@ -58,7 +80,7 @@ impl Render for SettingsNav {
             .px_2()
             .pt_1()
             .gap(px(2.))
-            .bg(theme.sidebar)
+            .when(self.workspace.read(cx).backdrop().is_none(), |el| el.bg(theme.sidebar))
             .child(
                 h_flex()
                     .id("settings-back")
@@ -75,11 +97,16 @@ impl Render for SettingsNav {
                     .child("Back to app")
                     .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx)))),
             )
-            .child(div().h_2())
-            .children(SettingsPage::ALL.into_iter().map(|p| {
-                let label: &'static str = p.label();
-                ui::nav_row(label, page_icon(p), label, None, p == current, cx)
-                    .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(p), cx))))
+            .children(NAV_GROUPS.iter().map(|(group, pages)| {
+                v_flex()
+                    .pt(px(16.))
+                    .gap(px(2.))
+                    .child(div().px(px(12.)).pb(px(4.)).text_xs().text_color(theme.muted_foreground).child(*group))
+                    .children(pages.iter().map(|&p| {
+                        let label: &'static str = p.label();
+                        ui::nav_row(label, page_icon(p), label, None, p == current, cx)
+                            .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(p), cx))))
+                    }))
             }))
     }
 }
@@ -125,15 +152,18 @@ impl SettingsView {
         let description: SharedString = description.into();
         h_flex()
             .w_full()
-            .gap_6()
-            .py(px(14.))
+            .min_h(px(56.))
+            .gap(px(24.))
+            .py(px(12.))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(3.))
-                    .child(div().text_sm().child(title))
-                    .when(!description.is_empty(), |el| el.child(div().text_xs().text_color(cx.theme().muted_foreground).child(description))),
+                    .gap(px(2.))
+                    .child(div().text_size(px(14.)).font_medium().child(title))
+                    .when(!description.is_empty(), |el| {
+                        el.child(div().text_size(px(12.5)).line_height(relative(1.45)).text_color(cx.theme().muted_foreground).child(description))
+                    }),
             )
             .child(div().flex_none().child(control))
             .into_any_element()
@@ -144,16 +174,83 @@ impl SettingsView {
         Switch::new(id).checked(on).on_click(move |v: &bool, window, cx| set(*v, window, cx))
     }
 
+    /// Section heading: more space above than below (rhythm), real weight instead of an eyebrow.
     fn heading(text: &str, cx: &App) -> AnyElement {
-        div().pt_5().pb_2().px_1().text_xs().font_medium().text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
+        div().pt(px(32.)).pb(px(8.)).px(px(4.)).text_size(px(14.)).font_semibold().text_color(cx.theme().foreground).child(text.to_string()).into_any_element()
     }
 
     fn note(text: &str, cx: &App) -> AnyElement {
-        div().pb_3().px_1().text_sm().text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
+        div().pb(px(12.)).px(px(4.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
     }
 
     fn status_dot(color: Hsla, label: &'static str) -> AnyElement {
         h_flex().gap_2().text_xs().child(div().size(px(7.)).rounded_full().bg(color)).child(label).into_any_element()
+    }
+
+    /// Thumbnails: None, the built-in art, the user's own image, and "Choose image…".
+    fn background_gallery(&self, s: &Settings, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let current = s.appearance.background.clone();
+        let mut options: Vec<(Option<String>, &'static str)> =
+            vec![(None, "None"), (Some("builtin:dawn".into()), "Dawn"), (Some("builtin:night".into()), "Night"), (Some("builtin:paper".into()), "Paper")];
+        if let Some(c) = current.clone().filter(|c| !c.starts_with("builtin:")) {
+            options.push((Some(c), "Yours"));
+        }
+        let tile = |id: SharedString, selected: bool| {
+            v_flex().id(id).gap(px(6.)).cursor_pointer().child(
+                div()
+                    .w(px(100.))
+                    .h(px(66.))
+                    .rounded(px(10.))
+                    .overflow_hidden()
+                    .border_2()
+                    .border_color(if selected { theme.foreground } else { theme.border })
+                    .border_dashed()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Plus).text_color(theme.muted_foreground)),
+            )
+        };
+        h_flex()
+            .flex_wrap()
+            .gap(px(12.))
+            .px(px(4.))
+            .children(options.into_iter().map(|(spec, label)| {
+                let selected = spec == current;
+                let preview = spec.clone();
+                let ws = self.workspace.clone();
+                v_flex()
+                    .id(SharedString::from(format!("bg-{label}")))
+                    .gap(px(6.))
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(100.))
+                            .h(px(66.))
+                            .rounded(px(10.))
+                            .overflow_hidden()
+                            .border_2()
+                            .border_color(if selected { theme.foreground } else { theme.border })
+                            .bg(theme.background)
+                            .when_some(preview, |el, spec| el.child(img(ui::background_source(&spec)).size_full().object_fit(ObjectFit::Cover))),
+                    )
+                    .child(div().text_xs().text_color(if selected { theme.foreground } else { theme.muted_foreground }).child(label))
+                    .on_click(move |_, _, cx| {
+                        let spec = spec.clone();
+                        ws.update(cx, |ws, cx| {
+                            ws.settings.appearance.background = spec;
+                            ws.save_settings(cx);
+                        })
+                    })
+            }))
+            .child(
+                tile("bg-choose".into(), false)
+                    .child(div().text_xs().text_color(theme.muted_foreground).child("Choose image…"))
+                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.pick_background_image(cx)))),
+            )
+            .into_any_element()
     }
 
     fn content(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -216,26 +313,59 @@ impl SettingsView {
                     crate::set_theme(v, window, cx);
                 };
                 out.push(ui::group(
+                    vec![Self::row(
+                        "Theme",
+                        "System follows macOS light and dark.",
+                        ui::segmented("theme", vec![(ThemeChoice::System, "System"), (ThemeChoice::Night, "Night"), (ThemeChoice::Paper, "Paper")], s.appearance.theme, pick, cx),
+                        cx,
+                    )],
+                    cx,
+                ));
+                out.push(Self::heading("Background", cx));
+                out.push(self.background_gallery(&s, cx));
+                out.push(div().h(px(12.)).into_any_element());
+                out.push(ui::group(
                     vec![
                         Self::row(
-                            "Theme",
-                            "",
+                            "Show on",
+                            "New thread puts the art behind the composer. Everywhere tints the whole window.",
                             ui::segmented(
-                                "theme",
-                                vec![(ThemeChoice::System, "System"), (ThemeChoice::Night, "Night"), (ThemeChoice::Paper, "Paper")],
-                                s.appearance.theme,
-                                pick,
+                                "bg-place",
+                                vec![(BackgroundPlacement::NewThread, "New thread"), (BackgroundPlacement::Everywhere, "Everywhere")],
+                                s.appearance.background_placement,
+                                self.setter(|s, v| s.appearance.background_placement = v),
                                 cx,
                             ),
                             cx,
                         ),
                         Self::row(
-                            "Reduce motion",
-                            "Use simple fades instead of movement.",
-                            self.switch("reduce-motion", s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v),
+                            "Dim",
+                            "Darkens the image so text stays readable.",
+                            ui::segmented(
+                                "bg-dim",
+                                vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
+                                match s.appearance.background_dim {
+                                    d if d < 0.1 => 0u8,
+                                    d if d < 0.3 => 1,
+                                    d if d < 0.5 => 2,
+                                    _ => 3,
+                                },
+                                self.setter(|s, v: u8| s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]),
+                                cx,
+                            ),
                             cx,
                         ),
                     ],
+                    cx,
+                ));
+                out.push(Self::heading("Motion", cx));
+                out.push(ui::group(
+                    vec![Self::row(
+                        "Reduce motion",
+                        "Use simple fades instead of movement.",
+                        self.switch("reduce-motion", s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v),
+                        cx,
+                    )],
                     cx,
                 ));
             }
@@ -558,11 +688,15 @@ impl Render for SettingsView {
             h_flex().w_full().justify_center().child(
                 v_flex()
                     .w_full()
-                    .max_w(px(720.))
-                    .px_8()
-                    .pt_8()
-                    .pb_12()
-                    .child(div().text_size(px(20.)).font_semibold().pb_4().px_1().child(page.label()))
+                    .max_w(px(680.))
+                    .px(px(40.))
+                    .pt(px(40.))
+                    .pb(px(64.))
+                    .child(div().px(px(4.)).text_size(px(22.)).font_semibold().child(page.label()))
+                    .when(!page_blurb(page).is_empty(), |el| {
+                        el.child(div().px(px(4.)).pt(px(4.)).text_size(px(13.)).text_color(cx.theme().muted_foreground).child(page_blurb(page)))
+                    })
+                    .child(div().h(px(24.)))
                     .children(body),
             ),
         )

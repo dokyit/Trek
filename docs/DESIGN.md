@@ -1,5 +1,13 @@
 # Trek — Design Spec
 
+> **v3 (2026-10-02) — references chosen by the owner:** T3 Code inbox sidebar · Capy new-thread hero ·
+> MonoCode composer (model pill → Fast / Effort › / Model › with provider rail + search; access pill with
+> icon + title + description rows) · Synara right panel (tab strip + launcher: Terminal, Browser, Explorer,
+> Side chat, Git) · Impeccable rules for Settings (4-unit spacing, 22/14/12.5 type roles, 32px between
+> sections, heading closer to its card than to the previous one, border-only cards, no eyebrows).
+> Background art: procedurally dithered ridge skies (assets/backgrounds/make_backgrounds.py), user images
+> supported; placement "New thread" (Capy) or "Everywhere" (window backdrop, translucent chrome).
+
 > **v2 visual language (2026-10-02), after side-by-side review against T3 Code and Codex.**
 > Neutral near-black chrome; ember is reserved for the logo and status, never for buttons or chips.
 > Sidebar: search + plain "New thread ⌘N" row; live threads as quiet cards (monogram · project · status,
