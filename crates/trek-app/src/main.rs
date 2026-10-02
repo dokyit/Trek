@@ -4,6 +4,8 @@ mod assets;
 mod brand;
 mod composer;
 mod integrations;
+mod mascot;
+mod md;
 mod mentions;
 mod onboarding;
 mod panels;

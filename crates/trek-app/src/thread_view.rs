@@ -282,7 +282,7 @@ impl ThreadView {
         out
     }
 
-    fn render_row(row: Row, view: WeakEntity<ThreadView>, text_size: Pixels, cx: &App) -> AnyElement {
+    fn render_row(row: Row, view: WeakEntity<ThreadView>, text_size: Pixels, cwd: Option<std::path::PathBuf>, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let child_view = view.clone();
         let column = |el: Div| h_flex().w_full().justify_center().px_6().child(el.w_full().max_w(px(COLUMN)));
@@ -348,7 +348,7 @@ impl ThreadView {
             }
             .into_any_element(),
             Row::Assistant(md) => column(
-                div().py_2().text_size(text_size).line_height(relative(1.6)).child(TextView::new(&md).selectable(true).stream_fade(true)),
+                div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, cwd.clone(), cx).stream_fade(true)),
             )
                 .into_any_element(),
             Row::Reasoning { ix, md, live, open } => column(
@@ -363,7 +363,13 @@ impl ThreadView {
                             .cursor_pointer()
                             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
                             .child(if live {
-                                ShimmerText::new("Thinking").id(("thinking", ix)).highlight_color(palette::ember(cx)).into_any_element()
+                                {
+                                    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                    ShimmerText::new(format!("{}…", crate::mascot::word(&format!("think-{ix}"), secs)))
+                                        .id(("thinking", ix))
+                                        .highlight_color(palette::ember(cx))
+                                        .into_any_element()
+                                }
                             } else {
                                 div().child("Thought").into_any_element()
                             })
@@ -413,7 +419,7 @@ impl ThreadView {
                                     .pl_4()
                                     .border_l_1()
                                     .border_color(theme.border)
-                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), text_size, cx))),
+                                    .children(tools.into_iter().map(|t| Self::render_row(t, child_view.clone(), text_size, cwd.clone(), cx))),
                             )
                         }),
                 )
@@ -580,22 +586,35 @@ impl ThreadView {
             );
         }
         if thread.run_state == RunState::Working {
-            let elapsed = live.turn_started.map(|t| time::elapsed(t.elapsed())).unwrap_or_default();
+            let started = live.turn_started.map(|t| t.elapsed());
+            let elapsed = started.map(time::elapsed).unwrap_or_default();
+            let word = crate::mascot::word(&id, started.map(|d| d.as_secs()).unwrap_or(0));
+            let reduce = ws.settings.appearance.reduce_motion;
             return Some(
                 h_flex()
                     .w_full()
                     .justify_center()
                     .px_6()
-                    .pb_2()
+                    .pb(px(6.))
                     .child(
                         h_flex()
                             .w_full()
                             .max_w(px(COLUMN))
-                            .gap_3()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(ShimmerText::new(format!("Working for {elapsed}")).id("working-shimmer").highlight_color(theme.foreground))
-                            .child(div().flex_1().h(px(1.)).bg(theme.border)),
+                            .px(px(4.))
+                            .gap(px(14.))
+                            .items_end()
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    // Fixed width so the trail doesn't jump when the word changes.
+                                    .w(px(250.))
+                                    .pb(px(4.))
+                                    .gap(px(8.))
+                                    .text_size(px(13.))
+                                    .child(ShimmerText::new(format!("{word}…")).id(SharedString::from(format!("trail-word-{word}"))).highlight_color(palette::ember(cx)))
+                                    .when(!elapsed.is_empty(), |el| el.child(div().text_color(theme.muted_foreground.opacity(0.8)).child(elapsed))),
+                            )
+                            .child(div().flex_1().min_w_0().child(crate::mascot::trail(SharedString::from(format!("hiker-{id}")), reduce, cx))),
                     )
                     .into_any_element(),
             );
@@ -625,12 +644,13 @@ impl Render for ThreadView {
         }
         let view = cx.entity().downgrade();
         let text_size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
+        let cwd = self.workspace.read(cx).current_cwd();
         v_flex()
             .size_full()
             .child(
                 div().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.get(ix).cloned() {
-                        Some(row) => ThreadView::render_row(row, view.clone(), text_size, cx),
+                        Some(row) => ThreadView::render_row(row, view.clone(), text_size, cwd.clone(), cx),
                         None => div().into_any_element(),
                     })
                     .with_list_style(StyleRefinement::default().pt_4().pb_6())

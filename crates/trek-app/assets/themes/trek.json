@@ -11,7 +11,7 @@
    "shadow": true,
    "colors": {
     "background": "#0A0A0B",
-    "foreground": "#EDEDEF",
+    "foreground": "#E4E4E7",
     "border": "#232327",
     "input.border": "#26262B",
     "ring": "#FFFFFF22",

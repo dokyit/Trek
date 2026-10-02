@@ -12,7 +12,7 @@ repository = "https://github.com/tobias/trek"
 [workspace.dependencies]
 trek-core = { path = "crates/trek-core" }
 trek-agents = { path = "crates/trek-agents" }
-gpui-kit = "=0.7.0"
+gpui-kit = { version = "=0.7.0", features = ["tree-sitter", "tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-css", "tree-sitter-diff", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java", "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust", "tree-sitter-swift", "tree-sitter-toml", "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml"] }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -40,3 +40,8 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Trek carries a small patch to gpui-base: semibold (not bold) emphasis and calmer heading sizes
+# in rendered markdown. See vendor/gpui-base/src/text/node.rs ("Trek:").
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
