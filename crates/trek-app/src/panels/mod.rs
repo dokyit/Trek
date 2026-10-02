@@ -4,6 +4,7 @@ mod browser;
 mod explorer;
 mod git;
 mod side_chat;
+mod simhid;
 mod simulator;
 mod terminal;
 
@@ -146,10 +147,10 @@ impl RightPanel {
 
     /// Native web views draw above GPUI, so only the visible Browser tab may show.
     /// The Simulator only mirrors (and polls the device) while its tab is on screen.
-    fn sync_native(&mut self, cx: &mut Context<Self>) {
+    pub fn sync_native(&mut self, cx: &mut Context<Self>) {
         let active = self.active;
         let open = self.open;
-        let menu_open = self.launcher_open;
+        let menu_open = self.launcher_open || self.workspace.read(cx).overlay_open;
         for t in &self.tabs {
             match &t.view {
                 View::Browser(b) => {

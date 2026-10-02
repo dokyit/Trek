@@ -54,6 +54,8 @@ pub struct Composer {
     /// Set when Enter picked a row, so the same keypress doesn't also send.
     swallow_enter: Option<std::time::Instant>,
     picker_scroll: ScrollHandle,
+    /// Width of the composer card at last layout; narrow cards get compact pills.
+    width: std::rc::Rc<std::cell::Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -124,6 +126,7 @@ impl Composer {
             snapshotting: false,
             swallow_enter: None,
             picker_scroll: ScrollHandle::new(),
+            width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             _subscriptions: subscriptions,
         }
     }
@@ -135,8 +138,20 @@ impl Composer {
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
         self.trigger = None;
+        self.sync_overlay(cx);
         let images = std::mem::take(&mut self.attachments);
         self.workspace.update(cx, |ws, cx| ws.send(text, images, cx));
+    }
+
+    /// Tell the workspace whether one of our popovers is open (native views hide under it).
+    fn sync_overlay(&self, cx: &mut Context<Self>) {
+        let open = self.model_open || self.access_open || self.trigger.is_some();
+        self.workspace.update(cx, |ws, cx| {
+            if ws.overlay_open != open {
+                ws.overlay_open = open;
+                cx.notify();
+            }
+        });
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -272,6 +287,7 @@ impl Composer {
             self.ensure_file_index(cx);
         }
         self.trigger = next;
+        self.sync_overlay(cx);
     }
 
     fn ensure_file_index(&mut self, cx: &mut Context<Self>) {
@@ -374,7 +390,10 @@ impl Composer {
             return;
         }
         match key {
-            "escape" => self.trigger = None,
+            "escape" => {
+                self.trigger = None;
+                self.sync_overlay(cx);
+            }
             "up" => self.picked = (self.picked + n - 1) % n,
             "down" => self.picked = (self.picked + 1) % n,
             _ => self.accept_pick(self.picked.min(n - 1), window, cx),
@@ -394,7 +413,10 @@ impl Composer {
             return;
         }
         match ks.key.as_str() {
-            "escape" => self.trigger = None,
+            "escape" => {
+                self.trigger = None;
+                self.sync_overlay(cx);
+            }
             "up" if n > 0 => self.picked = (self.picked + n - 1) % n,
             "down" if n > 0 => self.picked = (self.picked + 1) % n,
             "enter" | "tab" if n > 0 && !ks.modifiers.shift => {
@@ -685,6 +707,7 @@ impl Composer {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.update_prefs(cx, |p| p.effort = e);
                         this.model_open = false;
+                        this.sync_overlay(cx);
                         this.sub = None;
                         cx.notify();
                     }))
@@ -785,6 +808,7 @@ impl Composer {
                         p.model = Some(id);
                     });
                     this.model_open = false;
+                        this.sync_overlay(cx);
                     this.sub = None;
                     cx.notify();
                 }))
@@ -867,6 +891,7 @@ impl Composer {
                             this.update_prefs(cx, |p| p.hand_holding = level);
                         }
                         this.access_open = false;
+                        this.sync_overlay(cx);
                         cx.notify();
                     }))
             }))
@@ -1036,6 +1061,7 @@ impl Render for Composer {
         let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
         let thread_id = thread.as_ref().map(|t| t.id.clone());
         let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
+        let compact = self.width.get() < px(600.);
         let plan = prefs.plan;
 
         // Model pill + menu.
@@ -1046,6 +1072,7 @@ impl Render for Composer {
             .open(model_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
                 this.model_open = *open;
+                this.sync_overlay(cx);
                 if !*open {
                     this.sub = None;
                     this.rail = None;
@@ -1054,9 +1081,10 @@ impl Render for Composer {
             }))
             .trigger(
                 Pill::new("model-pill")
+                    .flexible()
                     .child(ui::agent_glyph(&prefs.agent, cx))
-                    .child(div().child(model_label))
-                    .child(div().text_color(theme.muted_foreground).child(prefs.effort.label()))
+                    .child(div().min_w_0().max_w(px(if compact { 120. } else { 240. })).truncate().child(model_label))
+                    .child(div().flex_none().text_color(theme.muted_foreground).child(prefs.effort.label()))
                     .when(prefs.fast, |el| el.child(Icon::new(crate::assets::Lucide::Zap).xsmall().text_color(palette::amber(cx))))
                     .child(Icon::new(if model_open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall().text_color(theme.muted_foreground)),
             );
@@ -1076,12 +1104,14 @@ impl Render for Composer {
             .open(access_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
                 this.access_open = *open;
+                this.sync_overlay(cx);
                 cx.notify();
             }))
             .trigger(
                 Pill::new("access-pill")
+                    .when(compact, |p| p.tooltip(hh.label()))
                     .child(hand_icon(hh).small().text_color(access_tint))
-                    .child(hh.label())
+                    .when(!compact, |p| p.child(hh.label()))
                     .child(Icon::new(if access_open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall().text_color(theme.muted_foreground)),
             )
             .content(move |_, _, cx| access_entity.update(cx, |c, cx| c.access_menu(cx)));
@@ -1112,7 +1142,29 @@ impl Render for Composer {
                 .into_any_element()
         };
 
+        // Record the card's width; crossing the compact threshold re-renders the pills.
+        let width_cell = self.width.clone();
+        let me = cx.entity().downgrade();
+        let measure = canvas(
+            move |bounds, _, cx| {
+                let before = width_cell.get();
+                width_cell.set(bounds.size.width);
+                if (before < px(600.)) != (bounds.size.width < px(600.)) {
+                    let me = me.clone();
+                    cx.defer(move |cx| {
+                        let _ = me.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
         let card = v_flex()
+            .relative()
+            .child(measure)
             .w_full()
             .rounded(px(16.))
             .bg(theme.secondary)
@@ -1139,6 +1191,8 @@ impl Render for Composer {
                 h_flex()
                     .p(px(8.))
                     .gap(px(6.))
+                    .min_w_0()
+                    .overflow_hidden()
                     .child(self.plus_button(cx))
                     .child(model_pill)
                     .child(access_pill)
@@ -1146,12 +1200,13 @@ impl Render for Composer {
                         el.child(
                             Pill::new("plan-pill")
                                 .selected(plan)
+                                .when(compact, |p| p.tooltip(if plan { "Plan mode on" } else { "Plan mode" }))
                                 .child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
-                                .child("Plan")
+                                .when(!compact, |p| p.child("Plan"))
                                 .on_click(cx.listener(|this, _, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan))),
                         )
                     })
-                    .child(div().flex_1())
+                    .child(div().flex_1().min_w(px(4.)))
                     .when_some(context, |el, (used, window)| el.child(self.context_ring(used, window, cx)))
                     .child(send),
             );

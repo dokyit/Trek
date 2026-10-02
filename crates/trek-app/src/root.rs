@@ -37,7 +37,10 @@ impl TrekWindow {
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
         let right_panel = cx.new(|_| RightPanel::new(workspace.clone()));
         let subscriptions = vec![
-            cx.observe(&workspace, |_, _, cx| cx.notify()),
+            cx.observe(&workspace, |this, _, cx| {
+                this.right_panel.update(cx, |p, cx| p.sync_native(cx));
+                cx.notify();
+            }),
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
                 WorkspaceEvent::Toast { message, undo } => this.toast(message.clone(), undo.clone(), window, cx),
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),

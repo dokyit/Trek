@@ -225,6 +225,8 @@ pub struct Workspace {
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
     pub usage_loading: bool,
+    /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
+    pub overlay_open: bool,
     tasks: Vec<Task<()>>,
 }
 
@@ -270,6 +272,7 @@ impl Workspace {
             status_fetched_at: 0,
             acp_info: HashMap::new(),
             usage_loading: false,
+            overlay_open: false,
             tasks: vec![],
         };
         this.reload(cx);

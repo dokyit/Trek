@@ -166,12 +166,25 @@ pub struct Pill {
     children: Vec<AnyElement>,
     selected: bool,
     ghost: bool,
+    flexible: bool,
+    tooltip: Option<SharedString>,
     on_click: Option<std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
 }
 
 impl Pill {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { id: id.into(), children: vec![], selected: false, ghost: false, on_click: None }
+        Self { id: id.into(), children: vec![], selected: false, ghost: false, flexible: false, tooltip: None, on_click: None }
+    }
+
+    /// May shrink (its text truncating) when the row runs out of room.
+    pub fn flexible(mut self) -> Self {
+        self.flexible = true;
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
     }
 
     /// No fill until hovered or selected (toolbar style).
@@ -220,7 +233,11 @@ impl RenderOnce for Pill {
                 (false, false) => 0.065,
             }))
             .hover(|s| s.bg(theme.foreground.opacity(0.11)))
+            .when(self.flexible, |el| el.min_w_0().flex_shrink(1.))
+            .when(!self.flexible, |el| el.flex_none())
+            .overflow_hidden()
             .children(self.children)
+            .when_some(self.tooltip, |el, t| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(window, cx)))
             .when_some(self.on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
     }
 }

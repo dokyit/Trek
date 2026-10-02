@@ -364,7 +364,8 @@ pub(crate) async fn fetch_models(rpc: &mut Rpc, lines: &mut RpcLines, backlog: &
         let id = rpc.request("model/list", params).await?;
         let result = tokio::time::timeout(std::time::Duration::from_secs(15), await_response(lines, id, backlog)).await??;
         for m in result["data"].as_array().into_iter().flatten() {
-            if m["hidden"] == true {
+            // Codex in Trek means OpenAI's models; `provider/model` ids come from custom routing.
+            if m["hidden"] == true || m["id"].as_str().or(m["model"].as_str()).is_some_and(|id| id.contains('/')) {
                 continue;
             }
             let efforts: Vec<Effort> = m["supportedReasoningEfforts"]

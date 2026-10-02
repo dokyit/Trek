@@ -1,7 +1,8 @@
 //! iOS Simulator: a live mirror of a booted simulator with touch, typing and hardware buttons.
 //!
-//! Frames come from `simctl io screenshot`, polled off the UI thread only while the tab is on
-//! screen. Taps, swipes, typing and hardware buttons go through the AXe CLI.
+//! With AXe installed, a resident helper (panels/simhid.rs) streams the framebuffer at up to 30 fps
+//! and delivers touches, keys and buttons over one open HID session. Without it (or while the
+//! helper is being built), frames come from `simctl io screenshot` and input from the AXe CLI.
 
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -22,6 +23,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::assets::Lucide;
+use super::simhid::{LinkEvent, SimLink};
 
 /// Mirror cadence while the screen is changing and once it has settled. One `simctl` screenshot
 /// takes ~0.35 s end to end, so while active two captures overlap (staggered) for ~5–6 fps;
@@ -354,6 +356,14 @@ pub struct SimulatorPanel {
     url_open: bool,
     focus: FocusHandle,
     axe_tx: async_channel::Sender<AxeJob>,
+    /// The resident helper: its binary once built, the open link, and whether streaming is paused.
+    helper: Option<Result<std::path::PathBuf, String>>,
+    helper_building: bool,
+    link: Option<Arc<SimLink>>,
+    link_ready: bool,
+    link_paused: bool,
+    link_retry: Option<Instant>,
+    _link_events: Option<Task<()>>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -440,6 +450,13 @@ impl SimulatorPanel {
             url_open: false,
             focus: cx.focus_handle(),
             axe_tx,
+            helper: None,
+            helper_building: false,
+            link: None,
+            link_ready: false,
+            link_paused: false,
+            link_retry: None,
+            _link_events: None,
             _tasks: vec![errors, poll],
             _subscriptions: vec![sub],
         }
@@ -463,6 +480,7 @@ impl SimulatorPanel {
     /// The tab is closing: give the frame textures back.
     pub fn release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.visible = false;
+        self.drop_link();
         for image in self.stale.drain(..).chain(self.frame.take().map(|f| f.image)) {
             cx.drop_image(image, Some(&mut *window));
         }
@@ -489,6 +507,23 @@ impl SimulatorPanel {
 
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.on_screen(window, cx) {
+            if let Some(link) = self.link.as_ref().filter(|_| !self.link_paused) {
+                link.send("fps 0");
+                self.link_paused = true;
+            }
+            return;
+        }
+        self.manage_link(window, cx);
+        if self.link_ready {
+            if self.link_paused {
+                if let Some(link) = &self.link {
+                    link.send("fps 30");
+                }
+                self.link_paused = false;
+            }
+            if !self.listing && self.last_list.is_none_or(|t| t.elapsed() >= DEVICE_REFRESH) {
+                self.refresh_devices(window, cx);
+            }
             return;
         }
         if !self.listing && self.last_list.is_none_or(|t| t.elapsed() >= DEVICE_REFRESH) {
@@ -608,6 +643,105 @@ impl SimulatorPanel {
         cx.notify();
     }
 
+    /// Put a decoded frame on screen, releasing the texture it replaces.
+    fn show_frame(&mut self, frame: Frame, window: &mut Window, cx: &mut Context<Self>) {
+        for old in self.stale.drain(..) {
+            cx.drop_image(old, Some(&mut *window));
+        }
+        if let Some(old) = self.frame.replace(frame) {
+            self.stale.push(old.image);
+        }
+        self.unchanged = 0;
+        self.capture_error = None;
+        cx.notify();
+    }
+
+    /// Build the helper once, then keep one link open to the live device.
+    fn manage_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let live = self.live().map(|d| d.udid.clone());
+        if self.link.as_ref().is_some_and(|l| Some(&l.udid) != live.as_ref()) {
+            self.drop_link();
+        }
+        let Some(udid) = live else { return };
+        if self.axe.is_none() || self.link.is_some() || self.link_retry.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+            return;
+        }
+        match &self.helper {
+            None if !self.helper_building => {
+                self.helper_building = true;
+                self.background(window, cx, super::simhid::ensure_helper, |this, result, _, cx| {
+                    this.helper_building = false;
+                    if let Err(e) = &result {
+                        tracing::warn!("simulator link unavailable: {e}");
+                    }
+                    this.helper = Some(result);
+                    cx.notify();
+                });
+            }
+            Some(Ok(path)) => {
+                let path = path.clone();
+                match SimLink::start(&path, &udid, cx.svg_renderer()) {
+                    Ok((link, events)) => {
+                        self.link = Some(link);
+                        self.link_ready = false;
+                        self.link_paused = false;
+                        self._link_events = Some(cx.spawn_in(window, async move |this, cx| {
+                            while let Ok(event) = events.recv().await {
+                                let done = matches!(event, LinkEvent::Exited);
+                                let _ = this.update_in(cx, |this, window, cx| this.link_event(event, window, cx));
+                                if done {
+                                    break;
+                                }
+                            }
+                        }));
+                    }
+                    Err(e) => {
+                        self.link_retry = Some(Instant::now());
+                        tracing::warn!("{e}");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn link_event(&mut self, event: LinkEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(udid) = self.link.as_ref().map(|l| l.udid.clone()) else { return };
+        match event {
+            LinkEvent::Ready => self.link_ready = true,
+            LinkEvent::Frame(f) => {
+                if self.selected.as_ref() != Some(&udid) {
+                    cx.drop_image(f.image, Some(window));
+                    return;
+                }
+                self.link_ready = true;
+                let id = self.next_seq;
+                self.next_seq += 1;
+                self.show_frame(Frame { udid, id, image: f.image, width: f.width, height: f.height }, window, cx);
+            }
+            LinkEvent::Error(e) => {
+                // Input errors are transient (e.g. the device is mid-boot); show them briefly.
+                self.fail(format!("Simulator: {e}"), cx);
+            }
+            LinkEvent::Exited => {
+                self.drop_link();
+                self.link_retry = Some(Instant::now());
+                cx.notify();
+            }
+        }
+    }
+
+    fn drop_link(&mut self) {
+        self.link = None;
+        self.link_ready = false;
+        self._link_events = None;
+    }
+
+    /// The open link when it's ready for input.
+    fn ready_link(&self) -> Option<Arc<SimLink>> {
+        self.link.clone().filter(|_| self.link_ready)
+    }
+
     fn capture(&mut self, udid: String, window: &mut Window, cx: &mut Context<Self>) {
         self.in_flight += 1;
         self.last_capture = Instant::now();
@@ -628,16 +762,7 @@ impl SimulatorPanel {
                             return;
                         }
                         this.shown_seq = seq;
-                        // Textures replaced last time are off screen now; release them.
-                        for old in this.stale.drain(..) {
-                            cx.drop_image(old, Some(&mut *window));
-                        }
-                        if let Some(old) = this.frame.replace(frame) {
-                            this.stale.push(old.image);
-                        }
-                        this.unchanged = 0;
-                        this.capture_error = None;
-                        cx.notify();
+                        this.show_frame(frame, window, cx);
                     }
                     Ok(None) => this.unchanged = this.unchanged.saturating_add(1),
                     Err(e) => {
@@ -677,6 +802,9 @@ impl SimulatorPanel {
     fn shutdown(&mut self, udid: String, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         self.pending.insert(udid.clone(), "Shutting down…");
+        if self.link.as_ref().is_some_and(|l| l.udid == udid) {
+            self.drop_link();
+        }
         cx.notify();
         let id = udid.clone();
         self.background(
@@ -838,6 +966,10 @@ impl SimulatorPanel {
 
     fn button(&mut self, name: &str) {
         self.flush_typed();
+        if let Some(link) = self.ready_link() {
+            link.send(&format!("button {}", if name == "side-button" { "side" } else { name }));
+            return;
+        }
         self.axe_send(vec!["button".into(), name.into()], None);
     }
 
@@ -850,6 +982,18 @@ impl SimulatorPanel {
     }
 
     fn queue_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(link) = self.ready_link() {
+            for line in text.split_inclusive('\n') {
+                let (body, newline) = line.strip_suffix('\n').map_or((line, false), |b| (b, true));
+                if !body.is_empty() {
+                    link.send(&format!("text {body}"));
+                }
+                if newline {
+                    link.send("key 40");
+                }
+            }
+            return;
+        }
         self.typed.push_str(text);
         self.type_flush = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TYPE_DEBOUNCE).await;
@@ -866,7 +1010,7 @@ impl SimulatorPanel {
             cx.notify();
             return;
         }
-        if self.axe.is_none() || self.live().is_none() {
+        if (self.axe.is_none() && self.ready_link().is_none()) || self.live().is_none() {
             return;
         }
         if m.platform {
@@ -895,6 +1039,11 @@ impl SimulatorPanel {
         };
         if let Some(code) = code {
             self.flush_typed();
+            if let Some(link) = self.ready_link() {
+                link.send(&format!("key {code}"));
+                cx.stop_propagation();
+                return;
+            }
             self.axe_send(vec!["key".into(), code.to_string()], None);
             cx.stop_propagation();
             return;
@@ -938,13 +1087,32 @@ impl SimulatorPanel {
         if self.screen_map().is_some_and(|(screen, _, _)| screen.contains(&p)) {
             self.flush_typed();
             self.gesture = Some(Gesture { start: p, last: p, at: Instant::now() });
+            if let (Some(link), Some((x, y))) = (self.ready_link(), self.to_points(p)) {
+                link.touch("down", x, y);
+            }
         }
         cx.notify();
+    }
+
+    /// Live drag: the finger follows the pointer while the link is open.
+    fn pointer_move(&mut self, p: Point<Pixels>) {
+        let Some(g) = self.gesture.as_mut() else { return };
+        g.last = p;
+        if let (Some(link), Some((x, y))) = (self.ready_link(), self.to_points(p)) {
+            link.touch("move", x, y);
+        }
     }
 
     fn pointer_up(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(mut g) = self.gesture.take() else { return };
         g.last = p;
+        if let Some(link) = self.ready_link() {
+            if let Some((x, y)) = self.to_points(p) {
+                link.touch("up", x, y);
+            }
+            cx.notify();
+            return;
+        }
         let (Some((ax, ay)), Some((bx, by))) = (self.to_points(g.start), self.to_points(g.last)) else { return };
         let held = g.at.elapsed();
         let moved = (g.last.x - g.start.x).as_f32().hypot((g.last.y - g.start.y).as_f32());
@@ -977,12 +1145,25 @@ impl SimulatorPanel {
 
     /// Trackpad / wheel scrolling over the screen becomes a swipe once the scroll pauses.
     fn scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        if self.axe.is_none() || !self.screen_map().is_some_and(|(s, _, _)| s.contains(&event.position)) {
+        if (self.axe.is_none() && self.ready_link().is_none()) || !self.screen_map().is_some_and(|(s, _, _)| s.contains(&event.position)) {
             return;
         }
         let delta = event.delta.pixel_delta(px(20.));
+        let first = self.scroll.is_none();
         let (anchor, total) = self.scroll.unwrap_or((event.position, Point::default()));
         self.scroll = Some((anchor, total + delta));
+        // With the link, scrolling is a finger dragging in real time; it lifts once scrolling stops.
+        if let Some(link) = self.ready_link() {
+            let to = |p: Point<Pixels>| self.to_points(p);
+            if first {
+                if let Some((x, y)) = to(anchor) {
+                    link.touch("down", x, y);
+                }
+            }
+            if let Some((x, y)) = to(anchor + total + delta) {
+                link.touch("move", x, y);
+            }
+        }
         self.scroll_flush = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SCROLL_DEBOUNCE).await;
             let _ = this.update(cx, |this, _| this.flush_scroll());
@@ -993,6 +1174,12 @@ impl SimulatorPanel {
     fn flush_scroll(&mut self) {
         self.scroll_flush = None;
         let Some((anchor, total)) = self.scroll.take() else { return };
+        if let Some(link) = self.ready_link() {
+            if let Some((x, y)) = self.to_points(anchor + total) {
+                link.touch("up", x, y);
+            }
+            return;
+        }
         let Some((screen, _, _)) = self.screen_map() else { return };
         // Start mid-screen so short screens and edges still leave room to travel.
         let start = point(anchor.x, screen.origin.y + screen.size.height / 2.);
@@ -1236,10 +1423,8 @@ impl SimulatorPanel {
             .on_key_down(cx.listener(Self::key))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, window, cx| this.pointer_down(e.position, window, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, _| {
-                if let Some(g) = this.gesture.as_mut() {
-                    if e.pressed_button == Some(MouseButton::Left) {
-                        g.last = e.position;
-                    }
+                if e.pressed_button == Some(MouseButton::Left) {
+                    this.pointer_move(e.position);
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.pointer_up(e.position, cx)))
