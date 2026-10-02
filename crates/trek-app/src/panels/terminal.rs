@@ -26,6 +26,8 @@ pub struct TerminalPanel {
     exited: bool,
     /// Resolved once: font family and its cell width.
     font: Option<(SharedString, f32)>,
+    /// Runs once when the shell exits (used by Install / Sign in to rescan agents).
+    on_exit: Option<Box<dyn FnOnce(&mut App)>>,
     _reader: Option<Task<()>>,
 }
 
@@ -68,6 +70,7 @@ impl TerminalPanel {
             focus: cx.focus_handle(),
             exited: false,
             font: None,
+            on_exit: None,
             _reader: None,
         };
         if let Err(e) = this.spawn(cwd, cx) {
@@ -122,10 +125,20 @@ impl TerminalPanel {
             }
             let _ = this.update(cx, |this, cx| {
                 this.exited = true;
+                if let Some(f) = this.on_exit.take() {
+                    f(cx);
+                }
                 cx.notify();
             });
         }));
         Ok(())
+    }
+
+    /// Type a one-off command into the shell, which exits when it's done so `on_exit` fires.
+    pub fn run_once(&mut self, command: &str, on_exit: impl FnOnce(&mut App) + 'static) {
+        self.on_exit = Some(Box::new(on_exit));
+        let line = format!("{command}; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $?; exit\r");
+        self.write(line.as_bytes());
     }
 
     fn write(&mut self, bytes: &[u8]) {

@@ -45,6 +45,10 @@ impl TrekWindow {
                     let tool = *tool;
                     this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
+                WorkspaceEvent::RunInTerminal(command) => {
+                    let command = command.clone();
+                    this.right_panel.update(cx, |p, cx| p.run_command(command, window, cx));
+                }
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {

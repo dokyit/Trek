@@ -149,14 +149,45 @@ pub const ACP_AGENTS: &[AcpAgent] = &[
     AcpAgent { id: "cursor", name: "Cursor", binary: "cursor-agent", args: &["acp"], version_marker: None, install_hint: "curl https://cursor.com/install -fsS | bash" },
     AcpAgent { id: "github-copilot", name: "GitHub Copilot", binary: "copilot", args: &["--acp"], version_marker: None, install_hint: "npm i -g @github/copilot" },
     AcpAgent { id: "gemini", name: "Gemini CLI", binary: "gemini", args: &["--acp"], version_marker: None, install_hint: "npm i -g @google/gemini-cli" },
-    AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: "uv tool install kimi-cli" },
+    AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: "npm i -g @moonshot-ai/kimi-code" },
     AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: "npm i -g @qwen-code/qwen-code" },
-    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["acp"], version_marker: None, install_hint: "see x.ai/cli" },
-    AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: "see devin.ai/cli" },
+    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["agent", "stdio"], version_marker: None, install_hint: "curl -fsSL https://x.ai/cli/install.sh | bash" },
+    AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: "curl -fsSL https://cli.devin.ai/install.sh | bash" },
     AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: "brew install block-goose-cli" },
-    AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: "npm i -g amp-acp" },
-    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: "npm i -g pi-acp" },
+    AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: "npm i -g @sourcegraph/amp amp-acp" },
+    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: "npm i -g @mariozechner/pi-coding-agent pi-acp" },
 ];
+
+/// How to install a CLI agent and sign in to it, keyed by `AgentId::key()`.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentSetup {
+    pub install: &'static str,
+    /// Command that signs the user in (opens a browser or device-code flow).
+    pub login: &'static str,
+    /// Where the plan or account is managed.
+    pub account_url: &'static str,
+}
+
+pub fn agent_setup(key: &str) -> Option<AgentSetup> {
+    let (install, login, account_url) = match key {
+        "claude-code" => ("npm i -g @anthropic-ai/claude-code", "claude auth login", "https://claude.ai/settings/usage"),
+        "codex" => ("npm i -g @openai/codex", "codex login", "https://chatgpt.com/codex/settings/usage"),
+        "opencode" => ("curl -fsSL https://opencode.ai/install | bash", "opencode auth login", "https://opencode.ai/auth"),
+        "droid" => ("curl -fsSL https://app.factory.ai/cli | sh", "droid", "https://app.factory.ai/settings/billing"),
+        "cursor" => ("curl https://cursor.com/install -fsS | bash", "cursor-agent login", "https://cursor.com/dashboard"),
+        "github-copilot" => ("npm i -g @github/copilot", "copilot login", "https://github.com/settings/copilot"),
+        "gemini" => ("npm i -g @google/gemini-cli", "gemini", "https://aistudio.google.com"),
+        "kimi" => ("npm i -g @moonshot-ai/kimi-code", "kimi login", "https://www.kimi.com/code"),
+        "qwen-code" => ("npm i -g @qwen-code/qwen-code", "qwen", "https://chat.qwen.ai"),
+        "grok" => ("curl -fsSL https://x.ai/cli/install.sh | bash", "grok login", "https://grok.com/settings"),
+        "devin" => ("curl -fsSL https://cli.devin.ai/install.sh | bash", "devin auth login", "https://app.devin.ai/settings"),
+        "goose" => ("brew install block-goose-cli", "goose configure", "https://block.github.io/goose"),
+        "amp" => ("npm i -g @sourcegraph/amp amp-acp", "amp login", "https://ampcode.com/settings"),
+        "pi" => ("npm i -g @mariozechner/pi-coding-agent pi-acp", "pi", "https://pi.dev"),
+        _ => return None,
+    };
+    Some(AgentSetup { install, login, account_url })
+}
 
 pub fn acp_display_name(id: &str) -> String {
     ACP_AGENTS.iter().find(|a| a.id == id).map(|a| a.name.to_string()).unwrap_or_else(|| id.to_string())

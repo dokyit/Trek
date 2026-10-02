@@ -93,6 +93,21 @@ impl RightPanel {
         self.after_activate(window, cx);
     }
 
+    /// Run a setup command (install / sign in) in a fresh terminal tab, then rescan agents.
+    pub fn run_command(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tool(PanelTool::Terminal, window, cx);
+        let ws = self.workspace.downgrade();
+        if let Some(Tab { view: View::Terminal(t), .. }) = self.active_tab() {
+            t.update(cx, |t, _| {
+                t.run_once(&command, move |cx| {
+                    let _ = ws.update(cx, |ws, cx| {
+                        ws.detect_agents(cx);
+                    });
+                })
+            });
+        }
+    }
+
     fn after_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_native(cx);
         if let Some(Tab { view: View::Terminal(t), .. }) = self.active_tab() {

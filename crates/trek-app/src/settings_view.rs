@@ -3,9 +3,10 @@
 use crate::brand;
 use crate::palette;
 use crate::ui;
-use crate::workspace::{Route, SettingsPage, UpdateStatus, Workspace};
+use crate::workspace::{Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,6 +22,7 @@ fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::General => Icon::new(IconName::Settings2),
         SettingsPage::Appearance => Icon::new(IconName::Palette),
         SettingsPage::Agents => Icon::new(IconName::Bot),
+        SettingsPage::Tools => Icon::new(crate::assets::Lucide::Plug),
         SettingsPage::ApiKeys => Icon::new(crate::assets::Lucide::Lock),
         SettingsPage::LocalModels => Icon::new(IconName::Cpu),
         SettingsPage::Permissions => Icon::new(crate::assets::Lucide::ShieldCheck),
@@ -34,6 +36,7 @@ fn page_icon(p: SettingsPage) -> Icon {
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
     ("App", &[SettingsPage::General, SettingsPage::Appearance]),
     ("Models", &[SettingsPage::Agents, SettingsPage::ApiKeys, SettingsPage::LocalModels]),
+    ("Tools", &[SettingsPage::Tools]),
     ("Workflow", &[SettingsPage::Permissions, SettingsPage::Inbox, SettingsPage::Import]),
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
@@ -42,7 +45,8 @@ fn page_blurb(p: SettingsPage) -> &'static str {
     match p {
         SettingsPage::General => "Defaults for new threads and how Trek behaves while agents work.",
         SettingsPage::Appearance => "Theme, background art and motion.",
-        SettingsPage::Agents => "Coding agents found on this Mac. Trek uses your existing logins.",
+        SettingsPage::Agents => "Coding agents on this Mac and the plans they're signed in with.",
+        SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.",
         SettingsPage::ApiKeys => "Use a provider directly with your own API key.",
         SettingsPage::LocalModels => "Models running on this Mac.",
         SettingsPage::Permissions => "How much each agent may do without asking.",
@@ -115,6 +119,8 @@ pub struct SettingsView {
     workspace: Entity<Workspace>,
     key_inputs: HashMap<&'static str, Entity<InputState>>,
     saved_keys: HashMap<&'static str, bool>,
+    mcp_name: Entity<InputState>,
+    mcp_command: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -127,7 +133,9 @@ impl SettingsView {
             saved_keys.insert(p.id, secrets::api_key(p.id).is_some());
         }
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
-        Self { workspace, key_inputs, saved_keys, _subscriptions: subs }
+        let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
+        let mcp_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. npx -y @modelcontextprotocol/server-github"));
+        Self { workspace, key_inputs, saved_keys, mcp_name, mcp_command, _subscriptions: subs }
     }
 
     fn page(&self, cx: &App) -> SettingsPage {
@@ -253,6 +261,284 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// One row per agent: logo, account and plan, enable switch, and Sign in or Install.
+    fn agents_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let detecting = ws.detecting;
+        let muted = cx.theme().muted_foreground;
+        let disabled = ws.settings.disabled_agents.clone();
+        let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
+        let (installed, missing): (Vec<_>, Vec<_>) = agents.into_iter().partition(|a| a.availability != Availability::NotInstalled);
+        let mut out = vec![Self::note(
+            "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
+            cx,
+        )];
+        let setup_key = |a: &AgentId| match a {
+            AgentId::Acp(id) => id.clone(),
+            other => other.key(),
+        };
+        let mut rows = vec![];
+        for a in installed {
+            let key = a.agent.key();
+            let status = ws.agent_status.get(&key);
+            let acp = ws.acp_info.get(&key);
+            let on = !disabled.contains(&key);
+            let setup = trek_core::catalog::agent_setup(&setup_key(&a.agent));
+            // Account line: who is signed in and on which plan.
+            let (account, needs_login): (String, bool) = match (&a.agent, status, acp) {
+                (_, Some(st), _) if st.logged_in || st.account.is_some() => {
+                    let parts: Vec<String> = [st.account.clone(), st.plan.clone()].into_iter().flatten().collect();
+                    (if parts.is_empty() { "Signed in".into() } else { parts.join(" · ") }, false)
+                }
+                (_, Some(_), _) => ("Not signed in".into(), true),
+                (_, _, Some(Ok(info))) if info.needs_auth => ("Sign in to use this agent".into(), true),
+                (_, _, Some(Ok(info))) => {
+                    let n = info.models.len();
+                    (if n > 0 { format!("Signed in · {n} models") } else { "Signed in".into() }, false)
+                }
+                (_, _, Some(Err(e))) => (e.lines().next().unwrap_or("Couldn't start").to_string(), true),
+                (AgentId::ClaudeCode | AgentId::Codex, None, None) if ws.usage_loading => ("Checking account…".into(), false),
+                (_, None, None) if a.availability == Availability::NeedsLogin => ("Not signed in".into(), true),
+                _ => ("Checking account…".into(), false),
+            };
+            // "2.1.287 (Claude Code)", "grok 1.0.46 (…) [stable]" → "2.1.287", "1.0.46".
+            let version = a.version.as_deref().and_then(|v| {
+                v.split(|c: char| c.is_whitespace() || c == '(' || c == ',').find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))
+            });
+            let account = match version {
+                Some(v) => format!("{account} · v{}", v.trim_end_matches('.')),
+                None => account,
+            };
+            let title = h_flex()
+                .gap(px(10.))
+                .child(ui::agent_logo(&a.agent, px(22.), cx))
+                .child(v_flex().child(div().text_size(px(14.)).font_medium().child(a.name.clone())).child(
+                    div().text_size(px(12.5)).text_color(if needs_login { palette::amber(cx) } else { muted }).child(account),
+                ));
+            let sign_in = setup.map(|s| {
+                let cmd = s.login.to_string();
+                Button::new(SharedString::from(format!("login-{key}")))
+                    .small()
+                    .when(needs_login, |b| b.primary())
+                    .when(!needs_login, |b| b.ghost())
+                    .label(if needs_login { "Sign in" } else { "Switch account" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let cmd = cmd.clone();
+                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                    }))
+            });
+            let manage = setup.map(|s| {
+                let url = s.account_url;
+                ui::icon_button(SharedString::from(format!("acct-{key}")), IconName::ExternalLink, "Manage plan").on_click(move |_, _, cx| cx.open_url(url))
+            });
+            let k2 = key.clone();
+            let toggle = Switch::new(SharedString::from(format!("enable-{key}"))).checked(on).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                let (k, v) = (k2.clone(), *v);
+                this.workspace.update(cx, |ws, cx| {
+                    ws.settings.disabled_agents.retain(|d| *d != k);
+                    if !v {
+                        ws.settings.disabled_agents.push(k);
+                    }
+                    ws.save_settings(cx);
+                });
+            }));
+            let controls = h_flex().gap_2().children(sign_in).children(manage).child(toggle);
+            rows.push(Self::row(title, "", controls, cx));
+        }
+        out.push(ui::group(rows, cx));
+        if !missing.is_empty() {
+            out.push(Self::heading("Not installed", cx));
+            let rows = missing
+                .into_iter()
+                .map(|a| {
+                    let key = a.agent.key();
+                    let install = trek_core::catalog::agent_setup(&setup_key(&a.agent)).map(|s| s.install.to_string()).or(a.install_hint.clone()).unwrap_or_default();
+                    let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(22.), cx)).child(div().text_size(px(14.)).font_medium().child(a.name.clone()));
+                    let cmd = install.clone();
+                    let button = Button::new(SharedString::from(format!("install-{key}"))).small().outline().icon(IconName::ArrowDown).label("Install").on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            let cmd = cmd.clone();
+                            this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                        }),
+                    );
+                    Self::row(title, install, button, cx)
+                })
+                .collect();
+            out.push(ui::group(rows, cx));
+        }
+        out.push(
+            h_flex()
+                .pt_3()
+                .child(
+                    Button::new("rescan")
+                        .small()
+                        .outline()
+                        .loading(detecting)
+                        .icon(IconName::RefreshCw)
+                        .label("Scan again")
+                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.detect_agents(cx)))),
+                )
+                .into_any_element(),
+        );
+        out
+    }
+
+    fn tools_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = self.workspace.read(cx).settings.clone();
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let mut out = vec![];
+        let bundled = crate::workspace::trek_mcp_binary().is_some();
+        let permission = |id: &'static str, label: &'static str, ok: bool, pane: &'static str, cx: &mut Context<Self>| -> AnyElement {
+            if ok {
+                Self::status_dot(palette::emerald(cx), label)
+            } else {
+                Button::new(id).small().outline().label(format!("Allow {label}")).on_click(move |_, _, cx| cx.open_url(pane)).into_any_element()
+            }
+        };
+        let ax = crate::integrations::accessibility_allowed();
+        let sr = crate::integrations::screen_recording_allowed();
+        out.push(ui::group(
+            vec![
+                Self::row(
+                    "Computer use",
+                    "Agents can see the screen, click, type and switch apps through Trek's MCP tools. They still follow your hand-holding level.",
+                    self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
+                    cx,
+                ),
+                Self::row("Accessibility", "Lets Trek click and type for the agent.", permission("ax-perm", "Accessibility", ax, crate::integrations::ACCESSIBILITY_PANE, cx), cx),
+                Self::row(
+                    "Screen Recording",
+                    "Lets Trek take screenshots of other apps.",
+                    permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
+                    cx,
+                ),
+            ],
+            cx,
+        ));
+        out.push(Self::heading("iOS Simulator", cx));
+        let axe = crate::integrations::axe_path();
+        let axe_control: AnyElement = match &axe {
+            Some(_) => Self::status_dot(palette::emerald(cx), "Installed"),
+            None => Button::new("install-axe")
+                .small()
+                .outline()
+                .icon(IconName::ArrowDown)
+                .label("Install AXe")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(crate::integrations::AXE_INSTALL.into())))
+                }))
+                .into_any_element(),
+        };
+        out.push(ui::group(
+            vec![
+                Self::row(
+                    "Simulator tools",
+                    "Agents can boot simulators, install and launch your app, take screenshots and tap through it.",
+                    self.switch("sim-tools", s.tools.simulator, |s, v| s.tools.simulator = v),
+                    cx,
+                ),
+                Self::row("Touch input (AXe)", "Taps, swipes and typing in the simulator, for you and for agents.", axe_control, cx),
+            ],
+            cx,
+        ));
+        if !bundled {
+            out.push(Self::note("Trek's MCP server (trek-mcp) isn't next to this build. Run cargo build -p trek-mcp, or use the bundled app.", cx));
+        }
+
+        out.push(Self::heading("Your MCP servers", cx));
+        out.push(Self::note("Passed to every new session, on top of what each agent already loads.", cx));
+        let mut rows: Vec<AnyElement> = s
+            .tools
+            .mcp_servers
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let line = std::iter::once(m.command.clone()).chain(m.args.iter().cloned()).collect::<Vec<_>>().join(" ");
+                let controls = h_flex()
+                    .gap_2()
+                    .child(ui::icon_button(SharedString::from(format!("mcp-del-{i}")), IconName::Delete, "Remove").on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            if i < ws.settings.tools.mcp_servers.len() {
+                                ws.settings.tools.mcp_servers.remove(i);
+                            }
+                            ws.save_settings(cx);
+                        })
+                    })))
+                    .child(Switch::new(SharedString::from(format!("mcp-on-{i}"))).checked(m.enabled).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                        let v = *v;
+                        this.workspace.update(cx, |ws, cx| {
+                            if let Some(m) = ws.settings.tools.mcp_servers.get_mut(i) {
+                                m.enabled = v;
+                            }
+                            ws.save_settings(cx);
+                        })
+                    })));
+                Self::row(m.name.clone(), line, controls, cx)
+            })
+            .collect();
+        rows.push(
+            h_flex()
+                .w_full()
+                .py(px(12.))
+                .gap_2()
+                .child(div().w(px(150.)).child(Input::new(&self.mcp_name).small()))
+                .child(div().flex_1().child(Input::new(&self.mcp_command).small()))
+                .child(Button::new("mcp-add").small().outline().icon(IconName::Plus).label("Add").on_click(cx.listener(|this, _, window, cx| {
+                    let name = this.mcp_name.read(cx).value().trim().to_string();
+                    let line = this.mcp_command.read(cx).value().trim().to_string();
+                    let mut parts = line.split_whitespace().map(String::from);
+                    let Some(command) = parts.next().filter(|_| !name.is_empty()) else {
+                        window.push_notification("Give the server a name and a command.", cx);
+                        return;
+                    };
+                    let args: Vec<String> = parts.collect();
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.settings.tools.mcp_servers.push(trek_core::settings::McpServerConfig { name, command, args, enabled: true });
+                        ws.save_settings(cx);
+                    });
+                    this.mcp_name.update(cx, |s, cx| s.set_value("", window, cx));
+                    this.mcp_command.update(cx, |s, cx| s.set_value("", window, cx));
+                })))
+                .into_any_element(),
+        );
+        out.push(ui::group(rows, cx));
+
+        out.push(Self::heading("Already set up in your agents", cx));
+        let ws = self.workspace.read(cx);
+        let mut rows = vec![];
+        for (agent, names) in crate::integrations::agent_mcp_servers() {
+            rows.push(Self::row(
+                format!("{agent} MCP servers"),
+                if names.is_empty() { "None".to_string() } else { names.join(", ") },
+                div().text_xs().text_color(muted).child(names.len().to_string()),
+                cx,
+            ));
+        }
+        for agent in [AgentId::ClaudeCode, AgentId::Codex] {
+            if let Some(st) = ws.agent_status.get(&agent.key()) {
+                let skills: Vec<String> = st.commands.iter().filter(|c| c.kind == trek_agents::CommandKind::Skill).map(|c| c.name.clone()).collect();
+                if !skills.is_empty() {
+                    rows.push(Self::row(
+                        format!("{} skills", agent.display_name()),
+                        format!("Type $ in the composer to use one. {}", skills.iter().take(12).cloned().collect::<Vec<_>>().join(", ")),
+                        div().text_xs().text_color(muted).child(skills.len().to_string()),
+                        cx,
+                    ));
+                }
+            }
+        }
+        let plugins = crate::integrations::claude_plugins();
+        rows.push(Self::row(
+            "Claude Code plugins",
+            if plugins.is_empty() { "None installed".to_string() } else { plugins.join(", ") },
+            div().font_family(mono).text_xs().text_color(muted).child(plugins.len().to_string()),
+            cx,
+        ));
+        out.push(ui::group(rows, cx));
+        out
+    }
+
     fn content(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let page = self.page(cx);
         let s = self.workspace.read(cx).settings.clone();
@@ -263,25 +549,32 @@ impl SettingsView {
                 let agents = self.workspace.read(cx).ready_agents();
                 let current = AgentId::from_key(&s.general.default_agent);
                 let ws = self.workspace.clone();
-                let options: Vec<(usize, String)> = agents.iter().enumerate().map(|(i, a)| (i, a.display_name())).collect();
-                let cur_ix = agents.iter().position(|a| *a == current).unwrap_or(0);
-                let agents2 = agents.clone();
-                let pick_agent = move |i: usize, _: &mut Window, cx: &mut App| {
-                    if let Some(a) = agents2.get(i).cloned() {
-                        ws.update(cx, |ws, cx| {
-                            ws.settings.general.default_agent = a.key();
-                            ws.draft_prefs.agent = a;
-                            ws.draft_prefs.model = None;
-                            ws.save_settings(cx);
-                        });
-                    }
-                };
+                let picker = Button::new("def-agent")
+                    .small()
+                    .outline()
+                    .child(h_flex().gap_2().child(ui::agent_logo(&current, px(14.), cx)).child(current.display_name()).child(Icon::new(IconName::ChevronDown).xsmall()))
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                        for a in agents.clone() {
+                            let ws = ws.clone();
+                            let checked = a == current;
+                            menu = menu.item(PopupMenuItem::new(a.display_name()).checked(checked).on_click(move |_, _, cx| {
+                                let a = a.clone();
+                                ws.update(cx, |ws, cx| {
+                                    ws.settings.general.default_agent = a.key();
+                                    ws.draft_prefs.agent = a;
+                                    ws.draft_prefs.model = None;
+                                    ws.save_settings(cx);
+                                });
+                            }));
+                        }
+                        menu.min_w(px(200.))
+                    });
                 out.push(ui::group(
                     vec![
                         Self::row(
                             "Default agent",
                             "Used for new threads. Every installed agent stays one click away in the composer.",
-                            ui::segmented("def-agent", options, cur_ix, pick_agent, cx),
+                            picker,
                             cx,
                         ),
                         Self::row(
@@ -369,48 +662,8 @@ impl SettingsView {
                     cx,
                 ));
             }
-            SettingsPage::Agents => {
-                let ws = self.workspace.read(cx);
-                let detecting = ws.detecting;
-                let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
-                out.push(Self::note(
-                    "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
-                    cx,
-                ));
-                let mut rows = vec![];
-                for a in agents {
-                    let status = match a.availability {
-                        Availability::Ready => Self::status_dot(palette::emerald(cx), "Ready"),
-                        Availability::NeedsLogin => Self::status_dot(palette::amber(cx), "Sign in needed"),
-                        Availability::NotInstalled => Self::status_dot(muted.opacity(0.5), "Not installed"),
-                        Availability::Offline => Self::status_dot(muted.opacity(0.5), "Offline"),
-                    };
-                    let wired = matches!(a.agent, AgentId::ClaudeCode | AgentId::Codex);
-                    let detail = match (&a.version, &a.install_hint) {
-                        (Some(v), _) if wired => v.clone(),
-                        (Some(v), _) => format!("{v} · coming with ACP support"),
-                        (None, Some(h)) => h.clone(),
-                        _ => String::new(),
-                    };
-                    let title = h_flex().gap_2().child(ui::agent_glyph(&a.agent, cx)).child(a.name.clone());
-                    rows.push(Self::row(title, detail, status, cx));
-                }
-                out.push(ui::group(rows, cx));
-                out.push(
-                    h_flex()
-                        .pt_3()
-                        .child(
-                            Button::new("rescan")
-                                .small()
-                                .outline()
-                                .loading(detecting)
-                                .icon(IconName::RefreshCw)
-                                .label("Scan again")
-                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.detect_agents(cx)))),
-                        )
-                        .into_any_element(),
-                );
-            }
+            SettingsPage::Agents => out.extend(self.agents_page(cx)),
+            SettingsPage::Tools => out.extend(self.tools_page(cx)),
             SettingsPage::ApiKeys => {
                 out.push(Self::note("Keys are stored in your macOS Keychain. Keys already in your shell environment are picked up automatically.", cx));
                 let mut rows = vec![];

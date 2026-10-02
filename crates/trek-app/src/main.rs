@@ -3,6 +3,8 @@
 mod assets;
 mod brand;
 mod composer;
+mod integrations;
+mod mentions;
 mod onboarding;
 mod panels;
 mod palette;

@@ -6,7 +6,7 @@ use crate::palette;
 use crate::ui::{self, Pill};
 use crate::workspace::{PanelTool, Prefs, Route, Workspace, WorkspaceEvent};
 use crate::TogglePlan;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
@@ -15,6 +15,9 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
+use std::path::PathBuf;
+use std::sync::Arc;
 use trek_core::catalog::ModelInfo;
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
@@ -39,6 +42,18 @@ pub struct Composer {
     access_open: bool,
     sub: Option<Sub>,
     rail: Option<Rail>,
+    /// Images going out with the next message.
+    attachments: Vec<PathBuf>,
+    /// The `/`, `@` or `$` token being completed, and the highlighted row.
+    trigger: Option<Trigger>,
+    picked: usize,
+    /// Project files for `@`, indexed once per folder.
+    file_index: Option<(PathBuf, Arc<Vec<String>>)>,
+    indexing: Option<Task<()>>,
+    snapshotting: bool,
+    /// Set when Enter picked a row, so the same keypress doesn't also send.
+    swallow_enter: Option<std::time::Instant>,
+    picker_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -80,24 +95,48 @@ impl Composer {
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift: false, .. } = event {
-                    this.submit(state.clone(), window, cx);
+                    let swallowed = this.swallow_enter.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250));
+                    if this.trigger.is_none() && !swallowed {
+                        this.submit(state.clone(), window, cx);
+                    }
                 } else if matches!(event, InputEvent::Change) {
+                    this.update_trigger(cx);
                     cx.notify();
                 }
             }),
             cx.observe(&workspace, |_, _, cx| cx.notify()),
             cx.observe(&model_search, |_, _, cx| cx.notify()),
         ];
-        Self { workspace, input, model_search, clone_input, model_open: false, access_open: false, sub: None, rail: None, _subscriptions: subscriptions }
+        Self {
+            workspace,
+            input,
+            model_search,
+            clone_input,
+            model_open: false,
+            access_open: false,
+            sub: None,
+            rail: None,
+            attachments: vec![],
+            trigger: None,
+            picked: 0,
+            file_index: None,
+            indexing: None,
+            snapshotting: false,
+            swallow_enter: None,
+            picker_scroll: ScrollHandle::new(),
+            _subscriptions: subscriptions,
+        }
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
         let text = state.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
-        self.workspace.update(cx, |ws, cx| ws.send(text, vec![], cx));
+        self.trigger = None;
+        let images = std::mem::take(&mut self.attachments);
+        self.workspace.update(cx, |ws, cx| ws.send(text, images, cx));
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -117,9 +156,17 @@ impl Composer {
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Attach".into()) });
         let input = self.input.clone();
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                let refs: Vec<String> = paths.iter().map(|p| format!("@{}", p.display())).collect();
+                let (images, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| mentions::is_image(p));
+                let _ = this.update(cx, |this, cx| {
+                    this.attachments.extend(images);
+                    cx.notify();
+                });
+                if files.is_empty() {
+                    return;
+                }
+                let refs: Vec<String> = files.iter().map(|p| format!("@{}", p.display())).collect();
                 let _ = input.update_in(cx, |s, window, cx| {
                     let mut v = s.value().to_string();
                     if !v.is_empty() && !v.ends_with(' ') {
@@ -132,6 +179,406 @@ impl Composer {
             }
         })
         .detach();
+    }
+
+    /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
+    fn snapshot(&mut self, mode: &'static str, cx: &mut Context<Self>) {
+        if self.snapshotting {
+            return;
+        }
+        self.snapshotting = true;
+        let path = mentions::snapshot_path();
+        let out = path.clone();
+        cx.spawn(async move |this, cx| {
+            let ok = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
+                    match mode {
+                        "window" => cmd.args(["-i", "-W", "-o", "-x"]),
+                        "area" => cmd.args(["-i", "-s", "-x"]),
+                        _ => cmd.args(["-m", "-x"]),
+                    };
+                    cmd.arg(&out).status().map(|s| s.success()).unwrap_or(false) && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.snapshotting = false;
+                if ok {
+                    this.attachments.push(path);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let (images, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.iter().cloned().partition(|p| mentions::is_image(p));
+        self.attachments.extend(images);
+        if !files.is_empty() {
+            let refs: Vec<String> = files.iter().map(|p| format!("@{} ", p.display())).collect();
+            self.input.update(cx, |s, cx| s.insert(refs.concat(), window, cx));
+        }
+        cx.notify();
+    }
+
+    fn insert_trigger(&mut self, ch: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| {
+            let v = s.value().to_string();
+            let cursor = s.cursor();
+            let needs_space = ch != "/" && cursor > 0 && !v[..cursor].ends_with(char::is_whitespace);
+            if ch == "/" {
+                s.set_value("/", window, cx);
+                s.set_selected_range(1..1, cx);
+            } else {
+                s.insert(if needs_space { format!(" {ch}") } else { ch.to_string() }, window, cx);
+            }
+        });
+        self.focus(window, cx);
+        self.update_trigger(cx);
+    }
+
+    // ---------- pickers ----------
+
+    fn update_trigger(&mut self, cx: &mut Context<Self>) {
+        let state = self.input.read(cx);
+        let next = mentions::trigger_at(&state.value(), state.cursor());
+        if next.as_ref().map(|t| (&t.kind, &t.query)) != self.trigger.as_ref().map(|t| (&t.kind, &t.query)) {
+            self.picked = 0;
+        }
+        if next.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
+            self.ensure_file_index(cx);
+        }
+        self.trigger = next;
+    }
+
+    fn ensure_file_index(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.workspace.read(cx).current_cwd() else { return };
+        if self.file_index.as_ref().is_some_and(|(r, _)| *r == root) || self.indexing.is_some() {
+            return;
+        }
+        let r = root.clone();
+        self.indexing = Some(cx.spawn(async move |this, cx| {
+            let files = cx.background_executor().spawn(async move { mentions::index_files(&r) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.file_index = Some((root, Arc::new(files)));
+                this.indexing = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn picker_items(&self, cx: &App) -> Vec<PickItem> {
+        let Some(t) = &self.trigger else { return vec![] };
+        let ws = self.workspace.read(cx);
+        let agent = ws.prefs().agent;
+        let q = t.query.to_lowercase();
+        let commands = ws.slash_commands(&agent);
+        let matches = |name: &str, desc: &str| q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q);
+        let rank = |name: &str| if name.to_lowercase().starts_with(&q) { 0 } else { 1 };
+        let mut items: Vec<PickItem> = match t.kind {
+            PickKind::Slash => {
+                let mut v: Vec<_> = commands.iter().filter(|c| c.kind != trek_agents::CommandKind::Agent && matches(&c.name, &c.description)).collect();
+                v.sort_by_key(|c| rank(&c.name));
+                v.into_iter()
+                    .map(|c| PickItem {
+                        label: format!("/{}", c.name),
+                        detail: c.description.clone(),
+                        insert: format!("/{}", c.name),
+                        icon: if c.kind == trek_agents::CommandKind::Skill { PickIcon::Skill } else { PickIcon::Command },
+                    })
+                    .collect()
+            }
+            PickKind::Skill => {
+                let codex = agent == AgentId::Codex;
+                let mut v: Vec<_> = commands.iter().filter(|c| c.kind == trek_agents::CommandKind::Skill && matches(&c.name, &c.description)).collect();
+                v.sort_by_key(|c| rank(&c.name));
+                v.into_iter()
+                    .map(|c| PickItem {
+                        label: c.name.clone(),
+                        detail: c.description.clone(),
+                        // Codex invokes skills as $name; Claude Code as /name.
+                        insert: if codex { format!("${}", c.name) } else { format!("/{}", c.name) },
+                        icon: PickIcon::Skill,
+                    })
+                    .collect()
+            }
+            PickKind::Mention => {
+                let mut v: Vec<PickItem> = commands
+                    .iter()
+                    .filter(|c| c.kind == trek_agents::CommandKind::Agent && matches(&c.name, &c.description))
+                    .take(6)
+                    .map(|c| PickItem { label: format!("agent-{}", c.name), detail: c.description.clone(), insert: format!("@agent-{}", c.name), icon: PickIcon::Agent })
+                    .collect();
+                if let Some((_, files)) = &self.file_index {
+                    v.extend(mentions::match_files(files, &t.query, 40).into_iter().map(|f| {
+                        let dir = f.ends_with('/');
+                        let trimmed = f.trim_end_matches('/');
+                        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
+                        PickItem {
+                            label: if dir { format!("{name}/") } else { name.to_string() },
+                            detail: parent.to_string(),
+                            insert: format!("@{f}"),
+                            icon: if dir { PickIcon::Folder } else { PickIcon::File },
+                        }
+                    }));
+                }
+                v
+            }
+        };
+        items.truncate(60);
+        items
+    }
+
+    fn accept_pick(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.trigger.clone() else { return };
+        let Some(item) = self.picker_items(cx).into_iter().nth(ix) else { return };
+        let folder = item.icon == PickIcon::Folder;
+        self.input.update(cx, |s, cx| {
+            let cursor = s.cursor();
+            s.set_selected_range(t.start..cursor, cx);
+            // Folders keep the picker open so you can keep drilling down.
+            s.replace(if folder { item.insert.clone() } else { format!("{} ", item.insert) }, window, cx);
+        });
+        self.picked = 0;
+        self.update_trigger(cx);
+        cx.notify();
+    }
+
+    fn picker_action(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.picker_items(cx).len();
+        if self.trigger.is_none() || (n == 0 && key != "escape") {
+            cx.propagate();
+            return;
+        }
+        match key {
+            "escape" => self.trigger = None,
+            "up" => self.picked = (self.picked + n - 1) % n,
+            "down" => self.picked = (self.picked + 1) % n,
+            _ => self.accept_pick(self.picked.min(n - 1), window, cx),
+        }
+        self.picker_scroll.scroll_to_item(self.picked);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.trigger.is_none() {
+            return;
+        }
+        let n = self.picker_items(cx).len();
+        let ks = &ev.keystroke;
+        if ks.modifiers.modified() && !ks.modifiers.shift {
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => self.trigger = None,
+            "up" if n > 0 => self.picked = (self.picked + n - 1) % n,
+            "down" if n > 0 => self.picked = (self.picked + 1) % n,
+            "enter" | "tab" if n > 0 && !ks.modifiers.shift => {
+                if ks.key == "enter" {
+                    self.swallow_enter = Some(std::time::Instant::now());
+                }
+                self.accept_pick(self.picked.min(n - 1), window, cx)
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.trigger.as_ref()?;
+        let items = self.picker_items(cx);
+        let theme = cx.theme().clone();
+        let title = match t.kind {
+            PickKind::Slash => "Commands",
+            PickKind::Mention => "Files and agents",
+            PickKind::Skill => "Skills",
+        };
+        let empty = match t.kind {
+            PickKind::Mention if self.indexing.is_some() => "Indexing project files…",
+            PickKind::Mention => "No matching files",
+            PickKind::Skill => "No matching skills",
+            PickKind::Slash => "No matching commands",
+        };
+        let picked = self.picked.min(items.len().saturating_sub(1));
+        Some(
+            ui::menu_surface(cx)
+                .w_full()
+                .child(
+                    h_flex()
+                        .px(px(10.))
+                        .pt(px(4.))
+                        .pb(px(6.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(div().flex_1().child(title))
+                        .child("↑↓ to move · ↩ to pick · esc"),
+                )
+                .when(items.is_empty(), |el| el.child(div().px(px(10.)).py(px(8.)).text_sm().text_color(theme.muted_foreground).child(empty)))
+                .child(v_flex().id("picker-list").max_h(px(280.)).overflow_y_scroll().track_scroll(&self.picker_scroll).children(items.into_iter().enumerate().map(|(i, item)| {
+                    let icon = match item.icon {
+                        PickIcon::Command => Icon::new(IconName::SquareTerminal),
+                        PickIcon::Skill => Icon::new(crate::assets::Lucide::Sparkle),
+                        PickIcon::Agent => Icon::new(IconName::Bot),
+                        PickIcon::File => Icon::new(IconName::File),
+                        PickIcon::Folder => Icon::new(IconName::Folder),
+                    };
+                    ui::menu_row(("pick", i), false, cx)
+                        .min_h(px(30.))
+                        .when(i == picked, |el| el.bg(theme.foreground.opacity(0.09)))
+                        .child(icon.small().text_color(theme.muted_foreground))
+                        .child(div().flex_none().max_w(px(260.)).truncate().child(item.label))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(item.detail))
+                        .on_click(cx.listener(move |this, _, window, cx| this.accept_pick(i, window, cx)))
+                })))
+                .into_any_element(),
+        )
+    }
+
+    fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.attachments.is_empty() && !self.snapshotting {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        Some(
+            h_flex()
+                .px(px(14.))
+                .pt(px(12.))
+                .gap_2()
+                .children(self.attachments.iter().enumerate().map(|(i, p)| {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    div()
+                        .id(("attachment", i))
+                        .group("att")
+                        .relative()
+                        .size(px(56.))
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme.border)
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx))
+                        .child(img(p.clone()).size_full().object_fit(ObjectFit::Cover))
+                        .child(
+                            div()
+                                .id(("att-x", i))
+                                .absolute()
+                                .top(px(3.))
+                                .right(px(3.))
+                                .size(px(18.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(gpui_kit::black().opacity(0.65))
+                                .invisible()
+                                .group_hover("att", |s| s.visible())
+                                .cursor_pointer()
+                                .child(Icon::new(IconName::Close).xsmall().text_color(gpui_kit::white()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if i < this.attachments.len() {
+                                        this.attachments.remove(i);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                }))
+                .when(self.snapshotting, |el| {
+                    el.child(
+                        div()
+                            .size(px(56.))
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_dashed()
+                            .border_color(theme.border)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Spinner::new().small().color(theme.muted_foreground)),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// "+" menu: files and photos, snapshots, and the three pickers.
+    fn plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let me = cx.entity();
+        let theme = cx.theme().clone();
+        gpui_kit::component::button::Button::new("attach")
+            .ghost()
+            .with_size(px(30.))
+            .rounded(px(8.))
+            .bg(theme.foreground.opacity(0.065))
+            .icon(Icon::new(IconName::Plus).text_color(theme.muted_foreground))
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                let (a, b, c, d, e, f, g) = (me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone());
+                menu.min_w(px(230.))
+                    .item(PopupMenuItem::new("Add photos & files").icon(crate::assets::Lucide::Image).on_click(move |_, window, cx| a.update(cx, |c, cx| c.attach(window, cx))))
+                    .separator()
+                    .item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
+                    .item(PopupMenuItem::new("Snapshot an area").icon(crate::assets::Lucide::Crosshair).on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))))
+                    .item(PopupMenuItem::new("Snapshot the screen").icon(crate::assets::Lucide::Monitor).on_click(move |_, _, cx| d.update(cx, |c, cx| c.snapshot("screen", cx))))
+                    .separator()
+                    .item(PopupMenuItem::new("Mention a file  @").icon(IconName::File).on_click(move |_, window, cx| e.update(cx, |c, cx| c.insert_trigger("@", window, cx))))
+                    .item(PopupMenuItem::new("Use a skill  $").icon(crate::assets::Lucide::Sparkle).on_click(move |_, window, cx| f.update(cx, |c, cx| c.insert_trigger("$", window, cx))))
+                    .item(PopupMenuItem::new("Run a command  /").icon(IconName::SquareTerminal).on_click(move |_, window, cx| g.update(cx, |c, cx| c.insert_trigger("/", window, cx))))
+            })
+    }
+
+    /// MonoCode-style context meter: a ring that fills as the context window does.
+    fn context_ring(&self, used: u64, window: u64, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let frac = (used as f32 / window.max(1) as f32).clamp(0.0, 1.0);
+        let color = if frac >= 0.9 { palette::red(cx) } else if frac >= 0.75 { palette::amber(cx) } else { theme.foreground.opacity(0.75) };
+        let track = theme.foreground.opacity(0.14);
+        let tip_title = format!("{:.0}% context used", frac * 100.);
+        let tip_detail = format!("{} / {} tokens", crate::workspace::fmt_tokens(used), crate::workspace::fmt_tokens(window));
+        div()
+            .id("context-ring")
+            .size(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.))
+            .hover(|s| s.bg(theme.foreground.opacity(0.065)))
+            .tooltip(move |window, cx| {
+                let (t, d) = (tip_title.clone(), tip_detail.clone());
+                gpui_kit::component::tooltip::Tooltip::element(move |_, cx| {
+                    v_flex().gap(px(2.)).child(div().text_sm().font_medium().child(t.clone())).child(div().text_xs().text_color(cx.theme().muted_foreground).child(d.clone()))
+                })
+                .build(window, cx)
+            })
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let c = bounds.center();
+                        let r = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
+                        let ring = |from: f32, to: f32, color: Hsla, window: &mut Window| {
+                            let steps = ((to - from) * 96.).ceil().max(2.) as usize;
+                            let mut path = PathBuilder::stroke(px(2.));
+                            for i in 0..=steps {
+                                let t = from + (to - from) * i as f32 / steps as f32;
+                                let a = t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                                let p = point(c.x + r * a.cos(), c.y + r * a.sin());
+                                if i == 0 { path.move_to(p) } else { path.line_to(p) }
+                            }
+                            if let Ok(p) = path.build() {
+                                window.paint_path(p, color);
+                            }
+                        };
+                        ring(0.0, 1.0, track, window);
+                        if frac > 0.004 {
+                            ring(0.0, frac, color, window);
+                        }
+                    },
+                )
+                .size(px(16.)),
+            )
+            .into_any_element()
     }
 
     // ---------- model menu ----------
@@ -414,7 +861,11 @@ impl Composer {
             _ => None,
         };
         let label = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Choose project".into());
-        let projects: Vec<(String, std::path::PathBuf)> = ws.projects.iter().map(|p| (p.name.clone(), p.path.clone())).collect();
+        let projects: Vec<(String, std::path::PathBuf)> = ws
+            .workspace_projects()
+            .into_iter()
+            .map(|p| (p.remote.clone().map(|r| format!("{}  ·  {r}", p.name)).unwrap_or_else(|| p.name.clone()), p.path.clone()))
+            .collect();
         let ws_entity = self.workspace.clone();
         let composer = cx.entity();
         let theme = cx.theme().clone();
@@ -430,7 +881,7 @@ impl Composer {
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                let mut menu = menu.min_w(px(240.)).max_h(px(360.)).scrollable(true);
+                let mut menu = menu.min_w(px(280.)).max_h(px(360.)).scrollable(true).label("Projects");
                 for (name, path) in projects.clone() {
                     let ws = ws_entity.clone();
                     let checked = project.as_ref() == Some(&path);
@@ -445,6 +896,80 @@ impl Composer {
                     .item(PopupMenuItem::new("Open folder…").icon(IconName::FolderOpen).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))))
                     .item(PopupMenuItem::new("Clone from GitHub…").icon(IconName::Github).on_click(move |_, window, cx| c.update(cx, |c, cx| c.open_clone_dialog(window, cx))))
             })
+    }
+
+    /// Where the agent runs (this Mac) and on which branch, with a branch switcher.
+    fn env_chips(&self, with_project: bool, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let git = ws.current_git().cloned();
+        let has_cwd = ws.current_cwd().is_some();
+        let theme = cx.theme().clone();
+        let chip = |id: &'static str| {
+            h_flex().id(id).h(px(26.)).px(px(8.)).gap(px(6.)).rounded(px(7.)).text_sm().text_color(theme.foreground.opacity(0.82))
+        };
+        let local = chip("env-local")
+            .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
+            .child("Local")
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Runs on this Mac, in the project folder").build(window, cx));
+        let branch: Option<AnyElement> = match git {
+            Some(g) if g.is_repo => {
+                let name = g.branch.clone().unwrap_or_else(|| "detached HEAD".into());
+                let on_default = g.on_default();
+                let ws_entity = self.workspace.clone();
+                let branches = g.branches.clone();
+                let current = g.branch.clone();
+                let default = g.default_branch.clone();
+                let status = match (g.changed, g.ahead) {
+                    (0, 0) => None,
+                    (c, 0) => Some(format!("{c} changed")),
+                    (0, a) => Some(format!("↑{a}")),
+                    (c, a) => Some(format!("{c} changed · ↑{a}")),
+                };
+                Some(
+                    gpui_kit::component::button::Button::new("branch-chip")
+                        .ghost()
+                        .small()
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(if on_default { theme.muted_foreground } else { palette::indigo(cx) }))
+                                .child(div().text_color(theme.foreground.opacity(0.9)).child(name))
+                                .when(on_default, |el| {
+                                    el.child(div().px(px(5.)).rounded(px(4.)).text_xs().bg(theme.foreground.opacity(0.08)).text_color(theme.muted_foreground).child("default"))
+                                })
+                                .when_some(status, |el, s| el.child(div().text_xs().text_color(palette::amber(cx)).child(s)))
+                                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
+                        )
+                        .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
+                            menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Switch branch");
+                            for b in branches.clone() {
+                                let ws = ws_entity.clone();
+                                let label = if Some(&b) == default.as_ref() { format!("{b}  (default)") } else { b.clone() };
+                                menu = menu.item(PopupMenuItem::new(label).checked(Some(&b) == current.as_ref()).on_click(move |_, _, cx| {
+                                    let b = b.clone();
+                                    ws.update(cx, |ws, cx| ws.switch_branch(b, cx))
+                                }));
+                            }
+                            menu
+                        })
+                        .into_any_element(),
+                )
+            }
+            Some(_) if has_cwd => Some(
+                chip("env-nogit")
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(crate::assets::Lucide::GitBranch).small())
+                    .child("Not a git repo")
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
+        h_flex()
+            .gap_1()
+            .when(with_project, |el| el.child(self.project_chip(cx)))
+            .child(local)
+            .children(branch)
+            .into_any_element()
     }
 
     fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -489,7 +1014,7 @@ impl Render for Composer {
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty();
         let thread_id = thread.as_ref().map(|t| t.id.clone());
-        let branch = thread.as_ref().and_then(|t| t.branch.clone()).filter(|b| b != "HEAD");
+        let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
         let plan = prefs.plan;
 
         // Model pill + menu.
@@ -576,31 +1101,24 @@ impl Render for Composer {
             .when(!is_draft, |el| {
                 el.child(
                     h_flex()
-                        .h(px(36.))
-                        .px(px(14.))
-                        .gap(px(14.))
+                        .h(px(38.))
+                        .px(px(8.))
+                        .gap(px(8.))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(h_flex().gap(px(6.)).child(Icon::new(IconName::Folder).small()).child("Current checkout"))
-                        .when_some(branch.clone(), |el, b| el.child(h_flex().gap(px(6.)).child(Icon::new(crate::assets::Lucide::GitBranch).small()).child(b)))
+                        .child(self.env_chips(false, cx))
                         .when(plan, |el| el.child(h_flex().gap(px(6.)).text_color(palette::indigo(cx)).child(Icon::new(crate::assets::Lucide::ListChecks).small()).child("Plan mode")))
                         .child(div().flex_1())
-                        .when(running, |el| el.child(Spinner::new().small().color(theme.muted_foreground))),
+                        .when(running, |el| el.child(div().pr(px(6.)).child(Spinner::new().small().color(theme.muted_foreground)))),
                 )
             })
-            .child(div().px(px(14.)).pt(px(if is_draft { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false)))
+            .children(self.attachment_strip(cx))
+            .child(div().px(px(14.)).pt(px(if is_draft || !self.attachments.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false)))
             .child(
                 h_flex()
                     .p(px(8.))
                     .gap(px(6.))
-                    .child(
-                        square("attach")
-                            .cursor_pointer()
-                            .bg(theme.foreground.opacity(0.065))
-                            .hover(|s| s.bg(theme.foreground.opacity(0.11)))
-                            .child(Icon::new(IconName::Plus).small().text_color(theme.muted_foreground))
-                            .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
-                    )
+                    .child(self.plus_button(cx))
                     .child(model_pill)
                     .child(access_pill)
                     .when(is_draft, |el| {
@@ -613,25 +1131,21 @@ impl Render for Composer {
                         )
                     })
                     .child(div().flex_1())
+                    .when_some(context, |el, (used, window)| el.child(self.context_ring(used, window, cx)))
                     .child(send),
             );
 
         // Capy-style context chips above the card on a new thread.
-        let chips = is_draft.then(|| {
-            h_flex()
-                .gap_1()
-                .pb(px(8.))
-                .child(self.project_chip(cx))
-                .child(
-                    h_flex()
-                        .px_2()
-                        .gap(px(6.))
-                        .text_sm()
-                        .text_color(theme.foreground.opacity(0.75))
-                        .child(Icon::new(IconName::HardDrive).small())
-                        .child("This Mac"),
-                )
-        });
+        let chips = is_draft.then(|| div().pb(px(8.)).child(self.env_chips(true, cx)));
+        let picker = self.picker(cx);
+        let drop_tint = palette::ember(cx);
+        let card = div()
+            .relative()
+            .w_full()
+            .child(card)
+            .when_some(picker, |el, p| el.child(div().absolute().bottom_full().left_0().w_full().pb(px(6.)).child(p)))
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.opacity(0.85).border_color(drop_tint))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.add_paths(paths.paths(), window, cx)));
 
         // Status strip under the card (threads).
         let status = (!is_draft).then(|| {
@@ -662,6 +1176,12 @@ impl Render for Composer {
             .px_6()
             .pb(px(if is_draft { 0. } else { 12. }))
             .key_context("Composer")
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key(ev, window, cx)))
+            // The textarea binds these keys to actions, which never reach key listeners.
+            .capture_action(cx.listener(|this, _: &MoveUp, window, cx| this.picker_action("up", window, cx)))
+            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| this.picker_action("down", window, cx)))
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| this.picker_action("escape", window, cx)))
+            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.picker_action("tab", window, cx)))
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
             .child(v_flex().w_full().max_w(px(760.)).children(chips).child(card).children(status))
     }

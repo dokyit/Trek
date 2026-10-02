@@ -4,7 +4,7 @@ use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Task};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use trek_agents::{AgentStatus, McpServer, SlashCommand, AgentEvent, Command, Decision, SessionConfig};
+use trek_agents::{AcpInfo, AgentStatus, McpServer, SlashCommand, AgentEvent, Command, Decision, SessionConfig};
 use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
@@ -26,6 +26,7 @@ pub enum SettingsPage {
     General,
     Appearance,
     Agents,
+    Tools,
     ApiKeys,
     LocalModels,
     Permissions,
@@ -36,23 +37,12 @@ pub enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 10] = [
-        SettingsPage::General,
-        SettingsPage::Appearance,
-        SettingsPage::Agents,
-        SettingsPage::ApiKeys,
-        SettingsPage::LocalModels,
-        SettingsPage::Permissions,
-        SettingsPage::Inbox,
-        SettingsPage::Import,
-        SettingsPage::Updates,
-        SettingsPage::About,
-    ];
     pub fn label(self) -> &'static str {
         match self {
             SettingsPage::General => "General",
             SettingsPage::Appearance => "Appearance",
             SettingsPage::Agents => "Agents & Subscriptions",
+            SettingsPage::Tools => "Tools & MCP",
             SettingsPage::ApiKeys => "API Keys",
             SettingsPage::LocalModels => "Local Models",
             SettingsPage::Permissions => "Permissions",
@@ -146,6 +136,8 @@ pub enum WorkspaceEvent {
     /// A toast-worthy message with an optional undo.
     Toast { message: String, undo: Option<UndoAction> },
     FocusComposer,
+    /// Run a shell command in a new terminal tab (agent install / sign in), then rescan agents.
+    RunInTerminal(String),
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +153,17 @@ pub struct GitInfo {
     pub branch: Option<String>,
     pub changed: usize,
     pub ahead: u32,
+    /// The remote's default branch (origin/HEAD), else main/master.
+    pub default_branch: Option<String>,
+    /// Local branches, most recently committed first.
+    pub branches: Vec<String>,
+    pub remote: Option<String>,
+}
+
+impl GitInfo {
+    pub fn on_default(&self) -> bool {
+        self.branch.is_some() && self.branch == self.default_branch
+    }
 }
 
 fn read_git_info(cwd: &std::path::Path) -> GitInfo {
@@ -175,6 +178,16 @@ fn read_git_info(cwd: &std::path::Path) -> GitInfo {
         branch: run(&["branch", "--show-current"]).filter(|b| !b.is_empty()),
         changed: run(&["status", "--porcelain"]).map(|s| s.lines().count()).unwrap_or(0),
         ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
+        default_branch: run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .and_then(|s| s.split_once('/').map(|(_, b)| b.to_string()))
+            .or_else(|| {
+                let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
+                ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
+            }),
+        branches: run(&["for-each-ref", "--sort=-committerdate", "--count=20", "--format=%(refname:short)", "refs/heads"])
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default(),
+        remote: trek_core::store::git_remote(cwd),
     }
 }
 
@@ -203,6 +216,8 @@ pub struct Workspace {
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
+    /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
+    pub acp_info: HashMap<String, Result<AcpInfo, String>>,
     pub usage_loading: bool,
     tasks: Vec<Task<()>>,
 }
@@ -247,6 +262,7 @@ impl Workspace {
             git_info: HashMap::new(),
             agent_status: HashMap::new(),
             status_fetched_at: 0,
+            acp_info: HashMap::new(),
             usage_loading: false,
             tasks: vec![],
         };
@@ -256,6 +272,7 @@ impl Workspace {
             this.route = Route::Draft { project: first };
         }
         this.detect_agents(cx);
+        this.refresh_git(cx);
         if this.settings.onboarding.completed {
             this.import_threads(cx);
         }
@@ -370,6 +387,29 @@ impl Workspace {
 
     pub fn current_git(&self) -> Option<&GitInfo> {
         self.current_cwd().and_then(|c| self.git_info.get(&c))
+    }
+
+    /// `git switch <branch>` in the current folder.
+    pub fn switch_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        let Some(cwd) = self.current_cwd() else { return };
+        let task = cx.spawn(async move |this, cx| {
+            let out = cx
+                .background_executor()
+                .spawn(async move { std::process::Command::new("git").args(["switch", &branch]).current_dir(&cwd).output() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match out {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr).lines().find(|l| l.starts_with("error")).unwrap_or("git switch failed").to_string();
+                        cx.emit(WorkspaceEvent::Toast { message: err, undo: None });
+                    }
+                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("git: {e}"), undo: None }),
+                }
+                this.refresh_git(cx);
+            });
+        });
+        self.tasks.push(task);
     }
 
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
@@ -511,6 +551,11 @@ impl Workspace {
         if *agent == AgentId::Codex && !self.codex_models.is_empty() {
             return self.codex_models.clone();
         }
+        if let Some(Ok(info)) = self.acp_info.get(&agent.key()) {
+            if !info.models.is_empty() {
+                return info.models.clone();
+            }
+        }
         if *agent == AgentId::ClaudeCode {
             if let Some(st) = self.agent_status.get(&agent.key()).filter(|s| !s.models.is_empty()) {
                 return st.models.clone();
@@ -586,7 +631,12 @@ impl Workspace {
             .agents
             .iter()
             .filter(|a| a.availability == Availability::Ready)
-            .filter(|a| matches!(a.agent, AgentId::ClaudeCode | AgentId::Codex) || matches!(&a.agent, AgentId::Direct(_)) && !a.models.is_empty())
+            .filter(|a| match &a.agent {
+                AgentId::ClaudeCode | AgentId::Codex => true,
+                AgentId::Direct(_) => !a.models.is_empty(),
+                // ACP agents are pickable once probed and signed in.
+                other => self.acp_info.get(&other.key()).is_some_and(|i| i.as_ref().is_ok_and(|i| !i.needs_auth)),
+            })
             .map(|a| a.agent.clone())
             .collect();
         for p in &self.settings.api_providers {
@@ -1075,6 +1125,7 @@ impl Workspace {
                     }
                     this.status_fetched_at = 0;
                     this.refresh_usage(cx);
+                    this.probe_acp_agents(cx);
                     // Default to an agent that's actually installed.
                     let ready = this.ready_agents();
                     if !ready.contains(&this.draft_prefs.agent) {
@@ -1138,6 +1189,33 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ask each installed ACP agent for its models and login state. Opens a session, sends no prompt.
+    pub fn probe_acp_agents(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|a| a.availability == Availability::Ready && matches!(a.agent, AgentId::OpenCode | AgentId::Droid | AgentId::Acp(_)))
+            .map(|a| a.agent.key())
+            .collect();
+        for id in ids {
+            let (tx, rx) = async_channel::bounded(1);
+            let probe_id = id.strip_prefix("acp:").unwrap_or(&id).to_string();
+            trek_core::runtime().spawn(async move {
+                let r = trek_agents::acp_probe(&probe_id).await.map_err(|e| format!("{e:#}"));
+                let _ = tx.send(r).await;
+            });
+            let task = cx.spawn(async move |this, cx| {
+                if let Ok(r) = rx.recv().await {
+                    let _ = this.update(cx, |this, cx| {
+                        this.acp_info.insert(id, r);
+                        cx.notify();
+                    });
+                }
+            });
+            self.tasks.push(task);
+        }
+    }
+
     /// Slash commands for an agent: Trek's own first, then the agent's commands and skills.
     pub fn slash_commands(&self, agent: &AgentId) -> Vec<SlashCommand> {
         let mut out: Vec<SlashCommand> = BUILTIN_COMMANDS
@@ -1194,16 +1272,12 @@ impl Workspace {
     pub fn mcp_servers(&self) -> Vec<McpServer> {
         let tools = &self.settings.tools;
         let mut out = vec![];
-        if tools.computer_use || tools.simulator {
-            if let Some(bin) = trek_mcp_binary() {
-                let mut args = vec![];
-                if !tools.computer_use {
-                    args.push("--no-computer-use".to_string());
+        if let Some(bin) = trek_mcp_binary() {
+            let bin = bin.display().to_string();
+            for (on, family) in [(tools.computer_use, "computer"), (tools.simulator, "simulator")] {
+                if on {
+                    out.push(McpServer { name: format!("trek-{family}"), command: bin.clone(), args: vec![family.into()], env: vec![] });
                 }
-                if !tools.simulator {
-                    args.push("--no-simulator".to_string());
-                }
-                out.push(McpServer { name: "trek".into(), command: bin.display().to_string(), args, env: vec![] });
             }
         }
         for s in tools.mcp_servers.iter().filter(|s| s.enabled) {
