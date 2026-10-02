@@ -58,6 +58,10 @@ pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
             ModelInfo::new("gpt-5.6-terra", "Terra", 2, CODEX_EFFORTS),
             ModelInfo::new("gpt-6-astra", "Astra", 3, CODEX_EFFORTS),
         ],
+        AgentId::Direct(p) if p == MOCK_PROVIDER => vec![
+            ModelInfo::new("mock-swift", "Mock Swift", 0, &[Low, Medium, High]),
+            ModelInfo::new("mock-deep", "Mock Deep", 1, &[Low, Medium, High, Max]),
+        ],
         AgentId::Direct(p) if p == "ollama" || p == "lmstudio" || p == "llamacpp" => vec![],
         _ => vec![],
     }
@@ -128,7 +132,14 @@ pub fn direct_provider(id: &str) -> Option<&'static DirectProvider> {
     DIRECT_PROVIDERS.iter().find(|p| p.id == id)
 }
 
+/// Provider id of Trek's scripted mock agent (`trek_agents::mock`), offered only when
+/// `TREK_MOCK_AGENT=1` and in tests.
+pub const MOCK_PROVIDER: &str = "mock";
+
 pub fn provider_display_name(id: &str) -> String {
+    if id == MOCK_PROVIDER {
+        return "Mock agent".into();
+    }
     direct_provider(id).map(|p| p.name.to_string()).unwrap_or_else(|| id.to_string())
 }
 

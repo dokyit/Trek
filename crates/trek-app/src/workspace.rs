@@ -274,6 +274,8 @@ pub struct Workspace {
     warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
+    /// Offer Trek's scripted mock agent (`TREK_MOCK_AGENT=1`, and in tests).
+    pub mock_agent: bool,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
@@ -291,7 +293,35 @@ impl Workspace {
         });
         // TREK_ONBOARDING=1 replays onboarding without resetting anything (design review, support).
         let replay = std::env::var("TREK_ONBOARDING").is_ok_and(|v| v == "1");
-        let route = if settings.onboarding.completed && !replay { Route::Draft { project: None } } else { Route::Onboarding };
+        let mut this = Self::with(store, settings, cx);
+        if replay {
+            this.route = Route::Onboarding;
+        }
+        this.detect_agents(cx);
+        this.refresh_git(cx);
+        if this.settings.onboarding.completed {
+            this.import_threads(cx);
+        }
+        if this.settings.updates.auto_check {
+            this.check_for_updates(false, cx);
+        }
+        this.start_housekeeping(cx);
+        let keep = this.settings.snapshots.keep_days;
+        cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
+        // TREK_MOCK_PROMPT starts a mock thread at launch, for performance measurements and demos
+        // that can't touch the UI. Only with the mock agent on.
+        if let Some(prompt) = std::env::var("TREK_MOCK_PROMPT").ok().filter(|_| this.mock_agent) {
+            this.draft_prefs.agent = AgentId::Direct(catalog::MOCK_PROVIDER.into());
+            this.draft_prefs.model = None;
+            this.send(prompt, vec![], cx);
+        }
+        this
+    }
+
+    /// The model over `store` and `settings` alone: no agent detection, import, update check or
+    /// housekeeping is started (`new` adds those). Tests build on this.
+    pub fn with(store: Store, settings: Settings, cx: &mut Context<Self>) -> Self {
+        let route = if settings.onboarding.completed { Route::Draft { project: None } } else { Route::Onboarding };
         let applied_defaults = default_prefs_key(&settings);
         let draft_prefs = Prefs {
             agent: AgentId::from_key(&settings.general.default_agent),
@@ -328,6 +358,7 @@ impl Workspace {
             settings_project: None,
             warm: None,
             overlay_open: false,
+            mock_agent: trek_agents::mock::enabled(),
             applied_defaults,
             tasks: vec![],
         };
@@ -336,17 +367,6 @@ impl Workspace {
             let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
             this.route = Route::Draft { project: first };
         }
-        this.detect_agents(cx);
-        this.refresh_git(cx);
-        if this.settings.onboarding.completed {
-            this.import_threads(cx);
-        }
-        if this.settings.updates.auto_check {
-            this.check_for_updates(false, cx);
-        }
-        this.start_housekeeping(cx);
-        let keep = this.settings.snapshots.keep_days;
-        cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
         this
     }
 
@@ -630,6 +650,13 @@ impl Workspace {
         let g = &self.settings.general;
         let prefs = self.project_prefs(project);
         let agent = prefs.agent.as_deref().map(AgentId::from_key).filter(|a| self.ready_agents().contains(a));
+        // With no agent of its own, a project can still pick the model Trek's default agent uses
+        // (Settings → Project offers that agent's models); one that agent doesn't have is ignored.
+        let default_agent = AgentId::from_key(&g.default_agent);
+        let model_for_default = prefs
+            .model
+            .clone()
+            .filter(|m| prefs.agent.is_none() && self.models_for(&default_agent).iter().any(|i| crate::composer::same_model(m, &i.id)));
         let p = &mut self.draft_prefs;
         match agent {
             Some(a) => {
@@ -637,8 +664,8 @@ impl Workspace {
                 p.agent = a;
             }
             None => {
-                p.agent = AgentId::from_key(&g.default_agent);
-                p.model = g.default_model.clone();
+                p.agent = default_agent;
+                p.model = model_for_default.or_else(|| g.default_model.clone());
             }
         }
         p.effort = prefs.effort.unwrap_or(g.default_effort);
@@ -833,7 +860,7 @@ impl Workspace {
             return match p.as_str() {
                 "anthropic" => catalog::default_models(&AgentId::ClaudeCode),
                 "openai" => catalog::default_models(&AgentId::Codex),
-                _ => vec![],
+                _ => catalog::default_models(agent),
             };
         }
         if *agent == AgentId::Codex && !self.codex_models.is_empty() {
@@ -932,6 +959,9 @@ impl Workspace {
             if !out.contains(&id) {
                 out.push(id);
             }
+        }
+        if self.mock_agent {
+            out.push(AgentId::Direct(catalog::MOCK_PROVIDER.into()));
         }
         out.retain(|a| !self.settings.disabled_agents.contains(&a.key()));
         if out.is_empty() {
@@ -1039,9 +1069,12 @@ impl Workspace {
         live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()) });
         live.streaming = None;
         live.reasoning = None;
-        live.turn_started = Some(Instant::now());
+        // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
+        if !running {
+            live.turn_started = Some(Instant::now());
+            live.tasks.clear();
+        }
         live.last_active = Some(Instant::now());
-        live.tasks.clear();
         live.revision += 1;
         if let Some(tx) = &live.commands {
             let _ = tx.try_send(Command::Prompt { text, images });

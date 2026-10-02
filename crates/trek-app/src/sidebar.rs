@@ -33,6 +33,9 @@ pub struct Sidebar {
     filter_open: bool,
     usage_open: bool,
     updater_open: bool,
+    /// Re-renders once a second while a turn runs, so "Working 12s" counts up (this view is
+    /// cached; nothing else would redraw it).
+    _clock: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -43,7 +46,12 @@ impl Sidebar {
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Thread title"));
         let subscriptions = vec![
-            cx.observe(&workspace, |_, _, cx| cx.notify()),
+            cx.observe(&workspace, |this, _, cx| {
+                this.sync_clock(cx);
+                cx.notify()
+            }),
+            // The cursor blinks and moves without an input event.
+            cx.observe(&search, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |this, state, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     let q = state.read(cx).value().to_string();
@@ -82,7 +90,22 @@ impl Sidebar {
             filter_open: false,
             usage_open: false,
             updater_open: false,
+            _clock: None,
             _subscriptions: subscriptions,
+        }
+    }
+
+    fn sync_clock(&mut self, cx: &mut Context<Self>) {
+        let running = self.workspace.read(cx).any_turn_running();
+        if running && self._clock.is_none() {
+            self._clock = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }));
+        } else if !running {
+            self._clock = None;
         }
     }
 
@@ -710,6 +733,8 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::tests::rendered("Sidebar");
         let ws = self.workspace.read(cx);
         let selected = match &ws.route {
             Route::Thread(id) => Some(id.clone()),

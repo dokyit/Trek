@@ -58,6 +58,9 @@ pub struct Composer {
     picker_scroll: ScrollHandle,
     /// Width of the composer card at last layout; narrow cards get compact pills.
     width: std::rc::Rc<std::cell::Cell<Pixels>>,
+    /// Height of the whole composer at last layout. The window caches this view at that height
+    /// (cached views need a definite size) on frames where the composer didn't change.
+    height: std::rc::Rc<std::cell::Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -124,6 +127,8 @@ impl Composer {
                 cx.notify()
             }),
             cx.observe(&model_search, |_, _, cx| cx.notify()),
+            // The cursor blinks and moves without an input event; this view is cached, so redraw.
+            cx.observe(&input, |_, _, cx| cx.notify()),
         ];
         Self {
             workspace,
@@ -144,6 +149,7 @@ impl Composer {
             cmd_enter,
             picker_scroll: ScrollHandle::new(),
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
+            height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             _subscriptions: subscriptions,
         }
     }
@@ -169,6 +175,16 @@ impl Composer {
                 cx.notify();
             }
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn text(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
+    /// Height at the last layout (zero before the first).
+    pub fn height(&self) -> Pixels {
+        self.height.get()
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1103,6 +1119,8 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::tests::rendered("Composer");
         let ws = self.workspace.read(cx);
         let prefs = ws.prefs();
         let thread = ws.current_thread().cloned();
@@ -1307,11 +1325,32 @@ impl Render for Composer {
                 )
         });
 
+        // Record the composer's height for the window's cache; a change re-renders it uncached.
+        let height_cell = self.height.clone();
+        let me = cx.entity().downgrade();
+        let measure_height = canvas(
+            move |bounds, _, cx| {
+                if height_cell.replace(bounds.size.height) != bounds.size.height {
+                    let me = me.clone();
+                    cx.defer(move |cx| {
+                        let _ = me.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+
         h_flex()
+            .relative()
             .w_full()
             .justify_center()
             .px_6()
             .pb(px(if is_draft { 0. } else { 12. }))
+            .child(measure_height)
             .key_context("Composer")
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key(ev, window, cx)))
             // The textarea binds these keys to actions, which never reach key listeners.

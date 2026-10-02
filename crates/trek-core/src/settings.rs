@@ -424,11 +424,15 @@ pub mod secrets {
     const SERVICE: &str = "dev.trek.Trek";
 
     pub fn set_api_key(provider: &str, key: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!crate::paths::isolated(), "the Keychain is off in this process");
         keyring::Entry::new(SERVICE, provider)?.set_password(key)?;
         Ok(())
     }
 
     pub fn api_key(provider: &str) -> Option<String> {
+        if crate::paths::isolated() {
+            return None;
+        }
         if let Some(env) = crate::catalog::direct_provider(provider).and_then(|p| p.env_key) {
             if let Ok(v) = std::env::var(env) {
                 if !v.is_empty() {
@@ -440,6 +444,7 @@ pub mod secrets {
     }
 
     pub fn delete_api_key(provider: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!crate::paths::isolated(), "the Keychain is off in this process");
         keyring::Entry::new(SERVICE, provider)?.delete_credential()?;
         Ok(())
     }

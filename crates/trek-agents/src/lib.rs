@@ -8,6 +8,7 @@ mod acp;
 mod claude;
 mod codex;
 mod direct;
+pub mod mock;
 mod status;
 
 pub use acp::{AcpInfo, acp_probe};
@@ -133,6 +134,7 @@ pub fn start(config: SessionConfig) -> SessionHandle {
         let result = match &config.agent {
             AgentId::ClaudeCode => claude::run(config, cmd_rx, ev_tx.clone()).await,
             AgentId::Codex => codex::run(config, cmd_rx, ev_tx.clone()).await,
+            AgentId::Direct(p) if p == mock::PROVIDER => mock::run(config, cmd_rx, ev_tx.clone()).await,
             AgentId::Direct(_) => direct::run(config, cmd_rx, ev_tx.clone()).await,
             AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, ev_tx.clone()).await,
         };

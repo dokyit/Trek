@@ -104,6 +104,28 @@ fn set_dock_badge(count: usize) {
 #[cfg(not(target_os = "macos"))]
 fn set_dock_badge(_: usize) {}
 
+/// Put `window` on screen behind every other app's windows, without making it key.
+#[cfg(target_os = "macos")]
+pub fn order_back(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+    // SAFETY: `ns_view` is the live NSView GPUI created for this window; both messages are
+    // plain AppKit calls made on the main thread.
+    unsafe {
+        let view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, orderBack: std::ptr::null_mut::<AnyObject>()];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn order_back(_: &Window) {}
+
 /// Play the alert sound off the main thread.
 pub fn play_alert_sound() {
     std::thread::spawn(|| {

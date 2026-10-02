@@ -6,6 +6,7 @@ use crate::panels::RightPanel;
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
+use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::notification::Notification;
@@ -17,13 +18,17 @@ pub const SIDEBAR_WIDTH: f32 = 272.;
 
 pub struct TrekWindow {
     workspace: Entity<Workspace>,
-    sidebar: Entity<Sidebar>,
-    thread_view: Entity<ThreadView>,
-    composer: Entity<Composer>,
+    pub(crate) sidebar: Entity<Sidebar>,
+    pub(crate) thread_view: Entity<ThreadView>,
+    pub(crate) composer: Entity<Composer>,
     settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
-    right_panel: Entity<RightPanel>,
+    pub(crate) right_panel: Entity<RightPanel>,
+    pub(crate) working_bar: Entity<WorkingBar>,
     onboarding: Entity<Onboarding>,
+    /// The composer changed since the last frame: lay it out from its content again rather than
+    /// reusing its cached frame (see `composer_element`).
+    composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
     _subscriptions: Vec<Subscription>,
@@ -37,6 +42,7 @@ impl TrekWindow {
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), window, cx));
+        let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -69,6 +75,7 @@ impl TrekWindow {
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
                 }
             }),
+            cx.observe(&composer, |this, _, _| this.composer_changed = true),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
@@ -83,7 +90,20 @@ impl TrekWindow {
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
         }
-        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, panel_drag: None, _subscriptions: subscriptions }
+        Self {
+            workspace,
+            sidebar,
+            thread_view,
+            composer,
+            settings,
+            settings_nav,
+            right_panel,
+            working_bar,
+            onboarding,
+            composer_changed: true,
+            panel_drag: None,
+            _subscriptions: subscriptions,
+        }
     }
 
     /// A thread needs the user or finished: toast, banner and sound per the notification settings.
@@ -224,18 +244,6 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, project_id: Opti
 /// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
 fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-    let apps: Vec<(&'static str, &'static str)> = [
-        ("Finder", "Finder"),
-        ("Terminal", "Terminal"),
-        ("Ghostty", "Ghostty"),
-        ("Zed", "Zed"),
-        ("Cursor", "Cursor"),
-        ("VS Code", "Visual Studio Code"),
-        ("Xcode", "Xcode"),
-    ]
-    .into_iter()
-    .filter(|(_, app)| *app == "Finder" || std::path::Path::new(&format!("/Applications/{app}.app")).exists() || *app == "Terminal")
-    .collect();
     gpui_kit::component::button::Button::new("open-in")
         .outline()
         .small()
@@ -243,7 +251,19 @@ fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
         .label("Open")
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
             let mut menu = menu.min_w(px(180.));
-            for (label, app) in apps.clone() {
+            // Checked when the menu opens, not on every frame of the title bar.
+            let apps = [
+                ("Finder", "Finder"),
+                ("Terminal", "Terminal"),
+                ("Ghostty", "Ghostty"),
+                ("Zed", "Zed"),
+                ("Cursor", "Cursor"),
+                ("VS Code", "Visual Studio Code"),
+                ("Xcode", "Xcode"),
+            ]
+            .into_iter()
+            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists());
+            for (label, app) in apps {
                 let dir = dir.clone();
                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
                     let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
@@ -254,6 +274,23 @@ fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
 }
 
 impl TrekWindow {
+    /// The composer, cached at its last height on frames where it didn't change (the working
+    /// animation's frames, chiefly); laid out from its content when it did.
+    fn composer_element(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let height = self.composer.read(cx).height();
+        if std::mem::take(&mut self.composer_changed) || height <= px(0.) {
+            return self.composer.clone().into_any_element();
+        }
+        self.composer.clone().cached(StyleRefinement::default().w_full().flex_none().h(height)).into_any_element()
+    }
+
+    /// The working bar, cached at its fixed height (zero while hidden) so frames that redraw other
+    /// views (the sidebar's clock) reuse it.
+    fn working_bar_element(&self, cx: &App) -> AnyElement {
+        let height = if self.working_bar.read(cx).visible() { crate::working_bar::HEIGHT } else { 0. };
+        self.working_bar.clone().cached(StyleRefinement::default().w_full().flex_none().h(px(height))).into_any_element()
+    }
+
     fn end_panel_drag(&mut self, cx: &mut Context<Self>) {
         if self.panel_drag.take().is_none() {
             return;
@@ -270,6 +307,8 @@ impl TrekWindow {
 
 impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::tests::rendered("TrekWindow");
         let route = self.workspace.read(cx).route.clone();
         let collapsed = self.workspace.read(cx).sidebar_collapsed;
         if route == Route::Onboarding {
@@ -292,12 +331,15 @@ impl Render for TrekWindow {
         let max_width = (window.viewport_size().width.as_f32() - side - MIN_CHAT - 16.).max(crate::panels::MIN_PANEL);
         let right_width = wanted_width.clamp(crate::panels::MIN_PANEL, max_width);
         let dragging = self.panel_drag.is_some();
+        // The heavy views are cached: a frame that only moves the working bar reuses them as
+        // drawn. Each re-renders when it's notified.
+        let fill = || StyleRefinement::default().size_full();
         let content = match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
             Route::Draft { .. } => div()
                 .relative()
                 .size_full()
-                .child(div().absolute().top_0().left_0().size_full().child(self.thread_view.clone()))
+                .child(div().absolute().top_0().left_0().size_full().child(self.thread_view.clone().cached(fill())))
                 .child(
                     v_flex()
                         .absolute()
@@ -306,14 +348,15 @@ impl Render for TrekWindow {
                         .size_full()
                         .justify_center()
                         .pb(px(40.))
-                        .child(self.composer.clone()),
+                        .child(self.composer_element(cx)),
                 )
                 .into_any_element(),
             _ => v_flex()
                 .size_full()
                 .min_w_0()
-                .child(div().flex_1().min_h_0().child(self.thread_view.clone()))
-                .child(self.composer.clone())
+                .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(fill())))
+                .child(self.working_bar_element(cx))
+                .child(self.composer_element(cx))
                 .into_any_element(),
         };
         v_flex()
@@ -398,7 +441,9 @@ impl Render for TrekWindow {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(!collapsed && !in_settings, |el| el.child(self.sidebar.clone()))
+                    .when(!collapsed && !in_settings, |el| {
+                        el.child(self.sidebar.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
+                    })
                     .when(in_settings, |el| el.child(self.settings_nav.clone()))
                     .child(
                         div()
@@ -467,7 +512,7 @@ impl Render for TrekWindow {
                                     .border_color(cx.theme().sidebar_border)
                                     .bg(cx.theme().background)
                                     .overflow_hidden()
-                                    .child(self.right_panel.clone()),
+                                    .child(self.right_panel.clone().cached(fill())),
                             ),
                         )
                     }),

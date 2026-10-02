@@ -20,6 +20,10 @@ mod trail_path;
 mod tray;
 mod ui;
 mod workspace;
+mod working_bar;
+
+#[cfg(test)]
+mod tests;
 
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::*;
@@ -120,6 +124,24 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-h", HideApp, None),
+        KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("cmd-n", NewThread, None),
+        KeyBinding::new("cmd-o", OpenFolder, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-e", SettleThread, None),
+        KeyBinding::new("shift-tab", TogglePlan, Some("Composer")),
+        KeyBinding::new("cmd-shift-s", TakeSnapshot, None),
+        KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
+        KeyBinding::new("cmd-.", Interrupt, None),
+        KeyBinding::new("cmd-j", ToggleRightPanel, None),
+    ]
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,trek=info".into()))
@@ -129,21 +151,7 @@ fn main() {
         gpui_kit::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-h", HideApp, None),
-            KeyBinding::new("cmd-m", Minimize, None),
-            KeyBinding::new("cmd-n", NewThread, None),
-            KeyBinding::new("cmd-o", OpenFolder, None),
-            KeyBinding::new("cmd-,", OpenSettings, None),
-            KeyBinding::new("cmd-b", ToggleSidebar, None),
-            KeyBinding::new("cmd-e", SettleThread, None),
-            KeyBinding::new("shift-tab", TogglePlan, Some("Composer")),
-            KeyBinding::new("cmd-shift-s", TakeSnapshot, None),
-            KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
-            KeyBinding::new("cmd-.", Interrupt, None),
-            KeyBinding::new("cmd-j", ToggleRightPanel, None),
-        ]);
+        cx.bind_keys(key_bindings());
         cx.on_action(|_: &Quit, cx| {
             workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
             cx.quit();
@@ -157,14 +165,26 @@ fn main() {
         apply_theme(theme, None, cx);
         system::init(ws.clone(), cx);
 
+        // TREK_LAUNCH_BEHIND=1 opens the window behind other apps' windows without activating Trek,
+        // for measurements and screenshots that mustn't take the user's focus.
+        let behind = std::env::var("TREK_LAUNCH_BEHIND").is_ok_and(|v| v == "1");
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
             window_min_size: Some(size(px(760.), px(520.))),
             app_id: Some("dev.trek.Trek".into()),
+            focus: !behind,
+            show: !behind,
             ..gpui_kit::component::TitleBar::window_options()
         };
-        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| root::TrekWindow::new(ws.clone(), window, cx)))
-            .expect("open window");
-        cx.activate(true);
+        gpui_kit::open_window(options, cx, |window, cx| {
+            if behind {
+                system::order_back(window);
+            }
+            cx.new(|cx| root::TrekWindow::new(ws.clone(), window, cx))
+        })
+        .expect("open window");
+        if !behind {
+            cx.activate(true);
+        }
     });
 }
