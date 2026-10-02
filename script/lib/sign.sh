@@ -3,15 +3,20 @@
 # Identity, first match wins:
 #   1. $TREK_SIGN_IDENTITY (any identity in your keychain; "-" forces ad-hoc)
 #   2. "Trek Local Signing" (script/signing-identity.sh creates it)
-#   3. ad-hoc ("-"): runs fine, but macOS forgets Accessibility / Screen Recording on every rebuild
+#   3. "Shelf Dev", an older self-signed identity on the maintainer's Mac: any stable key keeps
+#      permissions across rebuilds, though switching between identities resets them once
+#   4. ad-hoc ("-"): runs fine, but macOS forgets Accessibility / Screen Recording on every rebuild
+TREK_SIGN_IDENTITIES=("Trek Local Signing" "Shelf Dev")
 
 trek_sign_identity() {
-  if [[ -n "${TREK_SIGN_IDENTITY:-}" ]]; then echo "$TREK_SIGN_IDENTITY"; return; fi
-  if security find-identity -p codesigning 2>/dev/null | grep -q '"Trek Local Signing"'; then
-    echo "Trek Local Signing"
-  else
-    echo "-"
-  fi
+  # print, not echo: zsh's echo prints nothing for "-".
+  if [[ -n "${TREK_SIGN_IDENTITY:-}" ]]; then print -r -- "$TREK_SIGN_IDENTITY"; return; fi
+  local found name
+  found=$(security find-identity -p codesigning 2>/dev/null)
+  for name in "${TREK_SIGN_IDENTITIES[@]}"; do
+    if grep -qF "\"$name\"" <<< "$found"; then print -r -- "$name"; return; fi
+  done
+  print -r -- "-"
 }
 
 trek_sign_identity_kind() {

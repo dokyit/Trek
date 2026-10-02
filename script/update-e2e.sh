@@ -123,7 +123,7 @@ if [[ $OUTCOME == updated ]]; then
   print "    running now:      pid $NEXT, $(ps -o lstart= -p "$NEXT") (Trek $FROM exited)"
   print "    previous version: $(version_of "$WORK/data/updates/previous.noindex/Trek.app") kept in updates/previous.noindex"
 fi
-print "    leftovers:        $(ls -A "$WORK/app" | grep -v '^Trek.app$' || echo none) next to the app; staged copy $([[ -e $WORK/data/updates/staged.noindex ]] && echo present || echo gone)"
+print "    leftovers:        $(ls -A "$WORK/app" | grep -v '^Trek.app$' || echo none) next to the app; download folders: $(print -l "$WORK"/data/updates/download-*.noindex(N:t) | paste -sd ' ' - | sed 's/^$/none/')"
 
 if [[ -n $TAMPER ]]; then
   [[ $OUTCOME == rejected && $(version_of "$APP") == "$FROM" ]] && { say "PASS: tampered update refused, Trek $FROM untouched"; exit 0; }

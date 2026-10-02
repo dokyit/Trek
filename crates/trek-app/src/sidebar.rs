@@ -541,7 +541,7 @@ impl Sidebar {
     fn footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let in_settings = matches!(ws.route, Route::Settings(_));
-        let update = ws.update.clone();
+        let update = ws.updater.status.clone();
         let theme = cx.theme().clone();
         let importing = ws.importing;
         let (usage_open, updater_open) = (self.usage_open, self.updater_open);
@@ -569,6 +569,10 @@ impl Sidebar {
             });
         let busy = matches!(update, UpdateStatus::Checking | UpdateStatus::Downloading { .. });
         let ready = matches!(update, UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. });
+        // Found but not downloaded (automatic downloads off): say so, in neutral; ember is for
+        // the one-click "restart into it".
+        let available = matches!(update, UpdateStatus::Available { .. });
+        let label_color = if ready { palette::ember(cx) } else { theme.foreground };
         let updater = Popover::new("updater-popover")
             .anchor(Anchor::BottomRight)
             .appearance(false)
@@ -579,14 +583,15 @@ impl Sidebar {
             }))
             .trigger(
                 ui::Pill::new("updater")
-                    .ghost(!ready)
+                    .ghost(!ready && !available)
                     .selected(updater_open)
                     .child(if busy {
                         Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
                     } else {
-                        Icon::new(IconName::RefreshCw).small().text_color(if ready { palette::ember(cx) } else { theme.muted_foreground }).into_any_element()
+                        let color = if ready || available { label_color } else { theme.muted_foreground };
+                        Icon::new(IconName::RefreshCw).small().text_color(color).into_any_element()
                     })
-                    .when(ready, |el| el.child(div().text_xs().text_color(palette::ember(cx)).child("Update"))),
+                    .when(ready || available, |el| el.child(div().text_xs().text_color(label_color).child("Update"))),
             )
             .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
         h_flex()

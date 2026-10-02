@@ -23,6 +23,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Where official releases are published.
 pub const OFFICIAL_FEED: &str = "https://github.com/dokyit/Trek/releases";
@@ -158,18 +159,38 @@ fn http() -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// Couldn't reach or read from the update server: worth retrying soon, unlike a release that
+/// doesn't verify.
+#[derive(Debug)]
+struct NetError(String);
+
+impl std::fmt::Display for NetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NetError {}
+
 /// A network failure in a sentence, without reqwest's URL-and-cause chain.
 fn net_error(e: reqwest::Error) -> anyhow::Error {
     let host = e.url().and_then(|u| u.host_str()).unwrap_or("the update server").to_string();
-    if e.is_connect() {
-        anyhow!("couldn't connect to {host}")
+    let message = if e.is_connect() {
+        format!("couldn't connect to {host}")
     } else if e.is_timeout() {
-        anyhow!("{host} took too long to answer")
+        format!("{host} took too long to answer")
     } else if let Some(status) = e.status() {
-        anyhow!("{host} answered {status}")
+        format!("{host} answered {status}")
     } else {
-        anyhow!("{}", e.without_url())
-    }
+        e.without_url().to_string()
+    };
+    anyhow::Error::new(NetError(message))
+}
+
+/// Whether an update failed for a reason that may pass (offline, timeout, server error) rather
+/// than because the release itself is bad.
+pub fn is_transient(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<NetError>())
 }
 
 async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest> {
@@ -186,12 +207,17 @@ async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest>
 pub async fn check(urls: &[String]) -> Result<Option<AvailableUpdate>> {
     let client = http()?;
     let results = futures::future::join_all(urls.iter().map(|u| fetch_manifest(&client, u))).await;
-    let current = current_version();
+    newest(results, &current_version())
+}
+
+/// The newest build above `current` across the feeds' manifests; the first error only if every
+/// feed failed.
+fn newest(results: Vec<Result<Manifest>>, current: &semver::Version) -> Result<Option<AvailableUpdate>> {
     let mut best: Option<AvailableUpdate> = None;
     let mut first_error = None;
     let mut any_ok = false;
     for result in results {
-        match result.and_then(|m| newer_than(m, &current)) {
+        match result.and_then(|m| newer_than(m, current)) {
             Ok(found) => {
                 any_ok = true;
                 if let Some(u) = found.filter(|u| best.as_ref().is_none_or(|b| u.version > b.version)) {
@@ -221,9 +247,9 @@ fn newer_than(manifest: Manifest, current: &semver::Version) -> Result<Option<Av
     Ok(Some(AvailableUpdate { version, notes: manifest.notes.trim().to_string(), pub_date: manifest.pub_date, artifact }))
 }
 
-/// Download into the updates folder, reporting progress in 0.0..=1.0. Returns the archive only
-/// once its SHA-256 and minisign signature check out; a bad download is deleted.
-pub async fn download(update: &AvailableUpdate, mut progress: impl FnMut(f32)) -> Result<PathBuf> {
+/// Download into a new download folder, reporting progress in 0.0..=1.0. Returns the archive only
+/// once its SHA-256 and minisign signature check out; a bad or cancelled download is deleted.
+pub async fn download(update: &AvailableUpdate, cancel: &AtomicBool, mut progress: impl FnMut(f32)) -> Result<PathBuf> {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
 
@@ -232,16 +258,19 @@ pub async fn download(update: &AvailableUpdate, mut progress: impl FnMut(f32)) -
     let signature = signature_for(&update.artifact.signature, &update.version)?;
     let mut verifier = key.verify_stream(&signature).context("the update isn't signed with this build's release key")?;
 
-    let dest = crate::paths::updates_dir().join(format!("Trek-{}.tar.gz", update.version));
-    let partial = dest.with_extension("gz.part");
-    let resp = http()?.get(&update.artifact.url).send().await.and_then(|r| r.error_for_status()).map_err(net_error)?;
-    let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&partial).await?;
-    let mut hasher = sha2::Sha256::new();
-    let mut got = 0u64;
-    let mut stream = resp.bytes_stream();
+    let dir = new_download_dir(&crate::paths::updates_dir())?;
+    let dest = dir.join(format!("Trek-{}.tar.gz", update.version));
     let result: Result<()> = async {
+        let resp = http()?.get(&update.artifact.url).send().await.and_then(|r| r.error_for_status()).map_err(net_error)?;
+        let total = resp.content_length().unwrap_or(0);
+        let mut file = tokio::fs::File::create(&dest).await?;
+        let mut hasher = sha2::Sha256::new();
+        let mut got = 0u64;
+        let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            if cancel.load(Ordering::Relaxed) {
+                bail!("cancelled");
+            }
             let chunk = chunk.map_err(net_error)?;
             hasher.update(&chunk);
             verifier.update(&chunk);
@@ -261,10 +290,9 @@ pub async fn download(update: &AvailableUpdate, mut progress: impl FnMut(f32)) -
     }
     .await;
     if let Err(e) = result {
-        let _ = tokio::fs::remove_file(&partial).await;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err(e);
     }
-    tokio::fs::rename(&partial, &dest).await?;
     progress(1.0);
     Ok(dest)
 }
@@ -291,31 +319,44 @@ pub fn verify_file(path: &Path, signature: &str, public_key: &str) -> Result<()>
 
 // ---------- staging and install ----------
 
-fn staged_dir() -> PathBuf {
-    // `.noindex`: Spotlight skips it, so the waiting copy doesn't show up as a second Trek.
-    crate::paths::updates_dir().join("staged.noindex")
-}
-
-fn previous_dir() -> PathBuf {
-    crate::paths::updates_dir().join("previous.noindex")
-}
-
-/// Records the version an update replaced, so the new version can say it was just updated.
-fn updated_marker() -> PathBuf {
-    crate::paths::updates_dir().join("updated-from")
-}
-
-/// Unpack a verified archive and inspect the bundle inside: the same app, exactly `expected`,
-/// newer than this one, intact code signature, no quarantine. Returns the staged `.app`; the
-/// archive is removed. Blocking.
-pub fn stage(archive: &Path, expected: &semver::Version) -> Result<PathBuf> {
-    let bundle = running_bundle().context("not running from an app bundle")?;
-    let dir = staged_dir();
+/// A new folder for one download, `updates/download-<pid>-<n>.noindex/`: the archive, then the
+/// unpacked app waiting to be installed. It's named after the process that owns it, so another
+/// Trek sharing the data folder (a second copy, a dev build) leaves it alone. `.noindex` keeps
+/// Spotlight from listing the waiting copy as a second Trek.
+fn new_download_dir(updates: &Path) -> Result<PathBuf> {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = updates.join(format!("download-{}-{}.noindex", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// The process that owns a download folder, if `name` is one.
+fn download_owner(name: &str) -> Option<u32> {
+    name.strip_prefix("download-")?.strip_suffix(".noindex")?.split('-').next()?.parse().ok()
+}
+
+/// The download folder a staged app sits in.
+fn download_dir_of(staged: &Path) -> Option<&Path> {
+    staged.parent().filter(|d| d.file_name().and_then(OsStr::to_str).and_then(download_owner).is_some())
+}
+
+/// Delete a staged update that won't be installed (the channel changed under it). Blocking.
+pub fn discard(staged: &Path) {
+    if let Some(dir) = download_dir_of(staged) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Unpack a verified archive next to itself and inspect the bundle inside: the same app, exactly
+/// `expected`, newer than this one, intact code signature, no quarantine. Returns the staged
+/// `.app`; the archive is removed, and on failure the whole download folder. Blocking.
+pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) -> Result<PathBuf> {
+    let dir = archive.parent().context("the download has no folder")?;
     let result = (|| {
+        let bundle = running_bundle().context("not running from an app bundle")?;
         run("/usr/bin/tar", [OsStr::new("-xzf"), archive.as_os_str(), OsStr::new("-C"), dir.as_os_str()]).context("couldn't unpack the update")?;
-        let app = std::fs::read_dir(&dir)?
+        let app = std::fs::read_dir(dir)?
             .flatten()
             .map(|e| e.path())
             .find(|p| p.extension().is_some_and(|e| e == "app"))
@@ -325,11 +366,14 @@ pub fn stage(archive: &Path, expected: &semver::Version) -> Result<PathBuf> {
         // would carry the flag into every file.
         let _ = std::process::Command::new("/usr/bin/xattr").arg("-dr").arg("com.apple.quarantine").arg(&app).output();
         run("/usr/bin/codesign", [OsStr::new("--verify"), OsStr::new("--strict"), app.as_os_str()]).context("the update's code signature is broken")?;
+        if cancel.load(Ordering::Relaxed) {
+            bail!("cancelled");
+        }
         Ok(app)
     })();
     let _ = std::fs::remove_file(archive);
     if result.is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
     result
 }
@@ -382,8 +426,32 @@ fn check_bundle(app: &Path, id: &str, expected: &semver::Version, current: &semv
 /// Returns the bundle path. If anything fails before the swap, nothing has changed.
 pub fn install(staged: &Path) -> Result<PathBuf> {
     let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
+    install_into(staged, &bundle, &crate::paths::updates_dir())?;
+    Ok(bundle)
+}
+
+fn install_into(staged: &Path, bundle: &Path, updates: &Path) -> Result<()> {
+    let result = replace_bundle(staged, bundle, updates);
+    if let Some(dir) = download_dir_of(staged) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    if let Ok(true) = result {
+        let _ = std::fs::write(updates.join(UPDATED_MARKER), crate::VERSION);
+    }
+    result.map(|_| ())
+}
+
+/// `Ok(false)` when the app on disk is already at least the staged version: another copy of
+/// Trek updated it, or the user installed a newer one by hand. Installing would downgrade it.
+fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<bool> {
     if !staged.exists() {
         bail!("the downloaded update is gone; check again");
+    }
+    if let (Ok(installed), Ok(incoming)) = (bundle_version(bundle), bundle_version(staged)) {
+        if installed >= incoming {
+            tracing::info!("{} is already Trek {installed}; not installing {incoming}", bundle.display());
+            return Ok(false);
+        }
     }
     let parent = bundle.parent().context("app has no folder")?;
     let name = bundle.file_name().context("app has no name")?;
@@ -394,22 +462,27 @@ pub fn install(staged: &Path) -> Result<PathBuf> {
     let result = (|| {
         let incoming = work.join(name);
         move_dir(staged, &incoming)?;
-        swap(&incoming, &bundle)?;
-        // `incoming` now holds the previous version.
-        let backup = previous_dir().join(name);
+        let replaced = swap(&incoming, bundle)?;
+        let backup_dir = updates.join(PREVIOUS_DIR);
+        let backup = backup_dir.join(name);
         let _ = std::fs::remove_dir_all(&backup);
-        if std::fs::create_dir_all(previous_dir()).is_err() || move_dir(&incoming, &backup).is_err() {
+        if std::fs::create_dir_all(&backup_dir).is_err() || move_dir(&replaced, &backup).is_err() {
             tracing::warn!("couldn't keep a backup of the previous version");
         }
-        Ok(bundle.clone())
+        Ok(true)
     })();
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_dir_all(staged_dir());
-    if result.is_ok() {
-        let _ = std::fs::write(updated_marker(), crate::VERSION);
+    // A swap that couldn't put the current app back leaves it in `work`: the only copy then.
+    if bundle.exists() {
+        let _ = std::fs::remove_dir_all(&work);
     }
     result
 }
+
+/// Where the single backup of the version an update replaced is kept.
+const PREVIOUS_DIR: &str = "previous.noindex";
+
+/// Records the version an update replaced, so the new version can say it was just updated.
+const UPDATED_MARKER: &str = "updated-from";
 
 /// Rename, or copy then delete across volumes (`ditto` keeps signatures and attributes).
 fn move_dir(from: &Path, to: &Path) -> Result<()> {
@@ -421,9 +494,9 @@ fn move_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Exchange two directories. One atomic `renamex_np(RENAME_SWAP)` on APFS; on volumes without
-/// it, two renames with the first undone if the second fails.
-fn swap(incoming: &Path, bundle: &Path) -> Result<()> {
+/// Exchange two directories; returns where the replaced bundle is now. One atomic
+/// `renamex_np(RENAME_SWAP)` on APFS, two renames elsewhere.
+fn swap(incoming: &Path, bundle: &Path) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::ffi::OsStrExt as _;
@@ -431,23 +504,48 @@ fn swap(incoming: &Path, bundle: &Path) -> Result<()> {
         let b = std::ffi::CString::new(bundle.as_os_str().as_bytes())?;
         // SAFETY: both are valid NUL-terminated paths that outlive the call.
         if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } == 0 {
-            return Ok(());
+            return Ok(incoming.to_path_buf());
         }
     }
-    let aside = incoming.with_extension("swap");
+    swap_by_rename(incoming, bundle)
+}
+
+/// The current app moves aside next to `incoming`, then `incoming` takes its place. If that
+/// fails the current app goes back; if even that fails, the error says where it is.
+fn swap_by_rename(incoming: &Path, bundle: &Path) -> Result<PathBuf> {
+    let aside = incoming.with_extension("previous");
     std::fs::rename(bundle, &aside).context("couldn't move the current app aside")?;
     if let Err(e) = std::fs::rename(incoming, bundle) {
-        std::fs::rename(&aside, bundle).context("couldn't restore the current app")?;
+        if let Err(back) = std::fs::rename(&aside, bundle) {
+            bail!("couldn't install the update ({e}) or put the current app back ({back}); it is at {}", aside.display());
+        }
         return Err(e).context("couldn't install the update");
     }
-    std::fs::rename(&aside, incoming)?;
-    Ok(())
+    Ok(aside)
+}
+
+/// Waits for the old process to exit, then opens the new bundle; if that fails, puts the backup
+/// back and opens it instead. Arguments: pid, bundle, backup, opener, then the opener's options.
+const RELAUNCH_SCRIPT: &str = r#"
+    pid=$1 bundle=$2 backup=$3 opener=$4; shift 4
+    while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
+    "$opener" "$@" "$bundle" && exit 0
+    if [ -d "$backup" ]; then
+        /bin/mv "$bundle" "$bundle.failed" && /bin/mv "$backup" "$bundle" && /bin/rm -rf "$bundle.failed"
+        "$opener" "$@" "$bundle"
+    fi
+"#;
+
+fn relaunch_command(pid: u32, bundle: &Path, backup: &Path, opener: &str, open_args: &[String]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg(RELAUNCH_SCRIPT).arg("trek-relaunch").arg(pid.to_string()).arg(bundle).arg(backup).arg(opener).args(open_args);
+    cmd
 }
 
 /// Start the installed bundle once this process has exited. If it can't be opened, the backup
 /// goes back in its place and that is opened instead. The caller quits right after.
 pub fn relaunch(bundle: &Path, foreground: bool) -> Result<()> {
-    let backup = bundle.file_name().map(|n| previous_dir().join(n)).unwrap_or_default();
+    let backup = bundle.file_name().map(|n| crate::paths::updates_dir().join(PREVIOUS_DIR).join(n)).unwrap_or_default();
     let mut open_args: Vec<String> = vec!["-n".into()];
     if !foreground {
         open_args.push("-g".into());
@@ -458,24 +556,8 @@ pub fn relaunch(bundle: &Path, foreground: bool) -> Result<()> {
         open_args.push("--env".into());
         open_args.push(format!("{k}={v}"));
     }
-    let script = r#"
-        pid=$1 bundle=$2 backup=$3; shift 3
-        while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
-        /usr/bin/open "$@" "$bundle" && exit 0
-        if [ -d "$backup" ]; then
-            /bin/mv "$bundle" "$bundle.failed" && /bin/mv "$backup" "$bundle" && /bin/rm -rf "$bundle.failed"
-            /usr/bin/open "$@" "$bundle"
-        fi
-    "#;
     use std::os::unix::process::CommandExt as _;
-    std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(script)
-        .arg("trek-relaunch")
-        .arg(std::process::id().to_string())
-        .arg(bundle)
-        .arg(backup)
-        .args(open_args)
+    relaunch_command(std::process::id(), bundle, &backup, "/usr/bin/open", &open_args)
         .process_group(0)
         .spawn()
         .context("couldn't schedule the relaunch")?;
@@ -491,23 +573,37 @@ fn relaunch_env(foreground: bool) -> Vec<(String, String)> {
     env
 }
 
-/// Clear what an interrupted update left behind (a partial download, an unpacked copy) and
-/// report the version this launch replaced, once, if it just updated.
+/// Clear what interrupted updates left behind (download folders of processes that are gone) and
+/// report the version this launch replaced, once, if it just updated. Only for a bundled Trek:
+/// a dev build sharing the data folder must not take another copy's update or its message.
 pub fn after_launch() -> Option<String> {
-    let dir = crate::paths::updates_dir();
-    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".part") || name.ends_with(".tar.gz") {
-            let _ = std::fs::remove_file(&path);
+    after_launch_in(&crate::paths::updates_dir())
+}
+
+fn after_launch_in(updates: &Path) -> Option<String> {
+    for entry in std::fs::read_dir(updates).into_iter().flatten().flatten() {
+        if entry.file_name().to_str().and_then(download_owner).is_some_and(|pid| !process_alive(pid)) {
+            let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-    let _ = std::fs::remove_dir_all(staged_dir());
-    let marker = updated_marker();
+    let marker = updates.join(UPDATED_MARKER);
     let from = std::fs::read_to_string(&marker).ok()?;
     let _ = std::fs::remove_file(&marker);
     let from = from.trim().to_string();
     (from != crate::VERSION).then_some(from)
+}
+
+#[cfg(target_os = "macos")]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: signal 0 only asks whether the process exists. EPERM: it does, as another user's.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_alive(_: u32) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -601,20 +697,62 @@ mod tests {
         assert!(signature_for(FIXTURE_SIG, &v("1.0.0")).err().unwrap().to_string().contains("another version"));
     }
 
+    fn write_app(app: &Path, id: &str, version: &str) {
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleVersion</key><string>{version}</string></dict></plist>"#
+        );
+        std::fs::write(app.join("Contents/Info.plist"), plist).unwrap();
+        std::fs::write(app.join("Contents/v"), version).unwrap();
+    }
+
+    fn contents(app: &Path) -> String {
+        std::fs::read_to_string(app.join("Contents/v")).unwrap()
+    }
+
+    #[test]
+    fn the_newest_feed_wins_and_failing_feeds_are_skipped() {
+        let current = semver::Version::parse("0.2.0").unwrap();
+        let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Err(anyhow!("offline")), Ok(manifest("0.2.1"))], &current).unwrap();
+        assert_eq!(picked.unwrap().version.to_string(), "0.3.0-beta.1");
+        assert!(newest(vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))], &current).unwrap().is_none(), "one feed answered: up to date");
+        let all_failed = newest(vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))], &current);
+        assert_eq!(all_failed.err().unwrap().to_string(), "no release yet");
+    }
+
+    #[test]
+    fn network_failures_are_transient_and_bad_releases_are_not() {
+        let net = anyhow::Error::new(NetError("couldn't connect to github.com".into())).context("download");
+        assert!(is_transient(&net));
+        assert!(!is_transient(&anyhow!("the update's signature doesn't match; it was not installed")));
+    }
+
     #[test]
     fn swap_exchanges_bundles() {
         let dir = scratch("swap");
         let (new, old) = (dir.join("incoming.app"), dir.join("Trek.app"));
-        std::fs::create_dir_all(new.join("Contents")).unwrap();
-        std::fs::create_dir_all(old.join("Contents")).unwrap();
-        std::fs::write(new.join("Contents/v"), "new").unwrap();
-        std::fs::write(old.join("Contents/v"), "old").unwrap();
-        swap(&new, &old).unwrap();
-        assert_eq!(std::fs::read_to_string(old.join("Contents/v")).unwrap(), "new");
-        assert_eq!(std::fs::read_to_string(new.join("Contents/v")).unwrap(), "old");
+        write_app(&new, "dev.trek.Trek", "new");
+        write_app(&old, "dev.trek.Trek", "old");
+        let replaced = swap(&new, &old).unwrap();
+        assert_eq!((contents(&old), contents(&replaced)), ("new".into(), "old".into()));
         // Nothing to swap with: an error, and the bundle is untouched.
         assert!(swap(&dir.join("missing.app"), &old).is_err());
-        assert_eq!(std::fs::read_to_string(old.join("Contents/v")).unwrap(), "new");
+        assert_eq!(contents(&old), "new");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn swap_by_rename_puts_the_app_back_when_it_fails() {
+        let dir = scratch("rename");
+        let work = dir.join(".Trek.app.update");
+        let (new, old) = (work.join("Trek.app"), dir.join("Trek.app"));
+        write_app(&new, "dev.trek.Trek", "new");
+        write_app(&old, "dev.trek.Trek", "old");
+        let replaced = swap_by_rename(&new, &old).unwrap();
+        assert_eq!((contents(&old), contents(&replaced)), ("new".into(), "old".into()));
+        assert!(replaced.starts_with(&work));
+        assert!(swap_by_rename(&work.join("missing.app"), &old).is_err());
+        assert_eq!(contents(&old), "new", "restored after a failed second rename");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -623,21 +761,97 @@ mod tests {
     fn bundle_check_refuses_other_apps_versions_and_downgrades() {
         let dir = scratch("bundle");
         let app = dir.join("Trek.app");
-        std::fs::create_dir_all(app.join("Contents")).unwrap();
-        let write = |id: &str, version: &str| {
-            let plist = format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleVersion</key><string>{version}</string></dict></plist>"#
-            );
-            std::fs::write(app.join("Contents/Info.plist"), plist).unwrap();
-        };
         let v = |s: &str| semver::Version::parse(s).unwrap();
-        write("dev.trek.Trek", "0.2.1");
+        write_app(&app, "dev.trek.Trek", "0.2.1");
         check_bundle(&app, "dev.trek.Trek", &v("0.2.1"), &v("0.2.0")).unwrap();
         assert!(check_bundle(&app, "dev.trek.Trek", &v("0.2.2"), &v("0.2.0")).is_err(), "not the advertised version");
         assert!(check_bundle(&app, "dev.trek.Trek", &v("0.2.1"), &v("0.2.1")).is_err(), "not newer");
         assert!(check_bundle(&app, "com.example.Other", &v("0.2.1"), &v("0.2.0")).is_err(), "another app");
-        write("dev.trek.Trek", "0.3.0-beta.2");
+        write_app(&app, "dev.trek.Trek", "0.3.0-beta.2");
         check_bundle(&app, "dev.trek.Trek", &v("0.3.0-beta.2"), &v("0.2.1")).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_swaps_keeps_one_backup_and_never_downgrades() {
+        let dir = scratch("install");
+        let (apps, updates) = (dir.join("Applications"), dir.join("updates"));
+        let bundle = apps.join("Trek.app");
+        write_app(&bundle, "dev.trek.Trek", "0.2.0");
+        let stage_new = |version: &str| {
+            let app = new_download_dir(&updates).unwrap().join("Trek.app");
+            write_app(&app, "dev.trek.Trek", version);
+            app
+        };
+
+        let staged = stage_new("0.2.1");
+        install_into(&staged, &bundle, &updates).unwrap();
+        assert_eq!(contents(&bundle), "0.2.1");
+        assert_eq!(contents(&updates.join("previous.noindex/Trek.app")), "0.2.0");
+        assert!(!download_dir_of(&staged).unwrap().exists(), "the download folder is gone");
+        assert!(!apps.join(".Trek.app.update").exists());
+        assert_eq!(std::fs::read_to_string(updates.join("updated-from")).unwrap(), crate::VERSION);
+
+        // The next update replaces the backup: there's only ever one.
+        install_into(&stage_new("0.2.2"), &bundle, &updates).unwrap();
+        assert_eq!((contents(&bundle), contents(&updates.join("previous.noindex/Trek.app"))), ("0.2.2".into(), "0.2.1".into()));
+
+        // Something newer is already installed (another copy updated it): left alone, staged copy dropped.
+        std::fs::remove_file(updates.join("updated-from")).unwrap();
+        let older = stage_new("0.2.1");
+        install_into(&older, &bundle, &updates).unwrap();
+        assert_eq!(contents(&bundle), "0.2.2");
+        assert!(!older.exists());
+        assert!(!updates.join("updated-from").exists(), "nothing was installed");
+
+        let gone = updates.join("download-1-0.noindex/Trek.app");
+        assert!(install_into(&gone, &bundle, &updates).err().unwrap().to_string().contains("gone"));
+        assert_eq!(std::fs::read_dir(&apps).unwrap().count(), 1, "only Trek.app next to the bundle");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn after_launch_clears_only_downloads_of_exited_processes() {
+        let dir = scratch("after-launch");
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        exited.wait().unwrap();
+        let mine = new_download_dir(&dir).unwrap();
+        let theirs = dir.join(format!("download-{}-0.noindex", exited.id()));
+        std::fs::create_dir_all(theirs.join("Trek.app")).unwrap();
+        std::fs::create_dir_all(dir.join("previous.noindex/Trek.app")).unwrap();
+        std::fs::write(dir.join("updated-from"), "0.0.1").unwrap();
+
+        assert_eq!(after_launch_in(&dir).as_deref(), Some("0.0.1"));
+        assert!(mine.exists(), "a running process's download stays");
+        assert!(!theirs.exists());
+        assert!(dir.join("previous.noindex/Trek.app").exists(), "the backup stays");
+        assert_eq!(after_launch_in(&dir), None, "reported once");
+        std::fs::write(dir.join("updated-from"), crate::VERSION).unwrap();
+        assert_eq!(after_launch_in(&dir), None, "not an update");
+        assert_eq!(download_owner("download-123-4.noindex"), Some(123));
+        assert_eq!(download_owner("previous.noindex"), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn relaunch_helper_restores_the_backup_when_the_new_app_wont_open() {
+        let dir = scratch("relaunch");
+        let (bundle, backup) = (dir.join("Trek.app"), dir.join("previous.noindex/Trek.app"));
+        write_app(&bundle, "dev.trek.Trek", "new");
+        write_app(&backup, "dev.trek.Trek", "old");
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        exited.wait().unwrap();
+        let helper = |opener: &str| relaunch_command(exited.id(), &bundle, &backup, opener, &["-n".into()]).status().unwrap();
+
+        assert!(helper("/usr/bin/true").success());
+        assert_eq!(contents(&bundle), "new", "opened: nothing moves");
+        assert!(backup.exists());
+
+        helper("/usr/bin/false");
+        assert_eq!(contents(&bundle), "old", "the backup is back in place");
+        assert!(!backup.exists());
+        assert!(!dir.join("Trek.app.failed").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

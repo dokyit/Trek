@@ -19,6 +19,7 @@ mod time;
 mod trail_path;
 mod tray;
 mod ui;
+mod updater;
 mod workspace;
 
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};

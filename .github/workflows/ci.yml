@@ -34,6 +34,17 @@ jobs:
           shared-key: workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
+      # toolchain is a separate component that an image may not have; `xcrun -f metal` finds a
+      # stub either way, so run the compiler to tell.
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
       - name: Scripts parse
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
 

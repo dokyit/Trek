@@ -93,6 +93,7 @@ version, notes and per-platform archive URL, SHA-256 and minisign signature; the
 (`assets/update/minisign.pub`). Flow: check on launch and daily → download in the background → verify →
 unpack and inspect the bundle → "Update" pill in the sidebar footer and **Restart to update** → install
 only when no agent turn is running, or on quit (Conductor's pattern; Claude desktop's update-kills-sessions
-bug is the anti-pattern). The swap is one atomic rename with one backup kept. Bundles are signed with a
+bug is the anti-pattern). The swap is one atomic rename with one backup kept, and never replaces a version
+that's already as new. Changing the channel drops whatever the old channel downloaded. Bundles are signed with a
 stable identity so macOS permissions survive updates. Swap in Sparkle (macOS) or Velopack later if delta
 updates are needed. Details: docs/RELEASING.md.

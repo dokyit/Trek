@@ -73,7 +73,9 @@ them through your login shell's `PATH`; Settings → Agents & Subscriptions show
 
 ## Build from source
 
-You need macOS 13+, Xcode Command Line Tools and Rust (stable, edition 2024).
+You need macOS 13+, Xcode and Rust (stable, edition 2024). The full Xcode, not just the Command Line Tools:
+GPUI compiles its Metal shaders at build time. Since Xcode 26 the Metal compiler is a separate download; if
+the build stops at "missing Metal Toolchain", run `xcodebuild -downloadComponent MetalToolchain` once.
 
 ```sh
 git clone https://github.com/dokyit/Trek && cd Trek
@@ -89,8 +91,8 @@ script/signing-identity.sh            # once: a stable self-signed code-signing 
 script/bundle.sh [--install]          # dist/Trek.app, optionally copied to /Applications
 ```
 
-`bundle.sh` signs with `$TREK_SIGN_IDENTITY`, else the "Trek Local Signing" identity, else ad-hoc. Use a
-stable identity: macOS ties Accessibility and Screen Recording permission (computer use, snapshots) to the
+`bundle.sh` signs with `$TREK_SIGN_IDENTITY`, else the "Trek Local Signing" identity, else "Shelf Dev" (an
+older self-signed identity on the maintainer's Mac), else ad-hoc. Use a stable identity: macOS ties Accessibility and Screen Recording permission (computer use, snapshots) to the
 signing certificate, and an ad-hoc signature changes on every build, so you'd be asked again each time.
 
 Handy environment variables: `TREK_DATA_DIR=/some/folder` runs Trek against another data folder (your real
@@ -139,4 +141,5 @@ Support/dev.trek.Trek` (settings.toml, trek.sqlite, snapshots, updates). See
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE). `vendor/gpui-base` is a patched copy of Longbridge's gpui-base, Apache-2.0 under its
+own [license](vendor/gpui-base/LICENSE-APACHE).

@@ -12,7 +12,10 @@ the user picked, and installs a release only if its archive matches that key.
    `~/.trek-signing/codesign.p12` (mode 600; its password is in `codesign.p12.password` next to it) and
    imports it into the login keychain with only `/usr/bin/codesign` allowed to use the key. No trust
    settings are changed and no password prompt appears; codesign signs fine with an untrusted
-   certificate. `script/signing-identity.sh --check` shows which identity bundles will be signed with.
+   certificate. `script/signing-identity.sh --check` shows which identity bundles will be signed with:
+   `$TREK_SIGN_IDENTITY`, else "Trek Local Signing", else "Shelf Dev" (an older self-signed identity on
+   the maintainer's Mac), else ad-hoc. A real release refuses anything but Trek Local Signing unless
+   `TREK_SIGN_IDENTITY` names another identity on purpose.
 
    Every release must be signed with the same certificate: macOS ties Accessibility and Screen Recording
    grants to it (the designated requirement is `identifier "dev.trek.Trek" and certificate leaf = H"…"`),
@@ -45,8 +48,22 @@ moving parts. Beta and nightly can't use it (prereleases are never "latest"), so
 prerelease whose tag moves to the newest build and whose assets are replaced: the archive is uploaded first
 and the manifest that points at it last, then older archives are deleted. Beta users also get stable
 releases and nightly users get both: Trek checks every feed at or above its channel and takes the newest
-version. Versions follow semver, so `0.3.0-beta.2 < 0.3.0` and switching from nightly back to stable waits
-for the next stable release rather than downgrading. Trek never installs an older or equal version.
+version. Trek never installs an older or equal version.
+
+Versions follow semver, which decides who gets what:
+
+- `0.3.0-beta.2 < 0.3.0`: a stable release supersedes its betas, so beta users move to it.
+- `0.3.0-beta.2 < 0.3.0-nightly.20261002` (`nightly` sorts after `beta`): nightly users stay on nightlies
+  of 0.3.0 and don't step back to a 0.3.0 beta, which a nightly built later already contains. They move
+  to stable once 0.3.0 itself ships.
+- Switching from nightly back to stable waits for the next stable release rather than downgrading.
+  Switching channels discards an update the old channel already downloaded, so it is never installed.
+
+`release.sh` enforces this: a new version must be newer than the last release of its own channel and of
+the channels its users also get (beta: stable; nightly: stable and beta), and not older than the
+workspace version. Stable and beta versions are committed (`Release v<version>`) and tagged; a nightly's
+version is never committed (it's built from `HEAD` with the bump undone afterwards, like a dry run), so
+a nightly never blocks the next beta. The `nightly` tag's message records the last nightly's version.
 
 `feed_url` in settings.toml is `https://github.com/dokyit/Trek/releases` by default (settings files that
 still name the old `trek-app/trek` placeholder are migrated on load). It can also be a template with
@@ -64,9 +81,10 @@ script/release.sh 0.2.1 --notes notes.md     # hand-written notes instead of the
 
 What it does:
 
-1. Checks the version (semver; stable has no pre-release suffix, beta / nightly carry theirs; not older
-   than the current one), that the version tag doesn't exist, and — for a real release — a clean working
-   tree, `gh` logged in and a stable code-signing identity (ad-hoc releases are refused).
+1. For a real release, fetches tags from `origin`. Checks the version (semver; stable has no pre-release
+   suffix, beta / nightly carry theirs; newer than the channels' last releases as above), that the
+   version tag doesn't exist, and — for a real release — a clean working tree, `gh` logged in and a stable
+   code-signing identity (ad-hoc releases are refused).
 2. Sets `[workspace.package] version` in `Cargo.toml`.
 3. Runs `script/bundle.sh`: release build of `trek` and `trek-mcp`, icon, `Info.plist`
    (`CFBundleVersion` carries the full semver; the updater checks it), code signing.
@@ -85,9 +103,10 @@ What it does:
        "sha256": "…", "signature": "<the .minisig file>" } } }
    ```
 
-6. Without `--dry-run`: commits `Release v<version>`, tags `v<version>` (stable and beta; nightlies only
-   move the `nightly` tag), pushes the branch and tag, and creates the GitHub release with the archive,
-   its `.minisig` and the manifest (or, for beta / nightly, refreshes the channel's release).
+6. Without `--dry-run`: for stable and beta, commits `Release v<version>`, tags `v<version>` and pushes
+   both; creates the GitHub release with the archive, its `.minisig` and the manifest (or, for beta /
+   nightly, moves the channel tag and refreshes the channel's release). A nightly commits nothing: its
+   version bump is undone like a dry run's.
    With `--dry-run` the version bump is undone and nothing leaves the machine; the artifacts stay in
    `dist/release/<version>/`.
 
@@ -97,22 +116,31 @@ Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default
 
 ## How an update installs
 
-1. Check: on launch, then once a day (an hour after a failed check), and when the channel changes.
-2. Download into `updates/` in Trek's data folder, hashing and verifying the minisign signature while
-   streaming. A mismatch deletes the file. Nothing is downloaded at all if the manifest's signature is
-   missing or names another version.
-3. Stage: unpack into `updates/staged.noindex/`, then check the bundle id, that the version is exactly the
-   advertised one and newer than the running one, and the code signature; clear quarantine. Now the
-   sidebar shows **Update** and Settings → Updates shows the release notes and **Restart to update**.
+1. Check: on launch, then once a day by the wall clock (sleep counts), and when the channel changes. A
+   failed check, or a download that failed for network reasons, is retried after an hour; a release that
+   doesn't verify waits for the next daily check. With automatic downloads off, the sidebar shows a
+   neutral **Update** pill and the popover offers **Download**.
+2. Download into a folder of its own, `updates/download-<pid>-<n>.noindex/` in Trek's data folder,
+   hashing and verifying the minisign signature while streaming. A mismatch deletes the folder. Nothing
+   is downloaded at all if the manifest's signature is missing or names another version. Changing the
+   channel stops a download and deletes anything the old channel downloaded or staged.
+3. Stage: unpack in that folder, then check the bundle id, that the version is exactly the advertised one
+   and newer than the running one, and the code signature; clear quarantine. Now the sidebar shows an
+   ember **Update** pill and Settings → Updates shows the release notes and **Restart to update**.
 4. Install, when the user restarts (immediately if no agent turn is running, otherwise as soon as the last
-   one finishes) or quits Trek: move the staged app next to the running one, swap the two in one
-   `renamex_np(RENAME_SWAP)` (or two renames with rollback on volumes without it), keep the previous
-   version in `updates/previous.noindex/` as the one backup, relaunch with `open -n`. If the new app
-   can't be opened, the relaunch helper puts the backup back and opens that.
-5. The new version cleans up what's left in `updates/` and shows "Trek updated to <version>".
+   one finishes) or quits Trek. If the app on disk is already at least that version (another copy of
+   Trek updated it, or it was replaced by hand), nothing is installed. Otherwise: move the staged app next
+   to the running one, swap the two in one `renamex_np(RENAME_SWAP)` (or two renames on volumes without
+   it; if the second fails the current app is put back, and if even that fails it's left where the error
+   says rather than deleted), keep the previous version in `updates/previous.noindex/` as the one backup,
+   relaunch with `open -n`. If the new app can't be opened, the relaunch helper puts the backup back and
+   opens that.
+5. The new version deletes download folders of Trek processes that are gone and shows "Trek updated to
+   <version>". Download folders are named after their process so that a second Trek sharing the data
+   folder never deletes one that's in use.
 
-Development builds (`cargo run`, not inside an `.app`) never check for updates, and neither does a copy
-macOS runs translocated from Downloads.
+Development builds (`cargo run`, not inside an `.app`) never check for, download, install or clean up
+updates, and neither does a copy macOS runs translocated from Downloads.
 
 To roll back by hand: quit Trek, then
 `mv /Applications/Trek.app /tmp/ && mv ~/Library/Application\ Support/dev.trek.Trek/updates/previous.noindex/Trek.app /Applications/`.

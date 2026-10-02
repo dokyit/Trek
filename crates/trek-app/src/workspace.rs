@@ -134,48 +134,7 @@ impl LiveThread {
 /// What a pre-warmed draft session was started with; it's used only if the draft still matches.
 type WarmKey = (AgentId, PathBuf, Option<String>, Effort, HandHolding, bool, bool);
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum UpdateStatus {
-    Idle,
-    Checking,
-    UpToDate,
-    Available { version: String },
-    Downloading { version: String, progress: f32 },
-    /// Verified and unpacked at `staged`: installs on "Restart to update" or when Trek quits.
-    Ready { version: String, staged: PathBuf },
-    /// Ready, waiting for running agent turns to finish.
-    RestartPending { version: String, staged: PathBuf },
-    /// A full sentence for the user ("Couldn't download Trek 0.2.1: …").
-    Failed(String),
-}
-
-/// The one thing the updater offers to do next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateAction {
-    Check,
-    Download,
-    Restart,
-}
-
-impl UpdateAction {
-    pub fn label(self) -> &'static str {
-        match self {
-            UpdateAction::Check => "Check now",
-            UpdateAction::Download => "Download",
-            UpdateAction::Restart => "Restart to update",
-        }
-    }
-}
-
-/// What the Updates page and the sidebar updater show for the current state.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UpdateView {
-    pub line: String,
-    pub action: Option<UpdateAction>,
-    /// Checking or downloading: the action button spins.
-    pub busy: bool,
-    pub progress: Option<f32>,
-}
+pub use crate::updater::{UpdateAction, UpdateStatus, UpdateView};
 
 /// Tools that open as tabs in the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,13 +243,7 @@ pub struct Workspace {
     pub live: HashMap<String, LiveThread>,
     pub route: Route,
     pub draft_prefs: Prefs,
-    pub update: UpdateStatus,
-    /// The newest release the last check found (version, notes, download).
-    pub update_offer: Option<trek_core::update::AvailableUpdate>,
-    /// When the background check runs next (a day after a check, an hour after a failed one).
-    next_update_check: Option<Instant>,
-    /// The channel the last check asked.
-    update_channel: Option<trek_core::settings::Channel>,
+    pub updater: crate::updater::Updater,
     pub sidebar_collapsed: bool,
     pub settled_open: bool,
     pub search: String,
@@ -350,10 +303,7 @@ impl Workspace {
             live: HashMap::new(),
             route,
             draft_prefs,
-            update: UpdateStatus::Idle,
-            update_offer: None,
-            next_update_check: None,
-            update_channel: None,
+            updater: Default::default(),
             sidebar_collapsed: false,
             settled_open: false,
             search: String::new(),
@@ -380,7 +330,9 @@ impl Workspace {
         if this.settings.onboarding.completed {
             this.import_threads(cx);
         }
-        if let Some(from) = trek_core::update::after_launch() {
+        // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
+        let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
+        if let Some(from) = after_update {
             tracing::info!("updated from {from} to {}", trek_core::VERSION);
             // Spawned so it lands after the window has subscribed to workspace events.
             let message = format!("Trek updated to {} (from {from}).", trek_core::VERSION);
@@ -443,13 +395,10 @@ impl Workspace {
         if default_prefs_key(&self.settings) != self.applied_defaults {
             self.apply_default_prefs(cx);
         }
-        // Another channel: what was found (or not) on the old one no longer applies.
-        let channel = self.settings.updates.channel;
-        if self.update_channel.is_some_and(|c| c != channel)
-            && matches!(self.update, UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Available { .. } | UpdateStatus::Failed(_))
-        {
-            self.update = UpdateStatus::Idle;
-            self.update_offer = None;
+        // Another channel: whatever the old one found, downloaded or staged no longer applies. A
+        // nightly staged before the user left Nightly must not install on quit.
+        if self.updater.channel_changed(self.settings.updates.channel) {
+            self.drop_update(cx);
             self.check_for_updates(true, cx);
         }
         cx.notify();
@@ -2130,16 +2079,12 @@ impl Workspace {
     // ---------- updates ----------
 
     pub fn update_view(&self) -> UpdateView {
-        describe_update(&self.update, self.settings.updates.auto_check, trek_core::update::blocker())
+        crate::updater::describe_update(&self.updater.status, self.settings.updates.auto_check, trek_core::update::blocker())
     }
 
     /// The update on offer, while it's on offer and has release notes.
     pub fn update_notes(&self) -> Option<&trek_core::update::AvailableUpdate> {
-        let offered = matches!(
-            self.update,
-            UpdateStatus::Available { .. } | UpdateStatus::Downloading { .. } | UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. }
-        );
-        self.update_offer.as_ref().filter(|o| offered && !o.notes.is_empty())
+        self.updater.notes()
     }
 
     pub fn run_update_action(&mut self, action: UpdateAction, cx: &mut Context<Self>) {
@@ -2153,16 +2098,11 @@ impl Workspace {
     /// Ask the release feed for something newer. A background check stays quiet when it fails; a
     /// check the user asked for reports. Never runs while an update is downloading or waiting.
     pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
-        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. }) {
-            return;
-        }
         // A dev build (or one macOS runs from a read-only copy) can't replace itself: don't ask.
         if trek_core::update::blocker().is_some() {
             return;
         }
-        self.update = UpdateStatus::Checking;
-        self.next_update_check = Some(Instant::now() + Duration::from_secs(24 * 60 * 60));
-        self.update_channel = Some(self.settings.updates.channel);
+        let Some(ticket) = self.updater.begin_check(self.settings.updates.channel, now_ms()) else { return };
         cx.notify();
         let urls = trek_core::update::manifest_urls(&self.settings.updates);
         let (tx, rx) = async_channel::bounded(1);
@@ -2172,23 +2112,9 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(Some(u)) => {
-                        this.update = UpdateStatus::Available { version: u.version.to_string() };
-                        this.update_offer = Some(u);
-                        if this.settings.updates.auto_download {
-                            this.download_update(cx);
-                        }
-                    }
-                    Ok(None) => {
-                        this.update_offer = None;
-                        this.update = UpdateStatus::UpToDate;
-                    }
-                    Err(e) => {
-                        tracing::warn!("update check failed: {e}");
-                        this.next_update_check = Some(Instant::now() + Duration::from_secs(60 * 60));
-                        this.update = if user_initiated { UpdateStatus::Failed(format!("Couldn't check for updates: {e}")) } else { UpdateStatus::Idle };
-                    }
+                let auto_download = this.settings.updates.auto_download;
+                if this.updater.finish_check(ticket, result, user_initiated, auto_download, now_ms()) {
+                    this.download_update(cx);
                 }
                 cx.notify();
             });
@@ -2198,8 +2124,7 @@ impl Workspace {
 
     /// Re-check about once a day while Trek stays open (housekeeping calls this every minute).
     fn maybe_check_for_updates(&mut self, cx: &mut Context<Self>) {
-        let due = self.next_update_check.is_none_or(|t| Instant::now() >= t);
-        if self.settings.updates.auto_check && due && matches!(self.update, UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Failed(_)) {
+        if self.updater.check_due(self.settings.updates.auto_check, now_ms()) {
             self.check_for_updates(false, cx);
         }
     }
@@ -2207,31 +2132,28 @@ impl Workspace {
     /// Download, verify and unpack the update the last check found; it's `Ready` once the new
     /// bundle sits staged, so installing is a rename.
     pub fn download_update(&mut self, cx: &mut Context<Self>) {
-        let Some(update) = self.update_offer.clone() else { return };
-        if matches!(self.update, UpdateStatus::Downloading { .. } | UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. }) {
-            return;
-        }
+        let Some(crate::updater::DownloadJob { update, ticket, cancel }) = self.updater.begin_download() else { return };
         let version = update.version.to_string();
-        self.update = UpdateStatus::Downloading { version: version.clone(), progress: 0.0 };
         cx.notify();
-        let (tx, rx) = async_channel::bounded::<Result<PathBuf, String>>(1);
+        // The error, and whether it may pass (offline) so it's worth retrying within the hour.
+        let (tx, rx) = async_channel::bounded::<Result<PathBuf, (String, bool)>>(1);
         let (ptx, prx) = async_channel::unbounded::<f32>();
         trek_core::runtime().spawn(async move {
             let staged = async {
-                let archive = trek_core::update::download(&update, |p| {
+                let archive = trek_core::update::download(&update, &cancel, |p| {
                     let _ = ptx.try_send(p);
                 })
                 .await?;
                 let expected = update.version.clone();
-                tokio::task::spawn_blocking(move || trek_core::update::stage(&archive, &expected)).await?
+                tokio::task::spawn_blocking(move || trek_core::update::stage(&archive, &expected, &cancel)).await?
             };
-            let _ = tx.send(staged.await.map_err(|e: anyhow::Error| format!("{e:#}"))).await;
+            let result = staged.await.map_err(|e: anyhow::Error| (format!("{e:#}"), trek_core::update::is_transient(&e)));
+            let _ = tx.send(result).await;
         });
         let progress_task = cx.spawn(async move |this, cx| {
             while let Ok(p) = prx.recv().await {
                 let _ = this.update(cx, |this, cx| {
-                    if let UpdateStatus::Downloading { progress, .. } = &mut this.update {
-                        *progress = p;
+                    if this.updater.download_progress(ticket, p) {
                         cx.notify();
                     }
                 });
@@ -2240,20 +2162,13 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(staged) => {
-                        tracing::info!("update {version} verified and staged");
-                        this.update = UpdateStatus::Ready { version, staged };
-                        // Test hook (docs/RELEASING.md): restart as soon as the update is ready
-                        // instead of waiting for a click or for Trek to quit.
-                        if std::env::var_os("TREK_UPDATE_AUTO_RESTART").is_some() {
-                            this.restart_to_update(cx);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("update {version} rejected: {e}");
-                        this.update = UpdateStatus::Failed(format!("Couldn't update to Trek {version}: {e}"));
-                    }
+                if let Some(unwanted) = this.updater.finish_download(ticket, version, result, now_ms()) {
+                    cx.background_executor().spawn(async move { trek_core::update::discard(&unwanted) }).detach();
+                }
+                // Test hook (docs/RELEASING.md): restart as soon as the update is ready instead of
+                // waiting for a click or for Trek to quit.
+                if matches!(this.updater.status, UpdateStatus::Ready { .. }) && std::env::var_os("TREK_UPDATE_AUTO_RESTART").is_some() {
+                    this.restart_to_update(cx);
                 }
                 cx.notify();
             });
@@ -2262,11 +2177,19 @@ impl Workspace {
         self.tasks.push(task);
     }
 
+    /// Forget the update in flight or waiting (the channel changed): its download stops, late
+    /// results are ignored, and the staged copy is deleted rather than installed on quit.
+    fn drop_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(staged) = self.updater.drop_update() {
+            cx.background_executor().spawn(async move { trek_core::update::discard(&staged) }).detach();
+        }
+    }
+
     /// Install now if no agent turn is running; otherwise once the last one finishes.
     pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
-        if let UpdateStatus::Ready { version, staged } = self.update.clone() {
+        if let UpdateStatus::Ready { version, staged } = self.updater.status.clone() {
             if self.any_turn_running() {
-                self.update = UpdateStatus::RestartPending { version, staged };
+                self.updater.status = UpdateStatus::RestartPending { version, staged };
                 cx.emit(WorkspaceEvent::Toast { message: "Trek will restart when your agents finish.".into(), undo: None });
                 cx.notify();
             } else {
@@ -2276,7 +2199,7 @@ impl Workspace {
     }
 
     fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
-        if let UpdateStatus::RestartPending { staged, .. } = self.update.clone() {
+        if let UpdateStatus::RestartPending { staged, .. } = self.updater.status.clone() {
             if !self.any_turn_running() {
                 self.install_update(staged, cx);
             }
@@ -2288,16 +2211,16 @@ impl Workspace {
             Ok(bundle) => bundle,
             Err(e) => {
                 tracing::warn!("update install failed: {e:#}");
-                self.update = UpdateStatus::Failed(format!("Couldn't install the update: {e:#}"));
+                self.updater.status = UpdateStatus::Failed(format!("Couldn't install the update: {e:#}"));
                 cx.notify();
                 return;
             }
         };
         // Installed: nothing is left for the quit hook to do.
-        self.update = UpdateStatus::Idle;
+        self.updater.status = UpdateStatus::Idle;
         if let Err(e) = trek_core::update::relaunch(&bundle, crate::system::app_is_active()) {
             tracing::warn!("relaunch after update failed: {e:#}");
-            self.update = UpdateStatus::Failed("The update is installed. Quit and reopen Trek to start it.".into());
+            self.updater.status = UpdateStatus::Failed("The update is installed. Quit and reopen Trek to start it.".into());
             cx.notify();
             return;
         }
@@ -2307,7 +2230,7 @@ impl Workspace {
 
     /// Quitting with an update ready installs it, so the next launch is the new version.
     fn install_on_quit(&mut self) {
-        if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } = &self.update {
+        if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } = &self.updater.status {
             match trek_core::update::install(staged) {
                 Ok(_) => tracing::info!("update installed on quit"),
                 Err(e) => tracing::warn!("update install on quit failed: {e:#}"),
@@ -2321,27 +2244,6 @@ impl Workspace {
                 let _ = tx.try_send(Command::Shutdown);
             }
         }
-    }
-}
-
-/// The updater's status line and next action for a state.
-fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<trek_core::update::Blocker>) -> UpdateView {
-    let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, busy: false, progress: None };
-    if let Some(blocker) = blocker {
-        return view(blocker.message().into(), None);
-    }
-    match status {
-        UpdateStatus::Idle if auto_check => view("Trek checks for updates once a day.".into(), Some(UpdateAction::Check)),
-        UpdateStatus::Idle => view("Automatic checks are off.".into(), Some(UpdateAction::Check)),
-        UpdateStatus::Checking => UpdateView { busy: true, ..view("Checking for updates…".into(), Some(UpdateAction::Check)) },
-        UpdateStatus::UpToDate => view(format!("Trek {} is up to date.", trek_core::VERSION), Some(UpdateAction::Check)),
-        UpdateStatus::Available { version } => view(format!("Trek {version} is available."), Some(UpdateAction::Download)),
-        UpdateStatus::Downloading { version, progress } => {
-            UpdateView { busy: true, progress: Some(*progress), ..view(format!("Downloading Trek {version} · {:.0}%", progress * 100.), None) }
-        }
-        UpdateStatus::Ready { version, .. } => view(format!("Trek {version} is ready. Restart now, or it installs when you quit."), Some(UpdateAction::Restart)),
-        UpdateStatus::RestartPending { version, .. } => view(format!("Trek restarts into {version} when your agents finish."), None),
-        UpdateStatus::Failed(e) => view(e.clone(), Some(UpdateAction::Check)),
     }
 }
 
@@ -2395,34 +2297,4 @@ pub fn trek_mcp_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     [dir.join("trek-mcp"), dir.join("../Resources/trek-mcp")].into_iter().find(|p| p.exists())
-}
-
-#[cfg(test)]
-mod tests {
-    // Not `super::*`: the gpui glob import brings its own `test` attribute.
-    use super::{UpdateAction, UpdateStatus, describe_update};
-    use std::path::PathBuf;
-    use trek_core::update::Blocker;
-
-    #[test]
-    fn updater_offers_one_next_step_per_state() {
-        let action = |s: UpdateStatus| describe_update(&s, true, None).action;
-        let staged = PathBuf::from("/tmp/Trek.app");
-        assert_eq!(action(UpdateStatus::Idle), Some(UpdateAction::Check));
-        assert_eq!(action(UpdateStatus::Available { version: "0.2.1".into() }), Some(UpdateAction::Download));
-        assert_eq!(action(UpdateStatus::Downloading { version: "0.2.1".into(), progress: 0.5 }), None);
-        assert_eq!(action(UpdateStatus::Ready { version: "0.2.1".into(), staged: staged.clone() }), Some(UpdateAction::Restart));
-        assert_eq!(action(UpdateStatus::RestartPending { version: "0.2.1".into(), staged }), None);
-        assert_eq!(action(UpdateStatus::Failed("Couldn't check for updates: offline".into())), Some(UpdateAction::Check));
-        let downloading = describe_update(&UpdateStatus::Downloading { version: "0.2.1".into(), progress: 0.42 }, true, None);
-        assert_eq!((downloading.line.as_str(), downloading.busy, downloading.progress), ("Downloading Trek 0.2.1 · 42%", true, Some(0.42)));
-        assert_eq!(describe_update(&UpdateStatus::Idle, false, None).line, "Automatic checks are off.");
-    }
-
-    #[test]
-    fn builds_that_cant_replace_themselves_offer_nothing() {
-        let dev = describe_update(&UpdateStatus::Idle, true, Some(Blocker::DevBuild));
-        assert_eq!((dev.action, dev.line.as_str()), (None, Blocker::DevBuild.message()));
-        assert_eq!(describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::Translocated)).action, None);
-    }
 }
