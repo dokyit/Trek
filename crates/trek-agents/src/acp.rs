@@ -49,8 +49,9 @@ struct Agent {
 }
 
 impl Agent {
-    fn spawn(agent: &AgentId, cwd: &Path) -> Result<Agent> {
-        let (bin, args, name) = launch_spec(agent)?;
+    fn spawn(agent: &AgentId, cwd: &Path, extra: &[String]) -> Result<Agent> {
+        let (bin, mut args, name) = launch_spec(agent)?;
+        args.extend(extra.iter().cloned());
         let mut child = tokio::process::Command::new(&bin)
             .args(&args)
             .current_dir(cwd)
@@ -584,7 +585,7 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
-    let mut agent = Agent::spawn(&config.agent, &config.cwd)?;
+    let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config))?;
     let mut hand_holding = config.hand_holding;
     let mut fs = FsPolicy { cwd: config.cwd.clone(), full_access: hand_holding == HandHolding::FullAccess };
     let mut backlog = Vec::new();
@@ -803,7 +804,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     };
     let home = trek_core::paths::home();
     let probe = async {
-        let mut agent = Agent::spawn(&agent_id, &home)?;
+        let mut agent = Agent::spawn(&agent_id, &home, &[])?;
         let fs = FsPolicy { cwd: home.clone(), full_access: false };
         let mut backlog = Vec::new();
         let init = agent.handshake(&fs, &mut backlog).await?;
@@ -815,6 +816,9 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
         let _ = agent.child.start_kill();
+        if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
+            info.models = copilot_models().await;
+        }
         Ok(info)
     };
     tokio::time::timeout(Duration::from_secs(20), probe).await.map_err(|_| anyhow!("{id} didn't respond in 20s"))?
@@ -977,4 +981,90 @@ fn mcp_servers_json(servers: &[crate::McpServer]) -> Value {
             })
             .collect(),
     )
+}
+
+/// Agents that take their model on the command line rather than over ACP.
+fn launch_flags(config: &SessionConfig) -> Vec<String> {
+    let mut out = vec![];
+    if config.agent == AgentId::Acp("github-copilot".into()) {
+        if let Some(m) = &config.model {
+            out.extend(["--model".to_string(), m.clone()]);
+        }
+        let effort = match config.effort {
+            trek_core::Effort::Off => "none",
+            trek_core::Effort::Minimal => "minimal",
+            trek_core::Effort::Low => "low",
+            trek_core::Effort::Medium => "medium",
+            trek_core::Effort::High => "high",
+            trek_core::Effort::XHigh => "xhigh",
+            trek_core::Effort::Max => "max",
+        };
+        out.extend(["--reasoning-effort".to_string(), effort.to_string()]);
+    }
+    out
+}
+
+/// Copilot doesn't list models over ACP; its `help config` does.
+async fn copilot_models() -> Vec<ModelInfo> {
+    let Some(bin) = detect::which("copilot") else { return vec![] };
+    let Ok(out) = tokio::process::Command::new(bin).args(["help", "config"]).env("PATH", detect::login_path()).output().await else {
+        return vec![];
+    };
+    parse_copilot_models(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_copilot_models(help: &str) -> Vec<ModelInfo> {
+    let mut in_model = false;
+    let mut out = vec![ModelInfo { id: "auto".into(), name: "Auto".into(), efforts: vec![], tier: 0, fast: None }];
+    for line in help.lines() {
+        if line.trim_start().starts_with("`model`:") {
+            in_model = true;
+            continue;
+        }
+        if in_model {
+            match line.trim().strip_prefix("- \"").and_then(|l| l.strip_suffix('"')) {
+                Some(id) => out.push(ModelInfo { id: id.to_string(), name: pretty_model(id), efforts: vec![], tier: 1, fast: None }),
+                None if line.trim().is_empty() || line.trim_start().starts_with('-') => {}
+                None => break,
+            }
+        }
+    }
+    if out.len() == 1 { vec![] } else { out }
+}
+
+/// "claude-opus-4.8-fast" → "Claude Opus 4.8 Fast", "gpt-5.3-codex" → "GPT-5.3 Codex".
+fn pretty_model(id: &str) -> String {
+    let mut parts: Vec<String> = vec![];
+    for p in id.split('-') {
+        let w = match p {
+            "gpt" => "GPT".to_string(),
+            "mai" => "MAI".to_string(),
+            p if p.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+                if parts.last().is_some_and(|l| l == "GPT") {
+                    let last = parts.pop().unwrap();
+                    format!("{last}-{p}")
+                } else {
+                    p.to_string()
+                }
+            }
+            p => {
+                let mut c = p.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            }
+        };
+        parts.push(w);
+    }
+    parts.join(" ")
+}
+
+#[cfg(test)]
+mod copilot_tests {
+    use super::*;
+
+    #[test]
+    fn parses_copilot_model_list() {
+        let help = "  `model`: AI model to use\n    - \"claude-opus-4.8-fast\"\n    - \"gpt-5.3-codex\"\n\n  `contextTier`: x";
+        let m = parse_copilot_models(help);
+        assert_eq!(m.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["Auto", "Claude Opus 4.8 Fast", "GPT-5.3 Codex"]);
+    }
 }
