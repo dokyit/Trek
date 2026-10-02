@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en" style="/*VARS*/">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New Tab</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  html { background: var(--bg); color: var(--fg); }
+  body {
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex; justify-content: center;
+    overflow-y: auto;
+  }
+  main { width: 100%; max-width: 600px; padding: max(56px, 14vh) 24px 48px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; justify-content: center; }
+  .brand img { width: 22px; height: auto; }
+  .brand span { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg); opacity: .92; }
+  form { position: relative; }
+  .search {
+    display: flex; align-items: center; gap: 10px;
+    height: 44px; padding: 0 8px 0 14px; border-radius: 12px;
+    background: var(--card); border: 1px solid var(--border);
+    transition: border-color .15s, box-shadow .15s, background .15s;
+  }
+  .search:focus-within { border-color: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-ring); background: var(--card-strong); }
+  .search svg { flex: none; color: var(--muted); }
+  .search input {
+    flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent;
+    color: var(--fg); font: inherit; font-size: 14px;
+  }
+  .search input::placeholder { color: var(--muted); }
+  .kbd { flex: none; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; }
+  .hint { margin: 10px 2px 0; color: var(--muted); font-size: 12px; text-align: center; }
+  .hint code { font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; color: var(--fg); background: var(--chip); padding: 1px 5px; border-radius: 5px; }
+  section { margin-top: 36px; }
+  .head { display: flex; align-items: center; justify-content: space-between; margin: 0 2px 10px; }
+  .head h2 { margin: 0; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .head button {
+    display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .head button:hover { background: var(--chip); color: var(--fg); }
+  .head button.spin svg { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .list { border: 1px solid var(--border); border-radius: 12px; background: var(--card); overflow: hidden; }
+  .row {
+    display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border: 0; background: transparent;
+    color: inherit; font: inherit; text-align: left; cursor: pointer;
+  }
+  .row + .row { border-top: 1px solid var(--border); }
+  .row:hover { background: var(--chip); }
+  .row:hover .go { opacity: 1; transform: translateX(0); }
+  .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-ring); }
+  .meta { flex: 1; min-width: 0; }
+  .title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { color: var(--muted); font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; margin-top: 1px; }
+  .go { flex: none; color: var(--muted); opacity: 0; transform: translateX(-4px); transition: opacity .12s, transform .12s; }
+  .empty { padding: 18px 14px; color: var(--muted); display: flex; align-items: center; gap: 10px; }
+  .empty svg { flex: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .tile {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--card); color: inherit; font: inherit; cursor: pointer; text-align: left;
+    transition: background .12s, border-color .12s;
+  }
+  .tile:hover { background: var(--chip); border-color: var(--border-strong); }
+  .fav {
+    flex: none; width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center;
+    background: var(--chip); color: var(--fg); font-weight: 600; font-size: 12px; overflow: hidden;
+  }
+  .fav img { width: 16px; height: 16px; }
+  .tile .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .host { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile > div:last-child { min-width: 0; }
+  .error { text-align: center; padding-top: max(72px, 18vh); }
+  .error .badge { width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 12px; display: grid; place-items: center; background: var(--chip); color: var(--muted); }
+  .error h1 { font-size: 17px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .error p { color: var(--muted); margin: 0 auto; max-width: 420px; }
+  .error .url { font: 12px ui-monospace, "SF Mono", Menlo, monospace; color: var(--fg); background: var(--chip); padding: 2px 6px; border-radius: 6px; word-break: break-all; }
+  .actions { margin-top: 20px; display: flex; gap: 8px; justify-content: center; }
+  .btn {
+    height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card);
+    color: var(--fg); font: inherit; cursor: pointer;
+  }
+  .btn:hover { background: var(--chip); }
+  .btn.primary { background: var(--accent); border-color: transparent; color: #fff; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main id="start">
+  <div class="brand"><img src="trek://newtab/mark.png" alt=""><span>Trek</span></div>
+  <form id="form" autocomplete="off">
+    <label class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="q" name="q" placeholder="Search Google or enter an address" spellcheck="false" autocapitalize="off" autocorrect="off">
+      <span class="kbd">↵</span>
+    </label>
+  </form>
+  <p class="hint">Type a port like <code>3000</code> to open <code>localhost:3000</code></p>
+
+  <section>
+    <div class="head">
+      <h2>Local servers</h2>
+      <button id="rescan" type="button" title="Scan again">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+        <span>Rescan</span>
+      </button>
+    </div>
+    <div class="list" id="servers">
+      <div class="empty">Looking for dev servers…</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="head"><h2>Quick links</h2></div>
+    <div class="grid" id="links"></div>
+  </section>
+</main>
+
+<main id="failed" class="error" hidden>
+  <div class="badge">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20"/><path d="m4.9 4.9 14.2 14.2"/></svg>
+  </div>
+  <h1>Can’t reach this page</h1>
+  <p><span class="url" id="failed-url"></span></p>
+  <p style="margin-top:10px">Check the address, or make sure the server is running.</p>
+  <div class="actions">
+    <button class="btn primary" id="retry" type="button">Try again</button>
+    <button class="btn" id="home" type="button">New tab</button>
+  </div>
+</main>
+
+<script>
+(() => {
+  const post = (o) => { try { window.ipc.postMessage(JSON.stringify(o)); } catch (_) {} };
+  const go = (q) => post({ t: 'go', q });
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const arrow = '<svg class="go" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
+
+  if (location.pathname === '/error') {
+    const url = decodeURIComponent(location.hash.slice(1));
+    document.title = 'Can’t reach page';
+    $('start').hidden = true;
+    $('failed').hidden = false;
+    $('failed-url').textContent = url;
+    $('retry').onclick = () => go(url);
+    $('home').onclick = () => go('');
+    return;
+  }
+
+  $('form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = $('q').value.trim();
+    if (q) go(q);
+  });
+
+  const scan = () => {
+    $('rescan').classList.add('spin');
+    post({ t: 'servers' });
+  };
+  $('rescan').onclick = scan;
+
+  window.__trekServers = (servers) => {
+    $('rescan').classList.remove('spin');
+    const list = $('servers');
+    if (!servers.length) {
+      list.innerHTML = '<div class="empty"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>No dev servers running on common ports.</div>';
+      return;
+    }
+    list.innerHTML = servers.map((s) => {
+      const host = 'localhost:' + s.port;
+      return '<button class="row" data-url="http://' + host + '">' +
+        '<span class="dot"></span>' +
+        '<div class="meta"><div class="title">' + esc(s.title || host) + '</div><div class="sub">' + host + '</div></div>' +
+        arrow + '</button>';
+    }).join('');
+    list.querySelectorAll('.row').forEach((r) => (r.onclick = () => go(r.dataset.url)));
+  };
+
+  const links = [
+    ['GitHub', 'github.com'],
+    ['MDN Web Docs', 'developer.mozilla.org'],
+    ['Stack Overflow', 'stackoverflow.com'],
+    ['npm', 'www.npmjs.com'],
+    ['crates.io', 'crates.io'],
+    ['Can I use', 'caniuse.com'],
+  ];
+  $('links').innerHTML = links.map(([name, host]) =>
+    '<button class="tile" data-url="https://' + host + '">' +
+      '<span class="fav" data-letter="' + esc(name[0]) + '"><img alt="" src="https://www.google.com/s2/favicons?domain=' + host + '&sz=64"></span>' +
+      '<div><div class="name">' + esc(name) + '</div><div class="host">' + esc(host.replace(/^www\./, '')) + '</div></div>' +
+    '</button>').join('');
+  $('links').querySelectorAll('.tile').forEach((t) => (t.onclick = () => go(t.dataset.url)));
+  $('links').querySelectorAll('.fav img').forEach((img) => {
+    img.onerror = () => { const f = img.parentElement; f.textContent = f.dataset.letter; };
+  });
+
+  scan();
+})();
+</script>
+</body>
+</html>

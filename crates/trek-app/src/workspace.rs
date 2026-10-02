@@ -138,6 +138,10 @@ pub enum WorkspaceEvent {
     FocusComposer,
     /// Run a shell command in a new terminal tab (agent install / sign in), then rescan agents.
     RunInTerminal(String),
+    /// Insert text at the composer's cursor (e.g. an element picked in the browser).
+    InsertIntoComposer(String),
+    /// Attach an image to the composer (e.g. a browser screenshot).
+    AttachImage(std::path::PathBuf),
 }
 
 #[derive(Debug, Clone)]

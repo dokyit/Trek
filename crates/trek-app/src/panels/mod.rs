@@ -83,7 +83,7 @@ impl RightPanel {
                 let cwd = ws.read(cx).current_cwd();
                 View::Terminal(cx.new(|cx| terminal::TerminalPanel::new(cwd, cx)))
             }
-            PanelTool::Browser => View::Browser(cx.new(|cx| browser::BrowserPanel::new(window, cx))),
+            PanelTool::Browser => View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx))),
             PanelTool::SideChat => View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx))),
         };
         let id = self.next_id;
