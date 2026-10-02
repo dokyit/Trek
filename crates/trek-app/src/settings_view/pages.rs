@@ -4,7 +4,7 @@
 use super::SettingsView;
 use crate::palette;
 use crate::ui;
-use crate::workspace::{Route, UpdateStatus};
+use crate::workspace::{Route, UpdateAction};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -644,30 +644,18 @@ impl SettingsView {
 
     pub(super) fn updates_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        let status = self.workspace.read(cx).update.clone();
-        let (line, busy) = match &status {
-            _ if !trek_core::update::can_update() => ("A local build. It doesn't update itself; rebuild to update.".to_string(), false),
-            UpdateStatus::Idle => ("You're on the latest version you've checked for.".to_string(), false),
-            UpdateStatus::Checking => ("Checking for updates…".into(), true),
-            UpdateStatus::UpToDate => ("Trek is up to date.".into(), false),
-            UpdateStatus::Available { version, .. } => (format!("Trek {version} is available."), false),
-            UpdateStatus::Downloading { version, progress } => (format!("Downloading Trek {version} · {:.0}%", progress * 100.), true),
-            UpdateStatus::Ready { version, .. } => (format!("Trek {version} is ready. Restart to finish."), false),
-            UpdateStatus::RestartPending { .. } => ("Restarting as soon as your agents finish.".into(), true),
-            UpdateStatus::Failed(e) => (format!("Couldn't check: {e}"), false),
-        };
-        let ready = matches!(status, UpdateStatus::Ready { .. });
-        let action = if ready {
-            Button::new("restart-update").small().primary().label("Restart to update").on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.restart_to_update(cx))))
-        } else {
-            Button::new("check-now")
+        let ws = self.workspace.read(cx);
+        let view = ws.update_view();
+        let notes = ws.update_notes();
+        let action = view.action.map(|action| {
+            Button::new("update-action")
                 .small()
-                .outline()
-                .loading(busy)
-                .disabled(!trek_core::update::can_update())
-                .label("Check now")
-                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_for_updates(true, cx))))
-        };
+                .when(action == UpdateAction::Restart, |b| b.primary())
+                .when(action != UpdateAction::Restart, |b| b.outline())
+                .loading(view.busy)
+                .label(action.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx))))
+        });
         let header = h_flex()
             .gap(px(14.))
             .pb(px(24.))
@@ -677,37 +665,43 @@ impl SettingsView {
                     .flex_1()
                     .gap(px(2.))
                     .child(div().text_size(px(15.)).font_semibold().child(format!("Trek {}", trek_core::VERSION)))
-                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(line)),
+                    .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(view.line))
+                    .when_some(view.progress, |el, p| {
+                        el.child(div().mt(px(6.)).h(px(4.)).max_w(px(280.)).rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(palette::ember(cx)).w(relative(p))))
+                    }),
             )
-            .child(action)
+            .children(action)
             .into_any_element();
-        vec![
-            header,
-            ui::group(
-                vec![
-                    Self::row(
-                        "Channel",
-                        "Beta and Nightly get new things first, and occasionally rough edges.",
-                        ui::segmented(
-                            "channel",
-                            vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
-                            s.updates.channel,
-                            self.setter(|s, v| s.updates.channel = v),
-                            cx,
-                        ),
+        let mut page = vec![header];
+        if let Some((version, notes)) = notes {
+            page.push(div().pb(px(10.)).text_size(px(13.)).font_semibold().child(format!("What's new in Trek {version}")).into_any_element());
+            page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::release_notes("update-notes", notes, px(320.), cx)).into_any_element());
+        }
+        page.push(ui::group(
+            vec![
+                Self::row(
+                    "Channel",
+                    "Stable gets finished releases. Beta and Nightly get new things first, with the occasional rough edge, and every stable release too.",
+                    ui::segmented(
+                        "channel",
+                        vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
+                        s.updates.channel,
+                        self.setter(|s, v| s.updates.channel = v),
                         cx,
                     ),
-                    Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
-                    Self::row(
-                        "Download automatically",
-                        "Installs when you next restart, never while an agent is working.",
-                        self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
-                        cx,
-                    ),
-                ],
-                cx,
-            ),
-        ]
+                    cx,
+                ),
+                Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
+                Self::row(
+                    "Download automatically",
+                    "Gets the update ready in the background. It installs when you restart or quit Trek, never while an agent is working.",
+                    self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
+                    cx,
+                ),
+            ],
+            cx,
+        ));
+        page
     }
 
     pub(super) fn about_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {

@@ -165,6 +165,10 @@ fn main() {
         };
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| root::TrekWindow::new(ws.clone(), window, cx)))
             .expect("open window");
-        cx.activate(true);
+        // TREK_BACKGROUND=1: open without taking focus (a relaunch after an update that happened
+        // while Trek was in the background, or a scripted test run).
+        if std::env::var_os("TREK_BACKGROUND").is_none() {
+            cx.activate(true);
+        }
     });
 }

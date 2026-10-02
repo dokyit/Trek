@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Tobias"]
-repository = "https://github.com/tobias/trek"
+repository = "https://github.com/dokyit/Trek"
 
 [workspace.dependencies]
 trek-core = { path = "crates/trek-core" }

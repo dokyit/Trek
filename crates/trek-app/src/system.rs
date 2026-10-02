@@ -104,6 +104,19 @@ fn set_dock_badge(count: usize) {
 #[cfg(not(target_os = "macos"))]
 fn set_dock_badge(_: usize) {}
 
+/// Whether Trek is the frontmost app (a relaunch after an update comes back to the front only then).
+#[cfg(target_os = "macos")]
+pub fn app_is_active() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn app_is_active() -> bool {
+    true
+}
+
 /// Play the alert sound off the main thread.
 pub fn play_alert_sound() {
     std::thread::spawn(|| {
