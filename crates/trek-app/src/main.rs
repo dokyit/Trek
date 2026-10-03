@@ -25,6 +25,7 @@ mod ui;
 mod updater;
 mod workspace;
 mod working_bar;
+mod worktree_ui;
 
 #[cfg(test)]
 mod tests;

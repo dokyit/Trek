@@ -179,8 +179,10 @@ impl Render for WindowTitle {
             Route::Onboarding => (None, String::new(), None),
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
+        let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
         // The project's icon and its actions (Settings → Project).
-        let root = folder.as_deref().map(trek_core::store::project_root);
+        // A thread knows its project (a worktree's folder isn't the project's).
+        let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
         let project_entry = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
         let project = project_entry.map(|p| p.name.clone()).or(project);
         let icon = root.as_ref().and_then(|r| ws.project_icon(r));
@@ -222,7 +224,8 @@ impl Render for WindowTitle {
                                 .child(div().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })
-                        .child(div().truncate().font_medium().child(title)),
+                        .child(div().min_w_0().truncate().font_medium().child(title))
+                        .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
                 .when(folder.is_some(), |el| el.child(run_button(actions, project_id, self.workspace.clone())))
                 .when_some(folder, |el, dir| el.child(open_in_button(dir)))

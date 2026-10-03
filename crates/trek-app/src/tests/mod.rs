@@ -7,6 +7,7 @@ mod harness;
 mod inbox;
 mod render;
 mod windows;
+mod worktrees;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

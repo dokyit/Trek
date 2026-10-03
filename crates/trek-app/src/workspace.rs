@@ -1,5 +1,7 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
+mod worktrees;
+
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -80,6 +82,8 @@ pub struct Prefs {
     pub hand_holding: HandHolding,
     pub plan: bool,
     pub fast: bool,
+    /// Runs in a worktree of its own. Chosen on a draft (in a git project); fixed once it starts.
+    pub worktree: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +106,8 @@ pub struct LiveThread {
     pub items: Transcript,
     pub loaded: bool,
     pub loading: bool,
+    /// Its worktree is being made (or made again): messages wait for it, as while `loading`.
+    pub preparing: bool,
     /// Index of the assistant item currently streaming.
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
@@ -497,6 +503,7 @@ impl Workspace {
             hand_holding: settings.general.hand_holding,
             plan: false,
             fast: false,
+            worktree: false,
         };
         let mut this = Self {
             store,
@@ -541,6 +548,10 @@ impl Workspace {
         this.reload(cx);
         if this.route == (Route::Draft { project: None }) {
             let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
+            // The first draft starts from its project's defaults, as drafts opened later do.
+            if let Some(p) = &first {
+                this.apply_project_defaults(p);
+            }
             this.route = Route::Draft { project: first };
         }
         cx.on_app_quit(|this, _| {
@@ -1086,6 +1097,7 @@ impl Workspace {
         }
         p.effort = prefs.effort.unwrap_or(g.default_effort);
         p.hand_holding = prefs.hand_holding.unwrap_or(g.hand_holding);
+        p.worktree = prefs.run_in == trek_core::settings::RunIn::Worktree && project.join(".git").exists();
         if p.hand_holding == HandHolding::FullAccess && !self.settings.permissions.full_access_unlocked {
             p.hand_holding = HandHolding::Auto;
         }
@@ -1154,7 +1166,7 @@ impl Workspace {
 
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         let project = match &self.route {
-            Route::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+            Route::Thread(id) => self.thread(id).and_then(|t| self.draft_folder(t)),
             Route::Draft { project } => project.clone(),
             _ => None,
         }
@@ -1243,6 +1255,7 @@ impl Workspace {
                 hand_holding: t.hand_holding,
                 plan: self.live.get(&t.id).is_some_and(|l| l.plan),
                 fast: self.live.get(&t.id).is_some_and(|l| l.fast),
+                worktree: t.worktree.is_some(),
             },
             None => self.draft_prefs.clone(),
         }
@@ -1399,7 +1412,10 @@ impl Workspace {
             _ => "draft".into(),
         };
         let p = self.prefs();
-        let mut t = self.store.create_thread(cwd.as_deref(), p.agent, p.model, p.effort, HandHolding::Supervised).ok()?;
+        // Same project as its thread, and the same folder (a worktree, maybe).
+        let project = self.current_thread().and_then(|t| self.project_dir(t)).or_else(|| cwd.clone());
+        let mut t = self.store.create_thread(project.as_deref(), p.agent, p.model, p.effort, HandHolding::Supervised).ok()?;
+        t.cwd = cwd;
         t.title = "Side chat".into();
         t.side_of = Some(parent);
         let _ = self.store.save_thread(&t);
@@ -1464,6 +1480,17 @@ impl Workspace {
                     return;
                 };
                 let p = self.draft_prefs.clone();
+                // A worktree of its own: its branch and folder are picked now, and it's made in
+                // the background while the message waits.
+                let planned = match p.worktree.then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, &text)) {
+                    Some(Err(e)) => {
+                        cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start a worktree: {e}"), undo: None });
+                        cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+                        return;
+                    }
+                    Some(Ok(wt)) => Some(wt),
+                    None => None,
+                };
                 let mut thread = match self.store.create_thread(Some(&cwd), p.agent, p.model, p.effort, p.hand_holding) {
                     Ok(t) => t,
                     Err(e) => {
@@ -1472,6 +1499,10 @@ impl Workspace {
                     }
                 };
                 thread.title = trek_core::import_title(&text);
+                if let Some(wt) = &planned {
+                    thread.cwd = Some(wt.path.clone());
+                    thread.worktree = Some(wt.clone());
+                }
                 let _ = self.store.save_thread(&thread);
                 let id = thread.id.clone();
                 self.reload(cx);
@@ -1480,11 +1511,16 @@ impl Workspace {
                 live.plan = p.plan;
                 live.fast = p.fast;
                 self.route = Route::Thread(id.clone());
-                // Use the session that was started while the message was being typed, if it still fits.
-                let key = self.draft_key(&cwd);
-                match self.warm.take() {
-                    Some((k, handle, _)) if k == key => self.attach(&id, handle, cx),
-                    _ => {}
+                match planned {
+                    Some(wt) => self.make_worktree(&id, cwd, wt, cx),
+                    // Use the session that was started while the message was being typed, if it still fits.
+                    None => {
+                        let key = self.draft_key(&cwd);
+                        match self.warm.take() {
+                            Some((k, handle, _)) if k == key => self.attach(&id, handle, cx),
+                            _ => {}
+                        }
+                    }
                 }
                 id
             }
@@ -1515,9 +1551,11 @@ impl Workspace {
         if text.is_empty() && images.is_empty() {
             return;
         }
-        // The thread's history is still being read from the agent's files: hold the message until
-        // it's in, so it lands after it (`ensure_loaded` sends it).
-        if let Some(live) = self.live.get_mut(&id).filter(|l| l.loading) {
+        // The thread's history is still being read from the agent's files, or its worktree is being
+        // made or is missing: hold the message until that's sorted (`ensure_loaded`,
+        // `worktree_ready` and `run_in_project_folder` send it).
+        if self.holds_messages(&id) {
+            let live = self.live.entry(id).or_default();
             live.queued.push((text, images));
             live.revision += 1;
             cx.notify();
@@ -1587,10 +1625,16 @@ impl Workspace {
         self.persist_items(&id, cx);
     }
 
+    /// Messages to `id` wait: its history is still being read, or its worktree is being made or
+    /// has gone missing.
+    fn holds_messages(&self, id: &str) -> bool {
+        self.live.get(id).is_some_and(|l| l.loading || l.preparing) || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
+    }
+
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
     /// message starts a turn, and the rest wait for it as queued follow-ups do.
     fn send_queued(&mut self, id: &str, cx: &mut Context<Self>) {
-        while self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
+        while !self.holds_messages(id) && self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
             let Some((text, images)) = self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0))) else { break };
             self.send_to(id, text, images, cx);
         }
@@ -1606,7 +1650,11 @@ impl Workspace {
 
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
-        if self.live.get(id).is_some_and(|l| l.commands.is_some()) {
+        if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing) {
+            return;
+        }
+        // No folder to run in until the worktree is back (or the thread moves to the project's).
+        if thread.worktree.as_ref().is_some_and(|w| w.is_missing()) {
             return;
         }
         let (plan, fast_on) = self.live.get(id).map(|l| (l.plan, l.fast)).unwrap_or_default();
@@ -1661,7 +1709,8 @@ impl Workspace {
         match self.route.clone() {
             Route::Thread(id) => self.warm_thread(&id, cx),
             Route::Draft { project: Some(cwd) } => {
-                if matches!(self.draft_prefs.agent, AgentId::Direct(_)) {
+                // A thread in a worktree starts its agent there, once the worktree is made.
+                if matches!(self.draft_prefs.agent, AgentId::Direct(_)) || self.draft_prefs.worktree {
                     return;
                 }
                 let key = self.draft_key(&cwd);

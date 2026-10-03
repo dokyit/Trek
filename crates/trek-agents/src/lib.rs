@@ -3,7 +3,7 @@
 //! Sessions run on `trek_core::runtime()`; channels are executor-agnostic.
 
 mod title;
-pub use title::generate_title;
+pub use title::{generate_commit_message, generate_title};
 mod acp;
 mod claude;
 mod codex;

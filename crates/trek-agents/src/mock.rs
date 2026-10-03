@@ -12,6 +12,7 @@
 //! | `mock:long` [dur]            | a long build that runs `dur` (default 30s)                   |
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
 //! | `error`                      | a turn that fails                                             |
+//! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
 //! Every turn also reports context usage. A prompt sent mid-turn steers it.
@@ -58,6 +59,7 @@ enum Script {
     Long(Duration),
     Stream(Duration),
     Error,
+    Write,
 }
 
 impl Script {
@@ -74,6 +76,8 @@ impl Script {
                 // Bare "long" and "stream" are too common to start a 30-second turn.
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
+                // The one script that changes files: only when asked for by its full name.
+                "write" if w.starts_with("mock:") => Script::Write,
                 "error" => Script::Error,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
@@ -104,6 +108,7 @@ pub fn title(request: &str) -> String {
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
         Script::Error => "Fix the failing build",
+        Script::Write => "Add a note",
     }
     .into()
 }
@@ -140,6 +145,8 @@ enum Reply {
 }
 
 struct Session {
+    /// The session's folder (`mock:write` writes there).
+    cwd: std::path::PathBuf,
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
     hand_holding: HandHolding,
@@ -166,6 +173,7 @@ pub async fn run(
         format!("mock-{nanos:x}")
     });
     let mut s = Session {
+        cwd: config.cwd.clone(),
         commands,
         events,
         hand_holding: config.hand_holding,
@@ -242,6 +250,7 @@ impl Session {
             Script::Plan => self.plan_turn().await?,
             Script::Long(total) => self.long(total).await?,
             Script::Stream(total) => self.stream(total).await?,
+            Script::Write => self.write().await?,
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -361,6 +370,25 @@ impl Session {
         self.emit(AgentEvent::DiffStat { additions: 14, deletions: 3 }).await?;
         self.tool("Run command", "cargo test", TEST_OUTPUT, 600).await?;
         self.say("Added a `--verbose` flag:\n\n- `src/cli.rs` parses it into `Config::verbose`\n- `src/main.rs` raises the log level when it's set\n\nAll 14 tests pass.").await
+    }
+
+    /// Add a line to `NOTES.md` in the session's folder: a real change, for worktree reviews.
+    async fn write(&mut self) -> Step {
+        let path = self.cwd.join("NOTES.md");
+        let before = std::fs::read_to_string(&path).unwrap_or_default();
+        let n = before.lines().filter(|l| l.starts_with("- ")).count() + 1;
+        let text = if before.is_empty() { format!("# Notes\n\n- Note {n}\n") } else { format!("{before}- Note {n}\n") };
+        let id = self.id("tool");
+        self.tool_start(&id, "Edit", "NOTES.md").await?;
+        self.pause(paced(150)).await?;
+        let (output, ok) = match std::fs::write(&path, &text) {
+            Ok(()) => (format!("Wrote note {n} to NOTES.md"), true),
+            Err(e) => (format!("Couldn't write NOTES.md: {e}"), false),
+        };
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        let added = (text.lines().count() - before.lines().count()) as i64;
+        self.emit(AgentEvent::DiffStat { additions: added, deletions: 0 }).await?;
+        self.say(&format!("Added note {n} to `NOTES.md`.")).await
     }
 
     async fn agents(&mut self, after: Option<Duration>) -> Step {
@@ -493,7 +521,9 @@ impl Session {
             }
             self.pause((end - now).min(Duration::from_millis(250))).await?;
             self.acknowledge_steer().await?;
-            if tokio::time::Instant::now() >= next_context {
+            // Context grows as the build runs, at demo pace only: unpaced (tests), nothing but
+            // what a test drives arrives mid-turn, however slowly its machine runs it.
+            if PACE.load(Ordering::Relaxed) > 0 && tokio::time::Instant::now() >= next_context {
                 next_context += Duration::from_secs(10);
                 self.context += 800;
                 self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
@@ -598,6 +628,8 @@ mod tests {
         assert_eq!(title("explain the startup"), "How the app starts");
         assert_eq!(title("mock:long 5s"), "Run the full test suite");
         assert_eq!(title("ask a question"), "Choose a database");
+        assert_eq!(title("mock:write"), "Add a note");
+        assert_eq!(title("write it down"), "How the app starts", "only `mock:write` writes");
     }
 
     #[test]

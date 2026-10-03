@@ -1,0 +1,215 @@
+//! Threads in worktrees of their own, through the real window: starting one, the branch chips,
+//! the review in the Git tool, merging and removing, a worktree that vanished, and the warning
+//! for threads sharing a folder. Git runs for real, in repos under the test's temp folder.
+
+use super::harness::{Trek, open, run};
+use crate::workspace::{PanelTool, Route, Scope};
+use gpui_kit::TestAppContext;
+use std::path::Path;
+use trek_core::RunState;
+use trek_core::store::Item;
+use trek_core::worktree::{self, git};
+
+/// Make the test's project a git repo on `main` with one commit, an ignored `.env`, and a draft
+/// in it again (so the project's defaults and git state are read anew).
+fn make_repo(trek: &Trek, cx: &mut TestAppContext) {
+    let dir = &trek.project;
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+        git(dir, args).expect("git");
+    }
+    std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(dir.join(".env"), "TOKEN=1\n").unwrap();
+    git(dir, &["add", "-A"]).unwrap();
+    git(dir, &["commit", "-qm", "init"]).unwrap();
+    let project = dir.clone();
+    trek.update(cx, |ws, cx| {
+        ws.reload(cx);
+        ws.navigate(Route::Draft { project: None }, cx);
+        ws.navigate(Route::Draft { project: Some(project) }, cx);
+    });
+    trek.render(cx);
+}
+
+/// Pick "New worktree" for the draft, as its menu does.
+fn use_worktree(trek: &Trek, cx: &mut TestAppContext) {
+    trek.update(cx, |ws, cx| {
+        let mut p = ws.prefs_in(&Scope::Main);
+        p.worktree = true;
+        ws.set_prefs_in(&Scope::Main, p, cx);
+    });
+}
+
+fn clean(dir: &Path) -> bool {
+    git(dir, &["status", "--porcelain"]).unwrap().trim().is_empty()
+}
+
+/// A thread in a worktree that has added a note (uncommitted) there.
+async fn worktree_thread(trek: &Trek, cx: &mut TestAppContext) -> (String, worktree::Worktree) {
+    make_repo(trek, cx);
+    use_worktree(trek, cx);
+    let id = trek.send(cx, "mock:write");
+    trek.wait_done(cx, &id, RunState::Idle).await;
+    let wt = trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.worktree.clone())).expect("a worktree");
+    (id, wt)
+}
+
+#[test]
+fn a_new_thread_can_run_in_a_worktree_of_its_own() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        // The draft offers where to run once the project's git state is in.
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.refresh_git_at(project, cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "env-place"));
+        use_worktree(&trek, cx);
+        let id = trek.send(cx, "mock:write");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+
+        let t = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        let wt = t.worktree.clone().expect("a worktree");
+        assert_eq!((wt.branch.as_str(), wt.base.as_str()), ("trek/mock-write", "main"));
+        assert!(wt.path.starts_with(worktree::worktrees_dir()));
+        assert_eq!(t.cwd.as_ref(), Some(&wt.path), "the agent ran in the worktree");
+        assert_eq!(trek.read(cx, |ws, _| ws.project_dir(&t)), Some(trek.project.clone()), "still the project's thread");
+        // The agent's change landed there, not in the project folder; the env file came along.
+        assert!(wt.path.join("NOTES.md").exists() && !trek.project.join("NOTES.md").exists());
+        assert!(clean(&trek.project));
+        assert_eq!(std::fs::read_to_string(wt.path.join(".env")).unwrap(), "TOKEN=1\n");
+        assert_eq!(git(&wt.path, &["branch", "--show-current"]).unwrap().trim(), "trek/mock-write");
+        assert!(trek.answers(cx, &id).contains("NOTES.md"));
+        // Saved with the thread.
+        assert_eq!(trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().worktree), Some(wt.clone()));
+
+        // The branch shows on its card, in the title bar and in its own window; the composer
+        // says where it runs.
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("card-branch-{id}")));
+        assert!(trek.visible(cx, "title-branch"));
+        assert!(trek.visible(cx, "env-worktree"));
+        let own = trek.open_thread_window(cx, &id);
+        assert!(trek.visible_in(cx, own, "title-branch"));
+
+        // The next new thread from here starts in the project folder again, not in this worktree.
+        trek.update(cx, |ws, cx| ws.new_thread(cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
+    });
+}
+
+#[test]
+fn the_git_tool_reviews_commits_and_merges_a_worktree_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::Git, window, cx)));
+        // The review is read off the UI thread; a frame after it's in shows it.
+        trek.render(cx);
+        assert!(trek.visible(cx, "gf-NOTES.md"), "the thread's new file is listed");
+        assert!(trek.visible(cx, "git-merge"));
+
+        // Uncommitted work blocks the merge, and says so.
+        let blocked = trek.update(cx, |ws, cx| ws.merge_worktree(&id, cx)).await.unwrap();
+        assert_eq!(blocked, Err(worktree::MergeBlock::Uncommitted(1)));
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().settled_at.is_none()));
+
+        worktree::commit(&wt.path, "Add a note").unwrap();
+        let task = trek.update(cx, |ws, cx| ws.merge_worktree(&id, cx));
+        let tid = id.clone();
+        trek.wait(cx, "the merge to settle the thread", |ws| ws.thread(&tid).is_some_and(|t| t.settled_at.is_some())).await;
+        drop(task);
+        assert!(trek.project.join("NOTES.md").exists(), "merged into the project folder");
+        assert!(worktree::is_merged(&trek.project, &wt));
+
+        // Removing a merged worktree takes its branch too; the thread moves to the project folder.
+        let task = trek.update(cx, |ws, cx| ws.remove_worktree(&id, false, false, cx));
+        trek.wait(cx, "the worktree to go", |ws| ws.thread(&tid).is_some_and(|t| t.worktree.is_none())).await;
+        drop(task);
+        assert!(!wt.path.exists());
+        assert!(git(&trek.project, &["show-ref", "--verify", "--quiet", "refs/heads/trek/mock-write"]).is_err());
+        let t = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        assert_eq!((t.cwd, t.native_id), (Some(trek.project.clone()), None));
+        assert!(matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text.contains("worktree was removed")));
+    });
+}
+
+#[test]
+fn archiving_can_take_the_worktree_and_keeps_unmerged_commits() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        worktree::commit(&wt.path, "Add a note").unwrap();
+        std::fs::write(wt.path.join("scratch.txt"), "wip\n").unwrap();
+        let removal = trek.update(cx, |ws, cx| ws.worktree_removal(&id, cx)).await;
+        assert_eq!(removal, Some(worktree::Removal { uncommitted: 1, unmerged: 1, missing: false }));
+        // Archive and remove (the dialog named the uncommitted file first).
+        trek.update(cx, |ws, cx| ws.archive_removing_worktree(&id, cx));
+        let tid = id.clone();
+        trek.wait(cx, "the folder to go", move |ws| ws.store.thread(&tid).ok().flatten().is_some_and(|t| t.worktree.is_none())).await;
+        assert!(!wt.path.exists());
+        // The unmerged commit is still on its branch.
+        assert!(git(&trek.project, &["show-ref", "--verify", "--quiet", "refs/heads/trek/mock-write"]).is_ok());
+        let stored = trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap());
+        assert!(stored.archived_at.is_some());
+        assert_eq!(stored.cwd, Some(trek.project.clone()));
+    });
+}
+
+#[test]
+fn messages_wait_while_a_worktree_is_missing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        worktree::commit(&wt.path, "Add a note").unwrap();
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        trek.render(cx);
+        assert!(trek.visible(cx, "worktree-missing"));
+        // A message waits for a folder to run in.
+        trek.send(cx, "explain the startup");
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1);
+        assert_eq!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::User { .. })).count(), 1);
+
+        // Recreated from its branch: the message goes out there.
+        trek.click(cx, "wt-recreate");
+        let tid = id.clone();
+        trek.wait(cx, "the waiting message's answer", |ws| ws.live[&tid].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 2).await;
+        assert!(!wt.is_missing() && wt.path.join("NOTES.md").exists(), "back with the thread's commits");
+        assert!(!trek.visible(cx, "worktree-missing"));
+
+        // Gone again; this time the thread moves to the project folder.
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        trek.render(cx);
+        trek.send(cx, "explain the startup");
+        trek.click(cx, "wt-local");
+        trek.wait(cx, "the answer in the project folder", |ws| ws.live[&tid].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 3).await;
+        let t = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        assert_eq!((t.worktree, t.cwd), (None, Some(trek.project.clone())));
+    });
+}
+
+#[test]
+fn threads_editing_one_folder_are_warned_and_offered_a_worktree() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        let first = trek.send(cx, "mock:long 20s");
+        trek.update(cx, |ws, cx| ws.new_thread(cx));
+        let second = trek.send(cx, "mock:long 20s");
+        assert_ne!(first, second);
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| ws.sharing_folder(&first) && ws.sharing_folder(&second)));
+        assert!(trek.visible(cx, "next-in-worktree"));
+        // The link opens a new thread for the project, in a worktree.
+        trek.click(cx, "next-in-worktree");
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
+        assert!(trek.read(cx, |ws, _| ws.prefs_in(&Scope::Main).worktree));
+        // One stops: the other is alone again.
+        trek.update(cx, |ws, cx| ws.interrupt(&first, cx));
+        trek.wait_done(cx, &first, RunState::Idle).await;
+        assert!(!trek.read(cx, |ws, _| ws.sharing_folder(&second)));
+        trek.update(cx, |ws, cx| ws.interrupt(&second, cx));
+        trek.wait_done(cx, &second, RunState::Idle).await;
+    });
+}

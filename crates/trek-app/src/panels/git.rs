@@ -1,15 +1,22 @@
-//! Source control: branch, changed files with stats, a diff viewer, commit and push.
+//! Source control: branch, changed files with stats, a diff viewer, commit and push. For a thread
+//! in a worktree it reviews what the thread changed against its base (its commits and what isn't
+//! committed yet), and takes the work further: revert a file, commit, push, open a pull request,
+//! merge into the base, remove the worktree.
 
 use crate::palette;
 use crate::workspace::Workspace;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use trek_core::worktree::{self, Change, MergeBlock, Review, Worktree};
 
 #[derive(Clone, Debug)]
 struct FileChange {
@@ -82,12 +89,16 @@ fn snapshot(cwd: &Path) -> Snapshot {
     Snapshot { is_repo: true, branch, upstream, files }
 }
 
-fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
-    let text = if file.status == "??" {
-        std::fs::read_to_string(cwd.join(&file.path)).map(|s| s.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n")).unwrap_or_else(|_| "Binary or unreadable file".into())
-    } else {
-        git(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|_| git(cwd, &["diff", "--", &file.path])).unwrap_or_default()
-    };
+/// A worktree's changes in the shape the file list draws (`U`ntracked shows as `??` does).
+fn review_files(review: &Review) -> Vec<FileChange> {
+    review
+        .files
+        .iter()
+        .map(|c| FileChange { path: c.path.clone(), status: if c.status == 'U' { "??".into() } else { c.status.to_string() }, additions: c.additions, deletions: c.deletions })
+        .collect()
+}
+
+fn diff_lines(text: &str) -> Vec<(LineKind, String)> {
     text.lines()
         .take(5000)
         .map(|l| {
@@ -108,10 +119,68 @@ fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
         .collect()
 }
 
+fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
+    let text = if file.status == "??" {
+        std::fs::read_to_string(cwd.join(&file.path)).map(|s| s.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n")).unwrap_or_else(|_| "Binary or unreadable file".into())
+    } else {
+        git(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|_| git(cwd, &["diff", "--", &file.path])).unwrap_or_default()
+    };
+    diff_lines(&text)
+}
+
+/// A pull request's description: the agent's last answer (it usually sums up the work), then the
+/// branch's commits.
+fn pr_body(summary: Option<&str>, commits: &[String]) -> String {
+    let mut out = String::new();
+    if let Some(s) = summary.map(str::trim).filter(|s| !s.is_empty()) {
+        let mut end = s.len().min(3000);
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push_str(&s[..end]);
+        if end < s.len() {
+            out.push('…');
+        }
+    }
+    if !commits.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Commits:\n");
+        for c in commits {
+            out.push_str(&format!("- {c}\n"));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// The thread on screen runs in a worktree: what the panel reviews.
+#[derive(Clone, Debug, PartialEq)]
+struct Target {
+    thread: String,
+    title: String,
+    project: PathBuf,
+    wt: Worktree,
+}
+
+/// What a worktree thread changed, and what can be done with it.
+#[derive(Clone, Debug)]
+struct ReviewState {
+    review: Review,
+    merge_block: Option<MergeBlock>,
+    /// `gh` is installed and the project's origin is on GitHub.
+    can_pr: bool,
+}
+
 pub struct GitPanel {
     workspace: Entity<Workspace>,
     cwd: Option<PathBuf>,
     snap: Snapshot,
+    /// Set for a thread in a worktree; `review` then holds what it changed (or why that failed).
+    target: Option<Target>,
+    review: Option<Result<ReviewState, String>>,
+    /// Open pull requests by branch, looked up once each (`None`: none open).
+    prs: HashMap<String, Option<String>>,
     loading: bool,
     selected: Option<String>,
     diff: Vec<(LineKind, String)>,
@@ -126,11 +195,11 @@ impl GitPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let sub = cx.observe(&workspace, |this, ws, cx| {
-            let (cwd, turns) = {
+            let (cwd, turns, target) = {
                 let ws = ws.read(cx);
-                (ws.current_cwd(), ws.turns_finished)
+                (ws.current_cwd(), ws.turns_finished, Self::target_in(ws))
             };
-            if cwd != this.cwd || turns != this.turns_seen {
+            if cwd != this.cwd || turns != this.turns_seen || target != this.target {
                 this.turns_seen = turns;
                 this.refresh(cx);
             }
@@ -139,6 +208,9 @@ impl GitPanel {
             workspace,
             cwd: None,
             snap: Snapshot::default(),
+            target: None,
+            review: None,
+            prs: HashMap::new(),
             loading: false,
             selected: None,
             diff: vec![],
@@ -152,8 +224,23 @@ impl GitPanel {
         this
     }
 
+    fn target_in(ws: &Workspace) -> Option<Target> {
+        let t = ws.current_thread()?;
+        Some(Target { thread: t.id.clone(), title: t.title.clone(), project: ws.project_dir(t)?, wt: t.worktree.clone()? })
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.cwd = self.workspace.read(cx).current_cwd();
+        let (cwd, target) = {
+            let ws = self.workspace.read(cx);
+            (ws.current_cwd(), Self::target_in(ws))
+        };
+        if target != self.target {
+            self.review = None;
+            self.selected = None;
+            self.diff.clear();
+        }
+        self.cwd = cwd;
+        self.target = target.clone();
         let Some(cwd) = self.cwd.clone() else {
             self.snap = Snapshot::default();
             cx.notify();
@@ -161,29 +248,99 @@ impl GitPanel {
         };
         self.loading = true;
         cx.notify();
+        if let Some(target) = target {
+            self.refresh_review(target, cx);
+            return;
+        }
         self._task = Some(cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let snap = cx.background_executor().spawn(async move { snapshot(&c) }).await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
-                if this.selected.as_ref().is_some_and(|s| !snap.files.iter().any(|f| &f.path == s)) {
-                    this.selected = None;
-                    this.diff.clear();
-                }
                 this.snap = snap;
-                if let Some(sel) = this.selected.clone() {
-                    this.select(sel, cx);
-                }
-                cx.notify();
+                this.files_changed(cx);
             });
         }));
     }
 
+    fn refresh_review(&mut self, target: Target, cx: &mut Context<Self>) {
+        let lookup_pr = !self.prs.contains_key(&target.wt.branch);
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let t = target.clone();
+            let state = cx
+                .background_executor()
+                .spawn(async move {
+                    if t.wt.is_missing() {
+                        return Err("missing".to_string());
+                    }
+                    let review = worktree::review(&t.wt).map_err(|e| e.to_string())?;
+                    let can_pr = trek_core::detect::which("gh").is_some() && worktree::github_origin(&t.project);
+                    Ok(ReviewState { merge_block: worktree::merge_check(&t.project, &t.wt), can_pr, review })
+                })
+                .await;
+            let can_pr = state.as_ref().is_ok_and(|s| s.can_pr);
+            let _ = this.update(cx, |this, cx| {
+                if this.target.as_ref() != Some(&target) {
+                    return;
+                }
+                this.loading = false;
+                this.snap = Snapshot { is_repo: true, branch: target.wt.branch.clone(), upstream: None, files: state.as_ref().map(|s| review_files(&s.review)).unwrap_or_default() };
+                this.review = Some(state);
+                this.files_changed(cx);
+            });
+            // The open pull request, once per branch (it asks GitHub).
+            if can_pr && lookup_pr {
+                let wt = target.wt.clone();
+                let pr = cx.background_executor().spawn(async move { worktree::find_pr(&wt) }).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.prs.insert(target.wt.branch.clone(), pr);
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    /// The file list changed: keep the selection if its file is still there.
+    fn files_changed(&mut self, cx: &mut Context<Self>) {
+        if self.selected.as_ref().is_some_and(|s| !self.snap.files.iter().any(|f| &f.path == s)) {
+            self.selected = None;
+            self.diff.clear();
+        }
+        if let Some(sel) = self.selected.clone() {
+            self.select(sel, cx);
+        }
+        cx.notify();
+    }
+
+    fn merge_base(&self) -> Option<String> {
+        match &self.review {
+            Some(Ok(s)) => Some(s.review.merge_base.clone()),
+            _ => None,
+        }
+    }
+
+    fn change(&self, path: &str) -> Option<Change> {
+        match &self.review {
+            Some(Ok(s)) => s.review.files.iter().find(|c| c.path == path).cloned(),
+            _ => None,
+        }
+    }
+
     fn select(&mut self, path: String, cx: &mut Context<Self>) {
         let (Some(cwd), Some(file)) = (self.cwd.clone(), self.snap.files.iter().find(|f| f.path == path).cloned()) else { return };
+        // A worktree's diff is against where it left its base: its commits show too.
+        let against_base = self.target.clone().zip(self.merge_base()).zip(self.change(&path));
         self.selected = Some(path);
         cx.spawn(async move |this, cx| {
-            let lines = cx.background_executor().spawn(async move { file_diff(&cwd, &file) }).await;
+            let lines = cx
+                .background_executor()
+                .spawn(async move {
+                    match against_base {
+                        Some(((t, base), change)) => diff_lines(&worktree::file_diff(&t.wt, &base, &change)),
+                        None => file_diff(&cwd, &file),
+                    }
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.diff = lines;
                 cx.notify();
@@ -195,25 +352,44 @@ impl GitPanel {
 
     fn run(&mut self, label: &'static str, steps: Vec<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cwd) = self.cwd.clone() else { return };
+        self.run_op(
+            label,
+            move || {
+                let mut last = String::new();
+                for step in steps {
+                    let args: Vec<&str> = step.iter().map(String::as_str).collect();
+                    last = git(&cwd, &args).map_err(|e| anyhow::anyhow!(e))?;
+                }
+                Ok(last)
+            },
+            |_, _, _| {},
+            window,
+            cx,
+        );
+    }
+
+    /// Run `op` off the UI thread with `label`'s button spinning; say how it went, then
+    /// refresh. `done` gets what it returned.
+    fn run_op<T: Send + 'static>(
+        &mut self,
+        label: &'static str,
+        op: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+        done: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.busy = Some(label);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut last = String::new();
-                    for step in steps {
-                        let args: Vec<&str> = step.iter().map(String::as_str).collect();
-                        last = git(&cwd, &args)?;
-                    }
-                    Ok::<String, String>(last)
-                })
-                .await;
+            let result = cx.background_executor().spawn(async move { op() }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match result {
-                    Ok(_) => window.push_notification(format!("{label} done"), cx),
-                    Err(e) => window.push_notification(gpui_kit::component::notification::Notification::error(e), cx),
+                    Ok(v) => {
+                        window.push_notification(format!("{label} done"), cx);
+                        done(this, v, cx);
+                    }
+                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
                 }
                 this.refresh(cx);
             });
@@ -232,36 +408,107 @@ impl GitPanel {
     }
 
     fn push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(t) = self.target.clone() {
+            self.run_op("Push", move || worktree::push(&t.wt), |_, _, _| {}, window, cx);
+            return;
+        }
         let step = if self.snap.upstream.is_some() { vec!["push".to_string()] } else { vec!["push".into(), "-u".into(), "origin".into(), "HEAD".into()] };
         self.run("Push", vec![step], window, cx);
     }
-}
 
-impl Render for GitPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Write a commit message from the worktree's diff with a small model.
+    fn generate_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.cwd.clone() else { return };
+        self.busy = Some("Generate");
+        cx.notify();
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let context = tokio::task::spawn_blocking(move || worktree::commit_context(&dir, 8_000)).await.unwrap_or_default();
+            let _ = tx.send(trek_agents::generate_commit_message(&context).await.map_err(|e| format!("{e:#}"))).await;
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.recv().await.unwrap_or_else(|_| Err("cancelled".into()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                match result {
+                    Ok(msg) => this.message.update(cx, |s, cx| s.set_value(msg, window, cx)),
+                    Err(e) => window.push_notification(Notification::error(format!("Couldn't write a message: {e}")), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn create_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let summary = self.workspace.read(cx).last_answer(&t.thread);
+        let branch = t.wt.branch.clone();
+        self.run_op(
+            "Pull request",
+            move || {
+                let body = pr_body(summary.as_deref(), &worktree::commit_subjects(&t.wt));
+                worktree::create_pr(&t.wt, &t.title, &body)
+            },
+            move |this, url, cx| {
+                cx.open_url(&url);
+                this.prs.insert(branch, Some(url));
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        self.busy = Some("Merge");
+        cx.notify();
+        let task = self.workspace.update(cx, |ws, cx| ws.merge_worktree(&t.thread, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(block)) => window.push_notification(block.explain(&t.wt.base), cx),
+                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                }
+                this.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Put a file back as it is on the base, after asking.
+    fn confirm_revert(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(t), Some(base), Some(change)) = (self.target.clone(), self.merge_base(), self.change(&path)) else { return };
+        let me = cx.entity().downgrade();
+        let what = match change.status {
+            'U' | 'A' => "The thread added it; reverting deletes it.".to_string(),
+            'D' => format!("The thread deleted it; reverting brings back the version on {}.", t.wt.base),
+            _ => format!("Its changes since {} are undone, committed ones included.", t.wt.base),
+        };
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (me, t, base, change) = (me.clone(), t.clone(), base.clone(), change.clone());
+            alert
+                .title(format!("Revert {}?", change.path))
+                .description(format!("{what} This can't be undone."))
+                .confirm()
+                .ok_text("Revert")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let (t, base, change) = (t.clone(), base.clone(), change.clone());
+                    let _ = me.update(cx, |this, cx| this.run_op("Revert", move || worktree::revert_file(&t.wt, &base, &change), |_, _, _| {}, window, cx));
+                    true
+                })
+        });
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        if self.cwd.is_none() {
-            return super::empty("Open a project to see its changes.", cx).into_any_element();
-        }
-        if !self.snap.is_repo && !self.loading {
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(div().text_sm().text_color(muted).child("This folder isn't a Git repository."))
-                .child(Button::new("git-init").small().outline().label("Initialize repository").on_click(cx.listener(|this, _, window, cx| {
-                    this.run("Initialize", vec![vec!["init".into()]], window, cx)
-                })))
-                .into_any_element();
-        }
         let (ahead, behind) = self.snap.upstream.map(|(b, a)| (a, b)).unwrap_or((0, 0));
-        let total_add: i64 = self.snap.files.iter().map(|f| f.additions).sum();
-        let total_del: i64 = self.snap.files.iter().map(|f| f.deletions).sum();
-        let selected = self.selected.clone();
-
-        let header = h_flex()
+        h_flex()
             .px_3()
             .h(px(40.))
             .gap_2()
@@ -269,14 +516,23 @@ impl Render for GitPanel {
             .border_color(theme.border)
             .text_sm()
             .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(muted))
-            .child(div().font_medium().child(if self.snap.branch.is_empty() { "detached".to_string() } else { self.snap.branch.clone() }))
+            .child(div().min_w_0().truncate().font_medium().child(if self.snap.branch.is_empty() { "detached".to_string() } else { self.snap.branch.clone() }))
+            .when_some(self.target.as_ref(), |el, t| el.child(div().flex_none().text_xs().text_color(muted).child(format!("off {}", t.wt.base))))
             .when(ahead > 0, |el| el.child(div().text_xs().text_color(muted).child(format!("↑{ahead}"))))
             .when(behind > 0, |el| el.child(div().text_xs().text_color(muted).child(format!("↓{behind}"))))
             .child(div().flex_1())
             .when(self.loading, |el| el.child(Spinner::new().xsmall().color(muted)))
-            .child(crate::ui::icon_button("git-refresh", IconName::RefreshCw, "Refresh").on_click(cx.listener(|this, _, _, cx| this.refresh(cx))));
+            .child(crate::ui::icon_button("git-refresh", IconName::RefreshCw, "Refresh").on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
+    }
 
-        let files = v_flex()
+    fn file_list(&self, summary: String, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let total_add: i64 = self.snap.files.iter().map(|f| f.additions).sum();
+        let total_del: i64 = self.snap.files.iter().map(|f| f.deletions).sum();
+        let selected = self.selected.clone();
+        let revertible = self.target.is_some();
+        v_flex()
             .id("git-files")
             .max_h(px(260.))
             .overflow_y_scroll()
@@ -287,7 +543,7 @@ impl Render for GitPanel {
                     .py_1()
                     .text_xs()
                     .text_color(muted)
-                    .child(format!("{} changed", self.snap.files.len()))
+                    .child(summary)
                     .child(div().flex_1())
                     .child(div().text_color(palette::emerald(cx)).child(format!("+{total_add}")))
                     .child(div().pl_1().text_color(palette::red(cx)).child(format!("−{total_del}"))),
@@ -305,8 +561,11 @@ impl Render for GitPanel {
                     Some((d, n)) => (format!("{d}/"), n.to_string()),
                     None => (String::new(), f.path.clone()),
                 };
+                let revert_path = f.path.clone();
                 h_flex()
                     .id(SharedString::from(format!("gf-{}", f.path)))
+                    .test_support()
+                    .group("git-file")
                     .mx_1()
                     .px_2()
                     .h(px(28.))
@@ -320,37 +579,232 @@ impl Render for GitPanel {
                     .child(h_flex().flex_1().min_w_0().overflow_hidden().child(div().flex_none().child(name)).child(div().pl_1().truncate().text_xs().text_color(muted).child(dir)))
                     .when(f.additions > 0, |el| el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("+{}", f.additions))))
                     .when(f.deletions > 0, |el| el.child(div().text_xs().text_color(palette::red(cx)).child(format!("−{}", f.deletions))))
+                    .when(revertible, |el| {
+                        el.child(
+                            div().invisible().group_hover("git-file", |s| s.visible()).child(
+                                crate::ui::icon_button(SharedString::from(format!("gf-revert-{}", f.path)), IconName::Undo2, "Revert to the base version")
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.confirm_revert(revert_path.clone(), window, cx)
+                                    })),
+                            ),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(path.clone(), cx)))
-            }));
+            }))
+    }
 
+    fn diff_view(&self, empty: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        if self.selected.is_none() {
+            return super::empty(if self.snap.files.is_empty() { empty } else { "Select a file to view its diff." }, cx).into_any_element();
+        }
+        let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
         let diff_lines = self.diff.clone();
         let add_bg = palette::emerald(cx).opacity(0.12);
         let del_bg = palette::red(cx).opacity(0.12);
-        let diff = if selected.is_none() {
-            super::empty(if self.snap.files.is_empty() { "No changes. The working tree is clean." } else { "Select a file to view its diff." }, cx).into_any_element()
-        } else {
-            uniform_list("git-diff", diff_lines.len(), move |range, _, cx| {
-                let theme = cx.theme();
-                range
-                    .map(|i| {
-                        let (kind, text) = &diff_lines[i];
-                        div()
-                            .px_3()
-                            .h(px(19.))
-                            .whitespace_nowrap()
-                            .font_family(mono.clone())
-                            .text_size(px(12.))
-                            .when(*kind == LineKind::Add, |el| el.bg(add_bg))
-                            .when(*kind == LineKind::Del, |el| el.bg(del_bg))
-                            .when(*kind == LineKind::Hunk, |el| el.text_color(theme.muted_foreground).bg(theme.muted))
-                            .child(text.clone())
-                    })
-                    .collect()
-            })
+        uniform_list("git-diff", diff_lines.len(), move |range, _, cx| {
+            let theme = cx.theme();
+            range
+                .map(|i| {
+                    let (kind, text) = &diff_lines[i];
+                    div()
+                        .px_3()
+                        .h(px(19.))
+                        .whitespace_nowrap()
+                        .font_family(mono.clone())
+                        .text_size(px(12.))
+                        .when(*kind == LineKind::Add, |el| el.bg(add_bg))
+                        .when(*kind == LineKind::Del, |el| el.bg(del_bg))
+                        .when(*kind == LineKind::Hunk, |el| el.text_color(theme.muted_foreground).bg(theme.muted))
+                        .child(text.clone())
+                })
+                .collect()
+        })
+        .size_full()
+        .into_any_element()
+    }
+
+    /// A worktree thread whose folder is gone.
+    fn missing(&self, t: &Target, cx: &mut Context<Self>) -> AnyElement {
+        let (ws1, ws2, id1, id2) = (self.workspace.clone(), self.workspace.clone(), t.thread.clone(), t.thread.clone());
+        v_flex()
             .size_full()
+            .items_center()
+            .justify_center()
+            .px_6()
+            .gap_3()
+            .text_center()
+            .child(div().text_sm().font_medium().child("Worktree missing"))
+            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(format!("The folder for {} is gone. Bring it back from its branch, or move the thread to the project folder.", t.wt.branch)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Button::new("git-wt-recreate").small().outline().label("Recreate from branch").on_click(move |_, _, cx| {
+                        let id = id1.clone();
+                        ws1.update(cx, |ws, cx| ws.recreate_worktree(&id, cx))
+                    }))
+                    .child(Button::new("git-wt-local").small().ghost().label("Run in project folder").on_click(move |_, _, cx| {
+                        let id = id2.clone();
+                        ws2.update(cx, |ws, cx| ws.run_in_project_folder(&id, cx))
+                    })),
+            )
             .into_any_element()
+    }
+
+    /// Review of a worktree thread: its changes against the base, then commit, push, pull
+    /// request, merge and remove.
+    fn render_review(&mut self, t: Target, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let state = match self.review.clone() {
+            Some(Err(e)) if e == "missing" => return self.missing(&t, cx),
+            Some(Err(e)) => return v_flex().size_full().child(self.header(cx)).child(super::empty(e, cx)).into_any_element(),
+            Some(Ok(s)) => Some(s),
+            None => None,
         };
+        let review = state.as_ref().map(|s| s.review.clone()).unwrap_or_default();
+        let mut parts = vec![format!("{} changed", review.files.len())];
+        if review.ahead > 0 {
+            parts.push(format!("{} {}", review.ahead, if review.ahead == 1 { "commit" } else { "commits" }));
+        }
+        if review.uncommitted > 0 {
+            parts.push(format!("{} uncommitted", review.uncommitted));
+        }
+        let pr = self.prs.get(&t.wt.branch).cloned().flatten();
+        let can_pr = state.as_ref().is_some_and(|s| s.can_pr);
+        let block = state.as_ref().and_then(|s| s.merge_block.clone());
+        let nothing_to_merge = block.as_ref() == Some(&MergeBlock::NothingToMerge);
+        let generate = self.workspace.read(cx).can_write_with_claude();
+        let busy = self.busy;
+        let base = t.wt.base.clone();
+        let (ws, id) = (self.workspace.clone(), t.thread.clone());
+
+        let commit = v_flex()
+            .p_3()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                h_flex().gap_1().child(div().flex_1().child(Input::new(&self.message).small())).when(generate, |el| {
+                    el.child(
+                        crate::ui::icon_button("git-generate", crate::assets::Lucide::Sparkles, "Write a message from the changes")
+                            .loading(busy == Some("Generate"))
+                            .disabled(review.uncommitted == 0)
+                            .on_click(cx.listener(|this, _, window, cx| this.generate_message(window, cx))),
+                    )
+                }),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("git-commit")
+                            .small()
+                            .primary()
+                            .flex_1()
+                            .loading(busy == Some("Commit"))
+                            .disabled(review.uncommitted == 0)
+                            .label("Commit all")
+                            .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx))),
+                    )
+                    .child(
+                        Button::new("git-push")
+                            .small()
+                            .outline()
+                            .loading(busy == Some("Push"))
+                            .disabled(review.ahead == 0)
+                            .icon(IconName::ArrowUp)
+                            .label(match review.unpushed {
+                                Some(n) if n > 0 => format!("Push {n}"),
+                                _ => "Push".into(),
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| this.push(window, cx))),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .when_some(pr.clone(), |el, url| {
+                        el.child(Button::new("git-pr-open").small().outline().flex_1().icon(crate::assets::Lucide::GitPullRequest).label("View pull request").on_click(move |_, _, cx| cx.open_url(&url)))
+                    })
+                    .when(pr.is_none() && can_pr, |el| {
+                        el.child(
+                            Button::new("git-pr")
+                                .small()
+                                .outline()
+                                .flex_1()
+                                .loading(busy == Some("Pull request"))
+                                .disabled(review.ahead == 0)
+                                .icon(crate::assets::Lucide::GitPullRequestCreate)
+                                .label("Create pull request")
+                                .on_click(cx.listener(|this, _, window, cx| this.create_pr(window, cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("git-merge")
+                            .small()
+                            .outline()
+                            .flex_1()
+                            .loading(busy == Some("Merge"))
+                            .disabled(nothing_to_merge)
+                            .icon(crate::assets::Lucide::GitMerge)
+                            .label(format!("Merge into {base}"))
+                            .on_click(cx.listener(|this, _, window, cx| this.merge(window, cx))),
+                    )
+                    .child(
+                        Button::new("git-more").small().ghost().icon(IconName::Ellipsis).dropdown_menu_with_anchor(Anchor::BottomRight, {
+                            let path = t.wt.path.clone();
+                            move |menu, _, _| {
+                                let (ws, id, path) = (ws.clone(), id.clone(), path.clone());
+                                menu.min_w(px(200.))
+                                    .item(PopupMenuItem::new("Show in Finder").icon(IconName::FolderOpen).on_click(move |_, _, cx| cx.reveal_path(&path)))
+                                    .separator()
+                                    .item(PopupMenuItem::new("Remove worktree…").icon(crate::assets::Lucide::Trash).on_click(move |_, window, cx| {
+                                        crate::worktree_ui::confirm_remove(ws.clone(), id.clone(), window, cx)
+                                    }))
+                            }
+                        }),
+                    ),
+            )
+            // What stands in the way of merging (nothing to say when there's nothing to merge).
+            .when_some(block.filter(|b| *b != MergeBlock::NothingToMerge), |el, b| el.child(div().text_xs().text_color(theme.muted_foreground).child(b.explain(&base))));
+
+        v_flex()
+            .size_full()
+            .child(self.header(cx))
+            .child(self.file_list(parts.join(" · "), cx))
+            .child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(self.diff_view("No changes yet against the base branch.", cx)))
+            .child(commit)
+            .into_any_element()
+    }
+}
+
+impl Render for GitPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        if self.cwd.is_none() {
+            return super::empty("Open a project to see its changes.", cx).into_any_element();
+        }
+        if let Some(t) = self.target.clone() {
+            return self.render_review(t, cx);
+        }
+        if !self.snap.is_repo && !self.loading {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(div().text_sm().text_color(muted).child("This folder isn't a Git repository."))
+                .child(Button::new("git-init").small().outline().label("Initialize repository").on_click(cx.listener(|this, _, window, cx| {
+                    this.run("Initialize", vec![vec!["init".into()]], window, cx)
+                })))
+                .into_any_element();
+        }
+        let header = self.header(cx);
+        let files = self.file_list(format!("{} changed", self.snap.files.len()), cx);
+        let diff = self.diff_view("No changes. The working tree is clean.", cx);
 
         let commit = v_flex()
             .p_3()
@@ -389,5 +843,20 @@ impl Render for GitPanel {
             .child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(diff))
             .child(commit)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pr_body;
+
+    #[test]
+    fn pull_requests_describe_the_work_then_the_commits() {
+        let commits = vec!["Add a verbose flag".to_string(), "Test it".to_string()];
+        assert_eq!(pr_body(Some("  Added `--verbose`.\n"), &commits), "Added `--verbose`.\n\nCommits:\n- Add a verbose flag\n- Test it");
+        assert_eq!(pr_body(None, &commits[..1]), "Commits:\n- Add a verbose flag");
+        let long = "é".repeat(2000);
+        let body = pr_body(Some(&long), &[]);
+        assert!(body.ends_with('…') && body.len() <= 3003);
     }
 }

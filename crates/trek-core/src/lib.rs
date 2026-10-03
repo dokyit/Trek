@@ -11,6 +11,7 @@ pub mod store;
 pub mod transcript;
 pub mod types;
 pub mod update;
+pub mod worktree;
 
 pub use types::*;
 

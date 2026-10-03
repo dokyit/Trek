@@ -27,8 +27,8 @@ pub fn tool_icon(tool: PanelTool) -> Icon {
 }
 
 /// Quiet centered message for empty tool states.
-pub fn empty(text: &'static str, cx: &App) -> Div {
-    v_flex().size_full().items_center().justify_center().px_6().text_sm().text_center().text_color(cx.theme().muted_foreground).child(text)
+pub fn empty(text: impl Into<SharedString>, cx: &App) -> Div {
+    v_flex().size_full().items_center().justify_center().px_6().text_sm().text_center().text_color(cx.theme().muted_foreground).child(text.into())
 }
 
 enum View {
