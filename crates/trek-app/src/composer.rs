@@ -1002,9 +1002,10 @@ impl Composer {
             })
     }
 
-    /// Where a draft runs: the project folder, or a worktree of its own (git projects on a
-    /// branch). A quiet menu; the choice is fixed once the thread starts.
-    fn place_chip(&self, worktree: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// Where a draft runs: the project folder, or a worktree of its own (git projects). A quiet
+    /// menu; the choice is fixed once the thread starts. `blocked`: why a worktree can't start
+    /// from the project folder right now (no branch, or no commit, to start from).
+    fn place_chip(&self, worktree: bool, blocked: Option<&'static str>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.clone();
         let (icon, label) = if worktree { (crate::assets::Lucide::GitBranchPlus, "New worktree") } else { (crate::assets::Lucide::Laptop, "Local") };
@@ -1015,7 +1016,7 @@ impl Composer {
                 h_flex()
                     .gap(px(6.))
                     .text_color(theme.foreground.opacity(0.82))
-                    .child(Icon::new(icon).small().text_color(theme.muted_foreground))
+                    .child(Icon::new(icon).small().text_color(if worktree && blocked.is_some() { palette::amber(cx) } else { theme.muted_foreground }))
                     .child(label)
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )
@@ -1030,10 +1031,15 @@ impl Composer {
                         })
                     })
                 };
-                menu.min_w(px(240.))
+                let menu = menu
+                    .min_w(px(240.))
                     .label("New thread runs in")
                     .item(pick("Local: the project folder", false).icon(crate::assets::Lucide::Laptop))
-                    .item(pick("New worktree: a branch of its own", true).icon(crate::assets::Lucide::GitBranchPlus))
+                    .item(pick("New worktree: a branch of its own", true).icon(crate::assets::Lucide::GitBranchPlus).disabled(blocked.is_some() && !worktree));
+                match blocked {
+                    Some(why) => menu.separator().label(why),
+                    None => menu,
+                }
             })
             .into_any_element()
     }
@@ -1052,10 +1058,17 @@ impl Composer {
         let chip = |id: &'static str| {
             h_flex().id(id).h(px(26.)).px(px(8.)).gap(px(6.)).rounded(px(7.)).text_sm().text_color(theme.foreground.opacity(0.82))
         };
-        // A worktree needs a branch to start from (and a commit on it).
-        let can_branch = git.as_ref().is_some_and(|g| g.is_repo && g.branch.is_some());
-        let place = if is_draft && can_branch {
-            self.place_chip(draft_worktree, cx)
+        // A worktree needs a branch to start from (and a commit on it). The menu shows for any git
+        // project, and whenever the draft is set to a worktree (its git state may not be in yet):
+        // what it says is what sending does, and it can always go back to Local.
+        let is_repo = git.as_ref().is_some_and(|g| g.is_repo);
+        let blocked = match &git {
+            Some(g) if g.is_repo && g.branch.is_none() => Some("The project folder isn't on a branch to start from."),
+            Some(g) if g.is_repo && g.branches.is_empty() => Some("The repository has no commits to start from."),
+            _ => None,
+        };
+        let place = if is_draft && (is_repo || draft_worktree) {
+            self.place_chip(draft_worktree, blocked, cx)
         } else if let Some(wt) = worktree.clone() {
             let tip = format!("Runs in a worktree of its own: {}", trek_core::paths::tildify(&wt.path));
             chip("env-worktree")
@@ -1080,6 +1093,17 @@ impl Composer {
                     .child(div().text_xs().text_color(theme.muted_foreground).child(format!("off {}", wt.base)))
                     .into_any_element()
             }),
+            // A draft headed for a worktree: the branch it starts from, with no switcher (switching
+            // would check another branch out in the project folder, not pick a base).
+            Some(g) if is_draft && draft_worktree && g.is_repo => Some(
+                chip("env-base")
+                    .test_support()
+                    .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(theme.muted_foreground))
+                    .when_some(g.branch.clone(), |el, b| el.child(div().text_xs().text_color(theme.muted_foreground).child("off")).child(div().text_color(theme.foreground.opacity(0.9)).child(b)))
+                    .when(g.branch.is_none(), |el| el.text_color(palette::amber(cx)).child("detached HEAD"))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("The worktree's branch starts from the branch the project folder is on").build(window, cx))
+                    .into_any_element(),
+            ),
             Some(g) if g.is_repo => {
                 let name = g.branch.clone().unwrap_or_else(|| "detached HEAD".into());
                 let on_default = g.on_default();
@@ -1237,7 +1261,9 @@ impl Render for Composer {
         let preparing = live.is_some_and(|l| l.preparing);
         let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && w.is_missing())?, t.id.clone())));
         // Another thread edits the same folder right now: offer a worktree for the next one.
-        let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).and_then(|t| ws.project_dir(t));
+        let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).map(|t| ws.project_dir(t));
+        // The way out is a worktree, for git projects.
+        let crowded_repo = crowded.clone().flatten().filter(|p| p.join(".git").exists());
 
         // Model pill + menu.
         let model_open = self.model_open;
@@ -1432,7 +1458,7 @@ impl Render for Composer {
                 )
                 .when_some(cost_label, |el, c| el.child(c))
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
-                .when_some(crowded, |el, project| {
+                .when(crowded.is_some(), |el| {
                     let ws = self.workspace.clone();
                     el.child(
                         h_flex()
@@ -1440,7 +1466,7 @@ impl Render for Composer {
                             .gap(px(6.))
                             .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(palette::amber(cx)))
                             .child(div().min_w_0().truncate().child("Another thread is also editing this folder"))
-                            .child(
+                            .when_some(crowded_repo, |el, project| el.child(
                                 div()
                                     .id("next-in-worktree")
                                     .test_support()
@@ -1453,7 +1479,7 @@ impl Render for Composer {
                                         let project = project.clone();
                                         ws.update(cx, |ws, cx| ws.new_thread_in_worktree(project, cx))
                                     }),
-                            ),
+                            )),
                     )
                 })
                 .child(div().flex_1())

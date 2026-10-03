@@ -19,8 +19,9 @@ pub fn branch_chip(id: impl Into<ElementId>, wt: &Worktree, cx: &App) -> AnyElem
     h_flex()
         .id(id)
         .test_support()
-        .flex_none()
-        .max_w(px(200.))
+        .flex_shrink(1.)
+        .min_w(px(48.))
+        .max_w(px(160.))
         .h(px(20.))
         .px(px(6.))
         .gap(px(4.))
@@ -82,7 +83,9 @@ pub enum Leave {
 }
 
 /// Archive or delete a thread that has a worktree, asking whether the worktree goes too. Its
-/// state is checked first, so the question names uncommitted work that would be lost.
+/// state is checked first, so the question names uncommitted work that would be lost; removing
+/// loses no more than that (anything written since stops it). A deleted thread takes its worktree
+/// with it: nothing in Trek would lead back to one left behind. An archived one can keep it.
 pub fn confirm_leave(ws: Entity<Workspace>, id: String, leave: Leave, window: &mut Window, cx: &mut App) {
     let Some((title, wt)) = ws.read(cx).thread(&id).and_then(|t| Some((t.title.clone(), t.worktree.clone()?))) else { return };
     let check = ws.update(cx, |ws, cx| ws.worktree_removal(&id, cx));
@@ -92,39 +95,32 @@ pub fn confirm_leave(ws: Entity<Workspace>, id: String, leave: Leave, window: &m
             let _ = cx.update(|window, cx| {
                 let (verb, intro) = match leave {
                     Leave::Archive => ("Archive", "Its worktree can go with it, or stay for later."),
-                    Leave::Delete => ("Delete", "The thread and its transcript are deleted from Trek. This can't be undone. Its worktree can go too, or stay."),
+                    Leave::Delete => ("Delete", "The thread and its transcript are deleted from Trek, and its worktree with them. This can't be undone."),
                 };
                 let mut lines = vec![(intro.to_string(), false)];
                 lines.extend(losses(&wt, &r, None));
                 let remove_variant = if r.uncommitted > 0 || leave == Leave::Delete { ButtonVariant::Danger } else { ButtonVariant::Primary };
                 let (keep_ws, remove_ws, keep_id, remove_id) = (ws.clone(), ws.clone(), id.clone(), id.clone());
+                let discard = r.uncommitted;
                 window.open_alert_dialog(cx, move |alert, _, cx| {
                     let (keep_ws, remove_ws, keep_id, remove_id) = (keep_ws.clone(), remove_ws.clone(), keep_id.clone(), remove_id.clone());
+                    let remove = move |cx: &mut App| {
+                        let id = remove_id.clone();
+                        remove_ws.update(cx, |ws, cx| match leave {
+                            Leave::Archive => ws.archive_removing_worktree(&id, discard, cx),
+                            Leave::Delete => ws.delete_removing_worktree(&id, discard, cx),
+                        })
+                    };
                     let footer = DialogFooter::new().child(cancel());
-                    let footer = if r.missing {
-                        footer.child(action(Button::new("wt-leave").with_variant(remove_variant).label(verb), move |cx| {
-                            let id = remove_id.clone();
-                            remove_ws.update(cx, |ws, cx| match leave {
-                                Leave::Archive => ws.archive_removing_worktree(&id, cx),
-                                Leave::Delete => ws.delete_removing_worktree(&id, cx),
-                            })
-                        }))
+                    let footer = if r.missing || leave == Leave::Delete {
+                        footer.child(action(Button::new("wt-leave").with_variant(remove_variant).label(verb), remove))
                     } else {
                         footer
-                            .child(action(Button::new("wt-keep").outline().label(format!("{verb}, keep worktree")), move |cx| {
+                            .child(action(Button::new("wt-keep").outline().label("Archive, keep worktree"), move |cx| {
                                 let id = keep_id.clone();
-                                keep_ws.update(cx, |ws, cx| match leave {
-                                    Leave::Archive => ws.archive(&id, cx),
-                                    Leave::Delete => ws.delete_thread(&id, cx),
-                                })
+                                keep_ws.update(cx, |ws, cx| ws.archive(&id, cx))
                             }))
-                            .child(action(Button::new("wt-remove").with_variant(remove_variant).label(format!("{verb} and remove it")), move |cx| {
-                                let id = remove_id.clone();
-                                remove_ws.update(cx, |ws, cx| match leave {
-                                    Leave::Archive => ws.archive_removing_worktree(&id, cx),
-                                    Leave::Delete => ws.delete_removing_worktree(&id, cx),
-                                })
-                            }))
+                            .child(action(Button::new("wt-remove").with_variant(remove_variant).label("Archive and remove it"), remove))
                     };
                     alert.title(format!("{verb} “{title}”?")).description(body(lines.clone(), cx)).footer(footer)
                 });
@@ -145,6 +141,7 @@ pub fn confirm_remove(ws: Entity<Workspace>, id: String, window: &mut Window, cx
                 let mut lines = vec![(format!("Removes {}. The thread runs in the project folder afterwards.", trek_core::paths::tildify(&wt.path)), false)];
                 lines.extend(losses(&wt, &r, Some(true)));
                 let danger = if r.uncommitted > 0 { ButtonVariant::Danger } else { ButtonVariant::Primary };
+                let discard = r.uncommitted;
                 let (ws1, ws2, id1, id2) = (ws.clone(), ws.clone(), id.clone(), id.clone());
                 window.open_alert_dialog(cx, move |alert, _, cx| {
                     let (ws1, ws2, id1, id2) = (ws1.clone(), ws2.clone(), id1.clone(), id2.clone());
@@ -153,16 +150,16 @@ pub fn confirm_remove(ws: Entity<Workspace>, id: String, window: &mut Window, cx
                         footer
                             .child(action(Button::new("wt-remove-keep").outline().label("Remove, keep branch"), move |cx| {
                                 let id = id1.clone();
-                                ws1.update(cx, |ws, cx| ws.remove_worktree(&id, true, false, cx).detach())
+                                ws1.update(cx, |ws, cx| ws.remove_worktree(&id, discard, false, cx).detach())
                             }))
                             .child(action(Button::new("wt-remove-all").with_variant(ButtonVariant::Danger).label("Remove with branch"), move |cx| {
                                 let id = id2.clone();
-                                ws2.update(cx, |ws, cx| ws.remove_worktree(&id, true, true, cx).detach())
+                                ws2.update(cx, |ws, cx| ws.remove_worktree(&id, discard, true, cx).detach())
                             }))
                     } else {
                         footer.child(action(Button::new("wt-remove").with_variant(danger).label("Remove worktree"), move |cx| {
                             let id = id1.clone();
-                            ws1.update(cx, |ws, cx| ws.remove_worktree(&id, true, false, cx).detach())
+                            ws1.update(cx, |ws, cx| ws.remove_worktree(&id, discard, false, cx).detach())
                         }))
                     };
                     alert.title("Remove this thread's worktree?").description(body(lines.clone(), cx)).footer(footer)

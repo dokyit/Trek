@@ -184,7 +184,7 @@ impl SettingsView {
         }));
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let action_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Test"));
-        let worktree_copy = cx.new(|cx| InputState::new(window, cx).placeholder(".env, .env.local"));
+        let worktree_copy = cx.new(|cx| InputState::new(window, cx).placeholder("Nothing is copied"));
         subs.push(cx.subscribe_in(&worktree_copy, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
             if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
                 let list: Vec<String> = input.read(cx).value().split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();

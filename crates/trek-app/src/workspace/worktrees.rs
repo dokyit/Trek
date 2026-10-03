@@ -67,10 +67,15 @@ impl Workspace {
                 self.send_queued(id, cx);
             }
             Err(e) => {
-                // The thread shows its worktree as missing, with a way forward; the message waits.
+                // The thread shows its worktree as missing, with a way forward. What waited for it
+                // goes back to the composer when the thread is on screen (held messages live only
+                // in memory); otherwise it waits for that way forward.
                 live.items.push(Item::Error { text: format!("Couldn't create the worktree: {e}") });
                 self.mutate_thread(id, cx, |t| t.run_state = RunState::Failed);
                 self.persist_items(id, cx);
+                if self.shown_in(id).is_some() {
+                    self.restore_queued(id, cx);
+                }
             }
         }
         cx.notify();
@@ -96,9 +101,7 @@ impl Workspace {
             }
             return;
         };
-        if let Some(tx) = self.live.get_mut(id).and_then(|l| l.commands.take()) {
-            let _ = tx.try_send(Command::Shutdown);
-        }
+        self.end_session(id, cx).detach();
         self.mutate_thread(id, cx, |t| {
             t.worktree = None;
             t.cwd = Some(project.clone());
@@ -149,17 +152,43 @@ impl Workspace {
         cx.background_executor().spawn(async move { Some(worktree::removal(&project, &wt)) })
     }
 
-    /// Remove `id`'s worktree (see `worktree::remove`); the thread goes back to the project
-    /// folder. Its session ends first: nothing may be running in a folder that's being deleted.
-    pub fn remove_worktree(&mut self, id: &str, discard_uncommitted: bool, delete_unmerged: bool, cx: &mut Context<Self>) -> Task<Result<bool>> {
+    /// End `id`'s agent session. The task finishes once the session has (its events stop), or
+    /// after a few seconds if it doesn't say.
+    fn end_session(&mut self, id: &str, cx: &mut Context<Self>) -> Task<()> {
+        let Some(live) = self.live.get_mut(id) else { return Task::ready(()) };
+        if let Some(tx) = live.commands.take() {
+            let _ = tx.try_send(Command::Shutdown);
+        }
+        let Some(events) = live._events.take() else { return Task::ready(()) };
+        // Closed once the events task is done (its sender goes with it).
+        let (ended, done) = async_channel::bounded::<()>(1);
+        cx.spawn(async move |_, _| {
+            events.await;
+            drop(ended);
+        })
+        .detach();
+        cx.spawn(async move |_, cx| {
+            for _ in 0..100 {
+                if done.is_closed() {
+                    return;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+            }
+        })
+    }
+
+    /// Remove `id`'s worktree (see `worktree::remove`; `discard_uncommitted` is how many
+    /// uncommitted changes the user was shown and agreed to lose); the thread goes back to the
+    /// project folder. Its session ends first: nothing may be writing in a folder that's being
+    /// deleted, and what it wrote before it stopped counts.
+    pub fn remove_worktree(&mut self, id: &str, discard_uncommitted: usize, delete_unmerged: bool, cx: &mut Context<Self>) -> Task<Result<bool>> {
         let Some((project, wt)) = self.worktree_of(id).or_else(|| self.stored_worktree(id)) else {
             return Task::ready(Err(anyhow::anyhow!("This thread has no worktree.")));
         };
-        if let Some(tx) = self.live.get_mut(id).and_then(|l| l.commands.take()) {
-            let _ = tx.try_send(Command::Shutdown);
-        }
+        let ended = self.end_session(id, cx);
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
+            ended.await;
             let (p, w) = (project.clone(), wt.clone());
             let result = cx.background_executor().spawn(async move { worktree::remove(&p, &w, discard_uncommitted, delete_unmerged) }).await;
             let _ = this.update(cx, |this, cx| match &result {
@@ -182,21 +211,23 @@ impl Workspace {
         Some((project, wt))
     }
 
-    /// Archive a thread and remove its worktree (the user confirmed losing what isn't committed).
-    /// The branch stays unless it's merged.
-    pub fn archive_removing_worktree(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.remove_worktree(id, true, false, cx).detach();
+    /// Archive a thread and remove its worktree, losing the `discard_uncommitted` uncommitted
+    /// changes the user was told about (no more). The branch stays unless it's merged.
+    pub fn archive_removing_worktree(&mut self, id: &str, discard_uncommitted: usize, cx: &mut Context<Self>) {
+        self.remove_worktree(id, discard_uncommitted, false, cx).detach();
         self.archive(id, cx);
     }
 
-    /// Delete a thread and remove its worktree (confirmed as for archiving).
-    pub fn delete_removing_worktree(&mut self, id: &str, cx: &mut Context<Self>) {
-        let task = self.remove_worktree(id, true, false, cx);
+    /// Delete a thread and remove its worktree (confirmed as for archiving). The thread stays if
+    /// its worktree can't go: deleting it would leave the worktree with nothing pointing at it.
+    pub fn delete_removing_worktree(&mut self, id: &str, discard_uncommitted: usize, cx: &mut Context<Self>) {
+        let task = self.remove_worktree(id, discard_uncommitted, false, cx);
         let id = id.to_string();
         // The thread goes once its worktree has: removing reads the thread's project.
         let task = cx.spawn(async move |this, cx| {
-            let _ = task.await;
-            let _ = this.update(cx, |this, cx| this.delete_thread(&id, cx));
+            if task.await.is_ok() {
+                let _ = this.update(cx, |this, cx| this.delete_thread(&id, cx));
+            }
         });
         self.tasks.push(task);
     }

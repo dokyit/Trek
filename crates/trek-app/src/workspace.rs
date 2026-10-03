@@ -1481,11 +1481,16 @@ impl Workspace {
                 };
                 let p = self.draft_prefs.clone();
                 // A worktree of its own: its branch and folder are picked now, and it's made in
-                // the background while the message waits.
-                let planned = match p.worktree.then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, &text)) {
+                // the background while the message waits. Other threads' worktrees are taken,
+                // made yet or not.
+                let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
+                let planned = match p.worktree.then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, &text, &taken)) {
                     Some(Err(e)) => {
                         cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start a worktree: {e}"), undo: None });
                         cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+                        for image in images {
+                            cx.emit(WorkspaceEvent::AttachImage(image));
+                        }
                         return;
                     }
                     Some(Ok(wt)) => Some(wt),

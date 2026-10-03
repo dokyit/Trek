@@ -7,7 +7,6 @@ use crate::palette;
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
@@ -152,6 +151,15 @@ fn pr_body(summary: Option<&str>, commits: &[String]) -> String {
         }
     }
     out.trim_end().to_string()
+}
+
+/// How a pull request's link reads: `owner/repo#12` for a GitHub one, else the link itself.
+fn pr_label(url: &str) -> String {
+    let path = url.trim_end_matches('/').split_once("github.com/").map(|(_, p)| p);
+    match path.and_then(|p| p.rsplit_once("/pull/")) {
+        Some((repo, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => format!("{repo}#{n}"),
+        _ => url.to_string(),
+    }
 }
 
 /// The thread on screen runs in a worktree: what the panel reviews.
@@ -404,6 +412,10 @@ impl GitPanel {
             return;
         }
         self.message.update(cx, |s, cx| s.set_value("", window, cx));
+        if let Some(t) = self.target.clone() {
+            self.run_op("Commit", move || worktree::commit(&t.wt.path, &msg), |_, _, _| {}, window, cx);
+            return;
+        }
         self.run("Commit", vec![vec!["add".into(), "-A".into()], vec!["commit".into(), "-m".into(), msg]], window, cx);
     }
 
@@ -508,6 +520,12 @@ impl GitPanel {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let (ahead, behind) = self.snap.upstream.map(|(b, a)| (a, b)).unwrap_or((0, 0));
+        // A worktree's base may have moved on since the branch left it: merging then makes a
+        // merge commit, and the branch hasn't seen what's new there.
+        let base_ahead = match (&self.target, &self.review) {
+            (Some(t), Some(Ok(s))) if s.review.behind > 0 => Some((s.review.behind, t.wt.base.clone())),
+            _ => None,
+        };
         h_flex()
             .px_3()
             .h(px(40.))
@@ -520,6 +538,19 @@ impl GitPanel {
             .when_some(self.target.as_ref(), |el, t| el.child(div().flex_none().text_xs().text_color(muted).child(format!("off {}", t.wt.base))))
             .when(ahead > 0, |el| el.child(div().text_xs().text_color(muted).child(format!("↑{ahead}"))))
             .when(behind > 0, |el| el.child(div().text_xs().text_color(muted).child(format!("↓{behind}"))))
+            .when_some(base_ahead, |el, (n, base)| {
+                let tip = format!("{base} has {n} {} this branch doesn't", if n == 1 { "commit" } else { "commits" });
+                el.child(
+                    div()
+                        .id("git-base-ahead")
+                        .test_support()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("{base} ↑{n}"))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)),
+                )
+            })
             .child(div().flex_1())
             .when(self.loading, |el| el.child(Spinner::new().xsmall().color(muted)))
             .child(crate::ui::icon_button("git-refresh", IconName::RefreshCw, "Refresh").on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
@@ -686,7 +717,7 @@ impl GitPanel {
             .border_t_1()
             .border_color(theme.border)
             .child(
-                h_flex().gap_1().child(div().flex_1().child(Input::new(&self.message).small())).when(generate, |el| {
+                h_flex().gap_1().child(div().id("git-message").test_support().flex_1().child(Input::new(&self.message).small())).when(generate, |el| {
                     el.child(
                         crate::ui::icon_button("git-generate", crate::assets::Lucide::Sparkles, "Write a message from the changes")
                             .loading(busy == Some("Generate"))
@@ -725,9 +756,6 @@ impl GitPanel {
             .child(
                 h_flex()
                     .gap_2()
-                    .when_some(pr.clone(), |el, url| {
-                        el.child(Button::new("git-pr-open").small().outline().flex_1().icon(crate::assets::Lucide::GitPullRequest).label("View pull request").on_click(move |_, _, cx| cx.open_url(&url)))
-                    })
                     .when(pr.is_none() && can_pr, |el| {
                         el.child(
                             Button::new("git-pr")
@@ -751,24 +779,41 @@ impl GitPanel {
                             .icon(crate::assets::Lucide::GitMerge)
                             .label(format!("Merge into {base}"))
                             .on_click(cx.listener(|this, _, window, cx| this.merge(window, cx))),
-                    )
-                    .child(
-                        Button::new("git-more").small().ghost().icon(IconName::Ellipsis).dropdown_menu_with_anchor(Anchor::BottomRight, {
-                            let path = t.wt.path.clone();
-                            move |menu, _, _| {
-                                let (ws, id, path) = (ws.clone(), id.clone(), path.clone());
-                                menu.min_w(px(200.))
-                                    .item(PopupMenuItem::new("Show in Finder").icon(IconName::FolderOpen).on_click(move |_, _, cx| cx.reveal_path(&path)))
-                                    .separator()
-                                    .item(PopupMenuItem::new("Remove worktree…").icon(crate::assets::Lucide::Trash).on_click(move |_, window, cx| {
-                                        crate::worktree_ui::confirm_remove(ws.clone(), id.clone(), window, cx)
-                                    }))
-                            }
-                        }),
                     ),
             )
             // What stands in the way of merging (nothing to say when there's nothing to merge).
-            .when_some(block.filter(|b| *b != MergeBlock::NothingToMerge), |el, b| el.child(div().text_xs().text_color(theme.muted_foreground).child(b.explain(&base))));
+            .when_some(block.filter(|b| *b != MergeBlock::NothingToMerge), |el, b| el.child(div().text_xs().text_color(theme.muted_foreground).child(b.explain(&base))))
+            // The pull request, as a link that opens it.
+            .when_some(pr.clone(), |el, url| {
+                let label = pr_label(&url);
+                el.child(
+                    h_flex()
+                        .id("git-pr-link")
+                        .test_support()
+                        .gap(px(6.))
+                        .min_w_0()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(theme.foreground.opacity(0.85))
+                        .hover(|s| s.text_color(theme.foreground).underline())
+                        .child(Icon::new(crate::assets::Lucide::GitPullRequest).small().text_color(theme.muted_foreground))
+                        .child(div().min_w_0().truncate().child(label))
+                        .child(Icon::new(IconName::ExternalLink).xsmall().text_color(theme.muted_foreground))
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Button::new("git-reveal").small().ghost().icon(IconName::FolderOpen).label("Show in Finder").on_click({
+                        let path = t.wt.path.clone();
+                        move |_, _, cx| cx.reveal_path(&path)
+                    }))
+                    .child(div().flex_1())
+                    .child(Button::new("git-remove").small().ghost().icon(crate::assets::Lucide::Trash).label("Remove worktree…").on_click(move |_, window, cx| {
+                        crate::worktree_ui::confirm_remove(ws.clone(), id.clone(), window, cx)
+                    })),
+            );
 
         v_flex()
             .size_full()
@@ -848,7 +893,14 @@ impl Render for GitPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::pr_body;
+    use super::{pr_body, pr_label};
+
+    #[test]
+    fn pull_request_links_read_as_repo_and_number() {
+        assert_eq!(pr_label("https://github.com/dokyit/Trek/pull/42"), "dokyit/Trek#42");
+        assert_eq!(pr_label("https://github.com/dokyit/Trek/pull/42/"), "dokyit/Trek#42");
+        assert_eq!(pr_label("https://example.com/merge/7"), "https://example.com/merge/7");
+    }
 
     #[test]
     fn pull_requests_describe_the_work_then_the_commits() {

@@ -1252,7 +1252,7 @@ impl SettingsView {
             ));
             new_thread_rows.push(Self::row(
                 "Copy into new worktrees",
-                "Files a fresh checkout lacks because git ignores them, separated by commas.",
+                "Files a fresh checkout lacks because git ignores them, separated by commas. Ones git doesn't ignore aren't copied.",
                 div().w(px(240.)).child(Input::new(&self.worktree_copy).small()),
                 cx,
             ));

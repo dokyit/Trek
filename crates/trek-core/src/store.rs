@@ -285,13 +285,21 @@ fn enum_from<T: for<'de> Deserialize<'de> + Default>(s: &str) -> T {
     serde_json::from_value(serde_json::Value::String(s.into())).unwrap_or_default()
 }
 
-/// Project root for a working directory: the enclosing git repo (the main checkout, for a linked
-/// worktree), else the folder itself.
+/// Project root for a working directory: the enclosing git repo (the main checkout, for one of
+/// Trek's own worktrees), else the folder itself.
 pub fn project_root(cwd: &Path) -> PathBuf {
+    project_root_in(cwd, &crate::worktree::worktrees_dir())
+}
+
+/// [`project_root`], with Trek's worktrees under `trek_worktrees`. Only those belong to their main
+/// checkout: a worktree the user made themselves (by hand, or with another tool) is a project of
+/// its own, as it's opened.
+fn project_root_in(cwd: &Path, trek_worktrees: &Path) -> PathBuf {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
         if d.join(".git").exists() {
-            return crate::worktree::main_checkout(d).unwrap_or_else(|| d.to_path_buf());
+            let main = d.starts_with(trek_worktrees).then(|| crate::worktree::main_checkout(d)).flatten();
+            return main.unwrap_or_else(|| d.to_path_buf());
         }
         dir = d.parent();
     }
@@ -1167,20 +1175,28 @@ mod tests {
     }
 
     #[test]
-    fn a_linked_worktree_belongs_to_its_main_checkout() {
+    fn treks_own_worktrees_belong_to_their_main_checkout() {
         let dir = std::env::temp_dir().join(format!("trek-root-{}", uuid::Uuid::new_v4()));
-        let (main, linked) = (dir.join("repo"), dir.join("elsewhere/linked"));
-        std::fs::create_dir_all(main.join(".git/worktrees/linked")).unwrap();
-        std::fs::create_dir_all(linked.join("src")).unwrap();
-        std::fs::write(main.join(".git/worktrees/linked/commondir"), "../..\n").unwrap();
-        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/linked").display())).unwrap();
-        assert_eq!(project_root(&linked.join("src")), main);
-        assert_eq!(project_root(&main), main);
-        // A submodule's `.git` file has no `commondir`: it's a project of its own.
+        let trek = dir.join("worktrees");
+        let main = dir.join("repo");
+        let linked = |name: &str, at: &Path| {
+            std::fs::create_dir_all(main.join(".git/worktrees").join(name)).unwrap();
+            std::fs::create_dir_all(at.join("src")).unwrap();
+            std::fs::write(main.join(".git/worktrees").join(name).join("commondir"), "../..\n").unwrap();
+            std::fs::write(at.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees").join(name).display())).unwrap();
+        };
+        let (ours, theirs) = (trek.join("repo/fix-it"), dir.join("elsewhere/linked"));
+        linked("fix-it", &ours);
+        linked("linked", &theirs);
+        assert_eq!(project_root_in(&ours.join("src"), &trek), main);
+        assert_eq!(project_root_in(&main, &trek), main);
+        // One the user made themselves opens as its own project.
+        assert_eq!(project_root_in(&theirs.join("src"), &trek), theirs);
+        // A submodule's `.git` file has no `commondir`: it's a project of its own, even in there.
         std::fs::create_dir_all(main.join(".git/modules/sub")).unwrap();
-        std::fs::create_dir_all(main.join("sub")).unwrap();
-        std::fs::write(main.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
-        assert_eq!(project_root(&main.join("sub")), main.join("sub"));
+        std::fs::create_dir_all(ours.join("sub")).unwrap();
+        std::fs::write(ours.join("sub/.git"), format!("gitdir: {}\n", main.join(".git/modules/sub").display())).unwrap();
+        assert_eq!(project_root_in(&ours.join("sub"), &trek), ours.join("sub"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

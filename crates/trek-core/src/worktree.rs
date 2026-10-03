@@ -3,7 +3,8 @@
 //! makes those checkouts and takes the work back: what changed against the base branch, reverting
 //! a file, committing, pushing, a pull request, merging into the base, and removing the checkout.
 //!
-//! Everything here runs `git` (or `gh`) and blocks: call it off the UI thread.
+//! Everything here runs `git` (or `gh`) and blocks: call it off the UI thread ([`plan`], a few
+//! quick local reads, is the exception: a thread's worktree is picked as it's created).
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::path::{Component, Path, PathBuf};
@@ -103,8 +104,9 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
 
 /// Pick the branch and folder for a new thread's worktree in `repo`: `trek/<slug>` off the
 /// branch the project folder is on, at `<worktrees>/<repo>/<slug>` (Trek passes
-/// [`worktrees_dir`]). Nothing is made yet ([`add`] does that).
-pub fn plan(worktrees: &Path, repo: &Path, hint: &str) -> Result<Worktree> {
+/// [`worktrees_dir`]). Nothing is made yet ([`add`] does that), so worktrees already picked for
+/// other threads are passed as `taken`: one still being made has no folder or branch yet.
+pub fn plan(worktrees: &Path, repo: &Path, hint: &str, taken: &[Worktree]) -> Result<Worktree> {
     let base = current_branch(repo)?;
     let name = repo.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "repo".into());
     let root = worktrees.join(name);
@@ -113,7 +115,8 @@ pub fn plan(worktrees: &Path, repo: &Path, hint: &str) -> Result<Worktree> {
     loop {
         let s = if n == 1 { stem.clone() } else { format!("{stem}-{n}") };
         let (path, branch) = (root.join(&s), format!("{BRANCH_PREFIX}{s}"));
-        if !path.exists() && !branch_exists(repo, &branch) {
+        let reserved = taken.iter().any(|w| w.path == path || w.branch == branch);
+        if !reserved && !path.exists() && !branch_exists(repo, &branch) {
             return Ok(Worktree { path, branch, base });
         }
         n += 1;
@@ -140,13 +143,15 @@ pub fn add(repo: &Path, wt: &Worktree, copy: &[String]) -> Result<()> {
 
 /// [`plan`] and [`add`] in one go.
 pub fn create(worktrees: &Path, repo: &Path, hint: &str, copy: &[String]) -> Result<Worktree> {
-    let wt = plan(worktrees, repo, hint)?;
+    let wt = plan(worktrees, repo, hint, &[])?;
     add(repo, &wt, copy)?;
     Ok(wt)
 }
 
-/// Copy each of `entries` (paths relative to the project: files or folders) that the project has
-/// and the worktree doesn't. Returns what was copied.
+/// Copy each of `entries` (paths relative to the project: files or folders) that the project has,
+/// git ignores, and the worktree doesn't. Only ignored ones: anything else would show up in the
+/// worktree as the thread's own new file, and "Commit all" would commit it (a `.env` with secrets
+/// the project never tracked). Returns what was copied.
 pub fn copy_files(repo: &Path, dest: &Path, entries: &[String]) -> Vec<String> {
     let mut copied = vec![];
     for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
@@ -156,7 +161,7 @@ pub fn copy_files(repo: &Path, dest: &Path, entries: &[String]) -> Vec<String> {
             continue;
         }
         let (src, dst) = (repo.join(rel), dest.join(rel));
-        if !src.exists() || dst.exists() {
+        if !src.exists() || dst.exists() || !ok(repo, &["check-ignore", "-q", "--", entry]) {
             continue;
         }
         let done = if src.is_dir() {
@@ -323,8 +328,7 @@ pub fn github_origin(repo: &Path) -> bool {
     git(repo, &["remote", "get-url", "origin"]).is_ok_and(|u| u.contains("github.com"))
 }
 
-fn gh(dir: &Path, args: &[&str]) -> Result<String> {
-    let bin = crate::detect::which("gh").context("The GitHub CLI (gh) isn't installed.")?;
+fn gh_at(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new(bin).args(args).current_dir(dir).env("PATH", crate::detect::login_path()).env("GH_PROMPT_DISABLED", "1").output()?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -335,13 +339,23 @@ fn gh(dir: &Path, args: &[&str]) -> Result<String> {
 
 /// The open pull request for the branch, if there is one.
 pub fn find_pr(wt: &Worktree) -> Option<String> {
-    gh(&wt.path, &["pr", "view", &wt.branch, "--json", "url,state", "--jq", "select(.state == \"OPEN\") | .url"]).ok().filter(|u| u.starts_with("http"))
+    find_pr_with(&crate::detect::which("gh")?, wt)
+}
+
+fn find_pr_with(gh: &Path, wt: &Worktree) -> Option<String> {
+    gh_at(gh, &wt.path, &["pr", "view", &wt.branch, "--json", "url,state", "--jq", "select(.state == \"OPEN\") | .url"]).ok().filter(|u| u.starts_with("http"))
 }
 
 /// Push the branch and open a pull request into its base. Returns the pull request's URL.
 pub fn create_pr(wt: &Worktree, title: &str, body: &str) -> Result<String> {
+    let bin = crate::detect::which("gh").context("The GitHub CLI (gh) isn't installed.")?;
+    create_pr_with(&bin, wt, title, body)
+}
+
+fn create_pr_with(gh: &Path, wt: &Worktree, title: &str, body: &str) -> Result<String> {
     push(wt)?;
-    let out = gh(&wt.path, &["pr", "create", "--head", &wt.branch, "--base", &wt.base, "--title", title, "--body", body])?;
+    let out = gh_at(gh, &wt.path, &["pr", "create", "--head", &wt.branch, "--base", &wt.base, "--title", title, "--body", body])?;
+    // gh says what it did, then the link, last.
     out.lines().rev().find(|l| l.starts_with("http")).map(str::to_string).ok_or_else(|| anyhow!("gh didn't say where the pull request is: {out}"))
 }
 
@@ -444,17 +458,22 @@ pub fn removal(repo: &Path, wt: &Worktree) -> Removal {
 }
 
 /// Remove the worktree's folder and, when its commits are all in the base (or
-/// `delete_unmerged`), its branch. Uncommitted changes stop it unless `discard_uncommitted`.
-/// Returns whether the branch was deleted.
-pub fn remove(repo: &Path, wt: &Worktree, discard_uncommitted: bool, delete_unmerged: bool) -> Result<bool> {
+/// `delete_unmerged`), its branch. `discard_uncommitted` is how many uncommitted changes the user
+/// agreed to lose: more than that (the agent wrote more since they were asked) and nothing is
+/// removed. Returns whether the branch was deleted.
+pub fn remove(repo: &Path, wt: &Worktree, discard_uncommitted: usize, delete_unmerged: bool) -> Result<bool> {
     let check = removal(repo, wt);
-    if check.uncommitted > 0 && !discard_uncommitted {
-        bail!("The worktree has {} uncommitted {}.", check.uncommitted, if check.uncommitted == 1 { "change" } else { "changes" });
+    if check.uncommitted > discard_uncommitted {
+        bail!(
+            "The worktree has {} now{}. Nothing was removed.",
+            changes(check.uncommitted),
+            if discard_uncommitted == 0 { String::new() } else { format!(", not the {discard_uncommitted} you agreed to lose") }
+        );
     }
     if !check.missing {
         let path = wt.path.to_string_lossy();
         let mut args = vec!["worktree", "remove"];
-        if discard_uncommitted {
+        if check.uncommitted > 0 {
             args.push("--force");
         }
         args.push(&path);
@@ -465,18 +484,18 @@ pub fn remove(repo: &Path, wt: &Worktree, discard_uncommitted: bool, delete_unme
     if let Some(parent) = wt.path.parent() {
         let _ = std::fs::remove_dir(parent);
     }
-    if !branch_exists(repo, &wt.branch) {
+    if !branch_exists(repo, &wt.branch) || !(delete_unmerged || is_merged(repo, wt)) {
         return Ok(false);
     }
-    if is_merged(repo, wt) {
-        git(repo, &["branch", "-d", &wt.branch])?;
-        Ok(true)
-    } else if delete_unmerged {
-        git(repo, &["branch", "-D", &wt.branch])?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    // `-D`: whether it's merged was checked against its base just now. `-d` would check it
+    // against its upstream or whatever the project folder has checked out instead, and refuse a
+    // branch that's in its base but was pushed before its last commit. The folder's gone by
+    // now; a branch that won't go is just kept.
+    Ok(git(repo, &["branch", "-D", &wt.branch]).is_ok())
+}
+
+fn changes(n: usize) -> String {
+    format!("{n} uncommitted {}", if n == 1 { "change" } else { "changes" })
 }
 
 /// The checkout `dir` is in: the nearest folder up with a `.git` (a linked worktree's own
@@ -573,7 +592,9 @@ mod tests {
         let r = repo("create");
         write(&r, ".env", "KEY=1\n");
         write(&r, "secrets/token", "abc\n");
-        let copy = vec![".env".into(), ".env.local".into(), "secrets".into(), "../escape".into()];
+        // Untracked but not ignored: it would turn up as the thread's change, and get committed.
+        write(&r, "local.cfg", "secret\n");
+        let copy = vec![".env".into(), ".env.local".into(), "secrets".into(), "../escape".into(), "local.cfg".into(), "README.md".into()];
         let wt = create(&r, "Add a verbose flag", &copy).unwrap();
         assert_eq!(wt.branch, "trek/add-a-verbose-flag");
         assert_eq!(wt.base, "main");
@@ -581,6 +602,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.path.join(".env")).unwrap(), "KEY=1\n");
         assert_eq!(std::fs::read_to_string(wt.path.join("secrets/token")).unwrap(), "abc\n");
         assert!(!wt.path.join(".env.local").exists());
+        assert!(!wt.path.join("local.cfg").exists());
         assert_eq!(git(&wt.path, &["branch", "--show-current"]).unwrap().trim(), "trek/add-a-verbose-flag");
         assert_eq!(main_checkout(&wt.path).unwrap(), r.canonicalize().unwrap());
         assert_eq!(main_checkout(&r), None);
@@ -700,10 +722,14 @@ mod tests {
         let wt = create(&r, "dirty", &[]).unwrap();
         write(&wt.path, "wip.txt", "wip\n");
         assert_eq!(removal(&r, &wt), Removal { uncommitted: 1, unmerged: 0, missing: false });
-        assert!(remove(&r, &wt, false, false).is_err());
+        assert!(remove(&r, &wt, 0, false).is_err());
         assert!(wt.path.exists());
+        // More than the user agreed to lose (the agent wrote another file since): kept.
+        write(&wt.path, "more.txt", "more\n");
+        assert!(remove(&r, &wt, 1, false).unwrap_err().to_string().contains("2 uncommitted changes now"));
+        assert!(wt.path.join("wip.txt").exists());
         // Discarded on request; nothing unmerged, so the branch goes too.
-        assert!(remove(&r, &wt, true, false).unwrap());
+        assert!(remove(&r, &wt, 2, false).unwrap());
         assert!(!wt.path.exists() && !branch_exists(&r, &wt.branch));
 
         // Unmerged commits: the folder goes, the branch stays.
@@ -711,15 +737,51 @@ mod tests {
         write(&wt.path, "work.txt", "w\n");
         commit(&wt.path, "Work").unwrap();
         assert_eq!(removal(&r, &wt).unmerged, 1);
-        assert!(!remove(&r, &wt, false, false).unwrap());
+        assert!(!remove(&r, &wt, 0, false).unwrap());
         assert!(!wt.path.exists() && branch_exists(&r, &wt.branch));
         // Brought back from its branch, with its commit.
         assert!(wt.is_missing());
         add(&r, &wt, &[]).unwrap();
         assert!(!wt.is_missing() && wt.path.join("work.txt").exists());
         // Deleting the unmerged branch takes a yes.
-        assert!(remove(&r, &wt, false, true).unwrap());
+        assert!(remove(&r, &wt, 0, true).unwrap());
         assert!(!branch_exists(&r, &wt.branch));
+    }
+
+    #[test]
+    fn a_merged_branch_goes_whatever_its_upstream_or_the_checkout_say() {
+        let r = repo("merged");
+        let remote = tmp().join(format!("remote-{}.git", uuid::Uuid::new_v4().simple()));
+        git(&r, &["init", "-q", "--bare", &remote.to_string_lossy()]).unwrap();
+        git(&r, &["remote", "add", "origin", &remote.to_string_lossy()]).unwrap();
+        // Pushed, then another commit, then merged: its upstream lags behind what's merged.
+        let wt = create(&r, "pushed", &[]).unwrap();
+        write(&wt.path, "a.txt", "a\n");
+        commit(&wt.path, "A").unwrap();
+        push(&wt).unwrap();
+        write(&wt.path, "b.txt", "b\n");
+        commit(&wt.path, "B").unwrap();
+        assert_eq!(merge(&r, &wt).unwrap(), Ok(()));
+        assert!(remove(&r, &wt, 0, false).unwrap());
+        assert!(!branch_exists(&r, &wt.branch));
+        // No upstream, merged into its base, but the project folder has moved to another branch.
+        let wt = create(&r, "elsewhere", &[]).unwrap();
+        write(&wt.path, "c.txt", "c\n");
+        commit(&wt.path, "C").unwrap();
+        assert_eq!(merge(&r, &wt).unwrap(), Ok(()));
+        git(&r, &["switch", "-q", "-c", "side", "HEAD~1"]).unwrap();
+        assert!(remove(&r, &wt, 0, false).unwrap());
+        assert!(!branch_exists(&r, &wt.branch));
+    }
+
+    #[test]
+    fn worktrees_planned_for_other_threads_are_taken() {
+        let r = repo("taken");
+        let first = plan(&worktrees(), &r, "same words", &[]).unwrap();
+        // Not made yet, so only `taken` knows about it.
+        let second = plan(&worktrees(), &r, "same words", std::slice::from_ref(&first)).unwrap();
+        assert_eq!((first.branch.as_str(), second.branch.as_str()), ("trek/same-words", "trek/same-words-2"));
+        assert_ne!(first.path, second.path);
     }
 
     #[test]
@@ -741,7 +803,41 @@ mod tests {
         assert_eq!(git(&wt.path, &["branch", "--show-current"]).unwrap().trim(), wt.branch);
         // A missing folder can still be removed: just its branch is tidied.
         std::fs::remove_dir_all(&wt.path).unwrap();
-        assert!(remove(&r, &wt, false, false).unwrap());
+        assert!(remove(&r, &wt, 0, false).unwrap());
+    }
+
+    /// A stand-in for `gh`: records its arguments, says what the real one says.
+    fn fake_gh(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = dir.join(format!("gh-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}.args\"\n{script}\n", bin.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[test]
+    fn pull_requests_go_through_gh() {
+        let r = repo("pr");
+        let remote = tmp().join(format!("remote-{}.git", uuid::Uuid::new_v4().simple()));
+        git(&r, &["init", "-q", "--bare", &remote.to_string_lossy()]).unwrap();
+        git(&r, &["remote", "add", "origin", &remote.to_string_lossy()]).unwrap();
+        let wt = create(&r, "pr", &[]).unwrap();
+        write(&wt.path, "x.txt", "x\n");
+        commit(&wt.path, "X").unwrap();
+        let gh = fake_gh(&tmp(), "echo 'Creating pull request for trek/pr into main'\necho\necho https://github.com/o/r/pull/7");
+        let url = create_pr_with(&gh, &wt, "Add x", "Body").unwrap();
+        assert_eq!(url, "https://github.com/o/r/pull/7");
+        let args = std::fs::read_to_string(format!("{}.args", gh.display())).unwrap();
+        assert_eq!(args.lines().collect::<Vec<_>>(), ["pr", "create", "--head", "trek/pr", "--base", "main", "--title", "Add x", "--body", "Body"]);
+        // Pushed first, with its upstream set.
+        assert_eq!(review(&wt).unwrap().unpushed, Some(0));
+        // gh failing, or saying nothing useful, is an error with its words.
+        assert!(create_pr_with(&fake_gh(&tmp(), "echo 'no access' >&2; exit 1"), &wt, "t", "b").unwrap_err().to_string().contains("no access"));
+        assert!(create_pr_with(&fake_gh(&tmp(), "echo done"), &wt, "t", "b").is_err());
+        // The open one is found; none (or a closed one: gh prints nothing) is none.
+        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo https://github.com/o/r/pull/7"), &wt).as_deref(), Some("https://github.com/o/r/pull/7"));
+        assert_eq!(find_pr_with(&fake_gh(&tmp(), "true"), &wt), None);
+        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo 'no pull requests found' >&2; exit 1"), &wt), None);
     }
 
     #[test]
