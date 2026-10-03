@@ -242,6 +242,12 @@ impl CommandPalette {
         }
     }
 
+    /// The row the keyboard is on.
+    #[cfg(test)]
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open { self.dismiss(window, cx) } else { self.show(window, cx) }
     }
@@ -536,6 +542,7 @@ impl CommandPalette {
         };
         h_flex()
             .id(("palette-row", ix))
+            .test_support()
             .relative()
             .flex_shrink_0()
             .mx(px(5.))

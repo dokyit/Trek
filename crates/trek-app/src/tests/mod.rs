@@ -2,10 +2,13 @@
 //! appears on screen) over an in-memory database and a throwaway data folder, with the scripted
 //! mock agent standing in for real ones. `harness` has the setup; tests are grouped by area.
 
+mod alerts;
 mod flows;
 mod harness;
 mod inbox;
+mod lifecycle;
 mod render;
+mod screens;
 mod windows;
 
 use std::cell::RefCell;

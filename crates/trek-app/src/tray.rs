@@ -110,7 +110,8 @@ impl Tray {
 
     /// (threads needing you, threads with a live turn, reduce motion)
     fn read_state(ws: &Workspace) -> (usize, usize, bool) {
-        let needs = ws.threads.iter().filter(|t| t.needs_you()).count();
+        // The same count as the Dock badge: archived threads don't call for the user.
+        let needs = ws.needs_you_count();
         let working = if ws.any_turn_running() {
             ws.threads.iter().filter(|t| t.run_state == trek_core::RunState::Working && ws.live.get(&t.id).is_some_and(|l| l.turn_started.is_some())).count().max(1)
         } else {

@@ -4,12 +4,13 @@
 use crate::workspace::Workspace;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
-use std::process::{Child, Command, Stdio};
 use trek_core::settings::NotifyMode;
 
 /// What has been applied to the system so far; the observer only acts on differences.
 struct Applied {
-    caffeinate: Option<Child>,
+    /// Holds off idle sleep while held: macOS's power assertion for the process, released when
+    /// dropped (and by the system when Trek quits or dies).
+    awake: Option<Task<Result<ActivityGuard>>>,
     badge: usize,
     menu_bar_icon: bool,
     ui_font_size: f32,
@@ -20,7 +21,7 @@ struct Applied {
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let ws = workspace.read(cx);
     let mut applied = Applied {
-        caffeinate: None,
+        awake: None,
         badge: 0,
         menu_bar_icon: ws.settings.notifications.menu_bar_icon,
         ui_font_size: 0.,
@@ -36,7 +37,10 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     let menu_bar_icon = ws.settings.notifications.menu_bar_icon;
     let ui_font_size = ws.settings.appearance.ui_font_size();
 
-    keep_awake(&mut applied.caffeinate, awake);
+    if awake != applied.awake.is_some() {
+        applied.awake = awake.then(|| cx.prevent_idle_sleep("Agents are working in Trek"));
+        tracing::debug!("keep awake: {awake}");
+    }
     if badge != applied.badge {
         applied.badge = badge;
         set_dock_badge(badge);
@@ -51,37 +55,6 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     }
 }
 
-/// One `caffeinate -i -w <pid>` while `on`: it holds off idle sleep and exits on its own if Trek dies.
-fn keep_awake(child: &mut Option<Child>, on: bool) {
-    if let Some(c) = child {
-        // Respawn if it died underneath us (killed by hand, etc.).
-        let alive = matches!(c.try_wait(), Ok(None));
-        if !on || !alive {
-            let _ = c.kill();
-            let _ = c.wait();
-            *child = None;
-            if !on {
-                tracing::debug!("caffeinate stopped");
-            }
-        }
-    }
-    if on && child.is_none() {
-        match Command::new("/usr/bin/caffeinate")
-            .args(["-i", "-w", &std::process::id().to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => {
-                tracing::debug!("caffeinate started (pid {})", c.id());
-                *child = Some(c);
-            }
-            Err(e) => tracing::warn!("caffeinate: {e}"),
-        }
-    }
-}
-
 /// The base UI size is the theme's rem: every `text_sm()`-style size scales with it.
 pub fn apply_ui_font_size(size: f32, cx: &mut App) {
     if Theme::global(cx).font_size != px(size) {
@@ -90,7 +63,7 @@ pub fn apply_ui_font_size(size: f32, cx: &mut App) {
 }
 
 /// Show `count` on the Dock tile (cleared at 0). Must run on the main thread; a no-op elsewhere.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn set_dock_badge(count: usize) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
@@ -101,8 +74,21 @@ fn set_dock_badge(count: usize) {
     tile.setBadgeLabel(label.as_deref());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(test)))]
 fn set_dock_badge(_: usize) {}
+
+#[cfg(test)]
+thread_local! {
+    /// What tests would have shown on the Dock tile (each GPUI test runs on its own thread).
+    pub static DOCK_BADGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Alert sounds tests would have played.
+    pub static SOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn set_dock_badge(count: usize) {
+    DOCK_BADGE.with(|b| b.set(count));
+}
 
 /// Whether Trek is the frontmost app (a relaunch after an update comes back to the front only then).
 #[cfg(target_os = "macos")]
@@ -185,7 +171,9 @@ pub fn display_if_hidden(window: &Window) {
 pub fn display_if_hidden(_: &Window) {}
 
 /// Play the alert sound off the main thread.
+#[cfg(not(test))]
 pub fn play_alert_sound() {
+    use std::process::{Command, Stdio};
     std::thread::spawn(|| {
         let _ = Command::new("/usr/bin/afplay")
             .arg("/System/Library/Sounds/Glass.aiff")
@@ -194,6 +182,11 @@ pub fn play_alert_sound() {
             .stderr(Stdio::null())
             .status();
     });
+}
+
+#[cfg(test)]
+pub fn play_alert_sound() {
+    SOUNDS.with(|n| n.set(n.get() + 1));
 }
 
 /// How to tell the user a thread needs them or finished.

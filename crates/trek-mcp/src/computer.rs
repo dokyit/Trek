@@ -106,9 +106,77 @@ impl Mapping {
     }
 }
 
-#[derive(Default)]
 pub struct Computer {
     last: Option<Mapping>,
+    /// Whether this process may post mouse and keyboard events (Accessibility). A field so tests
+    /// can check the gate without the real permission, and without ever reaching the real mouse.
+    trusted: fn() -> bool,
+}
+
+impl Default for Computer {
+    fn default() -> Self {
+        Self { last: None, trusted: || unsafe { AXIsProcessTrusted() } != 0 }
+    }
+}
+
+/// Tools that post mouse or keyboard events, and so need Accessibility. Screenshots need Screen
+/// Recording instead (checked when capturing); the rest need nothing.
+fn needs_accessibility(tool: &str) -> bool {
+    matches!(tool, "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "key")
+}
+
+/// Longest side of a full-screen screenshot: the display's size in points (so one screenshot
+/// pixel is one point where it fits), capped at `MAX_IMAGE_SIDE`. A Retina capture comes back at
+/// twice that and is scaled down to it.
+fn full_side(logical_w: f64, logical_h: f64) -> u32 {
+    logical_w.max(logical_h).round().min(MAX_IMAGE_SIDE as f64) as u32
+}
+
+/// What the model is told with a full-screen screenshot.
+fn full_info(iw: u32, ih: u32, lw: f64, lh: f64, physical: Option<(u64, u64)>, m: Mapping, note: &str) -> String {
+    let physical = physical.map(|(pw, ph)| format!(", {pw}x{ph} physical pixels")).unwrap_or_default();
+    format!(
+        "Screenshot of the main display: {iw}x{ih} px. Screen: {}x{} logical points{physical}. \
+Scale: 1 screenshot px = {} points. Pass screenshot pixel coordinates (origin top-left) to click, move_mouse, drag \
+and scroll; trek-mcp converts them to screen points.{note}",
+        fmt_num(lw),
+        fmt_num(lh),
+        fmt_num(m.scale),
+    )
+}
+
+/// What the model is told with a zoom: the region `(x0, y0, rw, rh)` in screen points, rendered
+/// at `iw`×`ih`, and how to map a point in the zoom back to full-screenshot pixels.
+fn region_info(region_pts: (f64, f64, f64, f64), iw: u32, ih: u32, m: Mapping, note: &str) -> String {
+    let (x0, y0, rw, rh) = region_pts;
+    let (sx, sy, sw, sh) = (x0 / m.scale, y0 / m.scale, rw / m.scale, rh / m.scale);
+    format!(
+        "Zoomed view of screenshot region x={} y={} width={} height={} (screen points {},{} {}x{}), \
+rendered at {iw}x{ih} px. This is for reading detail only: click/drag/scroll coordinates still use the full-screen \
+screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{}, {} + v*{}).{note}",
+        fmt_num(sx),
+        fmt_num(sy),
+        fmt_num(sw),
+        fmt_num(sh),
+        fmt_num(x0),
+        fmt_num(y0),
+        fmt_num(rw),
+        fmt_num(rh),
+        fmt_num(sx),
+        fmt_num(sw / iw.max(1) as f64),
+        fmt_num(sy),
+        fmt_num(sh / ih.max(1) as f64),
+    )
+}
+
+/// A zoom's area in screen points from a region in full-screenshot pixels.
+fn region_points(m: Mapping, x: f64, y: f64, w: f64, h: f64) -> Result<(f64, f64, f64, f64), String> {
+    if w <= 0.0 || h <= 0.0 {
+        return Err("region width and height must be positive".into());
+    }
+    let (x0, y0) = m.to_points(x, y)?;
+    let (x1, y1) = m.to_points(x + w, y + h)?;
+    Ok((x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)))
 }
 
 fn display_info() -> (CGRect, Option<(u64, u64)>) {
@@ -140,13 +208,7 @@ impl Computer {
         // Region → logical points, through the full-screen mapping.
         let region_pts = match region {
             Some((x, y, w, h)) => {
-                if w <= 0.0 || h <= 0.0 {
-                    return Err("region width and height must be positive".into());
-                }
-                let m = self.mapping();
-                let (x0, y0) = m.to_points(x, y)?;
-                let (x1, y1) = m.to_points(x + w, y + h)?;
-                let (rw, rh) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+                let (x0, y0, rw, rh) = region_points(self.mapping(), x, y, w, h)?;
                 capture_args.push(format!("-R{},{},{},{}", x0.round(), y0.round(), rw.round(), rh.round()));
                 Some((x0, y0, rw, rh))
             }
@@ -171,7 +233,7 @@ impl Computer {
 
         match region_pts {
             None => {
-                let target = lw.max(lh).round().min(MAX_IMAGE_SIDE as f64) as u32;
+                let target = full_side(lw, lh);
                 let (_, w0, h0) = util::load_png(&tmp.0)?;
                 if w0.max(h0) > target {
                     util::sips_fit(tmp.path_str(), target)?;
@@ -179,51 +241,20 @@ impl Computer {
                 let (b64, iw, ih) = util::load_png(&tmp.0)?;
                 let m = Mapping::from_image(lw, lh, iw, ih);
                 self.last = Some(m);
-                let physical = pixels
-                    .map(|(pw, ph)| format!(", {pw}x{ph} physical pixels"))
-                    .unwrap_or_default();
-                let info = format!(
-                    "Screenshot of the main display: {iw}x{ih} px. Screen: {}x{} logical points{physical}. \
-Scale: 1 screenshot px = {} points. Pass screenshot pixel coordinates (origin top-left) to click, move_mouse, drag \
-and scroll; trek-mcp converts them to screen points.{permission_note}",
-                    fmt_num(lw),
-                    fmt_num(lh),
-                    fmt_num(m.scale),
-                );
-                Ok(vec![rpc::image_png(b64), text(info)])
+                Ok(vec![rpc::image_png(b64), text(full_info(iw, ih, lw, lh, pixels, m, permission_note))])
             }
-            Some((x0, y0, rw, rh)) => {
+            Some(region) => {
                 let (_, w0, h0) = util::load_png(&tmp.0)?;
                 if w0.max(h0) > MAX_IMAGE_SIDE {
                     util::sips_fit(tmp.path_str(), MAX_IMAGE_SIDE)?;
                 }
                 let (b64, iw, ih) = util::load_png(&tmp.0)?;
-                let m = self.mapping();
-                let (sx, sy, sw, sh) = (x0 / m.scale, y0 / m.scale, rw / m.scale, rh / m.scale);
-                let info = format!(
-                    "Zoomed view of screenshot region x={} y={} width={} height={} (screen points {},{} {}x{}), \
-rendered at {iw}x{ih} px. This is for reading detail only: click/drag/scroll coordinates still use the full-screen \
-screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{}, {} + v*{}).{permission_note}",
-                    fmt_num(sx),
-                    fmt_num(sy),
-                    fmt_num(sw),
-                    fmt_num(sh),
-                    fmt_num(x0),
-                    fmt_num(y0),
-                    fmt_num(rw),
-                    fmt_num(rh),
-                    fmt_num(sx),
-                    fmt_num(sw / iw.max(1) as f64),
-                    fmt_num(sy),
-                    fmt_num(sh / ih.max(1) as f64),
-                );
-                Ok(vec![rpc::image_png(b64), text(info)])
+                Ok(vec![rpc::image_png(b64), text(region_info(region, iw, ih, self.mapping(), permission_note))])
             }
         }
     }
 
     fn click(&mut self, args: &Value) -> ToolResult {
-        require_accessibility()?;
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         let button = args.get("button").and_then(Value::as_str).unwrap_or("left");
         let count = opt_f64(args, "count")?.unwrap_or(1.0) as i64;
@@ -262,7 +293,6 @@ screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{},
     }
 
     fn move_mouse(&mut self, args: &Value) -> ToolResult {
-        require_accessibility()?;
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         let (px, py) = self.mapping().to_points(x, y)?;
         post_mouse(CGEventType::MouseMoved, CGPoint::new(px, py), CGMouseButton::Left, None)?;
@@ -270,7 +300,6 @@ screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{},
     }
 
     fn drag(&mut self, args: &Value) -> ToolResult {
-        require_accessibility()?;
         let (fx, fy) = arg_point(args, "from")?;
         let (tx, ty) = arg_point(args, "to")?;
         let m = self.mapping();
@@ -300,7 +329,6 @@ screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{},
     }
 
     fn scroll(&mut self, args: &Value) -> ToolResult {
-        require_accessibility()?;
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         let dx = opt_f64(args, "dx")?.unwrap_or(0.0).round() as i32;
         let dy = opt_f64(args, "dy")?.unwrap_or(0.0).round() as i32;
@@ -322,7 +350,6 @@ screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{},
     }
 
     fn type_text(&mut self, args: &Value) -> ToolResult {
-        require_accessibility()?;
         let s = arg_str(args, "text")?;
         if s.is_empty() {
             return Err("text is empty".into());
@@ -348,7 +375,6 @@ screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{},
     fn key(&mut self, args: &Value) -> ToolResult {
         let combo = arg_str(args, "combo")?;
         let parsed = keys::parse_combo(combo)?;
-        require_accessibility()?;
         press(parsed)?;
         Ok(vec![text(format!("Pressed {combo}."))])
     }
@@ -523,6 +549,9 @@ delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup
     }
 
     fn call(&mut self, name: &str, args: &Value) -> ToolResult {
+        if needs_accessibility(name) && !(self.trusted)() {
+            return Err(ACCESSIBILITY_ERROR.into());
+        }
         match name {
             "screenshot" => self.screenshot(args),
             "click" => self.click(args),
@@ -547,14 +576,6 @@ delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup
 }
 
 // ---- CoreGraphics helpers ----
-
-fn require_accessibility() -> Result<(), String> {
-    if unsafe { AXIsProcessTrusted() } != 0 {
-        Ok(())
-    } else {
-        Err(ACCESSIBILITY_ERROR.into())
-    }
-}
 
 fn source() -> Result<CGEventSource, String> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| "Failed to create CGEventSource".to_string())
@@ -710,6 +731,127 @@ mod tests {
         assert!((x - 1280.0).abs() < 0.01);
         assert!(m.to_points(2000.0, 10.0).is_err());
         assert!(m.to_points(-50.0, 10.0).is_err());
+    }
+
+    use crate::rpc::ToolSet as _;
+
+    /// Arguments each input tool would act on. Only ever passed to a `Computer` that isn't
+    /// trusted, so nothing reaches the real mouse or keyboard.
+    fn acting_args(tool: &str) -> Value {
+        match tool {
+            "click" | "move_mouse" => json!({"x": 10, "y": 10}),
+            "drag" => json!({"from": {"x": 10, "y": 10}, "to": {"x": 20, "y": 20}}),
+            "scroll" => json!({"x": 10, "y": 10, "dy": 3}),
+            "type_text" => json!({"text": "hi"}),
+            "key" => json!({"combo": "cmd+c"}),
+            other => panic!("{other} posts no events"),
+        }
+    }
+
+    #[test]
+    fn input_tools_need_accessibility_and_do_nothing_without_it() {
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false };
+        for tool in ["click", "move_mouse", "drag", "scroll", "type_text", "key"] {
+            assert!(needs_accessibility(tool));
+            assert_eq!(c.call(tool, &acting_args(tool)), Err(ACCESSIBILITY_ERROR.to_string()), "{tool}");
+        }
+        // Looking, launching and waiting need no Accessibility.
+        for tool in ["screenshot", "list_windows", "open_app", "wait"] {
+            assert!(!needs_accessibility(tool), "{tool}");
+        }
+        assert_eq!(c.call("wait", &json!({"ms": 0})), Ok(vec![text("Waited 0 ms.")]));
+    }
+
+    #[test]
+    fn bad_arguments_are_refused_before_any_event() {
+        // Trusted, but every call here fails its checks before posting anything.
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true };
+        let refused = |c: &mut Computer, tool: &str, args: Value| c.call(tool, &args).expect_err(tool);
+        assert!(refused(&mut c, "click", json!({})).contains("`x`"));
+        assert!(refused(&mut c, "click", json!({"x": 10, "y": 10, "count": 4})).contains("count must be"));
+        assert!(refused(&mut c, "click", json!({"x": 10, "y": 10, "button": "middle"})).contains("Unknown button"));
+        assert!(refused(&mut c, "click", json!({"x": 5000, "y": 10})).contains("outside the screenshot (1512x982)"));
+        assert!(refused(&mut c, "move_mouse", json!({"x": 10, "y": -40})).contains("outside the screenshot"));
+        assert!(refused(&mut c, "drag", json!({"from": {"x": 10, "y": 10}})).contains("`to`"));
+        assert!(refused(&mut c, "drag", json!({"from": {"x": 10, "y": 10}, "to": {"x": 10, "y": 9000}})).contains("outside the screenshot"));
+        assert!(refused(&mut c, "scroll", json!({"x": 10, "y": 10})).contains("non-zero dx or dy"));
+        assert!(refused(&mut c, "type_text", json!({"text": ""})).contains("empty"));
+        assert!(refused(&mut c, "key", json!({"combo": "cmd+nope"})).contains("nope"));
+        assert!(refused(&mut c, "open_app", json!({"name": "  "})).contains("empty"));
+        assert!(refused(&mut c, "wait", json!({"ms": 20_000})).contains("between 0 and 10000"));
+        assert!(refused(&mut c, "teleport", json!({})).contains("Unknown tool"));
+    }
+
+    #[test]
+    fn every_tool_has_an_object_schema_and_a_handler() {
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false };
+        let tools = c.tools();
+        let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), tools.len(), "names are unique");
+        for t in &tools {
+            let schema = t.to_json()["inputSchema"].clone();
+            assert_eq!(schema["type"], "object", "{}", t.name);
+            let props = schema["properties"].as_object().unwrap_or_else(|| panic!("{} has properties", t.name));
+            for req in schema["required"].as_array().into_iter().flatten() {
+                assert!(props.contains_key(req.as_str().unwrap()), "{} requires {req}, which it doesn't describe", t.name);
+            }
+            assert!(!t.description.is_empty());
+            // Every listed tool is handled (screenshots and the window list read the real
+            // screen, so they're left out here).
+            if !matches!(t.name, "screenshot" | "list_windows") {
+                let err = c.call(t.name, &json!({})).expect_err(t.name);
+                assert!(!err.contains("Unknown tool"), "{}: {err}", t.name);
+            }
+        }
+        // The coordinates every pointer tool takes are screenshot pixels.
+        for name in ["click", "move_mouse", "scroll"] {
+            let t = tools.iter().find(|t| t.name == name).unwrap();
+            assert_eq!(t.input_schema["required"], json!(["x", "y"]));
+            assert!(t.input_schema["properties"]["x"]["description"].as_str().unwrap().contains("screenshot pixels"));
+        }
+    }
+
+    #[test]
+    fn retina_screenshots_map_back_to_screen_points() {
+        // 14" MacBook Pro at its default size: 1512x982 points, captured at 3024x1964 pixels and
+        // scaled to 1512 wide, so a screenshot pixel is a point.
+        assert_eq!(full_side(1512.0, 982.0), 1512);
+        let m = Mapping::from_image(1512.0, 982.0, 1512, 982);
+        assert_eq!(m.scale, 1.0);
+        assert_eq!(m.to_points(756.0, 491.0), Ok((756.0, 491.0)));
+        // 16" at 1728x1117 points (3456x2234 pixels): capped at 1568, aspect kept by `sips`.
+        assert_eq!(full_side(1728.0, 1117.0), 1568);
+        let m = Mapping::from_image(1728.0, 1117.0, 1568, 1014);
+        assert_eq!((m.image_w, m.image_h), (Mapping::for_display(1728.0, 1117.0).image_w, Mapping::for_display(1728.0, 1117.0).image_h));
+        let (x, y) = m.to_points(784.0, 507.0).unwrap();
+        assert!((x - 864.0).abs() < 0.5 && (y - 558.5).abs() < 1.0, "the centre maps to the centre: {x}, {y}");
+        assert_eq!(m.to_points(0.0, 0.0), Ok((0.0, 0.0)));
+        assert_eq!(m.to_points(1568.0, 1014.0), Ok((1727.0, 1116.0)), "far corner stays on the display");
+        // A portrait display: its height is the long side.
+        assert_eq!(full_side(1080.0, 1920.0), 1568);
+        let m = Mapping::for_display(1080.0, 1920.0);
+        assert_eq!((m.image_w, m.image_h), (882, 1568));
+        // A display smaller than the cap is never upscaled.
+        assert_eq!(full_side(1024.0, 768.0), 1024);
+    }
+
+    #[test]
+    fn zooms_say_how_to_map_back_and_reject_bad_regions() {
+        let m = Mapping::from_image(1728.0, 1117.0, 1568, 1014);
+        let region = region_points(m, 100.0, 200.0, 300.0, 150.0).unwrap();
+        assert!((region.0 - 100.0 * m.scale).abs() < 1e-9 && (region.2 - 300.0 * m.scale).abs() < 1e-9, "{region:?}");
+        // Captured on a Retina display: twice the points, in pixels.
+        let (iw, ih) = ((region.2 * 2.0).round() as u32, (region.3 * 2.0).round() as u32);
+        let info = region_info(region, iw, ih, m, "");
+        assert!(info.contains("x=100 y=200 width=300 height=150"), "{info}");
+        assert!(info.contains(&format!("(100 + u*{}, 200 + v*{})", fmt_num(300.0 / iw as f64), fmt_num(150.0 / ih as f64))), "{info}");
+        assert!(region_points(m, 10.0, 10.0, 0.0, 5.0).unwrap_err().contains("positive"));
+        assert!(region_points(m, 1500.0, 10.0, 400.0, 5.0).unwrap_err().contains("outside"));
+        let full = full_info(1568, 1014, 1728.0, 1117.0, Some((3456, 2234)), m, "");
+        assert!(full.contains("1568x1014 px") && full.contains("1728x1117 logical points, 3456x2234 physical pixels"), "{full}");
+        assert!(full.contains(&format!("1 screenshot px = {} points", fmt_num(m.scale))));
     }
 
     #[test]

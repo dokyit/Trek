@@ -1486,7 +1486,7 @@ impl SimulatorPanel {
             )
             .child(Button::new("sim-install-axe").small().primary().label("Install AXe").on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
-                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(crate::integrations::AXE_INSTALL.into())));
+                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }));
             })))
             .into_any_element()
     }

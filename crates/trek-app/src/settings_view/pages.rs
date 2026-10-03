@@ -209,6 +209,11 @@ impl SettingsView {
                         cx,
                     ),
                     cx,
+                ), Self::row(
+                    "Settle threads when their branch merges",
+                    "A thread that committed on a branch settles once that branch is merged into the default branch, here or on origin.",
+                    self.switch("settle-on-merge", s.inbox.auto_settle_on_merge, |s, v| s.inbox.auto_settle_on_merge = v),
+                    cx,
                 )],
                 cx,
             ),
@@ -1229,12 +1234,12 @@ impl SettingsView {
             .enumerate()
             .map(|(i, a)| {
                 let (w, p2) = (self.workspace.clone(), path.clone());
-                let (w2, cmd) = (self.workspace.clone(), a.command.clone());
+                let (w2, cmd, root) = (self.workspace.clone(), a.command.clone(), path.clone());
                 let controls = h_flex()
                     .gap(px(6.))
                     .child(Button::new(SharedString::from(format!("action-run-{i}"))).small().outline().icon(crate::assets::Lucide::Play).label("Run").on_click(move |_, _, cx| {
-                        let cmd = cmd.clone();
-                        w2.update(cx, |ws, cx| ws.run_project_action(cmd, cx))
+                        let (cmd, root) = (cmd.clone(), root.clone());
+                        w2.update(cx, |ws, cx| ws.run_project_action(root, cmd, cx))
                     }))
                     .child(Button::new(SharedString::from(format!("action-del-{i}"))).small().ghost().label("Remove").on_click(move |_, _, cx| {
                         w.update(cx, |ws, cx| {
@@ -1304,7 +1309,8 @@ impl SettingsView {
                         "Icon",
                         match prefs.icon.as_deref() {
                             None => "Automatic: two letters from the name.",
-                            Some(s) if s.starts_with("file:") => "Your image.",
+                            Some(s) if s.strip_prefix("file:").is_some_and(|f| std::path::Path::new(f).exists()) => "Your image.",
+                            Some(s) if s.starts_with("file:") => "Your image is gone, so the two letters stand in. Choose another.",
                             Some(_) => "One of Trek's icons.",
                         },
                         h_flex().gap(px(6.)).child(ui::project_badge(&project.name, prefs.icon.as_deref(), cx)).child(div().w(px(4.))).children(icon_reset).child(icon_menu).child(icon_file),

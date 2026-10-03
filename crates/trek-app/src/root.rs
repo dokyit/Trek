@@ -22,13 +22,13 @@ pub struct TrekWindow {
     pub(crate) sidebar: Entity<Sidebar>,
     pub(crate) thread_view: Entity<ThreadView>,
     pub(crate) composer: Entity<Composer>,
-    settings: Entity<SettingsView>,
+    pub(crate) settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,
     title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
-    palette: Entity<CommandPalette>,
+    pub(crate) palette: Entity<CommandPalette>,
     /// Takes keyboard focus when whatever had it leaves the screen (the composer, once a settings
     /// page opens): with nothing focused, keys reach none of the window's shortcuts, ⌘K included.
     focus: FocusHandle,
@@ -78,9 +78,9 @@ impl TrekWindow {
                     let tool = *tool;
                     this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
-                WorkspaceEvent::RunInTerminal(command) => {
-                    let command = command.clone();
-                    this.right_panel.update(cx, |p, cx| p.run_command(command, window, cx));
+                WorkspaceEvent::RunInTerminal { command, cwd } => {
+                    let (command, cwd) = (command.clone(), cwd.clone());
+                    this.right_panel.update(cx, |p, cx| p.run_command(command, cwd, window, cx));
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
                 WorkspaceEvent::AttachImage(path) => {
@@ -224,7 +224,7 @@ impl Render for WindowTitle {
                         })
                         .child(div().truncate().font_medium().child(title)),
                 )
-                .when(folder.is_some(), |el| el.child(run_button(actions, project_id, self.workspace.clone())))
+                .when_some(root.clone(), |el, root| el.child(run_button(actions, root, project_id, self.workspace.clone())))
                 .when_some(folder, |el, dir| el.child(open_in_button(dir)))
                 .when(thread.is_some(), |el| {
                     el.child(
@@ -297,6 +297,18 @@ pub fn show_palette(workspace: Entity<Workspace>, cx: &mut App) {
 /// window is in front (else the main one, else any), and "show the main window" reopens it.
 /// Handled here rather than by the main window so they keep working after it's closed.
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
+    // A click on one of Trek's banners opens its thread. GPUI keeps one handler for the app,
+    // which replaces GPUI Kit's own; that one only serves toasts delivered to the system as
+    // well, and Trek posts none (see `attention`).
+    let ws = workspace.downgrade();
+    cx.on_system_notification_response(move |response, cx| {
+        let Some(thread) = attention_thread(&response.tag) else { return };
+        let Some(ws) = ws.upgrade() else { return };
+        cx.activate(true);
+        // Not deferred: no window is busy here, and nothing would run a deferred call until
+        // the next event.
+        reveal_now(&ws, thread, cx);
+    });
     cx.subscribe(&workspace, |ws, event: &WorkspaceEvent, cx| match event {
         WorkspaceEvent::Toast { message, undo } => toast(&ws, message.clone(), undo.clone(), cx),
         WorkspaceEvent::Attention { message, thread } => attention(&ws, message.clone(), thread, cx),
@@ -327,7 +339,8 @@ fn notice_window(workspace: &Entity<Workspace>, front: Option<AnyWindowHandle>, 
 }
 
 /// A thread needs the user or finished: toast, banner and sound per the notification settings.
-/// Decided once for all windows, so a sound or banner never doubles up.
+/// Decided once for all windows, so a sound or banner never doubles up. Clicking either opens
+/// the thread.
 fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &mut App) {
     let front = key_window(cx);
     let ws = workspace.read(cx);
@@ -335,26 +348,49 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
     if alert.sound {
         crate::system::play_alert_sound();
     }
-    match notice_window(workspace, front, cx) {
-        Some(target) => {
-            let note = Notification::new().message(message);
-            let note = match (alert.toast, alert.banner) {
-                (true, true) => note.in_app_and_system(),
-                (true, false) => note,
-                (false, true) => note.system(),
-                (false, false) => return,
-            };
-            let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
-        }
-        // No window to show a toast in: the banner can still go out.
-        None if alert.banner => cx.show_system_notification(SystemNotification {
-            tag: format!("trek-attention-{thread}").into(),
-            title: message.into(),
-            body: SharedString::default(),
-            actions: Vec::new(),
-        }),
-        None => {}
+    if alert.banner {
+        // Posted by Trek rather than through a toast's system delivery, so it goes out with no
+        // window open too, and its tag says which thread to open when it's clicked.
+        cx.show_system_notification(SystemNotification { tag: attention_tag(thread), title: message.clone().into(), body: SharedString::default(), actions: Vec::new() });
     }
+    if alert.toast {
+        let Some(target) = notice_window(workspace, front, cx) else { return };
+        let (ws, thread) = (workspace.clone(), thread.to_string());
+        let note = Notification::new().message(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
+        let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
+    }
+}
+
+const ATTENTION_TAG: &str = "trek-attention-";
+
+/// The system notification tag for an alert about `thread`; a newer alert replaces an older one.
+fn attention_tag(thread: &str) -> SharedString {
+    format!("{ATTENTION_TAG}{thread}").into()
+}
+
+/// The thread a banner Trek posted is about.
+fn attention_thread(tag: &str) -> Option<&str> {
+    tag.strip_prefix(ATTENTION_TAG).filter(|id| !id.is_empty())
+}
+
+/// Bring `thread` on screen: its own window if it has one, else the main window (reopened if
+/// it was closed) showing it. Deferred: called from a toast, the window it's in is busy, and
+/// reaching it then would look like it had closed (and open a second main window).
+pub fn reveal_thread(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
+    let (workspace, thread) = (workspace.clone(), thread.to_string());
+    cx.defer(move |cx| reveal_now(&workspace, &thread, cx));
+}
+
+fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
+    if workspace.read(cx).thread(thread).is_none() {
+        return show_main(workspace.clone(), cx);
+    }
+    let own = workspace.read(cx).thread_windows.get(thread).copied();
+    if own.is_some_and(|w| w.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+        return;
+    }
+    workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(thread.to_string()), cx));
+    show_main(workspace.clone(), cx);
 }
 
 fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction>, cx: &mut App) {
@@ -377,7 +413,7 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
 }
 
 /// "Run" menu: the project's actions, each opening in a terminal tab.
-fn run_button(actions: Vec<trek_core::settings::ProjectAction>, project_id: Option<String>, ws: Entity<Workspace>) -> impl IntoElement {
+fn run_button(actions: Vec<trek_core::settings::ProjectAction>, root: std::path::PathBuf, project_id: Option<String>, ws: Entity<Workspace>) -> impl IntoElement {
     use gpui_kit::component::button::{Button, ButtonVariants as _};
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     use gpui_kit::component::Sizable as _;
@@ -387,10 +423,10 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, project_id: Opti
             menu = menu.label("No actions for this project yet");
         }
         for a in actions.clone() {
-            let ws = ws.clone();
+            let (ws, root) = (ws.clone(), root.clone());
             menu = menu.item(PopupMenuItem::new(a.name.clone()).icon(crate::assets::Lucide::Play).on_click(move |_, _, cx| {
-                let cmd = a.command.clone();
-                ws.update(cx, |ws, cx| ws.run_project_action(cmd, cx))
+                let (cmd, root) = (a.command.clone(), root.clone());
+                ws.update(cx, |ws, cx| ws.run_project_action(root, cmd, cx))
             }));
         }
         let (ws, pid) = (ws.clone(), project_id.clone());

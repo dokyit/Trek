@@ -195,6 +195,12 @@ impl Composer {
         self.input.read(cx).value().to_string()
     }
 
+    /// Images attached to the next message, and how many are still being saved.
+    #[cfg(test)]
+    pub(crate) fn attached(&self) -> (Vec<PathBuf>, usize) {
+        (self.outbox.paths.clone(), self.outbox.saving)
+    }
+
     /// Height at the last layout (zero before the first).
     pub fn height(&self) -> Pixels {
         self.height.get()

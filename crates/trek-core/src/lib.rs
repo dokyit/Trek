@@ -3,6 +3,7 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod git;
 pub mod import;
 pub mod paths;
 pub mod settings;

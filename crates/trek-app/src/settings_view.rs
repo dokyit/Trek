@@ -395,7 +395,7 @@ impl SettingsView {
                 let cmd = s.login.to_string();
                 Button::new(SharedString::from(format!("login-{key}"))).small().outline().label("Sign in").on_click(cx.listener(move |this, _, _, cx| {
                     let cmd = cmd.clone();
-                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
                 }))
             });
             let more = setup.map(|s| {
@@ -410,7 +410,7 @@ impl SettingsView {
                         menu.min_w(px(180.))
                             .item(PopupMenuItem::new("Switch account…").on_click(move |_, _, cx| {
                                 let cmd = login.clone();
-                                ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                                ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
                             }))
                             .item(PopupMenuItem::new("Manage plan").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(url)))
                     })
@@ -446,7 +446,7 @@ impl SettingsView {
                     let button = Button::new(SharedString::from(format!("install-{key}"))).small().outline().icon(IconName::ArrowDown).label("Install").on_click(
                         cx.listener(move |this, _, _, cx| {
                             let cmd = cmd.clone();
-                            this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(cmd)))
+                            this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
                         }),
                     );
                     Self::row(title, install, button, cx)
@@ -514,7 +514,7 @@ impl SettingsView {
                 .icon(IconName::ArrowDown)
                 .label("Install AXe")
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal(crate::integrations::AXE_INSTALL.into())))
+                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }))
                 }))
                 .into_any_element(),
         };

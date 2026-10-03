@@ -168,15 +168,17 @@ impl Thread {
         Some(Section::Inbox)
     }
 
-    /// Whether auto-settle applies now.
+    /// Whether auto-settle applies now. A snoozed thread is left alone until it wakes, and then
+    /// gets the full wait again: it came back to the inbox to be looked at.
     pub fn should_auto_settle(&self, now: i64, after_days: u32) -> bool {
+        let last_seen_in_inbox = self.updated_at.max(self.snoozed_until.unwrap_or(0));
         after_days > 0
             && !self.never_settle
             && self.settled_at.is_none()
             && self.pinned_at.is_none()
             && self.run_state == RunState::Idle
             && !self.is_unseen()
-            && now - self.updated_at > after_days as i64 * 86_400_000
+            && now - last_seen_in_inbox > after_days as i64 * 86_400_000
     }
 
     /// Urgency for sorting inside Inbox: needs-you first, then unseen, then recency.
@@ -1269,6 +1271,40 @@ mod tests {
         assert!(t.should_auto_settle(later, 3));
         t.updated_at += 1; // unseen
         assert!(!t.should_auto_settle(later, 3));
+    }
+
+    #[test]
+    fn auto_settle_skips_never_settle_pinned_busy_and_off() {
+        const DAY: i64 = 86_400_000;
+        let base = thread();
+        let later = base.updated_at + 4 * DAY;
+        assert!(!base.should_auto_settle(later, 0), "0 days is Never");
+        assert!(!base.should_auto_settle(base.updated_at + 3 * DAY, 3), "not yet");
+        assert!(!Thread { never_settle: true, ..base.clone() }.should_auto_settle(later, 3));
+        assert!(!Thread { pinned_at: Some(1), ..base.clone() }.should_auto_settle(later, 3));
+        assert!(!Thread { settled_at: Some(1), ..base.clone() }.should_auto_settle(later, 3));
+        for state in [RunState::Working, RunState::NeedsYou, RunState::Failed] {
+            assert!(!Thread { run_state: state, ..base.clone() }.should_auto_settle(later, 3), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn snoozed_threads_wake_into_the_inbox_and_get_the_full_wait_again() {
+        const DAY: i64 = 86_400_000;
+        let base = thread();
+        let wake = base.updated_at + 7 * DAY;
+        let snoozed = Thread { snoozed_until: Some(wake), ..base.clone() };
+        // Asleep: in Snoozed, and never settled meanwhile, however old its last activity.
+        assert_eq!(snoozed.section(wake - 1), Some(Section::Snoozed));
+        assert!(!snoozed.should_auto_settle(wake - 1, 3));
+        // Awake: back in the inbox, with the whole wait ahead of it.
+        assert_eq!(snoozed.section(wake), Some(Section::Inbox));
+        assert!(!snoozed.should_auto_settle(wake + 2 * DAY, 3));
+        assert!(snoozed.should_auto_settle(wake + 3 * DAY + 1, 3));
+        // One that needs the user raises its hand while snoozed.
+        assert_eq!(Thread { run_state: RunState::NeedsYou, ..snoozed.clone() }.section(wake - 1), Some(Section::Inbox));
+        // A settled thread snoozed by an earlier build stays settled when it wakes.
+        assert_eq!(Thread { settled_at: Some(1), ..snoozed }.section(wake), Some(Section::Settled));
     }
 
     #[test]
