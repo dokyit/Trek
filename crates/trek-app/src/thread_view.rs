@@ -2,6 +2,7 @@
 //! plus the cards the agent puts to the user (approvals, questions, plans). The working bar above
 //! the composer is its own view (`working_bar`).
 
+use crate::activity::{ToolKind, kind_icon, summarize, tool_kind};
 use crate::palette;
 use crate::workspace::{ForkAt, ItemRef, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::Button;
@@ -123,66 +124,6 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
     (slots, item_row)
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ToolKind {
-    Command,
-    Edit,
-    Read,
-    Search,
-    Other,
-    Agent,
-    Thought,
-}
-
-fn tool_kind(title: &str) -> ToolKind {
-    match title {
-        t if t.starts_with("Run") || t.starts_with("Ran") => ToolKind::Command,
-        t if t.starts_with("Edit") || t.starts_with("Wr") || t.starts_with("Wrote") => ToolKind::Edit,
-        t if t.starts_with("Read") || t.starts_with("Fetch") => ToolKind::Read,
-        t if t.contains("Search") || t.starts_with("List") => ToolKind::Search,
-        "Subagent" => ToolKind::Agent,
-        _ => ToolKind::Other,
-    }
-}
-
-fn kind_icon(kind: ToolKind) -> Icon {
-    match kind {
-        ToolKind::Command => Icon::new(IconName::SquareTerminal),
-        ToolKind::Edit => Icon::new(crate::assets::Lucide::FilePen),
-        ToolKind::Read => Icon::new(IconName::FileText),
-        ToolKind::Search => Icon::new(IconName::Search),
-        ToolKind::Other => Icon::new(crate::assets::Lucide::Wrench),
-        ToolKind::Agent => Icon::new(crate::assets::Lucide::Users),
-        ToolKind::Thought => Icon::new(crate::assets::Lucide::Sparkle),
-    }
-}
-
-/// "Ran 3 commands, read 2 files, and edited 1 file"
-fn summarize(kinds: &[ToolKind]) -> String {
-    let count = |k: ToolKind| kinds.iter().filter(|x| **x == k).count();
-    let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
-    let mut parts = vec![];
-    let (c, e, r, s, o) = (count(ToolKind::Command), count(ToolKind::Edit), count(ToolKind::Read), count(ToolKind::Search), count(ToolKind::Other));
-    if c > 0 { parts.push(format!("ran {}", plural(c, "command", "commands"))); }
-    if e > 0 { parts.push(format!("edited {}", plural(e, "file", "files"))); }
-    if r > 0 { parts.push(format!("read {}", plural(r, "file", "files"))); }
-    if s > 0 { parts.push(format!("ran {}", plural(s, "search", "searches"))); }
-    if o > 0 { parts.push(format!("used {}", plural(o, "tool", "tools"))); }
-    let a = count(ToolKind::Agent);
-    if a > 0 { parts.push(format!("started {}", plural(a, "agent", "agents"))); }
-    let text = match parts.len() {
-        0 => "thought it through".to_string(),
-        1 => parts.remove(0),
-        2 => format!("{} and {}", parts[0], parts[1]),
-        _ => {
-            let last = parts.pop().unwrap();
-            format!("{}, and {last}", parts.join(", "))
-        }
-    };
-    let mut chars = text.chars();
-    chars.next().map(|f| f.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
-}
-
 pub struct ThreadView {
     workspace: Entity<Workspace>,
     /// The main window's transcript follows its route; a thread window's shows one thread.
@@ -201,8 +142,18 @@ pub struct ThreadView {
     secrets: (Option<String>, Vec<Entity<InputState>>),
     /// Rendered plan for the plan card on screen (request id, markdown, redraw when it's parsed).
     plan_md: Option<(String, Entity<TextViewState>, Subscription)>,
-    /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes.
-    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64), std::rc::Rc<Rows>)>>,
+    /// Rows built for (thread, transcript revision, expansion state, where the transcript stops);
+    /// rebuilt only when one changes.
+    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, Option<usize>), std::rc::Rc<Rows>)>>,
+    /// Where the transcript stops for now: the live group of tool calls (and anything after it)
+    /// shows in the working bar instead (`activity::transcript_end`).
+    end: Option<usize>,
+    /// The live group last opened from the working bar (`Workspace::open_live_group`), once its
+    /// row here is open.
+    opened: Option<crate::activity::Opened>,
+    /// Where the transcript's last row ends on screen, as last laid out (`None` when it's out of
+    /// view): the working bar sits just under it when the transcript doesn't reach the bar.
+    pub tail: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     expanded_gen: u64,
     /// The last `Workspace::reveal` request handled.
     revealed: u64,
@@ -279,6 +230,8 @@ struct Shown {
     loading: bool,
     /// The question card's picks, which change without a new transcript revision.
     picks: HashMap<(String, usize), Vec<String>>,
+    /// Where the transcript stops (`ThreadView::end`), which moves without a new revision too.
+    end: Option<usize>,
     appearance: trek_core::settings::Appearance,
 }
 
@@ -314,6 +267,9 @@ impl ThreadView {
             secrets: (None, vec![]),
             plan_md: None,
             rows_cache: Default::default(),
+            end: None,
+            opened: None,
+            tail: Default::default(),
             expanded_gen: 0,
             revealed: 0,
             flash: None,
@@ -342,6 +298,7 @@ impl ThreadView {
         let switched = id != self.current;
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let revision = live.map_or(0, |l| l.revision);
+        let opened = live.and_then(|l| l.opened.clone());
         let shown = Shown {
             thread: id.clone(),
             draft: ws.is_draft_in(&self.scope),
@@ -349,8 +306,10 @@ impl ThreadView {
             agent: id.as_ref().and_then(|id| ws.thread(id)).map(|t| t.agent.clone()),
             loading: live.is_some_and(|l| l.loading),
             picks: live.map(|l| l.picks.clone()).unwrap_or_default(),
+            end: id.as_ref().and_then(|id| crate::activity::transcript_end(ws, id)),
             appearance: ws.settings.appearance.clone(),
         };
+        let end = shown.end;
         // Only the documents already built need updating: they follow their item to where it moved
         // and to its new text (while streaming, a longer tail). Those whose item left the
         // transcript go (`None`).
@@ -395,11 +354,27 @@ impl ThreadView {
                 cx.notify();
             }
         }
-        if revision == self.revision && !switched {
+        if revision == self.revision && !switched && end == self.end {
             self.reveal(cx);
             return;
         }
         self.revision = revision;
+        self.end = end;
+        // A live group opened from the bar: its row opens here, with the call clicked.
+        let mut follow = false;
+        if opened != self.opened {
+            self.opened = opened.clone();
+            if let Some(o) = opened {
+                let rows = self.rows(cx);
+                let group = self.workspace.read(cx).live.get(self.current.as_deref().unwrap_or_default()).and_then(|l| l.items.position(&o.first));
+                if let Some(Row::ToolGroup { key, .. }) = group.and_then(|ix| rows.row_of(ix)).and_then(|r| rows.rows.get(r)) {
+                    self.expanded.insert(key.to_string());
+                }
+                self.expanded.extend(o.call);
+                self.expanded_gen += 1;
+                follow = true;
+            }
+        }
         for (key, now) in docs {
             let Some((ix, text)) = now else {
                 self.md.remove(&key);
@@ -435,6 +410,9 @@ impl ThreadView {
             if new_count > 0 {
                 let from = new_count.saturating_sub(2);
                 let _ = s.remeasure_items(from..new_count, cx);
+            }
+            if follow {
+                s.scroll_to_end(cx);
             }
         });
         self.reveal(cx);
@@ -505,13 +483,20 @@ impl ThreadView {
 
     fn rows(&self, cx: &App) -> std::rc::Rc<Rows> {
         let revision = self.current.as_ref().and_then(|id| self.workspace.read(cx).live.get(id)).map(|l| l.revision).unwrap_or(0);
-        let key = (self.current.clone(), revision, self.expanded_gen);
+        // As of the last sync, so the rows match the count the scroller was given.
+        let end = self.end;
+        let key = (self.current.clone(), revision, self.expanded_gen, end);
         if let Some((k, rows)) = self.rows_cache.borrow().as_ref() {
             if *k == key {
                 return rows.clone();
             }
         }
-        let rows = std::rc::Rc::new(self.build_rows(cx));
+        let mut rows = self.build_rows(cx);
+        if let Some(end) = end {
+            let keep = rows.rows.iter().position(|r| r.item() >= end).unwrap_or(rows.rows.len());
+            rows.rows.truncate(keep);
+        }
+        let rows = std::rc::Rc::new(rows);
         *self.rows_cache.borrow_mut() = Some((key, rows.clone()));
         rows
     }
@@ -916,7 +901,7 @@ impl ThreadView {
                                 .text_color(muted)
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
-                                .child(kind_icon(kind).small())
+                                .child(crate::activity::group_icon(kind).small())
                                 .child(div().when(running, |el| el.text_color(theme.foreground.opacity(0.85))).child(summary))
                                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
                                 .on_click(toggle(key.clone())),
@@ -925,15 +910,12 @@ impl ThreadView {
                 )
                 .into_any_element()
             }
-            (Row::Tool { ix, key, open, activity }, Item::Tool { title, detail, output, status, .. }) => {
-                let icon = match title.as_str() {
-                    "Subagent" => Icon::new(crate::assets::Lucide::Users),
-                    t if t.starts_with("Run") || t.starts_with("Ran") => Icon::new(IconName::SquareTerminal),
-                    t if t.starts_with("Edit") || t.starts_with("Wr") => Icon::new(crate::assets::Lucide::FilePen),
-                    t if t.starts_with("Read") => Icon::new(IconName::FileText),
-                    t if t.contains("Search") || t.starts_with("List") => Icon::new(IconName::Search),
-                    _ => Icon::new(crate::assets::Lucide::Wrench),
-                };
+            (Row::Tool { ix, key, open, activity }, Item::Tool { id: tool_id, title, detail, output, status }) => {
+                let kind = tool_kind(&title);
+                let icon = kind_icon(kind);
+                // Files read or changed get their type's badge; changes, the lines they touched.
+                let file = matches!(kind, ToolKind::Read | ToolKind::Edit).then(|| detail.split(", ").next().unwrap_or_default().to_string()).filter(|f| !f.is_empty());
+                let lines = live.and_then(|l| l.lines.get(&tool_id)).copied().filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
                 let status_el = match status {
                     ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(theme.muted_foreground).into_any_element(),
                     ToolStatus::Done => Icon::new(IconName::Check).xsmall().text_color(theme.muted_foreground).into_any_element(),
@@ -962,6 +944,7 @@ impl ThreadView {
                             .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
                             .child(icon.small().text_color(theme.muted_foreground))
                             .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(label))
+                            .when_some(file, |el, f| el.child(crate::file_icon::badge(&f, px(13.), cx)))
                             .child(
                                 div()
                                     .flex_1()
@@ -972,6 +955,7 @@ impl ThreadView {
                                     .text_color(theme.muted_foreground)
                                     .child(detail),
                             )
+                            .when_some(lines, |el, (a, r)| el.child(crate::working_bar::lines_chip(a, r, cx)))
                             .child(status_el),
                     )
                     .when(open && has_output, |el| {
@@ -1525,9 +1509,15 @@ impl Render for ThreadView {
         crate::tests::rendered("ThreadView");
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);
+        // Where the last row ends is noted as it's laid out below; until then (and when it's out
+        // of view, or a card sits under it) there's no tail.
+        let tail = self.tail.clone();
+        let forget = canvas(move |_, _, _| tail.set(None), |_, _, _, _| {}).absolute().size_0();
         let (Some(thread), false) = (self.current.clone(), rows.rows.is_empty()) else {
-            return v_flex().size_full().child(self.empty_state(cx)).children(footer);
+            return v_flex().size_full().child(forget).child(self.empty_state(cx)).children(footer);
         };
+        let tail = (footer.is_none()).then(|| self.tail.clone());
+        let last = rows.rows.len() - 1;
         let view = cx.entity().downgrade();
         let ws = self.workspace.read(cx);
         let t = ws.thread(&thread);
@@ -1548,12 +1538,21 @@ impl Render for ThreadView {
         let flash = self.flash;
         v_flex()
             .size_full()
+            .child(forget)
             .child(
                 div().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
                         Some(row) => {
                             let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
-                            ThreadView::render_row(row, ix, flash, &view, &at, cx)
+                            let el = ThreadView::render_row(row, ix, flash, &view, &at, cx);
+                            match tail.clone().filter(|_| ix == last) {
+                                Some(tail) => v_flex()
+                                    .w_full()
+                                    .child(el)
+                                    .child(canvas(move |b, _, _| tail.set(Some(b.bottom())), |_, _, _, _| {}).w_full().h(px(0.)))
+                                    .into_any_element(),
+                                None => el,
+                            }
                         }
                         None => div().into_any_element(),
                     })

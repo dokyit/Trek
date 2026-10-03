@@ -426,6 +426,89 @@ pub fn match_text(text: &str, ranges: &[std::ops::Range<usize>], cx: &App) -> St
     StyledText::new(text.to_string()).with_highlights(ranges)
 }
 
+/// A thread title, animating in when it just changed (`reveal`: how far, 0 to 1, and the title
+/// before): the new one appears left to right behind a soft edge while the old one fades out
+/// ahead of it, a little trail dust where they meet. Otherwise just the title. `color` is the
+/// title's colour; the caller lays it out (and truncates it).
+pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &str)>, color: Hsla, cx: &App) -> AnyElement {
+    let Some((t, old)) = reveal else { return div().min_w_0().truncate().text_color(color).child(title.to_string()).into_any_element() };
+    let (new_alpha, old_alpha) = reveal_alphas(title.chars().count(), old.chars().count(), t);
+    // Highlight colours blend over the text's own, so opacity goes through `fade_out`.
+    let ranges = |text: &str, alphas: &[f32]| -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+        text.char_indices().zip(alphas).map(|((i, c), a)| (i..i + c.len_utf8(), HighlightStyle { fade_out: Some(1. - a), ..Default::default() })).collect()
+    };
+    let dust = cx.theme().foreground.opacity(0.5);
+    let chars = title.chars().count().max(1) as f32;
+    let front = reveal_front(t, title.chars().count());
+    div()
+        .id(id)
+        .test_support()
+        .relative()
+        .min_w_0()
+        .child(div().truncate().text_color(color).child(StyledText::new(title.to_string()).with_highlights(ranges(title, &new_alpha))))
+        .when(!old.is_empty(), |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .truncate()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(StyledText::new(old.to_string()).with_highlights(ranges(old, &old_alpha))),
+            )
+        })
+        .child(
+            canvas(|_, _, _| {}, move |b, _, window, _| {
+                // The edge sits about where the front character is; titles run in proportional
+                // type, so this is an estimate (and dust is forgiving).
+                let width = b.size.width.as_f32().min(chars * 7.4);
+                let x0 = b.origin.x.as_f32() + width * (front / chars).clamp(0., 1.);
+                let h = b.size.height.as_f32();
+                for i in 0..14u32 {
+                    // A fixed scatter: each speck's own pseudo-random numbers (a small integer hash).
+                    let r = |k: u32| {
+                        let mut h = i.wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+                        h ^= h >> 15;
+                        h = h.wrapping_mul(0x2C1B_3C6D);
+                        h ^= h >> 12;
+                        (h % 1000) as f32 / 1000.
+                    };
+                    // Dust drifts back from the edge and thins out as the title settles.
+                    let x = x0 - r(1) * 22. * (0.4 + t);
+                    let y = b.origin.y.as_f32() + 2. + r(2) * (h - 4.);
+                    let a = (1. - t) * (0.35 + 0.65 * r(3));
+                    window.paint_quad(fill(Bounds::new(point(px(x.round()), px(y.round())), size(px(1.5), px(1.5))), dust.opacity(dust.a * a)));
+                }
+            })
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// Characters of soft edge between the new title and the old one.
+const REVEAL_EDGE: f32 = 5.;
+
+/// Where the reveal's edge is, in characters of a title `n` long, at `t` (0 to 1).
+fn reveal_front(t: f32, n: usize) -> f32 {
+    // It starts an edge's width before the first character, so the old title is whole at first.
+    t.clamp(0., 1.) * (n as f32 + 2. * REVEAL_EDGE) - REVEAL_EDGE
+}
+
+/// Each character's opacity as a title `n` characters long replaces one `old` long, at `t`: the
+/// new one is in behind the edge, the old one still there a little ahead of it (and dimming).
+fn reveal_alphas(n: usize, old: usize, t: f32) -> (Vec<f32>, Vec<f32>) {
+    let front = reveal_front(t, n);
+    let new_alpha = |i: usize| ((front - i as f32) / REVEAL_EDGE).clamp(0., 1.);
+    // The old one clears out ahead of the edge rather than under it, so the two never sit on top
+    // of each other: the dust fills the gap.
+    let old_alpha = |i: usize| ((i as f32 - front) / REVEAL_EDGE).clamp(0., 1.) * (1. - t) * 0.8;
+    ((0..n).map(new_alpha).collect(), (0..old).map(old_alpha).collect())
+}
+
 /// Trim the start of a one-line excerpt so its first match sits about `lead` characters in (at a
 /// word start), for rows too narrow to show the excerpt whole. Ranges move with the text.
 pub fn lead_to_match(text: &str, ranges: &[std::ops::Range<usize>], lead: usize) -> (String, Vec<std::ops::Range<usize>>) {
@@ -473,7 +556,25 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::lead_to_match;
+    use super::{lead_to_match, reveal_alphas};
+
+    #[test]
+    fn titles_reveal_left_to_right_over_the_old_one() {
+        let (new, old) = reveal_alphas(10, 8, 0.);
+        assert!(new.iter().all(|a| *a == 0.), "nothing of the new title yet");
+        assert!(old.iter().all(|a| *a > 0.5), "the old one still shows");
+        let (new, old) = reveal_alphas(10, 8, 0.5);
+        assert!(new.windows(2).all(|w| w[0] >= w[1]), "in from the left: {new:?}");
+        assert!(new[0] == 1. && new[9] == 0.);
+        assert!(old[0] == 0. && old[4] == 0. && old[7] > 0., "the old one is gone behind the edge, there ahead of it: {old:?}");
+        let (_, old) = reveal_alphas(10, 30, 0.5);
+        assert!(old[20] > 0., "and still there well ahead of it: {old:?}");
+        // Where either is part-way, the other is out.
+        let (new, old) = reveal_alphas(10, 10, 0.3);
+        assert!(new.iter().zip(&old).all(|(n, o)| *n == 0. || *o == 0.), "{new:?} {old:?}");
+        let (new, old) = reveal_alphas(10, 8, 1.);
+        assert!(new.iter().all(|a| *a == 1.) && old.iter().all(|a| *a == 0.));
+    }
 
     #[test]
     fn excerpts_lead_with_the_match() {

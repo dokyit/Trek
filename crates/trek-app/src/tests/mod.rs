@@ -2,6 +2,7 @@
 //! appears on screen) over an in-memory database and a throwaway data folder, with the scripted
 //! mock agent standing in for real ones. `harness` has the setup; tests are grouped by area.
 
+mod activity;
 mod alerts;
 mod flows;
 mod harness;

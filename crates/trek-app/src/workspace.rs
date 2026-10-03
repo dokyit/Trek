@@ -99,6 +99,9 @@ pub struct PendingPermission {
     pub after_turn: bool,
 }
 
+/// How long a new title takes to animate in.
+pub const TITLE_REVEAL: Duration = Duration::from_millis(380);
+
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
 #[derive(Default)]
 pub struct LiveThread {
@@ -139,6 +142,15 @@ pub struct LiveThread {
     pub context: Option<(u64, u64)>,
     /// Bumped on every transcript change so views can resync cheaply.
     pub revision: u64,
+    /// Lines each tool call that changed a file added and removed, by call id (kept in the store).
+    pub lines: HashMap<String, (u32, u32)>,
+    /// The group of tool calls folding into its summary row now that it's over (`activity`).
+    pub fold: Option<crate::activity::Fold>,
+    /// Shows the folded group in the transcript once the fold is over.
+    _fold_done: Option<Task<()>>,
+    /// A live group the user opened from the working bar: it shows in the transcript instead,
+    /// open, with the call they clicked open too (`open_live_group`).
+    pub opened: Option<crate::activity::Opened>,
     /// Follow-ups held while a turn runs (`FollowUp::Queue`), sent one per finished turn.
     pub queued: Vec<(String, Vec<PathBuf>)>,
     /// Sub-agents launched this turn, keyed by the tool call that started them.
@@ -601,6 +613,9 @@ pub struct Workspace {
     pub search_epoch: u64,
     /// The message the transcript should scroll to next (`open_thread_at`).
     pub reveal: Option<Reveal>,
+    /// Threads whose title just changed, with the title before and when: it animates in where
+    /// it's shown (`title_reveal`).
+    pub retitled: HashMap<String, (String, Instant)>,
     /// Imported transcripts and older rows are being added to the search index.
     indexing: bool,
     /// More was handed to the index while it ran (a big save): go round once more.
@@ -797,6 +812,7 @@ impl Workspace {
             _search_task: None,
             search_epoch: 0,
             reveal: None,
+            retitled: HashMap::new(),
             indexing: false,
             index_again: false,
             project_filter: None,
@@ -995,9 +1011,27 @@ impl Workspace {
         self.tasks.push(task);
     }
 
+    /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
+    pub fn motion(&self, cx: &App) -> bool {
+        !self.settings.appearance.reduce_motion && !cx.reduce_motion()
+    }
+
+    /// How far `id`'s new title has animated in (0 to 1), and the title it replaces, while it does.
+    pub fn title_reveal(&self, id: &str) -> Option<(f32, &str)> {
+        let (old, at) = self.retitled.get(id)?;
+        let t = at.elapsed().as_secs_f32() / TITLE_REVEAL.as_secs_f32();
+        (t < 1.).then_some((t, old.as_str()))
+    }
+
     fn mutate_thread(&mut self, id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut Thread)) {
+        let motion = self.motion(cx);
         if let Some(t) = self.threads.iter_mut().find(|t| t.id == id) {
+            let before = t.title.clone();
             f(t);
+            if t.title != before && motion {
+                self.retitled.retain(|_, (_, at)| at.elapsed() < TITLE_REVEAL);
+                self.retitled.insert(id.to_string(), (before, Instant::now()));
+            }
             if let Err(e) = self.store.save_thread(t) {
                 tracing::warn!("save thread: {e}");
             }
@@ -1472,6 +1506,7 @@ impl Workspace {
             return;
         }
         live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+        live.lines = self.store.tool_lines(id).unwrap_or_default();
         let rows = self.store.items_with_ids(id).unwrap_or_default();
         if !rows.is_empty() {
             live.items = Transcript::stored(rows);
@@ -2132,6 +2167,8 @@ impl Workspace {
         // It's another session than the thread's: its points so far are unknown.
         let mut new_session = false;
         let current_native = self.thread(id).and_then(|t| t.native_id.clone());
+        // The group of tool calls on show in the working bar, which these events may end.
+        let live_group = self.live_group_start(id);
         let mut diff: Option<(i64, i64)> = None;
         let mut finished = false;
         // The turn ended cleanly: queued follow-ups may go out. After a stop or failure they go back
@@ -2171,7 +2208,12 @@ impl Workspace {
                 }
                 transcript_only &= matches!(
                     ev,
-                    AgentEvent::TextDelta(_) | AgentEvent::TextDone(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. } | AgentEvent::ToolFinished { .. }
+                    AgentEvent::TextDelta(_)
+                        | AgentEvent::TextDone(_)
+                        | AgentEvent::ReasoningDelta(_)
+                        | AgentEvent::ToolStarted { .. }
+                        | AgentEvent::ToolFinished { .. }
+                        | AgentEvent::ToolLines { .. }
                 );
                 // Text after a thought ends the thought, which then gets a row of its own.
                 appended &= match ev {
@@ -2279,6 +2321,16 @@ impl Workspace {
                         live.streaming = None;
                         live.reasoning = None;
                         live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
+                    }
+                    AgentEvent::ToolLines { id: tid, added, removed } => {
+                        let lines = (added > 0 || removed > 0).then_some((added, removed));
+                        if let Err(e) = self.store.set_tool_lines(id, &tid, lines) {
+                            tracing::warn!("save tool lines: {e}");
+                        }
+                        match lines {
+                            Some(l) => live.lines.insert(tid, l),
+                            None => live.lines.remove(&tid),
+                        };
                     }
                     AgentEvent::ToolFinished { id: tid, output, ok } => {
                         if let Some(Item::Tool { output: o, status, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
@@ -2480,6 +2532,14 @@ impl Workspace {
         if let Some(message) = notify_text.filter(|_| !side_chat) {
             cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string() });
         }
+        if let Some(first) = live_group {
+            // Text, the turn's end or a stop ended it (not a card, which shows it as it is): it
+            // folds into its summary row.
+            let card = self.live.get(id).is_some_and(|l| !l.permissions.is_empty());
+            if self.live_group_start(id).as_ref() != Some(&first) && !card && self.motion(cx) {
+                self.fold_group(id, first, cx);
+            }
+        }
         if transcript_only {
             // Only the transcript views redraw; the sidebar, title bar and composer would
             // otherwise redraw with every batch, up to 60 times a second while text streams.
@@ -2487,6 +2547,38 @@ impl Workspace {
         } else {
             cx.notify();
         }
+    }
+
+    /// The id of the first item of `id`'s live group of tool calls (`activity::live`).
+    fn live_group_start(&self, id: &str) -> Option<String> {
+        let start = crate::activity::live(self, id)?.start;
+        self.live.get(id)?.items.id_at(start).map(str::to_string)
+    }
+
+    /// Show `id`'s live group in the transcript, open (and its call `call` too), rather than in
+    /// the working bar: every call can be read there, output and all, while the turn goes on.
+    pub fn open_live_group(&mut self, id: &str, call: Option<String>, cx: &mut Context<Self>) {
+        let Some(first) = self.live_group_start(id) else { return };
+        let Some(live) = self.live.get_mut(id) else { return };
+        live.opened = Some(crate::activity::Opened { first, call });
+        cx.emit(WorkspaceEvent::Transcript { id: id.to_string(), appended: false });
+    }
+
+    /// The live group starting at item `first` is over: the working bar folds it away while the
+    /// transcript holds it (and what came after) back, then shows it as a summary row.
+    fn fold_group(&mut self, id: &str, first: String, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id) else { return };
+        live.fold = Some(crate::activity::Fold { first, until: Instant::now() + crate::activity::FOLD });
+        let id = id.to_string();
+        live._fold_done = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::activity::FOLD).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(l) = this.live.get_mut(&id) {
+                    l.fold = None;
+                }
+                cx.emit(WorkspaceEvent::Transcript { id, appended: false });
+            });
+        }));
     }
 
     /// Put queued follow-ups back into the composer (the thread must be on screen).
@@ -2951,6 +3043,13 @@ impl Workspace {
         };
         let kept: Vec<Item> = items[..cut].to_vec();
         let kept_ids: Vec<String> = items.ids()[..cut].to_vec();
+        let kept_lines: HashMap<String, (u32, u32)> = kept
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool { id: call, .. } => live.lines.get(call).map(|l| (call.clone(), *l)),
+                _ => None,
+            })
+            .collect();
         let reopen = match point {
             // Where the session stood as the first message left out was sent.
             Some(point) => trek_core::rewind::reopen_before(&kept, point.as_ref(), None, native),
@@ -2995,9 +3094,15 @@ impl Workspace {
             Ok(false) => {}
             Err(e) => tracing::warn!("save fork: {e}"),
         }
+        for (call, lines) in &kept_lines {
+            if let Err(e) = self.store.set_tool_lines(&fork.id, call, Some(*lines)) {
+                tracing::warn!("save tool lines: {e}");
+            }
+        }
         let fork_id = fork.id.clone();
         let live = self.live.entry(fork_id.clone()).or_default();
         live.items = transcript;
+        live.lines = kept_lines;
         live.loaded = true;
         live.mark = fork.native_at.clone();
         live.git_jobs.extend(links.into_iter().map(|(repo, checkpoints)| GitJob::Link { repo, checkpoints }));

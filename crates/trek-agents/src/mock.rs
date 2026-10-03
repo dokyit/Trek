@@ -11,6 +11,8 @@
 //! | `plan` (or plan mode)        | a plan to approve before any change                          |
 //! | `mock:long` [dur]            | a long build that runs `dur` (default 30s)                   |
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
+//! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
+//! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `error`                      | a turn that fails                                             |
 //! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
 //! | `recall`                     | the messages it remembers from this conversation             |
@@ -97,6 +99,7 @@ enum Script {
     Plan,
     Long(Duration),
     Stream(Duration),
+    Explore(Duration),
     Error,
     Write,
     Recall,
@@ -116,6 +119,7 @@ impl Script {
                 // Bare "long" and "stream" are too common to start a 30-second turn.
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
+                "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write,
                 "error" => Script::Error,
@@ -148,6 +152,7 @@ pub fn title(request: &str) -> String {
         Script::Plan => "Require a session on every route",
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
+        Script::Explore(_) => "Animate the title as it appears",
         Script::Error => "Fix the failing build",
         Script::Write => "Add a note",
         Script::Recall => "What was said",
@@ -344,6 +349,7 @@ impl Session {
             Script::Plan => self.plan_turn().await?,
             Script::Long(total) => self.long(total).await?,
             Script::Stream(total) => self.stream(total).await?,
+            Script::Explore(total) => self.explore(total).await?,
             Script::Write => self.write().await?,
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
@@ -461,6 +467,15 @@ impl Session {
         self.emit(AgentEvent::ToolFinished { id, output: output.into(), ok: true }).await
     }
 
+    /// An edit that adds `added` lines and removes `removed`.
+    async fn edit(&mut self, path: &str, output: &str, ms: u64, (added, removed): (u32, u32)) -> Step {
+        let id = self.id("tool");
+        self.tool_start(&id, "Edit", path).await?;
+        self.emit(AgentEvent::ToolLines { id: id.clone(), added, removed }).await?;
+        self.pause(paced(ms)).await?;
+        self.emit(AgentEvent::ToolFinished { id, output: output.into(), ok: true }).await
+    }
+
     async fn tools(&mut self) -> Step {
         self.think("I should look around before changing anything.").await?;
         self.tool("Run command", "ls -la", LS_OUTPUT, 250).await?;
@@ -468,8 +483,8 @@ impl Session {
         self.tool("Search", "parse_args", "src/main.rs:3:    let cfg = parse_args();\nsrc/cli.rs:12:pub fn parse_args() -> Config {", 150).await?;
         self.acknowledge_steer().await?;
         self.say("The flag parsing lives in `src/cli.rs`; I'll add the `--verbose` flag there and wire it through `src/main.rs`.").await?;
-        self.tool("Edit", "src/cli.rs", "Applied 1 edit to src/cli.rs", 220).await?;
-        self.tool("Edit", "src/main.rs", "Applied 2 edits to src/main.rs", 200).await?;
+        self.edit("src/cli.rs", "Applied 1 edit to src/cli.rs", 220, (9, 1)).await?;
+        self.edit("src/main.rs", "Applied 2 edits to src/main.rs", 200, (5, 2)).await?;
         self.emit(AgentEvent::DiffStat { additions: 14, deletions: 3 }).await?;
         self.tool("Run command", "cargo test", TEST_OUTPUT, 600).await?;
         self.say("Added a `--verbose` flag:\n\n- `src/cli.rs` parses it into `Config::verbose`\n- `src/main.rs` raises the log level when it's set\n\nAll 14 tests pass.").await
@@ -488,8 +503,11 @@ impl Session {
             Ok(()) => (format!("Wrote note {n} to NOTES.md"), true),
             Err(e) => (format!("Couldn't write NOTES.md: {e}"), false),
         };
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         let added = (text.lines().count() - before.lines().count()) as i64;
+        if ok {
+            self.emit(AgentEvent::ToolLines { id: id.clone(), added: added as u32, removed: 0 }).await?;
+        }
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         self.emit(AgentEvent::DiffStat { additions: added, deletions: 0 }).await?;
         self.say(&format!("Added note {n} to `NOTES.md`.")).await
     }
@@ -599,8 +617,8 @@ impl Session {
             Reply::Decision(Decision::Deny) => self.say("Okay — I'll keep refining the plan. What should change?").await,
             _ => {
                 self.plan = false;
-                self.tool("Edit", "src/auth.rs", "Applied 1 edit to src/auth.rs", 250).await?;
-                self.tool("Edit", "src/routes.rs", "Applied 2 edits to src/routes.rs", 250).await?;
+                self.edit("src/auth.rs", "Applied 1 edit to src/auth.rs", 250, (24, 2)).await?;
+                self.edit("src/routes.rs", "Applied 2 edits to src/routes.rs", 250, (7, 4)).await?;
                 self.emit(AgentEvent::DiffStat { additions: 31, deletions: 6 }).await?;
                 self.tool("Run command", "cargo test", TEST_OUTPUT, 500).await?;
                 self.say("Implemented the plan: every route now goes through `require_session`, and the tests pass.").await
@@ -658,6 +676,75 @@ impl Session {
     }
 }
 
+impl Session {
+    /// Tools at a steady pace for `total`, the way an agent finds its way around a project:
+    /// groups of reads, finds and commands, a thought or a message between them, then edits and
+    /// a test run. Real time, not the pace: the prompt asked for this long. A step takes a
+    /// fourteenth of `total` (at most 900 ms), so even a short run plays several of them.
+    async fn explore(&mut self, total: Duration) -> Step {
+        let end = tokio::time::Instant::now() + total;
+        let step = (total / 14).clamp(Duration::from_millis(5), Duration::from_millis(900));
+        let mut i = 0;
+        while tokio::time::Instant::now() < end {
+            match EXPLORE[i % EXPLORE.len()] {
+                Explore::Think(text) => self.think(text).await?,
+                Explore::Say(text) => self.say(text).await?,
+                Explore::Tool(title, detail) | Explore::Edit(title, detail, ..) => {
+                    let id = self.id("tool");
+                    self.tool_start(&id, title, detail).await?;
+                    if let Explore::Edit(.., added, removed) = EXPLORE[i % EXPLORE.len()] {
+                        self.emit(AgentEvent::ToolLines { id: id.clone(), added, removed }).await?;
+                    }
+                    self.pause(step).await?;
+                    self.emit(AgentEvent::ToolFinished { id, output: format!("{title} {detail}: done"), ok: true }).await?;
+                    self.pause(step / 4).await?;
+                }
+            }
+            self.acknowledge_steer().await?;
+            i += 1;
+        }
+        self.say("The title now fades in from the left as it arrives, and the tests pass.").await
+    }
+}
+
+/// One step of `mock:explore`.
+#[derive(Clone, Copy)]
+enum Explore {
+    Think(&'static str),
+    Say(&'static str),
+    /// A tool call: its title and detail, as agents report them.
+    Tool(&'static str, &'static str),
+    /// A call that changes a file, with the lines it adds and removes.
+    Edit(&'static str, &'static str, u32, u32),
+}
+
+const EXPLORE: &[Explore] = &[
+    Explore::Think("**Exploring the project**\n\nFirst, where titles come from and where the sidebar draws them."),
+    Explore::Tool("Run command", "cd /Users/me/code/trail-app && git status --short"),
+    Explore::Tool("Run command", "sed -n 165,260p src/shared/ui/ParticleText.tsx"),
+    Explore::Tool("Search", "generateTitle|titleGen|generatedTitle"),
+    Explore::Tool("Read", "src/features/sessions/model/session.ts"),
+    Explore::Tool("List files", "src/features/sessions/ui/**/*.tsx"),
+    Explore::Tool("Read", "src/features/sessions/ui/AgentTitle.tsx"),
+    Explore::Tool("Read", "Cargo.toml"),
+    Explore::Say("Titles come from `generateTitle` in `src/features/sessions/model/session.ts`; the sidebar draws them in `AgentTitle.tsx`."),
+    Explore::Tool("Fetch", "https://developer.mozilla.org/en-US/docs/Web/CSS/mask-image"),
+    Explore::Tool("Search the web", "css mask-image gradient text reveal"),
+    Explore::Think("**Planning the change**\n\nA mask that sweeps left to right, keyed on the title so it only plays when it changes."),
+    Explore::Edit("Edit", "src/features/sessions/ui/AgentTitle.tsx", 18, 4),
+    Explore::Edit("Edit", "src/shared/ui/ParticleText.tsx", 42, 0),
+    Explore::Edit("Write", "src/shared/ui/reveal.css", 27, 0),
+    Explore::Tool("Run command", "npm run typecheck"),
+    Explore::Tool("Run command", "npx vitest run src/features/sessions"),
+    Explore::Say("The reveal is in. Checking the native side next."),
+    Explore::Tool("Read", "src-tauri/src/main.rs"),
+    Explore::Tool("Run command", "rg -n \"set_title\" src-tauri/src"),
+    Explore::Tool("Read", "README.md"),
+    Explore::Edit("Edit", "src-tauri/src/window.rs", 6, 2),
+    Explore::Tool("Run command", "cargo test --manifest-path src-tauri/Cargo.toml"),
+    Explore::Say("Native titles follow the same rule now."),
+];
+
 fn humanize(d: Duration) -> String {
     match d.as_secs() {
         0 => format!("{} ms", d.as_millis()),
@@ -707,6 +794,8 @@ mod tests {
         assert_eq!(Script::parse("how long is it?", false), Script::Answer, "bare `long` is just a word");
         assert_eq!(Script::parse("mock:stream 2m", false), Script::Stream(Duration::from_secs(120)));
         assert_eq!(Script::parse("stream the logs", false), Script::Answer);
+        assert_eq!(Script::parse("mock:explore 5s", false), Script::Explore(Duration::from_secs(5)));
+        assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("send subagents 300ms", false), Script::Agents(Some(Duration::from_millis(300))));
         assert_eq!(Script::parse("ask a question", false), Script::Questions);
         assert_eq!(Script::parse("mock:permission", false), Script::Permission);
@@ -1003,6 +1092,27 @@ mod tests {
             assert!(streamed.starts_with("## Part 1\n\n## How the app starts"), "{streamed}");
             assert_eq!(text(&events), streamed, "one message, sent whole at the end");
             assert!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta(_))).count() > 10);
+        });
+    }
+
+    #[test]
+    fn explores_with_tools_for_as_long_as_asked() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            let start = std::time::Instant::now();
+            m.prompt("mock:explore 300ms").await;
+            let events = m.turn().await;
+            assert!(start.elapsed() >= Duration::from_millis(300));
+            let tools: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, .. } = e { Some(title.as_str()) } else { None }).collect();
+            assert!(tools.len() >= 8, "{tools:?}");
+            assert_eq!(tools.len(), events.iter().filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. })).count());
+            // Messages between the groups, and the last word at the end.
+            assert!(text(&events).contains("Titles come from"));
+            assert!(text(&events).ends_with("the tests pass."));
+            // Edits say how many lines they changed.
+            if tools.len() > 13 {
+                assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolLines { added: 18, removed: 4, .. })));
+            }
         });
     }
 

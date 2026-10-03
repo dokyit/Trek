@@ -132,6 +132,7 @@ impl ThreadWindow {
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
         let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
         let title = thread.map(|t| t.title).unwrap_or_default();
+        let reveal = ws.title_reveal(&self.id).map(|(p, old)| (p, old.to_string()));
         let transparent = ws.backdrop().is_some();
         TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
             h_flex()
@@ -152,7 +153,13 @@ impl ThreadWindow {
                                 .child(div().flex_none().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })
-                        .child(div().min_w_0().truncate().font_medium().child(title))
+                        .child(div().min_w_0().font_medium().child(crate::ui::title_text(
+                            "window-title",
+                            &title,
+                            reveal.as_ref().map(|(p, old)| (*p, old.as_str())),
+                            theme.foreground,
+                            cx,
+                        )))
                         .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
                 .when_some(folder, |el, dir| el.child(crate::root::open_in_button(dir)))
@@ -172,8 +179,11 @@ impl ThreadWindow {
 }
 
 impl Render for ThreadWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let backdrop = self.workspace.read(cx).backdrop();
+        if self.workspace.read(cx).title_reveal(&self.id).is_some() {
+            window.request_animation_frame();
+        }
         let theme = cx.theme().clone();
         v_flex()
             .id("thread-window")
@@ -233,7 +243,7 @@ impl Render for ThreadWindow {
                         .overflow_hidden()
                         // Cached as in the main window: the working bar's frames redraw only the bar.
                         .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(StyleRefinement::default().size_full())))
-                        .child(crate::working_bar::cached(&self.working_bar, cx))
+                        .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
                         .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
                 ),
             )

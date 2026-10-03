@@ -379,6 +379,17 @@ fn row_title(tool: &Tool) -> String {
     }
 }
 
+/// Lines the call's diffs add and remove (`content` entries of type `diff`), if it has any.
+fn diff_lines(tc: &Value) -> Option<(u32, u32)> {
+    let diffs: Vec<&Value> = tc["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "diff").collect();
+    (!diffs.is_empty()).then(|| {
+        diffs.iter().fold((0, 0), |(a, r), d| {
+            let (a2, r2) = crate::line_changes(d["oldText"].as_str().unwrap_or_default(), d["newText"].as_str().unwrap_or_default());
+            (a + a2, r + r2)
+        })
+    })
+}
+
 fn tool_output(tc: &Value) -> String {
     let mut parts = Vec::new();
     for c in tc["content"].as_array().into_iter().flatten() {
@@ -477,6 +488,9 @@ impl Turn {
                     out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail });
                 }
                 if done {
+                    if let Some((added, removed)) = diff_lines(u).filter(|_| status == "completed") {
+                        out.push(AgentEvent::ToolLines { id: id.clone(), added, removed });
+                    }
                     let output = match self.tools.remove(&id).and_then(|t| t.todos) {
                         Some(steps) if status == "completed" => plan_row(&steps).1,
                         _ => tool_output(u),
@@ -1236,6 +1250,18 @@ mod tests {
             t.finish(Ok("end_turn")),
             vec![AgentEvent::TextDone("pong".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }]
         );
+    }
+
+    #[test]
+    fn edits_report_the_lines_their_diffs_change() {
+        let mut t = Turn::default();
+        t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"e1","title":"Edit","kind":"edit","status":"in_progress","locations":[{"path":"/p/a.rs"}]}));
+        let ev = t.update(&json!({
+            "sessionUpdate":"tool_call_update","toolCallId":"e1","status":"completed",
+            "content":[{"type":"diff","path":"/p/a.rs","oldText":"a\nb\n","newText":"a\nB\nc\n"},{"type":"diff","path":"/p/n.rs","oldText":null,"newText":"x\n"}]
+        }));
+        assert_eq!(ev[0], AgentEvent::ToolLines { id: "e1".into(), added: 3, removed: 1 });
+        assert!(matches!(&ev[1], AgentEvent::ToolFinished { ok: true, .. }));
     }
 
     #[test]

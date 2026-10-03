@@ -243,6 +243,13 @@ impl Trek {
         self.window(cx, |window, _| window.try_find(id).is_some_and(|e| e.visible()))
     }
 
+    /// Where `id` was drawn in the last frame, if it was.
+    pub fn bounds(&self, cx: &mut TestAppContext, id: impl Into<gpui_kit::ElementId>) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+        let id = id.into();
+        cx.run_until_parked();
+        self.window(cx, |window, _| window.try_find(id).filter(|e| e.visible()).map(|e| e.bounds()))
+    }
+
     /// `visible`, in another of Trek's windows (a thread window).
     pub fn visible_in(&self, cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<gpui_kit::ElementId>) -> bool {
         let id = id.into();
@@ -302,6 +309,16 @@ impl Trek {
     /// The working bar's text, `None` while it's hidden.
     pub fn working_bar(&self, cx: &TestAppContext) -> Option<String> {
         cx.read(|cx| self.root.read(cx).working_bar.read(cx).label())
+    }
+
+    /// The working bar's live group (see `WorkingBar::live_group`), `None` when there's none.
+    pub fn live_group(&self, cx: &TestAppContext) -> Option<Vec<String>> {
+        cx.read(|cx| self.root.read(cx).working_bar.read(cx).live_group())
+    }
+
+    /// The summary of the group folding away in the working bar, if one is.
+    pub fn folding(&self, cx: &TestAppContext) -> Option<String> {
+        cx.read(|cx| self.root.read(cx).working_bar.read(cx).folding())
     }
 
     pub fn composer_text(&self, cx: &TestAppContext) -> String {

@@ -29,6 +29,35 @@ fn tool_title(name: &str, input: &Value) -> (String, String) {
     }
 }
 
+/// Lines an edit call will add and remove, from its input (refined by the result's patch).
+fn edit_lines(name: &str, input: &Value) -> Option<(u32, u32)> {
+    let s = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    match name {
+        "Edit" => Some(crate::line_changes(&s(input, "old_string"), &s(input, "new_string"))),
+        "MultiEdit" => Some(input["edits"].as_array().into_iter().flatten().fold((0, 0), |(a, r), e| {
+            let (a2, r2) = crate::line_changes(&s(e, "old_string"), &s(e, "new_string"));
+            (a + a2, r + r2)
+        })),
+        "Write" => Some((input["content"].as_str().unwrap_or_default().lines().count() as u32, 0)),
+        _ => None,
+    }
+}
+
+/// Lines an edit's result says it added and removed: its `structuredPatch`, or a new file's
+/// content. Stream-json calls the field `tool_use_result`; session files, `toolUseResult`.
+fn result_lines(v: &Value) -> Option<(u32, u32)> {
+    let r = if v["tool_use_result"].is_object() { &v["tool_use_result"] } else { &v["toolUseResult"] };
+    if let Some(hunks) = r["structuredPatch"].as_array().filter(|h| !h.is_empty()) {
+        let lines = hunks.iter().flat_map(|h| h["lines"].as_array().into_iter().flatten()).filter_map(|l| l.as_str());
+        return Some(lines.fold((0, 0), |(a, d), l| match l.chars().next() {
+            Some('+') => (a + 1, d),
+            Some('-') => (a, d + 1),
+            _ => (a, d),
+        }));
+    }
+    (r["type"] == "create").then(|| (r["content"].as_str().unwrap_or_default().lines().count() as u32, 0))
+}
+
 /// The step a TodoWrite call is on, like the plan rows of the other agents.
 fn todo_detail(input: &Value) -> String {
     let steps: Vec<(String, Step)> = input["todos"]
@@ -652,12 +681,13 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                         *streamed_text = false;
                     }
                     Some("tool_use") => {
-                        let (title, detail) = tool_title(block["name"].as_str().unwrap_or("tool"), &block["input"]);
-                        out.push(AgentEvent::ToolStarted {
-                            id: block["id"].as_str().unwrap_or_default().into(),
-                            title,
-                            detail,
-                        });
+                        let name = block["name"].as_str().unwrap_or("tool");
+                        let id: String = block["id"].as_str().unwrap_or_default().into();
+                        let (title, detail) = tool_title(name, &block["input"]);
+                        out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail });
+                        if let Some((added, removed)) = edit_lines(name, &block["input"]) {
+                            out.push(AgentEvent::ToolLines { id, added, removed });
+                        }
                     }
                     _ => {}
                 }
@@ -667,18 +697,23 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
         // The user's own message, echoed back (see `Turns`).
         Some("user") if v["isReplay"] == true => {}
         Some("user") if v["parent_tool_use_id"].is_null() => {
-            for block in v["message"]["content"].as_array().into_iter().flatten() {
+            let blocks = v["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+            // The result's patch describes the message's one tool call.
+            let patched = (blocks.iter().filter(|b| b["type"] == "tool_result").count() == 1).then(|| result_lines(v)).flatten();
+            for block in blocks {
                 if block["type"] == "tool_result" {
                     let output = match &block["content"] {
                         Value::String(s) => s.clone(),
                         Value::Array(a) => a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
                         _ => String::new(),
                     };
-                    out.push(AgentEvent::ToolFinished {
-                        id: block["tool_use_id"].as_str().unwrap_or_default().into(),
-                        output: clip(&output, 8000),
-                        ok: block["is_error"] != true,
-                    });
+                    let id: String = block["tool_use_id"].as_str().unwrap_or_default().into();
+                    let ok = block["is_error"] != true;
+                    // A failed or denied edit changed nothing, whatever its input estimated.
+                    if let Some((added, removed)) = if ok { patched } else { Some((0, 0)) } {
+                        out.push(AgentEvent::ToolLines { id: id.clone(), added, removed });
+                    }
+                    out.push(AgentEvent::ToolFinished { id, output: clip(&output, 8000), ok });
                 }
             }
             out.extend(mark(v));
@@ -738,6 +773,30 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
 mod tests {
     use super::*;
     use trek_core::HandHolding;
+
+    #[test]
+    fn edits_report_the_lines_they_change() {
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let edit = json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/p/a.rs","old_string":"fn a() {}\n","new_string":"fn a() {\n    b();\n}\n"}}]}});
+        let ev = translate(&edit, &mut pending, &mut streamed);
+        assert_eq!(ev[1], AgentEvent::ToolLines { id: "e1".into(), added: 3, removed: 1 });
+        // The result's patch is exact, and replaces the estimate.
+        let result = json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"ok"}]},
+            "tool_use_result":{"filePath":"/p/a.rs","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":3,"lines":["-fn a() {}","+fn a() {","+    b();","+}"," fn c() {}"]}]}});
+        let ev = translate(&result, &mut pending, &mut streamed);
+        assert_eq!(ev[0], AgentEvent::ToolLines { id: "e1".into(), added: 3, removed: 1 });
+        assert!(matches!(&ev[1], AgentEvent::ToolFinished { id, ok: true, .. } if id == "e1"));
+        let write = json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"/p/n.md","content":"# N\n\nhi\n"}}]}});
+        assert_eq!(translate(&write, &mut pending, &mut streamed)[1], AgentEvent::ToolLines { id: "w1".into(), added: 3, removed: 0 });
+        // A denied or failed edit changed nothing.
+        let denied = json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"The user doesn't want to proceed","is_error":true}]}});
+        let ev = translate(&denied, &mut pending, &mut streamed);
+        assert_eq!(ev[0], AgentEvent::ToolLines { id: "e1".into(), added: 0, removed: 0 });
+        assert!(matches!(&ev[1], AgentEvent::ToolFinished { ok: false, .. }));
+        // Other tools have none.
+        let read = json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/p/a.rs"}}]}});
+        assert!(!translate(&read, &mut pending, &mut streamed).iter().any(|e| matches!(e, AgentEvent::ToolLines { .. })));
+    }
 
     #[test]
     fn translates_core_stream_messages() {
