@@ -5,7 +5,8 @@
 # Signing (script/lib/sign.sh): $TREK_SIGN_IDENTITY, else "Trek Local Signing" (create it once with
 # script/signing-identity.sh), else "Shelf Dev", else ad-hoc. A stable identity keeps macOS's
 # Accessibility and Screen Recording grants across rebuilds; ad-hoc signatures change every build.
-# Releases (archive, signature, manifest, GitHub) are script/release.sh.
+# Releases (archive, signature, manifest, GitHub) are script/release.sh. A bundle built here doesn't
+# update itself (TREK_UPDATE_LOCAL_BUNDLE=1 at run time lets it, for testing the updater).
 set -euo pipefail
 cd "${0:A:h}/.."
 source script/lib/sign.sh
@@ -16,6 +17,10 @@ VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 # the updater checks before installing.
 SHORT=${VERSION%%-*}
 OUT=dist; APP="$OUT/Trek.app"
+# Only release.sh marks a bundle as a release. One built here for yourself isn't: the updater
+# treats it as a development build, so it never swaps itself for a published build of older code.
+RELEASE_KEY=""
+if [[ ${TREK_RELEASE_BUILD:-} == 1 ]]; then RELEASE_KEY="<key>TrekRelease</key><true/>"; fi
 
 echo "• building release $VERSION"
 cargo build --release -p trek-app -p trek-mcp
@@ -52,6 +57,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  $RELEASE_KEY
 </dict></plist>
 PLIST
 

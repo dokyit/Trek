@@ -61,7 +61,8 @@ Screenshots are coming with the first public release.
 
 ## Install
 
-Download `Trek-<version>-darwin-aarch64.app.tar.gz` from
+No release has been published yet: until the first one is, [build Trek from source](#build-from-source).
+Once there is one, download `Trek-<version>-darwin-aarch64.app.tar.gz` from
 [Releases](https://github.com/dokyit/Trek/releases), unpack it (double-click) and move **Trek.app** to
 Applications. Trek needs macOS 13 or later on Apple silicon.
 
@@ -80,7 +81,7 @@ After that Trek updates itself: Settings → Updates picks the channel (Stable, 
 checked once a day, downloaded in the background, verified (SHA-256 and a minisign signature against the
 key built into Trek) and installed when you restart or quit Trek — never while an agent is working. If you
 run Trek straight from Downloads without moving it, macOS runs a read-only copy and Trek can't update
-itself until you move it to Applications.
+itself until you move it to Applications; the same goes for a folder your account can't write to.
 
 To use the agents, install and log in to their CLIs as usual (`claude`, `codex`, `opencode`, …). Trek finds
 them through your login shell's `PATH`; Settings → Agents & Subscriptions shows what it found.
@@ -97,7 +98,9 @@ cargo run -p trek-app                 # debug build, runs from target/
 cargo test -p trek-core -p trek-agents -p trek-app -p trek-mcp
 ```
 
-A development build (`cargo run`) never updates itself; rebuilding is the update. To build an app bundle:
+A development build never updates itself; rebuilding is the update. That's `cargo run`, and also a bundle
+you build with `script/bundle.sh`: only bundles `script/release.sh` makes are releases. To build an app
+bundle:
 
 ```sh
 brew install resvg                    # renders the app icon

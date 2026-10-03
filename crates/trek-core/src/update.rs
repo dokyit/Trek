@@ -85,10 +85,14 @@ pub fn current_version() -> semver::Version {
 /// Why this copy of Trek can't replace itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Blocker {
-    /// Not running from an app bundle (`cargo run`): rebuilding is the update.
+    /// Not a release: `cargo run`, or a bundle built locally with `script/bundle.sh`. Rebuilding
+    /// is the update; a published release would replace the newer code it was built from.
     DevBuild,
     /// macOS runs a quarantined app from a read-only copy until it's moved out of Downloads.
     Translocated,
+    /// Trek can't write where it's installed (a standard account with Trek in /Applications, a
+    /// copy an administrator installed): an update could be downloaded but never installed.
+    ReadOnlyLocation,
 }
 
 impl Blocker {
@@ -96,16 +100,48 @@ impl Blocker {
         match self {
             Blocker::DevBuild => "This is a development build. It updates when you rebuild it.",
             Blocker::Translocated => "macOS is running Trek from a read-only copy. Move Trek to Applications to get updates.",
+            Blocker::ReadOnlyLocation => "Trek can't write to the folder it's in, so it can't update itself. Move it to a folder you own to get updates.",
         }
     }
 }
 
+/// The `Info.plist` key `script/release.sh` stamps release bundles with (`script/bundle.sh` on its
+/// own leaves it out).
+const RELEASE_KEY: &str = "TrekRelease";
+
+/// Lets a bundle built locally update itself anyway (testing the updater).
+pub const LOCAL_UPDATES_ENV: &str = "TREK_UPDATE_LOCAL_BUNDLE";
+
 pub fn blocker() -> Option<Blocker> {
-    match running_bundle() {
-        None => Some(Blocker::DevBuild),
-        Some(b) if b.to_string_lossy().contains("/AppTranslocation/") => Some(Blocker::Translocated),
-        Some(_) => None,
+    static RELEASE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let Some(bundle) = running_bundle() else { return Some(Blocker::DevBuild) };
+    let release = *RELEASE.get_or_init(|| std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || is_release(&bundle));
+    blocker_for(&bundle, release)
+}
+
+fn blocker_for(bundle: &Path, release: bool) -> Option<Blocker> {
+    if !release {
+        Some(Blocker::DevBuild)
+    } else if bundle.to_string_lossy().contains("/AppTranslocation/") {
+        Some(Blocker::Translocated)
+    } else if !writable(bundle) || !bundle.parent().is_some_and(writable) {
+        // Installing renames the bundle out of its folder and a new one in.
+        Some(Blocker::ReadOnlyLocation)
+    } else {
+        None
     }
+}
+
+/// Whether `app` is a published release (`RELEASE_KEY`).
+fn is_release(app: &Path) -> bool {
+    plist_value(app, RELEASE_KEY).is_ok_and(|v| v == "true")
+}
+
+fn writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    // SAFETY: a valid NUL-terminated path that outlives the call.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
 }
 
 /// The `.app` bundle we're running from, if any.
@@ -207,18 +243,24 @@ async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest>
 pub async fn check(urls: &[String]) -> Result<Option<AvailableUpdate>> {
     let client = http()?;
     let results = futures::future::join_all(urls.iter().map(|u| fetch_manifest(&client, u))).await;
-    newest(results, &current_version())
+    newest(results, &current_version(), skipped_version(&crate::paths::updates_dir()).as_ref())
 }
 
-/// The newest build above `current` across the feeds' manifests; the first error only if every
-/// feed failed.
-fn newest(results: Vec<Result<Manifest>>, current: &semver::Version) -> Result<Option<AvailableUpdate>> {
+/// The version a rollback turned away from (`SKIP_MARKER`), if any.
+fn skipped_version(updates: &Path) -> Option<semver::Version> {
+    semver::Version::parse(std::fs::read_to_string(updates.join(SKIP_MARKER)).ok()?.trim()).ok()
+}
+
+/// The newest build above `current` across the feeds' manifests, `skipped` aside; the first
+/// error only if every feed failed.
+fn newest(results: Vec<Result<Manifest>>, current: &semver::Version, skipped: Option<&semver::Version>) -> Result<Option<AvailableUpdate>> {
     let mut best: Option<AvailableUpdate> = None;
     let mut first_error = None;
     let mut any_ok = false;
     for result in results {
         match result.and_then(|m| newer_than(m, current)) {
             Ok(found) => {
+                let found = found.filter(|u| skipped != Some(&u.version));
                 any_ok = true;
                 if let Some(u) = found.filter(|u| best.as_ref().is_none_or(|b| u.version > b.version)) {
                     best = Some(u);
@@ -502,6 +544,11 @@ const PREVIOUS_DIR: &str = "previous.noindex";
 /// Records the version an update replaced, so the new version can say it was just updated.
 const UPDATED_MARKER: &str = "updated-from";
 
+/// A version that was rolled back from: the relaunch helper writes it when the new app won't
+/// open, and so can someone rolling back by hand (docs/RELEASING.md). Checks don't offer that
+/// version again; a newer one is offered as usual.
+pub const SKIP_MARKER: &str = "skip-version";
+
 /// Rename, or copy then delete across volumes (`ditto` keeps signatures and attributes).
 fn move_dir(from: &Path, to: &Path) -> Result<()> {
     if std::fs::rename(from, to).is_ok() {
@@ -543,22 +590,24 @@ fn swap_by_rename(incoming: &Path, bundle: &Path) -> Result<PathBuf> {
 }
 
 /// Waits for the old process to exit, then opens the new bundle; if that fails, puts the backup
-/// back and opens it instead. Arguments: pid, bundle, backup (empty: none), opener, then the
-/// opener's options.
+/// back, records the new version as one to skip (so the version it went back to doesn't install
+/// it again) and opens the backup instead. Arguments: pid, bundle, backup (empty: none), skip
+/// marker, the new version, opener, then the opener's options.
 const RELAUNCH_SCRIPT: &str = r#"
-    pid=$1 bundle=$2 backup=$3 opener=$4; shift 4
+    pid=$1 bundle=$2 backup=$3 skip=$4 version=$5 opener=$6; shift 6
     while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
     "$opener" "$@" "$bundle" && exit 0
     if [ -n "$backup" ] && [ -d "$backup" ]; then
         /bin/mv "$bundle" "$bundle.failed" && /bin/mv "$backup" "$bundle" && /bin/rm -rf "$bundle.failed"
+        printf '%s\n' "$version" > "$skip"
         "$opener" "$@" "$bundle"
     fi
 "#;
 
-fn relaunch_command(pid: u32, bundle: &Path, backup: Option<&Path>, opener: &str, open_args: &[String]) -> std::process::Command {
+fn relaunch_command(pid: u32, bundle: &Path, backup: Option<&Path>, skip: &Path, version: &str, opener: &str, open_args: &[String]) -> std::process::Command {
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(RELAUNCH_SCRIPT).arg("trek-relaunch").arg(pid.to_string()).arg(bundle);
-    cmd.arg(backup.map(Path::as_os_str).unwrap_or_default()).arg(opener).args(open_args);
+    cmd.arg(backup.map(Path::as_os_str).unwrap_or_default()).arg(skip).arg(version).arg(opener).args(open_args);
     cmd
 }
 
@@ -577,7 +626,9 @@ pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
         open_args.push(format!("{k}={v}"));
     }
     use std::os::unix::process::CommandExt as _;
-    relaunch_command(std::process::id(), &installed.bundle, installed.backup.as_deref(), "/usr/bin/open", &open_args)
+    let version = bundle_version(&installed.bundle).map(|v| v.to_string()).unwrap_or_default();
+    let skip = crate::paths::updates_dir().join(SKIP_MARKER);
+    relaunch_command(std::process::id(), &installed.bundle, installed.backup.as_deref(), &skip, &version, "/usr/bin/open", &open_args)
         .process_group(0)
         .spawn()
         .context("couldn't schedule the relaunch")?;
@@ -587,7 +638,8 @@ pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
 /// What the relaunched Trek runs with: where its data lives and how it's set up, never the
 /// one-time launch flags (`TREK_MOCK_PROMPT`, `TREK_OPEN_*`, `TREK_ONBOARDING`, measurement aids),
 /// which would fire again after every update.
-const RELAUNCH_KEEPS: &[&str] = &["TREK_DATA_DIR", "TREK_UPDATE_PUBKEY", "TREK_UPDATE_AUTO_RESTART", "TREK_MOCK_AGENT", "TREK_AXE_PATH", "RUST_LOG"];
+/// (`TREK_UPDATE_PUBKEY` isn't one: it's read when Trek is built, never at run time.)
+const RELAUNCH_KEEPS: &[&str] = &["TREK_DATA_DIR", "TREK_UPDATE_AUTO_RESTART", LOCAL_UPDATES_ENV, "TREK_MOCK_AGENT", "TREK_AXE_PATH", "RUST_LOG"];
 
 fn relaunch_env(foreground: bool) -> Vec<(String, String)> {
     relaunch_env_from(std::env::vars(), foreground)
@@ -741,10 +793,14 @@ mod tests {
     #[test]
     fn the_newest_feed_wins_and_failing_feeds_are_skipped() {
         let current = semver::Version::parse("0.2.0").unwrap();
-        let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Err(anyhow!("offline")), Ok(manifest("0.2.1"))], &current).unwrap();
+        let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Err(anyhow!("offline")), Ok(manifest("0.2.1"))], &current, None).unwrap();
         assert_eq!(picked.unwrap().version.to_string(), "0.3.0-beta.1");
-        assert!(newest(vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))], &current).unwrap().is_none(), "one feed answered: up to date");
-        let all_failed = newest(vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))], &current);
+        // A version rolled back from isn't offered again; the next best is.
+        let skipped = semver::Version::parse("0.3.0-beta.1").unwrap();
+        let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Ok(manifest("0.2.1"))], &current, Some(&skipped)).unwrap();
+        assert_eq!(picked.unwrap().version.to_string(), "0.2.1");
+        assert!(newest(vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))], &current, None).unwrap().is_none(), "one feed answered: up to date");
+        let all_failed = newest(vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))], &current, None);
         assert_eq!(all_failed.err().unwrap().to_string(), "no release yet");
     }
 
@@ -870,11 +926,13 @@ mod tests {
         write_app(&backup, "dev.trek.Trek", "old");
         let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         exited.wait().unwrap();
-        let helper = |backup: Option<&Path>, opener: &str| relaunch_command(exited.id(), &bundle, backup, opener, &["-n".into()]).status().unwrap();
+        let skip = dir.join(SKIP_MARKER);
+        let helper = |backup: Option<&Path>, opener: &str| relaunch_command(exited.id(), &bundle, backup, &skip, "0.2.1", opener, &["-n".into()]).status().unwrap();
 
         assert!(helper(Some(&backup), "/usr/bin/true").success());
         assert_eq!(contents(&bundle), "new", "opened: nothing moves");
         assert!(backup.exists());
+        assert!(!skip.exists());
 
         // Nothing was replaced (the app on disk was already newer): a backup from an earlier
         // update must not go back.
@@ -886,6 +944,29 @@ mod tests {
         assert_eq!(contents(&bundle), "old", "the backup is back in place");
         assert!(!backup.exists());
         assert!(!dir.join("Trek.app.failed").exists());
+        // The version it went back to won't install the one that failed again.
+        assert_eq!(skipped_version(&dir).map(|v| v.to_string()).as_deref(), Some("0.2.1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_releases_somewhere_writable_update_themselves() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("blocker");
+        let app = dir.join("apps/Trek.app");
+        write_app(&app, "dev.trek.Trek", "0.2.0");
+        // script/bundle.sh on its own: a local build, whatever its version says.
+        assert!(!is_release(&app));
+        assert_eq!(blocker_for(&app, false), Some(Blocker::DevBuild));
+        let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), plist.replace("</dict>", "<key>TrekRelease</key><true/></dict>")).unwrap();
+        assert!(is_release(&app));
+        assert_eq!(blocker_for(&app, true), None);
+        assert_eq!(blocker_for(Path::new("/private/var/folders/x/AppTranslocation/y/d/Trek.app"), true), Some(Blocker::Translocated));
+        // A folder this user can't write to: nothing would ever install.
+        std::fs::set_permissions(dir.join("apps"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(blocker_for(&app, true), Some(Blocker::ReadOnlyLocation));
+        std::fs::set_permissions(dir.join("apps"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -907,7 +988,7 @@ mod tests {
         ];
         let from = |foreground| relaunch_env_from(vars.iter().map(|(k, v)| (k.to_string(), v.to_string())), foreground);
         let keys = |env: Vec<(String, String)>| env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
-        assert_eq!(keys(from(true)), ["TREK_DATA_DIR", "TREK_UPDATE_PUBKEY", "TREK_MOCK_AGENT", "RUST_LOG"]);
+        assert_eq!(keys(from(true)), ["TREK_DATA_DIR", "TREK_MOCK_AGENT", "RUST_LOG"]);
         // In the background it opens behind other apps again, whatever this launch was.
         let env = from(false);
         assert!(env.contains(&("TREK_DATA_DIR".into(), "/tmp/trek-data".into())));

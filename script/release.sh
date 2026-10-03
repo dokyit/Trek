@@ -128,7 +128,8 @@ if [[ $VERSION != "$CURRENT" ]]; then
 fi
 
 # ---------- build ----------
-script/bundle.sh
+# Marked as a release: only these replace themselves with newer releases.
+TREK_RELEASE_BUILD=1 script/bundle.sh
 [[ $(trek_sign_identity) == "Trek Local Signing" || -n ${TREK_SIGN_IDENTITY:-} ]] \
   || echo "! signed with \"$(trek_sign_identity)\": fine for a dry run, refused for a real release"
 
