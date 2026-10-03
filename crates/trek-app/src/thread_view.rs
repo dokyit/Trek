@@ -5,6 +5,7 @@ use crate::palette;
 use crate::time;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -103,12 +104,13 @@ pub struct ThreadView {
     /// Markdown state per transcript index, with the byte length already pushed.
     md: HashMap<usize, (Entity<TextViewState>, usize)>,
     expanded: HashSet<usize>,
-    /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes,
-    /// not on every animation frame.
-    /// Picks so far for the question card on screen: (request, question index) → chosen labels.
-    picks: HashMap<(String, usize), Vec<String>>,
+    /// Masked fields for the question card's secret questions, in order, and the request they
+    /// were last shown for (a new card starts them empty).
+    secrets: (Option<String>, Vec<Entity<InputState>>),
     /// Rendered plan for the plan card on screen (request id, markdown).
     plan_md: Option<(String, Entity<TextViewState>)>,
+    /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes,
+    /// not on every animation frame.
     rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, usize), std::rc::Rc<Vec<Row>>)>>,
     expanded_gen: u64,
     /// (transcript, UI) font sizes the rows were measured at; a change remeasures every row.
@@ -137,7 +139,7 @@ impl ThreadView {
             count: 0,
             md: HashMap::new(),
             expanded: HashSet::new(),
-            picks: HashMap::new(),
+            secrets: (None, vec![]),
             plan_md: None,
             rows_cache: Default::default(),
             expanded_gen: 0,
@@ -609,24 +611,78 @@ impl ThreadView {
         }
     }
 
-    /// The agent asked something only a person can answer: multiple-choice questions.
-    fn question_card(&mut self, id: String, request_id: String, questions: Vec<trek_agents::Question>, agent: String, cx: &mut Context<Self>) -> AnyElement {
+    /// Answers from the question card: picked options, and the masked fields for secrets. `None`
+    /// until every question has one.
+    fn card_answers(&self, request_id: &str, questions: &[trek_agents::Question], cx: &App) -> Option<Vec<(String, String)>> {
+        let ws = self.workspace.read(cx);
+        let picks = &ws.live.get(self.current.as_ref()?)?.picks;
+        let mut fields = self.secrets.1.iter();
+        questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let picked = picks.get(&(request_id.to_string(), i)).filter(|v| !v.is_empty()).map(|v| v.join(", "));
+                let typed = q.secret.then(|| fields.next()).flatten().map(|f| f.read(cx).value().trim().to_string()).filter(|v| !v.is_empty());
+                typed.or(picked).map(|a| (q.question.clone(), a))
+            })
+            .collect()
+    }
+
+    /// One masked field per secret question, empty for each new card.
+    fn secret_fields(&mut self, request_id: &str, questions: &[trek_agents::Question], window: &mut Window, cx: &mut Context<Self>) {
+        if self.secrets.0.as_deref() != Some(request_id) {
+            self.secrets.0 = Some(request_id.to_string());
+            self.clear_secrets(window, cx);
+        }
+        while self.secrets.1.len() < questions.iter().filter(|q| q.secret).count() {
+            let field = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Type it here"));
+            self._subscriptions.push(cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            }));
+            self.secrets.1.push(field);
+        }
+    }
+
+    fn clear_secrets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for f in &self.secrets.1 {
+            f.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
+    /// Send the question card's answers, if it's complete.
+    fn submit_answers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.current.clone() else { return };
+        let pending = self.workspace.read(cx).live.get(&id).and_then(|l| l.permissions.first()).and_then(|p| match &p.prompt {
+            Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+            _ => None,
+        });
+        let Some((request_id, questions)) = pending else { return };
+        let Some(answers) = self.card_answers(&request_id, &questions, cx) else { return };
+        self.clear_secrets(window, cx);
+        self.workspace.update(cx, |ws, cx| ws.answer(&id, &request_id, answers, cx));
+    }
+
+    /// The agent asked something only a person can answer: multiple-choice questions, or a secret.
+    fn question_card(&mut self, id: String, request_id: String, questions: Vec<trek_agents::Question>, agent: String, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.secret_fields(&request_id, &questions, window, cx);
+        let mut fields = self.secrets.1.clone().into_iter();
         let theme = cx.theme().clone();
         let ember = palette::ember(cx);
-        let complete = questions.iter().enumerate().all(|(i, _)| self.picks.get(&(request_id.clone(), i)).is_some_and(|v| !v.is_empty()));
-        let answers: Vec<(String, String)> =
-            questions.iter().enumerate().map(|(i, q)| (q.question.clone(), self.picks.get(&(request_id.clone(), i)).map(|v| v.join(", ")).unwrap_or_default())).collect();
-        let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
-        let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id.clone(), request_id.clone());
+        let complete = self.card_answers(&request_id, &questions, cx).is_some();
+        let picks = self.workspace.read(cx).live.get(&id).map(|l| l.picks.clone()).unwrap_or_default();
+        let (id2, rid2) = (id.clone(), request_id.clone());
+        let hint = if questions.len() > 1 { "Or type below to answer the first open question in your own words." } else { "Or type your own answer below and send it." };
         let body = v_flex().gap(px(14.)).children(questions.iter().enumerate().map(|(qi, q)| {
-            let picked = self.picks.get(&(request_id.clone(), qi)).cloned().unwrap_or_default();
+            let picked = picks.get(&(request_id.clone(), qi)).cloned().unwrap_or_default();
             v_flex()
                 .gap(px(6.))
                 .child(div().text_size(px(13.5)).font_medium().child(q.question.clone()))
                 .when(q.multi, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("Choose any that apply.")))
                 .children(q.options.iter().enumerate().map(|(oi, (label, desc))| {
                     let on = picked.contains(label);
-                    let (rid, label2, multi) = (request_id.clone(), label.clone(), q.multi);
+                    let (ws, id, rid, label2, multi) = (self.workspace.clone(), id.clone(), request_id.clone(), label.clone(), q.multi);
                     h_flex()
                         .id(SharedString::from(format!("q-{request_id}-{qi}-{oi}")))
                         .px(px(10.))
@@ -660,20 +716,27 @@ impl ThreadView {
                                 .child(div().text_size(px(13.)).child(label.clone()))
                                 .when(!desc.is_empty(), |el| el.child(div().text_xs().line_height(relative(1.45)).text_color(theme.muted_foreground).child(desc.clone()))),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let entry = this.picks.entry((rid.clone(), qi)).or_default();
-                            if multi {
-                                if let Some(pos) = entry.iter().position(|l| *l == label2) {
-                                    entry.remove(pos);
+                        .on_click(move |_, _, cx| {
+                            ws.update(cx, |ws, cx| {
+                                let Some(live) = ws.live.get_mut(&id) else { return };
+                                let entry = live.picks.entry((rid.clone(), qi)).or_default();
+                                if multi {
+                                    if let Some(pos) = entry.iter().position(|l| *l == label2) {
+                                        entry.remove(pos);
+                                    } else {
+                                        entry.push(label2.clone());
+                                    }
                                 } else {
-                                    entry.push(label2.clone());
+                                    *entry = vec![label2.clone()];
                                 }
-                            } else {
-                                *entry = vec![label2.clone()];
-                            }
-                            cx.notify();
-                        }))
+                                cx.notify();
+                            })
+                        })
                 }))
+                .when_some(q.secret.then(|| fields.next()).flatten(), |el, field| {
+                    el.child(Input::new(&field).small().mask_toggle())
+                        .child(div().text_xs().text_color(theme.muted_foreground).child("Private: Trek sends it to the agent without showing or saving it."))
+                })
         }));
         v_flex()
             .w_full()
@@ -690,12 +753,12 @@ impl ThreadView {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child("Or type your own answer below and send it."))
-                    .child(Button::new("q-skip").small().ghost().label("Skip").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx))))
-                    .child(Button::new("q-send").small().primary().label("Answer").disabled(!complete).on_click(move |_, _, cx| {
-                        let answers = answers.clone();
-                        ws2.update(cx, |ws, cx| ws.answer(&id3, &rid3, answers, cx))
-                    })),
+                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child(hint))
+                    .child(Button::new("q-skip").small().ghost().label("Skip").on_click(cx.listener(move |this, _, window, cx| {
+                        this.clear_secrets(window, cx);
+                        this.workspace.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx));
+                    })))
+                    .child(Button::new("q-send").small().primary().label("Answer").disabled(!complete).on_click(cx.listener(|this, _, window, cx| this.submit_answers(window, cx)))),
             )
             .into_any_element()
     }
@@ -733,7 +796,7 @@ impl ThreadView {
             .into_any_element()
     }
 
-    fn live_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn live_footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.current.clone()?;
         // Questions and plans get their own cards.
         let special = {
@@ -744,7 +807,7 @@ impl ThreadView {
         };
         if let Some((request_id, prompt, agent)) = special {
             let card = match prompt {
-                trek_agents::Prompt::Questions(q) => self.question_card(id.clone(), request_id, q, agent, cx),
+                trek_agents::Prompt::Questions(q) => self.question_card(id.clone(), request_id, q, agent, window, cx),
                 trek_agents::Prompt::Plan(plan) => self.plan_card(id.clone(), request_id, plan, agent, cx),
             };
             return Some(h_flex().w_full().justify_center().px_6().pb_2().child(card).into_any_element());
@@ -883,7 +946,7 @@ impl ThreadView {
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows(cx);
-        let footer = self.live_footer(cx);
+        let footer = self.live_footer(window, cx);
         if rows.is_empty() {
             return v_flex().size_full().child(self.empty_state(cx)).children(footer);
         }

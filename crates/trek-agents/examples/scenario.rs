@@ -2,9 +2,9 @@
 //! own drivers, with tiny prompts on cheap models:
 //! `cargo run -p trek-agents --example scenario -- <agent> <scenario>`
 //!
-//! codex:    approvals | steer | plan | resume | subagent | interrupt | lost-thread
+//! codex:    approvals | steer | plan | plan-restart | resume | subagent | interrupt | lost-thread
 //! opencode: approvals | resume | interrupt | plan | model
-//! claude:   plan | keep-planning | question
+//! claude:   plan | keep-planning | question | cancel | interrupt
 //!
 //! Each scenario works in its own folder under /tmp/trek-agents-e2e and exits non-zero when a
 //! check fails.
@@ -143,6 +143,7 @@ fn main() {
             ("opencode", "approvals") => approvals(AgentId::OpenCode, OPENCODE, "opencode-approvals").await,
             ("codex", "steer") => codex_steer().await,
             ("codex", "plan") => codex_plan().await,
+            ("codex", "plan-restart") => codex_plan_restart().await,
             ("codex", "resume") => resume(AgentId::Codex, CODEX, Some("gpt-6-luna"), "codex-resume").await,
             ("opencode", "resume") => resume(AgentId::OpenCode, OPENCODE, None, "opencode-resume").await,
             ("codex", "subagent") => codex_subagent().await,
@@ -154,6 +155,8 @@ fn main() {
             ("claude", "plan") => claude_plan(true).await,
             ("claude", "keep-planning") => claude_plan(false).await,
             ("claude", "question") => claude_question().await,
+            ("claude", "cancel") => claude_cancel().await,
+            ("claude", "interrupt") => interrupt(AgentId::ClaudeCode, CLAUDE, "claude-interrupt").await,
             _ => fail("unknown scenario"),
         }
     });
@@ -228,6 +231,29 @@ async fn codex_plan() {
     s.stop().await;
 }
 
+/// The plan waits while the app-server restarts (Trek relaunches idle sessions when plan mode or
+/// fast mode changes): a new session, still started in plan mode, takes the approval.
+async fn codex_plan_restart() {
+    let cwd = folder("codex-plan-restart");
+    let mut s = Session::start(AgentId::Codex, &cwd, CODEX, HandHolding::FullAccess, true, None);
+    s.prompt("Plan adding a file note.txt to this folder containing the single word: restarted. Don't ask me anything; keep the plan to three lines.").await;
+    let (rid, _, _, prompt) = s.permission(240).await;
+    check(matches!(prompt, Some(Prompt::Plan(_))), "plan offered after the turn");
+    check(s.count(|e| matches!(e, AgentEvent::ToolStarted { title, .. } if title == "Plan")) == 1, "the plan shows on a Plan row");
+    check(!s.seen.iter().any(|e| matches!(e, AgentEvent::TextDone(t) if t.contains("note.txt"))), "and not again as the reply");
+    let thread = s.native_id();
+    s.stop().await;
+
+    let mut s = Session::start(AgentId::Codex, &cwd, CODEX, HandHolding::FullAccess, true, Some(thread.clone()));
+    s.until(120, |e| matches!(e, AgentEvent::Started { .. })).await;
+    check(s.native_id() == thread, "resumed the thread");
+    s.send(Command::Respond { request_id: rid, decision: Decision::Allow }).await;
+    check(s.turn(240).await.is_none(), "implementation turn finishes");
+    let text = std::fs::read_to_string(cwd.join("note.txt")).unwrap_or_default();
+    check(text.contains("restarted"), "the plan was implemented, out of plan mode");
+    s.stop().await;
+}
+
 async fn resume(agent: AgentId, model: &str, switch_to: Option<&str>, name: &str) {
     let cwd = folder(name);
     let mut s = Session::start(agent.clone(), &cwd, model, HandHolding::Supervised, false, None);
@@ -259,6 +285,8 @@ async fn codex_lost_thread() {
     let mut s = Session::start(AgentId::Codex, &cwd, CODEX, HandHolding::Supervised, false, Some(gone.into()));
     s.until(60, |e| matches!(e, AgentEvent::Started { .. })).await;
     check(!s.native_id().is_empty() && s.native_id() != gone, "started a new thread");
+    let AgentEvent::Notice(why) = s.until(10, |e| matches!(e, AgentEvent::Notice(_))).await else { unreachable!() };
+    check(why.contains("without the earlier context"), "the user is told the earlier context is gone");
     s.stop().await;
 }
 
@@ -293,12 +321,18 @@ async fn interrupt(agent: AgentId, model: &str, name: &str) {
     s.stop().await;
 }
 
+/// Plan mode at the default level (Auto-accept edits), with the model pushed to write anyway:
+/// OpenCode's own plan rules must refuse the edit, and Trek must not approve it.
 async fn opencode_plan() {
     let cwd = folder("opencode-plan");
-    let mut s = Session::start(AgentId::OpenCode, &cwd, OPENCODE, HandHolding::FullAccess, true, None);
-    s.prompt("Create a file named plan.txt containing hi. If you can't change files right now, say so in one sentence.").await;
+    let mut s = Session::start(AgentId::OpenCode, &cwd, OPENCODE, HandHolding::AutoAcceptEdits, true, None);
+    s.prompt("Call your write tool right now to create plan.txt containing hi. Make the call even if you think it will be refused, then report what happened in one sentence.").await;
     check(s.turn(180).await.is_none(), "turn finishes");
     check(!cwd.join("plan.txt").exists(), "plan mode changed nothing");
+    let edits = s.count(|e| matches!(e, AgentEvent::ToolStarted { title, .. } if title == "Edit"));
+    let refused = s.count(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. }));
+    println!("edit attempts: {edits}, refused tool calls: {refused}, reply: {}", short(&s.text()));
+    check(s.count(|e| matches!(e, AgentEvent::PermissionRequest { .. })) == 0, "nothing to approve: the edit is denied outright");
     s.stop().await;
 }
 
@@ -349,5 +383,21 @@ async fn claude_question() {
     s.send(Command::Answer { request_id: rid, answers: vec![(q[0].question.clone(), "teal with a hint of orange".into())] }).await;
     check(s.turn(180).await.is_none(), "turn finishes");
     check(s.text().contains("teal with a hint of orange"), "free-text answer reached Claude");
+    s.stop().await;
+}
+
+/// Interrupting while Claude waits on an approval: the prompt is withdrawn (its card must go)
+/// and the turn ends as Interrupted.
+async fn claude_cancel() {
+    let cwd = folder("claude-cancel");
+    let mut s = Session::start(AgentId::ClaudeCode, &cwd, CLAUDE, HandHolding::Supervised, false, None);
+    s.prompt("Run the shell command `touch cancel.txt`, then reply: done").await;
+    let (rid, title, _, _) = s.permission(180).await;
+    check(title == "Run command", "asks to run the command");
+    s.send(Command::Interrupt).await;
+    let err = s.turn(60).await;
+    check(err.as_deref() == Some("Interrupted"), "turn ends as Interrupted");
+    check(s.count(|e| matches!(e, AgentEvent::PermissionResolved { request_id } if *request_id == rid)) == 1, "the prompt was withdrawn");
+    check(!cwd.join("cancel.txt").exists(), "nothing ran");
     s.stop().await;
 }

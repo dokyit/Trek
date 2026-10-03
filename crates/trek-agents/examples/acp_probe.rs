@@ -1,4 +1,6 @@
 //! Probe installed ACP agents: `cargo run -p trek-agents --example acp_probe -- [id...]`
+//! Answers come from what each agent last reported (under Trek's data folder; set
+//! `TREK_DATA_DIR` to probe afresh without touching the app's).
 use trek_agents::acp_probe;
 
 fn main() {

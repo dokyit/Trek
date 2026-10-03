@@ -80,6 +80,9 @@ pub struct PendingPermission {
     pub detail: String,
     /// A question or a plan, when the agent asked for more than yes/no.
     pub prompt: Option<trek_agents::Prompt>,
+    /// Offered once its turn was over (Codex's plan): it outlives the session that offered it,
+    /// and the next message answers it instead.
+    pub after_turn: bool,
 }
 
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
@@ -92,6 +95,8 @@ pub struct LiveThread {
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
     pub permissions: Vec<PendingPermission>,
+    /// Options picked so far on the question card: (request id, question index) → labels.
+    pub picks: HashMap<(String, usize), Vec<String>>,
     pub commands: Option<async_channel::Sender<Command>>,
     pub turn_started: Option<Instant>,
     pub plan: bool,
@@ -129,6 +134,33 @@ impl LiveThread {
     pub fn active_tasks(&self) -> usize {
         self.tasks.iter().filter(|t| t.done.is_none()).count()
     }
+
+    /// The prompt `request_id` is settled: its card and picks go.
+    fn settle_prompt(&mut self, request_id: &str) {
+        self.permissions.retain(|p| p.request_id != request_id);
+        self.picks.retain(|(rid, _), _| rid != request_id);
+    }
+
+    /// Drop prompts offered after their turn: a new message answers them instead.
+    fn drop_after_turn(&mut self) {
+        let stale: Vec<String> = self.permissions.iter().filter(|p| p.after_turn).map(|p| p.request_id.clone()).collect();
+        for rid in stale {
+            self.settle_prompt(&rid);
+        }
+    }
+}
+
+/// Answers for a question card when the user typed their own: `typed` answers the first question
+/// nothing was picked for (the last one if all have picks), picks answer the rest, and questions
+/// left open go unanswered. Also says whether the typed answer is a secret.
+fn typed_answers(questions: &[trek_agents::Question], picked: impl Fn(usize) -> Option<String>, typed: &str) -> (Vec<(String, String)>, bool) {
+    let target = (0..questions.len()).find(|i| picked(*i).is_none()).unwrap_or(questions.len().saturating_sub(1));
+    let answers = questions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, q)| if i == target { Some(typed.to_string()) } else { picked(i) }.map(|a| (q.question.clone(), a)))
+        .collect();
+    (answers, questions.get(target).is_some_and(|q| q.secret))
 }
 
 /// What a pre-warmed draft session was started with; it's used only if the draft still matches.
@@ -267,8 +299,8 @@ pub struct Workspace {
     pub status_fetched_at: i64,
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
-    /// Slash commands an agent offered in its last session, keyed by `AgentId::key()`.
-    agent_commands: HashMap<String, Vec<SlashCommand>>,
+    /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
+    agent_commands: HashMap<(String, PathBuf), Vec<SlashCommand>>,
     pub usage_loading: bool,
     /// The project open on Settings → Project (project id).
     pub settings_project: Option<String>,
@@ -798,6 +830,11 @@ impl Workspace {
                 let plan_changed = live.plan != prefs.plan;
                 live.plan = prefs.plan;
                 live.fast = prefs.fast;
+                // The old agent's questions and plans go with it.
+                if before.as_ref().is_some_and(|b| b.agent != prefs.agent) {
+                    live.permissions.clear();
+                    live.picks.clear();
+                }
                 if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
                     // Claude reads effort, fast mode and plan at launch: restart idle sessions (they resume).
                     let relaunch = live.turn_started.is_none()
@@ -1021,10 +1058,14 @@ impl Workspace {
             _ => None,
         });
         if let Some((request_id, questions)) = question {
+            let picks = self.live.get(&id).map(|l| l.picks.clone()).unwrap_or_default();
+            let picked = |i: usize| picks.get(&(request_id.clone(), i)).filter(|v| !v.is_empty()).map(|v| v.join(", "));
+            let (answers, secret) = typed_answers(&questions, picked, &text);
             if let Some(live) = self.live.get_mut(&id) {
-                live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()) });
+                // A secret (a token, a password) goes to the agent and nowhere else.
+                live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()) } });
             }
-            self.answer(&id, &request_id, questions.iter().map(|q| (q.question.clone(), text.clone())).collect(), cx);
+            self.answer(&id, &request_id, answers, cx);
             self.persist_items(&id);
             return;
         }
@@ -1039,6 +1080,7 @@ impl Workspace {
         }
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
+        live.drop_after_turn();
         live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()) });
         live.streaming = None;
         live.reasoning = None;
@@ -1207,6 +1249,16 @@ impl Workspace {
                     }
                     AgentEvent::Background(n) => live.background = n,
                     AgentEvent::Commands(c) => commands = Some(c),
+                    AgentEvent::Notice(text) => {
+                        live.streaming = None;
+                        live.items.push(Item::Notice { text });
+                    }
+                    AgentEvent::PermissionResolved { request_id } => {
+                        live.settle_prompt(&request_id);
+                        if live.permissions.is_empty() {
+                            run_state = Some(if live.turn_started.is_some() { RunState::Working } else { RunState::Idle });
+                        }
+                    }
                     AgentEvent::Started { native_id, .. } => {
                         if !native_id.is_empty() {
                             native = Some(native_id);
@@ -1273,7 +1325,8 @@ impl Workspace {
                             Some(trek_agents::Prompt::Plan(_)) => "Needs your approval: a plan to review".to_string(),
                             None => format!("Needs your approval: {title}"),
                         });
-                        live.permissions.push(PendingPermission { request_id, title, detail, prompt });
+                        let after_turn = live.turn_started.is_none();
+                        live.permissions.push(PendingPermission { request_id, title, detail, prompt, after_turn });
                         run_state = Some(RunState::NeedsYou);
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
@@ -1333,6 +1386,9 @@ impl Workspace {
                     AgentEvent::Exited => {
                         continue_queue = false;
                         live.commands = None;
+                        // Nobody is left to answer what the agent was asking.
+                        live.permissions.retain(|p| p.after_turn);
+                        live.picks.retain(|(rid, _), _| live.permissions.iter().any(|p| p.request_id == *rid));
                         if live.turn_started.take().is_some() {
                             run_state.get_or_insert(RunState::Failed);
                         }
@@ -1341,8 +1397,9 @@ impl Workspace {
             }
             live.revision += 1;
         }
-        if let (Some(c), Some(agent)) = (commands, self.thread(id).map(|t| t.agent.key())) {
-            self.agent_commands.insert(agent, c);
+        if let (Some(c), Some(t)) = (commands, self.thread(id)) {
+            let key = (t.agent.key(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
+            self.agent_commands.insert(key, c);
         }
         let viewing = self.route == Route::Thread(id.to_string());
         // Streaming text changes nothing on the thread row: skip the database write (this runs
@@ -1431,9 +1488,9 @@ impl Workspace {
         let mut still_waiting = false;
         let mut running = false;
         if let Some(live) = self.live.get_mut(id) {
-            live.permissions.retain(|p| p.request_id != request_id);
+            live.settle_prompt(request_id);
             still_waiting = !live.permissions.is_empty();
-            running = live.turn_started.is_some();
+            running = live.turn_started.is_some() && live.commands.is_some();
             if let Some(tx) = &live.commands {
                 let _ = tx.try_send(Command::Respond { request_id: request_id.to_string(), decision });
             }
@@ -1452,7 +1509,7 @@ impl Workspace {
     pub fn answer(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
         let mut still_waiting = false;
         if let Some(live) = self.live.get_mut(id) {
-            live.permissions.retain(|p| p.request_id != request_id);
+            live.settle_prompt(request_id);
             still_waiting = !live.permissions.is_empty();
             if let Some(tx) = &live.commands {
                 let _ = tx.try_send(Command::Answer { request_id: request_id.to_string(), answers });
@@ -1467,10 +1524,14 @@ impl Workspace {
 
     /// Approve the agent's plan: it leaves plan mode and starts the work.
     pub fn approve_plan(&mut self, id: &str, request_id: &str, cx: &mut Context<Self>) {
-        if let Some(live) = self.live.get_mut(id) {
-            live.plan = false;
-            // Offered after its turn ended, the plan's approval starts a new one.
-            if live.turn_started.is_none() {
+        let Some(live) = self.live.get_mut(id) else { return };
+        live.plan = false;
+        // Offered after its turn ended (Codex), the plan's approval starts a new turn. If the
+        // session that offered it has gone (restarted, or quit), a new one, out of plan mode,
+        // takes the approval: the agent still has the plan in the thread's history.
+        if live.permissions.iter().any(|p| p.request_id == request_id && p.after_turn) {
+            self.ensure_session(id, cx);
+            if let Some(live) = self.live.get_mut(id).filter(|l| l.commands.is_some()) {
                 live.turn_started = Some(Instant::now());
                 live.tasks.clear();
             }
@@ -1861,7 +1922,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Ask each installed ACP agent for its models and login state. Opens a session, sends no prompt.
+    /// Ask each installed ACP agent for its models and login state. Answered from what the agent
+    /// reported last time; only a new install or version (or a missing sign-in) is asked afresh.
     pub fn probe_acp_agents(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<String> = self
             .agents
@@ -1894,7 +1956,8 @@ impl Workspace {
             .iter()
             .map(|(n, d)| SlashCommand { name: n.to_string(), description: d.to_string(), kind: trek_agents::CommandKind::Command })
             .collect();
-        let offered = self.agent_commands.get(&agent.key()).into_iter().flatten();
+        let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
+        let offered = self.agent_commands.get(&(agent.key(), cwd)).into_iter().flatten();
         for c in self.agent_status.get(&agent.key()).into_iter().flat_map(|st| st.commands.iter()).chain(offered) {
             if !out.iter().any(|o| o.name == c.name) {
                 out.push(c.clone());
@@ -2257,4 +2320,48 @@ pub fn trek_mcp_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     [dir.join("trek-mcp"), dir.join("../Resources/trek-mcp")].into_iter().find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trek_agents::Question;
+
+    fn q(text: &str, secret: bool) -> Question {
+        Question { question: text.into(), header: String::new(), options: vec![("Yes".into(), String::new())], multi: false, secret }
+    }
+
+    #[test]
+    fn typed_text_answers_the_first_open_question() {
+        let qs = [q("Name?", false), q("Color?", false), q("Size?", false)];
+        // "Color?" was picked on the card; the typed text answers "Name?", "Size?" stays open.
+        let picked = |i: usize| (i == 1).then(|| "Blue".to_string());
+        let (answers, secret) = typed_answers(&qs, picked, "Trek");
+        assert_eq!(answers, vec![("Name?".to_string(), "Trek".to_string()), ("Color?".into(), "Blue".into())]);
+        assert!(!secret);
+        // Everything picked: the typed text replaces the last answer.
+        let (answers, _) = typed_answers(&qs, |_| Some("Yes".to_string()), "No, large");
+        assert_eq!(answers.last(), Some(&("Size?".to_string(), "No, large".to_string())));
+        assert_eq!(answers.len(), 3);
+    }
+
+    #[test]
+    fn a_typed_secret_is_flagged() {
+        let qs = [q("User?", false), q("Token?", true)];
+        let (answers, secret) = typed_answers(&qs, |i| (i == 0).then(|| "me".to_string()), "s3cr3t");
+        assert_eq!(answers[1], ("Token?".to_string(), "s3cr3t".to_string()));
+        assert!(secret);
+        assert!(!typed_answers(&qs, |_| None, "me").1);
+    }
+
+    #[test]
+    fn prompts_offered_after_their_turn_go_when_new_work_starts() {
+        let mut live = LiveThread::default();
+        let card = |rid: &str, after_turn| PendingPermission { request_id: rid.into(), title: "Plan".into(), detail: String::new(), prompt: None, after_turn };
+        live.permissions = vec![card("codex-plan-1", true), card("codex-7", false)];
+        live.picks.insert(("codex-plan-1".into(), 0), vec!["x".into()]);
+        live.drop_after_turn();
+        assert_eq!(live.permissions.iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(), vec!["codex-7"]);
+        assert!(live.picks.is_empty());
+    }
 }

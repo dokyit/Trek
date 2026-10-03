@@ -4,6 +4,7 @@
 
 use crate::{AgentEvent, Command, CommandKind, Decision, SessionConfig, SlashCommand, StderrTail, Step, clip, plan_row};
 use anyhow::{Context as _, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -15,7 +16,7 @@ use trek_core::catalog::{ACP_AGENTS, ModelInfo};
 use trek_core::{AgentId, Effort, HandHolding, detect};
 
 /// What `acp_probe` learns about an installed ACP agent.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AcpInfo {
     pub models: Vec<ModelInfo>,
     /// `(id, name)` of the agent's advertised login methods.
@@ -39,13 +40,11 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
     Ok((path, args.into_iter().map(String::from).collect(), name))
 }
 
-/// OpenCode runs edits and commands without asking unless told to. Trek's access levels need
-/// the prompts; Trek then answers the ones the thread's level covers (see `auto_allow`).
-const OPENCODE_PERMISSION: &str = r#"{"edit":"ask","bash":"ask","webfetch":"ask"}"#;
-
-fn launch_env(agent: &AgentId) -> Vec<(&'static str, &'static str)> {
+/// Extra environment for the agent. OpenCode is told to ask before edits and commands (see
+/// `opencode`); Trek then answers the prompts the thread's level covers (see `auto_allow`).
+fn launch_env(agent: &AgentId, cwd: &Path) -> Vec<(String, String)> {
     match agent {
-        AgentId::OpenCode => vec![("OPENCODE_PERMISSION", OPENCODE_PERMISSION)],
+        AgentId::OpenCode => crate::opencode::launch_env(cwd),
         _ => vec![],
     }
 }
@@ -56,6 +55,7 @@ struct Agent {
     lines: Lines<BufReader<ChildStdout>>,
     stderr: StderrTail,
     name: String,
+    bin: PathBuf,
 }
 
 impl Agent {
@@ -64,7 +64,7 @@ impl Agent {
         args.extend(extra.iter().cloned());
         let mut child = tokio::process::Command::new(&bin)
             .args(&args)
-            .envs(launch_env(agent))
+            .envs(launch_env(agent, cwd))
             .current_dir(cwd)
             .env("PATH", detect::login_path())
             .stdin(Stdio::piped())
@@ -76,7 +76,7 @@ impl Agent {
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
         let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        Ok(Agent { child, rpc, lines, stderr, name })
+        Ok(Agent { child, rpc, lines, stderr, name, bin })
     }
 
     fn exited(&self) -> anyhow::Error {
@@ -722,33 +722,40 @@ pub async fn run(
     let setup = Duration::from_secs(120);
 
     let mut opened = None;
-    if let Some(id) = &config.resume
-        && init["agentCapabilities"]["loadSession"] == true
-    {
-        let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp });
-        match agent.call("session/load", params, &fs, &mut backlog, setup).await? {
-            Ok(r) => {
-                // The agent replays history as updates; the transcript already has it. Session
-                // state (commands, usage) still counts.
-                backlog.retain(|v| {
-                    v["method"] != "session/update"
-                        || matches!(v["params"]["update"]["sessionUpdate"].as_str(), Some("available_commands_update" | "usage_update"))
-                });
-                opened = Some((id.clone(), r));
+    // The saved conversation can't be reopened: the session starts over, and the user is told.
+    let mut lost = false;
+    if let Some(id) = &config.resume {
+        if init["agentCapabilities"]["loadSession"] == true {
+            let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp });
+            match agent.call("session/load", params, &fs, &mut backlog, setup).await? {
+                Ok(r) => {
+                    drop_replay(&mut backlog);
+                    opened = Some((id.clone(), r));
+                }
+                Err(e) => {
+                    tracing::warn!("session/load failed, starting fresh: {}", rpc_message(&e));
+                    lost = true;
+                }
             }
-            Err(e) => tracing::warn!("session/load failed, starting fresh: {}", rpc_message(&e)),
+        } else {
+            lost = true;
         }
     }
     let (session_id, result) = match opened {
         Some(s) => s,
         None => match agent.call("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), &fs, &mut backlog, setup).await? {
             Ok(r) => (r["sessionId"].as_str().context("session/new returned no sessionId")?.to_string(), r),
-            Err(e) if is_auth_error(&e) => bail!(auth_hint(&agent.name, &init)),
+            Err(e) if is_auth_error(&e) => {
+                ProbeCache::signed_out(&ProbeCache::dir(), &config.agent);
+                bail!(auth_hint(&agent.name, &init))
+            }
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         },
     };
 
     let ctl = controls(&result);
+    // What this session reports is what the next launch's probe would learn.
+    ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
     let mut model = ctl.current_model.clone();
     if let Some(want) = config.model.as_ref().filter(|m| model.as_ref() != Some(*m))
         && let Some((method, params)) = model_request(&ctl, &session_id, want)
@@ -763,14 +770,21 @@ pub async fn run(
         let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
     }
     // Into plan mode, or out of it when a resumed session was left there.
+    let mut planning = ctl.planning;
     if config.plan != ctl.planning
         && let Some((method, params)) = plan_request(&ctl, &session_id, config.plan)
+        && agent.call(method, params, &fs, &mut backlog, setup).await?.is_ok()
     {
-        let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
+        planning = config.plan;
     }
+    // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
+    let no_plan = (config.plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some()));
     events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
+    if lost {
+        events.send(crate::lost_session(&agent.name)).await?;
+    }
 
-    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompt: None };
+    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompt: None, planning };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -782,6 +796,9 @@ pub async fn run(
             cmd = commands.recv() => {
                 let Ok(cmd) = cmd else { break };
                 match cmd {
+                    Command::Prompt { .. } if let Some(why) = &no_plan => {
+                        let _ = events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some(why.clone()) }).await;
+                    }
                     Command::Prompt { text, images } => {
                         let mut prompt = Vec::new();
                         for path in &images {
@@ -840,6 +857,20 @@ pub async fn run(
     Ok(())
 }
 
+/// Why a prompt isn't sent when plan mode is on but the agent couldn't enter it.
+fn plan_refusal(agent: &str, has_plan_mode: bool) -> String {
+    let why = if has_plan_mode { "didn't switch to plan mode" } else { "has no plan mode" };
+    format!("{agent} {why}, so it could change files. Turn plan mode off to send this.")
+}
+
+/// `session/load` replays the conversation as updates; the transcript already has it. Session
+/// state (commands, usage) still counts.
+fn drop_replay(backlog: &mut Vec<Value>) {
+    backlog.retain(|v| {
+        v["method"] != "session/update" || matches!(v["params"]["update"]["sessionUpdate"].as_str(), Some("available_commands_update" | "usage_update"))
+    });
+}
+
 /// State of an open session between turns.
 struct Live {
     session_id: String,
@@ -847,6 +878,8 @@ struct Live {
     /// Permission prompts awaiting the user: our request id → (JSON-RPC id, options).
     perms: HashMap<String, (Value, Vec<Value>)>,
     prompt: Option<i64>,
+    /// In plan mode: edits are never approved on the user's behalf.
+    planning: bool,
 }
 
 impl Live {
@@ -904,7 +937,7 @@ impl Live {
             rpc.reply(rpc_id, reply).await?;
             return Ok(vec![]);
         }
-        match self.turn.permission(p, hand_holding) {
+        match self.turn.permission(p, hand_holding, self.planning) {
             Ask::Answer(option) => {
                 rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
                 Ok(vec![])
@@ -927,12 +960,16 @@ enum Ask {
 }
 
 impl Turn {
-    fn permission(&self, p: &Value, hand_holding: HandHolding) -> Ask {
+    /// `planning`: the session is in plan mode, so an edit the agent asks to make (its own rules
+    /// would normally forbid it) goes to the user whatever the access level.
+    fn permission(&self, p: &Value, hand_holding: HandHolding, planning: bool) -> Ask {
         let tc = &p["toolCall"];
         let known = tc["toolCallId"].as_str().and_then(|id| self.tools.get(id));
         let kind = tc["kind"].as_str().or(known.map(|t| t.kind.as_str())).unwrap_or("other").to_string();
         let options = p["options"].as_array().cloned().unwrap_or_default();
+        let edit = matches!(kind.as_str(), "edit" | "delete" | "move");
         if auto_allow(hand_holding, &kind)
+            && !(planning && edit)
             && let Some(option) = pick_option(&options, Decision::Allow)
         {
             return Ask::Answer(option);
@@ -944,14 +981,22 @@ impl Turn {
     }
 }
 
-/// Start an ACP agent in the home folder, open a throwaway session and report its models and
-/// login state. `id` is a catalog id, or `opencode` / `droid`.
+/// Models and login state for an installed ACP agent. ACP only reports them for an open
+/// session, and agents keep every session they open in their history, so this answers from what
+/// the agent reported last time (its last probe, or the last session Trek opened with it). Only
+/// a new install, a new version, or a missing sign-in opens a throwaway session, which is
+/// deleted again where the agent allows it. `id` is a catalog id, or `opencode` / `droid`.
 pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     let agent_id = match id {
         "opencode" => AgentId::OpenCode,
         "droid" => AgentId::Droid,
         other => AgentId::Acp(other.into()),
     };
+    let (bin, _, _) = launch_spec(&agent_id)?;
+    let cache = ProbeCache::dir();
+    if let Some(info) = ProbeCache::load(&cache, &agent_id, &bin).filter(|i| !i.needs_auth) {
+        return Ok(info);
+    }
     let home = trek_core::paths::home();
     let probe = async {
         let mut agent = Agent::spawn(&agent_id, &home, &[])?;
@@ -960,18 +1005,114 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         let init = agent.handshake(&fs, &mut backlog).await?;
         let mut info = AcpInfo { auth_methods: auth_methods(&init), ..Default::default() };
         let params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
+        let mut opened = None;
         match agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(20)).await? {
-            Ok(r) => info.models = controls(&r).models,
+            Ok(r) => {
+                info.models = controls(&r).models;
+                opened = r["sessionId"].as_str().map(String::from);
+            }
             Err(e) if is_auth_error(&e) => info.needs_auth = true,
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
         let _ = agent.child.start_kill();
+        let _ = agent.child.wait().await;
         if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
             info.models = copilot_models().await;
         }
-        Ok(info)
+        Ok((info, opened))
     };
-    tokio::time::timeout(Duration::from_secs(20), probe).await.map_err(|_| anyhow!("{id} didn't respond in 20s"))?
+    let (info, opened) = tokio::time::timeout(Duration::from_secs(20), probe).await.map_err(|_| anyhow!("{id} didn't respond in 20s"))??;
+    if let Some(session) = opened {
+        discard_session(&agent_id, &session, &home).await;
+    }
+    ProbeCache::store(&cache, &agent_id, &bin, &info);
+    Ok(info)
+}
+
+/// Delete a session Trek opened only to look at it, through the agent's own CLI. Agents
+/// without a way to do that keep it (ACP has no delete).
+async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
+    let (binary, args): (&str, [&str; 2]) = match agent {
+        AgentId::OpenCode => ("opencode", ["session", "delete"]),
+        _ => return,
+    };
+    let Some(bin) = detect::which(binary) else { return };
+    let run = tokio::process::Command::new(bin).args(args).arg(session).current_dir(cwd).env("PATH", detect::login_path()).stdin(Stdio::null()).output();
+    match tokio::time::timeout(Duration::from_secs(20), run).await {
+        Ok(Ok(out)) if out.status.success() => {}
+        Ok(Ok(out)) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        Ok(Err(e)) => tracing::warn!("couldn't delete probe session {session}: {e}"),
+        Err(_) => tracing::warn!("deleting probe session {session} timed out"),
+    }
+}
+
+/// The last thing each ACP agent reported, one file per agent under Trek's data folder. It's
+/// tied to the agent's binary: a reinstall or new version is probed afresh.
+#[derive(Debug, Serialize, Deserialize)]
+struct ProbeCache {
+    binary: String,
+    info: AcpInfo,
+}
+
+impl ProbeCache {
+    fn dir() -> PathBuf {
+        trek_core::paths::data_dir().join("acp-agents")
+    }
+
+    fn path(dir: &Path, agent: &AgentId) -> PathBuf {
+        let name: String = agent.key().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        dir.join(format!("{name}.json"))
+    }
+
+    /// Which binary this is: its real path, size and modification time.
+    fn stamp(bin: &Path) -> String {
+        let real = bin.canonicalize().unwrap_or_else(|_| bin.to_path_buf());
+        let meta = std::fs::metadata(&real).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        format!("{}:{}:{modified}", real.display(), meta.map_or(0, |m| m.len()))
+    }
+
+    fn read(dir: &Path, agent: &AgentId) -> Option<ProbeCache> {
+        serde_json::from_str(&std::fs::read_to_string(Self::path(dir, agent)).ok()?).ok()
+    }
+
+    /// What's known about the agent at `bin`, if it's still the same binary.
+    fn load(dir: &Path, agent: &AgentId, bin: &Path) -> Option<AcpInfo> {
+        Self::read(dir, agent).filter(|c| c.binary == Self::stamp(bin)).map(|c| c.info)
+    }
+
+    fn store(dir: &Path, agent: &AgentId, bin: &Path, info: &AcpInfo) {
+        ProbeCache { binary: Self::stamp(bin), info: info.clone() }.write(dir, agent);
+    }
+
+    /// Written whole, then moved into place: a probe and a session may write at once.
+    fn write(&self, dir: &Path, agent: &AgentId) {
+        let path = Self::path(dir, agent);
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let saved = std::fs::create_dir_all(dir)
+            .and_then(|_| std::fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default()))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = saved {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::debug!("couldn't save what {} reported: {e}", agent.key());
+        }
+    }
+
+    /// A session opened: its model list is the agent's current one. Agents that list no models
+    /// over ACP (Copilot) keep the list found another way.
+    fn session_opened(dir: &Path, agent: &AgentId, bin: &Path, models: &[ModelInfo], auth_methods: Vec<(String, String)>) {
+        if !models.is_empty() {
+            Self::store(dir, agent, bin, &AcpInfo { models: models.to_vec(), auth_methods, needs_auth: false });
+        }
+    }
+
+    /// The agent turned a session down for want of a sign-in: the next launch probes it again.
+    fn signed_out(dir: &Path, agent: &AgentId) {
+        if let Some(mut c) = Self::read(dir, agent).filter(|c| !c.info.needs_auth) {
+            c.info.needs_auth = true;
+            c.write(dir, agent);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1150,9 +1291,13 @@ mod tests {
         let mut t = Turn::default();
         let upto = lines.iter().position(|v| v == ask).unwrap();
         updates(&mut t, &lines[..upto]);
-        let Ask::User { title, detail, .. } = t.permission(&ask["params"], HandHolding::Supervised) else { panic!() };
+        let Ask::User { title, detail, .. } = t.permission(&ask["params"], HandHolding::Supervised, false) else { panic!() };
         assert_eq!((title.as_str(), detail.as_str()), ("Edit", "/private/tmp/trek-agents-e2e/notes.txt"));
-        assert_eq!(t.permission(&ask["params"], HandHolding::AutoAcceptEdits), Ask::Answer("once".into()));
+        assert_eq!(t.permission(&ask["params"], HandHolding::AutoAcceptEdits, false), Ask::Answer("once".into()));
+        // In plan mode an edit is never approved on the user's behalf, whatever the level.
+        for level in [HandHolding::AutoAcceptEdits, HandHolding::Auto, HandHolding::FullAccess] {
+            assert!(matches!(t.permission(&ask["params"], level, true), Ask::User { .. }), "{level:?}");
+        }
     }
 
     #[test]
@@ -1166,12 +1311,14 @@ mod tests {
             vec![AgentEvent::ToolStarted { id: "call_66c3b2d0ebfa47829d8d907f".into(), title: "Run command".into(), detail: "touch oc1.txt".into() }]
         );
         let ask = &lines[2]["params"];
-        let Ask::User { title, detail, options } = t.permission(ask, HandHolding::Supervised) else { panic!() };
+        let Ask::User { title, detail, options } = t.permission(ask, HandHolding::Supervised, false) else { panic!() };
         assert_eq!((title.as_str(), detail.as_str()), ("Run command", "touch oc1.txt"));
         assert_eq!(pick_option(&options, Decision::Deny).as_deref(), Some("reject"));
         assert_eq!(pick_option(&options, Decision::AllowForSession).as_deref(), Some("always"));
-        assert!(matches!(t.permission(ask, HandHolding::Auto), Ask::User { .. }), "Auto still asks before commands");
-        assert_eq!(t.permission(ask, HandHolding::FullAccess), Ask::Answer("once".into()));
+        assert!(matches!(t.permission(ask, HandHolding::Auto, false), Ask::User { .. }), "Auto still asks before commands");
+        assert_eq!(t.permission(ask, HandHolding::FullAccess, false), Ask::Answer("once".into()));
+        // Plan mode keeps commands (OpenCode's plan agent may run them); only edits always ask.
+        assert_eq!(t.permission(ask, HandHolding::FullAccess, true), Ask::Answer("once".into()));
         assert_eq!(
             t.update(&lines[3]["params"]["update"]),
             vec![AgentEvent::ToolFinished {
@@ -1216,11 +1363,84 @@ mod tests {
 
     #[test]
     fn opencode_is_told_to_ask() {
-        let env = launch_env(&AgentId::OpenCode);
-        let rules: Value = serde_json::from_str(env[0].1).unwrap();
-        assert_eq!(env[0].0, "OPENCODE_PERMISSION");
-        assert_eq!((rules["edit"].as_str(), rules["bash"].as_str()), (Some("ask"), Some("ask")));
-        assert!(launch_env(&AgentId::Droid).is_empty());
+        // What's added depends on the user's own OpenCode config (see `opencode`); it's always
+        // inline agent config, never the global permission override.
+        let cwd = std::env::temp_dir();
+        for (k, v) in launch_env(&AgentId::OpenCode, &cwd) {
+            assert_eq!(k, "OPENCODE_CONFIG_CONTENT");
+            assert!(serde_json::from_str::<Value>(&v).unwrap()["agent"].is_object());
+        }
+        assert!(launch_env(&AgentId::Droid, &cwd).is_empty());
+    }
+
+    #[test]
+    fn a_reopened_session_drops_its_replayed_history() {
+        // Recorded `session/load` (OpenCode 1.18.34): the conversation comes back as updates
+        // before the response. Commands and usage are session state, so they stay.
+        let lines = fixture(include_str!("../fixtures/opencode-load.jsonl"));
+        let commands = fixture(include_str!("../fixtures/opencode-turn.jsonl"))
+            .into_iter()
+            .find(|v| v["params"]["update"]["sessionUpdate"] == "available_commands_update")
+            .unwrap();
+        let usage = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":12132,"size":200000}}});
+        let mut backlog = lines[..3].to_vec();
+        backlog.extend([commands.clone(), usage.clone()]);
+        drop_replay(&mut backlog);
+        assert_eq!(backlog, vec![commands, usage]);
+        let c = controls(&lines[3]["result"]);
+        assert_eq!(c.current_model.as_deref(), Some("opencode/mimo-v2.6-flash-free"));
+        assert!(!c.planning);
+    }
+
+    #[test]
+    fn a_resumed_session_left_in_plan_mode_is_taken_out_of_it() {
+        // ACP `modes` (Copilot, Devin), reopened while in plan mode.
+        let loaded = json!({"modes":{"currentModeId":"plan","availableModes":[{"id":"agent","name":"Agent"},{"id":"plan","name":"Plan"},{"id":"autopilot","name":"Autopilot"}]}});
+        let c = controls(&loaded);
+        assert!(c.planning);
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Mode { plan: "plan".into(), off: "agent".into() }));
+        assert_eq!(plan_request(&c, "s", false), Some(("session/set_mode", json!({"sessionId":"s","modeId":"agent"}))));
+        // Copilot's mode ids are URLs.
+        let copilot = json!({"modes":{"currentModeId":"https://agentclientprotocol.com/protocol/session-modes#agent","availableModes":[
+            {"id":"https://agentclientprotocol.com/protocol/session-modes#agent","name":"Agent"},{"id":"https://agentclientprotocol.com/protocol/session-modes#plan","name":"Plan"}]}});
+        let c = controls(&copilot);
+        assert!(!c.planning);
+        assert_eq!(plan_request(&c, "s", true).unwrap().1["modeId"], "https://agentclientprotocol.com/protocol/session-modes#plan");
+    }
+
+    #[test]
+    fn plan_mode_that_cant_be_had_is_refused() {
+        assert_eq!(plan_refusal("Grok", false), "Grok has no plan mode, so it could change files. Turn plan mode off to send this.");
+        assert!(plan_refusal("Devin", true).starts_with("Devin didn't switch to plan mode"));
+        assert_eq!(controls(&json!({"sessionId":"s"})).plan_mode, None);
+    }
+
+    #[test]
+    fn probe_results_are_kept_per_binary() {
+        let dir = std::env::temp_dir().join(format!("trek-acp-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("agent-bin");
+        std::fs::write(&bin, "v1").unwrap();
+        let agent = AgentId::Acp("grok".into());
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin), None);
+        let model = |id: &str| ModelInfo { id: id.into(), name: id.into(), efforts: vec![], tier: 0, fast: None };
+        let info = AcpInfo { models: vec![model("a")], auth_methods: vec![("login".into(), "Log in".into())], needs_auth: false };
+        ProbeCache::store(&dir, &agent, &bin, &info);
+        assert!(dir.join("acp_grok.json").exists());
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin), Some(info.clone()));
+        // A session's list replaces it; one with no models (Copilot) leaves it alone.
+        ProbeCache::session_opened(&dir, &agent, &bin, &[model("b")], vec![]);
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().models, vec![model("b")]);
+        ProbeCache::session_opened(&dir, &agent, &bin, &[], vec![]);
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().models, vec![model("b")]);
+        // Turned away for want of a sign-in: still cached, but marked so the probe runs again.
+        ProbeCache::signed_out(&dir, &agent);
+        assert!(ProbeCache::load(&dir, &agent, &bin).unwrap().needs_auth);
+        // Another binary (an upgrade) isn't the one that was probed.
+        std::fs::write(&bin, "version 2").unwrap();
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

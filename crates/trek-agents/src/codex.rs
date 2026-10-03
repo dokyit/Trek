@@ -1,7 +1,7 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
-use crate::{AgentEvent, Command, Decision, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row};
+use crate::{AgentEvent, Command, Decision, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -257,22 +257,32 @@ fn permissions_grant(requested: &Value, d: Decision) -> Value {
     }
 }
 
-/// `{id: {answers: [..]}}`. Trek answers by question text (in order as a fallback).
+/// `{id: {answers: [..]}}`. Trek answers by question text; answers that name no question are
+/// taken in order. Questions left unanswered are left out.
 fn question_answers(ids: &[(String, String)], answers: &[(String, String)]) -> Value {
     let mut out = serde_json::Map::new();
     for (i, (question, id)) in ids.iter().enumerate() {
-        if let Some((_, a)) = answers.iter().find(|(q, _)| q == question).or(answers.get(i)) {
+        let by_order = || answers.get(i).filter(|(q, _)| !ids.iter().any(|(known, _)| known == q));
+        if let Some((_, a)) = answers.iter().find(|(q, _)| q == question).or_else(by_order).filter(|(_, a)| !a.is_empty()) {
             out.insert(id.clone(), json!({ "answers": [a] }));
         }
     }
     Value::Object(out)
 }
 
+/// Request ids of plans offered after their turn: `codex-plan-<turn id>`.
+const PLAN_REQUEST: &str = "codex-plan-";
+
+/// Trek's id for a server request.
+fn request_key(rpc_id: &Value) -> String {
+    format!("codex-{}", rpc_id.as_str().map(String::from).unwrap_or_else(|| rpc_id.to_string()))
+}
+
 /// What one of our requests was, so its response can be acted on.
 enum Call {
     Start,
-    /// A steer. If the turn ended first, the input goes out again as a new prompt (once).
-    Steer { input: Value, retried: bool },
+    /// A steer into turn `turn`; `retried` once it has gone out a second time.
+    Steer { input: Value, turn: String, retried: bool },
     Other,
 }
 
@@ -295,8 +305,9 @@ enum Pending {
 }
 
 struct SubAgent {
-    /// The tool row (and task id) it shows on.
+    /// The tool row (and task id) it shows on. Each run of the same agent gets its own.
     row: String,
+    runs: u32,
     tool_uses: u64,
     /// Its latest message: the row's output once it finishes.
     last: String,
@@ -322,8 +333,12 @@ struct Session {
     /// The collaboration mode Codex last reported, so leaving Plan mode is said explicitly.
     mode: Option<String>,
     turn: Turn,
+    /// A turn has been started in this session.
+    started: bool,
     /// Messages sent while `turn/start` was in flight; they steer the turn once its id is known.
     held: Vec<Value>,
+    /// Steers Codex refused because the turn was ending: they start the next turn.
+    after_turn: Vec<Value>,
     /// Interrupt the starting turn as soon as it has an id.
     interrupt: bool,
     calls: HashMap<i64, Call>,
@@ -332,6 +347,9 @@ struct Session {
     pending: HashMap<String, Pending>,
     /// The running Plan-mode turn's proposed plan.
     proposed: Option<String>,
+    /// The plan as it streams: `(item id, text so far, row shown)`. Its row appears once the
+    /// first line (the title) is in.
+    drafting: Option<(String, String, bool)>,
     /// A fatal error reported before its `turn/completed`.
     turn_error: Option<String>,
     /// `fileChange` item id → its paths, for the approval card.
@@ -352,12 +370,15 @@ impl Session {
             plan: config.plan,
             mode: opened["collaborationMode"]["mode"].as_str().map(String::from),
             turn: Turn::Idle,
+            started: false,
             held: vec![],
+            after_turn: vec![],
             interrupt: false,
             calls: HashMap::new(),
             next_id,
             pending: HashMap::new(),
             proposed: None,
+            drafting: None,
             turn_error: None,
             edits: HashMap::new(),
             agents: HashMap::new(),
@@ -401,8 +422,12 @@ impl Session {
             self.mode = Some(mode.into());
         }
         self.turn = Turn::Starting;
+        self.started = true;
         self.turn_error = None;
         self.proposed = None;
+        self.drafting = None;
+        // A plan offered after the last turn is answered by this message instead.
+        self.pending.retain(|_, p| !matches!(p, Pending::Plan));
         self.request("turn/start", p, Call::Start)
     }
 
@@ -416,9 +441,23 @@ impl Session {
             Turn::Starting => self.held.push(input),
             Turn::Running(id) => {
                 let params = json!({ "threadId": self.thread_id, "expectedTurnId": id, "input": input });
-                let m = self.request("turn/steer", params, Call::Steer { input, retried });
+                let m = self.request("turn/steer", params, Call::Steer { input, turn: id, retried });
                 out.send.push(m);
             }
+        }
+    }
+
+    /// Codex refused a steer. The message is never dropped: it goes into whatever turn is next.
+    fn steer_failed(&mut self, input: Value, turn: String, retried: bool, out: &mut Out) {
+        match self.turn.clone() {
+            // The turn ended first ("no active turn to steer"): the message starts the next one.
+            Turn::Idle => self.prompt(input, true, out),
+            Turn::Starting => self.held.push(input),
+            // A newer turn is running: steer into that one instead.
+            Turn::Running(id) if id != turn && !retried => self.prompt(input, true, out),
+            // Codex is ending this turn and its `turn/completed` hasn't arrived yet (or the retry
+            // was refused too): the message starts the next turn.
+            Turn::Running(_) => self.after_turn.push(input),
         }
     }
 
@@ -467,7 +506,13 @@ impl Session {
     }
 
     fn respond(&mut self, request_id: &str, decision: Decision, out: &mut Out) {
-        let Some(pending) = self.pending.remove(request_id) else { return };
+        let pending = match self.pending.remove(request_id) {
+            Some(p) => p,
+            // A plan offered by this thread's previous session (it restarted while the plan
+            // waited). Nothing has run here since, so it's still the latest plan.
+            None if request_id.starts_with(PLAN_REQUEST) && !self.started => Pending::Plan,
+            None => return,
+        };
         match pending {
             Pending::Approval(rpc_id) => out.send.push(json!({ "id": rpc_id, "result": { "decision": approval_decision(decision) } })),
             Pending::Permissions { rpc_id, requested } => {
@@ -479,6 +524,9 @@ impl Session {
             // on planning needs nothing; the user's next message goes to Plan mode.
             Pending::Plan if decision != Decision::Deny => {
                 self.plan = false;
+                // The plan came from a Plan-mode turn, so the thread is in Plan mode whatever
+                // a resumed session reported: leave it explicitly.
+                self.mode = Some("plan".into());
                 self.prompt(user_input("Implement the plan.", &[]), false, out);
             }
             Pending::Plan => {}
@@ -520,16 +568,17 @@ impl Session {
                 self.interrupt = false;
                 out.events.push(AgentEvent::Error(e));
             }
-            // The turn ended before the steer landed ("no active turn to steer").
-            (Call::Steer { input, retried: false }, Some(_)) => self.prompt(input, true, out),
-            (Call::Steer { .. }, Some(e)) => out.events.push(AgentEvent::Error(e)),
+            (Call::Steer { input, turn, retried }, Some(e)) => {
+                tracing::debug!("codex refused a steer: {e}");
+                self.steer_failed(input, turn, retried, out);
+            }
             (_, Some(e)) => tracing::debug!("codex request failed: {e}"),
             _ => {}
         }
     }
 
     fn server_request(&mut self, method: &str, rpc_id: Value, p: &Value, out: &mut Out) {
-        let request_id = format!("codex-{}", rpc_id.as_str().map(String::from).unwrap_or_else(|| rpc_id.to_string()));
+        let request_id = request_key(&rpc_id);
         let mut prompt = None;
         let (title, detail) = match method {
             "item/commandExecution/requestApproval" => {
@@ -574,6 +623,7 @@ impl Session {
                             .map(|o| (o["label"].as_str().unwrap_or_default().to_string(), o["description"].as_str().unwrap_or_default().to_string()))
                             .collect(),
                         multi: false,
+                        secret: q["isSecret"] == true,
                     })
                     .collect();
                 let detail = questions.first().map(|q| q.question.clone()).unwrap_or_default();
@@ -611,8 +661,17 @@ impl Session {
                 self.turn_completed(&p["turn"], out);
                 None
             }
-            // A Plan-mode turn streams its proposed plan as the reply.
-            "item/agentMessage/delta" | "item/plan/delta" => Some(AgentEvent::TextDelta(p["delta"].as_str().unwrap_or_default().into())),
+            "item/agentMessage/delta" => Some(AgentEvent::TextDelta(p["delta"].as_str().unwrap_or_default().into())),
+            "item/plan/delta" => {
+                self.plan_delta(p["itemId"].as_str().unwrap_or_default(), p["delta"].as_str().unwrap_or_default(), out);
+                None
+            }
+            // Codex settled a request itself (auto-resolved, reviewed, or its turn moved on). Ones
+            // Trek answered are already gone.
+            "serverRequest/resolved" => {
+                let request_id = request_key(&p["requestId"]);
+                self.pending.remove(&request_id).map(|_| AgentEvent::PermissionResolved { request_id })
+            }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 Some(AgentEvent::ReasoningDelta(p["delta"].as_str().unwrap_or_default().into()))
             }
@@ -671,9 +730,17 @@ impl Session {
         self.turn_error = None;
         let failed = error.is_some();
         out.events.push(AgentEvent::TurnComplete { cost_usd: None, error });
+        // Messages that missed this turn start the next one, and answer its plan.
+        let mut late = std::mem::take(&mut self.after_turn).into_iter();
+        if let Some(first) = late.next() {
+            let m = self.turn_start(first);
+            out.send.push(m);
+            self.held.extend(late);
+            return;
+        }
         // After the turn, like Codex's own "Implement this plan?" prompt.
         if let Some(plan) = self.proposed.take().filter(|p| self.plan && !failed && !p.trim().is_empty()) {
-            let request_id = format!("codex-plan-{}", turn["id"].as_str().unwrap_or_default());
+            let request_id = format!("{PLAN_REQUEST}{}", turn["id"].as_str().unwrap_or_default());
             self.pending.insert(request_id.clone(), Pending::Plan);
             out.events.push(AgentEvent::PermissionRequest { request_id, title: "Plan".into(), detail: String::new(), prompt: Some(Prompt::Plan(plan)) });
         }
@@ -699,9 +766,27 @@ impl Session {
                 ("Subagent".to_string(), clip(item["prompt"].as_str().unwrap_or_default(), 200))
             }
             Some("subAgentActivity") => return self.sub_agent_activity(item, out),
+            Some("plan") => {
+                self.drafting = Some((id, String::new(), false));
+                return;
+            }
             _ => return,
         };
         out.events.push(AgentEvent::ToolStarted { id, title, detail });
+    }
+
+    /// The proposed plan shows as a "Plan" row, like Claude's: its title as the detail, the
+    /// whole plan as the output, and the plan card to approve it once the turn ends.
+    fn plan_delta(&mut self, item: &str, delta: &str, out: &mut Out) {
+        if self.drafting.as_ref().is_none_or(|(id, ..)| id != item) {
+            self.drafting = Some((item.to_string(), String::new(), false));
+        }
+        let Some((id, text, shown)) = self.drafting.as_mut() else { return };
+        text.push_str(delta);
+        if !*shown && text.trim_start().contains('\n') {
+            *shown = true;
+            out.events.push(AgentEvent::ToolStarted { id: id.clone(), title: "Plan".into(), detail: plan_title(text) });
+        }
     }
 
     fn item_completed(&mut self, item: &Value, out: &mut Out) {
@@ -711,9 +796,14 @@ impl Session {
         let ev = match item["type"].as_str() {
             Some("agentMessage") => AgentEvent::TextDone(item["text"].as_str().unwrap_or_default().into()),
             Some("plan") => {
+                // The completed item is authoritative; the deltas may not add up to it.
                 let text = item["text"].as_str().unwrap_or_default().to_string();
+                let shown = self.drafting.take().is_some_and(|(row, _, shown)| row == id && shown);
+                if !shown {
+                    out.events.push(AgentEvent::ToolStarted { id: id.clone(), title: "Plan".into(), detail: plan_title(&text) });
+                }
                 self.proposed = Some(text.clone());
-                AgentEvent::TextDone(text)
+                AgentEvent::ToolFinished { id, output: text, ok: true }
             }
             Some("commandExecution") => {
                 let output = item["aggregatedOutput"].as_str().map(|o| clip(o, 8000)).unwrap_or_else(declined);
@@ -759,15 +849,18 @@ impl Session {
         out.events.push(AgentEvent::ToolFinished { id, output, ok: true });
     }
 
-    /// Multi-agent v2: a sub-agent started, finished or was interrupted.
+    /// Multi-agent v2: a sub-agent started, was given more work, finished or was interrupted.
     fn sub_agent_activity(&mut self, item: &Value, out: &mut Out) {
         let Some(thread) = item["agentThreadId"].as_str() else { return };
         match item["kind"].as_str() {
-            Some("started") if !self.agents.contains_key(thread) => {
+            // A finished agent that's given more work runs again, on a row of its own.
+            Some("started" | "interacted") if self.agents.get(thread).is_none_or(|a| a.done) => {
                 let name = agent_name(item["agentPath"].as_str().unwrap_or_default());
-                self.agents.insert(thread.into(), SubAgent { row: thread.into(), tool_uses: 0, last: String::new(), done: false });
-                out.events.push(AgentEvent::ToolStarted { id: thread.into(), title: "Subagent".into(), detail: name.clone() });
-                out.events.push(AgentEvent::Task { id: thread.into(), description: Some(name), activity: None, tool_uses: None, done: None });
+                let runs = self.agents.get(thread).map_or(0, |a| a.runs) + 1;
+                let row = if runs == 1 { thread.to_string() } else { format!("{thread}-{runs}") };
+                self.agents.insert(thread.into(), SubAgent { row: row.clone(), runs, tool_uses: 0, last: String::new(), done: false });
+                out.events.push(AgentEvent::ToolStarted { id: row.clone(), title: "Subagent".into(), detail: name.clone() });
+                out.events.push(AgentEvent::Task { id: row, description: Some(name), activity: None, tool_uses: None, done: None });
             }
             Some("completed") => self.finish_agent(thread, true, out),
             Some("interrupted") => self.finish_agent(thread, false, out),
@@ -783,7 +876,7 @@ impl Session {
             let description = Some(clip(item["prompt"].as_str().unwrap_or("Subagent"), 200));
             for t in item["receiverThreadIds"].as_array().into_iter().flatten().filter_map(|t| t.as_str()) {
                 if !self.agents.contains_key(t) {
-                    self.agents.insert(t.into(), SubAgent { row: id.clone(), tool_uses: 0, last: String::new(), done: false });
+                    self.agents.insert(t.into(), SubAgent { row: id.clone(), runs: 1, tool_uses: 0, last: String::new(), done: false });
                     out.events.push(AgentEvent::Task { id: id.clone(), description: description.clone(), activity: None, tool_uses: None, done: None });
                 }
             }
@@ -851,6 +944,7 @@ pub async fn run(
         // Config overrides merge with the user's own `mcp_servers` (verified against 0.160).
         params["config"] = json!({ "mcp_servers": mcp_servers_json(&config.mcp_servers) });
     }
+    let mut lost = false;
     let resumed = match &config.resume {
         Some(thread_id) => {
             let mut p = params.clone();
@@ -862,6 +956,7 @@ pub async fn run(
                 // Codex no longer has the thread (its rollout was deleted): carry on in a new one.
                 Err(e) if e.to_string().contains("no rollout found") => {
                     tracing::warn!("codex resume failed, starting a new thread: {e:#}");
+                    lost = true;
                     None
                 }
                 Err(e) => return Err(e),
@@ -879,6 +974,9 @@ pub async fn run(
     let thread_id = opened["thread"]["id"].as_str().context("no thread id")?.to_string();
     let mut s = Session::new(thread_id.clone(), &config, &opened, rpc.next_id);
     events.send(AgentEvent::Started { native_id: thread_id, model: s.model.clone() }).await?;
+    if lost {
+        events.send(crate::lost_session("Codex")).await?;
+    }
 
     let mut out = Out::default();
     for v in std::mem::take(&mut backlog) {
@@ -1071,11 +1169,15 @@ mod tests {
         let answer = s.command(Command::Answer { request_id: "codex-0".into(), answers: vec![(qs[0].question.clone(), qs[0].options[0].0.clone())] });
         assert_eq!(answer.send, vec![json!({"id":0,"result":{"answers":{"content":{"answers":["Hello, world! (Recommended)"]}}}})]);
 
-        // The plan streams as the reply, then waits for approval once the turn is over.
+        // The plan shows as a "Plan" row once its title is in (not as the reply too), then waits
+        // for approval once the turn is over.
         let out = feed(&mut s, &lines[2..]);
-        assert_eq!(out.events.iter().filter(|e| matches!(e, AgentEvent::TextDelta(_))).count(), 6);
+        let row = "01a0fe4b-3b8c-7841-b156-902ccc923692-plan";
+        assert!(!out.events.iter().any(|e| matches!(e, AgentEvent::TextDelta(_) | AgentEvent::TextDone(_))));
+        assert_eq!(out.events[0], AgentEvent::ToolStarted { id: row.into(), title: "Plan".into(), detail: "Add `hello.txt`".into() });
         let n = out.events.len();
-        assert!(matches!(&out.events[n - 3], AgentEvent::TextDone(t) if t.starts_with("# Add `hello.txt`")));
+        assert_eq!(n, 4);
+        assert!(matches!(&out.events[n - 3], AgentEvent::ToolFinished { id, output, ok: true } if id == row && output.starts_with("# Add `hello.txt`\n\n## Summary")));
         assert_eq!(out.events[n - 2], AgentEvent::TurnComplete { cost_usd: None, error: None });
         let AgentEvent::PermissionRequest { request_id, prompt: Some(Prompt::Plan(plan)), .. } = &out.events[n - 1] else { panic!() };
         assert!(plan.contains("Hello, world!"));
@@ -1252,8 +1354,9 @@ mod tests {
     }
 
     #[test]
-    fn steer_follows_the_running_turn_and_falls_back_to_a_new_turn() {
+    fn steer_follows_the_running_turn_and_never_drops_a_message() {
         let lines = fixture(include_str!("../fixtures/codex-steer.jsonl"));
+        let turn = "01a0fe4d-9675-7061-935d-d8b249eb41d6";
         let mut s = session("01a0fe4d-9485-79e2-8d9e-a4847ef074fc", false);
         let first = s.command(prompt("Run sleep 5")).send;
         assert_eq!((first[0]["id"].as_i64(), first[0]["method"].as_str()), (Some(3), Some("turn/start")));
@@ -1261,25 +1364,43 @@ mod tests {
         assert!(s.command(prompt("Also say BANANA")).send.is_empty());
         let out = feed(&mut s, &lines[..1]);
         assert_eq!(out.send[0]["method"], "turn/steer");
-        assert_eq!(out.send[0]["params"]["expectedTurnId"], "01a0fe4d-9675-7061-935d-d8b249eb41d6");
+        assert_eq!(out.send[0]["params"]["expectedTurnId"], turn);
         assert_eq!(out.send[0]["params"]["input"][0]["text"], "Also say BANANA");
         assert_eq!(out.send[0]["id"], 4);
-        // A rejected steer (stale turn id) goes out once more against the current turn.
+        // Codex refuses the steer before this turn's `turn/completed` is read (it clears the
+        // active turn first): the message waits, then starts the next turn.
         let out = feed(&mut s, &lines[1..3]);
-        assert_eq!(out.send[0]["method"], "turn/steer");
-        assert_eq!(out.send[0]["id"], 5);
-        assert!(out.events.is_empty());
-        let out = feed(&mut s, &lines[3..5]);
+        assert!(out.send.is_empty() && out.events.is_empty());
+        let out = feed(&mut s, &lines[4..5]);
         assert_eq!(turn_completes(&out.events), 1);
-        // The turn ended while a steer was in flight: it becomes the next turn.
-        s.turn = Turn::Running("01a0fe4d-9675-7061-935d-d8b249eb41d6".into());
-        let late = s.command(prompt("late")).send;
-        assert_eq!(late[0]["id"], 6);
+        assert_eq!(out.send[0]["method"], "turn/start");
+        assert_eq!(out.send[0]["params"]["input"][0]["text"], "Also say BANANA");
+        assert_eq!(s.turn, Turn::Starting);
+
+        // The other order: the turn ended while the steer was in flight.
+        let mut s = session("01a0fe4d-9485-79e2-8d9e-a4847ef074fc", false);
+        s.next_id = 5;
+        s.turn = Turn::Running(turn.into());
+        assert_eq!(s.command(prompt("late")).send[0]["id"], 6);
         feed(&mut s, &lines[4..5]);
         let out = feed(&mut s, &lines[5..]);
         assert_eq!(out.send[0]["method"], "turn/start");
         assert_eq!(out.send[0]["params"]["input"][0]["text"], "late");
         assert!(out.events.is_empty());
+
+        // A newer turn is already running: the refused steer goes into that one, once.
+        let mut s = session("t", false);
+        s.turn = Turn::Running("old".into());
+        let id = s.command(prompt("more")).send[0]["id"].clone();
+        s.turn = Turn::Running("new".into());
+        let refused = |id: &Value| json!({"id":id,"error":{"code":-32600,"message":"expected active turn id `old` but found `new`"}});
+        let out = s.incoming(&refused(&id));
+        assert_eq!((out.send[0]["method"].as_str(), out.send[0]["params"]["expectedTurnId"].as_str()), (Some("turn/steer"), Some("new")));
+        // Refused again: it starts the next turn rather than being lost.
+        let out = s.incoming(&refused(&out.send[0]["id"]));
+        assert!(out.send.is_empty() && out.events.is_empty());
+        let out = s.incoming(&json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"new","status":"completed","items":[]}}}));
+        assert_eq!(out.send[0]["params"]["input"][0]["text"], "more");
     }
 
     #[test]
@@ -1340,5 +1461,171 @@ mod tests {
         let out = s.incoming(&json!({"id":8,"method":"item/tool/call","params":{"threadId":"t"}}));
         assert_eq!(out.send[0]["error"]["code"], -32601);
         assert!(out.events.is_empty());
+    }
+
+    #[test]
+    fn a_plan_offered_by_the_previous_session_can_still_be_approved() {
+        // The app-server restarted while the plan card waited (plan mode toggled, or it quit);
+        // the new session resumes the thread and was started with plan on. Leaving Plan mode is
+        // said even if the resumed thread didn't report its mode.
+        let config = SessionConfig {
+            agent: AgentId::Codex,
+            cwd: "/tmp".into(),
+            model: Some("gpt-5.6-luna".into()),
+            effort: Effort::Low,
+            hand_holding: HandHolding::Supervised,
+            plan: true,
+            resume: Some("t".into()),
+            fast: None,
+            mcp_servers: vec![],
+        };
+        let opened = json!({"model":"gpt-5.6-luna"});
+        let mut s = Session::new("t".into(), &config, &opened, 2);
+        let go = s.command(Command::Respond { request_id: "codex-plan-turn-1".into(), decision: Decision::Allow }).send;
+        assert_eq!(go[0]["params"]["collaborationMode"]["mode"], "default");
+        assert_eq!(go[0]["params"]["input"][0]["text"], "Implement the plan.");
+        // Keep planning needs nothing.
+        let mut s = Session::new("t".into(), &config, &opened, 2);
+        assert!(s.command(Command::Respond { request_id: "codex-plan-turn-1".into(), decision: Decision::Deny }).send.is_empty());
+    }
+
+    #[test]
+    fn a_newer_message_answers_the_plan_instead() {
+        let lines = fixture(include_str!("../fixtures/codex-plan-question.jsonl"));
+        let mut s = session("01a0fe4b-3a5d-7cd2-bda4-95b0523e3695", true);
+        s.command(prompt("Plan it"));
+        let out = feed(&mut s, &lines[2..]);
+        let Some(AgentEvent::PermissionRequest { request_id, .. }) = out.events.last() else { panic!() };
+        // The user wrote back instead of approving: a new Plan-mode turn.
+        let next = s.command(prompt("Make it say hi instead")).send;
+        assert_eq!(next[0]["params"]["collaborationMode"]["mode"], "plan");
+        // The old card can't start the work any more (it would steer into the planning turn).
+        assert!(s.command(Command::Respond { request_id: request_id.clone(), decision: Decision::Allow }).send.is_empty());
+        assert!(s.plan);
+    }
+
+    #[test]
+    fn requests_codex_settles_itself_lose_their_card() {
+        let lines = fixture(include_str!("../fixtures/codex-plan-question.jsonl"));
+        let mut s = session("01a0fe4b-3a5d-7cd2-bda4-95b0523e3695", true);
+        let out = feed(&mut s, &lines[..3]);
+        assert_eq!(out.events.last(), Some(&AgentEvent::PermissionResolved { request_id: "codex-0".into() }));
+        // A late answer goes nowhere.
+        assert!(s.command(Command::Answer { request_id: "codex-0".into(), answers: vec![("q".into(), "a".into())] }).send.is_empty());
+        // Ones Trek answered itself are already settled: no event.
+        let lines = fixture(include_str!("../fixtures/codex-approvals.jsonl"));
+        let mut s = session("01a0fe4d-09c7-77c0-b896-912482b6fdd8", false);
+        let asked = feed(&mut s, &lines[..5]);
+        assert!(matches!(asked.events.last(), Some(AgentEvent::PermissionRequest { .. })));
+        s.command(Command::Respond { request_id: "codex-0".into(), decision: Decision::Allow });
+        assert!(feed(&mut s, &lines[5..6]).events.is_empty());
+    }
+
+    #[test]
+    fn secret_and_free_text_questions() {
+        // Shape from the app-server schema (ToolRequestUserInputParams).
+        let mut s = session("t", false);
+        let out = s.incoming(&json!({"id":4,"method":"item/tool/requestUserInput","params":{"threadId":"t","turnId":"u","itemId":"i","isBlocking":true,"questions":[
+            {"id":"name","header":"Name","question":"What should the service be called?","options":null},
+            {"id":"token","header":"Token","question":"Paste the deploy token","isSecret":true,"options":null}]}}));
+        let AgentEvent::PermissionRequest { prompt: Some(Prompt::Questions(qs)), .. } = &out.events[0] else { panic!("{:?}", out.events) };
+        assert_eq!(qs.iter().map(|q| (q.options.len(), q.secret)).collect::<Vec<_>>(), vec![(0, false), (0, true)]);
+        let answer = s.command(Command::Answer { request_id: "codex-4".into(), answers: vec![(qs[1].question.clone(), "s3cr3t".into())] }).send;
+        assert_eq!(answer, vec![json!({"id":4,"result":{"answers":{"token":{"answers":["s3cr3t"]}}}})]);
+    }
+
+    #[test]
+    fn current_time_and_network_approvals() {
+        let mut s = session("t", false);
+        let out = s.incoming(&json!({"id":"r1","method":"currentTime/read","params":{"threadId":"t"}}));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(out.send[0]["id"], "r1");
+        assert!(out.send[0]["result"]["currentTimeAt"].as_u64().is_some_and(|t| t.abs_diff(now) < 5));
+        // Shape from CommandExecutionRequestApprovalParams.
+        let out = s.incoming(&json!({"id":5,"method":"item/commandExecution/requestApproval","params":{"threadId":"t","turnId":"u","itemId":"e",
+            "command":null,"networkApprovalContext":{"host":"pypi.org","protocol":"https"}}}));
+        assert_eq!(out.events, vec![AgentEvent::PermissionRequest { request_id: "codex-5".into(), title: "Network access".into(), detail: "pypi.org".into(), prompt: None }]);
+        let ok = s.command(Command::Respond { request_id: "codex-5".into(), decision: Decision::AllowForSession }).send;
+        assert_eq!(ok, vec![json!({"id":5,"result":{"decision":"acceptForSession"}})]);
+    }
+
+    #[test]
+    fn settings_updates_are_followed() {
+        // Plan mode turned on outside Trek's control (shape from ThreadSettingsUpdatedNotification):
+        // Trek's next turn, with plan mode off, says so.
+        let mut s = session("t", false);
+        s.incoming(&json!({"method":"thread/settings/updated","params":{"threadId":"t","threadSettings":{"collaborationMode":{"mode":"plan","settings":{"model":"gpt-5.6-luna"}},
+            "approvalPolicy":"on-request","approvalsReviewer":"user","cwd":"/tmp","model":"gpt-5.6-luna","modelProvider":"openai","sandboxPolicy":{"type":"workspaceWrite"}}}}));
+        assert_eq!(s.command(prompt("go")).send[0]["params"]["collaborationMode"]["mode"], "default");
+    }
+
+    #[test]
+    fn image_views_are_read_rows() {
+        let mut s = session("t", false);
+        let item = json!({"type":"imageView","id":"img1","path":"/tmp/shot.png"});
+        let out = feed(&mut s, &[
+            json!({"method":"item/started","params":{"threadId":"t","turnId":"u","item":item}}),
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"u","item":item}}),
+        ]);
+        assert_eq!(
+            out.events,
+            vec![
+                AgentEvent::ToolStarted { id: "img1".into(), title: "Read".into(), detail: "/tmp/shot.png".into() },
+                AgentEvent::ToolFinished { id: "img1".into(), output: String::new(), ok: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_agent_v1_spawns_show_on_the_spawn_row() {
+        // Shapes from the app-server schema (collabAgentToolCall, CollabAgentState).
+        let mut s = session("main", false);
+        let spawn = |status: &str, states: Value| json!({"type":"collabAgentToolCall","id":"call1","tool":"spawnAgent","status":status,
+            "senderThreadId":"main","receiverThreadIds":["kid"],"prompt":"Count the files","agentsStates":states});
+        let out = feed(&mut s, &[
+            json!({"method":"item/started","params":{"threadId":"main","turnId":"u","item":spawn("inProgress", json!({}))}}),
+            json!({"method":"item/completed","params":{"threadId":"main","turnId":"u","item":spawn("completed", json!({"kid":{"status":"running","message":null}}))}}),
+            json!({"method":"item/started","params":{"threadId":"kid","turnId":"k","item":{"type":"commandExecution","id":"e1","command":"ls","cwd":"/tmp","status":"inProgress","commandActions":[]}}}),
+        ]);
+        assert_eq!(
+            out.events,
+            vec![
+                AgentEvent::ToolStarted { id: "call1".into(), title: "Subagent".into(), detail: "Count the files".into() },
+                AgentEvent::Task { id: "call1".into(), description: Some("Count the files".into()), activity: None, tool_uses: None, done: None },
+                AgentEvent::ToolFinished { id: "call1".into(), output: String::new(), ok: true },
+                AgentEvent::Task { id: "call1".into(), description: None, activity: Some("Running ls".into()), tool_uses: Some(1), done: None },
+            ]
+        );
+        // A later collab call (here `wait`) reports it finished, with its reply.
+        let wait = json!({"type":"collabAgentToolCall","id":"call2","tool":"wait","status":"completed","senderThreadId":"main","receiverThreadIds":["kid"],
+            "agentsStates":{"kid":{"status":"completed","message":"3 files"}}});
+        let out = s.incoming(&json!({"method":"item/completed","params":{"threadId":"main","turnId":"u","item":wait}}));
+        assert_eq!(
+            out.events,
+            vec![
+                AgentEvent::Task { id: "call1".into(), description: None, activity: None, tool_uses: None, done: Some(true) },
+                AgentEvent::ToolFinished { id: "call1".into(), output: "3 files".into(), ok: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_given_more_work_gets_a_new_row() {
+        let mut s = session("main", false);
+        let activity = |kind: &str| json!({"method":"item/completed","params":{"threadId":"main","turnId":"u","item":{"type":"subAgentActivity","id":format!("a-{kind}"),"kind":kind,"agentThreadId":"kid","agentPath":"/root/pong_agent"}}});
+        feed(&mut s, &[activity("started"), activity("completed")]);
+        let out = feed(&mut s, &[activity("interacted")]);
+        assert_eq!(
+            out.events,
+            vec![
+                AgentEvent::ToolStarted { id: "kid-2".into(), title: "Subagent".into(), detail: "pong agent".into() },
+                AgentEvent::Task { id: "kid-2".into(), description: Some("pong agent".into()), activity: None, tool_uses: None, done: None },
+            ]
+        );
+        let out = feed(&mut s, &[activity("completed")]);
+        assert_eq!(out.events[0], AgentEvent::Task { id: "kid-2".into(), description: None, activity: None, tool_uses: None, done: Some(true) });
+        // While it's still running, more work is the same run.
+        feed(&mut s, &[activity("interacted")]);
+        assert!(feed(&mut s, &[activity("interacted")]).events.is_empty());
     }
 }

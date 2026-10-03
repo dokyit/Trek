@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row};
+use crate::{AgentEvent, Command, Decision, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -23,7 +23,7 @@ fn tool_title(name: &str, input: &Value) -> (String, String) {
         "WebSearch" => ("Search the web".into(), s("query")),
         "Agent" | "Task" => ("Subagent".into(), s("description")),
         "TodoWrite" => ("Update plan".into(), todo_detail(input)),
-        "ExitPlanMode" => ("Plan".into(), input["plan"].as_str().and_then(|p| p.lines().find(|l| !l.trim().is_empty())).unwrap_or_default().trim_start_matches('#').trim().to_string()),
+        "ExitPlanMode" => ("Plan".into(), plan_title(input["plan"].as_str().unwrap_or_default())),
         "AskUserQuestion" => ("Question".into(), input["questions"][0]["question"].as_str().unwrap_or_default().to_string()),
         other => (other.to_string(), clip(&input.to_string(), 200)),
     }
@@ -309,7 +309,11 @@ fn user_content(text: &str, images: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
 /// Why a turn failed: its result text, else the CLI's own errors (e.g. a session that can't be
 /// resumed).
 fn result_error(v: &Value) -> String {
-    let errors: Vec<&str> = v["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str()).collect();
+    // A stopped turn (Trek's interrupt) ends with an internal diagnostic as its only "error".
+    if matches!(v["terminal_reason"].as_str(), Some("aborted_streaming" | "aborted_tools")) {
+        return "Interrupted".to_string();
+    }
+    let errors: Vec<&str> = v["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str()).filter(|e| !e.starts_with("[ede_diagnostic]")).collect();
     v["result"]
         .as_str()
         .filter(|r| !r.trim().is_empty())
@@ -457,6 +461,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                                 .map(|o| (o["label"].as_str().unwrap_or_default().to_string(), o["description"].as_str().unwrap_or_default().to_string()))
                                 .collect(),
                             multi: q["multiSelect"] == true,
+                            secret: false,
                         })
                         .collect(),
                 )),
@@ -469,6 +474,12 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                 detail: r["description"].as_str().map(String::from).unwrap_or(detail),
                 prompt,
             });
+        }
+        // Claude dropped a prompt it was waiting on (an interrupt, or a hook answered it).
+        Some("control_cancel_request") => {
+            if let Some(id) = v["request_id"].as_str().filter(|id| pending.remove(*id).is_some()) {
+                out.push(AgentEvent::PermissionResolved { request_id: id.to_string() });
+            }
         }
         _ => {}
     }
@@ -588,6 +599,24 @@ mod tests {
         assert_eq!(input["questions"], lines[0]["request"]["input"]["questions"]);
         let skipped = respond(&mut Control { next_id: 0 }, request_id, &pending[request_id], Decision::Deny, "default");
         assert!(skipped[0]["response"]["response"]["message"].as_str().unwrap().contains("skipped"));
+    }
+
+    #[test]
+    fn interrupting_an_open_prompt_withdraws_it_and_ends_the_turn_as_interrupted() {
+        // Recorded: Trek's interrupt while Claude waited on a Bash approval.
+        let lines = fixture(include_str!("../fixtures/claude-interrupt.jsonl"));
+        let mut pending = HashMap::new();
+        let ev: Vec<AgentEvent> = lines.iter().flat_map(|v| translate(v, &mut pending, &mut false)).collect();
+        let request_id = lines[0]["request_id"].as_str().unwrap().to_string();
+        assert!(matches!(&ev[0], AgentEvent::PermissionRequest { request_id: r, .. } if *r == request_id));
+        assert!(ev.contains(&AgentEvent::PermissionResolved { request_id: request_id.clone() }));
+        assert!(pending.is_empty());
+        let Some(AgentEvent::TurnComplete { error, .. }) = ev.last() else { panic!("{ev:?}") };
+        assert_eq!(error.as_deref(), Some("Interrupted"));
+        // Already answered: nothing to take down.
+        assert!(translate(&lines[1], &mut pending, &mut false).is_empty());
+        // Claude's internal diagnostics never reach the user as the reason.
+        assert_eq!(result_error(&json!({"is_error":true,"errors":["[ede_diagnostic] result_type=user"]})), "The turn failed.");
     }
 
     #[test]

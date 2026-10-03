@@ -8,6 +8,7 @@ mod acp;
 mod claude;
 mod codex;
 mod direct;
+mod opencode;
 mod status;
 
 pub use acp::{AcpInfo, acp_probe};
@@ -79,6 +80,8 @@ pub struct Question {
     /// `(label, description)`
     pub options: Vec<(String, String)>,
     pub multi: bool,
+    /// The answer is a secret (a token, a password): it must not be shown or kept.
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +110,8 @@ pub enum AgentEvent {
     ToolFinished { id: String, output: String, ok: bool },
     /// The agent needs the user: a yes/no approval, or (`prompt`) a question or a plan to review.
     PermissionRequest { request_id: String, title: String, detail: String, prompt: Option<Prompt> },
+    /// The agent settled a request on its own (it timed out, or the turn moved on): its card goes.
+    PermissionResolved { request_id: String },
     /// A diff stat for the turn, when the agent reports one.
     DiffStat { additions: i64, deletions: i64 },
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
@@ -118,6 +123,8 @@ pub enum AgentEvent {
     Background(usize),
     /// The slash commands the agent offers in this session (replaces any earlier list).
     Commands(Vec<SlashCommand>),
+    /// Something the user should know that isn't an error (the transcript shows it as a note).
+    Notice(String),
     Error(String),
     Exited,
 }
@@ -195,6 +202,16 @@ pub(crate) fn plan_row(steps: &[(String, Step)]) -> (String, String) {
     (clip(&detail, 200), output)
 }
 
+/// Said when an agent can't reopen a saved conversation and starts over.
+pub(crate) fn lost_session(agent: &str) -> AgentEvent {
+    AgentEvent::Notice(format!("{agent} couldn't reopen this conversation, so it continues in a new session without the earlier context."))
+}
+
+/// A plan's title for its row: its first non-empty line, without the Markdown heading marks.
+pub(crate) fn plan_title(plan: &str) -> String {
+    clip(plan.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim_start_matches('#').trim(), 200)
+}
+
 /// The last lines a child process wrote to stderr, for a readable error when it dies.
 #[derive(Clone)]
 pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
@@ -262,6 +279,12 @@ mod tests {
     fn diff_stat_ignores_headers() {
         let d = "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more\n";
         assert_eq!(diff_stat(d), (2, 1));
+    }
+
+    #[test]
+    fn plan_title_is_the_first_line() {
+        assert_eq!(plan_title("\n# Add `hello.txt`\n\n1. Write it"), "Add `hello.txt`");
+        assert_eq!(plan_title(""), "");
     }
 
     #[test]
