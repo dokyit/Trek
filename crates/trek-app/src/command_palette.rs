@@ -164,6 +164,34 @@ fn scroll_target(groups: &[Group], selected: usize) -> Option<usize> {
     None
 }
 
+/// Whether `query` names one of `commands`: it starts the label or one of its words.
+fn commands_named<T>(query: &str, commands: &[(T, String, String)]) -> bool {
+    query.chars().count() >= 2 && commands.iter().any(|(_, label, keywords)| score(query, label, keywords).is_some_and(|s| s >= 800))
+}
+
+/// Characters of a folder shown as a hint, at most.
+const FOLDER_HINT: usize = 30;
+
+/// `path` cut to its last folders, to fit in about `max` characters: projects side by side in one
+/// parent differ only at the end. A last folder that's too long on its own is kept whole.
+fn path_tail(path: &str, max: usize) -> String {
+    if path.chars().count() <= max {
+        return path.to_string();
+    }
+    let mut tail: Vec<&str> = vec![];
+    let mut len = 2;
+    for part in path.rsplit('/').filter(|p| !p.is_empty()) {
+        let n = part.chars().count() + 1;
+        if !tail.is_empty() && len + n > max {
+            break;
+        }
+        len += n;
+        tail.push(part);
+    }
+    tail.reverse();
+    format!("…/{}", tail.join("/"))
+}
+
 /// The search results the Threads group shows: title matches, then message matches (one per
 /// thread, `Store::search` sees to that) from threads not listed already.
 fn thread_hits(hits: &[SearchHit]) -> Vec<&SearchHit> {
@@ -351,6 +379,16 @@ impl CommandPalette {
         let searching = !q.is_empty();
         let project_name = |pid: &Option<String>| pid.as_ref().and_then(|p| ws.project(p)).map(|p| p.name.clone());
         let mut out = Vec::new();
+        // Typing a command's name ("theme", "terminal") puts the commands first: below a page of
+        // threads that merely mention the word, the command would be out of sight.
+        let commands = self.commands(cx);
+        let named = commands_named(q, &commands);
+        let commands = rank(q, commands);
+        let n = commands.len();
+        let commands: Vec<Entry> = commands.into_iter().take(if searching { COMMANDS } else { n }).collect();
+        if named {
+            out.extend(commands.iter().cloned());
+        }
 
         if searching {
             for h in thread_hits(&self.hits) {
@@ -394,6 +432,7 @@ impl CommandPalette {
             let glyph = Glyph::Project(p.name.clone(), ws.project_icon(&p.path));
             let folder = trek_core::paths::tildify(&p.path);
             let keywords = format!("{} {}", p.remote.clone().unwrap_or_default(), folder);
+            let folder = path_tail(&folder, FOLDER_HINT);
             let new = Entry::new(Group::Projects, glyph.clone(), format!("New thread in {}", p.name), Action::NewThreadIn(p.path.clone())).hint(folder.clone());
             projects.push((new, p.name.clone(), keywords.clone()));
             if searching {
@@ -402,10 +441,9 @@ impl CommandPalette {
             }
         }
         out.extend(rank(q, projects).into_iter().take(if searching { PROJECTS } else { 4 }));
-
-        let commands = rank(q, self.commands(cx));
-        let n = commands.len();
-        out.extend(commands.into_iter().take(if searching { COMMANDS } else { n }));
+        if !named {
+            out.extend(commands);
+        }
         out
     }
 
@@ -671,7 +709,7 @@ impl Render for CommandPalette {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS as CAP, Group, MESSAGE_HITS, TITLE_HITS, rank, score, scroll_target, thread_hits};
+    use super::{COMMANDS as CAP, Group, MESSAGE_HITS, TITLE_HITS, commands_named, path_tail, rank, score, scroll_target, thread_hits};
     use trek_core::store::SearchHit;
 
     fn ranked(query: &str, labels: &[(&str, &str)]) -> Vec<String> {
@@ -733,6 +771,25 @@ mod tests {
         let found = ranked("settings", &offered);
         assert!(labels.len() <= CAP, "{} pages, {CAP} rows", labels.len());
         assert_eq!(found[..labels.len()], labels[..]);
+    }
+
+    #[test]
+    fn a_commands_name_puts_the_commands_first() {
+        let offered: Vec<((), String, String)> = COMMANDS.iter().map(|(l, k)| ((), l.to_string(), k.to_string())).collect();
+        assert!(commands_named("theme", &offered));
+        assert!(commands_named("term", &offered), "a word of the label");
+        assert!(!commands_named("parser", &offered));
+        // Only in keywords, or a letter: threads keep the top.
+        assert!(!commands_named("dark", &offered));
+        assert!(!commands_named("t", &offered));
+    }
+
+    #[test]
+    fn folder_hints_keep_their_last_folders() {
+        assert_eq!(path_tail("~/Code/trek", 30), "~/Code/trek");
+        assert_eq!(path_tail("~/Documents/Documents - Toby's MacBook Air/Direct", 30), "…/Direct");
+        assert_eq!(path_tail("~/Documents/Projects/Clients/acme/web", 30), "…/Projects/Clients/acme/web");
+        assert_eq!(path_tail("~/a/an-uncommonly-long-project-folder-name", 30), "…/an-uncommonly-long-project-folder-name");
     }
 
     #[test]

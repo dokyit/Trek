@@ -209,3 +209,50 @@ fn turns_an_earlier_run_left_open_are_closed_at_launch() {
         assert_eq!(store.items(&working).expect("items"), vec![user, tool(ToolStatus::Failed), notice]);
     });
 }
+
+#[test]
+fn archiving_stops_the_agent_and_ends_its_turn() {
+    run(async |cx| {
+        let trek = open(cx);
+        // Paused on a card: once archived nothing could answer it, so it doesn't wait.
+        let asking = trek.send(cx, "mock:permission");
+        trek.wait_needs_you(cx, &asking).await;
+        trek.update(cx, |ws, cx| ws.archive(&asking, cx));
+        assert!(!trek.read(cx, |ws, _| ws.work_in_flight()), "an update may install");
+        assert!(trek.read(cx, |ws, _| ws.live[&asking].commands.is_none() && ws.live[&asking].turn_started.is_none()));
+        let stored = trek.read(cx, |ws, _| ws.store.thread(&asking).unwrap().unwrap());
+        assert_eq!(stored.run_state, RunState::Idle);
+        let items = trek.read(cx, |ws, _| ws.store.items(&asking).unwrap());
+        assert!(matches!(items.last(), Some(Item::Notice { text }) if text == "Interrupted"), "{items:?}");
+        assert!(!items.iter().any(|i| matches!(i, Item::Tool { status: ToolStatus::Running, .. })));
+
+        // Working: back from the archive, it isn't left "Working" for good.
+        let working = trek.send(cx, "mock:long 20s");
+        trek.update(cx, |ws, cx| ws.archive(&working, cx));
+        trek.update(cx, |ws, cx| ws.undo(UndoAction::Unarchive(working.clone()), cx));
+        assert_eq!(trek.run_state(cx, &working), RunState::Idle);
+        assert!(!trek.read(cx, |ws, _| ws.any_turn_running() || ws.work_in_flight()));
+    });
+}
+
+#[test]
+fn trek_commands_in_a_draft_start_no_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let toasts = toasts(&trek, cx);
+        // As the composer sends them (the / menu inserts the command; Return sends it).
+        for text in ["/new please", "/clear", "/model", "/cost", "/context", "/usage", "/permissions"] {
+            trek.update(cx, |ws, cx| ws.send_in(&crate::workspace::Scope::Main, text.into(), vec![], cx));
+        }
+        assert!(trek.read(cx, |ws, _| ws.threads.is_empty()), "{:?}", trek.read(cx, |ws, _| ws.threads.iter().map(|t| t.title.clone()).collect::<Vec<_>>()));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
+        // /new and /clear just leave a fresh draft; the rest answer in a toast.
+        let said = toasts.borrow().clone();
+        assert_eq!(said.len(), 5, "{said:?}");
+        assert!(said[0].ends_with("default model"), "{said:?}");
+        assert!(said[4].starts_with("Hand-holding is"), "{said:?}");
+        // Anything else starts a thread as usual.
+        let id = trek.send(cx, "/review the parser");
+        assert_eq!(trek.read(cx, |ws, _| ws.threads.iter().map(|t| t.id.clone()).collect::<Vec<_>>()), [id]);
+    });
+}

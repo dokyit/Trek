@@ -1140,7 +1140,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("trek-acp-recap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        trek_core::paths::isolate(dir.join("data"));
         let config = SessionConfig {
             agent: AgentId::Acp(FAKE.into()),
             cwd: dir.clone(),

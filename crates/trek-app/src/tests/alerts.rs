@@ -64,6 +64,12 @@ fn toasts(trek: &Trek, cx: &mut TestAppContext) -> usize {
     trek.window(cx, |window, cx| window.notifications(cx).len())
 }
 
+/// Let the toast's entrance (real time, 400 ms) finish.
+fn settled_in(trek: &Trek, cx: &mut TestAppContext) {
+    std::thread::sleep(std::time::Duration::from_millis(450));
+    trek.render(cx);
+}
+
 fn sounds() -> usize {
     SOUNDS.with(|n| n.get())
 }
@@ -96,7 +102,9 @@ fn alerts_follow_focus_and_what_is_on_screen() {
         finish(&trek, cx, &away, None);
         assert_eq!(said.borrow().last().map(String::as_str), Some("Finished: Fix the login bug"));
         assert_eq!((toasts(&trek, cx), banners(cx).len(), sounds()), (1, 0, 0));
-        // Clicking the toast opens that thread.
+        // Clicking the toast opens that thread (once it has slid into place: mid-slide, the
+        // press and the release land on different frames and make no click).
+        settled_in(&trek, cx);
         trek.click(cx, "notification");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(away.clone()));
 

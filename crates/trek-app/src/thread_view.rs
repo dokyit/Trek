@@ -710,7 +710,10 @@ impl ThreadView {
                 let tooltip = if off { tip("retry", "") } else { "Retry with another model".into() };
                 action(("retry-with", ix), Icon::new(IconName::ChevronDown), tooltip).disabled(off).dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, cx| {
                     menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Retry with");
-                    for m in ws.read(cx).models_for(&agent).into_iter().filter(|m| current.as_deref().is_none_or(|c| !crate::composer::same_model(c, &m.id))) {
+                    let models = ws.read(cx).models_for(&agent);
+                    // The model it ran with: the thread's, else the agent's default (as the composer shows it).
+                    let current = current.clone().or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()));
+                    for m in models.iter().filter(|m| current.as_deref().is_none_or(|c| !crate::composer::same_model(c, &m.id))).cloned() {
                         let (view, end) = (view.clone(), end.clone());
                         menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(move |_, _, cx| {
                             let (id, end) = (m.id.clone(), end.clone());

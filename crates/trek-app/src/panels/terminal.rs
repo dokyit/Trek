@@ -79,6 +79,12 @@ impl TerminalPanel {
             on_exit: None,
             _reader: None,
         };
+        // An isolated (test) process starts no shell: one would run the user's login profile,
+        // and the command (a project's tests, an agent's sign-in) for real.
+        if trek_core::paths::isolated() {
+            this.parser.process(format!("$ {}\r\n(no shell in tests)\r\n", command.unwrap_or_default()).as_bytes());
+            return this;
+        }
         if let Err(e) = this.spawn(cwd, command, cx) {
             this.parser.process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
         }

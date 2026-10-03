@@ -123,6 +123,24 @@ impl TrekWindow {
         if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
             workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
         }
+        // Once this window hears the workspace (it hears nothing until later; see `show_palette`):
+        // the composer, or the focus anchor on screens without one, takes the keys, as after
+        // a navigation. A window reopened from a thread window may also have a message to show
+        // (a fork's) or follow-ups to hand back.
+        cx.defer_in(window, |this, window, cx| {
+            let ws = this.workspace.clone();
+            match ws.read(cx).route.clone() {
+                Route::Thread(_) | Route::Draft { .. } => this.composer.update(cx, |c, cx| c.focus(window, cx)),
+                Route::Settings(_) | Route::Onboarding => this.focus.focus(window, cx),
+            }
+            let pending = ws.update(cx, |ws, _| ws.pending_compose.take());
+            if let Some((thread, text, images)) = pending.filter(|(t, ..)| ws.read(cx).thread_id_in(&Scope::Main) == Some(t.as_str())) {
+                this.composer.update(cx, |c, cx| c.compose(&thread, &text, &images, None, window, cx));
+            }
+            if let Some(id) = ws.read(cx).thread_id_in(&Scope::Main).map(str::to_string) {
+                ws.update(cx, |ws, cx| ws.hand_back_queued(&id, cx));
+            }
+        });
         let hidden_frames = crate::system::hidden_frames(window, cx);
         Self {
             workspace,

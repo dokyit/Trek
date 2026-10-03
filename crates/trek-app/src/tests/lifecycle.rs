@@ -505,3 +505,148 @@ fn answers_picked_on_the_question_card_are_in_the_transcript_and_the_markdown() 
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()), "Choose a database");
     });
 }
+
+/// Attention messages the workspace raises from now on.
+fn alerts(trek: &Trek, cx: &mut TestAppContext) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+    let sink = seen.clone();
+    cx.update(|cx| {
+        cx.subscribe(&trek.ws, move |_, event: &crate::workspace::WorkspaceEvent, _| {
+            if let crate::workspace::WorkspaceEvent::Attention { message, .. } = event {
+                sink.borrow_mut().push(message.clone());
+            }
+        })
+        .detach()
+    });
+    seen
+}
+
+#[test]
+fn an_error_that_ends_nothing_leaves_the_turn_running() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
+        let alerts = alerts(&trek, cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Looking at it".into())], cx));
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().queued.push(("then the tests".into(), vec![])));
+        // An image the agent couldn't read: said, and the turn goes on.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::Error("can't read image /x.png".into())], cx));
+        assert_eq!(trek.run_state(cx, &id), RunState::Working);
+        assert!(trek.read(cx, |ws, _| ws.turn_running(&id) && ws.work_in_flight()));
+        assert!(alerts.borrow().is_empty());
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "the follow-up still waits its turn");
+        let done = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }];
+        trek.update(cx, |ws, cx| ws.apply_events(&id, done, cx));
+        assert_eq!(*alerts.borrow(), [format!("Finished: {}", trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()))]);
+        assert!(matches!(trek.items(cx, &id).iter().find(|i| matches!(i, Item::Error { .. })), Some(Item::Error { text }) if text.contains("/x.png")));
+
+        // Its session then dies mid-turn: the error it gave is why, said once.
+        let quiet = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&quiet, vec![AgentEvent::TextDelta("Building".into())], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&quiet, vec![AgentEvent::Error("the agent session crashed".into()), AgentEvent::Exited], cx));
+        assert_eq!(trek.run_state(cx, &quiet), RunState::Failed);
+        let errors: Vec<Item> = trek.items(cx, &quiet).into_iter().filter(|i| matches!(i, Item::Error { .. })).collect();
+        assert_eq!(errors, [Item::Error { text: "the agent session crashed".into() }]);
+
+        // Turned down while idle (a model change, say): no failure to settle.
+        let idle = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&idle, vec![AgentEvent::Error("Claude Code rejected the change.".into())], cx));
+        assert_eq!(trek.run_state(cx, &idle), RunState::Idle);
+        assert!(!trek.read(cx, |ws, _| ws.thread(&idle).unwrap().needs_you()));
+    });
+}
+
+#[test]
+fn switching_agent_leaves_nothing_waiting_on_the_old_one() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let other = |ws: &crate::workspace::Workspace, id: &str| {
+            let mut p = ws.prefs_in(&crate::workspace::Scope::Thread(id.to_string()));
+            p.agent = trek_core::AgentId::Codex;
+            p.model = None;
+            p
+        };
+        // A plan offered after its turn (Codex's): the new agent has no card for it.
+        let planned = trek.quiet_thread(cx);
+        let plan = AgentEvent::PermissionRequest { request_id: "plan-1".into(), title: "Plan".into(), detail: String::new(), prompt: Some(trek_agents::Prompt::Plan("1. Do it".into())) };
+        trek.update(cx, |ws, cx| ws.apply_events(&planned, vec![AgentEvent::TextDelta("Here's the plan.".into())], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&planned, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }, plan], cx));
+        assert_eq!(trek.run_state(cx, &planned), RunState::NeedsYou);
+        trek.update(cx, |ws, cx| {
+            let p = other(ws, &planned);
+            ws.set_prefs_in(&crate::workspace::Scope::Thread(planned.clone()), p, cx)
+        });
+        assert_eq!(trek.run_state(cx, &planned), RunState::Idle);
+        assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 0, "no Dock badge for a card that's gone");
+
+        // Mid-turn: the turn stops there, rather than end as a crash when the old agent exits.
+        let busy = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&busy, vec![AgentEvent::TextDelta("Halfway".into())], cx));
+        trek.update(cx, |ws, cx| {
+            let p = other(ws, &busy);
+            ws.set_prefs_in(&crate::workspace::Scope::Thread(busy.clone()), p, cx)
+        });
+        trek.update(cx, |ws, cx| ws.apply_events(&busy, vec![AgentEvent::Exited], cx));
+        assert_eq!(trek.run_state(cx, &busy), RunState::Idle);
+        assert!(!trek.items(cx, &busy).iter().any(|i| matches!(i, Item::Error { .. })));
+        assert!(matches!(trek.items(cx, &busy).last(), Some(Item::Notice { text }) if text == "Interrupted"));
+    });
+}
+
+#[test]
+fn follow_ups_left_by_a_turn_that_failed_off_screen_come_back_with_the_thread() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Working on it".into())], cx));
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().queued.push(("stale follow-up".into(), vec![])));
+        // The turn fails while another thread is on screen: nowhere to hand them back yet.
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("boom".into()) }], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1);
+        assert!(trek.read(cx, |ws, _| ws.work_in_flight()), "a restart would lose it");
+        // Back on screen: in the composer, not sent after whatever comes next.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0);
+        assert_eq!(trek.composer_text(cx), "stale follow-up");
+    });
+}
+
+#[test]
+fn side_chats_raise_no_alerts_and_no_badge() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let alerts = alerts(&trek, cx);
+        let parent = trek.quiet_thread(cx);
+        let side = trek.update(cx, |ws, cx| ws.create_side_chat(cx)).expect("side chat");
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&side).and_then(|t| t.side_of.clone())), Some(parent));
+        trek.update(cx, |ws, cx| ws.apply_events(&side, vec![AgentEvent::TextDelta("An answer".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&side, vec![AgentEvent::TextDelta("More".into()), AgentEvent::TurnComplete { cost_usd: None, error: Some("boom".into()) }], cx));
+        assert_eq!(trek.run_state(cx, &side), RunState::Failed);
+        assert!(alerts.borrow().is_empty(), "{:?}", alerts.borrow());
+        assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 0);
+    });
+}
+
+#[test]
+fn the_last_turn_of_a_transcript_saved_without_turn_ends_gets_its_footer() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.update(cx, |ws, cx| {
+            let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            let user = |text: &str| Item::User { text: text.into(), images: vec![], at: None, resume: None, aside: false };
+            store_items(&ws.store, &t.id, vec![user("pong?"), Item::Assistant { text: "Pong.".into() }]);
+            ws.reload(cx);
+            t.id
+        });
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.render(cx);
+        assert!(matches!(trek.items(cx, &id).last(), Some(Item::TurnEnd { took_secs: 0, .. })));
+        assert!(trek.visible(cx, ("copy-turn", 2usize)));
+    });
+}

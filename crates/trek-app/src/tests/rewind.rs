@@ -224,8 +224,11 @@ fn retry_sends_the_message_again_with_the_model_asked_for() {
         // "Retry with…" another model of the same agent, from the chevron's menu.
         let end = last_end(&trek, cx, &id);
         let other = trek.read(cx, |ws, _| {
-            let current = ws.thread(&id).unwrap().model.clone().unwrap_or_default();
-            ws.models_for(&mock()).into_iter().find(|m| !crate::composer::same_model(&current, &m.id)).unwrap().id
+            // The thread has no model of its own: it runs the agent's default, which the menu
+            // leaves out (picking it would be a plain retry).
+            let models = ws.models_for(&mock());
+            let current = ws.thread(&id).unwrap().model.clone().or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone())).unwrap();
+            models.into_iter().find(|m| !crate::composer::same_model(&current, &m.id)).unwrap().id
         });
         trek.click(cx, ("retry-with", end));
         // The menu's first row is its label; the models follow.
@@ -583,6 +586,11 @@ fn imported_threads_rewind_and_fork_their_agents_session() {
         assert_eq!(t.reopen, Some(Reopen::Native { session: "claude-s1".into(), at: Some("msg-a".into()), fork: false }));
         assert_eq!((t.native_id.as_deref(), t.source), (Some("claude-s1"), ThreadSource::ClaudeCode));
         assert_eq!(said(&trek, cx, &id), ["one"]);
+        // "two" is back in the composer, which warms a session up for it: in tests that's never
+        // the real Claude Code, and the thread says so.
+        assert!(trek.composer_text(cx).ends_with("two"));
+        trek.wait(cx, "the warm-up to end", |ws| ws.live[&id].commands.is_none()).await;
+        assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::Error { text } if text == "Claude Code isn't started in tests.")), "{:?}", trek.items(cx, &id));
     });
 }
 
@@ -664,5 +672,28 @@ fn live_rewind_and_fork() {
         let (a, b) = trek.read(cx, |ws, _| (ws.thread(&id).unwrap().native_id.clone(), ws.thread(&fork).unwrap().native_id.clone()));
         assert!(a.is_some() && b.is_some() && a != b, "the fork has a session of its own");
         println!("live {}: ok (sessions {a:?}, fork {b:?})", agent.key());
+    });
+}
+
+#[test]
+fn undoing_a_restore_waits_for_the_running_turn() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let toasts = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let sink = toasts.clone();
+        cx.update(|cx| {
+            cx.subscribe(&trek.ws, move |_, event: &crate::workspace::WorkspaceEvent, _| {
+                if let crate::workspace::WorkspaceEvent::Toast { message, .. } = event {
+                    sink.borrow_mut().push(message.clone());
+                }
+            })
+            .detach()
+        });
+        // The resent turn has started when "Restored N files · Undo" is clicked.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::TextDelta("Editing the parser".into())], cx));
+        let undo = crate::workspace::UndoAction::Unrestore { thread: id.clone(), repo: trek.project.clone(), sha: "0".repeat(40) };
+        trek.update(cx, |ws, cx| ws.undo(undo, cx));
+        assert_eq!(*toasts.borrow(), ["Stop the running turn first."], "nothing was put back under the agent");
     });
 }

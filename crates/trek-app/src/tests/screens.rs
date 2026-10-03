@@ -88,10 +88,12 @@ fn first_run_onboarding_from_an_empty_data_folder() {
         let s = trek.read(cx, |ws, _| ws.settings.clone());
         assert!(s.onboarding.completed);
         assert_eq!(s.general.hand_holding, HandHolding::Supervised);
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(folder) });
-        // Saved, so the next launch doesn't onboard again.
-        let saved = std::fs::read_to_string(trek_core::paths::settings_file()).expect("settings saved");
-        assert!(saved.contains("completed = true"), "{saved}");
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(folder.clone()) });
+        // Saved (in this test's own folder), so the next launch doesn't onboard again.
+        let saved = Settings::load();
+        assert!(saved.onboarding.completed);
+        assert_eq!(saved.general.hand_holding, HandHolding::Supervised);
+        assert!(saved.user_projects.contains(&folder.display().to_string()), "{:?}", saved.user_projects);
     });
 }
 

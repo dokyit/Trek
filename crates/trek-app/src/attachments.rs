@@ -19,8 +19,9 @@ pub struct Outbox {
     pub paths: Vec<PathBuf>,
     /// Images still being saved or converted.
     pub saving: usize,
-    /// The user sent while some were still being saved: the send goes once they land.
-    held: bool,
+    /// The user sent while some were still being saved: the send goes once they land, if the
+    /// view still shows where it was sent (`Attaching::target`).
+    held: Option<String>,
 }
 
 impl Outbox {
@@ -33,17 +34,19 @@ impl Outbox {
         }
     }
 
-    /// Hold a send while images are still being saved (⌘V then Return straight away), so it
-    /// doesn't go out without them. Returns whether it was held.
-    pub fn hold_send(&mut self) -> bool {
-        self.held |= self.saving > 0;
-        self.held
+    /// Hold a send to `target` while images are still being saved (⌘V then Return straight
+    /// away), so it doesn't go out without them. Returns whether it was held.
+    pub fn hold_send(&mut self, target: String) -> bool {
+        if self.saving > 0 {
+            self.held = Some(target);
+        }
+        self.held.is_some()
     }
 
     /// `n` images finished saving: attach the ones that made it. Returns a message for the first
-    /// failure, and whether a held send can go now. A failure cancels the held send, so the user
-    /// can decide whether to send without that image.
-    fn landed(&mut self, n: usize, results: Vec<(String, Result<PathBuf>)>) -> (Option<String>, bool) {
+    /// failure, and where a held send that can go now was meant for. A failure cancels the held
+    /// send, so the user can decide whether to send without that image.
+    fn landed(&mut self, n: usize, results: Vec<(String, Result<PathBuf>)>) -> (Option<String>, Option<String>) {
         self.saving = self.saving.saturating_sub(n);
         let mut failed = None;
         for (label, result) in results {
@@ -55,12 +58,9 @@ impl Outbox {
             }
         }
         if failed.is_some() {
-            self.held = false;
+            self.held = None;
         }
-        let send = self.held && self.saving == 0;
-        if send {
-            self.held = false;
-        }
+        let send = if self.saving == 0 { self.held.take() } else { None };
         (failed, send)
     }
 }
@@ -68,6 +68,9 @@ impl Outbox {
 /// A view that sends images with its next message (the composer, the side chat).
 pub trait Attaching: Sized + 'static {
     fn outbox(&mut self) -> &mut Outbox;
+    /// Where a message sent now would go (a thread, or a new one in a project), to tell whether a
+    /// held send still goes where it was sent.
+    fn target(&self, cx: &App) -> String;
     /// Send the message that waited for its images to be saved.
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>);
 }
@@ -200,7 +203,9 @@ fn save<T: Attaching>(this: &mut T, jobs: Vec<Job>, window: &mut Window, cx: &mu
             if let Some(message) = failed {
                 crate::workspace::workspace_global(cx).update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
             }
-            if send {
+            // Sent elsewhere than the view now shows (the user moved on meanwhile): it stays in
+            // the composer rather than go somewhere it wasn't meant for.
+            if send.is_some_and(|target| target == this.target(cx)) {
                 this.send_held(window, cx);
             }
             cx.notify();
@@ -375,26 +380,27 @@ mod tests {
     fn a_send_waits_for_images_still_being_saved() {
         let mut outbox = Outbox::default();
         // Nothing being saved: the send goes now.
-        assert!(!outbox.hold_send());
+        assert!(!outbox.hold_send("thread:a".into()));
         outbox.saving = 2;
-        assert!(outbox.hold_send());
+        assert!(outbox.hold_send("thread:a".into()));
         // The first image lands; the second is still out, so the send keeps waiting.
-        assert_eq!(outbox.landed(1, vec![("the pasted image".into(), Ok(PathBuf::from("/s/a.png")))]), (None, false));
-        assert_eq!(outbox.landed(1, vec![("the pasted image".into(), Ok(PathBuf::from("/s/b.png")))]), (None, true));
+        assert_eq!(outbox.landed(1, vec![("the pasted image".into(), Ok(PathBuf::from("/s/a.png")))]), (None, None));
+        // Once all are in, it goes where it was sent.
+        assert_eq!(outbox.landed(1, vec![("the pasted image".into(), Ok(PathBuf::from("/s/b.png")))]), (None, Some("thread:a".into())));
         assert_eq!(outbox.paths, vec![PathBuf::from("/s/a.png"), PathBuf::from("/s/b.png")]);
         // Once sent, a later paste doesn't send by itself.
         outbox.saving = 1;
-        assert_eq!(outbox.landed(1, vec![("the pasted image".into(), Ok(PathBuf::from("/s/c.png")))]), (None, false));
+        assert_eq!(outbox.landed(1, vec![("the pasted image".into(), Ok(PathBuf::from("/s/c.png")))]), (None, None));
     }
 
     #[test]
     fn a_failed_image_cancels_the_waiting_send() {
         let mut outbox = Outbox { saving: 1, ..Default::default() };
-        assert!(outbox.hold_send());
+        assert!(outbox.hold_send("thread:a".into()));
         let (failed, send) = outbox.landed(1, vec![("IMG_1.HEIC".into(), Err(anyhow::anyhow!("it couldn't be converted to PNG")))]);
         assert_eq!(failed.as_deref(), Some("Couldn't attach IMG_1.HEIC: it couldn't be converted to PNG."));
-        assert!(!send && outbox.paths.is_empty() && outbox.saving == 0);
-        assert!(!outbox.hold_send());
+        assert!(send.is_none() && outbox.paths.is_empty() && outbox.saving == 0);
+        assert!(!outbox.hold_send("thread:a".into()));
     }
 
     #[test]

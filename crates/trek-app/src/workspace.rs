@@ -109,6 +109,8 @@ pub struct LiveThread {
     pub loading: bool,
     /// Its worktree is being made (or made again): messages wait for it, as while `loading`.
     pub preparing: bool,
+    /// Its worktree is being removed: messages wait, so no session starts in a folder that's going.
+    pub removing: bool,
     /// Index of the assistant item currently streaming.
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
@@ -116,7 +118,12 @@ pub struct LiveThread {
     /// Options picked so far on the question card: (request id, question index) → labels.
     pub picks: HashMap<(String, usize), Vec<String>>,
     pub commands: Option<async_channel::Sender<Command>>,
+    /// Counts the sessions attached so far. A session that was let finish after another took its
+    /// place (`end_session`) speaks for the thread no more: its events are dropped.
+    session_gen: u64,
     pub turn_started: Option<Instant>,
+    /// The running turn reported an error that didn't end it (an image the agent couldn't read).
+    turn_error: bool,
     pub plan: bool,
     pub fast: bool,
     /// Settings the agent reads only at launch changed mid-turn: the session restarts (and
@@ -623,6 +630,9 @@ pub struct Workspace {
     pub main_window: Option<AnyWindowHandle>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
+    /// A message for the main window's composer while that window is being reopened: a window
+    /// opened just now hears no events until later, so `TrekWindow::new` takes it from here.
+    pub(crate) pending_compose: Option<(String, String, Vec<PathBuf>)>,
     /// Offer Trek's scripted mock agent (`TREK_MOCK_AGENT=1`, and in tests).
     pub mock_agent: bool,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
@@ -649,33 +659,37 @@ impl Workspace {
                 (Store::in_memory().expect("in-memory store"), Some(format!("{e:#}")))
             }
         };
+        let alone = hold_data_folder();
         // Side chats an earlier run started from a draft can't be reopened: they go before any
         // opens. Their file checkpoints go in the background, with those of threads put away
-        // long ago, which only keep objects alive in the user's repos.
-        let orphans = store.drop_orphan_side_chats().unwrap_or_else(|e| {
-            tracing::warn!("drop orphaned side chats: {e:#}");
-            vec![]
-        });
-        let s = store.clone();
-        cx.background_executor()
-            .spawn(async move {
-                for (thread, checkpoints) in orphans {
-                    let mut repos: HashSet<PathBuf> = checkpoints.into_iter().map(|c| c.repo).collect();
-                    repos.extend(thread.cwd.filter(|c| in_repo(Some(c))));
-                    for repo in repos {
-                        if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread.id)) {
-                            tracing::warn!("drop checkpoints of {}: {e:#}", thread.id);
+        // long ago, which only keep objects alive in the user's repos. Not while another Trek
+        // has the data folder: its draft side chats are open right now.
+        if alone {
+            let orphans = store.drop_orphan_side_chats().unwrap_or_else(|e| {
+                tracing::warn!("drop orphaned side chats: {e:#}");
+                vec![]
+            });
+            let s = store.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    for (thread, checkpoints) in orphans {
+                        let mut repos: HashSet<PathBuf> = checkpoints.into_iter().map(|c| c.repo).collect();
+                        repos.extend(thread.cwd.filter(|c| in_repo(Some(c))));
+                        for repo in repos {
+                            if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread.id)) {
+                                tracing::warn!("drop checkpoints of {}: {e:#}", thread.id);
+                            }
                         }
                     }
-                }
-                if let Err(e) = trek_core::checkpoint::prune_stale(&s, now_ms()) {
-                    tracing::warn!("prune old checkpoints: {e:#}");
-                }
-            })
-            .detach();
+                    if let Err(e) = trek_core::checkpoint::prune_stale(&s, now_ms()) {
+                        tracing::warn!("prune old checkpoints: {e:#}");
+                    }
+                })
+                .detach();
+        }
         // TREK_ONBOARDING=1 replays onboarding without resetting anything (design review, support).
         let replay = std::env::var("TREK_ONBOARDING").is_ok_and(|v| v == "1");
-        let mut this = Self::with(store, settings, cx);
+        let mut this = Self::build(store, settings, alone, cx);
         this.store_error = store_error;
         if replay {
             this.route = Route::Onboarding;
@@ -705,21 +719,39 @@ impl Workspace {
         let keep = this.settings.snapshots.keep_days;
         cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
         // TREK_MOCK_PROMPT starts a mock thread at launch, for performance measurements and demos
-        // that can't touch the UI. Only with the mock agent on.
+        // that can't touch the UI. Only with the mock agent on, and in a scratch folder of its
+        // own: in one of the user's repos its turns would leave checkpoint refs behind.
         if let Some(prompt) = std::env::var("TREK_MOCK_PROMPT").ok().filter(|_| this.mock_agent) {
-            this.draft_prefs.agent = AgentId::Direct(catalog::MOCK_PROVIDER.into());
-            this.draft_prefs.model = None;
-            this.send(prompt, vec![], cx);
+            let scratch = trek_core::paths::data_dir().join("mock-project");
+            match std::fs::create_dir_all(&scratch).map_err(anyhow::Error::from).and_then(|_| this.store.ensure_project(&scratch)) {
+                Ok(p) => {
+                    this.reload(cx);
+                    this.route = Route::Draft { project: Some(p.path) };
+                    this.draft_prefs.agent = AgentId::Direct(catalog::MOCK_PROVIDER.into());
+                    this.draft_prefs.model = None;
+                    this.draft_prefs.worktree = false;
+                    this.send(prompt, vec![], cx);
+                }
+                Err(e) => tracing::warn!("mock prompt: {e:#}"),
+            }
         }
         this
     }
 
     /// The model over `store` and `settings` alone: no agent detection, import, update check or
     /// housekeeping is started (`new` adds those). Tests build on this.
+    #[cfg(test)]
     pub fn with(store: Store, settings: Settings, cx: &mut Context<Self>) -> Self {
+        Self::build(store, settings, true, cx)
+    }
+
+    /// `with`, where `alone`: no other Trek is using the data folder (`hold_data_folder`).
+    fn build(store: Store, settings: Settings, alone: bool, cx: &mut Context<Self>) -> Self {
         // No session runs yet: turns an earlier run left open (it quit or crashed mid-turn, or
         // with a card up) are over, and saying otherwise would leave them "Working" for good.
-        match store.close_interrupted_turns() {
+        // Unless another Trek has the data folder: those turns may well be its own, running.
+        let closed = if alone { store.close_interrupted_turns() } else { Ok(vec![]) };
+        match closed {
             Ok(closed) if !closed.is_empty() => tracing::info!("turns an earlier run left open, now closed: {}", closed.len()),
             Ok(_) => {}
             Err(e) => tracing::warn!("close interrupted turns: {e}"),
@@ -773,6 +805,7 @@ impl Workspace {
             overlay_open: false,
             main_window: None,
             thread_windows: HashMap::new(),
+            pending_compose: None,
             mock_agent: trek_agents::mock::enabled(),
             applied_defaults,
             tasks: vec![],
@@ -894,6 +927,7 @@ impl Workspace {
             let cwd = t.cwd.clone().unwrap_or_else(trek_core::paths::home);
             self.fetch_claude_commands(cwd, cx);
         }
+        self.hand_back_queued(id, cx);
         cx.notify();
     }
 
@@ -902,7 +936,7 @@ impl Workspace {
     fn fetch_claude_commands(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         let key = (AgentId::ClaudeCode.key(), cwd);
         let ready = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
-        if !ready || self.settings.disabled_agents.contains(&key.0) || self.agent_commands.contains_key(&key) {
+        if !ready || trek_core::paths::isolated() || self.settings.disabled_agents.contains(&key.0) || self.agent_commands.contains_key(&key) {
             return;
         }
         let (tx, rx) = async_channel::bounded(1);
@@ -917,7 +951,7 @@ impl Workspace {
                 cx.notify();
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     pub fn thread_window_closed(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
@@ -943,6 +977,13 @@ impl Workspace {
     pub fn show_in_main(&mut self, route: Route, cx: &mut Context<Self>) {
         self.navigate(route, cx);
         cx.emit(WorkspaceEvent::ActivateMain);
+    }
+
+    /// Keep `task` running for as long as the workspace lives; finished ones are let go here, so
+    /// the list doesn't grow with every navigation and turn.
+    fn keep(&mut self, task: Task<()>) {
+        self.tasks.retain(|t| !t.is_ready());
+        self.tasks.push(task);
     }
 
     fn mutate_thread(&mut self, id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut Thread)) {
@@ -1071,26 +1112,15 @@ impl Workspace {
     }
 
     /// Threads waiting on the user (approval or failure), as the inbox shows them: a settled
-    /// thread that asks again is back in the inbox, so it counts too. Archived ones don't.
+    /// thread that asks again is back in the inbox, so it counts too. Archived ones don't, nor do
+    /// side chats: the inbox doesn't list them, so nothing there could settle them.
     pub fn needs_you_count(&self) -> usize {
-        self.threads.iter().filter(|t| t.needs_you() && t.archived_at.is_none()).count()
+        self.threads.iter().filter(|t| t.needs_you() && t.archived_at.is_none() && t.side_of.is_none()).count()
     }
 
     /// Follow-ups waiting for the running turn of `id` to finish (`FollowUp::Queue`).
     pub fn queued(&self, id: &str) -> usize {
         self.live.get(id).map_or(0, |l| l.queued.len())
-    }
-
-    /// Drop the follow-ups queued on `id` without sending them.
-    #[allow(dead_code)] // for the settings / composer UI
-    pub fn clear_queued(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(live) = self.live.get_mut(id) {
-            if !live.queued.is_empty() {
-                live.queued.clear();
-                live.revision += 1;
-                cx.notify();
-            }
-        }
     }
 
     /// A thread is working with a live agent turn in this process. Threads left marked Working by
@@ -1102,12 +1132,21 @@ impl Workspace {
     }
 
     /// Quitting now would cut agent work short: a turn under way, whether it's working or paused
-    /// on an approval, a question or a plan; sub-agents still out; or a plan offered after its
-    /// turn, waiting for an answer (it lives only in memory). Updates wait until there's none.
+    /// on an approval, a question or a plan; sub-agents still out; a plan offered after its turn,
+    /// waiting for an answer; or messages that haven't reached an agent yet (waiting for a
+    /// worktree, for history to load or for git work, or queued behind a turn). All of those live
+    /// only in memory. Updates wait until there's none.
     pub fn work_in_flight(&self) -> bool {
-        self.live
-            .values()
-            .any(|l| (l.commands.is_some() && (l.turn_started.is_some() || l.background > 0)) || l.permissions.iter().any(|p| p.after_turn))
+        self.live.values().any(|l| {
+            (l.commands.is_some() && (l.turn_started.is_some() || l.background > 0))
+                || l.permissions.iter().any(|p| p.after_turn)
+                || l.preparing
+                || l.loading
+                || l.removing
+                || l.git_busy
+                || !l.queued.is_empty()
+                || !l.held.is_empty()
+        })
     }
 
     // ---------- navigation ----------
@@ -1137,7 +1176,7 @@ impl Workspace {
                 }
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// `git switch <branch>` in `cwd`.
@@ -1160,7 +1199,7 @@ impl Workspace {
                 this.refresh_git_at(cwd, cx);
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
@@ -1177,6 +1216,9 @@ impl Workspace {
         self.route = route;
         self.refresh_git(cx);
         cx.emit(WorkspaceEvent::FocusComposer);
+        if let Route::Thread(id) = self.route.clone() {
+            self.hand_back_queued(&id, cx);
+        }
         cx.notify();
     }
 
@@ -1274,7 +1316,7 @@ impl Workspace {
                 }
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     // ---------- projects: preferences ----------
@@ -1424,6 +1466,11 @@ impl Workspace {
         let rows = self.store.items_with_ids(id).unwrap_or_default();
         if !rows.is_empty() {
             live.items = Transcript::stored(rows);
+            // Turns saved before Trek marked their ends have none: the last one gets its end
+            // (and with it the footer that copies, undoes, retries and forks it).
+            if matches!(live.items.last(), Some(Item::Assistant { .. })) {
+                live.items.push(Item::TurnEnd { at: thread.as_ref().map_or_else(now_ms, |t| t.updated_at), took_secs: 0 });
+            }
             live.loaded = true;
             live.revision += 1;
             return;
@@ -1478,7 +1525,7 @@ impl Workspace {
                 }
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     // ---------- composer prefs ----------
@@ -1521,15 +1568,25 @@ impl Workspace {
                     }
                 });
                 let live = self.live.entry(id.clone()).or_default();
+                let switched = before.as_ref().is_some_and(|b| b.agent != prefs.agent);
                 // Another agent means another login and a fresh session: what the old one cost
                 // and how it was billed say nothing about the new one, and the old agent's
-                // questions and plans go with it.
-                if before.as_ref().is_some_and(|b| b.agent != prefs.agent) {
+                // questions and plans go with it, as does a turn it was running.
+                let mut cut = false;
+                if switched {
                     live.billing = None;
                     live.cost_usd = 0.0;
                     live.cost_total = 0.0;
                     live.permissions.clear();
                     live.picks.clear();
+                    if live.turn_started.take().is_some() || live.background > 0 {
+                        live.close_turn(false);
+                        live.streaming = None;
+                        live.reasoning = None;
+                        live.items.push(Item::Notice { text: "Interrupted".into() });
+                        live.revision += 1;
+                        cut = true;
+                    }
                 }
                 let fast_changed = live.fast != prefs.fast;
                 let plan_changed = live.plan != prefs.plan;
@@ -1544,6 +1601,8 @@ impl Workspace {
                     if before.agent != prefs.agent || relaunch {
                         let _ = tx.try_send(Command::Shutdown);
                         live.commands = None;
+                        // What it says from here on (its exit above all) isn't the thread's news.
+                        live._events = None;
                     } else {
                         if before.hand_holding != prefs.hand_holding {
                             let _ = tx.try_send(Command::SetHandHolding(prefs.hand_holding));
@@ -1554,6 +1613,18 @@ impl Workspace {
                             }
                         }
                     }
+                }
+                // Nothing is left running or waiting on the user (a plan offered after its turn
+                // went with the old agent), unless its worktree is still being made.
+                if switched && !self.live.get(&id).is_some_and(|l| l.preparing) {
+                    if cut {
+                        self.persist_items(&id, cx);
+                    }
+                    self.mutate_thread(&id, cx, |t| {
+                        if matches!(t.run_state, RunState::Working | RunState::NeedsYou) {
+                            t.run_state = RunState::Idle;
+                        }
+                    });
                 }
                 self.approve_covered_prompts(&id, prefs.hand_holding, cx);
             }
@@ -1644,7 +1715,7 @@ impl Workspace {
                 }
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// Start a side chat next to `parent` (or the current draft's project). Hidden from the sidebar.
@@ -1706,12 +1777,12 @@ impl Workspace {
         if text.is_empty() && images.is_empty() {
             return;
         }
+        // Trek's own commands are answered in a draft too, without starting a thread for them.
         if matches!(self.route, Route::Draft { .. }) {
-            let mut words = text.split_whitespace();
-            if matches!(words.next(), Some("/permissions" | "/access" | "/mode")) {
-                let arg = words.next().map(str::to_string);
-                let reply = self.permissions_command(None, arg.as_deref(), cx);
-                cx.emit(WorkspaceEvent::Toast { message: reply.replace("**", "").replace('`', ""), undo: None });
+            if let Some(reply) = self.run_builtin_command(None, &text, cx) {
+                if !reply.is_empty() {
+                    cx.emit(WorkspaceEvent::Toast { message: reply.replace("**", "").replace('`', ""), undo: None });
+                }
                 return;
             }
         }
@@ -1809,7 +1880,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if let Some(reply) = self.run_builtin_command(&id, &text, cx) {
+        if let Some(reply) = self.run_builtin_command(Some(&id), &text, cx) {
             if reply.is_empty() {
                 return;
             }
@@ -1870,6 +1941,7 @@ impl Workspace {
         // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
         if !running {
             live.turn_started = Some(Instant::now());
+            live.turn_error = false;
             live.tasks.clear();
             // A new turn starts from a checkpoint of the files, taken before the agent has the
             // message (it's held until then): a rewind can put them back.
@@ -1891,10 +1963,10 @@ impl Workspace {
         self.persist_items(&id, cx);
     }
 
-    /// Messages to `id` wait: its history is still being read, or its worktree is being made or
-    /// has gone missing.
+    /// Messages to `id` wait: its history is still being read, or its worktree is being made,
+    /// removed or has gone missing.
     fn holds_messages(&self, id: &str) -> bool {
-        self.live.get(id).is_some_and(|l| l.loading || l.preparing) || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
+        self.live.get(id).is_some_and(|l| l.loading || l.preparing || l.removing) || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
     }
 
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
@@ -1916,7 +1988,7 @@ impl Workspace {
 
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
-        if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing) {
+        if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing || l.removing) {
             return;
         }
         // No folder to run in until the worktree is back (or the thread moves to the project's).
@@ -1934,7 +2006,7 @@ impl Workspace {
             None if thread.native_id.is_none() => (None, None, false, recap()),
             None => (thread.native_id.clone(), None, false, None),
         };
-        let handle = trek_agents::start(SessionConfig {
+        let handle = start_session(SessionConfig {
             agent: thread.agent.clone(),
             cwd: thread.cwd.clone().unwrap_or_else(trek_core::paths::home),
             model: thread.model.clone(),
@@ -1959,6 +2031,8 @@ impl Workspace {
         live.last_active = Some(cx.background_executor().now());
         // A new process says how it's billed again (the login may have changed since).
         live.billing = None;
+        live.session_gen += 1;
+        let session = live.session_gen;
         let events = handle.events;
         let id = id.to_string();
         live._events = Some(cx.spawn(async move |this, cx| {
@@ -1968,7 +2042,14 @@ impl Workspace {
                 while let Ok(more) = events.try_recv() {
                     batch.push(more);
                 }
-                if this.update(cx, |this, cx| this.apply_events(&id, batch, cx)).is_err() {
+                let applied = this.update(cx, |this, cx| {
+                    // Another session has taken this one's place (it was let finish, see
+                    // `end_session`): its last words, its exit above all, aren't the thread's.
+                    if this.live.get(&id).is_some_and(|l| l.session_gen == session) {
+                        this.apply_events(&id, batch, cx);
+                    }
+                });
+                if applied.is_err() {
                     break;
                 }
                 // Cap UI updates at ~60 Hz while streaming.
@@ -1998,7 +2079,7 @@ impl Workspace {
                     return;
                 }
                 let p = self.draft_prefs.clone();
-                let handle = trek_agents::start(SessionConfig {
+                let handle = start_session(SessionConfig {
                     agent: p.agent.clone(),
                     cwd,
                     model: p.model.clone(),
@@ -2229,6 +2310,7 @@ impl Workspace {
                             continue;
                         }
                         let took = live.turn_started.take().map(|t| t.elapsed().as_secs() as u32).unwrap_or(0);
+                        live.turn_error = false;
                         live.close_turn(error.is_none());
                         if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
                             live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
@@ -2251,15 +2333,14 @@ impl Workspace {
                         finished = true;
                     }
                     AgentEvent::Mark(_) => {}
+                    // Shown, and that's all: agents report trouble that ends nothing this way too
+                    // (an image they couldn't read, a model change they turned down). A turn that
+                    // fails says so as it completes, or its session ends (`Exited`).
                     AgentEvent::Error(e) => {
-                        live.close_turn(false);
                         live.streaming = None;
                         live.reasoning = None;
                         live.items.push(Item::Error { text: e });
-                        live.turn_started = None;
-                        run_state = Some(RunState::Failed);
-                        finished = true;
-                        continue_queue = false;
+                        live.turn_error |= live.turn_started.is_some();
                     }
                     AgentEvent::Exited => {
                         continue_queue = false;
@@ -2267,13 +2348,16 @@ impl Workspace {
                         // Nobody is left to answer what the agent was asking.
                         live.permissions.retain(|p| p.after_turn);
                         live.picks.retain(|(rid, _), _| live.permissions.iter().any(|p| p.request_id == *rid));
-                        // The process ended mid-turn without saying why: the turn failed, and
-                        // ends here like any other (saved, queued follow-ups handed back, an alert).
+                        // The process ended mid-turn: the turn failed, and ends here like any other
+                        // (saved, queued follow-ups handed back, an alert). Unless the error it
+                        // reported says why, that it stopped is all there is to say.
                         if live.turn_started.take().is_some() {
                             live.close_turn(false);
                             live.streaming = None;
                             live.reasoning = None;
-                            live.items.push(Item::Error { text: "The agent stopped unexpectedly.".into() });
+                            if !std::mem::take(&mut live.turn_error) {
+                                live.items.push(Item::Error { text: "The agent stopped unexpectedly.".into() });
+                            }
                             run_state.get_or_insert(RunState::Failed);
                             finished = true;
                         }
@@ -2381,7 +2465,10 @@ impl Workspace {
                 self.maybe_restart_for_update(cx);
             }
         }
-        if let Some(message) = notify_text {
+        // A side chat answers in the panel it was asked in, beside its thread; the inbox doesn't
+        // list it, so an alert would lead nowhere.
+        let side_chat = self.thread(id).is_some_and(|t| t.side_of.is_some());
+        if let Some(message) = notify_text.filter(|_| !side_chat) {
             cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string() });
         }
         if transcript_only {
@@ -2402,6 +2489,16 @@ impl Workspace {
         let text = queued.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let images = queued.into_iter().flat_map(|(_, images)| images).collect();
         cx.emit(WorkspaceEvent::RestoreQueued { thread: id.to_string(), text, images });
+    }
+
+    /// Follow-ups held for a turn that stopped or failed while `id` was off screen go back to the
+    /// composer now that it's on screen. Left queued, they'd go out after some later turn, long
+    /// after the turn they were written for.
+    pub(crate) fn hand_back_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+        let stale = self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none() && l.background == 0);
+        if stale && !self.holds_messages(id) && self.on_screen(id) {
+            self.restore_queued(id, cx);
+        }
     }
 
     /// Save `id`'s transcript a second from now, unless a save is on its way already.
@@ -2823,7 +2920,7 @@ impl Workspace {
                 }
                 let _ = this.update(cx, |this, cx| this.fork_thread(&id, at, &scope, cx));
             });
-            self.tasks.push(task);
+            self.keep(task);
             return None;
         }
         let thread = self.thread(id)?.clone();
@@ -2901,7 +2998,12 @@ impl Workspace {
             Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
         }
         if let Some((text, images)) = message {
-            cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Main, thread: fork_id.clone(), text, images, edit: None });
+            // A main window reopened for the fork can't hear it yet: it takes the message itself.
+            if self.main_window.is_some() {
+                cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Main, thread: fork_id.clone(), text, images, edit: None });
+            } else {
+                self.pending_compose = Some((fork_id.clone(), text, images));
+            }
         }
         self.run_git(&fork_id, cx);
         Some(fork_id)
@@ -2959,8 +3061,38 @@ impl Workspace {
         self.mutate_thread(id, cx, |t| t.last_seen_at = t.updated_at - 1);
     }
 
+    /// Out of every list until it's unarchived. Its agent stops: nothing could answer it once
+    /// the thread is out of sight, and nothing would save what it does. A turn under way ends
+    /// here, saved as it stands.
     pub fn archive(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.mutate_thread(id, cx, |t| t.archived_at = Some(now_ms()));
+        let mut cut = false;
+        if let Some(live) = self.live.get_mut(id) {
+            if let Some(tx) = live.commands.take() {
+                let _ = tx.try_send(Command::Shutdown);
+            }
+            live._events = None;
+            live.held.clear();
+            live.queued.clear();
+            live.permissions.clear();
+            live.picks.clear();
+            if live.turn_started.take().is_some() || live.background > 0 {
+                live.close_turn(false);
+                live.streaming = None;
+                live.reasoning = None;
+                live.items.push(Item::Notice { text: "Interrupted".into() });
+                cut = true;
+            }
+            live.revision += 1;
+        }
+        if cut {
+            self.persist_items(id, cx);
+        }
+        self.mutate_thread(id, cx, |t| {
+            t.archived_at = Some(now_ms());
+            if matches!(t.run_state, RunState::Working | RunState::NeedsYou) {
+                t.run_state = RunState::Idle;
+            }
+        });
         if self.route == Route::Thread(id.into()) {
             self.new_thread(cx);
         }
@@ -3128,7 +3260,7 @@ impl Workspace {
                 Err(e) => tracing::warn!("auto title: {e}"),
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// After a new Trek thread's first answer, replace the truncated first message with a real title.
@@ -3157,6 +3289,10 @@ impl Workspace {
             UndoAction::Unarchive(id) => {
                 let _ = self.store.update_thread(&id, |t| t.archived_at = None);
                 self.reload(cx);
+            }
+            // Not under a running turn: the agent's edits since would be lost under it.
+            UndoAction::Unrestore { thread, .. } if self.turn_running(&thread) => {
+                cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn first.".into(), undo: None });
             }
             // Not for a thread deleted since: its refs are gone.
             UndoAction::Unrestore { thread, repo, sha } if self.thread(&thread).is_some() => {
@@ -3194,7 +3330,7 @@ impl Workspace {
                 break;
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// Settle threads left alone for the configured days and ones whose branch merged. Snoozes
@@ -3315,7 +3451,7 @@ impl Workspace {
                 }
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     pub fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -3372,13 +3508,15 @@ impl Workspace {
                 Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Clone failed: {e}"), undo: None }),
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     // ---------- discovery ----------
 
+    /// Look for installed agents, then ask the ones found about their models, logins and usage.
+    /// Not in an isolated (test) process: that would run the user's own CLIs.
     pub fn detect_agents(&mut self, cx: &mut Context<Self>) {
-        if self.detecting {
+        if self.detecting || trek_core::paths::isolated() {
             return;
         }
         self.detecting = true;
@@ -3409,13 +3547,13 @@ impl Workspace {
                 });
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
     /// no prompt is sent. Throttled to once every 30 seconds.
     pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
-        if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 {
+        if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 || trek_core::paths::isolated() {
             return;
         }
         let ready = |id: AgentId| self.agents.iter().any(|a| a.agent == id && a.availability == Availability::Ready) && !self.settings.disabled_agents.contains(&id.key());
@@ -3459,7 +3597,7 @@ impl Workspace {
                 cx.notify();
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
         cx.notify();
     }
 
@@ -3477,7 +3615,11 @@ impl Workspace {
     }
 
     fn probe_acp(&mut self, only: Option<&str>, cx: &mut Context<Self>) {
-        // Probing starts the agent and opens a session in its history: not for agents the user turned off.
+        // Probing starts the agent and opens a session in its history: not for agents the user
+        // turned off, nor from an isolated (test) process.
+        if trek_core::paths::isolated() {
+            return;
+        }
         let ids: Vec<String> = self
             .agents
             .iter()
@@ -3500,7 +3642,7 @@ impl Workspace {
                     });
                 }
             });
-            self.tasks.push(task);
+            self.keep(task);
         }
     }
 
@@ -3600,44 +3742,61 @@ impl Workspace {
         }
     }
 
-    fn run_builtin_command(&mut self, id: &str, text: &str, cx: &mut Context<Self>) -> Option<String> {
+    /// Answer one of Trek's own commands (`BUILTIN_COMMANDS`, `/clear`) in thread `id`, or in the
+    /// draft (`None`). `None` when `text` isn't one Trek answers there: it goes to the agent.
+    fn run_builtin_command(&mut self, id: Option<&str>, text: &str, cx: &mut Context<Self>) -> Option<String> {
         let cmd = text.strip_prefix('/')?.split_whitespace().next()?;
-        let agent = self.thread(id).map(|t| t.agent.clone())?;
+        let thread = match id {
+            Some(id) => Some(self.thread(id)?.clone()),
+            None => None,
+        };
+        let draft_project = match &self.route {
+            Route::Draft { project } => project.clone(),
+            _ => None,
+        };
+        let (agent, model) = match &thread {
+            Some(t) => (t.agent.clone(), t.model.clone()),
+            None => (self.draft_prefs.agent.clone(), self.draft_prefs.model.clone()),
+        };
+        let live = id.and_then(|id| self.live.get(id));
         match cmd {
             "permissions" | "access" | "mode" => {
                 let arg = text.split_whitespace().nth(1).map(str::to_string);
-                Some(self.permissions_command(Some(id), arg.as_deref(), cx))
+                Some(self.permissions_command(id, arg.as_deref(), cx))
             }
             "clear" | "new" => {
-                let project = self.thread(id).and_then(|t| t.cwd.clone());
+                let project = match &thread {
+                    Some(t) => self.draft_folder(t),
+                    None => draft_project,
+                };
                 self.navigate(Route::Draft { project }, cx);
                 Some(String::new())
             }
             "usage" => {
                 self.status_fetched_at = 0;
                 self.refresh_usage(cx);
-                let st = self.agent_status.get(&agent.key())?;
+                let Some(st) = self.agent_status.get(&agent.key()) else {
+                    // In a thread the agent may answer it itself; a draft has no agent to ask.
+                    return thread.is_none().then(|| format!("{} hasn't reported its usage yet.", agent.display_name()));
+                };
                 let mut lines = vec![format!("**{}** · {}", agent.display_name(), st.plan.clone().unwrap_or_else(|| "no plan reported".into()))];
                 for l in &st.limits {
                     lines.push(format!("- {}: {:.0}% used{}", l.label, l.percent, l.resets_at.map(|r| format!(", resets {}", crate::time::until(r))).unwrap_or_default()));
                 }
                 Some(lines.join("\n"))
             }
-            "context" => {
-                let (used, window) = self.live.get(id).and_then(|l| l.context)?;
-                Some(format!("{} of {} tokens in context ({:.0}%).", fmt_tokens(used), fmt_tokens(window), used as f64 / window.max(1) as f64 * 100.))
-            }
+            "context" => match live.and_then(|l| l.context) {
+                Some((used, window)) => Some(format!("{} of {} tokens in context ({:.0}%).", fmt_tokens(used), fmt_tokens(window), used as f64 / window.max(1) as f64 * 100.)),
+                None => thread.is_none().then(|| "Nothing is in context yet: this thread hasn't started.".to_string()),
+            },
+            "cost" if thread.is_none() => Some("Nothing is spent yet: this thread hasn't started.".into()),
             "cost" => {
-                let live = self.live.get(id);
                 let cost = live.map(|l| l.cost_usd).unwrap_or(0.0);
                 // Claude Code reports cost on every turn; ACP agents (OpenCode) only for priced models.
                 let reports_cost = agent == AgentId::ClaudeCode || cost > 0.0;
                 Some(cost_reply(reports_cost, live.and_then(|l| l.billing.as_ref()), cost))
             }
-            "model" => {
-                let t = self.thread(id)?;
-                Some(format!("{} · {}", agent.display_name(), t.model.clone().unwrap_or_else(|| "default model".into())))
-            }
+            "model" => Some(format!("{} · {}", agent.display_name(), model.unwrap_or_else(|| "default model".into()))),
             _ => None,
         }
     }
@@ -3661,6 +3820,9 @@ impl Workspace {
     }
 
     fn fetch_codex_models(&mut self, cx: &mut Context<Self>) {
+        if trek_core::paths::isolated() {
+            return;
+        }
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
             let _ = tx.send(trek_agents::codex_models().await.unwrap_or_default()).await;
@@ -3673,7 +3835,7 @@ impl Workspace {
                 });
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     pub fn import_threads(&mut self, cx: &mut Context<Self>) {
@@ -3699,7 +3861,7 @@ impl Workspace {
                 this.index_for_search(cx);
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     pub fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
@@ -3754,7 +3916,7 @@ impl Workspace {
                 cx.notify();
             });
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// Re-check about once a day while Trek stays open (housekeeping calls this every minute).
@@ -3808,8 +3970,8 @@ impl Workspace {
                 cx.notify();
             });
         });
-        self.tasks.push(progress_task);
-        self.tasks.push(task);
+        self.keep(progress_task);
+        self.keep(task);
     }
 
     /// Forget the update in flight or waiting (the channel changed): its download stops, late
@@ -3999,6 +4161,57 @@ fn index_step(store: &Store) -> bool {
         }
     }
     !batch.is_empty()
+}
+
+/// Start an agent session. In an isolated (test) process only the mock agent runs: any other
+/// would be one of the user's own CLIs, signed in to their account, writing to their history.
+/// Live tests ask for a real one (`TREK_LIVE_AGENT`).
+fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
+    let mock = matches!(&config.agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
+    if mock || !trek_core::paths::isolated() || std::env::var_os("TREK_LIVE_AGENT").is_some() {
+        return trek_agents::start(config);
+    }
+    let (commands, _) = async_channel::unbounded();
+    let (tx, events) = async_channel::unbounded();
+    let _ = tx.try_send(AgentEvent::Error(format!("{} isn't started in tests.", config.agent.display_name())));
+    let _ = tx.try_send(AgentEvent::Exited);
+    trek_agents::SessionHandle { commands, events }
+}
+
+/// Lock `dir` for this process (an advisory `flock` on a file in it, released when the process
+/// ends): `Ok(Some(lock))` to keep while the folder is ours, `Ok(None)` when another process
+/// holds it.
+fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd as _;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
+    // SAFETY: flock on a descriptor this function owns.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    match std::io::Error::last_os_error() {
+        e if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        e => Err(e),
+    }
+}
+
+/// Take the data folder for this process, for as long as it runs. False when another Trek has
+/// it (a dev build sharing the folder, say): what that one has open isn't this one's to close.
+fn hold_data_folder() -> bool {
+    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    match lock_folder(&trek_core::paths::data_dir()) {
+        Ok(Some(lock)) => {
+            let _ = LOCK.set(lock);
+            true
+        }
+        Ok(None) => {
+            tracing::warn!("another Trek is using {}; turns it left open are left to it", trek_core::paths::data_dir().display());
+            false
+        }
+        Err(e) => {
+            tracing::warn!("lock the data folder: {e}");
+            true
+        }
+    }
 }
 
 /// The settings that seed a new thread's composer.
@@ -4375,6 +4588,25 @@ mod tests {
         assert_eq!(repo.items(&t.id).unwrap(), ["m2", "m3"]);
         prune_checkpoints(&s, &t.id, 2).unwrap();
         assert_eq!(repo.items(&t.id).unwrap().len(), 2, "nothing past the limit: nothing goes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn one_process_at_a_time_holds_a_data_folder() {
+        let dir = std::env::temp_dir().join(format!("trek-lock-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = lock_folder(&dir).unwrap().expect("free");
+        // Another holder (flock locks are per open file, so this stands in for a second Trek).
+        assert!(lock_folder(&dir).unwrap().is_none());
+        drop(first);
+        // A child another test forks shares the lock's descriptor until it execs: wait that out.
+        let again = (0..100).any(|_| {
+            lock_folder(&dir).unwrap().is_some() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(again, "free again once the first is gone");
         let _ = std::fs::remove_dir_all(dir);
     }
 

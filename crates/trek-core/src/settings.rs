@@ -444,11 +444,17 @@ impl Settings {
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
+        // A temp file of each save's own: two saves at once (two Treks, or tests side by side)
+        // mustn't rename each other's half-written file into place.
+        static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = crate::paths::settings_file();
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
-        std::fs::rename(tmp, path)?;
-        Ok(())
+        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("toml.{}-{n}.tmp", std::process::id()));
+        let saved = std::fs::write(&tmp, toml::to_string_pretty(self)?).and_then(|_| std::fs::rename(&tmp, path));
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        Ok(saved?)
     }
 }
 

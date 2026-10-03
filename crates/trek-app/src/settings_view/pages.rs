@@ -391,7 +391,8 @@ impl SettingsView {
                     Self::row(
                         "Only when Trek is in the background",
                         "While you're in Trek, other threads show a note in the window instead of a banner or sound.",
-                        self.switch("notify-unfocused", n.only_when_unfocused, |s, v| s.notifications.only_when_unfocused = v),
+                        // With alerts off there's no banner or sound for it to hold back.
+                        self.switch("notify-unfocused", n.only_when_unfocused, |s, v| s.notifications.only_when_unfocused = v).disabled(n.mode == NotifyMode::Off),
                         cx,
                     ),
                 ],

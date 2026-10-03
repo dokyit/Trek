@@ -104,3 +104,82 @@ fn slash_commands_follow_the_folder_of_the_thread_shown() {
         assert_eq!(trek.read(cx, |ws, _| ws.slash_commands(&Scope::Thread(id.clone()), &mock()).first().map(|c| c.name.clone())), Some("new".into()));
     });
 }
+
+/// The `TrekWindow` in `window`.
+fn trek_window(cx: &mut TestAppContext, window: AnyWindowHandle) -> gpui_kit::Entity<crate::root::TrekWindow> {
+    cx.update_window(window, |root, _, cx| {
+        let view = root.downcast::<gpui_kit::component::Root>().expect("root").read(cx).view().clone();
+        view.downcast::<crate::root::TrekWindow>().expect("a Trek window")
+    })
+    .expect("window")
+}
+
+#[test]
+fn a_reopened_main_window_takes_the_keys() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        close_main(&trek, cx);
+        // From the Dock: no navigation comes with it.
+        cx.update(|cx| crate::root::show_main(trek.ws.clone(), cx));
+        cx.run_until_parked();
+        let main = main_window(&trek, cx);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(id));
+        cx.update_window(main, |_, window, cx| gpui_kit::test::TestWindowExt::input(window, "hello", cx)).expect("window");
+        cx.run_until_parked();
+        let view = trek_window(cx, main);
+        assert_eq!(cx.read(|cx| view.read(cx).composer.read(cx).text(cx)), "hello");
+        // Its shortcuts work as well.
+        cx.update_window(main, |_, window, cx| gpui_kit::test::TestWindowExt::press(window, "cmd-b", cx)).expect("window");
+        cx.run_until_parked();
+        assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
+    });
+}
+
+#[test]
+fn a_fork_from_a_thread_window_brings_its_message_to_a_reopened_main_window() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.update(cx, |ws, cx| {
+            let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            store_items(&ws.store, &t.id, transcript(2));
+            ws.reload(cx);
+            t.id
+        });
+        let own = trek.open_thread_window(cx, &id);
+        close_main(&trek, cx);
+        let second = trek.read(cx, |ws, _| ws.store.items_with_ids(&id).expect("items")[5].0.clone());
+        let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, crate::workspace::ForkAt::Before(second), &Scope::Thread(id.clone()), cx)).expect("forked");
+        let main = main_window(&trek, cx);
+        assert_ne!(main, own);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(fork));
+        let view = trek_window(cx, main);
+        assert!(cx.read(|cx| view.read(cx).composer.read(cx).text(cx)).starts_with("Step 1:"));
+    });
+}
+
+#[test]
+fn the_file_picker_follows_the_folder_on_screen() {
+    run(async |cx| {
+        let trek = open(cx);
+        std::fs::write(trek.project.join("alpha_only.rs"), "").unwrap();
+        let other = new_project("beta");
+        std::fs::write(other.join("beta_only.rs"), "").unwrap();
+        let (a, b) = trek.update(cx, |ws, cx| {
+            let a = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            let b = ws.store.create_thread(Some(&other), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            ws.reload(cx);
+            (a.id, b.id)
+        });
+        let picks = |trek: &Trek, cx: &TestAppContext| cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a), cx));
+        trek.type_text(cx, "@");
+        trek.wait(cx, "project A's files", |_| true).await;
+        assert!(picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
+        // The window moves to a thread in project B with the picker still open.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(b), cx));
+        assert!(!picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
+        trek.wait(cx, "project B's files", |_| true).await;
+        assert!(picks(&trek, cx).contains(&"beta_only.rs".to_string()), "{:?}", picks(&trek, cx));
+    });
+}

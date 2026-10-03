@@ -314,10 +314,118 @@ fn messages_wait_while_a_worktree_is_missing() {
         std::fs::remove_dir_all(&wt.path).unwrap();
         trek.render(cx);
         trek.send(cx, "explain the startup");
+        assert!(trek.read(cx, |ws, _| ws.live[&tid].commands.is_some()), "the session from before is still up");
         trek.click(cx, "wt-local");
         trek.wait(cx, "the answer in the project folder", |ws| ws.live[&tid].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 3).await;
         let t = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
         assert_eq!((t.worktree, t.cwd), (None, Some(trek.project.clone())));
+        // The session it had in the worktree has ended by now; its end isn't the new one's.
+        settle_real_time(cx, 300);
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::Error { .. })), "{:?}", trek.items(cx, &id));
+        assert!(trek.read(cx, |ws, _| ws.live[&tid].commands.is_some()), "the new session is still up");
+        assert_eq!(trek.run_state(cx, &id), RunState::Idle);
+    });
+}
+
+/// Let `ms` of real time pass (agent sessions run on other threads), handling what arrives.
+fn settle_real_time(cx: &mut TestAppContext, ms: u64) {
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while std::time::Instant::now() < until {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    cx.run_until_parked();
+}
+
+#[test]
+fn messages_wait_while_a_worktree_is_removed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        worktree::commit(&wt.path, "Add a note").unwrap();
+        // Sent while the folder is on its way out: it waits, and no session starts in there.
+        let removed = trek.ws.update(cx, |ws, cx| {
+            let task = ws.remove_worktree(&id, 0, false, cx);
+            ws.send_to(&id, "explain the startup".into(), vec![], cx);
+            assert_eq!(ws.queued(&id), 1);
+            assert!(ws.live[&id].commands.is_none());
+            assert!(ws.work_in_flight(), "a restart would lose the message");
+            task
+        });
+        assert!(!removed.await.expect("removed"), "unmerged: the branch is kept");
+        let tid = id.clone();
+        trek.wait(cx, "the waiting message's answer", |ws| ws.live[&tid].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 2).await;
+        assert!(!wt.path.exists());
+        let t = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        assert_eq!((t.worktree, t.cwd), (None, Some(trek.project.clone())), "it went out in the project folder");
+        settle_real_time(cx, 200);
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::Error { .. })), "{:?}", trek.items(cx, &id));
+    });
+}
+
+#[test]
+fn the_git_tool_waits_for_a_worktree_being_made() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, _) = worktree_thread(&trek, cx).await;
+        open_git(&trek, cx);
+        assert!(trek.visible(cx, "gf-NOTES.md"));
+        // Being made (again): not missing, nothing to offer yet.
+        trek.update(cx, |ws, cx| {
+            ws.live.get_mut(&id).unwrap().preparing = true;
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "git-wt-preparing"));
+        assert!(!trek.visible(cx, "git-wt-local"), "no way to move a thread out of a worktree that's on its way");
+        // Made: the review comes in without waiting for a turn to end.
+        trek.update(cx, |ws, cx| {
+            ws.live.get_mut(&id).unwrap().preparing = false;
+            cx.notify();
+        });
+        trek.wait(cx, "the review", |_| true).await;
+        trek.render(cx);
+        assert!(trek.visible(cx, "gf-NOTES.md"));
+    });
+}
+
+#[test]
+fn the_git_tool_keeps_its_place_and_a_turned_down_commit_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, _) = worktree_thread(&trek, cx).await;
+        open_git(&trek, cx);
+        trek.click(cx, "gf-NOTES.md");
+        assert!(trek.visible(cx, "git-diff-view"));
+        // The thread gets its title: the diff stays open.
+        trek.update(cx, |ws, cx| ws.rename(&id, "Add a note to the readme".into(), cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "git-diff-view"));
+
+        // A hook turns the commit down: the message is still there to try again.
+        let hook = trek.project.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        trek.click(cx, "git-message");
+        trek.type_text(cx, "Add a note");
+        trek.click(cx, "git-commit");
+        let message = |trek: &Trek, cx: &TestAppContext| cx.read(|cx| trek.root.read(cx).right_panel.read(cx).git_message(cx));
+        trek.wait(cx, "the commit to be turned down", |_| true).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while trek.window(cx, |window, cx| gpui_kit::component::WindowExt::notifications(window, cx).len()) == 0 {
+            assert!(std::time::Instant::now() < deadline, "no word on the commit");
+            settle_real_time(cx, 20);
+        }
+        assert_eq!(message(&trek, cx).as_deref(), Some("Add a note"));
+        // Without the hook it goes through, and the box empties.
+        std::fs::remove_file(&hook).unwrap();
+        trek.render(cx);
+        trek.click(cx, "git-commit");
+        let dir = trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.cwd.clone())).unwrap();
+        trek.wait(cx, "the commit", |_| clean(&dir)).await;
+        trek.wait(cx, "the box to empty", |_| true).await;
+        assert_eq!(message(&trek, cx).as_deref(), Some(""));
     });
 }
 

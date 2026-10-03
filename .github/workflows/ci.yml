@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental builds don't help a fresh runner and bloat the cache.
   CARGO_INCREMENTAL: 0
+  # The build stays free of warnings: one fails it. (Crates from crates.io have their lints
+  # capped by Cargo; this covers the workspace and vendor/.)
+  RUSTFLAGS: -D warnings
 
 jobs:
   test:

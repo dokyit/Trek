@@ -19,7 +19,8 @@ pub fn branch_chip(id: impl Into<ElementId>, wt: &Worktree, cx: &App) -> AnyElem
     h_flex()
         .id(id)
         .test_support()
-        .flex_shrink(1.)
+        // Gives way before the names beside it (the project's, on a sidebar card) do.
+        .flex_shrink(100.)
         .min_w(px(48.))
         .max_w(px(160.))
         .h(px(20.))
