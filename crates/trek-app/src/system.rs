@@ -117,6 +117,59 @@ pub fn app_is_active() -> bool {
     true
 }
 
+/// Put `window` on screen behind every other app's windows, without making it key.
+#[cfg(target_os = "macos")]
+pub fn order_back(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+    // SAFETY: `ns_view` is the live NSView GPUI created for this window; both messages are
+    // plain AppKit calls made on the main thread.
+    unsafe {
+        let view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, orderBack: std::ptr::null_mut::<AnyObject>()];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn order_back(_: &Window) {}
+
+/// Have Core Animation draw `window` now if macOS counts it as hidden (covered by other windows,
+/// or on another Space), where GPUI's display link is stopped. GPUI draws and presents the frame
+/// if anything changed. Only for `TREK_FORCE_ACTIVE` measurements.
+#[cfg(target_os = "macos")]
+pub fn display_if_hidden(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    /// `NSWindowOcclusionStateVisible`.
+    const VISIBLE: usize = 1 << 1;
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+    // SAFETY: `ns_view` is the live NSView GPUI created for this window; these are plain AppKit
+    // and Core Animation calls made on the main thread.
+    unsafe {
+        let view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let occlusion: usize = msg_send![ns_window, occlusionState];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if occlusion & VISIBLE == 0 && !layer.is_null() {
+            let _: () = msg_send![layer, setNeedsDisplay];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn display_if_hidden(_: &Window) {}
+
 /// Play the alert sound off the main thread.
 pub fn play_alert_sound() {
     std::thread::spawn(|| {

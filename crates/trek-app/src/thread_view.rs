@@ -1,9 +1,9 @@
 //! The transcript: user turns, streaming markdown answers, collapsible reasoning and tool rows,
-//! plus the live footer (thinking indicator, approval cards).
+//! plus the cards the agent puts to the user (approvals, questions, plans). The working bar above
+//! the composer is its own view (`working_bar`).
 
 use crate::palette;
-use crate::time;
-use crate::workspace::{ItemRef, Scope, Workspace};
+use crate::workspace::{ItemRef, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -16,27 +16,45 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use trek_agents::Decision;
-use trek_core::RunState;
 use trek_core::store::{Item, ToolStatus};
 
 const COLUMN: f32 = 760.;
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
 
-/// Rows that open and close carry their item's stable id (`key`): what's expanded follows the
-/// item, not its position, which shifts when empty thoughts are dropped at the end of a turn.
+/// A transcript row. Rows point into the thread's items (`ix`, their position when the rows were
+/// built); text is read when a row is drawn, so building rows for a long thread copies nothing.
+/// Rows that open and close, and answers, carry their item's stable id (`key`): what's expanded
+/// and each markdown document follow the item, not its position, which shifts when empty
+/// thoughts are dropped at the end of a turn.
 #[derive(Clone)]
 enum Row {
-    User { ix: usize, key: SharedString, text: SharedString, open: bool, images: Vec<String>, at: Option<i64> },
+    User { ix: usize, key: SharedString, open: bool },
     /// End of a response: copy the whole answer, when it finished, how long it took.
-    TurnEnd { ix: usize, text: SharedString, at: i64, took_secs: u32 },
-    Assistant(Entity<TextViewState>),
-    Reasoning { ix: usize, key: SharedString, md: Entity<TextViewState>, live: bool, open: bool },
-    Tool { ix: usize, key: SharedString, title: SharedString, detail: SharedString, output: SharedString, status: ToolStatus, open: bool, activity: Option<SharedString> },
+    TurnEnd { ix: usize },
+    Assistant { ix: usize, key: SharedString },
+    Reasoning { ix: usize, key: SharedString, open: bool },
+    Tool { ix: usize, key: SharedString, open: bool, activity: Option<SharedString> },
     /// Consecutive tool calls folded into one summary line ("Ran 3 commands and edited 2 files").
     ToolGroup { ix: usize, key: SharedString, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
-    Notice(SharedString),
-    Error(SharedString),
+    Notice { ix: usize },
+    Error { ix: usize },
+}
+
+impl Row {
+    /// The transcript item the row shows (a group's first member).
+    fn item(&self) -> usize {
+        match self {
+            Row::User { ix, .. }
+            | Row::TurnEnd { ix }
+            | Row::Assistant { ix, .. }
+            | Row::Reasoning { ix, .. }
+            | Row::Tool { ix, .. }
+            | Row::ToolGroup { ix, .. }
+            | Row::Notice { ix }
+            | Row::Error { ix } => *ix,
+        }
+    }
 }
 
 /// The transcript as rows, and which row shows each item (items without a row of their own,
@@ -170,18 +188,18 @@ pub struct ThreadView {
     current: Option<String>,
     revision: u64,
     count: usize,
-    /// Markdown state per item id, with the byte length already pushed.
-    md: HashMap<String, (Entity<TextViewState>, usize)>,
+    /// Markdown documents by item id. Built when a row is first drawn, so opening a long thread
+    /// doesn't parse all of it.
+    md: HashMap<String, Markdown>,
     /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
     expanded: HashSet<String>,
     /// Masked fields for the question card's secret questions, in order, and the request they
     /// were last shown for (a new card starts them empty).
     secrets: (Option<String>, Vec<Entity<InputState>>),
-    /// Rendered plan for the plan card on screen (request id, markdown).
-    plan_md: Option<(String, Entity<TextViewState>)>,
-    /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes,
-    /// not on every animation frame.
-    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, usize), std::rc::Rc<Rows>)>>,
+    /// Rendered plan for the plan card on screen (request id, markdown, redraw when it's parsed).
+    plan_md: Option<(String, Entity<TextViewState>, Subscription)>,
+    /// Rows built for (thread, transcript revision, expansion state); rebuilt only when one changes.
+    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64), std::rc::Rc<Rows>)>>,
     expanded_gen: u64,
     /// The last `Workspace::reveal` request handled.
     revealed: u64,
@@ -191,20 +209,57 @@ pub struct ThreadView {
     _flash_timer: Option<Task<()>>,
     /// (transcript, UI) font sizes the rows were measured at; a change remeasures every row.
     fonts: (f32, f32),
-    /// The window is frontmost. Animations stop when it isn't (they'd redraw 60×/s for nobody).
+    /// The window is frontmost. The search-result tint fades only then.
     active: bool,
+    /// What the last render showed, to skip workspace changes that don't touch the transcript.
+    shown: Option<Shown>,
     _subscriptions: Vec<Subscription>,
-    _ticker: Option<Task<()>>,
+}
+
+struct Markdown {
+    state: Entity<TextViewState>,
+    /// The text the document holds. Text that extends it is appended (parsed incrementally, as
+    /// it streams); anything else replaces it.
+    text: String,
+    /// Where the item was last seen, to find it again without a search.
+    ix: usize,
+    /// Parsing finishes in the background and streamed text fades in; this view is cached, so it
+    /// re-renders when the document says so.
+    _changed: Subscription,
+}
+
+/// The workspace state the transcript is drawn from.
+#[derive(Clone, PartialEq)]
+struct Shown {
+    thread: Option<String>,
+    /// The main window is on a new thread (its backdrop may show behind an empty transcript).
+    draft: bool,
+    revision: u64,
+    agent: Option<trek_core::AgentId>,
+    loading: bool,
+    /// The question card's picks, which change without a new transcript revision.
+    picks: HashMap<(String, usize), Vec<String>>,
+    appearance: trek_core::settings::Appearance,
 }
 
 impl ThreadView {
     pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let subscriptions = vec![
-            cx.observe(&workspace, |this, _, cx| this.sync(cx)),
+            cx.observe(&workspace, |this, _, cx| this.sync(false, cx)),
+            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
+                if let WorkspaceEvent::Transcript { id, appended } = event
+                    && this.current.as_ref() == Some(id)
+                {
+                    this.sync(*appended, cx);
+                }
+            }),
+            cx.observe(&scroller, |_, _, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active();
-                cx.notify();
+                if this.flash.is_some() {
+                    cx.notify();
+                }
             }),
         ];
         let mut this = Self {
@@ -225,10 +280,10 @@ impl ThreadView {
             _flash_timer: None,
             fonts: (0., 0.),
             active: window.is_window_active(),
+            shown: None,
             _subscriptions: subscriptions,
-            _ticker: None,
         };
-        this.sync(cx);
+        this.sync(false, cx);
         this
     }
 
@@ -237,23 +292,39 @@ impl ThreadView {
     }
 
     /// Bring row state in line with the workspace transcript without rebuilding everything.
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    /// `appended`: only text was added to the messages already streaming. Their documents redraw
+    /// this view once the new text is parsed, so it doesn't redraw before that (it would show the
+    /// same text again).
+    fn sync(&mut self, appended: bool, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
         let id = ws.thread_id_in(&self.scope).map(str::to_string);
         let switched = id != self.current;
         let live = id.as_ref().and_then(|id| ws.live.get(id));
-        let (revision, working) = live.map_or((0, false), |l| (l.revision, l.turn_started.is_some()));
-        // Markdown that's new or changed since the last sync, by item id. Only these texts are
-        // copied out; streaming touches one or two items per frame.
-        let mut texts: Vec<(String, String)> = Vec::new();
-        let mut text_items = 0;
-        if let Some(l) = live.filter(|_| switched || revision != self.revision) {
-            for (item, key) in l.items.iter().zip(l.item_ids()) {
-                let (Item::Assistant { text } | Item::Reasoning { text }) = item else { continue };
-                text_items += 1;
-                let known = if switched { None } else { self.md.get(key).map(|(_, pushed)| *pushed) };
-                if known != Some(text.len()) {
-                    texts.push((key.clone(), text.clone()));
+        let revision = live.map_or(0, |l| l.revision);
+        let shown = Shown {
+            thread: id.clone(),
+            draft: ws.is_draft_in(&self.scope),
+            revision,
+            agent: id.as_ref().and_then(|id| ws.thread(id)).map(|t| t.agent.clone()),
+            loading: live.is_some_and(|l| l.loading),
+            picks: live.map(|l| l.picks.clone()).unwrap_or_default(),
+            appearance: ws.settings.appearance.clone(),
+        };
+        // Only the documents already built need updating: they follow their item to where it moved
+        // and to its new text (while streaming, a longer tail). Those whose item left the
+        // transcript go (`None`).
+        let mut docs: Vec<(String, Option<(usize, Option<String>)>)> = Vec::new();
+        if let Some(l) = live.filter(|_| !switched && revision != self.revision) {
+            for (key, m) in &self.md {
+                let ix = if l.items.id_at(m.ix) == Some(key.as_str()) { Some(m.ix) } else { l.items.position(key) };
+                let now = ix.and_then(|ix| match &l.items[ix] {
+                    Item::Assistant { text } | Item::Reasoning { text } => Some((ix, text)),
+                    _ => None,
+                });
+                match now {
+                    None => docs.push((key.clone(), None)),
+                    Some((ix, text)) if ix != m.ix || *text != m.text => docs.push((key.clone(), Some((ix, (*text != m.text).then(|| text.clone()))))),
+                    Some(_) => {}
                 }
             }
         }
@@ -275,37 +346,39 @@ impl ThreadView {
             self.flash = None;
             self.scroller.update(cx, |s, cx| s.reset(0, cx));
         }
+        let quiet = appended && !switched && self.shown.as_ref().is_some_and(|s| Shown { revision, ..s.clone() } == shown);
+        if self.shown.as_ref() != Some(&shown) {
+            self.shown = Some(shown);
+            if !quiet {
+                cx.notify();
+            }
+        }
         if revision == self.revision && !switched {
             self.reveal(cx);
-            cx.notify();
             return;
         }
         self.revision = revision;
-        for (key, text) in texts {
-            match self.md.get_mut(&key) {
-                None => {
-                    let len = text.len();
-                    let state = cx.new(|cx| TextViewState::markdown(&text, cx));
-                    self.md.insert(key, (state, len));
+        for (key, now) in docs {
+            let Some((ix, text)) = now else {
+                self.md.remove(&key);
+                continue;
+            };
+            let Some(m) = self.md.get_mut(&key) else { continue };
+            m.ix = ix;
+            if let Some(text) = text {
+                // Streaming appends (parsed incrementally); anything else replaces the document.
+                match text.strip_prefix(m.text.as_str()) {
+                    Some(tail) => m.state.update(cx, |s, cx| s.push_str(tail, cx)),
+                    None => m.state.update(cx, |s, cx| s.set_text(&text, cx)),
                 }
-                Some((state, pushed)) => {
-                    let fits = text.len() > *pushed && text.is_char_boundary(*pushed);
-                    let (state, from) = (state.clone(), *pushed);
-                    *pushed = text.len();
-                    state.update(cx, |s, cx| if fits { s.push_str(&text[from..], cx) } else { s.set_text(&text, cx) });
-                }
-            }
-        }
-        // Items removed from the transcript leave their markdown behind; drop it.
-        if self.md.len() > text_items {
-            let ws = self.workspace.read(cx);
-            if let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) {
-                let ids: HashSet<&String> = l.item_ids().iter().collect();
-                self.md.retain(|k, _| ids.contains(k));
+                m.text = text;
             }
         }
         let new_count = self.rows(cx).rows.len();
         let old = self.count;
+        if quiet && new_count == old {
+            return;
+        }
         self.count = new_count;
         self.scroller.update(cx, |s, cx| {
             if switched || new_count < old {
@@ -322,25 +395,25 @@ impl ThreadView {
                 let _ = s.remeasure_items(from..new_count, cx);
             }
         });
-        // Tick the elapsed-time label once a second while a turn runs.
-        if working && self._ticker.is_none() {
-            // One ticker drives everything that moves while a turn runs: the hiker and the word
-            // sweep at mascot::FPS when the window is in front, the elapsed time once a second otherwise.
-            self._ticker = Some(cx.spawn(async move |this, cx| loop {
-                let Ok(fast) = this.update(cx, |this, cx| {
-                    cx.notify();
-                    this.active && !this.workspace.read(cx).settings.appearance.reduce_motion
-                }) else {
-                    break;
-                };
-                let wait = if fast { std::time::Duration::from_millis(1000 / crate::mascot::FPS) } else { std::time::Duration::from_secs(1) };
-                cx.background_executor().timer(wait).await;
-            }));
-        } else if !working {
-            self._ticker = None;
-        }
         self.reveal(cx);
         cx.notify();
+    }
+
+    /// The markdown document for item `key` (at `ix`), built the first time its row is drawn.
+    fn markdown(&mut self, key: &str, ix: usize, cx: &mut Context<Self>) -> Option<Entity<TextViewState>> {
+        if let Some(m) = self.md.get(key) {
+            return Some(m.state.clone());
+        }
+        let ws = self.workspace.read(cx);
+        let items = &ws.live.get(self.current.as_ref()?)?.items;
+        let text = match (items.id_at(ix) == Some(key)).then(|| items.get(ix)).flatten()? {
+            Item::Assistant { text } | Item::Reasoning { text } => text.clone(),
+            _ => return None,
+        };
+        let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+        let changed = cx.observe(&state, |_, _, cx| cx.notify());
+        self.md.insert(key.to_string(), Markdown { state: state.clone(), text, ix, _changed: changed });
+        Some(state)
     }
 
     /// Scroll to the message `Workspace::reveal` asks for, once its thread is on screen and loaded.
@@ -390,7 +463,7 @@ impl ThreadView {
 
     fn rows(&self, cx: &App) -> std::rc::Rc<Rows> {
         let revision = self.current.as_ref().and_then(|id| self.workspace.read(cx).live.get(id)).map(|l| l.revision).unwrap_or(0);
-        let key = (self.current.clone(), revision, self.expanded_gen, self.md.len());
+        let key = (self.current.clone(), revision, self.expanded_gen);
         if let Some((k, rows)) = self.rows_cache.borrow().as_ref() {
             if *k == key {
                 return rows.clone();
@@ -416,10 +489,10 @@ impl ThreadView {
                     let mut running = false;
                     let tools: Vec<Row> = members
                         .into_iter()
-                        .filter_map(|ix| {
+                        .map(|ix| {
                             let key = &ids[ix];
                             match &live.items[ix] {
-                                Item::Tool { id: tool_id, title, detail, output, status } => {
+                                Item::Tool { id: tool_id, title, status, .. } => {
                                     // A running sub-agent shows what it's doing right now.
                                     let activity = live.tasks.iter().find(|t| &t.id == tool_id && t.done.is_none()).map(|t| {
                                         let steps = if t.tool_uses == 1 { "1 step".to_string() } else { format!("{} steps", t.tool_uses) };
@@ -427,23 +500,14 @@ impl ThreadView {
                                     });
                                     kinds.push(tool_kind(title));
                                     running |= *status == ToolStatus::Running;
-                                    Some(Row::Tool {
-                                        ix,
-                                        key: key.clone().into(),
-                                        title: title.clone().into(),
-                                        detail: detail.clone().into(),
-                                        output: output.clone().into(),
-                                        status: *status,
-                                        open: self.expanded.contains(key),
-                                        activity,
-                                    })
+                                    Row::Tool { ix, key: key.clone().into(), open: self.expanded.contains(key), activity }
                                 }
                                 // Finished thoughts fold into the group; live thinking has no row
-                                // (the trail bar above the composer is the one "working" indicator).
-                                _ => self.md.get(key).map(|(md, _)| {
+                                // (the working bar above the composer is the one "working" indicator).
+                                _ => {
                                     kinds.push(ToolKind::Thought);
-                                    Row::Reasoning { ix, key: key.clone().into(), md: md.clone(), live: false, open: self.expanded.contains(key) }
-                                }),
+                                    Row::Reasoning { ix, key: key.clone().into(), open: self.expanded.contains(key) }
+                                }
                             }
                         })
                         .collect();
@@ -461,27 +525,11 @@ impl ThreadView {
                 Slot::Item(ix) => {
                     let key = &ids[ix];
                     match &live.items[ix] {
-                        Item::User { text, images, at } => {
-                            Row::User { ix, key: key.clone().into(), text: text.clone().into(), open: self.expanded.contains(key), images: images.clone(), at: *at }
-                        }
-                        Item::TurnEnd { at, took_secs } => {
-                            // Everything the agent said since the last message of yours.
-                            let start = live.items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
-                            let text = live.items[start..ix]
-                                .iter()
-                                .filter_map(|i| if let Item::Assistant { text } = i { Some(text.trim()) } else { None })
-                                .filter(|t| !t.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("\n\n");
-                            Row::TurnEnd { ix, text: text.into(), at: *at, took_secs: *took_secs }
-                        }
-                        Item::Assistant { .. } => match self.md.get(key) {
-                            Some((s, _)) => Row::Assistant(s.clone()),
-                            None => Row::Notice("".into()),
-                        },
-                        // Notices are plain text; drop the light markdown the built-in commands use.
-                        Item::Notice { text } => Row::Notice(text.replace("**", "").replace('`', "").into()),
-                        Item::Error { text } => Row::Error(text.clone().into()),
+                        Item::User { .. } => Row::User { ix, key: key.clone().into(), open: self.expanded.contains(key) },
+                        Item::TurnEnd { .. } => Row::TurnEnd { ix },
+                        Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into() },
+                        Item::Notice { .. } => Row::Notice { ix },
+                        Item::Error { .. } => Row::Error { ix },
                         Item::Tool { .. } | Item::Reasoning { .. } => unreachable!("grouped by layout()"),
                     }
                 }
@@ -490,22 +538,38 @@ impl ThreadView {
         Rows { rows, item_row }
     }
 
+    /// Everything the agent said between the user's message before `ix` and `ix`.
+    fn response_text(items: &[Item], ix: usize) -> String {
+        let ix = ix.min(items.len());
+        let start = items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
+        items[start..ix]
+            .iter()
+            .filter_map(|i| if let Item::Assistant { text } = i { Some(text.trim()) } else { None })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
     /// group's); `flash` tints it for a moment after a search result scrolled to it.
-    #[allow(clippy::too_many_arguments)]
-    fn render_row(
-        row: Row,
-        row_ix: usize,
-        flash: Option<u64>,
-        view: WeakEntity<ThreadView>,
-        text_size: Pixels,
-        cwd: Option<std::path::PathBuf>,
-        animate: bool,
-        cx: &App,
-    ) -> AnyElement {
+    fn render_row(row: Row, row_ix: usize, flash: Option<u64>, view: &WeakEntity<ThreadView>, at: &RowContext, cx: &mut App) -> AnyElement {
+        // Documents and nested rows need the app mutably; everything else only reads it.
+        let md = match &row {
+            Row::Assistant { ix, key } | Row::Reasoning { ix, key, open: true } => view.update(cx, |this, cx| this.markdown(key, *ix, cx)).ok().flatten(),
+            _ => None,
+        };
+        let children: Vec<AnyElement> = match &row {
+            Row::ToolGroup { open: true, tools, .. } => tools.iter().map(|t| Self::render_row(t.clone(), row_ix, None, view, at, cx)).collect(),
+            _ => vec![],
+        };
+        let cx: &App = cx;
+        let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).cloned() else {
+            return div().into_any_element();
+        };
         let theme = cx.theme();
-        let child_view = view.clone();
+        let text_size = at.text_size;
         let tint = theme.foreground.opacity(0.07);
+        let animate = at.animate;
         let column = |el: Div| {
             let el = el.w_full().max_w(px(COLUMN));
             let el = match flash {
@@ -536,8 +600,9 @@ impl ThreadView {
                 });
             }
         };
-        match row {
-            Row::User { ix, key, text, open, images, at } => {
+        match (row, item) {
+            (Row::User { ix, key, open }, Item::User { text, images, at: sent }) => {
+                let text = SharedString::from(text);
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
                 let copy_text = text.clone();
@@ -549,7 +614,7 @@ impl ThreadView {
                     .text_color(theme.muted_foreground)
                     .invisible()
                     .group_hover("user-msg", |s| s.visible())
-                    .children(at.map(crate::time::clock))
+                    .children(sent.map(crate::time::clock))
                     .child(
                         Button::new(("copy-user", ix))
                             .ghost()
@@ -605,35 +670,42 @@ impl ThreadView {
                     ))
                     .child(meta),
                 )
+                .into_any_element()
             }
-            .into_any_element(),
-            Row::TurnEnd { ix, text, at, took_secs } => column(
-                h_flex()
-                    .pt(px(2.))
-                    .pb(px(10.))
-                    .gap(px(6.))
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        Button::new(("copy-turn", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(IconName::Copy).text_color(theme.muted_foreground))
-                            .tooltip("Copy response")
-                            .on_click(move |_, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                                window.push_notification("Copied", cx);
-                            }),
-                    )
-                    .child(crate::time::clock(at))
-                    .when(took_secs >= 1, |el| el.child(div().text_color(theme.muted_foreground.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs))))),
-            )
-            .into_any_element(),
-            Row::Assistant(md) => column(
-                div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, cwd.clone(), cx).stream_fade(true)),
-            )
-                .into_any_element(),
-            Row::Reasoning { ix, key, md, live, open } => column(
+            (Row::TurnEnd { ix }, Item::TurnEnd { at: finished, took_secs }) => {
+                let (workspace, thread) = (at.workspace.clone(), at.thread.clone());
+                column(
+                    h_flex()
+                        .pt(px(2.))
+                        .pb(px(10.))
+                        .gap(px(6.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            Button::new(("copy-turn", ix))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Copy).text_color(theme.muted_foreground))
+                                .tooltip("Copy response")
+                                .on_click(move |_, window, cx| {
+                                    let text = workspace.read(cx).live.get(&thread).map(|l| Self::response_text(&l.items, ix)).unwrap_or_default();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    window.push_notification("Copied", cx);
+                                }),
+                        )
+                        .child(crate::time::clock(finished))
+                        .when(took_secs >= 1, |el| el.child(div().text_color(theme.muted_foreground.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs))))),
+                )
+                .into_any_element()
+            }
+            (Row::Assistant { ix, .. }, _) => match md {
+                Some(md) => column(div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, at.cwd.clone(), cx).stream_fade(true)))
+                    .id(("answer", ix))
+                    .test_support()
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
+            (Row::Reasoning { ix, key, open }, _) => column(
                 v_flex()
                     .py_1()
                     .child(
@@ -644,10 +716,10 @@ impl ThreadView {
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
                             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
-                            .child(div().child(if live { "Thinking" } else { "Thought" }))
+                            .child(div().child("Thought"))
                             .on_click(toggle(key.clone())),
                     )
-                    .when(open, |el| {
+                    .when_some(md.filter(|_| open), |el, md| {
                         el.child(
                             div()
                                 .ml_2()
@@ -661,7 +733,7 @@ impl ThreadView {
                     }),
             )
             .into_any_element(),
-            Row::ToolGroup { ix, key, summary, kind, running, open, tools } => {
+            (Row::ToolGroup { ix, key, summary, kind, running, open, .. }, _) => {
                 let muted = theme.muted_foreground;
                 column(
                     v_flex()
@@ -669,6 +741,7 @@ impl ThreadView {
                         .child(
                             h_flex()
                                 .id(("tool-group", ix))
+                                .test_support()
                                 .gap_2()
                                 .py_1()
                                 .text_sm()
@@ -680,21 +753,12 @@ impl ThreadView {
                                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
                                 .on_click(toggle(key.clone())),
                         )
-                        .when(open, |el| {
-                            el.child(
-                                v_flex()
-                                    .ml(px(7.))
-                                    .pl_4()
-                                    .border_l_1()
-                                    .border_color(theme.border)
-                                    .children(tools.into_iter().map(|t| Self::render_row(t, row_ix, None, child_view.clone(), text_size, cwd.clone(), animate, cx))),
-                            )
-                        }),
+                        .when(open, |el| el.child(v_flex().ml(px(7.)).pl_4().border_l_1().border_color(theme.border).children(children))),
                 )
                 .into_any_element()
             }
-            Row::Tool { ix, key, title, detail, output, status, open, activity } => {
-                let icon = match title.as_ref() {
+            (Row::Tool { ix, key, open, activity }, Item::Tool { title, detail, output, status, .. }) => {
+                let icon = match title.as_str() {
                     "Subagent" => Icon::new(crate::assets::Lucide::Users),
                     t if t.starts_with("Run") || t.starts_with("Ran") => Icon::new(IconName::SquareTerminal),
                     t if t.starts_with("Edit") || t.starts_with("Wr") => Icon::new(crate::assets::Lucide::FilePen),
@@ -705,66 +769,69 @@ impl ThreadView {
                 let status_el = match status {
                     ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(theme.muted_foreground).into_any_element(),
                     ToolStatus::Done => Icon::new(IconName::Check).xsmall().text_color(theme.muted_foreground).into_any_element(),
-                    ToolStatus::Failed | ToolStatus::Denied => {
-                        Icon::new(IconName::CircleX).xsmall().text_color(palette::red(cx)).into_any_element()
-                    }
+                    ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX).xsmall().text_color(palette::red(cx)).into_any_element(),
                 };
                 let has_output = !output.is_empty();
-                (
-                    v_flex()
-                        .py(px(1.))
-                        .child(
-                            h_flex()
-                                .id(("tool", ix))
-                                .gap_2()
-                                .px_2()
-                                .py_1()
-                                .rounded(theme.radius)
-                                .text_sm()
-                                .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
-                                .child(icon.small().text_color(theme.muted_foreground))
-                                .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(if title.as_ref() == "Subagent" { detail.clone() } else { title.clone() }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .when(activity.is_none(), |el| el.font_family(theme.mono_font_family.clone()))
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(match (activity, title.as_ref()) {
-                                            (Some(a), _) => a,
-                                            (None, "Subagent") => SharedString::default(),
-                                            (None, _) => detail,
-                                        }),
-                                )
-                                .child(status_el),
-                        )
-                        .when(open && has_output, |el| {
-                            el.child(
+                let subagent = title == "Subagent";
+                let label = SharedString::from(if subagent { detail.clone() } else { title });
+                let code = activity.is_none();
+                let detail = match activity {
+                    Some(a) => a,
+                    None if subagent => SharedString::default(),
+                    None => detail.into(),
+                };
+                v_flex()
+                    .py(px(1.))
+                    .child(
+                        h_flex()
+                            .id(("tool", ix))
+                            .test_support()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(theme.radius)
+                            .text_sm()
+                            .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
+                            .child(icon.small().text_color(theme.muted_foreground))
+                            .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(label))
+                            .child(
                                 div()
-                                    .id(("tool-out", ix))
-                                    .mt_1()
-                                    .ml_8()
-                                    .max_h(px(260.))
-                                    .overflow_y_scroll()
-                                    .p_3()
-                                    .rounded(theme.radius)
-                                    .bg(theme.muted)
-                                    .font_family(theme.mono_font_family.clone())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(code, |el| el.font_family(theme.mono_font_family.clone()))
                                     .text_xs()
-                                    .whitespace_normal()
-                                    .child(output),
+                                    .text_color(theme.muted_foreground)
+                                    .child(detail),
                             )
-                        })
-                )
-                .into_any_element()
+                            .child(status_el),
+                    )
+                    .when(open && has_output, |el| {
+                        el.child(
+                            div()
+                                .id(("tool-out", ix))
+                                .test_support()
+                                .mt_1()
+                                .ml_8()
+                                .max_h(px(260.))
+                                .overflow_y_scroll()
+                                .p_3()
+                                .rounded(theme.radius)
+                                .bg(theme.muted)
+                                .font_family(theme.mono_font_family.clone())
+                                .text_xs()
+                                .whitespace_normal()
+                                .child(output),
+                        )
+                    })
+                    .into_any_element()
             }
-            Row::Notice(text) => column(
-                h_flex().justify_center().py_1().text_xs().text_color(theme.muted_foreground).child(text),
+            // Notices are plain text; drop the light markdown the built-in commands use.
+            (Row::Notice { .. }, Item::Notice { text }) => column(
+                h_flex().justify_center().py_1().text_xs().text_color(theme.muted_foreground).child(text.replace("**", "").replace('`', "")),
             )
             .into_any_element(),
-            Row::Error(text) => column(
+            (Row::Error { .. }, Item::Error { text }) => column(
                 div()
                     .my_2()
                     .px_3()
@@ -777,6 +844,8 @@ impl ThreadView {
                     .child(text),
             )
             .into_any_element(),
+            // The transcript changed under the row (it's rebuilt on the next render).
+            _ => div().into_any_element(),
         }
     }
 
@@ -854,6 +923,7 @@ impl ThreadView {
                     let (ws, id, rid, label2, multi) = (self.workspace.clone(), id.clone(), request_id.clone(), label.clone(), q.multi);
                     h_flex()
                         .id(SharedString::from(format!("q-{request_id}-{qi}-{oi}")))
+                        .test_support()
                         .px(px(10.))
                         .py(px(7.))
                         .gap(px(10.))
@@ -935,11 +1005,13 @@ impl ThreadView {
     /// The agent finished planning and wants a go-ahead before changing anything.
     fn plan_card(&mut self, id: String, request_id: String, plan: String, agent: String, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.plan_md.as_ref().is_none_or(|(rid, _)| *rid != request_id) {
+        if self.plan_md.as_ref().is_none_or(|(rid, _, _)| *rid != request_id) {
             let text = plan.clone();
-            self.plan_md = Some((request_id.clone(), cx.new(|cx| TextViewState::markdown(&text, cx))));
+            let md = cx.new(|cx| TextViewState::markdown(&text, cx));
+            let parsed = cx.observe(&md, |_, _, cx| cx.notify());
+            self.plan_md = Some((request_id.clone(), md, parsed));
         }
-        let md = self.plan_md.as_ref().map(|(_, m)| m.clone());
+        let md = self.plan_md.as_ref().map(|(_, m, _)| m.clone());
         let cwd = self.workspace.read(cx).cwd_in(&self.scope);
         let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
         let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id, request_id);
@@ -965,6 +1037,7 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// An approval, question or plan waiting on the user, in place of the working bar.
     fn live_footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.current.clone()?;
         // Questions and plans get their own cards.
@@ -1057,45 +1130,6 @@ impl ThreadView {
                     .into_any_element(),
             );
         }
-        if thread.run_state == RunState::Working {
-            let started = live.turn_started.map(|t| t.elapsed());
-            let elapsed = started.map(time::elapsed).unwrap_or_default();
-            let word = crate::mascot::word(&id, started.map(|d| d.as_secs()).unwrap_or(0));
-            let still = ws.settings.appearance.reduce_motion || !self.active;
-            let clock = live.turn_started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.);
-            let agents = live.active_tasks().max(live.background);
-            return Some(
-                h_flex()
-                    .w_full()
-                    .justify_center()
-                    .px_6()
-                    .pb(px(6.))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .max_w(px(COLUMN))
-                            .px(px(4.))
-                            .gap(px(14.))
-                            .items_end()
-                            .child(
-                                h_flex()
-                                    .flex_none()
-                                    // Fixed width so the trail doesn't jump when the word changes.
-                                    .w(px(330.))
-                                    .pb(px(4.))
-                                    .gap(px(8.))
-                                    .text_size(px(13.))
-                                    .child(crate::mascot::word_label(word, clock, still, cx))
-                                    .when(!elapsed.is_empty(), |el| el.child(div().text_color(theme.muted_foreground.opacity(0.8)).child(elapsed)))
-                                    .when(agents > 0, |el| {
-                                        el.child(div().text_color(theme.muted_foreground.opacity(0.8)).child(if agents == 1 { "· 1 agent out".to_string() } else { format!("· {agents} agents out") }))
-                                    }),
-                            )
-                            .child(div().flex_1().min_w_0().child(crate::mascot::trail(clock, still, cx))),
-                    )
-                    .into_any_element(),
-            );
-        }
         None
     }
 
@@ -1112,17 +1146,34 @@ impl ThreadView {
     }
 }
 
+/// What every row of one render shares.
+struct RowContext {
+    workspace: Entity<Workspace>,
+    thread: String,
+    text_size: Pixels,
+    cwd: Option<std::path::PathBuf>,
+    /// The search-result tint fades (the window is in front and motion isn't reduced).
+    animate: bool,
+}
+
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::tests::rendered("ThreadView");
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);
-        if rows.rows.is_empty() {
+        let (Some(thread), false) = (self.current.clone(), rows.rows.is_empty()) else {
             return v_flex().size_full().child(self.empty_state(cx)).children(footer);
-        }
+        };
         let view = cx.entity().downgrade();
-        let text_size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
-        let cwd = self.workspace.read(cx).cwd_in(&self.scope);
-        let animate = self.animate(window, cx);
+        let ws = self.workspace.read(cx);
+        let at = RowContext {
+            workspace: self.workspace.clone(),
+            thread,
+            text_size: px(ws.settings.appearance.transcript_font_size()),
+            cwd: ws.cwd_in(&self.scope),
+            animate: self.animate(window, cx),
+        };
         let flash = self.flash;
         v_flex()
             .size_full()
@@ -1131,7 +1182,7 @@ impl Render for ThreadView {
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
                         Some(row) => {
                             let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
-                            ThreadView::render_row(row, ix, flash, view.clone(), text_size, cwd.clone(), animate, cx)
+                            ThreadView::render_row(row, ix, flash, &view, &at, cx)
                         }
                         None => div().into_any_element(),
                     })
@@ -1141,6 +1192,55 @@ impl Render for ThreadView {
                 ),
             )
             .children(footer)
+    }
+}
+
+#[cfg(test)]
+impl ThreadView {
+    /// The question card's masked field for its `n`th secret question.
+    pub(crate) fn secret_field(&self, n: usize) -> Entity<InputState> {
+        self.secrets.1[n].clone()
+    }
+
+    /// Markdown documents built so far.
+    pub(crate) fn markdown_states(&self) -> usize {
+        self.md.len()
+    }
+
+    /// The markdown documents built so far, by where their item is in the transcript now.
+    pub(crate) fn markdown_documents(&self, cx: &App) -> Vec<(usize, Entity<TextViewState>)> {
+        let ws = self.workspace.read(cx);
+        let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return vec![] };
+        let mut docs: Vec<_> = self.md.iter().filter_map(|(key, m)| Some((l.items.position(key)?, m.state.clone()))).collect();
+        docs.sort_by_key(|(ix, _)| *ix);
+        docs
+    }
+
+    /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines
+    /// under an open group), "end", "notice", "error".
+    pub(crate) fn describe(&self, cx: &App) -> Vec<String> {
+        fn line(row: &Row, out: &mut Vec<String>, indent: &str) {
+            out.push(match row {
+                Row::User { .. } => format!("{indent}user"),
+                Row::TurnEnd { .. } => format!("{indent}end"),
+                Row::Assistant { .. } => format!("{indent}assistant"),
+                Row::Reasoning { .. } => format!("{indent}thought"),
+                Row::Tool { activity, .. } => format!("{indent}tool{}", activity.as_ref().map(|a| format!(" ({a})")).unwrap_or_default()),
+                Row::ToolGroup { summary, running, .. } => format!("{indent}group: {summary}{}", if *running { " (running)" } else { "" }),
+                Row::Notice { .. } => format!("{indent}notice"),
+                Row::Error { .. } => format!("{indent}error"),
+            });
+            if let Row::ToolGroup { open: true, tools, .. } = row {
+                for t in tools {
+                    line(t, out, "  ");
+                }
+            }
+        }
+        let mut out = vec![];
+        for row in self.rows(cx).rows.iter() {
+            line(row, &mut out, "");
+        }
+        out
     }
 }
 

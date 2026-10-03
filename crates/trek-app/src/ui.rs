@@ -271,6 +271,7 @@ impl RenderOnce for Pill {
         let theme = cx.theme();
         h_flex()
             .id(self.id)
+            .test_support()
             .h(px(28.))
             .px(px(10.))
             .gap(px(6.))

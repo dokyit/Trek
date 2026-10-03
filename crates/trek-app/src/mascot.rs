@@ -55,7 +55,8 @@ const LAP: Duration = Duration::from_secs(16);
 const PX: f32 = 1.5;
 const SPRITE_W: usize = 14;
 const SPRITE_H: usize = 16;
-const HEIGHT: f32 = SPRITE_H as f32 * PX + 4.;
+/// Height of the trail with the hiker on it.
+pub const HEIGHT: f32 = SPRITE_H as f32 * PX + 4.;
 
 /// Pixel hiker facing right: hat, ember backpack with a bedroll, walking pole.
 const TOP: [&str; 12] = [
@@ -102,12 +103,22 @@ fn color(c: char) -> Option<u32> {
     })
 }
 
-/// Frames per second for the working animation. Pixel art reads fine at this rate, and the whole
-/// window redraws on every frame, so 15 instead of 60 is a quarter of the CPU.
+/// `TREK_FORCE_ACTIVE=1` runs the working animation as if the window were frontmost, and keeps
+/// drawing the window while macOS hides it (covered, or on another Space), so the animation's full
+/// cost, drawing included, can be measured while Trek stays in the background. A measurement aid,
+/// not a setting.
+pub fn force_active() -> bool {
+    static FORCE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("TREK_FORCE_ACTIVE").is_ok_and(|v| v == "1"));
+    *FORCE
+}
+
+/// Frames per second for the working animation. Pixel art reads fine at this rate, and each frame
+/// still redraws the window (the other views come from GPUI's cache), so 15 instead of 60 is a
+/// quarter of the CPU.
 pub const FPS: u64 = 15;
 
 /// A dotted trail the width of its parent with the hiker walking it. `clock` is seconds since the
-/// turn started; the caller re-renders at [`FPS`] while it wants motion (see `ThreadView`).
+/// turn started; the caller re-renders at [`FPS`] while it wants motion (see `WorkingBar`).
 pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
     let dots = cx.theme().foreground.opacity(0.16);
     let (pos, frame, right) = if still {

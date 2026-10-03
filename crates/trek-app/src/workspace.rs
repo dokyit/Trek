@@ -309,6 +309,10 @@ pub enum WorkspaceEvent {
     ActivateMain,
     /// ⌘K from a thread window: the palette opens in the main window (its commands act there).
     OpenPalette,
+    /// Only this thread's transcript changed (streamed text, tool calls). Sent instead of a
+    /// notification, so views that don't draw transcripts aren't redrawn for every batch.
+    /// `appended`: all that changed is text added to the messages already streaming.
+    Transcript { id: String, appended: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +418,8 @@ pub struct Workspace {
     pub main_window: Option<AnyWindowHandle>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
+    /// Offer Trek's scripted mock agent (`TREK_MOCK_AGENT=1`, and in tests).
+    pub mock_agent: bool,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
@@ -431,7 +437,53 @@ impl Workspace {
         });
         // TREK_ONBOARDING=1 replays onboarding without resetting anything (design review, support).
         let replay = std::env::var("TREK_ONBOARDING").is_ok_and(|v| v == "1");
-        let route = if settings.onboarding.completed && !replay { Route::Draft { project: None } } else { Route::Onboarding };
+        let mut this = Self::with(store, settings, cx);
+        if replay {
+            this.route = Route::Onboarding;
+        }
+        this.detect_agents(cx);
+        this.refresh_git(cx);
+        if this.settings.onboarding.completed {
+            this.import_threads(cx);
+        } else {
+            this.index_for_search(cx);
+        }
+        // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
+        let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
+        if let Some(from) = after_update {
+            tracing::info!("updated from {from} to {}", trek_core::VERSION);
+            // Spawned so it lands after the window has subscribed to workspace events.
+            let message = format!("Trek updated to {} (from {from}).", trek_core::VERSION);
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+            })
+            .detach();
+        }
+        cx.on_app_quit(|this, _| {
+            this.install_on_quit();
+            async {}
+        })
+        .detach();
+        if this.settings.updates.auto_check {
+            this.check_for_updates(false, cx);
+        }
+        this.start_housekeeping(cx);
+        let keep = this.settings.snapshots.keep_days;
+        cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
+        // TREK_MOCK_PROMPT starts a mock thread at launch, for performance measurements and demos
+        // that can't touch the UI. Only with the mock agent on.
+        if let Some(prompt) = std::env::var("TREK_MOCK_PROMPT").ok().filter(|_| this.mock_agent) {
+            this.draft_prefs.agent = AgentId::Direct(catalog::MOCK_PROVIDER.into());
+            this.draft_prefs.model = None;
+            this.send(prompt, vec![], cx);
+        }
+        this
+    }
+
+    /// The model over `store` and `settings` alone: no agent detection, import, update check or
+    /// housekeeping is started (`new` adds those). Tests build on this.
+    pub fn with(store: Store, settings: Settings, cx: &mut Context<Self>) -> Self {
+        let route = if settings.onboarding.completed { Route::Draft { project: None } } else { Route::Onboarding };
         let applied_defaults = default_prefs_key(&settings);
         let draft_prefs = Prefs {
             agent: AgentId::from_key(&settings.general.default_agent),
@@ -477,6 +529,7 @@ impl Workspace {
             overlay_open: false,
             main_window: None,
             thread_windows: HashMap::new(),
+            mock_agent: trek_agents::mock::enabled(),
             applied_defaults,
             tasks: vec![],
         };
@@ -485,35 +538,6 @@ impl Workspace {
             let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
             this.route = Route::Draft { project: first };
         }
-        this.detect_agents(cx);
-        this.refresh_git(cx);
-        if this.settings.onboarding.completed {
-            this.import_threads(cx);
-        } else {
-            this.index_for_search(cx);
-        }
-        // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
-        let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
-        if let Some(from) = after_update {
-            tracing::info!("updated from {from} to {}", trek_core::VERSION);
-            // Spawned so it lands after the window has subscribed to workspace events.
-            let message = format!("Trek updated to {} (from {from}).", trek_core::VERSION);
-            cx.spawn(async move |this, cx| {
-                let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
-            })
-            .detach();
-        }
-        cx.on_app_quit(|this, _| {
-            this.install_on_quit();
-            async {}
-        })
-        .detach();
-        if this.settings.updates.auto_check {
-            this.check_for_updates(false, cx);
-        }
-        this.start_housekeeping(cx);
-        let keep = this.settings.snapshots.keep_days;
-        cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
         this
     }
 
@@ -989,6 +1013,13 @@ impl Workspace {
         let g = &self.settings.general;
         let prefs = self.project_prefs(project);
         let agent = prefs.agent.as_deref().map(AgentId::from_key).filter(|a| self.ready_agents().contains(a));
+        // With no agent of its own, a project can still pick the model Trek's default agent uses
+        // (Settings → Project offers that agent's models); one that agent doesn't have is ignored.
+        let default_agent = AgentId::from_key(&g.default_agent);
+        let model_for_default = prefs
+            .model
+            .clone()
+            .filter(|m| prefs.agent.is_none() && self.models_for(&default_agent).iter().any(|i| crate::composer::same_model(m, &i.id)));
         let p = &mut self.draft_prefs;
         match agent {
             Some(a) => {
@@ -996,8 +1027,8 @@ impl Workspace {
                 p.agent = a;
             }
             None => {
-                p.agent = AgentId::from_key(&g.default_agent);
-                p.model = g.default_model.clone();
+                p.agent = default_agent;
+                p.model = model_for_default.or_else(|| g.default_model.clone());
             }
         }
         p.effort = prefs.effort.unwrap_or(g.default_effort);
@@ -1246,7 +1277,7 @@ impl Workspace {
             return match p.as_str() {
                 "anthropic" => catalog::default_models(&AgentId::ClaudeCode),
                 "openai" => catalog::default_models(&AgentId::Codex),
-                _ => vec![],
+                _ => catalog::default_models(agent),
             };
         }
         if *agent == AgentId::Codex && !self.codex_models.is_empty() {
@@ -1345,6 +1376,9 @@ impl Workspace {
             if !out.contains(&id) {
                 out.push(id);
             }
+        }
+        if self.mock_agent {
+            out.push(AgentId::Direct(catalog::MOCK_PROVIDER.into()));
         }
         out.retain(|a| !self.settings.disabled_agents.contains(&a.key()));
         if out.is_empty() {
@@ -1480,9 +1514,12 @@ impl Workspace {
         live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()) });
         live.streaming = None;
         live.reasoning = None;
-        live.turn_started = Some(Instant::now());
+        // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
+        if !running {
+            live.turn_started = Some(Instant::now());
+            live.tasks.clear();
+        }
         live.last_active = Some(Instant::now());
-        live.tasks.clear();
         live.revision += 1;
         if let Some(tx) = &live.commands {
             let _ = tx.try_send(Command::Prompt { text, images });
@@ -1612,7 +1649,7 @@ impl Workspace {
         }
     }
 
-    fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
+    pub(crate) fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
         let mut run_state: Option<RunState> = None;
         let mut native: Option<String> = None;
         let mut diff: Option<(i64, i64)> = None;
@@ -1622,6 +1659,10 @@ impl Workspace {
         let mut continue_queue = false;
         let mut notify_text: Option<String> = None;
         let mut commands: Option<Vec<SlashCommand>> = None;
+        // Streamed text and tool calls change nothing but the transcript; mostly they only extend
+        // the messages already streaming.
+        let mut transcript_only = true;
+        let mut appended = true;
         {
             let live = self.live.entry(id.to_string()).or_default();
             live.last_active = Some(Instant::now());
@@ -1630,7 +1671,18 @@ impl Workspace {
                 if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
                     live.turn_started = Some(Instant::now());
                     run_state = Some(RunState::Working);
+                    transcript_only = false;
                 }
+                transcript_only &= matches!(
+                    ev,
+                    AgentEvent::TextDelta(_) | AgentEvent::TextDone(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. } | AgentEvent::ToolFinished { .. }
+                );
+                // Text after a thought ends the thought, which then gets a row of its own.
+                appended &= match ev {
+                    AgentEvent::TextDelta(_) => live.streaming.is_some() && live.reasoning.is_none(),
+                    AgentEvent::ReasoningDelta(_) => live.reasoning.is_some(),
+                    _ => false,
+                };
                 match ev {
                     AgentEvent::Task { id: tid, description, activity, tool_uses, done } => {
                         let known = live.tasks.iter().position(|t| t.id == tid);
@@ -1883,7 +1935,13 @@ impl Workspace {
         if let Some(message) = notify_text {
             cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string() });
         }
-        cx.notify();
+        if transcript_only {
+            // Only the transcript views redraw; the sidebar, title bar and composer would
+            // otherwise redraw with every batch, up to 60 times a second while text streams.
+            cx.emit(WorkspaceEvent::Transcript { id: id.to_string(), appended });
+        } else {
+            cx.notify();
+        }
     }
 
     /// Put queued follow-ups back into the composer (the thread must be on screen).
@@ -2094,6 +2152,11 @@ impl Workspace {
     /// Ask a small model for a short title (through the user's Claude Code login).
     pub fn regenerate_title(&mut self, id: &str, announce: bool, cx: &mut Context<Self>) {
         let Some((request, reply)) = self.title_inputs(id) else { return };
+        // The mock agent names its own threads: it makes no model calls, titles included.
+        if self.thread(id).is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER)) {
+            self.rename(id, trek_agents::mock::title(&request), cx);
+            return;
+        }
         let claude = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
         if !claude {
             if announce {

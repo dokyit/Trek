@@ -208,6 +208,8 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::tests::rendered("RightPanel");
         let theme = cx.theme().clone();
         let active = self.active;
         let tabs = h_flex()

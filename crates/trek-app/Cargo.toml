@@ -36,3 +36,13 @@ raw-window-handle = "0.6.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile"] }
+
+[dev-dependencies]
+# Headless UI tests (src/tests): GPUI's test platform, plus CoreText from the macOS platform so
+# text lays out as it does in the app.
+gpui-kit = { workspace = true, features = ["test-support"] }
+ctor = "1"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }

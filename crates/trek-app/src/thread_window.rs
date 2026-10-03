@@ -4,6 +4,7 @@
 
 use crate::composer::Composer;
 use crate::thread_view::ThreadView;
+use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, Scope, SettingsPage, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::{ActiveTheme as _, IconName, StyledExt as _, TitleBar, v_flex, h_flex};
@@ -15,7 +16,8 @@ pub fn open(workspace: Entity<Workspace>, id: &str, cx: &mut App) {
     open_with_focus(workspace, id, true, cx);
 }
 
-/// `open`; with `focus: false` keyboard focus stays where it is (a launch in the background).
+/// `open`; with `focus: false` the window opens behind other apps' windows and keyboard focus
+/// stays where it is (a launch in the background).
 pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: &mut App) {
     let (existing, exists, open_count) = {
         let ws = workspace.read(cx);
@@ -38,11 +40,17 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
         window_min_size: Some(size(px(520.), px(440.))),
         app_id: Some("dev.trek.Trek".into()),
         focus,
+        show: focus,
         ..TitleBar::window_options()
     };
     let thread_id = id.to_string();
     let ws = workspace.clone();
-    match gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| ThreadWindow::new(ws, thread_id, window, cx))) {
+    match gpui_kit::open_window(options, cx, move |window, cx| {
+        if !focus {
+            crate::system::order_back(window);
+        }
+        cx.new(|cx| ThreadWindow::new(ws, thread_id, window, cx))
+    }) {
         Ok((handle, _)) => workspace.update(cx, |ws, cx| ws.thread_window_opened(id, handle, cx)),
         Err(e) => tracing::warn!("thread window: {e:#}"),
     }
@@ -53,6 +61,9 @@ pub struct ThreadWindow {
     id: String,
     thread_view: Entity<ThreadView>,
     composer: Entity<Composer>,
+    working_bar: Entity<WorkingBar>,
+    /// The composer changed since the last frame (see `Composer::element`).
+    composer_changed: bool,
     /// The window title as last set (the thread's title).
     title: String,
     _subscriptions: Vec<Subscription>,
@@ -62,6 +73,7 @@ impl ThreadWindow {
     fn new(workspace: Entity<Workspace>, id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scope = Scope::Thread(id.clone());
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), scope.clone(), window, cx));
+        let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), scope.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), scope, window, cx));
         let title = workspace.read(cx).thread(&id).map(|t| t.title.clone()).unwrap_or_default();
         window.set_window_title(&title);
@@ -85,6 +97,7 @@ impl ThreadWindow {
                     }
                 }
             }),
+            cx.observe(&composer, |this, _, _| this.composer_changed = true),
             // With nothing focused, keys reach none of the window's shortcuts (⌘W included): the
             // composer takes focus back when what had it leaves (an answered question's text field).
             cx.on_focus_lost(window, |this, window, cx| this.composer.update(cx, |c, cx| c.focus(window, cx))),
@@ -97,7 +110,7 @@ impl ThreadWindow {
         ];
         let c = composer.clone();
         window.defer(cx, move |window, cx| c.update(cx, |c, cx| c.focus(window, cx)));
-        Self { workspace, id, thread_view, composer, title, _subscriptions: subscriptions }
+        Self { workspace, id, thread_view, composer, working_bar, composer_changed: true, title, _subscriptions: subscriptions }
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -213,8 +226,10 @@ impl Render for ThreadWindow {
                         .border_color(theme.sidebar_border)
                         .bg(theme.background)
                         .overflow_hidden()
-                        .child(div().flex_1().min_h_0().child(self.thread_view.clone()))
-                        .child(self.composer.clone()),
+                        // Cached as in the main window: the working bar's frames redraw only the bar.
+                        .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(StyleRefinement::default().size_full())))
+                        .child(crate::working_bar::cached(&self.working_bar, cx))
+                        .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
                 ),
             )
     }

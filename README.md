@@ -109,9 +109,29 @@ Accessibility and Screen Recording permission (computer use, snapshots) to the s
 ad-hoc signature changes on every build, so you'd be asked again each time.
 
 Handy environment variables: `TREK_DATA_DIR=/some/folder` runs Trek against another data folder (your real
-one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens without taking focus,
-`TREK_OPEN_SETTINGS=updates`, `TREK_OPEN_TOOL=browser` and `TREK_OPEN_THREAD_WINDOW=<thread id>` open a
-settings page, a tool or a thread window at launch, and `TREK_ONBOARDING=1` replays onboarding.
+one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens behind other apps' windows
+without taking focus, `TREK_OPEN_SETTINGS=updates`, `TREK_OPEN_TOOL=browser` and
+`TREK_OPEN_THREAD_WINDOW=<thread id>` open a settings page, a tool or a thread window at launch, and
+`TREK_ONBOARDING=1` replays onboarding.
+
+### Tests and the mock agent
+
+The test command above includes headless UI tests (`crates/trek-app/src/tests`): Trek's real windows and
+views run on GPUI's test platform against an in-memory database and a throwaway data folder (the Keychain
+stays untouched, and nothing reaches a real agent), with the **mock agent** standing in for real ones.
+
+The mock agent (`crates/trek-agents/src/mock.rs`) is a scripted agent with no process or network. Each
+prompt plays a script picked by a keyword: none (a streamed markdown answer), `tools`, `subagents 5s`,
+`permission`, `question`, `plan`, `mock:long 30s`, `mock:stream 30s` or `error`. `TREK_MOCK_AGENT=1` offers it
+as "Mock agent" in the pickers, and `TREK_MOCK_PROMPT="mock:long 60s"` (with the mock on) starts a mock
+thread at launch.
+
+`cargo test -p trek-app [--release] -- --ignored --nocapture rendering_cost` prints what a working-animation
+frame and a batch of streamed text cost, and how fast a 2,000-item thread opens; those numbers cover layout
+and painting only (the test platform has no GPU). For the whole cost, drawing included, run a build with
+`TREK_BACKGROUND=1 TREK_FORCE_ACTIVE=1 TREK_MOCK_AGENT=1 TREK_MOCK_PROMPT="mock:long 60s"` and a throwaway
+`TREK_DATA_DIR`, and sample it with `top -pid`. `TREK_FORCE_ACTIVE=1` is a measurement aid, not a setting: it
+runs the working animation as if the window were in front and keeps drawing the window while it's covered.
 
 ## Releases
 
@@ -127,9 +147,9 @@ keys and how to test an update locally are in [docs/RELEASING.md](docs/RELEASING
 crates/trek-core     engine, no UI: types, settings (TOML), SQLite store, agent detection, thread import,
                      skills, model catalog, updater
 crates/trek-agents   live sessions: Claude Code (stream-json), Codex (app-server JSON-RPC), ACP agents,
-                     direct API / local models; usage limits and auto titles
+                     direct API / local models, the scripted mock agent; usage limits and auto titles
 crates/trek-app      the GPUI app (gpui-kit 0.7): workspace state, sidebar, thread view, composer, settings,
-                     onboarding, tools panel, menu bar, notifications
+                     onboarding, tools panel, menu bar, notifications; headless UI tests
 crates/trek-mcp      MCP server agents use for computer use and the iOS Simulator
 vendor/gpui-base     gpui-base 0.7 with Trek's small markdown patch (semibold emphasis, calmer headings)
 assets/              brand art, backgrounds, the update signing public key

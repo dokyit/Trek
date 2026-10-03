@@ -20,6 +20,10 @@ fn clip(s: &str, max: usize) -> &str {
 /// A title for a conversation that began with `request` (and, if known, got `reply`).
 /// The session isn't saved, so it never shows up in the user's Claude Code history.
 pub async fn generate_title(request: &str, reply: &str) -> Result<String> {
+    // Tests never reach the user's Claude login.
+    if trek_core::paths::isolated() {
+        bail!("no model calls in an isolated (test) process");
+    }
     let bin = detect::which("claude").context("Claude Code isn't installed")?;
     let mut child = tokio::process::Command::new(bin)
         // No tools: a small model handed "map the codebase" would otherwise start mapping it.
