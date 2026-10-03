@@ -145,8 +145,8 @@ Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default
    to the running one, swap the two in one `renamex_np(RENAME_SWAP)` (or two renames on volumes without
    it; if the second fails the current app is put back, and if even that fails it's left where the error
    says rather than deleted), keep the previous version in `updates/previous.noindex/` as the one backup,
-   relaunch with `open -n`. If the new app can't be opened, the relaunch helper puts the backup back and
-   opens that.
+   relaunch with `open -n`. If the new app can't be opened, the relaunch helper puts the version this
+   install replaced back and opens that (never an older backup when nothing was replaced).
 5. The new version deletes download folders of Trek processes that are gone and shows "Trek updated to
    <version>". Download folders are named after their process so that a second Trek sharing the data
    folder never deletes one that's in use.
