@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn retain_keeps_ids_aligned_and_records_removed_rows() {
         let mut t = Transcript::stored(vec![
-            ("u".into(), Item::User { text: "hi".into(), images: vec![], at: None, resume: None }),
+            ("u".into(), Item::User { text: "hi".into(), images: vec![], at: None, resume: None, aside: false }),
             ("r".into(), Item::Reasoning { text: " ".into() }),
             ("a".into(), text("answer")),
         ]);

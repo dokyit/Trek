@@ -249,7 +249,7 @@ enum Files {
     Checking,
     Changes(Vec<FileChange>),
     /// There's nothing to restore them from, and why.
-    Unavailable(&'static str),
+    Unavailable(String),
     Failed(String),
 }
 
@@ -642,10 +642,19 @@ impl ThreadView {
                 });
             }
         };
+        let ends_turn = trek_core::rewind::ends_turn(&item);
         // The confirmation open on this row, if any.
         let asking = view.upgrade().and_then(|v| v.read(cx).confirm.as_ref().map(|c| (c.anchor.clone(), c.ask.clone())));
         let muted = theme.muted_foreground;
-        let action = |id: (&'static str, usize), icon: Icon, tooltip: &'static str| Button::new(id).ghost().xsmall().icon(icon.text_color(muted)).tooltip(tooltip);
+        let action = |id: (&'static str, usize), icon: Icon, tooltip: SharedString| Button::new(id).ghost().xsmall().icon(icon.text_color(muted)).tooltip(tooltip);
+        let live = at.workspace.read(cx).live.get(&at.thread);
+        // A tooltip, with why the files won't be restored when they won't (message `pos`).
+        let with_files = |tooltip: &str, pos: Option<usize>| -> SharedString {
+            match live.zip(pos).and_then(|(l, pos)| crate::workspace::NoCheckpoint::of(l, pos, at.in_repo)) {
+                Some(why) => format!("{tooltip} ({})", why.short()).into(),
+                None => tooltip.to_string().into(),
+            }
+        };
         // The popover a rewind, undo or retry asks for confirmation in.
         let confirm_popover = |id: (&'static str, usize), anchor: Anchor, ask: Ask, item: &str, open: bool, trigger: Button| {
             let (v1, v2, item) = (view.clone(), view.clone(), item.to_string());
@@ -660,8 +669,75 @@ impl ThreadView {
                 .trigger(trigger)
                 .content(move |_, _, cx| v2.update(cx, |this, cx| this.confirm_card(cx)).unwrap_or_else(|_| div().into_any_element()))
         };
+        // Undo, retry (or with another model) and fork for the turn ending at item `ix` (its
+        // footer, its error, or its interruption). The latest turn's are always there; earlier
+        // ones show on hover.
+        let turn_actions = |ix: usize| -> AnyElement {
+            let end = live.and_then(|l| l.items.id_at(ix)).unwrap_or_default().to_string();
+            // A turn the agent started itself (a sub-agent reporting back) has no message to take back.
+            let start = live.and_then(|l| trek_core::rewind::turn_start(&l.items, ix));
+            let ask = asking.as_ref().filter(|(a, _)| *a == end).map(|(_, ask)| ask.clone());
+            let busy = at.busy;
+            let tip = |what: &str, label: &str| -> SharedString {
+                if busy {
+                    format!("Stop the running turn to {what}").into()
+                } else if start.is_none() {
+                    "This turn didn't start from a message of yours".into()
+                } else {
+                    with_files(label, start)
+                }
+            };
+            let off = busy || start.is_none();
+            let undo = confirm_popover(
+                ("undo-pop", ix),
+                Anchor::BottomLeft,
+                Ask::Undo,
+                &end,
+                ask == Some(Ask::Undo),
+                action(("undo-turn", ix), Icon::new(crate::assets::Lucide::Undo2), tip("undo", "Undo this turn")).disabled(off),
+            );
+            let retry_with = ask.as_ref().and_then(|a| if let Ask::Retry(m) = a { Some(m.clone()) } else { None });
+            let retry = confirm_popover(
+                ("retry-pop", ix),
+                Anchor::BottomLeft,
+                Ask::Retry(retry_with.clone().flatten()),
+                &end,
+                retry_with.is_some(),
+                action(("retry-turn", ix), Icon::new(crate::assets::Lucide::RefreshCw), tip("retry", "Retry")).disabled(off),
+            );
+            let models = {
+                let (ws, view, end, agent, current) = (at.workspace.clone(), view.clone(), end.clone(), at.agent.clone(), at.model.clone());
+                let tooltip = if off { tip("retry", "") } else { "Retry with another model".into() };
+                action(("retry-with", ix), Icon::new(IconName::ChevronDown), tooltip).disabled(off).dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, cx| {
+                    menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Retry with");
+                    for m in ws.read(cx).models_for(&agent).into_iter().filter(|m| current.as_deref().is_none_or(|c| !crate::composer::same_model(c, &m.id))) {
+                        let (view, end) = (view.clone(), end.clone());
+                        menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(move |_, _, cx| {
+                            let (id, end) = (m.id.clone(), end.clone());
+                            let _ = view.update(cx, |this, cx| this.open_confirm(Ask::Retry(Some(id)), end, cx));
+                        }));
+                    }
+                    menu
+                })
+            };
+            let fork = {
+                let (ws, thread, scope, end) = (at.workspace.clone(), at.thread.clone(), at.scope.clone(), end.clone());
+                action(("fork-turn", ix), Icon::new(crate::assets::Lucide::GitFork), "Fork from here: a new thread with the conversation up to this point".into()).on_click(move |_, _, cx| {
+                    let (thread, scope, end) = (thread.clone(), scope.clone(), end.clone());
+                    ws.update(cx, |ws, cx| _ = ws.fork_thread(&thread, ForkAt::After(end), &scope, cx));
+                })
+            };
+            let shown = at.last_end == Some(ix) || ask.is_some();
+            h_flex()
+                .gap(px(2.))
+                .when(!shown, |el| el.invisible().group_hover("turn-end", |s| s.visible()))
+                .child(undo)
+                .child(h_flex().child(retry).child(models))
+                .child(fork)
+                .into_any_element()
+        };
         match (row, item) {
-            (Row::User { ix, key, open }, Item::User { text, images, at: sent, .. }) => {
+            (Row::User { ix, key, open }, Item::User { text, images, at: sent, aside, .. }) => {
                 let text = SharedString::from(text);
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
@@ -672,7 +748,7 @@ impl ThreadView {
                 let edit = {
                     let (ws, thread, scope, item, text) = (ws.clone(), thread.clone(), scope.clone(), item.clone(), text.to_string());
                     let images: Vec<std::path::PathBuf> = images.iter().map(std::path::PathBuf::from).collect();
-                    action(("edit-user", ix), Icon::new(crate::assets::Lucide::Pencil), if busy { "Stop the running turn to edit" } else { "Edit and send again" })
+                    action(("edit-user", ix), Icon::new(crate::assets::Lucide::Pencil), if busy { "Stop the running turn to edit".into() } else { with_files("Edit and send again", Some(ix)) })
                         .disabled(busy)
                         .on_click(move |_, _, cx| {
                             let (thread, scope, item, text, images) = (thread.clone(), scope.clone(), item.clone(), text.clone(), images.clone());
@@ -685,9 +761,9 @@ impl ThreadView {
                     Ask::Rewind,
                     &item,
                     rewinding,
-                    action(("rewind-user", ix), Icon::new(crate::assets::Lucide::Undo2), if busy { "Stop the running turn to rewind" } else { "Rewind to here" }).disabled(busy),
+                    action(("rewind-user", ix), Icon::new(crate::assets::Lucide::Undo2), if busy { "Stop the running turn to rewind".into() } else { with_files("Rewind to here", Some(ix)) }).disabled(busy),
                 );
-                let fork = action(("fork-user", ix), Icon::new(crate::assets::Lucide::GitFork), "Fork from here: a new thread with the conversation before this message")
+                let fork = action(("fork-user", ix), Icon::new(crate::assets::Lucide::GitFork), "Fork from here: a new thread with the conversation before this message".into())
                     .on_click(move |_, _, cx| {
                         let (thread, scope, item) = (thread.clone(), scope.clone(), item.clone());
                         ws.update(cx, |ws, cx| _ = ws.fork_thread(&thread, ForkAt::Before(item), &scope, cx));
@@ -700,7 +776,9 @@ impl ThreadView {
                     .text_color(muted)
                     .when(!rewinding, |el| el.invisible().group_hover("user-msg", |s| s.visible()))
                     .children(sent.map(crate::time::clock))
-                    .child(h_flex().gap(px(2.)).child(edit).child(rewind).child(fork).child(
+                    // A command Trek answered or an answer to the agent's question isn't somewhere
+                    // to go back to: it only gets copy.
+                    .child(h_flex().gap(px(2.)).when(!aside, |el| el.child(edit).child(rewind).child(fork)).child(
                         Button::new(("copy-user", ix))
                             .ghost()
                             .xsmall()
@@ -759,49 +837,6 @@ impl ThreadView {
             }
             (Row::TurnEnd { ix }, Item::TurnEnd { at: finished, took_secs }) => {
                 let (workspace, thread) = (at.workspace.clone(), at.thread.clone());
-                let end = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.id_at(ix)).unwrap_or_default().to_string();
-                let ask = asking.as_ref().filter(|(a, _)| *a == end).map(|(_, ask)| ask.clone());
-                let busy = at.busy;
-                let undo = confirm_popover(
-                    ("undo-pop", ix),
-                    Anchor::BottomLeft,
-                    Ask::Undo,
-                    &end,
-                    ask == Some(Ask::Undo),
-                    action(("undo-turn", ix), Icon::new(crate::assets::Lucide::Undo2), if busy { "Stop the running turn to undo" } else { "Undo this turn" }).disabled(busy),
-                );
-                let retry_with = ask.as_ref().and_then(|a| if let Ask::Retry(m) = a { Some(m.clone()) } else { None });
-                let retry = confirm_popover(
-                    ("retry-pop", ix),
-                    Anchor::BottomLeft,
-                    Ask::Retry(retry_with.clone().flatten()),
-                    &end,
-                    retry_with.is_some(),
-                    action(("retry-turn", ix), Icon::new(crate::assets::Lucide::RefreshCw), if busy { "Stop the running turn to retry" } else { "Retry" }).disabled(busy),
-                );
-                let models = {
-                    let (ws, view, end, agent, current) = (at.workspace.clone(), view.clone(), end.clone(), at.agent.clone(), at.model.clone());
-                    action(("retry-with", ix), Icon::new(IconName::ChevronDown), "Retry with another model").disabled(busy).dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, cx| {
-                        menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Retry with");
-                        for m in ws.read(cx).models_for(&agent).into_iter().filter(|m| current.as_deref().is_none_or(|c| !crate::composer::same_model(c, &m.id))) {
-                            let (view, end) = (view.clone(), end.clone());
-                            menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(move |_, _, cx| {
-                                let (id, end) = (m.id.clone(), end.clone());
-                                let _ = view.update(cx, |this, cx| this.open_confirm(Ask::Retry(Some(id)), end, cx));
-                            }));
-                        }
-                        menu
-                    })
-                };
-                let fork = {
-                    let (ws, thread, scope, end) = (at.workspace.clone(), at.thread.clone(), at.scope.clone(), end.clone());
-                    action(("fork-turn", ix), Icon::new(crate::assets::Lucide::GitFork), "Fork from here: a new thread with the conversation up to this point").on_click(move |_, _, cx| {
-                        let (thread, scope, end) = (thread.clone(), scope.clone(), end.clone());
-                        ws.update(cx, |ws, cx| _ = ws.fork_thread(&thread, ForkAt::After(end), &scope, cx));
-                    })
-                };
-                // The latest turn's actions are always there; earlier ones show on hover.
-                let shown = at.last_end == Some(ix) || ask.is_some();
                 column(
                     h_flex()
                         .group("turn-end")
@@ -824,14 +859,7 @@ impl ThreadView {
                         )
                         .child(crate::time::clock(finished))
                         .when(took_secs >= 1, |el| el.child(div().text_color(muted.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs)))))
-                        .child(
-                            h_flex()
-                                .gap(px(2.))
-                                .when(!shown, |el| el.invisible().group_hover("turn-end", |s| s.visible()))
-                                .child(undo)
-                                .child(h_flex().child(retry).child(models))
-                                .child(fork),
-                        ),
+                        .child(turn_actions(ix)),
                 )
                 .into_any_element()
             }
@@ -964,23 +992,44 @@ impl ThreadView {
                     .into_any_element()
             }
             // Notices are plain text; drop the light markdown the built-in commands use.
-            (Row::Notice { .. }, Item::Notice { text }) => column(
-                h_flex().justify_center().py_1().text_xs().text_color(theme.muted_foreground).child(text.replace("**", "").replace('`', "")),
-            )
-            .into_any_element(),
-            (Row::Error { .. }, Item::Error { text }) => column(
-                div()
-                    .my_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(palette::red(cx).opacity(0.5))
-                    .bg(palette::red(cx).opacity(0.08))
-                    .text_sm()
-                    .child(text),
-            )
-            .into_any_element(),
+            (Row::Notice { ix }, Item::Notice { text }) => {
+                // An interrupted turn can be taken back or tried again from here.
+                let turn = ends_turn && live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                column(
+                    h_flex()
+                        .group("turn-end")
+                        .justify_center()
+                        .gap(px(6.))
+                        .py_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(text.replace("**", "").replace('`', ""))
+                        .when(turn, |el| el.child(turn_actions(ix))),
+                )
+                .into_any_element()
+            }
+            (Row::Error { ix }, Item::Error { text }) => {
+                let turn = live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                column(
+                    v_flex()
+                        .group("turn-end")
+                        .my_2()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(palette::red(cx).opacity(0.5))
+                                .bg(palette::red(cx).opacity(0.08))
+                                .text_sm()
+                                .child(text),
+                        )
+                        .when(turn, |el| el.child(turn_actions(ix))),
+                )
+                .into_any_element()
+            }
             // The transcript changed under the row (it's rebuilt on the next render).
             _ => div().into_any_element(),
         }
@@ -1000,11 +1049,9 @@ impl ThreadView {
         };
         let Some(message) = message else { return };
         let checkpoint = ws.store.checkpoint(&thread, &message).ok().flatten();
-        let in_repo = ws.thread(&thread).and_then(|t| t.cwd.as_deref()).is_some_and(|c| trek_core::store::project_root(c).join(".git").exists());
         let files = match &checkpoint {
             Some(_) => Files::Checking,
-            None if !in_repo => Files::Unavailable("This folder isn't a git repository, so Trek keeps no file checkpoints for it."),
-            None => Files::Unavailable("There's no file checkpoint from before this message (it was sent before Trek kept them, or outside Trek), so the files stay as they are."),
+            None => Files::Unavailable(ws.no_checkpoint(&thread, &message).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain()),
         };
         let check = checkpoint.as_ref().map(|c| {
             let (repo, sha) = (c.repo.clone(), c.sha.clone());
@@ -1114,6 +1161,7 @@ impl ThreadView {
                                 Change::Modified => "revert",
                                 Change::Added => "delete",
                                 Change::Deleted => "bring back",
+                                Change::Nested => "left as is",
                             };
                             h_flex()
                                 .gap(px(8.))
@@ -1456,8 +1504,10 @@ struct RowContext {
     model: Option<String>,
     /// A turn is running: nothing can be taken back yet.
     busy: bool,
-    /// The last turn's footer (its actions stay in view).
+    /// Where the last turn ended (its actions stay in view).
     last_end: Option<usize>,
+    /// The thread's folder is in a git repository (it gets file checkpoints).
+    in_repo: bool,
     text_size: Pixels,
     cwd: Option<std::path::PathBuf>,
     /// The search-result tint fades (the window is in front and motion isn't reduced).
@@ -1482,7 +1532,8 @@ impl Render for ThreadView {
             agent: t.map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode),
             model: t.and_then(|t| t.model.clone()),
             busy: ws.turn_running(&thread),
-            last_end: ws.live.get(&thread).and_then(|l| l.items.iter().rposition(|i| matches!(i, Item::TurnEnd { .. }))),
+            last_end: ws.live.get(&thread).and_then(|l| l.items.iter().rposition(trek_core::rewind::ends_turn)),
+            in_repo: crate::workspace::in_repo(t.and_then(|t| t.cwd.as_deref())),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
             cwd: ws.cwd_in(&self.scope),
@@ -1575,7 +1626,7 @@ mod tests {
     use trek_core::store::{Item, ToolStatus};
 
     fn user(t: &str) -> Item {
-        Item::User { text: t.into(), images: vec![], at: None, resume: None }
+        Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false }
     }
     fn said(t: &str) -> Item {
         Item::Assistant { text: t.into() }

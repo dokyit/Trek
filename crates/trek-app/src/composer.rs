@@ -75,10 +75,22 @@ struct Editing {
     /// Put the files back as they were when it was first sent; `None` when there's no checkpoint.
     restore: Option<bool>,
     /// Why the files can't be put back, when they can't.
-    why_not: &'static str,
-    /// What the composer held before (text, images): back on cancel.
+    why_not: String,
+    /// What putting the files back would change, once checked.
+    files: EditFiles,
+    /// What the composer held before (text, images): back on cancel, and once the edit is sent.
     draft: (String, Vec<PathBuf>),
+    _check: Option<Task<()>>,
 }
+
+enum EditFiles {
+    Checking,
+    Changes(Vec<trek_core::checkpoint::FileChange>),
+    Failed(String),
+}
+
+/// Files a tooltip lists before "and N more".
+const FILES_LISTED: usize = 8;
 
 /// True when `id` is `candidate` or a dated snapshot of it (claude-haiku-4-5-20251001).
 pub fn same_model(id: &str, candidate: &str) -> bool {
@@ -191,9 +203,19 @@ impl Composer {
         if text.trim().is_empty() && self.outbox.paths.is_empty() {
             return;
         }
-        if self.editing.as_ref().is_some_and(|e| self.workspace.read(cx).turn_running(&e.thread)) {
-            self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn to send the edited message.".into(), undo: None }));
-            return;
+        if let Some(e) = &self.editing {
+            let ws = self.workspace.read(cx);
+            let why = if ws.turn_running(&e.thread) {
+                Some("Stop the running turn to send the edited message.")
+            } else if !ws.can_rewind(&e.thread, &e.item) {
+                Some("That message can't be edited any more.")
+            } else {
+                None
+            };
+            if let Some(message) = why {
+                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: message.into(), undo: None }));
+                return;
+            }
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
         self.trigger = None;
@@ -201,8 +223,18 @@ impl Composer {
         let images = std::mem::take(&mut self.outbox.paths);
         let scope = self.scope.clone();
         match self.editing.take() {
-            // Sent in place of the message: the conversation goes back to just before it.
-            Some(e) => self.workspace.update(cx, |ws, cx| _ = ws.edit_and_resend(&e.thread, &e.item, text, images, e.restore.unwrap_or(false), cx)),
+            // Sent in place of the message: the conversation goes back to just before it. What
+            // the composer held before the edit comes back.
+            Some(e) => {
+                let restore = e.restore == Some(true) && !matches!(&e.files, EditFiles::Changes(c) if c.is_empty());
+                let sent = self.workspace.update(cx, |ws, cx| ws.edit_and_resend(&e.thread, &e.item, text.clone(), images.clone(), restore, cx));
+                let (text, images) = if sent { e.draft.clone() } else { (text, images) };
+                self.outbox.paths = images;
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+                if !sent {
+                    self.editing = Some(e);
+                }
+            }
             None => self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx)),
         }
     }
@@ -219,14 +251,39 @@ impl Composer {
             None => (self.input.read(cx).value().to_string(), std::mem::take(&mut self.outbox.paths)),
         };
         let ws = self.workspace.read(cx);
-        let checkpoint = ws.store.checkpoint(thread, &item).ok().flatten().is_some();
-        let in_repo = ws.thread(thread).and_then(|t| t.cwd.as_deref()).is_some_and(|c| trek_core::store::project_root(c).join(".git").exists());
-        let why_not = if in_repo {
-            "There's no file checkpoint from before this message (it was sent before Trek kept them, or outside Trek), so the files stay as they are."
-        } else {
-            "This folder isn't a git repository, so Trek keeps no file checkpoints for it."
-        };
-        self.editing = Some(Editing { thread: thread.to_string(), item, restore: checkpoint.then_some(true), why_not, draft });
+        let checkpoint = ws.store.checkpoint(thread, &item).ok().flatten();
+        let why_not = ws.no_checkpoint(thread, &item).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain();
+        // Which files sending it would put back, found off the main thread.
+        let check = checkpoint.as_ref().map(|c| {
+            let (repo, sha) = (c.repo.clone(), c.sha.clone());
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let r = trek_core::checkpoint::Repo::find(&repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display()))?;
+                        r.changes_since(&sha)
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(e) = this.editing.as_mut() {
+                        e.files = match result {
+                            Ok(changes) => EditFiles::Changes(changes),
+                            Err(e) => EditFiles::Failed(format!("{e:#}")),
+                        };
+                        cx.notify();
+                    }
+                });
+            })
+        });
+        self.editing = Some(Editing {
+            thread: thread.to_string(),
+            item,
+            restore: checkpoint.is_some().then_some(true),
+            why_not,
+            files: EditFiles::Checking,
+            draft,
+            _check: check,
+        });
         self.outbox.paths = images.to_vec();
         self.input.update(cx, |s, cx| {
             s.set_value(text, window, cx);
@@ -251,19 +308,42 @@ impl Composer {
     fn edit_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let e = self.editing.as_ref()?;
         let theme = cx.theme().clone();
-        let restore = match e.restore {
-            Some(on) => ui::check_row("edit-restore", "Restore files", on, false, cx)
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Put the files back as they were when this message was first sent").build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| {
+        let tooltip = |text: String| move |window: &mut Window, cx: &mut App| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx);
+        let restore = match (e.restore, &e.files) {
+            (Some(_), EditFiles::Changes(changes)) if changes.is_empty() => {
+                ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(tooltip("The files are as they were when this message was first sent.".into()))
+            }
+            (Some(on), files) => {
+                // What sending it puts back, before it's sent: restoring reverts edits made since
+                // (yours too) and removes files created since.
+                let (label, tip) = match files {
+                    EditFiles::Checking => ("Restore files".to_string(), "Checking which files changed…".to_string()),
+                    EditFiles::Failed(why) => ("Restore files".to_string(), format!("Couldn't check the files: {why}")),
+                    EditFiles::Changes(changes) => {
+                        let mut tip = String::from("Put the files back as they were when this message was first sent:");
+                        for f in changes.iter().filter(|f| f.change != trek_core::checkpoint::Change::Nested).take(FILES_LISTED) {
+                            let what = match f.change {
+                                trek_core::checkpoint::Change::Added => "delete",
+                                trek_core::checkpoint::Change::Deleted => "bring back",
+                                _ => "revert",
+                            };
+                            tip.push_str(&format!("\n{what} {}", f.path));
+                        }
+                        let n = changes.iter().filter(|f| f.change != trek_core::checkpoint::Change::Nested).count();
+                        if n > FILES_LISTED {
+                            tip.push_str(&format!("\nand {} more", n - FILES_LISTED));
+                        }
+                        (format!("Restore {n} file{}", if n == 1 { "" } else { "s" }), tip)
+                    }
+                };
+                ui::check_row("edit-restore", label, on, false, cx).tooltip(tooltip(tip)).on_click(cx.listener(|this, _, _, cx| {
                     if let Some(e) = this.editing.as_mut() {
                         e.restore = e.restore.map(|on| !on);
                     }
                     cx.notify();
-                })),
-            None => {
-                let why = e.why_not;
-                ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(why).build(window, cx))
+                }))
             }
+            (None, _) => ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(tooltip(e.why_not.clone())),
         };
         Some(
             h_flex()

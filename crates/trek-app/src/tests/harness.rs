@@ -362,7 +362,7 @@ pub fn store_items(store: &Store, thread: &str, items: Vec<Item>) {
 pub fn transcript(turns: usize) -> Vec<Item> {
     let mut items = Vec::with_capacity(turns * 6);
     for i in 0..turns {
-        items.push(Item::User { text: format!("Step {i}: tighten the error handling in the request parser and add a test."), images: vec![], at: Some(1_759_400_000_000 + i as i64 * 60_000), resume: None });
+        items.push(Item::User { text: format!("Step {i}: tighten the error handling in the request parser and add a test."), images: vec![], at: Some(1_759_400_000_000 + i as i64 * 60_000), resume: None, aside: false });
         items.push(Item::Tool { id: format!("t{i}a"), title: "Read".into(), detail: "src/parser.rs".into(), output: "pub fn parse(input: &str) -> Result<Request> { … }".into(), status: trek_core::store::ToolStatus::Done });
         items.push(Item::Tool { id: format!("t{i}b"), title: "Edit".into(), detail: "src/parser.rs".into(), output: "Applied 1 edit".into(), status: trek_core::store::ToolStatus::Done });
         items.push(Item::Assistant {

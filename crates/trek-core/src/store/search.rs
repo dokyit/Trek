@@ -532,7 +532,7 @@ mod tests {
     use crate::types::{AgentId, Effort, HandHolding};
 
     fn user(t: &str) -> Item {
-        Item::User { text: t.into(), images: vec![], at: None, resume: None }
+        Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false }
     }
     fn said(t: &str) -> Item {
         Item::Assistant { text: t.into() }

@@ -52,6 +52,11 @@ pub fn remembered(id: &str) -> Vec<String> {
     HISTORY.lock().unwrap().get(id).map(|h| h.iter().map(|(_, m)| m.clone()).collect()).unwrap_or_default()
 }
 
+/// The mark of the last turn in session `id` (see `crate::session_tail`).
+pub fn last_mark(id: &str) -> Option<String> {
+    HISTORY.lock().unwrap().get(id)?.last().map(|(mark, _)| mark.clone())
+}
+
 /// A message that came with a recap of the conversation: the messages the recap holds, and the
 /// message itself.
 fn split_recap(text: &str) -> (Vec<String>, &str) {

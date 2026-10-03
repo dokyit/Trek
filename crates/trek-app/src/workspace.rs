@@ -134,9 +134,15 @@ pub struct LiveThread {
     /// The latest point the agent's session can be taken back to (`AgentEvent::Mark`); saved to
     /// the thread as turns end (`Thread::native_at`).
     pub mark: Option<String>,
+    /// Messages with a file checkpoint (as the store has them).
+    pub checkpointed: HashSet<String>,
+    /// Messages whose checkpoint couldn't be taken, and why.
+    pub checkpoint_failed: HashMap<String, String>,
     /// Git work for this thread (checkpoints, restoring files), done in order off the main thread.
     git_jobs: VecDeque<GitJob>,
     git_busy: bool,
+    /// Shared with the git work under way, so deleting the thread can wait for it.
+    git_guard: std::sync::Arc<GitGuard>,
     /// Messages for the agent held until the git work before them is done: a turn mustn't start
     /// before its checkpoint is taken, or before files a rewind restores are back.
     held: Vec<Command>,
@@ -146,17 +152,97 @@ pub struct LiveThread {
     _events: Option<Task<()>>,
 }
 
-/// Git work queued on a thread (see `LiveThread::git_jobs`).
+/// Held by a thread's git work while it runs. Once the thread is deleted (`gone`), work that
+/// hadn't started does nothing, and the cleanup takes the lock, so it runs after any that had.
+#[derive(Default)]
+struct GitGuard {
+    lock: std::sync::Mutex<()>,
+    gone: std::sync::atomic::AtomicBool,
+}
+
+/// Work queued on a thread before its next message reaches the agent (see `LiveThread::git_jobs`):
+/// git, mostly.
 #[derive(Debug, Clone)]
 enum GitJob {
     /// Snapshot the files in `cwd` (if it's in a git repo) as message `item` goes out.
     Checkpoint { cwd: PathBuf, item: String },
+    /// Find where the agent's `session` stands (`trek_agents::session_tail`), for message `item`
+    /// sent in a thread that doesn't know yet (imported, or kept by an older Trek).
+    FindPoint { agent: AgentId, session: String, item: String },
     /// Put the files back as checkpoint `sha` of `repo` has them.
     Restore { repo: PathBuf, sha: String },
     /// Drop checkpoints by message (theirs left the transcript).
     Forget { repo: PathBuf, items: Vec<String> },
     /// Give a fork the checkpoints of the messages it copied: `(item, commit)`.
     Link { repo: PathBuf, checkpoints: Vec<(String, String)> },
+}
+
+/// What a `GitJob` came to.
+enum GitDone {
+    Nothing,
+    /// A checkpoint was taken.
+    Taken,
+    Restored(trek_core::checkpoint::Restored),
+    /// Where the session stands (`GitJob::FindPoint`).
+    Point(Option<String>),
+}
+
+/// Why a message has no file checkpoint to go back to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NoCheckpoint {
+    /// The thread's folder isn't in a git repository.
+    NotGit,
+    /// Sent while a turn ran, it steered that turn: the turn's first message has its checkpoint.
+    Steered,
+    /// Taking it failed, and why.
+    Failed(String),
+    /// Sent before Trek kept checkpoints, or outside Trek (imported history).
+    Missing,
+}
+
+impl NoCheckpoint {
+    /// Why, for a tooltip.
+    pub fn short(&self) -> &'static str {
+        match self {
+            NoCheckpoint::NotGit => "files aren't restored: not a git repository",
+            NoCheckpoint::Steered => "files aren't restored: sent mid-turn",
+            NoCheckpoint::Failed(_) => "files aren't restored: the checkpoint failed",
+            NoCheckpoint::Missing => "files aren't restored: no checkpoint",
+        }
+    }
+
+    /// Why, in full.
+    pub fn explain(&self) -> String {
+        match self {
+            NoCheckpoint::NotGit => "This folder isn't a git repository, so Trek keeps no file checkpoints for it.".into(),
+            NoCheckpoint::Steered => "This message was sent while a turn was running, so it has no file checkpoint of its own; undo that turn to put the files back.".into(),
+            NoCheckpoint::Failed(why) => format!("Trek couldn't take a file checkpoint when this was sent ({why}), so the files stay as they are."),
+            NoCheckpoint::Missing => "There's no file checkpoint from before this message (it was sent before Trek kept them, or outside Trek), so the files stay as they are.".into(),
+        }
+    }
+
+    /// Why message `pos` of `live` has no checkpoint; `None` when it has one. `in_repo`: the
+    /// thread's folder is in a git repository.
+    pub fn of(live: &LiveThread, pos: usize, in_repo: bool) -> Option<NoCheckpoint> {
+        let item = live.items.id_at(pos)?;
+        if live.checkpointed.contains(item) {
+            return None;
+        }
+        Some(if let Some(why) = live.checkpoint_failed.get(item) {
+            NoCheckpoint::Failed(why.clone())
+        } else if !in_repo {
+            NoCheckpoint::NotGit
+        } else if trek_core::rewind::turn_start(&live.items, pos + 1).is_some_and(|start| start != pos) {
+            NoCheckpoint::Steered
+        } else {
+            NoCheckpoint::Missing
+        })
+    }
+}
+
+/// Whether `cwd` is in a git repository (as checkpoints see it).
+pub fn in_repo(cwd: Option<&std::path::Path>) -> bool {
+    cwd.is_some_and(|c| trek_core::store::project_root(c).join(".git").exists())
 }
 
 /// Where a fork takes its conversation up to.
@@ -359,6 +445,8 @@ pub enum WorkspaceEvent {
 pub enum UndoAction {
     Unsettle(String),
     Unarchive(String),
+    /// Put the files of `repo` back as they were before a restore (`Restored::undo`).
+    Unrestore { thread: String, repo: PathBuf, sha: String },
 }
 
 /// Git state of the folder on screen, for the composer's branch chip.
@@ -1206,6 +1294,7 @@ impl Workspace {
         if live.loaded || live.loading {
             return;
         }
+        live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
         let rows = self.store.items_with_ids(id).unwrap_or_default();
         if !rows.is_empty() {
             live.items = Transcript::stored(rows);
@@ -1566,7 +1655,7 @@ impl Workspace {
                 return;
             }
             let live = self.live.entry(id.clone()).or_default();
-            live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()), resume: None });
+            live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()), resume: None, aside: true });
             live.items.push(Item::Notice { text: reply });
             live.revision += 1;
             self.persist_items(&id, cx);
@@ -1584,7 +1673,7 @@ impl Workspace {
             let (answers, secret) = typed_answers(&questions, picked, &text);
             if let Some(live) = self.live.get_mut(&id) {
                 // A secret (a token, a password) goes to the agent and nowhere else.
-                live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()), resume: None } });
+                live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()), resume: None, aside: true } });
             }
             self.answer(&id, &request_id, answers, cx);
             self.persist_items(&id, cx);
@@ -1600,11 +1689,23 @@ impl Workspace {
             return;
         }
         let resume = self.resume_point(&id);
+        // Where the session stands isn't known yet (an imported thread, or one an older Trek
+        // kept): it's read from the agent's files before the message goes, or a rewind to it
+        // couldn't take the agent's own session back.
+        let find_point = match (&resume, self.thread(&id)) {
+            (Some(ResumePoint { session, after: None }), Some(t)) if !running && t.reopen.is_none() && trek_agents::resumes_partway(&t.agent, t.model.as_deref()) => {
+                Some((t.agent.clone(), session.clone()))
+            }
+            _ => None,
+        };
         let cwd = self.thread(&id).and_then(|t| t.cwd.clone());
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
         live.drop_after_turn();
-        let ix = live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()), resume });
+        let ix = live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()), resume, aside: false });
+        if let (Some((agent, session)), Some(item)) = (find_point, live.items.id_at(ix)) {
+            live.git_jobs.push_back(GitJob::FindPoint { agent, session, item: item.to_string() });
+        }
         live.streaming = None;
         live.reasoning = None;
         // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
@@ -1613,8 +1714,7 @@ impl Workspace {
             live.tasks.clear();
             // A new turn starts from a checkpoint of the files, taken before the agent has the
             // message (it's held until then): a rewind can put them back.
-            let in_repo = cwd.as_deref().is_some_and(|c| trek_core::store::project_root(c).join(".git").exists());
-            if let (Some(cwd), Some(item), true) = (cwd, live.items.id_at(ix).map(str::to_string), in_repo) {
+            if let (Some(cwd), Some(item), true) = (cwd.clone(), live.items.id_at(ix).map(str::to_string), in_repo(cwd.as_deref())) {
                 live.git_jobs.push_back(GitJob::Checkpoint { cwd, item });
             }
         }
@@ -2014,10 +2114,22 @@ impl Workspace {
             || self.thread(id).is_some_and(|t| {
                 (started && t.reopen.is_some()) || native.as_ref().is_some_and(|n| t.native_id.as_ref() != Some(n)) || run_state.is_some_and(|s| t.run_state != s)
             });
+        // The agent moved to another session than the thread's (it couldn't cut its own back, or
+        // started over): the one left behind isn't this thread's any more, and mustn't come
+        // back as an imported thread of its own.
+        let left = native.as_ref().and_then(|n| current_native.clone().filter(|old| old != n));
+        if let Some(old) = &left {
+            if let Err(e) = self.store.retire_session(old, id) {
+                tracing::warn!("retire session {old}: {e}");
+            }
+        }
         if changed {
             self.mutate_thread(id, cx, |t| {
                 if let Some(n) = native {
                     t.native_id = Some(n);
+                }
+                if left.is_some() {
+                    t.source = ThreadSource::Trek;
                 }
                 if started {
                     t.reopen = None;
@@ -2196,7 +2308,17 @@ impl Workspace {
     }
 
     pub fn interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.dispatch(id, Command::Interrupt);
+        let Some(live) = self.live.get_mut(id) else { return };
+        // A stop never waits behind git work. If the message is still held for its checkpoint,
+        // the agent never gets it: the turn ends here.
+        if live.held.iter().any(|c| matches!(c, Command::Prompt { .. })) {
+            live.held.retain(|c| !matches!(c, Command::Prompt { .. }));
+            self.apply_events(id, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }], cx);
+            return;
+        }
+        if let Some(tx) = &live.commands {
+            let _ = tx.try_send(Command::Interrupt);
+        }
         cx.notify();
     }
 
@@ -2224,31 +2346,88 @@ impl Workspace {
             return;
         };
         live.git_busy = true;
-        let (store, thread, run) = (self.store.clone(), id.to_string(), job.clone());
+        let (store, thread, run, guard) = (self.store.clone(), id.to_string(), job.clone(), live.git_guard.clone());
         live._git = Some(cx.spawn(async move |this, cx| {
             let t = thread.clone();
-            let result = cx.background_executor().spawn(async move { git_job(&store, &t, run) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let _held = guard.lock.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.gone.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Ok(GitDone::Nothing);
+                    }
+                    git_job(&store, &t, run)
+                })
+                .await;
             let _ = this.update(cx, |this, cx| this.git_done(&thread, job, result, cx));
         }));
     }
 
-    fn git_done(&mut self, id: &str, job: GitJob, result: anyhow::Result<usize>, cx: &mut Context<Self>) {
-        if let Some(live) = self.live.get_mut(id) {
-            live.git_busy = false;
-        }
+    fn git_done(&mut self, id: &str, job: GitJob, result: anyhow::Result<GitDone>, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id) else { return };
+        live.git_busy = false;
         match (job, result) {
-            (GitJob::Restore { repo, .. }, Ok(files)) => {
-                if files > 0 {
-                    let message = if files == 1 { "Restored 1 file".to_string() } else { format!("Restored {files} files") };
-                    cx.emit(WorkspaceEvent::Toast { message, undo: None });
+            // Taking one may have pruned the oldest.
+            (GitJob::Checkpoint { .. }, Ok(GitDone::Taken)) => live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect(),
+            (GitJob::Checkpoint { item, .. }, Err(e)) => {
+                tracing::warn!("checkpoint of {id}: {e:#}");
+                // Said once per thread: a repo where it fails tends to fail every time.
+                let first = live.checkpoint_failed.is_empty();
+                live.checkpoint_failed.insert(item, format!("{e:#}"));
+                live.revision += 1;
+                if first {
+                    cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't checkpoint the files: {e:#}"), undo: None });
+                }
+            }
+            (GitJob::FindPoint { session, item, .. }, Ok(GitDone::Point(Some(at)))) => {
+                if let Some(pos) = live.items.position(&item) {
+                    if let Some(Item::User { resume: Some(ResumePoint { session: s, after }), .. }) = live.items.get_mut(pos) {
+                        if *s == session && after.is_none() {
+                            *after = Some(at.clone());
+                        }
+                    }
+                }
+                live.mark.get_or_insert(at);
+                self.persist_items(id, cx);
+            }
+            (GitJob::Restore { repo, .. }, result) => {
+                let restored = result.as_ref().ok().and_then(|d| if let GitDone::Restored(r) = d { Some(r) } else { None });
+                let failed = match &result {
+                    Err(e) => Some(format!("Couldn't restore the files: {e:#}")),
+                    Ok(_) => restored.and_then(|r| r.failed.first().map(|(path, why)| (r.failed.len(), path, why))).map(|(n, path, why)| {
+                        let what = if path.is_empty() { why.clone() } else { format!("{path}: {why}") };
+                        let more = if n > 1 { format!(" and {} more", n - 1) } else { String::new() };
+                        format!("Couldn't restore {what}{more}")
+                    }),
+                };
+                // Restoring went wrong: the checkpoints it would have dropped stay, so the
+                // files can still be had from them.
+                if failed.is_some() {
+                    live.git_jobs.retain(|j| !matches!(j, GitJob::Forget { .. }));
+                }
+                let n = restored.map_or(0, |r| r.restored());
+                let message = match (n, failed) {
+                    (0, Some(f)) => Some(f),
+                    (n, Some(f)) => Some(format!("Restored {n} file{} · {f}", if n == 1 { "" } else { "s" })),
+                    (0, None) => None,
+                    (n, None) => Some(format!("Restored {n} file{}", if n == 1 { "" } else { "s" })),
+                };
+                let undo = restored.and_then(|r| r.undo.clone()).map(|sha| UndoAction::Unrestore { thread: id.to_string(), repo: repo.clone(), sha });
+                if let Some(message) = message {
+                    cx.emit(WorkspaceEvent::Toast { message, undo });
                 }
                 self.refresh_git_at(repo, cx);
                 if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()) {
                     self.refresh_git_at(cwd, cx);
                 }
             }
-            (GitJob::Restore { .. }, Err(e)) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't restore the files: {e:#}"), undo: None }),
-            (_, Err(e)) => tracing::warn!("checkpoints of {id}: {e:#}"),
+            (GitJob::Forget { items, .. }, Ok(_)) => {
+                for i in &items {
+                    live.checkpointed.remove(i);
+                }
+            }
+            (GitJob::Link { checkpoints, .. }, Ok(_)) => live.checkpointed.extend(checkpoints.into_iter().map(|(item, _)| item)),
+            (_, Err(e)) => tracing::warn!("git work for {id}: {e:#}"),
             _ => {}
         }
         self.run_git(id, cx);
@@ -2285,7 +2464,7 @@ impl Workspace {
         let checkpoints = self.store.checkpoints(id).unwrap_or_default();
         let live = self.live.get_mut(id).filter(|l| l.loaded && !l.loading)?;
         let pos = live.items.position(item)?;
-        let Item::User { text, images, .. } = live.items[pos].clone() else { return None };
+        let Item::User { text, images, aside: false, .. } = live.items[pos].clone() else { return None };
         let removed: HashSet<String> = live.items.ids()[pos..].iter().cloned().collect();
         // The session goes; the next message starts one that knows only what's kept.
         if let Some(tx) = live.commands.take() {
@@ -2341,6 +2520,18 @@ impl Workspace {
         });
         self.run_git(id, cx);
         Some((text, images.into_iter().map(PathBuf::from).collect()))
+    }
+
+    /// Whether `id` can be rewound to just before message `item` now (see `rewind`).
+    pub fn can_rewind(&self, id: &str, item: &str) -> bool {
+        let live = self.live.get(id).filter(|l| l.loaded && !l.loading);
+        !self.turn_running(id) && live.and_then(|l| l.items.position(item).map(|p| matches!(l.items[p], Item::User { aside: false, .. }))).unwrap_or(false)
+    }
+
+    /// Why message `item` of `id` has no file checkpoint to go back to; `None` when it has one.
+    pub fn no_checkpoint(&self, id: &str, item: &str) -> Option<NoCheckpoint> {
+        let live = self.live.get(id)?;
+        NoCheckpoint::of(live, live.items.position(item)?, in_repo(self.thread(id).and_then(|t| t.cwd.as_deref())))
     }
 
     /// How the agent would pick up `id` if it were rewound to just before message `item`.
@@ -2552,21 +2743,37 @@ impl Workspace {
         if let Some(tx) = self.live.get(id).and_then(|l| l.commands.clone()) {
             let _ = tx.try_send(Command::Shutdown);
         }
-        self.live.remove(id);
-        // Its file checkpoints go with it, and its side chats' (they go too).
-        let checkpoints = self.store.checkpoints(id).unwrap_or_default();
-        let mut refs: Vec<(String, PathBuf)> = checkpoints.iter().map(|c| (id.to_string(), c.repo.clone())).collect();
+        // Its file checkpoints go with it, and its side chats' (they go too): in the repos they
+        // were taken in, and the one its folder is in (a checkpoint may be being taken now).
+        let mut threads = vec![thread.clone()];
         if thread.source == ThreadSource::Trek {
-            for side in self.threads.iter().filter(|t| t.side_of.as_deref() == Some(id)) {
-                refs.extend(self.store.checkpoints(&side.id).unwrap_or_default().into_iter().map(|c| (side.id.clone(), c.repo)));
+            threads.extend(self.threads.iter().filter(|t| t.side_of.as_deref() == Some(id)).cloned());
+        }
+        let checkpoints = self.store.checkpoints(id).unwrap_or_default();
+        let mut refs: HashSet<(String, PathBuf)> = HashSet::new();
+        let mut guards = vec![];
+        for t in &threads {
+            refs.extend(self.store.checkpoints(&t.id).unwrap_or_default().into_iter().map(|c| (t.id.clone(), c.repo)));
+            if let Some(cwd) = t.cwd.as_deref().filter(|c| in_repo(Some(c))) {
+                refs.insert((t.id.clone(), cwd.to_path_buf()));
+            }
+            if let Some(live) = self.live.remove(&t.id) {
+                live.git_guard.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                guards.push(live.git_guard.clone());
             }
         }
-        let refs: HashSet<(String, PathBuf)> = refs.into_iter().collect();
         if !refs.is_empty() {
+            let store = self.store.clone();
             cx.background_executor()
                 .spawn(async move {
+                    // After the git work under way: what it took goes too.
+                    let _held: Vec<_> = guards.iter().map(|g| g.lock.lock().unwrap_or_else(|e| e.into_inner())).collect();
                     for (thread, repo) in refs {
                         if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread)) {
+                            tracing::warn!("drop checkpoints of {thread}: {e:#}");
+                        }
+                        let items: Vec<String> = store.checkpoints(&thread).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+                        if let Err(e) = store.delete_checkpoints(&thread, &items) {
                             tracing::warn!("drop checkpoints of {thread}: {e:#}");
                         }
                     }
@@ -2683,6 +2890,12 @@ impl Workspace {
                 let _ = self.store.update_thread(&id, |t| t.archived_at = None);
                 self.reload(cx);
             }
+            // Not for a thread deleted since: its refs are gone.
+            UndoAction::Unrestore { thread, repo, sha } if self.thread(&thread).is_some() => {
+                self.live.entry(thread.clone()).or_default().git_jobs.push_back(GitJob::Restore { repo, sha });
+                self.run_git(&thread, cx);
+            }
+            UndoAction::Unrestore { .. } => {}
         }
     }
 
@@ -3310,32 +3523,33 @@ impl Workspace {
 }
 
 /// One piece of a thread's git work (blocking). Returns how many files a restore changed.
-fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<usize> {
+fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<GitDone> {
     use trek_core::checkpoint::{KEEP, Repo};
     let repo_at = |path: &std::path::Path| Repo::find(path).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", path.display()));
     match job {
         GitJob::Checkpoint { cwd, item } => {
             // Folders outside git get no checkpoints.
-            let Some(repo) = Repo::find(&cwd) else { return Ok(0) };
+            let Some(repo) = Repo::find(&cwd) else { return Ok(GitDone::Nothing) };
             let sha = repo.snapshot(thread, &item)?;
             store.add_checkpoint(thread, &item, &repo.top, &sha)?;
             prune_checkpoints(store, thread, KEEP)?;
-            Ok(0)
+            Ok(GitDone::Taken)
         }
-        GitJob::Restore { repo, sha } => Ok(repo_at(&repo)?.restore(&sha)?.len()),
+        GitJob::FindPoint { agent, session, .. } => Ok(GitDone::Point(trek_agents::session_tail(&agent, &session))),
+        GitJob::Restore { repo, sha } => Ok(GitDone::Restored(repo_at(&repo)?.restore(&sha, thread)?)),
         GitJob::Forget { repo, items } => {
             if let Some(r) = Repo::find(&repo) {
                 r.delete(thread, &items)?;
             }
             store.delete_checkpoints(thread, &items)?;
-            Ok(0)
+            Ok(GitDone::Nothing)
         }
         GitJob::Link { repo, checkpoints } => {
             repo_at(&repo)?.link(thread, &checkpoints)?;
             for (item, sha) in &checkpoints {
                 store.add_checkpoint(thread, item, &repo, sha)?;
             }
-            Ok(0)
+            Ok(GitDone::Nothing)
         }
     }
 }
@@ -3725,6 +3939,22 @@ mod tests {
         assert!(cost_reply(true, Some(&Billing::Plan(Some("Claude Max".into()))), 3.5).starts_with("About $3.50 at API prices so far. It's included in your Claude Max plan"));
         assert_eq!(cost_reply(true, Some(&Billing::Metered), 1.25), "This session has cost $1.25 so far.");
         assert_eq!(cost_reply(true, Some(&Billing::Local), 0.0), "This session runs on a local model, so nothing is billed.");
+    }
+
+    #[test]
+    fn messages_without_a_checkpoint_say_why() {
+        let user = |t: &str| Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false };
+        let mut live = LiveThread::default();
+        live.items = Transcript::unsaved(vec![user("a"), Item::Assistant { text: "1".into() }, user("steer"), Item::TurnEnd { at: 1, took_secs: 1 }, user("b"), user("c")]);
+        let id = |ix: usize| live.items.id_at(ix).unwrap().to_string();
+        live.checkpointed.insert(id(0));
+        live.checkpoint_failed.insert(id(5), "git add took longer than 10s".into());
+        assert_eq!(NoCheckpoint::of(&live, 0, true), None);
+        assert_eq!(NoCheckpoint::of(&live, 2, true), Some(NoCheckpoint::Steered));
+        assert_eq!(NoCheckpoint::of(&live, 4, true), Some(NoCheckpoint::Missing));
+        assert_eq!(NoCheckpoint::of(&live, 4, false), Some(NoCheckpoint::NotGit));
+        assert!(matches!(NoCheckpoint::of(&live, 5, true), Some(NoCheckpoint::Failed(why)) if why.contains("longer")));
+        assert!(NoCheckpoint::Failed("boom".into()).explain().contains("(boom)"));
     }
 
     #[test]

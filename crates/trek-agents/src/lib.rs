@@ -174,6 +174,18 @@ pub fn resumes_partway(agent: &AgentId, model: Option<&str>) -> bool {
     }
 }
 
+/// Where session `session` of `agent` stands now (`ResumePoint::after` for a message sent next),
+/// read from the agent's own files: for threads whose point Trek doesn't know yet (imported, or
+/// kept by an older Trek). Reads the session from the start: run it off the main thread.
+pub fn session_tail(agent: &AgentId, session: &str) -> Option<String> {
+    match agent {
+        AgentId::ClaudeCode => trek_core::import::claude::last_message(session),
+        AgentId::Codex => trek_core::import::codex::last_turn(session),
+        AgentId::Direct(p) if p == mock::PROVIDER => mock::last_mark(session),
+        _ => None,
+    }
+}
+
 /// The first message of a session that starts afresh in a conversation already under way.
 pub(crate) fn recap_prompt(recap: &str, text: &str) -> String {
     format!(

@@ -341,6 +341,28 @@ pub fn has_message(id: &str, uuid: &str) -> bool {
     BufReader::new(file).lines().map_while(Result::ok).any(|l| l.contains(&needle))
 }
 
+/// The id of a line of the conversation that `--resume-session-at` can cut it after: a user or
+/// assistant message of the main conversation (not a sub-agent's).
+fn message_uuid(v: &Value) -> Option<&str> {
+    (matches!(v["type"].as_str(), Some("user" | "assistant")) && v["isSidechain"] != true).then(|| v["uuid"].as_str()).flatten()
+}
+
+/// The last message in session `id` so far: where a message sent now goes after.
+pub fn last_message(id: &str) -> Option<String> {
+    last_message_in(&find_session(id)?)
+}
+
+fn last_message_in(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut last = None;
+    for line in BufReader::new(file).lines().map_while(Result::ok).filter(|l| l.contains("\"uuid\"")) {
+        if let Some(uuid) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(message_uuid) {
+            last = Some(uuid.to_string());
+        }
+    }
+    last
+}
+
 fn tool_title(name: &str, input: &Value) -> (String, String) {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
     match name {
@@ -390,10 +412,8 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
         let at = v["timestamp"].as_str().and_then(ms_from_rfc3339);
         let content = &v["message"]["content"];
         let before = last_message.clone();
-        if matches!(v["type"].as_str(), Some("user" | "assistant")) {
-            if let Some(uuid) = v["uuid"].as_str() {
-                last_message = Some(uuid.to_string());
-            }
+        if let Some(uuid) = message_uuid(&v) {
+            last_message = Some(uuid.to_string());
         }
         match v["type"].as_str() {
             Some("user") => {
@@ -733,7 +753,7 @@ mod tests {
         let items = load_file(&path).unwrap();
         let at = |s: &str| ms_from_rfc3339(s);
         let resume = |after: Option<&str>| Some(ResumePoint { session: "a".into(), after: after.map(String::from) });
-        assert_eq!(items[0], Item::User { text: "fix the build".into(), images: vec![], at: at("2026-10-01T10:00:00Z"), resume: resume(None) });
+        assert_eq!(items[0], Item::User { text: "fix the build".into(), images: vec![], at: at("2026-10-01T10:00:00Z"), resume: resume(None), aside: false });
         assert!(matches!(&items[1], Item::Tool { output, .. } if output == "error[E0425]"));
         assert_eq!(items[2], Item::Assistant { text: "Fixed the missing import.".into() });
         assert_eq!(items[3], Item::TurnEnd { at: at("2026-10-01T10:00:42Z").unwrap(), took_secs: 42 });
@@ -742,6 +762,8 @@ mod tests {
         // Each message can be cut off at the last line before it.
         assert!(matches!(&items[4], Item::User { resume: r, .. } if *r == resume(Some("l6"))));
         assert!(matches!(&items[6], Item::User { resume: r, .. } if *r == resume(Some("l9"))));
+        // A message sent now goes after the last one.
+        assert_eq!(last_message_in(&path).as_deref(), Some("l10"));
     }
 
     /// Each item's kind, with a user message's first word and a footer's duration.

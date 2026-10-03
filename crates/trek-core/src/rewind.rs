@@ -51,17 +51,23 @@ pub fn reopen_before(kept: &[Item], point: Option<&ResumePoint>, current: Option
     }
 }
 
-/// Where the turn ending at `end` (its `TurnEnd`) began: the first message after the previous
-/// turn's end, so a message that steered the turn is part of it.
+/// Where the turn ending at `end` (its `TurnEnd`, error or interruption) began: the first message
+/// after the previous turn's end, so a message that steered the turn is part of it. Asides (a
+/// command Trek answered, an answer to the agent's question) don't start turns.
 pub fn turn_start(items: &[Item], end: usize) -> Option<usize> {
     let end = end.min(items.len());
-    let boundary = items[..end].iter().rposition(|i| match i {
+    let boundary = items[..end].iter().rposition(ends_turn);
+    let from = boundary.map_or(0, |b| b + 1);
+    items[from..end].iter().position(|i| matches!(i, Item::User { aside: false, .. })).map(|p| from + p)
+}
+
+/// Whether `item` ends a turn: its footer, a failure, or an interruption.
+pub fn ends_turn(item: &Item) -> bool {
+    match item {
         Item::TurnEnd { .. } | Item::Error { .. } => true,
         Item::Notice { text } => text == "Interrupted" || text == INTERRUPTED_BY_QUIT,
         _ => false,
-    });
-    let from = boundary.map_or(0, |b| b + 1);
-    items[from..end].iter().position(|i| matches!(i, Item::User { .. })).map(|p| from + p)
+    }
 }
 
 /// Longest a single message runs in a recap.
@@ -128,7 +134,7 @@ mod tests {
     use crate::store::ToolStatus;
 
     fn user(t: &str) -> Item {
-        Item::User { text: t.into(), images: vec![], at: None, resume: None }
+        Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false }
     }
     fn said(t: &str) -> Item {
         Item::Assistant { text: t.into() }
@@ -154,6 +160,22 @@ mod tests {
         let items = [user("a"), Item::Notice { text: "Codex couldn't reopen".into() }, said("2"), end()];
         assert_eq!(turn_start(&items, 3), Some(0));
         assert_eq!(turn_start(&[said("woke up"), end()], 1), None);
+    }
+
+    #[test]
+    fn asides_dont_start_turns() {
+        let aside = |t: &str| Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: true };
+        // A command Trek answered itself between two turns.
+        let items = [user("remember APPLE"), said("ok"), end(), aside("/model"), Item::Notice { text: "Model: haiku".into() }, user("remember PEAR"), said("ok"), end()];
+        assert_eq!(turn_start(&items, 7), Some(5));
+        // An answer to the agent's question mid-turn is part of the turn its message started.
+        let items = [user("set it up"), said("Which port?"), aside("8080"), said("done"), end()];
+        assert_eq!(turn_start(&items, 4), Some(0));
+        // A turn only an answer started has no message to take back.
+        let items = [user("a"), said("1"), end(), aside("yes"), said("2"), end()];
+        assert_eq!(turn_start(&items, 5), None);
+        assert!(ends_turn(&end()) && ends_turn(&Item::Error { text: "x".into() }) && ends_turn(&Item::Notice { text: "Interrupted".into() }));
+        assert!(!ends_turn(&Item::Notice { text: "Model: haiku".into() }));
     }
 
     #[test]
@@ -185,7 +207,7 @@ mod tests {
     fn recaps_keep_the_conversation_and_drop_the_noise() {
         let tool = |d: &str| Item::Tool { id: "t".into(), title: "Edit".into(), detail: d.into(), output: "lots of output".into(), status: ToolStatus::Done };
         let items = [
-            Item::User { text: "fix the parser".into(), images: vec!["/tmp/s.png".into()], at: None, resume: None },
+            Item::User { text: "fix the parser".into(), images: vec!["/tmp/s.png".into()], at: None, resume: None, aside: false },
             Item::Reasoning { text: "hmm".into() },
             tool("src/parser.rs"),
             tool("src/lib.rs"),

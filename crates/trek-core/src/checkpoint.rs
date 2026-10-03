@@ -13,15 +13,26 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Checkpoints kept per thread; older ones are pruned as new ones are taken.
 pub const KEEP: usize = 100;
 
+/// Longest a snapshot may take reading the files. The message waits for it, so past this (huge
+/// untracked files, a clean filter that hangs) it goes without one.
+pub const SNAPSHOT_LIMIT: Duration = Duration::from_secs(10);
+
 const REF_ROOT: &str = "refs/trek/checkpoints";
+const UNDO_ROOT: &str = "refs/trek/undo";
 
 /// Where the checkpoint taken as `item` was sent in `thread` lives.
 pub fn ref_name(thread: &str, item: &str) -> String {
     format!("{REF_ROOT}/{thread}/{item}")
+}
+
+/// Where the files as they were just before `thread`'s latest restore are kept, so it can be undone.
+pub fn undo_ref(thread: &str) -> String {
+    format!("{UNDO_ROOT}/{thread}")
 }
 
 /// What restoring a checkpoint does to a file.
@@ -33,6 +44,10 @@ pub enum Change {
     Added,
     /// Deleted since: it comes back.
     Deleted,
+    /// A repository inside this one (its own `.git`) that came, went or moved on since, or a file
+    /// in one. Restoring leaves it as it is: its history isn't in the checkpoint, and removing it
+    /// could lose work.
+    Nested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +55,25 @@ pub struct FileChange {
     /// Relative to the repository's top folder.
     pub path: String,
     pub change: Change,
+}
+
+/// What a restore did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// Every difference from the checkpoint, nested repositories (left alone) included.
+    pub changes: Vec<FileChange>,
+    /// Files that couldn't be put back, with why; the rest were.
+    pub failed: Vec<(String, String)>,
+    /// The files as they were just before (`undo_ref`): restoring it undoes this one. `None`
+    /// when nothing needed restoring.
+    pub undo: Option<String>,
+}
+
+impl Restored {
+    /// Files put back (changed, recreated or removed).
+    pub fn restored(&self) -> usize {
+        self.changes.iter().filter(|c| c.change != Change::Nested).count().saturating_sub(self.failed.len())
+    }
 }
 
 /// The git binary itself. macOS's `/usr/bin/git` is a shim that looks up the developer tools on
@@ -80,6 +114,8 @@ pub struct Repo {
     pub top: PathBuf,
     /// The user's index (per worktree).
     index: PathBuf,
+    /// Longest a snapshot may spend reading the files (`SNAPSHOT_LIMIT`).
+    limit: Duration,
 }
 
 impl Repo {
@@ -94,7 +130,12 @@ impl Repo {
         let mut lines = text.lines();
         let top = PathBuf::from(lines.next()?.trim());
         let index = PathBuf::from(lines.next()?.trim());
-        (!top.as_os_str().is_empty()).then_some(Repo { top, index })
+        (!top.as_os_str().is_empty()).then_some(Repo { top, index, limit: SNAPSHOT_LIMIT })
+    }
+
+    /// The same repository, with snapshots stopped after `limit`.
+    pub fn with_limit(self, limit: Duration) -> Repo {
+        Repo { limit, ..self }
     }
 
     fn git(&self, index: Option<&TempIndex>) -> Command {
@@ -106,6 +147,15 @@ impl Repo {
     }
 
     fn run(&self, index: Option<&TempIndex>, args: &[&str], input: Option<&[u8]>) -> Result<String> {
+        let out = self.output(index, args, input, None)?;
+        if !out.status.success() {
+            bail!("git {} failed: {}", command_name(args), String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    }
+
+    /// Run git; with `limit`, it's stopped if it runs longer.
+    fn output(&self, index: Option<&TempIndex>, args: &[&str], input: Option<&[u8]>, limit: Option<Duration>) -> Result<std::process::Output> {
         let mut c = self.git(index);
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         if input.is_some() {
@@ -116,38 +166,68 @@ impl Repo {
             let mut stdin = child.stdin.take().context("git stdin")?;
             stdin.write_all(bytes)?;
         }
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            bail!("git {} failed: {}", args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"?"), err.trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+        let Some(limit) = limit else { return Ok(child.wait_with_output()?) };
+        // Drain the pipes on threads of their own, so a chatty git can't stall on a full pipe
+        // while this one watches the clock.
+        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = vec![];
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                buf
+            })
+        };
+        let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+        let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+        let deadline = Instant::now() + limit;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("git {} took longer than {:.1?}", command_name(args), limit);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
     }
 
     /// The tree the working directory holds right now: tracked and untracked files that aren't
-    /// ignored, as `git add -A` sees them.
+    /// ignored, as `git add -A` sees them. Files git can't take are left out, the same way each
+    /// time (a nested repository with no commit yet, an unreadable file), rather than failing it.
     fn tree_now(&self) -> Result<String> {
         let index = TempIndex::new();
         // Starting from the user's index keeps its stat data: only files that changed are read.
         if self.index.exists() {
             std::fs::copy(&self.index, &index.0).context("copy the index")?;
         }
-        self.run(Some(&index), &["add", "-A"], None)?;
+        let out = self.output(Some(&index), &["add", "-A", "--ignore-errors"], None, Some(self.limit))?;
+        // 1: some files were left out (see above); anything else is git failing outright.
+        if !matches!(out.status.code(), Some(0 | 1)) {
+            bail!("git add failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
         self.run(Some(&index), &["write-tree"], None)
     }
 
-    /// Snapshot the working tree as checkpoint `item` of `thread`; returns its commit.
-    pub fn snapshot(&self, thread: &str, item: &str) -> Result<String> {
-        let tree = self.tree_now()?;
+    /// A commit of `tree`, hung on HEAD when there is one.
+    fn commit(&self, tree: &str) -> Result<String> {
         let commit = |parent: bool| {
-            let mut args = vec!["-c", "commit.gpgSign=false", "commit-tree", tree.as_str(), "-m", "Trek checkpoint"];
+            let mut args = vec!["-c", "commit.gpgSign=false", "commit-tree", tree, "-m", "Trek checkpoint"];
             if parent {
                 args.extend(["-p", "HEAD"]);
             }
             self.run(None, &args, None)
         };
         // A repository without a commit yet has no HEAD to hang the snapshot on.
-        let sha = commit(true).or_else(|_| commit(false))?;
+        commit(true).or_else(|_| commit(false))
+    }
+
+    /// Snapshot the working tree as checkpoint `item` of `thread`; returns its commit.
+    pub fn snapshot(&self, thread: &str, item: &str) -> Result<String> {
+        let sha = self.commit(&self.tree_now()?)?;
         self.run(None, &["update-ref", &ref_name(thread, item), &sha], None)?;
         Ok(sha)
     }
@@ -160,43 +240,74 @@ impl Repo {
 
     /// `to` against `from`, as what restoring `from` does to each file.
     fn diff(&self, from: &str, to: &str) -> Result<Vec<FileChange>> {
-        let out = self.run(None, &["diff-tree", "-r", "-z", "--no-renames", "--name-status", from, to], None)?;
+        // Raw output, for the modes: a nested repository is an entry of mode 160000.
+        let out = self.run(None, &["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to], None)?;
         let mut fields = out.split('\0').filter(|f| !f.is_empty());
         let mut changes = vec![];
-        while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-            let change = match status.chars().next() {
+        while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+            // ":<old mode> <new mode> <old sha> <new sha> <status>"
+            let meta: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+            let nested = meta.iter().take(2).any(|m| *m == "160000");
+            let change = match meta.get(4).and_then(|s| s.chars().next()) {
+                _ if nested => Change::Nested,
                 Some('A') => Change::Added,
                 Some('D') => Change::Deleted,
                 _ => Change::Modified,
             };
             changes.push(FileChange { path: path.to_string(), change });
         }
+        // Nothing inside a nested repository is touched either (one the turn turned into a plain
+        // folder, say).
+        let nested: Vec<String> = changes.iter().filter(|c| c.change == Change::Nested).map(|c| format!("{}/", c.path)).collect();
+        for c in changes.iter_mut().filter(|c| nested.iter().any(|n| c.path.starts_with(n.as_str()))) {
+            c.change = Change::Nested;
+        }
         Ok(changes)
     }
 
     /// Put the working tree back as checkpoint `sha` had it: files changed since get their old
-    /// contents, deleted ones come back, and ones created since are removed (ignored files are
-    /// left alone). Returns what changed.
-    pub fn restore(&self, sha: &str) -> Result<Vec<FileChange>> {
-        let changes = self.changes_since(sha)?;
+    /// contents, deleted ones come back, and ones created since are removed (ignored files and
+    /// nested repositories are left alone). The files as they were just before are kept first
+    /// (`Restored::undo`, under `undo_ref(thread)`). A file that can't be put back doesn't stop
+    /// the rest; it's listed in `Restored::failed`.
+    pub fn restore(&self, sha: &str, thread: &str) -> Result<Restored> {
+        let now = self.tree_now()?;
+        let changes = self.diff(sha, &now)?;
+        if changes.iter().all(|c| c.change == Change::Nested) {
+            return Ok(Restored { changes, ..Restored::default() });
+        }
+        let undo = self.commit(&now)?;
+        self.run(None, &["update-ref", &undo_ref(thread), &undo], None)?;
+        let touch = |c: &&FileChange| c.change != Change::Nested;
+        let mut failed = vec![];
         // Removals first: a new file may stand where the checkpoint has a folder, or the reverse.
-        for c in changes.iter().filter(|c| c.change == Change::Added) {
+        for c in changes.iter().filter(touch).filter(|c| c.change == Change::Added) {
             let path = self.top.join(&c.path);
             match std::fs::remove_file(&path) {
                 Ok(()) => self.prune_empty_dirs(&path),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e).with_context(|| format!("remove {}", c.path)),
+                Err(e) => failed.push((c.path.clone(), e.to_string())),
             }
         }
-        let back: Vec<&str> = changes.iter().filter(|c| c.change != Change::Added).map(|c| c.path.as_str()).collect();
+        let back: Vec<&str> = changes.iter().filter(touch).filter(|c| c.change != Change::Added).map(|c| c.path.as_str()).collect();
         if !back.is_empty() {
             let index = TempIndex::new();
             self.run(Some(&index), &["read-tree", sha], None)?;
             let mut input = back.join("\0").into_bytes();
             input.push(0);
-            self.run(Some(&index), &["checkout-index", "-f", "-z", "--stdin"], Some(&input))?;
+            let out = self.output(Some(&index), &["checkout-index", "-f", "-z", "--stdin"], Some(&input), None)?;
+            if !out.status.success() {
+                // It writes what it can and names the rest.
+                let err = String::from_utf8_lossy(&out.stderr);
+                for path in back.iter().filter(|p| err.contains(*p)) {
+                    failed.push((path.to_string(), err.lines().find(|l| l.contains(*path)).unwrap_or_default().trim().to_string()));
+                }
+                if failed.is_empty() {
+                    failed.push((String::new(), err.trim().to_string()));
+                }
+            }
         }
-        Ok(changes)
+        Ok(Restored { changes, failed, undo: Some(undo) })
     }
 
     /// Remove the folders above `path` that are empty now, up to the top folder.
@@ -229,14 +340,16 @@ impl Repo {
         self.run(None, &["update-ref", "--stdin"], Some(script.as_bytes())).map(|_| ())
     }
 
-    /// Drop every checkpoint of `thread` (it was deleted); returns how many went.
+    /// Drop every checkpoint of `thread` (it was deleted), and what would undo its last restore;
+    /// returns how many checkpoints went.
     pub fn delete_all(&self, thread: &str) -> Result<usize> {
-        let refs = self.run(None, &["for-each-ref", "--format=%(refname)", &format!("{REF_ROOT}/{thread}/")], None)?;
-        let script: String = refs.lines().filter(|r| !r.is_empty()).map(|r| format!("delete {r}\n")).collect();
+        let refs = self.run(None, &["for-each-ref", "--format=%(refname)", &format!("{REF_ROOT}/{thread}/"), &undo_ref(thread)], None)?;
+        let refs: Vec<&str> = refs.lines().filter(|r| !r.is_empty()).collect();
+        let script: String = refs.iter().map(|r| format!("delete {r}\n")).collect();
         if !script.is_empty() {
             self.run(None, &["update-ref", "--stdin"], Some(script.as_bytes()))?;
         }
-        Ok(refs.lines().filter(|r| !r.is_empty()).count())
+        Ok(refs.iter().filter(|r| r.starts_with(REF_ROOT)).count())
     }
 
     /// Checkpoint items of `thread` that have a ref.
@@ -245,6 +358,20 @@ impl Repo {
         let refs = self.run(None, &["for-each-ref", "--format=%(refname)", &prefix], None)?;
         Ok(refs.lines().filter_map(|r| r.strip_prefix(&prefix)).map(str::to_string).collect())
     }
+}
+
+/// The git command in `args` (`add`, `update-ref`), for messages.
+fn command_name<'a>(args: &[&'a str]) -> &'a str {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            // `-c name=value` takes the next argument.
+            "-c" => _ = it.next(),
+            a if a.starts_with('-') => {}
+            a => return a,
+        }
+    }
+    "?"
 }
 
 /// git in `dir`, never reading from the terminal, never taking optional locks (the user's own git
@@ -354,7 +481,9 @@ mod tests {
             ("src/deep/new.rs".into(), Change::Added),
         ];
         assert_eq!(sorted(repo.changes_since(&sha).unwrap()), expected);
-        assert_eq!(sorted(repo.restore(&sha).unwrap()), expected);
+        let restored = repo.restore(&sha, "t1").unwrap();
+        assert_eq!(sorted(restored.changes.clone()), expected);
+        assert_eq!((restored.restored(), restored.failed.len()), (6, 0));
 
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
         assert_eq!(std::fs::read(s.0.join("bin.dat")).unwrap(), [0u8, 159, 146, 150, 0, 1, 2]);
@@ -364,6 +493,17 @@ mod tests {
         assert!(!s.0.join("src").exists(), "folders left empty go too");
         assert_eq!(s.read("build.log").as_deref(), Some("changed by the turn\n"), "ignored files are left alone");
         assert!(repo.changes_since(&sha).unwrap().is_empty());
+
+        // The restore itself can be undone: the files as they were just before it come back.
+        let undo = restored.undo.expect("kept what it replaced");
+        assert_eq!(s.git(&["rev-parse", &undo_ref("t1")]), undo);
+        repo.restore(&undo, "t1").unwrap();
+        assert_eq!(s.read("a.txt").as_deref(), Some("two\n"));
+        assert_eq!(s.read("src/deep/new.rs").as_deref(), Some("fn main() {}\n"));
+        assert!(!s.0.join("draft.txt").exists());
+        assert!(repo.changes_since(&undo).unwrap().is_empty());
+        // Nothing to put back: nothing kept.
+        assert_eq!(repo.restore(&undo, "t1").unwrap(), Restored::default());
     }
 
     #[test]
@@ -383,7 +523,7 @@ mod tests {
         let sha = repo.snapshot("t", "u").unwrap();
         s.write("a.txt", "the agent's\n");
         s.write("new.txt", "x\n");
-        repo.restore(&sha).unwrap();
+        repo.restore(&sha, "t").unwrap();
 
         assert_eq!(s.read("a.txt").as_deref(), Some("staged then edited\n"));
         assert!(!s.0.join("new.txt").exists());
@@ -403,7 +543,7 @@ mod tests {
         assert!(Command::new("git").args(["rev-parse", "-q", "--verify", "HEAD"]).current_dir(&s.0).output().unwrap().status.code() != Some(0));
         s.write("a.txt", "changed\n");
         s.write("b.txt", "new\n");
-        assert_eq!(sorted(repo.restore(&sha).unwrap()), vec![("a.txt".to_string(), Change::Modified), ("b.txt".into(), Change::Added)]);
+        assert_eq!(sorted(repo.restore(&sha, "t").unwrap().changes), vec![("a.txt".to_string(), Change::Modified), ("b.txt".into(), Change::Added)]);
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
         assert!(!s.0.join("b.txt").exists());
     }
@@ -424,7 +564,7 @@ mod tests {
         assert_eq!(repo, s.repo());
         let sha = repo.snapshot("t", "u").unwrap();
         s.write("a.txt", "outside the subfolder\n");
-        repo.restore(&sha).unwrap();
+        repo.restore(&sha, "t").unwrap();
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
     }
 
@@ -444,7 +584,87 @@ mod tests {
         assert!(repo.items("t1").unwrap().is_empty());
         assert_eq!(repo.items("t2").unwrap(), ["u9"], "other threads keep theirs");
         // The fork's copies outlive the original's refs.
-        assert_eq!(repo.restore(&a).unwrap(), vec![]);
+        assert_eq!(repo.restore(&a, "fork").unwrap(), Restored::default());
+        // A thread's undo goes with it too.
+        s.write("a.txt", "changed\n");
+        repo.restore(&a, "t2").unwrap();
+        assert!(!s.git(&["for-each-ref", &undo_ref("t2")]).is_empty());
+        assert_eq!(repo.delete_all("t2").unwrap(), 1);
+        assert!(s.git(&["for-each-ref", "refs/trek/"]).lines().all(|r| !r.contains("t2")));
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A repository of its own in `dir`, with one commit.
+    fn nested_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git_in(dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("lib.rs"), "// vendored\n").unwrap();
+        git_in(dir, &["add", "-A"]);
+        git_in(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "v"]);
+    }
+
+    #[test]
+    fn nested_repositories_are_left_alone() {
+        let s = Scratch::new(true);
+        // One with no commit yet sits in the tree as the turn starts: git can't take it, and
+        // the snapshot goes on without it.
+        std::fs::create_dir_all(s.0.join("empty")).unwrap();
+        git_in(&s.0.join("empty"), &["init", "-q"]);
+        s.write("empty/x.txt", "x\n");
+        let repo = s.repo();
+        let sha = repo.snapshot("t", "u").unwrap();
+
+        // The turn clones something (a repository with commits), edits and adds files.
+        nested_repo(&s.0.join("vendor/lib"));
+        s.write("a.txt", "two\n");
+        s.write("b_new.txt", "new\n");
+        assert_eq!(
+            sorted(repo.changes_since(&sha).unwrap()),
+            vec![("a.txt".to_string(), Change::Modified), ("b_new.txt".into(), Change::Added), ("vendor/lib".into(), Change::Nested)]
+        );
+        let restored = repo.restore(&sha, "t").unwrap();
+        assert_eq!((restored.restored(), restored.failed.clone()), (2, vec![]));
+        assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
+        assert!(!s.0.join("b_new.txt").exists());
+        assert_eq!(s.read("vendor/lib/lib.rs").as_deref(), Some("// vendored\n"), "the clone is still there");
+        assert!(s.0.join("vendor/lib/.git").exists());
+        assert_eq!(s.read("empty/x.txt").as_deref(), Some("x\n"));
+    }
+
+    #[test]
+    fn a_file_that_cant_be_removed_doesnt_stop_the_rest() {
+        let s = Scratch::new(true);
+        let repo = s.repo();
+        let sha = repo.snapshot("t", "u").unwrap();
+        s.write("locked/new.txt", "made by the turn\n");
+        s.write("a.txt", "two\n");
+        use std::os::unix::fs::PermissionsExt as _;
+        let locked = s.0.join("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let restored = repo.restore(&sha, "t").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(restored.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["locked/new.txt"]);
+        assert_eq!(restored.restored(), 1);
+        assert_eq!(s.read("a.txt").as_deref(), Some("one\n"), "the other file came back");
+        assert!(restored.undo.is_some());
+    }
+
+    #[test]
+    fn a_snapshot_that_takes_too_long_is_stopped() {
+        let s = Scratch::new(true);
+        // A clean filter that hangs (an LFS server that doesn't answer, say).
+        s.git(&["config", "filter.slow.clean", "sleep 5; cat"]);
+        s.write(".gitattributes", "*.big filter=slow\n");
+        s.write("data.big", "lots\n");
+        let started = std::time::Instant::now();
+        let err = s.repo().with_limit(Duration::from_millis(300)).snapshot("t", "u").unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        assert!(format!("{err:#}").contains("took longer"), "{err:#}");
+        assert!(s.repo().items("t").unwrap().is_empty());
     }
 
     /// Snapshot timings on a real working tree (not run by default): `TREK_BENCH_REPO=<a scratch

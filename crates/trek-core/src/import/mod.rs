@@ -606,7 +606,7 @@ impl Transcript {
         // Reports of sub-agents launched before don't hold this reply open: a lost report
         // would otherwise take the footers of every later turn with it.
         self.background.clear();
-        self.items.push(Item::User { text, images, at, resume: None });
+        self.items.push(Item::User { text, images, at, resume: None, aside: false });
         self.start = at;
         self.last = at;
     }
@@ -620,7 +620,7 @@ impl Transcript {
 
     /// The user's answer to a question the agent asked mid-turn: shown, and the turn goes on.
     pub fn answer(&mut self, text: String, at: Option<i64>) {
-        self.items.push(Item::User { text, images: vec![], at, resume: None });
+        self.items.push(Item::User { text, images: vec![], at, resume: None, aside: true });
         self.touch(at);
     }
 

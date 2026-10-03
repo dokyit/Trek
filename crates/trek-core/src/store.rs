@@ -213,6 +213,10 @@ pub enum Item {
         /// back there; absent when that isn't known (the message started a session, say).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<ResumePoint>,
+        /// Not a prompt: a command Trek answered itself (`/model`), or a typed answer to the
+        /// agent's question. It neither starts a turn nor is somewhere to rewind to.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        aside: bool,
     },
     Assistant { text: String },
     /// Marks the end of a response: when it finished and how long the turn took.
@@ -1052,7 +1056,7 @@ mod tests {
         let t = s.create_thread(None, AgentId::Codex, Some("gpt-6-astra".into()), Effort::Max, HandHolding::FullAccess).unwrap();
         let back = s.thread(&t.id).unwrap().unwrap();
         assert_eq!(back, t);
-        let hi = Item::User { text: "hi".into(), images: vec![], at: None, resume: None };
+        let hi = Item::User { text: "hi".into(), images: vec![], at: None, resume: None, aside: false };
         let hello = Item::Assistant { text: "hello".into() };
         s.append_items(&t.id, [("a", &hi), ("b", &hello)]).unwrap();
         assert_eq!(s.items(&t.id).unwrap(), vec![hi, hello]);
@@ -1101,7 +1105,7 @@ mod tests {
         let s = Store::in_memory().unwrap();
         let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
         let mut tr = Transcript::default();
-        tr.push(Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None });
+        tr.push(Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None, aside: false });
         tr.push(Item::Reasoning { text: String::new() });
         let answer = tr.push(said("work"));
         s.save_transcript(&t.id, &mut tr).unwrap();
@@ -1180,7 +1184,7 @@ mod tests {
             let s = Store::open(&path).unwrap();
             let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
             let mut tr = Transcript::default();
-            tr.push(Item::User { text: "harbour lights".into(), images: vec![], at: None, resume: None });
+            tr.push(Item::User { text: "harbour lights".into(), images: vec![], at: None, resume: None, aside: false });
             tr.push(said("the harbour is dark"));
             s.save_transcript(&t.id, &mut tr).unwrap();
             // Put the table back the way the first build with ids made it: no default for `id`.
@@ -1224,7 +1228,7 @@ mod tests {
         assert_eq!(s.thread(&t.id).unwrap().unwrap(), t);
 
         // A message's resume point is stored with it.
-        let sent = Item::User { text: "go".into(), images: vec![], at: Some(1), resume: Some(ResumePoint { session: "s2".into(), after: Some("m9".into()) }) };
+        let sent = Item::User { text: "go".into(), images: vec![], at: Some(1), resume: Some(ResumePoint { session: "s2".into(), after: Some("m9".into()) }), aside: false };
         s.append_items(&t.id, [("u1", &sent)]).unwrap();
         assert_eq!(s.items(&t.id).unwrap(), [sent]);
 
@@ -1331,7 +1335,7 @@ mod tests {
         assert!(s.threads().unwrap().is_empty());
         s.upsert_imported(&[imported("old", "say ok"), imported("pinned", "say ok"), imported("used", "say ok")]).unwrap();
         s.update_thread(&by_native(&s, "pinned").id, |t| t.pinned_at = Some(5)).unwrap();
-        s.append_items(&by_native(&s, "used").id, [("u1", &Item::User { text: "keep going".into(), images: vec![], at: None, resume: None })]).unwrap();
+        s.append_items(&by_native(&s, "used").id, [("u1", &Item::User { text: "keep going".into(), images: vec![], at: None, resume: None, aside: false })]).unwrap();
         let out = s.upsert_imported(&[skip("old"), skip("pinned"), skip("used")]).unwrap();
         // Threads the user pinned or continued in Trek stay.
         assert_eq!(out.iter().map(|o| (o.hidden, o.left_out)).collect::<Vec<_>>(), [(true, true), (false, false), (false, false)]);
@@ -1437,7 +1441,7 @@ mod tests {
             t.id
         };
         let (working, asking, failed, idle, imported) = (open(RunState::Working), open(RunState::NeedsYou), open(RunState::Failed), open(RunState::Idle), open(RunState::Working));
-        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1), resume: None };
+        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1), resume: None, aside: false };
         let empty_thought = Item::Reasoning { text: " ".into() };
         let partial = said("The schema change needs");
         let tool = |status| Item::Tool { id: "t1".into(), title: "Bash".into(), detail: "make migrate".into(), output: String::new(), status };

@@ -295,6 +295,7 @@ impl Sidebar {
         let hit = self.content_hit(t, cx);
         let row = v_flex()
             .id(SharedString::from(format!("card-{}", t.id)))
+            .test_support()
             .mx_2()
             .mb(px(2.))
             .px(px(12.))

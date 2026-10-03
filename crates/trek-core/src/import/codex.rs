@@ -247,6 +247,28 @@ fn question_reply(text: &str) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
+/// The turn a rollout line says ended (finished or stopped), if it says one did.
+fn ended_turn(v: &Value) -> Option<&str> {
+    let p = &v["payload"];
+    (v["type"] == "event_msg" && matches!(p["type"].as_str(), Some("task_complete" | "turn_aborted"))).then(|| p["turn_id"].as_str()).flatten()
+}
+
+/// The last turn of thread `id` that ended: where a message sent now goes after.
+pub fn last_turn(id: &str) -> Option<String> {
+    last_turn_in(&rollout_path(id)?)
+}
+
+fn last_turn_in(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut last = None;
+    for line in BufReader::new(file).lines().map_while(Result::ok).filter(|l| l.contains("\"turn_id\"")) {
+        if let Some(turn) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(ended_turn) {
+            last = Some(turn.to_string());
+        }
+    }
+    last
+}
+
 pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
     let path = rollout_path(id).ok_or_else(|| anyhow::anyhow!("rollout not found"))?;
     load_rollout(&path, id)
@@ -277,11 +299,11 @@ fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                 }
                 Some("task_complete") => {
                     t.complete(at);
-                    last_turn = p["turn_id"].as_str().map(String::from).or(last_turn);
+                    last_turn = ended_turn(&v).map(String::from).or(last_turn);
                 }
                 Some("turn_aborted") => {
                     t.interrupt();
-                    last_turn = p["turn_id"].as_str().map(String::from).or(last_turn);
+                    last_turn = ended_turn(&v).map(String::from).or(last_turn);
                 }
                 Some("thread_goal_updated") => {
                     let g = &p["goal"];
@@ -659,11 +681,13 @@ mod tests {
         let path = dir.write("rollout.jsonl", &lines.join("\n"));
         let items = load_rollout(&path, "t").unwrap();
         let resume = |after: Option<&str>| Some(ResumePoint { session: "t".into(), after: after.map(String::from) });
-        assert_eq!(items[0], Item::User { text: "reset eduroam".into(), images: vec![], at: ms_from_rfc3339("2026-09-06T22:15:24.832Z"), resume: resume(None) });
+        assert_eq!(items[0], Item::User { text: "reset eduroam".into(), images: vec![], at: ms_from_rfc3339("2026-09-06T22:15:24.832Z"), resume: resume(None), aside: false });
         assert!(matches!(&items[1], Item::Tool { title, detail, output, .. } if title == "Ran command" && detail == "ls" && output == "a b"));
         assert_eq!(items[3], Item::TurnEnd { at: ms_from_rfc3339("2026-09-06T22:16:29.201Z").unwrap(), took_secs: 64 });
         // The second message drops the turn after the first one ended.
         assert!(matches!(&items[4], Item::User { text, resume: r, .. } if text == "do it for me" && *r == resume(Some("turn-1"))));
         assert_eq!(items.len(), 6, "the aborted turn has no footer: {items:?}");
+        // A message sent now drops nothing: it goes after the last turn that said it ended.
+        assert_eq!(last_turn_in(&path).as_deref(), Some("turn-1"));
     }
 }
