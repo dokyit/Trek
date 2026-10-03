@@ -1668,3 +1668,59 @@ mod tests {
         assert!(feed(&mut s, &[activity("interacted")]).events.is_empty());
     }
 }
+
+/// Against the real Codex: a message sent mid-turn steers the running turn. Costs a few cents of
+/// the user's plan, so it only runs on request:
+/// `cargo test -p trek-agents codex_live -- --ignored --nocapture` (Codex must be signed in).
+#[cfg(test)]
+mod live {
+    use crate::{AgentEvent, Command, SessionConfig, start};
+    use std::time::Duration;
+    use trek_core::{AgentId, Effort, HandHolding};
+
+    #[test]
+    #[ignore = "talks to the real Codex"]
+    fn codex_live_steer_joins_the_running_turn() {
+        let cwd = std::env::temp_dir().join("trek-verify-e2e");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = start(SessionConfig {
+            agent: AgentId::Codex,
+            cwd,
+            model: Some(std::env::var("TREK_LIVE_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".into())),
+            effort: Effort::Low,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            resume: None,
+            fast: None,
+            mcp_servers: vec![],
+        });
+        let events = trek_core::runtime().block_on(async {
+            let prompt = |text: &str| Command::Prompt { text: text.into(), images: vec![] };
+            session.commands.send(prompt("Run the shell command `sleep 6` and then reply with exactly the word: done")).await.unwrap();
+            let mut seen = vec![];
+            let mut steered = false;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+            loop {
+                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                println!("{ev:?}");
+                // Once the command is running, steer.
+                if !steered && matches!(ev, AgentEvent::ToolStarted { .. }) {
+                    steered = true;
+                    session.commands.send(prompt("After that, also add the word banana on its own line.")).await.unwrap();
+                }
+                let done = matches!(ev, AgentEvent::TurnComplete { .. } | AgentEvent::Error(_) | AgentEvent::Exited);
+                seen.push(ev);
+                if done {
+                    break;
+                }
+            }
+            let _ = session.commands.send(Command::Shutdown).await;
+            seen
+        });
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { .. })), "the command ran");
+        let turns: Vec<&AgentEvent> = events.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).collect();
+        assert!(matches!(turns[..], [AgentEvent::TurnComplete { error: None, .. }]), "one turn, finished: {turns:?}");
+        let said: String = events.iter().filter_map(|e| if let AgentEvent::TextDone(t) = e { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("\n");
+        assert!(said.to_lowercase().contains("banana"), "the steer reached the running turn: {said}");
+    }
+}

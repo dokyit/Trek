@@ -2147,8 +2147,14 @@ impl Workspace {
         cx.emit(WorkspaceEvent::Toast { message: "Settled".into(), undo: Some(UndoAction::Unsettle(id.into())) });
     }
 
+    /// Back to the inbox, and counted as looked at now: auto-settle would otherwise send an old
+    /// thread straight back on its next pass.
     pub fn unsettle(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.mutate_thread(id, cx, |t| t.settled_at = None);
+        self.mutate_thread(id, cx, |t| {
+            t.settled_at = None;
+            t.updated_at = now_ms().max(t.updated_at);
+            t.last_seen_at = t.updated_at;
+        });
     }
 
     pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2412,8 +2418,12 @@ impl Workspace {
                 let now = now_ms();
                 for id in merged {
                     // Still idle and unsettled: the user may have picked it up again meanwhile.
+                    // Its branch is forgotten: moved back to the inbox, it stays there.
                     if this.thread(&id).is_some_and(|t| t.settled_at.is_none() && t.run_state == RunState::Idle) {
-                        this.mutate_thread(&id, cx, |t| t.settled_at = Some(now));
+                        this.mutate_thread(&id, cx, |t| {
+                            t.settled_at = Some(now);
+                            t.branch = None;
+                        });
                     }
                 }
             });

@@ -390,7 +390,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Only when Trek is in the background",
-                        "Skip alerts for the thread you're already looking at.",
+                        "While you're in Trek, other threads show a note in the window instead of a banner or sound.",
                         self.switch("notify-unfocused", n.only_when_unfocused, |s, v| s.notifications.only_when_unfocused = v),
                         cx,
                     ),

@@ -22,7 +22,7 @@ pub struct TrekWindow {
     pub(crate) sidebar: Entity<Sidebar>,
     pub(crate) thread_view: Entity<ThreadView>,
     pub(crate) composer: Entity<Composer>,
-    pub(crate) settings: Entity<SettingsView>,
+    settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,

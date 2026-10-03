@@ -115,6 +115,10 @@ fn threads_settle_after_days_unless_told_never_to() {
         for (id, why) in [(&kept, "never settle"), (&recent, "too recent"), (&unread, "unread"), (&failed, "needs the user")] {
             assert_eq!(section_of(&trek, cx, id), Some(Section::Inbox), "{why}");
         }
+        // Moved back to the inbox by hand, it stays there.
+        trek.update(cx, |ws, cx| ws.unsettle(&stale, cx));
+        trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
+        assert_eq!(section_of(&trek, cx, &stale), Some(Section::Inbox));
         // Following Trek's setting again, it settles with the rest.
         trek.update(cx, |ws, cx| ws.set_never_settle(&kept, false, cx));
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
@@ -177,6 +181,12 @@ fn threads_settle_once_their_branch_is_merged() {
         trek.wait(cx, "the merged thread to settle", |ws| ws.thread(&tid).is_some_and(|t| t.settled_at.is_some())).await;
         // A thread that never worked on the branch stays where it is.
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&other).unwrap().settled_at), None);
+        // Moved back to the inbox, the merged thread stays there.
+        trek.update(cx, |ws, cx| ws.unsettle(&id, cx));
+        trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().settled_at), None);
 
         // Off in Settings: a merge settles nothing, and no branch is noted.
         let again = trek.update(cx, |ws, cx| {
