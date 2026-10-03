@@ -114,10 +114,10 @@ impl RightPanel {
     }
 
     /// Run a setup command (install / sign in) in a fresh terminal tab, then rescan agents.
-    pub fn run_command(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_command(&mut self, command: String, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.launcher_open = false;
-        let cwd = self.workspace.read(cx).current_cwd();
+        let cwd = cwd.or_else(|| self.workspace.read(cx).current_cwd());
         let ws = self.workspace.downgrade();
         let view = cx.new(|cx| {
             let mut t = terminal::TerminalPanel::with_command(cwd, Some(command), cx);

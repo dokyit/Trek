@@ -128,6 +128,18 @@ pub fn open_with(cx: &mut TestAppContext, tweak: impl FnOnce(&mut Settings)) -> 
     tweak(&mut settings);
     let store = Store::in_memory().expect("store");
     store.ensure_project(&project).expect("project");
+    let (ws, root, window) = launch(cx, store, settings);
+    let trek = Trek { ws, root, window, project };
+    // Navigating focuses the composer, as at launch.
+    let project = trek.project.clone();
+    trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+    trek.render(cx);
+    trek
+}
+
+/// Trek's main window over `store` and `settings`, on whatever route they lead to (onboarding on
+/// a first run).
+pub fn launch(cx: &mut TestAppContext, store: Store, settings: Settings) -> (Entity<Workspace>, Entity<TrekWindow>, AnyWindowHandle) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&crate::assets::theme_json());
@@ -147,12 +159,7 @@ pub fn open_with(cx: &mut TestAppContext, tweak: impl FnOnce(&mut Settings)) -> 
     let (window, root) = cx
         .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| TrekWindow::new(ws.clone(), window, cx))))
         .expect("open window");
-    let trek = Trek { ws, root, window, project };
-    // Navigating focuses the composer, as at launch.
-    let project = trek.project.clone();
-    trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
-    trek.render(cx);
-    trek
+    (ws, root, window)
 }
 
 impl Trek {

@@ -195,6 +195,12 @@ impl Composer {
         self.input.read(cx).value().to_string()
     }
 
+    /// Images attached to the next message, and how many are still being saved.
+    #[cfg(test)]
+    pub(crate) fn attached(&self) -> (Vec<PathBuf>, usize) {
+        (self.outbox.paths.clone(), self.outbox.saving)
+    }
+
     /// Height at the last layout (zero before the first).
     pub fn height(&self) -> Pixels {
         self.height.get()
@@ -566,7 +572,7 @@ impl Composer {
                         .child("↑↓ to move · ↩ to pick · esc"),
                 )
                 .when(items.is_empty(), |el| el.child(div().px(px(10.)).py(px(8.)).text_sm().text_color(theme.muted_foreground).child(empty)))
-                .child(v_flex().id("picker-list").max_h(px(280.)).overflow_y_scroll().track_scroll(&self.picker_scroll).children(items.into_iter().enumerate().map(|(i, item)| {
+                .child(v_flex().id("picker-list").test_support().max_h(px(280.)).overflow_y_scroll().track_scroll(&self.picker_scroll).children(items.into_iter().enumerate().map(|(i, item)| {
                     let icon = match item.icon {
                         PickIcon::Command => Icon::new(IconName::SquareTerminal),
                         PickIcon::Skill => Icon::new(crate::assets::Lucide::Sparkle),
@@ -745,7 +751,7 @@ impl Composer {
             Some(Sub::Model) => Some(self.model_panel(&prefs, current.as_deref(), cx)),
             None => None,
         };
-        h_flex().items_end().gap(px(6.)).child(main).children(sub).into_any_element()
+        h_flex().id("model-menu-body").test_support().items_end().gap(px(6.)).child(main).children(sub).into_any_element()
     }
 
     fn effort_panel(&mut self, prefs: &Prefs, model: Option<&ModelInfo>, cx: &mut Context<Self>) -> AnyElement {
@@ -953,6 +959,8 @@ impl Composer {
                         cx.notify();
                     }))
             }))
+            .id("access-menu-body")
+            .test_support()
             .into_any_element()
     }
 

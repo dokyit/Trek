@@ -33,9 +33,10 @@ pub struct Sidebar {
     filter_open: bool,
     usage_open: bool,
     updater_open: bool,
-    /// Re-renders once a second while a turn runs, so "Working 12s" counts up (this view is
-    /// cached; nothing else would redraw it).
-    _clock: Option<Task<()>>,
+    /// Re-renders once a second while a turn runs, so "Working 12s" counts up, and once a minute
+    /// otherwise, so "5m" ages (this view is cached; nothing else would redraw it). The flag is
+    /// whether it's the fast one.
+    _clock: Option<(bool, Task<()>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -75,7 +76,7 @@ impl Sidebar {
             this.active = window.is_window_active();
             cx.notify();
         }));
-        Self {
+        let mut this = Self {
             workspace,
             search,
             project_search,
@@ -89,21 +90,26 @@ impl Sidebar {
             updater_open: false,
             _clock: None,
             _subscriptions: subscriptions,
-        }
+        };
+        this.sync_clock(cx);
+        this
     }
 
     fn sync_clock(&mut self, cx: &mut Context<Self>) {
         let running = self.workspace.read(cx).any_turn_running();
-        if running && self._clock.is_none() {
-            self._clock = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+        if self._clock.as_ref().is_some_and(|(fast, _)| *fast == running) {
+            return;
+        }
+        let every = std::time::Duration::from_secs(if running { 1 } else { 60 });
+        self._clock = Some((
+            running,
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(every).await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
-            }));
-        } else if !running {
-            self._clock = None;
-        }
+            }),
+        ));
     }
 
     fn top(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -295,6 +301,7 @@ impl Sidebar {
         let hit = self.content_hit(t, cx);
         let row = v_flex()
             .id(SharedString::from(format!("card-{}", t.id)))
+            .test_support()
             .mx_2()
             .mb(px(2.))
             .px(px(12.))

@@ -249,6 +249,7 @@ impl Onboarding {
                 let detail = if locked { "No prompts and no sandbox. Unlock it later in Settings → Permissions." } else { h.description() };
                 Self::list_row(radio.into_any_element(), h.label(), detail, div().into_any_element(), cx)
                     .id(SharedString::from(format!("ob-hh-{h:?}")))
+                    .test_support()
                     .when(locked, |el| el.opacity(0.5))
                     .when(!locked, |el| {
                         el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {

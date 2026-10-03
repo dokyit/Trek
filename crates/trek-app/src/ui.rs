@@ -41,7 +41,11 @@ pub fn status_text(text: &'static str, color: Hsla) -> AnyElement {
 }
 
 /// Two-letter project badge with a stable tint (T3-style).
-pub fn monogram(name: &str, cx: &App) -> impl IntoElement {
+pub fn monogram(name: &str, cx: &App) -> Div {
+    monogram_in(name, cx.theme().mode.is_dark())
+}
+
+fn monogram_in(name: &str, dark: bool) -> Div {
     let letters: String = {
         let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
         match words.as_slice() {
@@ -53,7 +57,6 @@ pub fn monogram(name: &str, cx: &App) -> impl IntoElement {
     .to_uppercase();
     let hash = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
     let hue = (hash % 360) as f32 / 360.;
-    let dark = cx.theme().mode.is_dark();
     div()
         .flex_none()
         .h(px(16.))
@@ -91,7 +94,18 @@ pub fn project_badge(name: &str, icon: Option<&str>, cx: &App) -> AnyElement {
     match icon {
         Some(spec) if spec.starts_with("file:") => {
             let path = std::path::PathBuf::from(&spec[5..]);
-            img(path).flex_none().size(px(16.)).rounded(px(4.)).object_fit(ObjectFit::Cover).into_any_element()
+            // An image that's gone or doesn't decode shows the monogram instead of a hole.
+            let name = name.to_string();
+            // A hairline keeps an image as light (or as dark) as the window from losing its edge.
+            img(path)
+                .flex_none()
+                .size(px(16.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(cx.theme().foreground.opacity(0.1))
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(move || monogram_in(&name, dark).into_any_element())
+                .into_any_element()
         }
         Some(spec) => match PROJECT_ICONS.iter().find(|(k, _)| spec.strip_prefix("lucide:") == Some(k)) {
             Some((_, icon)) => div()
