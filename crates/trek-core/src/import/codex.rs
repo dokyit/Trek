@@ -107,12 +107,24 @@ fn is_interactive(source: &str, originator: &str) -> bool {
     source == "cli" || ["Codex Desktop", "codex_vscode", "codex-tui", "codex_cli_rs"].contains(&originator)
 }
 
+/// The client that started a rollout, from its first (`session_meta`) line.
+fn rollout_originator(path: &Path) -> Option<String> {
+    let line = BufReader::new(std::fs::File::open(path).ok()?).lines().next()?.ok()?;
+    let v: Value = serde_json::from_str(&line).ok()?;
+    (v["type"] == "session_meta").then(|| v["payload"]["originator"].as_str().map(String::from)).flatten()
+}
+
 fn thread_from(row: &Row) -> ImportedThread {
     let cwd = row.cwd.as_deref().map(PathBuf::from);
     let first = row.first.as_deref().filter(|f| !f.trim().is_empty());
-    let interactive = is_interactive(&row.source, &row.originator);
+    // Codex Desktop sometimes leaves the index's column empty; the rollout records it.
+    let originator = match row.originator.as_str() {
+        "" => rollout_originator(Path::new(&row.rollout)).unwrap_or_default(),
+        known => known.to_string(),
+    };
+    let interactive = is_interactive(&row.source, &originator);
     // `codex exec` from a script or another agent; the Codex SDK drives exec for app conversations.
-    let cli_run = row.source == "exec" && !row.originator.starts_with("codex_sdk");
+    let cli_run = row.source == "exec" && !originator.starts_with("codex_sdk");
     // Counting prompts means reading the rollout: only when it decides a rule.
     let count_matters = cli_run || first.is_some_and(is_title_request) || (cwd.as_deref().is_some_and(is_temp_dir) && !interactive);
     let prompts = count_matters.then(|| count_prompts(Path::new(&row.rollout))).flatten();
@@ -125,7 +137,7 @@ fn thread_from(row: &Row) -> ImportedThread {
         replied: true,
         subagent: !row.agent_role.is_empty() || row.thread_source == "subagent" || row.source.contains("subagent"),
         untouched_fork: false,
-        trek: row.originator == "trek",
+        trek: originator == "trek",
         cli_run,
     });
     // The thread's name (set by the user or by Codex), else its stored title, else the first
@@ -286,6 +298,9 @@ fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
     // The goal shown for the current turn: typed as "/goal …", the message itself is recorded
     // after the turn it started is under way.
     let mut goal_shown: Option<String> = None;
+    // A turn is under way (started, not yet complete or aborted), and its message is shown: a
+    // message now steers it rather than starting another.
+    let (mut running, mut has_message) = (false, false);
     for line in reader.lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         let at = v["timestamp"].as_str().and_then(ms_from_rfc3339);
@@ -295,13 +310,16 @@ fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                 // Every turn starts with this; ones without a message (a goal continuing) too.
                 Some("task_started") => {
                     goal_shown = None;
+                    (running, has_message) = (true, false);
                     t.wake(at);
                 }
                 Some("task_complete") => {
+                    running = false;
                     t.complete(at);
                     last_turn = ended_turn(&v).map(String::from).or(last_turn);
                 }
                 Some("turn_aborted") => {
+                    running = false;
                     t.interrupt();
                     last_turn = ended_turn(&v).map(String::from).or(last_turn);
                 }
@@ -333,6 +351,7 @@ fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                                 goal_shown = Some(objective.clone());
                                 t.user(objective, set_at.or(at));
                                 t.resume_from(point(&last_turn));
+                                has_message = true;
                             }
                         } else if !text.trim().is_empty() {
                             goal = None;
@@ -340,8 +359,13 @@ fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                                 continue;
                             }
                             let (text, images) = sent_message(&text);
-                            t.user_with(text, images, at);
-                            t.resume_from(point(&last_turn));
+                            if running && has_message {
+                                t.steer(text, images, at);
+                            } else {
+                                t.user_with(text, images, at);
+                                t.resume_from(point(&last_turn));
+                                has_message = true;
+                            }
                         }
                     }
                     Some("assistant") => {
@@ -529,6 +553,64 @@ mod tests {
                 ("tmp".into(), Some(Skip::TempDir)),
                 ("tmp-tui".into(), None),
                 ("trek".into(), Some(Skip::Trek)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_originator_is_read_from_the_rollout() {
+        let f = Fixture::new();
+        let tmp = [("cwd", "/private/tmp/scratch-experiment")];
+        let prompts = ["try this", "and that", "and one more"];
+        f.thread("desktop", &tmp, &prompts);
+        f.thread("unknown", &tmp, &prompts);
+        // Codex Desktop left the index's column empty; its rollout says who started it.
+        let path = f.dir.0.join("rollout-desktop.jsonl");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let meta = line("session_meta", json!({ "id": "desktop", "originator": "Codex Desktop" }), "2026-09-06T22:15:24Z");
+        std::fs::write(&path, format!("{meta}\n{body}")).unwrap();
+        assert_eq!(f.get("desktop").skip, None);
+        assert_eq!(f.get("unknown").skip, Some(Skip::TempDir));
+    }
+
+    #[test]
+    fn messages_sent_mid_turn_steer_it() {
+        let dir = Scratch::new();
+        let event = |kind: &str, at: &str| line("event_msg", json!({ "type": kind }), at);
+        let lines = [
+            event("task_started", "2026-09-30T19:27:24Z"),
+            said("user", "translate the report", "2026-09-30T19:27:24Z"),
+            said("assistant", "Reading it.", "2026-09-30T19:30:00Z"),
+            said("user", "only the crash part", "2026-09-30T20:14:30Z"),
+            said("assistant", "Translated.", "2026-09-30T20:51:14Z"),
+            event("task_complete", "2026-09-30T20:51:14Z"),
+            event("task_started", "2026-09-30T21:00:00Z"),
+            said("user", "thanks", "2026-09-30T21:00:00Z"),
+            said("assistant", "Welcome.", "2026-09-30T21:00:05Z"),
+            event("task_complete", "2026-09-30T21:00:05Z"),
+        ];
+        let path = dir.write("rollout.jsonl", &lines.join("\n"));
+        let items = load_rollout(&path, "t").unwrap();
+        let shown: Vec<String> = items
+            .iter()
+            .map(|i| match i {
+                Item::User { text, aside, .. } => format!("user{}: {text}", if *aside { " (steer)" } else { "" }),
+                Item::Assistant { text } => format!("agent: {text}"),
+                Item::TurnEnd { took_secs, .. } => format!("took {took_secs}s"),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "user: translate the report",
+                "agent: Reading it.",
+                "user (steer): only the crash part",
+                "agent: Translated.",
+                "took 5030s",
+                "user: thanks",
+                "agent: Welcome.",
+                "took 5s",
             ]
         );
     }

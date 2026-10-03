@@ -13,7 +13,7 @@ use crate::transcript::Transcript;
 use crate::types::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 use crate::worktree::Worktree;
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -301,10 +301,13 @@ pub struct Store {
     /// Held while an imported transcript is (re)indexed: that runs over many transactions, and
     /// two passes over the same thread mustn't interleave.
     indexer: Arc<Mutex<()>>,
+    /// A second, read-only connection for searches. WAL lets it read while `conn` writes, so a
+    /// search ranking a big history never holds up a save on the main thread. `None` in memory
+    /// (a second connection would open another, empty, database): searches share `conn`.
+    reader: Option<Arc<Mutex<Connection>>>,
 }
 
 const SCHEMA: &str = r#"
-PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -362,18 +365,29 @@ fn project_root_in(cwd: &Path, trek_worktrees: &Path) -> PathBuf {
     cwd.to_path_buf()
 }
 
-/// Migrations; each is a no-op once applied.
+/// Columns added to `threads` since the first release, in order.
+const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
+    ("side_of", "TEXT"),
+    ("never_settle", "INTEGER NOT NULL DEFAULT 0"),
+    ("imported_title", "TEXT"),
+    ("import_hidden", "TEXT"),
+    ("import_kept", "INTEGER NOT NULL DEFAULT 0"),
+    ("worktree_path", "TEXT"),
+    ("worktree_branch", "TEXT"),
+    ("worktree_base", "TEXT"),
+    ("native_at", "TEXT"),
+    ("reopen", "TEXT"),
+];
+
+/// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
+/// a failure leaves the database as it was rather than half migrated.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN side_of TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN never_settle INTEGER NOT NULL DEFAULT 0", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN imported_title TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_hidden TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_kept INTEGER NOT NULL DEFAULT 0", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN worktree_path TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN worktree_branch TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN worktree_base TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN native_at TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN reopen TEXT", []);
+    let have: HashSet<String> = conn.prepare("SELECT name FROM pragma_table_info('threads')")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    for (name, decl) in THREAD_COLUMNS_ADDED {
+        if !have.contains(*name) {
+            conn.execute(&format!("ALTER TABLE threads ADD COLUMN {name} {decl}"), [])?;
+        }
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS checkpoints (
            thread_id TEXT NOT NULL, item_id TEXT NOT NULL, repo TEXT NOT NULL, sha TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -412,14 +426,13 @@ fn migrate_items(conn: &Connection) -> rusqlite::Result<()> {
     if matches!(id_default, Some(Some(_))) {
         return Ok(());
     }
-    let tx = conn.unchecked_transaction()?;
-    tx.execute_batch("ALTER TABLE items RENAME TO items_old")?;
-    tx.execute_batch(ITEMS_TABLE)?;
+    conn.execute_batch("ALTER TABLE items RENAME TO items_old")?;
+    conn.execute_batch(ITEMS_TABLE)?;
     if id_default.is_some() {
-        tx.execute_batch("INSERT INTO items (pk, id, thread_id, seq, data, created_at) SELECT pk, id, thread_id, seq, data, created_at FROM items_old")?;
+        conn.execute_batch("INSERT INTO items (pk, id, thread_id, seq, data, created_at) SELECT pk, id, thread_id, seq, data, created_at FROM items_old")?;
     } else {
-        let mut read = tx.prepare("SELECT thread_id, seq, data, created_at FROM items_old ORDER BY thread_id, seq")?;
-        let mut write = tx.prepare("INSERT INTO items (id, thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        let mut read = conn.prepare("SELECT thread_id, seq, data, created_at FROM items_old ORDER BY thread_id, seq")?;
+        let mut write = conn.prepare("INSERT INTO items (id, thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         let mut rows = read.query([])?;
         while let Some(r) = rows.next()? {
             let (thread, seq, data, at): (String, i64, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
@@ -428,16 +441,19 @@ fn migrate_items(conn: &Connection) -> rusqlite::Result<()> {
     }
     // The search triggers moved to the old table with the rename and go with it: have
     // `search::ensure_schema` set the index up again.
-    tx.execute_batch("DROP TABLE items_old")?;
-    if tx.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_state'")?.exists([])? {
-        tx.execute_batch("DELETE FROM search_state WHERE key = 'version'")?;
+    conn.execute_batch("DROP TABLE items_old")?;
+    if conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_state'")?.exists([])? {
+        conn.execute_batch("DELETE FROM search_state WHERE key = 'version'")?;
     }
-    tx.commit()
+    Ok(())
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
-        Store::with_connection(Connection::open(path)?)
+        let mut store = Store::with_connection(Connection::open(path)?)?;
+        let reader = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI)?;
+        store.reader = Some(Arc::new(Mutex::new(reader)));
+        Ok(store)
     }
 
     pub fn open_default() -> Result<Store> {
@@ -448,14 +464,31 @@ impl Store {
         Store::with_connection(Connection::open_in_memory()?)
     }
 
-    fn with_connection(conn: Connection) -> Result<Store> {
-        conn.execute_batch(SCHEMA)?;
-        migrate(&conn)?;
-        Ok(Store { conn: Arc::new(Mutex::new(conn)), indexer: Arc::default() })
+    fn with_connection(mut conn: Connection) -> Result<Store> {
+        // Not in a transaction: SQLite can't change the journal mode inside one. Only when it
+        // needs changing, as that waits for other connections' locks.
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            conn.execute_batch("PRAGMA journal_mode = WAL")?;
+        }
+        // IMMEDIATE takes the write lock up front: with another Trek migrating the same database,
+        // this waits for it (or fails whole) instead of applying half the steps.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(SCHEMA)?;
+        migrate(&tx)?;
+        tx.commit()?;
+        Ok(Store { conn: Arc::new(Mutex::new(conn)), indexer: Arc::default(), reader: None })
     }
 
     fn with<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> Result<R> {
         let conn = self.conn.lock().expect("store lock");
+        Ok(f(&conn)?)
+    }
+
+    /// `with`, for reads that may take a while: on the read-only connection where there is one.
+    fn reading<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> Result<R> {
+        let Some(reader) = &self.reader else { return self.with(f) };
+        let conn = reader.lock().expect("store reader lock");
         Ok(f(&conn)?)
     }
 
@@ -595,7 +628,11 @@ impl Store {
             format!("INSERT INTO threads ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}", cols.join(", "), marks.join(", "), set.join(", "))
         });
         if let Some(native) = &t.native_id {
-            c.execute("DELETE FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3", params![t.source.key(), native, t.id])?;
+            let replaced = "SELECT id FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3";
+            let args = params![t.source.key(), native, t.id];
+            c.execute(&format!("DELETE FROM items WHERE thread_id IN ({replaced})"), args)?;
+            c.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({replaced})"), args)?;
+            c.execute("DELETE FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3", args)?;
         }
         c.execute(
             &SQL,
@@ -762,6 +799,10 @@ impl Store {
                 t.last_seen_at = imp.updated_at;
             }
             t.updated_at = imp.updated_at;
+        } else if t.updated_at > imp.updated_at && !Self::has_items_in(c, &t.id)? {
+            // Until it's continued here, only imports set its time, and earlier ones went by
+            // the session file's modified time, which the agent bumps long after the last message.
+            t.updated_at = imp.updated_at;
         }
         if t != before {
             Self::save_thread_in(c, &t)?;
@@ -870,14 +911,45 @@ impl Store {
         c.query_row("SELECT EXISTS (SELECT 1 FROM items WHERE thread_id = ?1)", [thread_id], |r| r.get(0))
     }
 
-    /// Remove a thread and its transcript from Trek's database.
+    /// Remove a thread, its side chats and their transcripts from Trek's database. The agent
+    /// sessions they ran stay in the agents' own history; they're retired, so no import brings
+    /// the conversation back.
     pub fn delete_thread(&self, id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute("DELETE FROM items WHERE thread_id = ?1", [id])?;
-            c.execute("DELETE FROM checkpoints WHERE thread_id = ?1 OR thread_id IN (SELECT id FROM threads WHERE side_of = ?1)", [id])?;
-            c.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
-            Ok(())
-        })
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO retired_sessions (native_id, thread_id)
+             SELECT native_id, id FROM threads WHERE (id = ?1 OR side_of = ?1) AND source = 'trek' AND native_id IS NOT NULL",
+            [id],
+        )?;
+        let gone = "SELECT id FROM threads WHERE id = ?1 OR side_of = ?1";
+        tx.execute(&format!("DELETE FROM items WHERE thread_id IN ({gone})"), [id])?;
+        tx.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({gone})"), [id])?;
+        tx.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Side chats left without their thread: ones started from a draft (`side_of = "draft"`) in
+    /// an earlier run, which nothing can reopen, and any whose thread is gone. Removed like
+    /// `delete_thread` removes them; returns them, for their file checkpoints. For launch, before
+    /// any side chat opens.
+    pub fn drop_orphan_side_chats(&self) -> Result<Vec<(Thread, Vec<Checkpoint>)>> {
+        let orphans: Vec<Thread> = self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM threads WHERE side_of IS NOT NULL AND side_of NOT IN (SELECT id FROM threads)",
+                Self::THREAD_COLS
+            ))?;
+            let rows = st.query_map([], Self::row_to_thread)?;
+            rows.collect()
+        })?;
+        let mut out = Vec::with_capacity(orphans.len());
+        for t in orphans {
+            let checkpoints = self.checkpoints(&t.id)?;
+            self.delete_thread(&t.id)?;
+            out.push((t, checkpoints));
+        }
+        Ok(out)
     }
 
     pub fn rename_project(&self, id: &str, name: &str) -> Result<()> {
@@ -990,6 +1062,20 @@ impl Store {
             let rows = st.query_map([thread_id], Checkpoint::from_row)?;
             rows.collect()
         })
+    }
+
+    /// Checkpoints of threads archived or settled before `before` (pinned ones aside), and of
+    /// threads that are gone, by thread.
+    pub fn stale_checkpoints(&self, before: i64) -> Result<Vec<(String, Vec<Checkpoint>)>> {
+        let threads: Vec<String> = self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT DISTINCT k.thread_id FROM checkpoints k LEFT JOIN threads t ON t.id = k.thread_id
+                 WHERE t.id IS NULL OR t.archived_at < ?1 OR (t.settled_at < ?1 AND t.pinned_at IS NULL AND t.archived_at IS NULL)",
+            )?;
+            let rows = st.query_map([before], |r| r.get(0))?;
+            rows.collect()
+        })?;
+        threads.into_iter().map(|t| Ok((t.clone(), self.checkpoints(&t)?))).collect()
     }
 
     /// Forget checkpoints by message.
@@ -1338,6 +1424,33 @@ mod tests {
     }
 
     #[test]
+    fn migrations_apply_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("trek-migrate-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        let columns = |c: &Connection| -> HashSet<String> { c.prepare("SELECT name FROM pragma_table_info('threads')").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect() };
+        // An older database that got some of today's columns.
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("PRAGMA journal_mode = WAL").unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch("ALTER TABLE threads ADD COLUMN side_of TEXT").unwrap();
+        let before = columns(&c);
+        // Another process holds the write lock past the busy timeout: opening fails, and none
+        // of the steps are applied.
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(Store::open(&path).is_err());
+        assert_eq!(columns(&c), before);
+        c.execute_batch("COMMIT").unwrap();
+        // Once it's free, the rest are added around the column that's there already.
+        let s = Store::open(&path).unwrap();
+        let after = columns(&c);
+        assert!(THREAD_COLUMNS_ADDED.iter().all(|(name, _)| after.contains(*name)));
+        assert!(s.threads().unwrap().is_empty());
+        drop((s, c));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn treks_own_worktrees_belong_to_their_main_checkout() {
         let dir = std::env::temp_dir().join(format!("trek-root-{}", uuid::Uuid::new_v4()));
         let trek = dir.join("worktrees");
@@ -1521,6 +1634,13 @@ mod tests {
         s.upsert_imported(&[ImportedThread { updated_at: 50, ..imported("a", "t") }]).unwrap();
         let t = by_native(&s, "a");
         assert_eq!((t.updated_at, t.last_seen_at), (50, 50));
+        // A later import that knows better (the last message, not the file's modified time)
+        // moves it back down, until it's continued here.
+        s.upsert_imported(&[ImportedThread { updated_at: 30, ..imported("a", "t") }]).unwrap();
+        assert_eq!(by_native(&s, "a").updated_at, 30);
+        s.append_items(&t.id, [("u1", &Item::Assistant { text: "here".into() })]).unwrap();
+        s.upsert_imported(&[ImportedThread { updated_at: 20, ..imported("a", "t") }]).unwrap();
+        assert_eq!(by_native(&s, "a").updated_at, 30);
     }
 
     #[test]

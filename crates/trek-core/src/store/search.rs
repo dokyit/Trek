@@ -103,19 +103,18 @@ pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     if version == Some(VERSION) {
         return Ok(());
     }
-    let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(&SCHEMA.replace("{max}", &MAX_INDEXED_CHARS.to_string()))?;
+    conn.execute_batch(&SCHEMA.replace("{max}", &MAX_INDEXED_CHARS.to_string()))?;
     // Keys for today's threads (cheap); their titles are indexed with the rest.
-    tx.execute_batch("INSERT INTO title_docs (thread_id) SELECT id FROM threads ORDER BY rowid")?;
+    conn.execute_batch("INSERT INTO title_docs (thread_id) SELECT id FROM threads ORDER BY rowid")?;
     // Everything up to today's last row is backfilled; the triggers cover what comes after.
-    tx.execute(
+    conn.execute(
         "INSERT OR REPLACE INTO search_state (key, value) VALUES
            ('version', ?1),
            ('titles_from', 0), ('titles_upto', (SELECT COALESCE(MAX(pk), 0) FROM title_docs)),
            ('items_from', 0), ('items_upto', (SELECT COALESCE(MAX(pk), 0) FROM items))",
         [VERSION],
     )?;
-    tx.commit()
+    Ok(())
 }
 
 fn state(c: &Connection, key: &str) -> rusqlite::Result<i64> {
@@ -271,15 +270,38 @@ fn messages(items: &[Item]) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
+/// Matches ranked per message index before grouping by thread: a common prefix matches most of
+/// the index, and only the best of those can make the list.
+const RANKED_MATCHES: i64 = 2000;
+
 /// Best message match per thread in one index, best first: (bm25, thread updated_at, rowid,
-/// thread id). Grouping happens before the limit, so one thread with many matching messages
-/// can't crowd out the rest.
+/// thread id). `sql` selects (rowid, thread_id, score, updated_at) from the index's best
+/// matches, `?3` of them. Grouping happens before the limit, so one thread with many matching
+/// messages can't crowd out the rest.
 fn best_per_thread(c: &Connection, sql: &str, query: &str, limit: i64) -> rusqlite::Result<Vec<(f64, i64, i64, String)>> {
-    // bm25() can't sit inside an aggregate; the materialized CTE scores every match first.
     let sql = format!("WITH m AS MATERIALIZED ({sql}) SELECT rowid, thread_id, MIN(score) AS best, updated_at FROM m GROUP BY thread_id ORDER BY best, updated_at DESC LIMIT ?2");
     let mut st = c.prepare_cached(&sql)?;
-    let rows = st.query_map(params![query, limit], |r| Ok((r.get(2)?, r.get(3)?, r.get(0)?, r.get(1)?)))?;
+    let rows = st.query_map(params![query, limit, RANKED_MATCHES.max(limit * 4)], |r| Ok((r.get(2)?, r.get(3)?, r.get(0)?, r.get(1)?)))?;
     rows.collect()
+}
+
+/// bm25 scores from one index relative to its best match there, best = 1. Scores from two FTS
+/// tables aren't comparable as they are: each depends on its own table's size, document lengths
+/// and term frequencies.
+fn relative_scores(found: &[(f64, i64, i64, String)]) -> Vec<f64> {
+    let best = found.iter().map(|f| f.0).fold(0.0, f64::min);
+    found.iter().map(|f| if best < 0.0 { f.0 / best } else { 1.0 }).collect()
+}
+
+/// The words of `query` worth looking for in messages: one-letter prefixes match most of the
+/// index and narrow nothing. `None` unless a word has three characters: with only short
+/// prefixes, ranking would score most of the index for hits that tell nobody anything.
+fn message_query(query: &str) -> Option<String> {
+    let len = |w: &str| w.chars().filter(|c| c.is_alphanumeric()).count();
+    if !query.split_whitespace().any(|w| len(w) >= 3) {
+        return None;
+    }
+    fts_query(&query.split_whitespace().filter(|w| len(w) >= 2).collect::<Vec<_>>().join(" "))
 }
 
 impl Store {
@@ -312,13 +334,15 @@ impl Store {
         Ok(titles || items)
     }
 
-    /// Clear out index entries nobody can reach: threads deleted without their delete trigger
+    /// Clear out rows and index entries nobody can reach: transcripts of threads that are gone
+    /// (older Trek builds left side chats' behind), threads deleted without their delete trigger
     /// firing (an older Trek's INSERT OR REPLACE taking another thread's agent session), and
     /// imported history of threads since continued here (their stored rows are what's searched).
     pub fn prune_search(&self) -> Result<()> {
         self.with(|c| {
             c.execute_batch(
-                "DELETE FROM title_search WHERE rowid IN (SELECT pk FROM title_docs WHERE thread_id NOT IN (SELECT id FROM threads));
+                "DELETE FROM items WHERE thread_id NOT IN (SELECT id FROM threads);
+                 DELETE FROM title_search WHERE rowid IN (SELECT pk FROM title_docs WHERE thread_id NOT IN (SELECT id FROM threads));
                  DELETE FROM title_docs WHERE thread_id NOT IN (SELECT id FROM threads);
                  DELETE FROM import_indexed WHERE thread_id NOT IN (SELECT id FROM threads);",
             )
@@ -340,13 +364,13 @@ impl Store {
 
     /// Threads matching `query`, archived threads and side chats left out: title matches first
     /// (best first), then message matches, the best one per thread, best first. Each list holds
-    /// up to `limit` hits. Messages are searched once a word has two characters: a one-letter
-    /// prefix matches most of the index and would hold the database for nothing useful.
+    /// up to `limit` hits. Messages are searched once a word has three characters (`message_query`).
+    /// Runs on the read-only connection, so saves go on meanwhile.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let Some(q) = fts_query(query) else { return Ok(vec![]) };
-        let messages = query.split_whitespace().any(|w| w.chars().filter(|c| c.is_alphanumeric()).count() >= 2);
+        let messages = message_query(query);
         let limit = limit.max(1) as i64;
-        self.with(|c| {
+        self.reading(|c| {
             let mut out = Vec::new();
             let mut st = c.prepare_cached(
                 "SELECT t.id, t.title, highlight(title_search, 0, ?2, ?3)
@@ -360,35 +384,41 @@ impl Store {
                 let (snippet, ranges) = parse_marked(&marked, false);
                 out.push(SearchHit { thread_id, title, position: None, item_id: None, snippet, ranges });
             }
-            if !messages {
-                return Ok(out);
-            }
+            let Some(q) = messages else { return Ok(out) };
 
             // Rank first, cheaply, across both message indexes (stored rows; imported history
             // unless the thread has been continued here); a thread's best match wins. Excerpts are
             // cut afterwards, for the winners only.
             let stored = best_per_thread(
                 c,
-                "SELECT item_search.rowid AS rowid, i.thread_id AS thread_id, bm25(item_search) AS score, t.updated_at AS updated_at
-                 FROM item_search JOIN items i ON i.pk = item_search.rowid JOIN threads t ON t.id = i.thread_id
-                 WHERE item_search MATCH ?1 AND t.archived_at IS NULL AND t.side_of IS NULL",
+                "SELECT m.rowid AS rowid, i.thread_id AS thread_id, m.score AS score, t.updated_at AS updated_at
+                 FROM (SELECT rowid, rank AS score FROM item_search WHERE item_search MATCH ?1 ORDER BY rank LIMIT ?3) m
+                 JOIN items i ON i.pk = m.rowid JOIN threads t ON t.id = i.thread_id
+                 WHERE t.archived_at IS NULL AND t.side_of IS NULL",
                 &q,
                 limit,
             )?;
             let imported = best_per_thread(
                 c,
-                "SELECT import_search.rowid AS rowid, d.thread_id AS thread_id, bm25(import_search) AS score, t.updated_at AS updated_at
-                 FROM import_search JOIN import_docs d ON d.pk = import_search.rowid JOIN threads t ON t.id = d.thread_id
-                 WHERE import_search MATCH ?1 AND t.archived_at IS NULL AND t.side_of IS NULL
+                "SELECT m.rowid AS rowid, d.thread_id AS thread_id, m.score AS score, t.updated_at AS updated_at
+                 FROM (SELECT rowid, rank AS score FROM import_search WHERE import_search MATCH ?1 ORDER BY rank LIMIT ?3) m
+                 JOIN import_docs d ON d.pk = m.rowid JOIN threads t ON t.id = d.thread_id
+                 WHERE t.archived_at IS NULL AND t.side_of IS NULL
                    AND NOT EXISTS (SELECT 1 FROM items WHERE items.thread_id = d.thread_id)",
                 &q,
                 limit,
             )?;
-            // (bm25, thread updated_at, stored row?, rowid). A thread is in one index or the other.
-            let mut found: Vec<(f64, i64, bool, i64)> =
-                stored.into_iter().map(|f| (f.0, f.1, true, f.2)).chain(imported.into_iter().map(|f| (f.0, f.1, false, f.2))).collect();
-            // bm25 is lower-is-better; ties go to the more recent thread.
-            found.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
+            // (score relative to its index's best, thread updated_at, stored row?, rowid). A
+            // thread is in one index or the other.
+            let (stored_rel, imported_rel) = (relative_scores(&stored), relative_scores(&imported));
+            let mut found: Vec<(f64, i64, bool, i64)> = stored
+                .iter()
+                .zip(stored_rel)
+                .map(|(f, rel)| (rel, f.1, true, f.2))
+                .chain(imported.iter().zip(imported_rel).map(|(f, rel)| (rel, f.1, false, f.2)))
+                .collect();
+            // Higher is better; ties go to the more recent thread.
+            found.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
             found.truncate(limit as usize);
             let winners: Vec<(bool, i64)> = found.into_iter().map(|f| (f.2, f.3)).collect();
             let rowids = |stored: bool| format!("[{}]", winners.iter().filter(|w| w.0 == stored).map(|w| w.1.to_string()).collect::<Vec<_>>().join(","));
@@ -825,6 +855,127 @@ mod tests {
         assert_eq!(count(&s, "SELECT COUNT(*) FROM import_search"), 1);
         assert_eq!(s.search("still", 5).unwrap()[0].thread_id, t.id);
         assert_eq!(s.search("history", 5).unwrap()[0].item_id.as_deref(), Some(tr.ids()[0].as_str()));
+    }
+
+    #[test]
+    fn deleted_threads_leave_no_rows_behind() {
+        let s = Store::in_memory().unwrap();
+        let t = thread(&s, "Parent");
+        let mut side = thread(&s, "Side chat");
+        side.side_of = Some(t.id.clone());
+        s.save_thread(&side).unwrap();
+        for (id, text) in [(&t.id, "parent words"), (&side.id, "aside words")] {
+            let mut tr = Transcript::default();
+            tr.push(user(text));
+            s.save_transcript(id, &mut tr).unwrap();
+            s.add_checkpoint(id, &tr.ids()[0], std::path::Path::new("/tmp/repo"), "abc").unwrap();
+        }
+        s.delete_thread(&t.id).unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM item_search"), 0);
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM checkpoints"), 0);
+
+        // A thread taking over another's agent session replaces it, transcript and all.
+        let mut a = thread(&s, "First");
+        a.native_id = Some("sess".into());
+        s.save_thread(&a).unwrap();
+        let mut tr = Transcript::default();
+        tr.push(user("replaced words"));
+        s.save_transcript(&a.id, &mut tr).unwrap();
+        let mut b = thread(&s, "Second");
+        b.native_id = Some("sess".into());
+        s.save_thread(&b).unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
+
+        // Rows older builds left behind go at the next prune.
+        s.with(|c| c.execute("INSERT INTO items (thread_id, seq, data, created_at) VALUES ('gone', 0, ?1, 1)", [serde_json::to_string(&user("stray words")).unwrap()])).unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM item_search"), 1);
+        s.prune_search().unwrap();
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM item_search"), 0);
+    }
+
+    #[test]
+    fn draft_side_chats_go_at_the_next_launch() {
+        let s = Store::in_memory().unwrap();
+        let t = thread(&s, "Parent");
+        let mut kept = thread(&s, "Side chat");
+        kept.side_of = Some(t.id.clone());
+        s.save_thread(&kept).unwrap();
+        let mut draft = thread(&s, "Side chat");
+        draft.side_of = Some("draft".into());
+        draft.native_id = Some("draft-session".into());
+        s.save_thread(&draft).unwrap();
+        let mut tr = Transcript::default();
+        tr.push(user("draft words"));
+        s.save_transcript(&draft.id, &mut tr).unwrap();
+        s.add_checkpoint(&draft.id, &tr.ids()[0], std::path::Path::new("/tmp/repo"), "abc").unwrap();
+        let gone = s.drop_orphan_side_chats().unwrap();
+        assert_eq!(gone.len(), 1);
+        assert_eq!((gone[0].0.id.as_str(), gone[0].1.len()), (draft.id.as_str(), 1));
+        assert!(s.thread(&draft.id).unwrap().is_none());
+        assert!(s.thread(&kept.id).unwrap().is_some());
+        assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
+        assert!(s.trek_native_ids().unwrap().contains("draft-session"));
+    }
+
+    #[test]
+    fn short_prefixes_search_titles_only() {
+        assert_eq!(message_query("th"), None);
+        assert_eq!(message_query("co de"), None);
+        assert_eq!(message_query("a fix").as_deref(), Some("\"fix\"*"));
+        assert_eq!(message_query("ui the").as_deref(), Some("\"ui\"* \"the\"*"));
+        let s = Store::in_memory().unwrap();
+        let t = thread(&s, "Chat");
+        let mut tr = Transcript::default();
+        tr.push(user("the thing about the theme"));
+        s.save_transcript(&t.id, &mut tr).unwrap();
+        assert!(s.search("th", 5).unwrap().is_empty());
+        assert_eq!(s.search("a them", 5).unwrap()[0].position, Some(0));
+    }
+
+    #[test]
+    fn stored_and_imported_hits_rank_on_the_same_scale() {
+        let s = Store::in_memory().unwrap();
+        // In the stored index "deploy" is in every message, so bm25 gives it almost no weight
+        // there; in the imported one it's rare and weighs a lot. Raw scores would always put
+        // imported history first.
+        let imported = thread(&s, "Imported");
+        s.index_imported(&imported.id, Some(&[user("deploy it"), user("unrelated"), user("other"), user("more"), user("words")]), 1).unwrap();
+        let mut stored = thread(&s, "Stored");
+        let mut tr = Transcript::default();
+        tr.push(user("deploy it"));
+        tr.push(said("deploy done"));
+        s.save_transcript(&stored.id, &mut tr).unwrap();
+        stored.updated_at = imported.updated_at + 1;
+        s.save_thread(&stored).unwrap();
+        let raw: f64 = s.with(|c| c.query_row("SELECT rank FROM item_search WHERE item_search MATCH '\"deploy\"*' ORDER BY rank LIMIT 1", [], |r| r.get(0))).unwrap();
+        let imported_raw: f64 = s.with(|c| c.query_row("SELECT rank FROM import_search WHERE import_search MATCH '\"deploy\"*' ORDER BY rank LIMIT 1", [], |r| r.get(0))).unwrap();
+        assert!(imported_raw < raw, "the imported hit scores better raw");
+        // Each index's best is as good as the other's; the more recent thread goes first.
+        let hits: Vec<String> = s.search("deploy", 5).unwrap().into_iter().filter(|h| h.position.is_some()).map(|h| h.thread_id).collect();
+        assert_eq!(hits, [stored.id.clone(), imported.id.clone()]);
+    }
+
+    #[test]
+    fn searches_run_while_a_save_holds_the_store() {
+        let (path, dir) = temp_db("search-reader");
+        let s = Store::open(&path).unwrap();
+        let t = thread(&s, "Harbour");
+        let mut tr = Transcript::default();
+        tr.push(user("lighthouse keeper"));
+        s.save_transcript(&t.id, &mut tr).unwrap();
+        let held = s.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let searcher = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(searcher.search("lighthouse", 5).map(|h| h.len()).ok());
+        });
+        let found = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("search waited for the writer");
+        assert_eq!(found, Some(1));
+        drop(held);
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
