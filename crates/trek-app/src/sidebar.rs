@@ -139,21 +139,33 @@ impl Sidebar {
                     .item(PopupMenuItem::new("Clone from GitHub…").icon(IconName::Github).on_click(move |_, window, cx| sb.update(cx, |s, cx| s.open_clone_dialog(window, cx))))
             }
         });
-        h_flex()
-            .px_3()
-            .pt_1()
-            .pb_2()
-            .gap(px(2.))
+        let ws = self.workspace.read(cx);
+        let at_basecamp = ws.route == Route::Basecamp;
+        let waiting = ws.ready_for_review().len();
+        let basecamp = ui::nav_row("open-basecamp", Icon::new(crate::assets::Lucide::Tent), "Basecamp", None, at_basecamp, cx)
+            .test_support()
+            .when(waiting > 0, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(waiting.to_string())))
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Your day on the trail (⌘⇧H)").build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))));
+        v_flex()
             .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&self.search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)),
-                ),
+                h_flex()
+                    .px_3()
+                    .pt_1()
+                    .pb_2()
+                    .gap(px(2.))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)),
+                        ),
+                    )
+                    .child(filter)
+                    .child(add)
+                    .child(ui::icon_button("new-thread", crate::assets::Lucide::SquarePen, "New thread (⌘N)").on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace.update(cx, |ws, cx| ws.new_thread(cx))
+                    }))),
             )
-            .child(filter)
-            .child(add)
-            .child(ui::icon_button("new-thread", crate::assets::Lucide::SquarePen, "New thread (⌘N)").on_click(cx.listener(|this, _, _, cx| {
-                this.workspace.update(cx, |ws, cx| ws.new_thread(cx))
-            })))
+            .child(div().px_2().pb_1().child(basecamp))
     }
 
     fn project_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {

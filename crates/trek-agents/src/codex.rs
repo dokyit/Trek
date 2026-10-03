@@ -10,7 +10,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use trek_core::catalog::ModelInfo;
-use trek_core::{Effort, HandHolding, detect};
+use trek_core::{Effort, HandHolding, TokenUsage, detect};
 
 pub(crate) struct Rpc {
     pub(crate) stdin: ChildStdin,
@@ -370,6 +370,10 @@ struct Session {
     /// Sub-agents by their thread id.
     agents: HashMap<String, SubAgent>,
     plan_updates: u32,
+    /// Each Codex thread's token total as last reported (this one's and its sub-agents').
+    token_totals: HashMap<String, TokenUsage>,
+    /// Tokens the running turn has used so far, sent as `Usage` when it ends.
+    turn_tokens: TokenUsage,
 }
 
 impl Session {
@@ -398,6 +402,8 @@ impl Session {
             recap: None,
             agents: HashMap::new(),
             plan_updates: 0,
+            token_totals: HashMap::new(),
+            turn_tokens: TokenUsage::default(),
         }
     }
 
@@ -569,6 +575,7 @@ impl Session {
             // Requests are Trek's by request id, whichever thread raised them: a sub-agent's
             // approval that Codex settles must go too.
             _ if method == "serverRequest/resolved" => self.notification(method, p, &mut out),
+            Some(t) if t != self.thread_id && method == "thread/tokenUsage/updated" => self.count_tokens(t, p, &mut out),
             Some(t) if t != self.thread_id => self.sub_agent(t, method, p, &mut out),
             _ => self.notification(method, p, &mut out),
         }
@@ -724,7 +731,11 @@ impl Session {
                 self.plan_updated(p, out);
                 None
             }
-            "thread/tokenUsage/updated" => context_event(p),
+            "thread/tokenUsage/updated" => {
+                let main = self.thread_id.clone();
+                self.count_tokens(&main, p, out);
+                context_event(p)
+            }
             "turn/diff/updated" => {
                 let (additions, deletions) = diff_stat(p["diff"].as_str().unwrap_or_default());
                 Some(AgentEvent::DiffStat { additions, deletions })
@@ -750,6 +761,25 @@ impl Session {
         out.events.extend(ev);
     }
 
+    /// A `thread/tokenUsage/updated` for `thread` (this one or a sub-agent's): what it used is how
+    /// far its running total moved since the last report (a resumed thread's total carries on
+    /// from its history; the first report's `last` is its own request). Counted toward the
+    /// running turn, or reported at once when none runs (a background sub-agent).
+    fn count_tokens(&mut self, thread: &str, p: &Value, out: &mut Out) {
+        let usage = &p["tokenUsage"];
+        let total = trek_core::import::codex::tokens(&usage["total"]);
+        let used = match self.token_totals.get(thread) {
+            Some(before) => total.since(before),
+            None => trek_core::import::codex::tokens(&usage["last"]),
+        };
+        self.token_totals.insert(thread.to_string(), total);
+        if self.busy() {
+            self.turn_tokens.add(&used);
+        } else if !used.is_empty() {
+            out.events.push(AgentEvent::Usage { model: self.model.clone(), tokens: used });
+        }
+    }
+
     fn turn_completed(&mut self, turn: &Value, out: &mut Out) {
         self.turn = Turn::Idle;
         self.interrupt = false;
@@ -768,6 +798,10 @@ impl Session {
         // Whatever became of it, the turn is in the thread's history: one to cut back to.
         if let Some(id) = turn["id"].as_str().filter(|id| !id.is_empty()) {
             out.events.push(AgentEvent::Mark(id.to_string()));
+        }
+        let tokens = std::mem::take(&mut self.turn_tokens);
+        if !tokens.is_empty() {
+            out.events.push(AgentEvent::Usage { model: self.model.clone(), tokens });
         }
         out.events.push(AgentEvent::TurnComplete { cost_usd: None, error });
         // Messages that missed this turn start the next one, and answer its plan.
@@ -1897,6 +1931,24 @@ mod tests {
         // While it's still running, more work is the same run.
         feed(&mut s, &[activity("interacted")]);
         assert!(feed(&mut s, &[activity("interacted")]).events.is_empty());
+    }
+
+    #[test]
+    fn a_turn_reports_the_tokens_it_and_its_sub_agents_used() {
+        // A real turn: the main thread reports three times (running totals), its sub-agent once.
+        let lines = fixture(include_str!("../fixtures/codex-subagents.jsonl"));
+        let mut s = session("01a0fe4e-092b-70a0-9bf1-acaf9895b554", false);
+        let out = feed(&mut s, &lines);
+        let used: Vec<&AgentEvent> = out.events.iter().filter(|e| matches!(e, AgentEvent::Usage { .. })).collect();
+        let tokens = TokenUsage { input: (51982 - 28928) + (23158 - 6912), output: 90 + 5, cache_read: 28928 + 6912, cache_write: 0 };
+        assert_eq!(used, vec![&AgentEvent::Usage { model: Some("gpt-5.6-luna".into()), tokens }]);
+        // Reported as the turn ends, just before it.
+        let at = out.events.iter().position(|e| matches!(e, AgentEvent::Usage { .. })).unwrap();
+        assert!(matches!(out.events[at + 1], AgentEvent::TurnComplete { .. }));
+        // A background sub-agent reporting between turns is counted at once.
+        let late = json!({"method":"thread/tokenUsage/updated","params":{"threadId":"01a0fe4e-1f2d-7f20-a1e8-b5a58b5a5126","tokenUsage":{"total":{"inputTokens":24158,"cachedInputTokens":6912,"outputTokens":15},"last":{},"modelContextWindow":258400}}});
+        let out = feed(&mut s, &[late]);
+        assert_eq!(out.events, vec![AgentEvent::Usage { model: Some("gpt-5.6-luna".into()), tokens: TokenUsage { input: 1000, output: 10, cache_read: 0, cache_write: 0 } }]);
     }
 }
 

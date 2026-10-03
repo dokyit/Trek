@@ -144,6 +144,22 @@ project), with `snoozed_until`, `pinned_at`, `pending_approval_count`, `pending_
 - Context menu: Pin, Rename, Mark unread, Snooze, Settle, Archive, Copy resume command, Reveal in Finder.
 - Footer: Settings, update pill, account/usage ring.
 
+### Basecamp (the day's recap)
+The sidebar is the inbox; **Basecamp** (Tent row at the top of the sidebar, ⌘K, ⌘⇧H; Esc goes back) is the
+recap of the work behind it, after Synara's Inbox, in Trek's trail language:
+- Header: "Basecamp", the greeting and date, a Today / This week switch, Mark all read.
+- **Ready for review** (left): needs-you threads (approvals, questions, plans, failures) first, then finished
+  unread ones, newest first: status icon, title, agent logo, diff stat, project. A click opens the thread.
+- **Today's trek** (right): the recap in sentences with inline project badges and model logos; an
+  **elevation profile** (agent time per hour, or per three hours for the week, as a filled mountain
+  silhouette, the summit flagged in ember, the hiker standing at "now", the trail ahead dotted; hover shows a
+  stretch's numbers); then quiet tiles between hairlines: best model, worked most on, tokens (with a
+  sparkline), agent time and failures, and what's left of each plan limit.
+- Data: prompts and turn ends from transcripts, token usage recorded per turn as agents report it
+  (`token_usage`), imported threads read from the agents' own files. Nothing is claimed that wasn't reported:
+  without tokens the recap counts turns. Computed off the main thread when threads change; numbers count up
+  for 400 ms once per visit (none with reduced motion).
+
 ### Composer
 - Multiline input; `@` files/symbols/threads; `/` commands (+ skills); paste/drag images; ⌘↩ send, ↩ newline
   configurable. While running: ↩ = **steer** (inject at next step), ⌥↩ = queue (Pi/Zed/Codex pattern).

@@ -245,6 +245,48 @@ impl ThreadSource {
     }
 }
 
+/// Tokens a model went through, split the way providers bill them. `input` is fresh input only:
+/// reads from and writes to the prompt cache are counted apart (OpenAI's `input_tokens`, which
+/// include cached ones, are split up to match).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+    }
+
+    /// What was used since `earlier`, a lower running total of the same session. A total that
+    /// went down started over (a new session, a `/clear`): all of it is new.
+    pub fn since(&self, earlier: &TokenUsage) -> TokenUsage {
+        if self.input < earlier.input || self.output < earlier.output || self.cache_read < earlier.cache_read || self.cache_write < earlier.cache_write {
+            return *self;
+        }
+        TokenUsage {
+            input: self.input - earlier.input,
+            output: self.output - earlier.output,
+            cache_read: self.cache_read - earlier.cache_read,
+            cache_write: self.cache_write - earlier.cache_write,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +297,19 @@ mod tests {
         assert_eq!(Effort::Max.clamp_to(&supported), Effort::High);
         assert_eq!(Effort::Off.clamp_to(&supported), Effort::Low);
         assert_eq!(Effort::Medium.clamp_to(&supported), Effort::Medium);
+    }
+
+    #[test]
+    fn token_usage_since_an_earlier_total() {
+        let a = TokenUsage { input: 10, output: 5, cache_read: 100, cache_write: 20 };
+        let b = TokenUsage { input: 15, output: 9, cache_read: 160, cache_write: 20 };
+        assert_eq!(b.since(&a), TokenUsage { input: 5, output: 4, cache_read: 60, cache_write: 0 });
+        assert_eq!(b.since(&a).total(), 69);
+        // A total that went down started over.
+        assert_eq!(a.since(&b), a);
+        let mut sum = a;
+        sum.add(&b);
+        assert_eq!(sum.total(), a.total() + b.total());
     }
 
     #[test]

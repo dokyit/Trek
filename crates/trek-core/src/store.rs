@@ -5,8 +5,10 @@
 //! changed or gone (`save_transcript`), so long threads stay cheap to save mid-turn.
 
 mod search;
+mod usage;
 
 pub use search::{INDEX_MAX_BYTES, ImportedToIndex, SearchHit, fts_query};
+pub use usage::{Activity, UsageRow};
 
 use crate::import::ImportedThread;
 use crate::transcript::Transcript;
@@ -395,6 +397,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE TABLE IF NOT EXISTS retired_sessions (native_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);",
     )?;
+    conn.execute_batch(usage::SCHEMA)?;
     migrate_items(conn)?;
     search::ensure_schema(conn)
 }
@@ -632,6 +635,7 @@ impl Store {
             let args = params![t.source.key(), native, t.id];
             c.execute(&format!("DELETE FROM items WHERE thread_id IN ({replaced})"), args)?;
             c.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({replaced})"), args)?;
+            c.execute(&format!("DELETE FROM token_usage WHERE thread_id IN ({replaced})"), args)?;
             c.execute("DELETE FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3", args)?;
         }
         c.execute(
@@ -925,6 +929,7 @@ impl Store {
         let gone = "SELECT id FROM threads WHERE id = ?1 OR side_of = ?1";
         tx.execute(&format!("DELETE FROM items WHERE thread_id IN ({gone})"), [id])?;
         tx.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({gone})"), [id])?;
+        tx.execute(&format!("DELETE FROM token_usage WHERE thread_id IN ({gone})"), [id])?;
         tx.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
         tx.commit()?;
         Ok(())

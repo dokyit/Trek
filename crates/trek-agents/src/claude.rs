@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use trek_core::{Effort, detect};
+use trek_core::{Effort, TokenUsage, detect};
 
 fn tool_title(name: &str, input: &Value) -> (String, String) {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
@@ -228,6 +228,9 @@ struct Turns {
     /// A result held back for unread messages: its cost, and when to stop waiting for Claude to
     /// take them in (they may never come, and the turn mustn't hang).
     waiting: Option<(Option<f64>, tokio::time::Instant)>,
+    /// Each model's tokens as the last `result` counted them: `modelUsage` runs from the start
+    /// of the process, so a turn's share is how far it moved.
+    models: HashMap<String, TokenUsage>,
 }
 
 /// How long a held result waits for Claude to start on the messages after it. It starts within
@@ -268,6 +271,9 @@ impl Turns {
         }
         let mut out = translate(v, pending, streamed_text);
         if v["type"] == "result" {
+            // Tokens the turn used go out first, whether or not the result ends the turn here.
+            let used = self.usage(v);
+            out.splice(0..0, used);
             // A stopped or failed turn ends here whatever was sent: Claude may drop what it hadn't
             // read yet, and a turn that waited on it would never end.
             if v["is_error"] == true || !self.unread.iter().any(|(_, mid_turn)| *mid_turn) {
@@ -276,6 +282,28 @@ impl Turns {
             } else {
                 self.waiting = Some((v["total_cost_usd"].as_f64(), tokio::time::Instant::now() + STEER_WAIT));
                 out.retain(|e| !matches!(e, AgentEvent::TurnComplete { .. }));
+            }
+        }
+        out
+    }
+
+    /// What a `result` says its turn used, per model (sub-agents and Claude Code's own helper
+    /// calls may run on another one). Without `modelUsage`, the turn's `usage` (its main model).
+    fn usage(&mut self, v: &Value) -> Vec<AgentEvent> {
+        let Some(models) = v["modelUsage"].as_object() else {
+            let u = &v["usage"];
+            let n = |k: &str| u[k].as_u64().unwrap_or(0);
+            let tokens = TokenUsage { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens") };
+            return if tokens.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: None, tokens }] };
+        };
+        let mut out = vec![];
+        for (model, u) in models {
+            let n = |k: &str| u[k].as_u64().unwrap_or(0);
+            let total = TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cacheReadInputTokens"), cache_write: n("cacheCreationInputTokens") };
+            let tokens = total.since(&self.models.get(model).copied().unwrap_or_default());
+            self.models.insert(model.clone(), total);
+            if !tokens.is_empty() {
+                out.push(AgentEvent::Usage { model: Some(model.clone()), tokens });
             }
         }
         out
@@ -1069,5 +1097,41 @@ mod tests {
             json!({ "mcpServers": mcp_servers_json(&servers) }),
             json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})
         );
+    }
+
+    #[test]
+    fn results_report_what_each_turn_used_per_model() {
+        let mut pending = HashMap::new();
+        let mut streamed = false;
+        let mut turns = Turns::default();
+        // Two real results from one session (trimmed): `usage` is the turn's, `modelUsage` runs
+        // from the start of the process. The dated Haiku is Claude Code's own helper call.
+        let first = json!({"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0191803,
+            "usage":{"input_tokens":10,"cache_creation_input_tokens":8324,"cache_read_input_tokens":13803,"output_tokens":41},
+            "modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":897,"outputTokens":8,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.000937},
+                "claude-haiku-4-5":{"inputTokens":10,"outputTokens":41,"cacheReadInputTokens":13803,"cacheCreationInputTokens":8324,"costUSD":0.0182433}}});
+        let second = json!({"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.023611,
+            "usage":{"input_tokens":10,"cache_creation_input_tokens":1004,"cache_read_input_tokens":22127,"output_tokens":40},
+            "modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":897,"outputTokens":8,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.000937},
+                "claude-haiku-4-5":{"inputTokens":20,"outputTokens":81,"cacheReadInputTokens":35930,"cacheCreationInputTokens":9328,"costUSD":0.022674}}});
+        let usage = |ev: Vec<AgentEvent>| -> Vec<(Option<String>, TokenUsage)> {
+            assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { .. })), "{ev:?}");
+            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model, tokens)) } else { None }).collect()
+        };
+        let mut got = usage(turns.step(&first, &mut pending, &mut streamed));
+        got.sort_by_key(|(m, _)| m.clone());
+        assert_eq!(
+            got,
+            vec![
+                (Some("claude-haiku-4-5".into()), TokenUsage { input: 10, output: 41, cache_read: 13803, cache_write: 8324 }),
+                (Some("claude-haiku-4-5-20251001".into()), TokenUsage { input: 897, output: 8, cache_read: 0, cache_write: 0 }),
+            ]
+        );
+        // The second turn: only what moved, which is the turn's own `usage`.
+        assert_eq!(usage(turns.step(&second, &mut pending, &mut streamed)), vec![(Some("claude-haiku-4-5".into()), TokenUsage { input: 10, output: 40, cache_read: 22127, cache_write: 1004 })]);
+        // Without `modelUsage`, the turn's `usage` stands for the session's model.
+        let mut fresh = Turns::default();
+        let bare = json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":4}});
+        assert_eq!(usage(fresh.step(&bare, &mut pending, &mut streamed)), vec![(None, TokenUsage { input: 3, output: 4, ..Default::default() })]);
     }
 }

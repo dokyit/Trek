@@ -17,7 +17,7 @@ pub use codex::list_models as codex_models;
 pub use status::{AgentStatus, CommandKind, SlashCommand, UsageLimit, claude_status, codex_status};
 
 use std::path::PathBuf;
-use trek_core::{AgentId, Effort, HandHolding};
+use trek_core::{AgentId, Effort, HandHolding, TokenUsage};
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -141,6 +141,10 @@ pub enum AgentEvent {
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
     /// Tokens currently in the context window, and the window size.
     Context { used: u64, window: u64 },
+    /// Tokens the running turn used on `model` (`None`: the session's own), sent as the agent
+    /// reports them, before the turn's `TurnComplete`. A turn may send several: one per model
+    /// it used, or one per request.
+    Usage { model: Option<String>, tokens: TokenUsage },
     /// How the session is billed, once the agent has said which login it uses.
     Billing(Billing),
     /// A sub-agent (keyed by the tool call that launched it) started, moved on, or finished.
@@ -446,5 +450,76 @@ mod tests {
             events
         });
         assert!(matches!(&events[..], [AgentEvent::Error(e), AgentEvent::Exited] if e.contains("crashed")), "{events:?}");
+    }
+}
+
+#[cfg(test)]
+mod live_usage {
+    use super::*;
+    use std::time::Duration;
+
+    /// One tiny turn with a real agent: the events it sent.
+    fn one_turn(agent: AgentId, model: &str) -> Vec<AgentEvent> {
+        let cwd = std::path::PathBuf::from("/tmp/trek-basecamp-e2e");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = start(SessionConfig {
+            agent,
+            cwd,
+            model: Some(model.into()),
+            effort: Effort::Low,
+            hand_holding: HandHolding::Supervised,
+            plan: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+        });
+        trek_core::runtime().block_on(async {
+            session.commands.send(Command::Prompt { text: "Reply with just the word: ok".into(), images: vec![] }).await.unwrap();
+            let mut seen = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            loop {
+                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                println!("{ev:?}");
+                let done = matches!(ev, AgentEvent::TurnComplete { .. } | AgentEvent::Exited);
+                seen.push(ev);
+                if done {
+                    break;
+                }
+            }
+            let _ = session.commands.send(Command::Shutdown).await;
+            seen
+        })
+    }
+
+    fn reported(events: &[AgentEvent]) -> Vec<(Option<String>, TokenUsage)> {
+        events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model.clone(), *tokens)) } else { None }).collect()
+    }
+
+    #[test]
+    #[ignore = "talks to the real Claude Code"]
+    fn claude_live_turn_reports_its_tokens() {
+        let ev = one_turn(AgentId::ClaudeCode, "claude-haiku-4-5");
+        let used = reported(&ev);
+        assert!(used.iter().any(|(m, t)| m.as_deref().is_some_and(|m| m.starts_with("claude-haiku")) && t.output > 0), "{used:?}");
+    }
+
+    #[test]
+    #[ignore = "talks to the real Codex"]
+    fn codex_live_turn_reports_its_tokens() {
+        let ev = one_turn(AgentId::Codex, "gpt-5.6-luna");
+        let used = reported(&ev);
+        assert!(matches!(&used[..], [(Some(m), t)] if m == "gpt-5.6-luna" && t.total() > 0), "{used:?}");
+    }
+
+    #[test]
+    #[ignore = "talks to the real OpenCode"]
+    fn opencode_live_turn_reports_what_it_reports() {
+        // ACP agents report a turn's tokens in the prompt response when they do at all.
+        let ev = one_turn(AgentId::OpenCode, &std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into()));
+        assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { error: None, .. })), "{ev:?}");
+        println!("reported: {:?}", reported(&ev));
     }
 }

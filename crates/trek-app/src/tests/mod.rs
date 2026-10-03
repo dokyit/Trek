@@ -3,6 +3,7 @@
 //! mock agent standing in for real ones. `harness` has the setup; tests are grouped by area.
 
 mod alerts;
+mod basecamp;
 mod flows;
 mod harness;
 mod inbox;

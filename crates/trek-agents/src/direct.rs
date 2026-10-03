@@ -8,7 +8,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use trek_core::catalog::{Wire, direct_provider};
 use trek_core::settings::secrets;
-use trek_core::{AgentId, Effort};
+use trek_core::{AgentId, Effort, TokenUsage};
 
 const SYSTEM: &str = "You are Trek, a coding assistant. Be direct and concise. Use Markdown with fenced code blocks.";
 
@@ -44,7 +44,10 @@ pub async fn run(
                 history.push(message);
                 let result = match provider.wire {
                     Wire::Anthropic => anthropic_turn(&client, key.as_deref().unwrap_or_default(), &model, effort, &history, &events, &commands).await,
-                    _ => openai_turn(&client, provider.base_url, key.as_deref(), provider.local, &model, effort, &history, &events, &commands).await,
+                    _ => {
+                        let usage = REPORTS_USAGE.contains(&provider.id);
+                        openai_turn(&client, provider.base_url, key.as_deref(), provider.local, usage, &model, effort, &history, &events, &commands).await
+                    }
                 };
                 match result {
                     Ok(assistant) => {
@@ -67,6 +70,39 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// OpenAI-style providers known to take `stream_options.include_usage` (a final chunk with the
+/// request's usage). Others aren't sent it; usage they send anyway is still counted.
+const REPORTS_USAGE: &[&str] = &["openai", "openrouter", "deepseek", "xai", "groq"];
+
+/// Take in what an Anthropic stream event says about usage: `message_start` has the input
+/// side (and output so far), `message_delta` the running output count.
+fn anthropic_usage(v: &Value, usage: &mut TokenUsage) {
+    let u = match v["type"].as_str() {
+        Some("message_start") => &v["message"]["usage"],
+        Some("message_delta") => &v["usage"],
+        _ => return,
+    };
+    let set = |k: &str, field: &mut u64| {
+        if let Some(n) = u[k].as_u64() {
+            *field = n;
+        }
+    };
+    set("input_tokens", &mut usage.input);
+    set("output_tokens", &mut usage.output);
+    set("cache_read_input_tokens", &mut usage.cache_read);
+    set("cache_creation_input_tokens", &mut usage.cache_write);
+}
+
+/// An OpenAI-style chunk's `usage` (the last chunk, when asked for): prompt tokens include
+/// cached ones, which are counted apart here.
+fn openai_usage(v: &Value) -> Option<TokenUsage> {
+    let u = v.get("usage").filter(|u| u.is_object())?;
+    let prompt = u["prompt_tokens"].as_u64().unwrap_or(0);
+    let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(prompt);
+    let t = TokenUsage { input: prompt - cached, output: u["completion_tokens"].as_u64().unwrap_or(0), cache_read: cached, cache_write: 0 };
+    (!t.is_empty()).then_some(t)
 }
 
 /// A user message for `wire`. Without images the content is a plain string; with images it's
@@ -178,6 +214,7 @@ async fn anthropic_turn(
     let mut blocks: Vec<Value> = Vec::new();
     let mut text = String::new();
     let mut stop_reason = None;
+    let mut usage = TokenUsage::default();
     loop {
         tokio::select! {
             chunk = stream.next() => {
@@ -185,6 +222,7 @@ async fn anthropic_turn(
                 buf.push_str(&String::from_utf8_lossy(&chunk?));
                 for data in sse_events(&mut buf) {
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
+                    anthropic_usage(&v, &mut usage);
                     match v["type"].as_str() {
                         Some("content_block_start") => blocks.push(v["content_block"].clone()),
                         Some("content_block_delta") => {
@@ -219,6 +257,9 @@ async fn anthropic_turn(
             }
         }
     }
+    if !usage.is_empty() {
+        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens: usage }).await?;
+    }
     if stop_reason.as_deref() == Some("refusal") {
         bail!("The model declined this request.");
     }
@@ -239,6 +280,7 @@ async fn openai_turn(
     base_url: &str,
     key: Option<&str>,
     local: bool,
+    include_usage: bool,
     model: &str,
     effort: Effort,
     history: &[Value],
@@ -248,6 +290,9 @@ async fn openai_turn(
     let mut messages = vec![json!({ "role": "system", "content": SYSTEM })];
     messages.extend(history.iter().cloned());
     let mut body = json!({ "model": model, "messages": messages, "stream": true });
+    if include_usage {
+        body["stream_options"] = json!({ "include_usage": true });
+    }
     if !local && effort != Effort::Off {
         let e = effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High]);
         body["reasoning_effort"] = json!(e.as_str());
@@ -264,6 +309,7 @@ async fn openai_turn(
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut text = String::new();
+    let mut usage = None;
     loop {
         tokio::select! {
             chunk = stream.next() => {
@@ -272,6 +318,7 @@ async fn openai_turn(
                 for data in sse_events(&mut buf) {
                     if data == "[DONE]" { continue; }
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
+                    usage = openai_usage(&v).or(usage);
                     let d = &v["choices"][0]["delta"];
                     if let Some(r) = d["reasoning_content"].as_str().or(d["reasoning"].as_str()) {
                         events.send(AgentEvent::ReasoningDelta(r.into())).await?;
@@ -288,6 +335,9 @@ async fn openai_turn(
                 }
             }
         }
+    }
+    if let Some(tokens) = usage {
+        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens }).await?;
     }
     events.send(AgentEvent::TextDone(text.clone())).await?;
     Ok(json!({ "role": "assistant", "content": text }))
@@ -321,6 +371,20 @@ mod tests {
         let (missing, errs) = user_message(Wire::OpenAiChat, "hi", &[dir.join("nope.png")]);
         assert_eq!((missing["content"].as_str(), errs.len()), (Some("hi"), 1));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn usage_from_both_wires() {
+        // Anthropic's stream: the input side up front, the output count as it ends.
+        let mut u = TokenUsage::default();
+        anthropic_usage(&json!({"type":"message_start","message":{"id":"m","usage":{"input_tokens":12,"cache_creation_input_tokens":800,"cache_read_input_tokens":4000,"output_tokens":1}}}), &mut u);
+        anthropic_usage(&json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}), &mut u);
+        anthropic_usage(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":57}}), &mut u);
+        assert_eq!(u, TokenUsage { input: 12, output: 57, cache_read: 4000, cache_write: 800 });
+        // OpenAI's last chunk, asked for with include_usage: cached prompt tokens counted apart.
+        let last = json!({"id":"c","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"total_tokens":1280,"prompt_tokens_details":{"cached_tokens":1024}}});
+        assert_eq!(openai_usage(&last), Some(TokenUsage { input: 176, output: 80, cache_read: 1024, cache_write: 0 }));
+        assert_eq!(openai_usage(&json!({"choices":[{"delta":{"content":"x"}}],"usage":null})), None);
     }
 
     #[test]

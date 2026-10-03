@@ -16,7 +16,7 @@
 //! | `recall`                     | the messages it remembers from this conversation             |
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
-//! Every turn also reports context usage. A prompt sent mid-turn steers it.
+//! Every turn also reports context and token usage. A prompt sent mid-turn steers it.
 //!
 //! Like Claude Code and Codex, it keeps each session's history (in memory, for the process) and
 //! can resume one partway or fork it (`SessionConfig::resume_at`, `fork`); its `mock-recap`
@@ -207,6 +207,8 @@ struct Session {
     native_id: String,
     /// The mark of the turn under way: messages sent during it share it.
     mark: String,
+    /// The model it plays, named in its token reports.
+    model: String,
 }
 
 pub async fn run(
@@ -233,8 +235,9 @@ pub async fn run(
         background: vec![],
         native_id: native_id.clone(),
         mark: String::new(),
+        model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
     };
-    if s.emit(AgentEvent::Started { native_id, model: Some(config.model.clone().unwrap_or_else(|| "mock-swift".into())) }).await.is_err() {
+    if s.emit(AgentEvent::Started { native_id, model: Some(s.model.clone()) }).await.is_err() {
         return Ok(());
     }
     if let Some(at) = resumed_at {
@@ -251,9 +254,10 @@ pub async fn run(
                 }
             }
             Command::SetHandHolding(h) => s.hand_holding = h,
+            Command::SetModel { model, .. } => s.model = model,
             Command::Shutdown => break,
             // Nothing is running or pending between turns.
-            Command::SetModel { .. } | Command::Interrupt | Command::Respond { .. } | Command::Answer { .. } => {}
+            Command::Interrupt | Command::Respond { .. } | Command::Answer { .. } => {}
         }
     }
     Ok(())
@@ -358,6 +362,7 @@ impl Session {
                 self.pause(paced(400)).await?;
                 self.emit(AgentEvent::ToolFinished { id, output: "error[E0425]: cannot find value `cfg` in this scope\n --> src/main.rs:14:9".into(), ok: false }).await?;
                 let cost_usd = Some(self.spend(0.01));
+                self.report_usage().await?;
                 return self.emit(AgentEvent::TurnComplete { cost_usd, error: Some("The mock agent hit an error: the build failed and the session ended (exit code 101).".into()) }).await;
             }
         }
@@ -367,7 +372,15 @@ impl Session {
     async fn finish(&mut self) -> Step {
         self.acknowledge_steer().await?;
         let cost_usd = Some(self.spend(0.02));
+        self.report_usage().await?;
         self.emit(AgentEvent::TurnComplete { cost_usd, error: None }).await
+    }
+
+    /// The tokens a turn used, as agents report them as it ends: the conversation so far read
+    /// from the cache, the new message fresh, and the answer.
+    async fn report_usage(&self) -> Step {
+        let tokens = trek_core::TokenUsage { input: 1_200, output: 420, cache_read: self.context, cache_write: 0 };
+        self.emit(AgentEvent::Usage { model: Some(self.model.clone()), tokens }).await
     }
 
     /// Add `usd` to the session's spend; returns the new total.
@@ -511,6 +524,7 @@ impl Session {
         self.say("Both scouts are out. I'll pull their findings together when they report back.").await?;
         // The turn ends, but the thread keeps working until the background agents are back.
         let cost_usd = Some(self.spend(0.01));
+        self.report_usage().await?;
         self.emit(AgentEvent::TurnComplete { cost_usd, error: None }).await?;
         let agents = self.background.clone();
         for (i, (id, _)) in agents.iter().enumerate() {
@@ -884,6 +898,9 @@ mod tests {
             assert_eq!(streamed, ANSWER);
             assert!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta(_))).count() > 20, "streams token by token");
             assert!(events.iter().any(|e| matches!(e, AgentEvent::ReasoningDelta(_))));
+            // The turn's tokens, on the session's model, just before it ends.
+            let n = events.len();
+            assert!(matches!(&events[n - 2], AgentEvent::Usage { model: Some(m), tokens } if m == "mock-swift" && tokens.output > 0), "{:?}", &events[n - 2]);
             assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
         });
     }

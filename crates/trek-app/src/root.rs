@@ -1,5 +1,6 @@
 //! The main window: title bar, sidebar, and the routed content area.
 
+use crate::basecamp::Basecamp;
 use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
@@ -24,6 +25,7 @@ pub struct TrekWindow {
     pub(crate) composer: Entity<Composer>,
     settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
+    pub(crate) basecamp: Entity<Basecamp>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,
     title: Entity<WindowTitle>,
@@ -56,6 +58,7 @@ impl TrekWindow {
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
+        let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
             let mut p = RightPanel::new(workspace.clone());
@@ -73,6 +76,8 @@ impl TrekWindow {
             // handled app-wide (`init`), so they keep working while this window is closed.
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
                 WorkspaceEvent::Toast { .. } | WorkspaceEvent::Attention { .. } | WorkspaceEvent::ActivateMain | WorkspaceEvent::OpenPalette => {}
+                // Basecamp has no composer: it takes the keys itself (Esc goes back).
+                WorkspaceEvent::FocusComposer if this.workspace.read(cx).route == Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 WorkspaceEvent::OpenTool(tool) => {
                     let tool = *tool;
@@ -123,6 +128,13 @@ impl TrekWindow {
         if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
             workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
         }
+        // TREK_OPEN_BASECAMP=1 (or =week) opens Basecamp at launch, the same way.
+        if let Ok(which) = std::env::var("TREK_OPEN_BASECAMP") {
+            if which.trim() == "week" {
+                basecamp.update(cx, |b, cx| b.set_range(trek_core::basecamp::Range::Week, cx));
+            }
+            workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        }
         // Once this window hears the workspace (it hears nothing until later; see `show_palette`):
         // the composer, or the focus anchor on screens without one, takes the keys, as after
         // a navigation. A window reopened from a thread window may also have a message to show
@@ -131,6 +143,7 @@ impl TrekWindow {
             let ws = this.workspace.clone();
             match ws.read(cx).route.clone() {
                 Route::Thread(_) | Route::Draft { .. } => this.composer.update(cx, |c, cx| c.focus(window, cx)),
+                Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Settings(_) | Route::Onboarding => this.focus.focus(window, cx),
             }
             let pending = ws.update(cx, |ws, _| ws.pending_compose.take());
@@ -149,6 +162,7 @@ impl TrekWindow {
             composer,
             settings,
             settings_nav,
+            basecamp,
             right_panel,
             working_bar,
             title,
@@ -200,6 +214,7 @@ impl Render for WindowTitle {
             },
             Route::Draft { project } => (project.as_deref().map(project_name), "New thread".into(), project.clone()),
             Route::Settings(_) => (None, "Settings".into(), None),
+            Route::Basecamp => (None, "Basecamp".into(), None),
             Route::Onboarding => (None, String::new(), None),
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
@@ -562,6 +577,7 @@ impl Render for TrekWindow {
         let fill = || StyleRefinement::default().size_full();
         let content = match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
+            Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
             Route::Draft { .. } => div()
                 .relative()
                 .size_full()
@@ -649,6 +665,7 @@ impl Render for TrekWindow {
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
+            .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
             .bg(cx.theme().sidebar)
             .when_some(backdrop.clone(), |el, (spec, dim)| {
                 let side = cx.theme().sidebar;

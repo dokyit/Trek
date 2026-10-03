@@ -5,7 +5,8 @@ use super::{
     is_title_request, legacy_is_injected, legacy_title_from, ms_from_rfc3339, source_title, title_from, unwrap_pasted, user_text,
 };
 use crate::store::{Item, ResumePoint, ToolStatus};
-use crate::types::{Effort, ThreadSource};
+use super::UsageEntry;
+use crate::types::{Effort, ThreadSource, TokenUsage};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -414,6 +415,53 @@ fn tool_title(name: &str, input: &Value) -> (String, String) {
         "TodoWrite" => ("Updated plan".into(), String::new()),
         other => (other.to_string(), clip(&input.to_string(), 200)),
     }
+}
+
+/// Tokens session `id` used between `from` and `to` (unix ms), per API response: when, which
+/// model, how many. Read from the start of the file: run it off the main thread.
+pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
+    find_session(id).map(|p| usage_in(&p, from, to)).unwrap_or_default()
+}
+
+/// Claude Code writes a line per content block of a response, each repeating the response's
+/// usage (the last one has the final output count): each response counts once, as its last
+/// line has it.
+fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
+    let Ok(file) = std::fs::File::open(path) else { return vec![] };
+    let mut out: Vec<UsageEntry> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        // Most lines aren't responses; skip them without parsing.
+        if !line.contains("\"usage\"") || !line.contains("\"assistant\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if v["type"] != "assistant" {
+            continue;
+        }
+        let Some(at) = v["timestamp"].as_str().and_then(ms_from_rfc3339).filter(|at| (from..to).contains(at)) else { continue };
+        let m = &v["message"];
+        let u = &m["usage"];
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+        let tokens = TokenUsage { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens") };
+        // API errors are written as "<synthetic>" responses that used nothing.
+        let model = m["model"].as_str().filter(|m| !m.starts_with('<')).map(String::from);
+        if tokens.is_empty() {
+            continue;
+        }
+        let entry = (at, model, tokens);
+        match m["id"].as_str().map(String::from) {
+            Some(id) => match seen.get(&id) {
+                Some(&i) => out[i] = entry,
+                None => {
+                    seen.insert(id, out.len());
+                    out.push(entry);
+                }
+            },
+            None => out.push(entry),
+        }
+    }
+    out
 }
 
 /// Full transcript, streamed line by line.
@@ -945,5 +993,32 @@ mod tests {
         let items = load_file(&path).unwrap();
         let ends: Vec<u32> = items.iter().filter_map(|i| if let Item::TurnEnd { took_secs, .. } = i { Some(*took_secs) } else { None }).collect();
         assert_eq!(ends, [5, 1183, 630]);
+    }
+
+    #[test]
+    fn usage_counts_each_response_once() {
+        let dir = Scratch::new();
+        // As Claude Code writes it: a line per content block, each with the response's usage
+        // (the shape of a real session's lines, trimmed).
+        let response = |id: &str, model: &str, out: u64, at: &str| {
+            json!({ "type": "assistant", "timestamp": at, "message": { "id": id, "role": "assistant", "model": model, "content": [{ "type": "text", "text": "…" }],
+                "usage": { "input_tokens": 10, "cache_creation_input_tokens": 8324, "cache_read_input_tokens": 13803, "output_tokens": out,
+                    "output_tokens_details": { "thinking_tokens": 35 }, "service_tier": "standard" } } })
+        };
+        let path = session(&dir, "s", REPO, "cli", &[
+            user("hi", "2026-10-03T15:15:29.000Z"),
+            response("msg_1", "claude-haiku-4-5-20251001", 12, "2026-10-03T15:15:30.032Z"),
+            response("msg_1", "claude-haiku-4-5-20251001", 41, "2026-10-03T15:15:30.037Z"),
+            response("msg_2", "claude-opus-5-5", 7, "2026-10-03T15:16:00.000Z"),
+            // An API error: nothing used.
+            json!({ "type": "assistant", "timestamp": "2026-10-03T15:17:00.000Z", "message": { "id": "x", "model": "<synthetic>", "content": [], "usage": { "input_tokens": 0, "output_tokens": 0 } } }),
+            // Yesterday.
+            response("msg_0", "claude-opus-5-5", 99, "2026-10-02T10:00:00.000Z"),
+        ]);
+        let from = ms_from_rfc3339("2026-10-03T00:00:00Z").unwrap();
+        let got = usage_in(&path, from, from + 86_400_000);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], (ms_from_rfc3339("2026-10-03T15:15:30.037Z").unwrap(), Some("claude-haiku-4-5-20251001".into()), TokenUsage { input: 10, output: 41, cache_read: 13803, cache_write: 8324 }));
+        assert_eq!(got[1].1.as_deref(), Some("claude-opus-5-5"));
     }
 }

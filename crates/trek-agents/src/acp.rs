@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use trek_core::catalog::{ACP_AGENTS, ModelInfo};
-use trek_core::{AgentId, Effort, HandHolding, detect};
+use trek_core::{AgentId, Effort, HandHolding, TokenUsage, detect};
 
 /// What `acp_probe` learns about an installed ACP agent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -424,6 +424,8 @@ struct Turn {
     /// The session's running cost as last reported. Turns report it as is (see
     /// `AgentEvent::TurnComplete`); the app works out what each turn added.
     cost: Option<f64>,
+    /// Tokens the turn used, from the prompt response's `usage` (agents that report it).
+    tokens: Option<TokenUsage>,
 }
 
 impl Turn {
@@ -536,6 +538,9 @@ impl Turn {
         self.flush_text(&mut out);
         self.tools.clear();
         let cost_usd = self.cost.filter(|c| *c > 0.0);
+        if let Some(tokens) = self.tokens.take().filter(|t| !t.is_empty()) {
+            out.push(AgentEvent::Usage { model: None, tokens });
+        }
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
@@ -547,6 +552,18 @@ impl Turn {
         out.push(AgentEvent::TurnComplete { cost_usd, error });
         out
     }
+}
+
+/// A prompt response's `usage` (ACP's session usage: totals for the turn). Input is fresh input;
+/// thought tokens are output, unless the agent already counted them there (then the parts add
+/// up to `totalTokens` without them).
+fn prompt_usage(u: &Value) -> Option<TokenUsage> {
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    let mut t = TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cachedReadTokens"), cache_write: n("cachedWriteTokens") };
+    if u["totalTokens"].as_u64() != Some(t.total()) {
+        t.output += n("thoughtTokens");
+    }
+    (!t.is_empty()).then_some(t)
 }
 
 /// How this agent switches models, if at all.
@@ -904,6 +921,10 @@ impl Live {
                         Some(e) => Err(rpc_message(e)),
                         None => Ok(v["result"]["stopReason"].as_str().unwrap_or("end_turn")),
                     };
+                    // Each prompt answered reports its own; messages that joined the turn add theirs.
+                    if let Some(used) = prompt_usage(&v["result"]["usage"]) {
+                        self.turn.tokens.get_or_insert_default().add(&used);
+                    }
                     if self.prompts.is_empty() {
                         self.perms.clear();
                         self.turn.finish(stop)
@@ -1561,6 +1582,20 @@ mod tests {
     fn auth_errors_are_recognised() {
         assert!(is_auth_error(&json!({"code":-32000,"message":"Authentication required"})));
         assert!(!is_auth_error(&json!({"code":-32603,"message":"Internal error"})));
+    }
+
+    #[test]
+    fn prompt_responses_report_the_turns_tokens() {
+        // As OpenCode answers `session/prompt`: its message's tokens, reasoning apart.
+        let u = json!({"totalTokens":12663,"inputTokens":12618,"outputTokens":2,"thoughtTokens":3,"cachedReadTokens":40,"cachedWriteTokens":0});
+        assert_eq!(prompt_usage(&u), Some(TokenUsage { input: 12618, output: 5, cache_read: 40, cache_write: 0 }));
+        // Thoughts already inside the output count: the parts add up without them.
+        let inside = json!({"totalTokens":120,"inputTokens":100,"outputTokens":20,"thoughtTokens":5});
+        assert_eq!(prompt_usage(&inside).map(|t| t.output), Some(20));
+        assert_eq!(prompt_usage(&Value::Null), None);
+        let mut t = Turn { tokens: prompt_usage(&u), ..Default::default() };
+        let ev = t.finish(Ok("end_turn"));
+        assert!(matches!(&ev[..], [AgentEvent::Usage { model: None, tokens }, AgentEvent::TurnComplete { .. }] if tokens.total() == 12663));
     }
 }
 
