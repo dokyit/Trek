@@ -1,6 +1,9 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
+mod limits;
 mod worktrees;
+
+pub use limits::Clock;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -163,6 +166,10 @@ pub struct LiveThread {
     /// before its checkpoint is taken, or before files a rewind restores are back.
     held: Vec<Command>,
     _git: Option<Task<()>>,
+    /// A usage limit the running turn reported: the thread pauses when the turn ends.
+    limit: Option<limits::Hit>,
+    /// The running turn is a resume after a usage limit: hitting the limit again resumes again.
+    resuming: bool,
     /// A save of the transcript on its way (`persist_soon`).
     _save_soon: Option<Task<()>>,
     _events: Option<Task<()>>,
@@ -644,6 +651,14 @@ pub struct Workspace {
     /// Why Trek's database couldn't be opened, until the main window has said so: this session
     /// runs on an in-memory copy and nothing is saved.
     pub store_error: Option<String>,
+    /// Wall-clock time for usage limits (tests set their own).
+    pub clock: Clock,
+    /// Wakes when the next usage-limit pause ends (`schedule_limits`).
+    limit_timer: Option<Task<()>>,
+    /// No resume goes before this (unix ms): just after launch, Trek finds its feet first.
+    resumes_from: i64,
+    /// Threads whose agent is being asked whether its limit really reset.
+    limit_checks: HashSet<String>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -820,6 +835,10 @@ impl Workspace {
             tasks: vec![],
             restart_countdown: None,
             store_error: None,
+            clock: Clock::default(),
+            limit_timer: None,
+            resumes_from: 0,
+            limit_checks: HashSet::new(),
         };
         this.reload(cx);
         if this.route == (Route::Draft { project: None }) {
@@ -838,6 +857,7 @@ impl Workspace {
             async {}
         })
         .detach();
+        this.resume_overdue(cx);
         this
     }
 
@@ -1566,6 +1586,7 @@ impl Workspace {
         match self.thread_id_in(scope).map(str::to_string) {
             Some(id) => {
                 let before = self.thread(&id).cloned();
+                let was = before.as_ref().map(|b| (b.agent.clone(), b.model.clone()));
                 self.mutate_thread(&id, cx, |t| {
                     t.model = prefs.model.clone();
                     t.effort = prefs.effort;
@@ -1574,6 +1595,9 @@ impl Workspace {
                     if t.agent != prefs.agent {
                         t.agent = prefs.agent.clone();
                         t.native_id = None;
+                        // A rewind's way back into the old agent's session is no way into the new
+                        // one's: it starts from a recap of what the transcript keeps.
+                        t.reopen = None;
                     }
                 });
                 let live = self.live.entry(id.clone()).or_default();
@@ -1636,6 +1660,22 @@ impl Workspace {
                     });
                 }
                 self.approve_covered_prompts(&id, prefs.hand_holding, cx);
+                if let Some((agent, model)) = was {
+                    // Another agent picks the conversation up from a recap: the transcript says
+                    // so, and a usage limit on the old one holds nothing back any more. Within one
+                    // agent, only another model gets past a limit on a model.
+                    let past_limit = if agent != prefs.agent {
+                        if self.note_handoff(&id, (&agent, model), (&prefs.agent, prefs.model.clone())) {
+                            self.persist_items(&id, cx);
+                        }
+                        true
+                    } else {
+                        model != prefs.model && self.pause(&id).is_some_and(|p| matches!(p.scope, trek_agents::LimitScope::Model(_)))
+                    };
+                    if past_limit && self.pause(&id).is_some() {
+                        self.end_pause(&id, false, cx);
+                    }
+                }
             }
             None => self.draft_prefs = prefs,
         }
@@ -1771,6 +1811,7 @@ impl Workspace {
         }
         if self.mock_agent {
             out.push(AgentId::Direct(catalog::MOCK_PROVIDER.into()));
+            out.push(AgentId::Direct(catalog::MOCK_RELAY_PROVIDER.into()));
         }
         out.retain(|a| !self.settings.disabled_agents.contains(&a.key()));
         if out.is_empty() {
@@ -1920,6 +1961,11 @@ impl Workspace {
         }
         // Queue mode: hold follow-ups until the running turn finishes (see `apply_events`).
         let running = self.live.get(&id).is_some_and(|l| l.turn_started.is_some() && l.commands.is_some());
+        // Paused at a usage limit: it goes when the limit resets.
+        if !running && self.pause(&id).is_some() {
+            self.queue_for_reset(&id, text, images, cx);
+            return;
+        }
         if running && self.settings.general.follow_up == FollowUp::Queue {
             let live = self.live.entry(id.clone()).or_default();
             live.queued.push((text, images));
@@ -2140,6 +2186,8 @@ impl Workspace {
         let mut notify_text: Option<String> = None;
         // The user stopped the turn: nothing to tell them.
         let mut interrupted = false;
+        // The turn ended at a usage limit: the thread pauses until it resets.
+        let mut hit: Option<limits::Hit> = None;
         // The agent stopped to ask the user something.
         let mut asked = false;
         let mut commands: Option<Vec<SlashCommand>> = None;
@@ -2213,6 +2261,13 @@ impl Workspace {
                         }
                     }
                     AgentEvent::Background(n) => live.background = n,
+                    // One row says it, in place of the error the turn ends with.
+                    AgentEvent::LimitReached { message, resets_at, scope } => {
+                        live.streaming = None;
+                        live.reasoning = None;
+                        live.items.push(Item::Limit { text: message.clone(), resets_at, scope: scope.clone() });
+                        live.limit = Some(limits::Hit { message, resets_at, scope });
+                    }
                     AgentEvent::Commands(c) => commands = Some(c),
                     AgentEvent::Notice(text) => {
                         live.streaming = None;
@@ -2324,7 +2379,13 @@ impl Workspace {
                         if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
                             live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
                         }
-                        if let Some(e) = error {
+                        if let Some(h) = live.limit.take() {
+                            // Paused, not failed: its limit row says why.
+                            hit = Some(h);
+                            run_state = Some(RunState::Idle);
+                            continue_queue = false;
+                        } else if let Some(e) = error {
+                            live.resuming = false;
                             if e != "Interrupted" {
                                 live.items.push(Item::Error { text: e });
                                 run_state = Some(RunState::Failed);
@@ -2336,6 +2397,7 @@ impl Workspace {
                                 interrupted = true;
                             }
                         } else {
+                            live.resuming = false;
                             run_state = Some(RunState::Idle);
                             continue_queue = true;
                         }
@@ -2364,10 +2426,15 @@ impl Workspace {
                             live.close_turn(false);
                             live.streaming = None;
                             live.reasoning = None;
-                            if !std::mem::take(&mut live.turn_error) {
-                                live.items.push(Item::Error { text: "The agent stopped unexpectedly.".into() });
+                            if let Some(h) = live.limit.take() {
+                                hit = Some(h);
+                                run_state = Some(RunState::Idle);
+                            } else {
+                                if !std::mem::take(&mut live.turn_error) {
+                                    live.items.push(Item::Error { text: "The agent stopped unexpectedly.".into() });
+                                }
+                                run_state.get_or_insert(RunState::Failed);
                             }
-                            run_state.get_or_insert(RunState::Failed);
                             finished = true;
                         }
                     }
@@ -2379,6 +2446,11 @@ impl Workspace {
         if let (Some(c), Some(t)) = (commands, self.thread(id)) {
             let key = (t.agent.key(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
             self.agent_commands.insert(key, c);
+        }
+        // Before anything hands queued messages back: they wait for the reset now.
+        let paused = hit.is_some();
+        if let Some(hit) = hit {
+            self.pause_at_limit(id, hit, cx);
         }
         let viewing = self.on_screen(id);
         // Streaming text changes nothing on the thread row: skip the database write (this runs
@@ -2467,7 +2539,7 @@ impl Workspace {
                 self.send_to(id, text, images, cx);
             } else {
                 self.maybe_auto_title(id, cx);
-                if let Some(t) = self.thread(id).filter(|_| !interrupted) {
+                if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused) {
                     let verb = if t.run_state == RunState::Failed { "Failed" } else { "Finished" };
                     notify_text.get_or_insert(format!("{verb}: {}", t.title));
                 }
@@ -3218,6 +3290,7 @@ impl Workspace {
                 }
                 Item::Assistant { text } if !text.trim().is_empty() => out.push_str(&format!("\n{}\n", text.trim())),
                 Item::Error { text } => out.push_str(&format!("\n> **Error:** {}\n", text.trim().replace('\n', "\n> "))),
+                Item::Limit { text, .. } => out.push_str(&format!("\n> **Usage limit:** {}\n", text.trim().replace('\n', "\n> "))),
                 _ => {}
             }
         }
@@ -3244,7 +3317,7 @@ impl Workspace {
     pub fn regenerate_title(&mut self, id: &str, announce: bool, cx: &mut Context<Self>) {
         let Some((request, reply)) = self.title_inputs(id) else { return };
         // The mock agent names its own threads: it makes no model calls, titles included.
-        if self.thread(id).is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER)) {
+        if self.thread(id).is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if catalog::is_mock(p))) {
             self.rename(id, trek_agents::mock::title(&request), cx);
             return;
         }
@@ -3603,6 +3676,7 @@ impl Workspace {
                 }
                 this.usage_loading = false;
                 this.status_fetched_at = now_ms();
+                this.fill_unknown_resets(cx);
                 cx.notify();
             });
         });
@@ -4221,7 +4295,7 @@ fn index_step(store: &Store) -> bool {
 /// would be one of the user's own CLIs, signed in to their account, writing to their history.
 /// Live tests ask for a real one (`TREK_LIVE_AGENT`).
 fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
-    let mock = matches!(&config.agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
+    let mock = matches!(&config.agent, AgentId::Direct(p) if catalog::is_mock(p));
     if mock || !trek_core::paths::isolated() || std::env::var_os("TREK_LIVE_AGENT").is_some() {
         return trek_agents::start(config);
     }

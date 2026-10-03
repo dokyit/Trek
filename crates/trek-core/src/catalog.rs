@@ -62,6 +62,7 @@ pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
             ModelInfo::new("mock-swift", "Mock Swift", 0, &[Low, Medium, High]),
             ModelInfo::new("mock-deep", "Mock Deep", 1, &[Low, Medium, High, Max]),
         ],
+        AgentId::Direct(p) if p == MOCK_RELAY_PROVIDER => vec![ModelInfo::new("relay-swift", "Relay Swift", 0, &[Low, Medium, High])],
         AgentId::Direct(p) if p == "ollama" || p == "lmstudio" || p == "llamacpp" => vec![],
         _ => vec![],
     }
@@ -136,9 +137,21 @@ pub fn direct_provider(id: &str) -> Option<&'static DirectProvider> {
 /// `TREK_MOCK_AGENT=1` and in tests.
 pub const MOCK_PROVIDER: &str = "mock";
 
+/// A second mock agent, offered with the first: a conversation can be handed from one agent to
+/// another (and its recap checked) without real agents.
+pub const MOCK_RELAY_PROVIDER: &str = "mock-relay";
+
+/// Whether a direct provider is one of the mock agents.
+pub fn is_mock(provider: &str) -> bool {
+    provider == MOCK_PROVIDER || provider == MOCK_RELAY_PROVIDER
+}
+
 pub fn provider_display_name(id: &str) -> String {
     if id == MOCK_PROVIDER {
         return "Mock agent".into();
+    }
+    if id == MOCK_RELAY_PROVIDER {
+        return "Mock relay".into();
     }
     direct_provider(id).map(|p| p.name.to_string()).unwrap_or_else(|| id.to_string())
 }

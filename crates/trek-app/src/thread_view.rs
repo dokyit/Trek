@@ -42,6 +42,10 @@ enum Row {
     ToolGroup { ix: usize, key: SharedString, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
     Notice { ix: usize },
     Error { ix: usize },
+    /// The agent stopped at a usage limit.
+    Limit { ix: usize },
+    /// The thread moved to another agent, which picks up from a recap.
+    Handoff { ix: usize },
 }
 
 impl Row {
@@ -55,7 +59,9 @@ impl Row {
             | Row::Tool { ix, .. }
             | Row::ToolGroup { ix, .. }
             | Row::Notice { ix }
-            | Row::Error { ix } => *ix,
+            | Row::Error { ix }
+            | Row::Limit { ix }
+            | Row::Handoff { ix } => *ix,
         }
     }
 }
@@ -572,6 +578,8 @@ impl ThreadView {
                         Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into() },
                         Item::Notice { .. } => Row::Notice { ix },
                         Item::Error { .. } => Row::Error { ix },
+                        Item::Limit { .. } => Row::Limit { ix },
+                        Item::Handoff { .. } => Row::Handoff { ix },
                         Item::Tool { .. } | Item::Reasoning { .. } => unreachable!("grouped by layout()"),
                     }
                 }
@@ -1030,6 +1038,67 @@ impl ThreadView {
                                 .child(text),
                         )
                         .when(turn, |el| el.child(turn_actions(ix))),
+                )
+                .into_any_element()
+            }
+            (Row::Limit { ix }, Item::Limit { text, resets_at, scope }) => {
+                let turn = live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                let amber = palette::amber(cx);
+                let now = at.workspace.read(cx).now();
+                let when = match resets_at {
+                    Some(r) if r > now => format!("{} resets {}", scope.label(), crate::time::reset_clock(r, now)),
+                    Some(r) => format!("{} reset {}", scope.label(), crate::time::reset_clock(r, now)),
+                    None => scope.label(),
+                };
+                let words = SharedString::from(text);
+                column(
+                    v_flex().group("turn-end").my_1().gap(px(2.)).child(
+                        h_flex()
+                            .id(("limit-row", ix))
+                            .test_support()
+                            .min_w_0()
+                            .gap(px(8.))
+                            .py_1()
+                            .text_sm()
+                            // What the agent said, in its words.
+                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(words.clone()).build(window, cx))
+                            .child(Icon::new(crate::assets::Lucide::Gauge).small().text_color(amber))
+                            .child(div().flex_none().font_medium().text_color(amber).child("Usage limit reached"))
+                            .child(div().min_w_0().truncate().text_color(muted).child(when)),
+                    )
+                    .when(turn, |el| el.child(turn_actions(ix))),
+                )
+                .into_any_element()
+            }
+            (Row::Handoff { ix }, Item::Handoff { from, from_model, to, to_model }) => {
+                let ws = at.workspace.read(cx);
+                let side = |agent: &str, model: &Option<String>| {
+                    let agent = trek_core::AgentId::from_key(agent);
+                    let models = ws.models_for(&agent);
+                    let name = model
+                        .as_deref()
+                        .map(|m| crate::composer::model_name(&models, m))
+                        .or_else(|| crate::composer::default_model(&models).map(|m| m.name.clone()))
+                        .unwrap_or_else(|| agent.display_name());
+                    // A model's name alone can be ambiguous ("Sol"): the agent's mark goes with it.
+                    h_flex().gap(px(6.)).text_color(theme.foreground.opacity(0.8)).child(crate::ui::agent_glyph(&agent, cx)).child(name)
+                };
+                column(
+                    h_flex().justify_center().child(
+                        h_flex()
+                            .id(("handoff-row", ix))
+                            .test_support()
+                            .gap(px(8.))
+                            .py_2()
+                            .text_xs()
+                            .text_color(muted)
+                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("The new agent picks the conversation up from a recap of it").build(window, cx))
+                            .child(Icon::new(crate::assets::Lucide::ArrowLeftRight).xsmall().text_color(muted))
+                            .child("Context handoff")
+                            .child(side(&from, &from_model))
+                            .child(Icon::new(IconName::ArrowRight).xsmall().text_color(muted))
+                            .child(side(&to, &to_model)),
+                    ),
                 )
                 .into_any_element()
             }
@@ -1611,6 +1680,8 @@ impl ThreadView {
                 Row::ToolGroup { summary, running, .. } => format!("{indent}group: {summary}{}", if *running { " (running)" } else { "" }),
                 Row::Notice { .. } => format!("{indent}notice"),
                 Row::Error { .. } => format!("{indent}error"),
+                Row::Limit { .. } => format!("{indent}limit"),
+                Row::Handoff { .. } => format!("{indent}handoff"),
             });
             if let Row::ToolGroup { open: true, tools, .. } = row {
                 for t in tools {

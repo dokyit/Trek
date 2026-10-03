@@ -7,6 +7,7 @@ pub mod checkpoint;
 pub mod detect;
 pub mod git;
 pub mod import;
+pub mod limit;
 pub mod paths;
 pub mod rewind;
 pub mod settings;

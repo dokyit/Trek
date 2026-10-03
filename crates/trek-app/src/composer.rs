@@ -65,6 +65,8 @@ pub struct Composer {
     height: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// The message being edited, to send again in its place.
     editing: Option<Editing>,
+    /// Redraws the usage-limit bar's countdown while it's up.
+    limit_tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -102,7 +104,7 @@ pub fn same_model(id: &str, candidate: &str) -> bool {
 }
 
 /// Display name for a model id.
-fn model_name(models: &[ModelInfo], id: &str) -> String {
+pub(crate) fn model_name(models: &[ModelInfo], id: &str) -> String {
     models.iter().find(|i| same_model(id, &i.id)).map(|i| i.name.clone()).unwrap_or_else(|| id.to_string())
 }
 
@@ -194,6 +196,7 @@ impl Composer {
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
+            limit_tick: None,
             _subscriptions: subscriptions,
         }
     }
@@ -370,6 +373,139 @@ impl Composer {
                         .tooltip("Cancel editing")
                         .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// The bar above the prompt while the thread is paused at a usage limit: when it resets, what
+    /// happens then, and the ways on (resume at the reset, snooze until it, another agent). The
+    /// messages waiting for the reset are listed under it.
+    fn limit_bar(&mut self, id: &str, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let pause = ws.pause(id)?.clone();
+        if ws.turn_running(id) {
+            return None;
+        }
+        let now = ws.now();
+        let snoozed = ws.thread(id).and_then(|t| t.snoozed_until).is_some_and(|u| u > now);
+        // The countdown moves on its own: redraw this view (not the window) twice a minute.
+        if self.limit_tick.is_none() {
+            self.limit_tick = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                let paused = this.update(cx, |this, cx| {
+                    let ws = this.workspace.read(cx);
+                    let paused = ws.thread_id_in(&this.scope).is_some_and(|id| ws.pause(id).is_some());
+                    if paused {
+                        cx.notify();
+                    } else {
+                        this.limit_tick = None;
+                    }
+                    paused
+                });
+                if !paused.unwrap_or(false) {
+                    break;
+                }
+            }));
+        }
+        let theme = cx.theme().clone();
+        let amber = palette::amber(cx);
+        let when = |at: i64| {
+            let clock = crate::time::reset_clock(at, now);
+            if compact { clock } else { format!("{clock} (in {})", crate::time::countdown(at, now)) }
+        };
+        let (title, detail) = match (pause.resets_at, pause.resume) {
+            (Some(at), true) => ("Usage limit reached".to_string(), format!("Resumes at {}", when(at + trek_core::limit::RESUME_GRACE_MS))),
+            (Some(at), false) => ("Usage limit reached".to_string(), format!("Resets {}", when(at))),
+            (None, _) => ("Usage limit reached".to_string(), "Reset time unknown".to_string()),
+        };
+        let action = |key: &'static str, label: &'static str, strong: bool| {
+            div()
+                .id(key)
+                .test_support()
+                .flex_none()
+                .h(px(24.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_color(if strong { theme.foreground } else { theme.muted_foreground })
+                .when(strong, |el| el.font_medium())
+                .hover(|s| s.bg(theme.foreground.opacity(0.06)).text_color(theme.foreground))
+                .child(label)
+        };
+        let ws = self.workspace.clone();
+        let on = |f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
+            let (ws, id) = (ws.clone(), id.to_string());
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| ws.update(cx, |ws, cx| f(ws, &id, cx))
+        };
+        let mut actions: Vec<AnyElement> = vec![];
+        match (pause.resets_at.is_some(), pause.resume) {
+            (true, false) => actions.push(action("limit-resume", "Resume at reset", true).on_click(on(|ws, id, cx| ws.resume_at_reset(id, cx))).into_any_element()),
+            (true, true) => actions.push(action("limit-cancel", "Cancel", false).on_click(on(|ws, id, cx| ws.cancel_resume(id, cx))).into_any_element()),
+            (false, _) => actions.push(action("limit-retry", "Try again", true).on_click(on(|ws, id, cx| ws.end_pause(id, true, cx))).into_any_element()),
+        }
+        if pause.resets_at.is_some() && !snoozed {
+            let label = if compact { "Snooze" } else { "Snooze until reset" };
+            actions.push(action("limit-snooze", label, false).on_click(on(|ws, id, cx| ws.snooze_until_reset(id, cx))).into_any_element());
+        }
+        actions.push(
+            action("limit-switch", if compact { "Switch…" } else { "Switch agent…" }, false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_open = true;
+                    this.sync_overlay(cx);
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        let queued = pause.queued.iter().enumerate().map(|(ix, q)| {
+            let ws = self.workspace.clone();
+            let id = id.to_string();
+            let text = if q.text.trim().is_empty() { format!("{} image{}", q.images.len(), if q.images.len() == 1 { "" } else { "s" }) } else { q.text.lines().next().unwrap_or_default().to_string() };
+            h_flex()
+                .id(("limit-queued", ix))
+                .test_support()
+                .h(px(28.))
+                .px(px(12.))
+                .gap(px(8.))
+                .border_t_1()
+                .border_color(theme.foreground.opacity(0.07))
+                .child(Icon::new(crate::assets::Lucide::Clock).xsmall().text_color(theme.muted_foreground))
+                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground.opacity(0.85)).child(text))
+                .when(!compact, |el| el.child(div().flex_none().text_color(theme.muted_foreground).child("Sends when your limit resets")))
+                .child(
+                    gpui_kit::component::button::Button::new(("limit-unqueue", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Close).text_color(theme.muted_foreground))
+                        .tooltip("Don't send this at the reset")
+                        .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.unqueue_for_reset(&id, ix, cx))),
+                )
+                .into_any_element()
+        });
+        Some(
+            v_flex()
+                .id("limit-bar")
+                .test_support()
+                .mx(px(12.))
+                .rounded_t(px(12.))
+                .border_1()
+                .border_b_0()
+                .border_color(amber.opacity(0.28))
+                .bg(amber.opacity(0.07))
+                .text_size(px(12.5))
+                .child(
+                    h_flex()
+                        .h(px(36.))
+                        .pl(px(12.))
+                        .pr(px(6.))
+                        .gap(px(8.))
+                        .child(Icon::new(crate::assets::Lucide::Gauge).small().text_color(amber))
+                        .child(div().flex_none().font_medium().text_color(theme.foreground).child(title))
+                        .child(div().flex_1().min_w_0().truncate().text_color(theme.muted_foreground).child(detail))
+                        .children(actions),
+                )
+                .children(queued)
                 .into_any_element(),
         )
     }
@@ -1667,6 +1803,7 @@ impl Render for Composer {
                     .child(send),
             );
 
+        let limit_bar = thread.as_ref().and_then(|t| self.limit_bar(&t.id, compact, cx));
         // Capy-style context chips above the card on a new thread.
         let chips = is_draft.then(|| div().pb(px(8.)).child(self.env_chips(true, cx)));
         let picker = self.picker(cx);
@@ -1773,6 +1910,6 @@ impl Render for Composer {
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.picker_action("tab", window, cx)))
             .capture_action(cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)))
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
-            .child(v_flex().w_full().max_w(px(760.)).children(chips).child(card).children(status))
+            .child(v_flex().w_full().max_w(px(760.)).children(chips).children(limit_bar).child(card).children(status))
     }
 }

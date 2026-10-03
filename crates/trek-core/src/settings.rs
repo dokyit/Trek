@@ -208,6 +208,8 @@ pub struct General {
     pub prevent_sleep_while_running: bool,
     /// Favorite models as `agent-key/model-id`.
     pub favorite_models: Vec<String>,
+    /// What a thread does when its agent hits a usage limit.
+    pub on_usage_limit: OnUsageLimit,
 }
 
 impl Default for General {
@@ -222,8 +224,20 @@ impl Default for General {
             auto_title: true,
             prevent_sleep_while_running: true,
             favorite_models: vec![],
+            on_usage_limit: OnUsageLimit::Ask,
         }
     }
+}
+
+/// What a thread does when its agent hits a usage limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnUsageLimit {
+    /// Pause, and offer to resume at the reset, snooze, or switch agents.
+    #[default]
+    Ask,
+    /// Pause, and resume on its own once the limit resets.
+    Resume,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

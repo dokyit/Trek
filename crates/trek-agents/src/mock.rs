@@ -12,11 +12,13 @@
 //! | `mock:long` [dur]            | a long build that runs `dur` (default 30s)                   |
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
 //! | `error`                      | a turn that fails                                             |
+//! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
 //! | `recall`                     | the messages it remembers from this conversation             |
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
-//! Every turn also reports context usage. A prompt sent mid-turn steers it.
+//! Every turn also reports context usage. A prompt sent mid-turn steers it. Once a session has
+//! hit its limit, every prompt hits it again until it resets (or `lift_limit`).
 //!
 //! Like Claude Code and Codex, it keeps each session's history (in memory, for the process) and
 //! can resume one partway or fork it (`SessionConfig::resume_at`, `fork`); its `mock-recap`
@@ -46,6 +48,14 @@ fn new_id(kind: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("mock-{kind}-{nanos:x}-{}", N.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Sessions at their usage limit: session id → when it resets (unix ms).
+static LIMITS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::default);
+
+/// Lift session `id`'s usage limit now, as if it had reset (tests run on a clock of their own).
+pub fn lift_limit(id: &str) {
+    LIMITS.lock().unwrap().remove(id);
 }
 
 /// The messages the mock remembers in session `id`, oldest first.
@@ -100,6 +110,7 @@ enum Script {
     Error,
     Write,
     Recall,
+    Limit(Duration),
 }
 
 impl Script {
@@ -118,6 +129,7 @@ impl Script {
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write,
+                "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
                 "error" => Script::Error,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
@@ -151,6 +163,7 @@ pub fn title(request: &str) -> String {
         Script::Error => "Fix the failing build",
         Script::Write => "Add a note",
         Script::Recall => "What was said",
+        Script::Limit(_) => "Refactor the parser",
     }
     .into()
 }
@@ -315,7 +328,11 @@ impl Session {
         let text = text.as_str();
         self.context += 1_200 + text.len() as u64 / 3;
         self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
-        let script = Script::parse(text, self.plan);
+        let mut script = Script::parse(text, self.plan);
+        // Until the limit resets, every prompt meets it.
+        if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| *u > trek_core::store::now_ms()) {
+            script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()) as u64));
+        }
         match self.play(script).await {
             Ok(()) => {}
             Err(Stop::Interrupted) => {
@@ -351,6 +368,7 @@ impl Session {
                 let text = if said.is_empty() { "I don't remember anything from before this message.".to_string() } else { format!("I remember: {}", said.join(" | ")) };
                 self.say(&text).await?;
             }
+            Script::Limit(after) => return self.limit(after).await,
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -368,6 +386,22 @@ impl Session {
         self.acknowledge_steer().await?;
         let cost_usd = Some(self.spend(0.02));
         self.emit(AgentEvent::TurnComplete { cost_usd, error: None }).await
+    }
+
+    /// A usage limit hit partway through, resetting `after` from now. Like Claude Code: the
+    /// limit's own message instead of an answer, and the turn fails with it.
+    async fn limit(&mut self, after: Duration) -> Step {
+        let resets_at = {
+            let mut limits = LIMITS.lock().unwrap();
+            *limits.entry(self.native_id.clone()).or_insert_with(|| trek_core::store::now_ms() + after.as_millis() as i64)
+        };
+        self.think("Picking up the parser refactor where it stood.").await?;
+        self.tool("Read", "src/parser.rs", "pub fn parse(input: &str) -> Result<Ast> { … }", 150).await?;
+        let at = chrono::DateTime::from_timestamp_millis(resets_at).map(|d| d.with_timezone(&chrono::Local).format("%-I:%M%P").to_string()).unwrap_or_default();
+        let message = format!("You've hit your session limit · resets {at}");
+        self.emit(AgentEvent::LimitReached { message: message.clone(), resets_at: Some(resets_at), scope: crate::LimitScope::Session }).await?;
+        let cost_usd = Some(self.spend(0.0));
+        self.emit(AgentEvent::TurnComplete { cost_usd, error: Some(message) }).await
     }
 
     /// Add `usd` to the session's spend; returns the new total.
@@ -712,6 +746,9 @@ mod tests {
         assert_eq!(Script::parse("mock:permission", false), Script::Permission);
         assert_eq!(Script::parse("anything", true), Script::Plan);
         assert_eq!(Script::parse("Error!", false), Script::Error);
+        assert_eq!(Script::parse("mock:limit 5s", false), Script::Limit(Duration::from_secs(5)));
+        assert_eq!(Script::parse("mock:limit", false), Script::Limit(Duration::from_secs(5)));
+        assert_eq!(Script::parse("the rate limit", false), Script::Answer, "bare `limit` is just a word");
     }
 
     #[test]
@@ -1013,6 +1050,30 @@ mod tests {
             m.prompt("mock:error").await;
             let events = m.turn().await;
             assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: Some(_), .. })));
+        });
+    }
+
+    #[test]
+    fn a_limit_holds_until_it_resets() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            let started = m.until(|e| matches!(e, AgentEvent::Started { .. })).await;
+            let Some(AgentEvent::Started { native_id, .. }) = started.last() else { panic!() };
+            let before = trek_core::store::now_ms();
+            m.prompt("mock:limit 5s").await;
+            let events = m.turn().await;
+            let Some(AgentEvent::LimitReached { message, resets_at: Some(at), scope }) = events.iter().find(|e| matches!(e, AgentEvent::LimitReached { .. })) else { panic!("{events:?}") };
+            assert!(*at >= before + 5_000 && *at < before + 7_000);
+            assert_eq!(*scope, crate::LimitScope::Session);
+            assert!(message.starts_with("You've hit your session limit · resets "));
+            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { cost_usd: Some(0.0), error: Some(message.clone()) }));
+            // Anything else meets the same limit until it resets.
+            m.prompt("explain the startup").await;
+            let again = m.turn().await;
+            assert!(again.contains(&AgentEvent::LimitReached { message: message.clone(), resets_at: Some(*at), scope: crate::LimitScope::Session }));
+            lift_limit(native_id);
+            m.prompt("explain the startup").await;
+            assert!(matches!(m.turn().await.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
         });
     }
 }

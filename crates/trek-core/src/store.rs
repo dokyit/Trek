@@ -121,6 +121,8 @@ pub struct Thread {
     /// How the next session picks the conversation up after a rewind or a fork; cleared once
     /// that session has started.
     pub reopen: Option<crate::rewind::Reopen>,
+    /// Its agent hit a usage limit: paused until the limit resets (and what to send then).
+    pub paused: Option<crate::limit::Pause>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -243,6 +245,24 @@ pub enum Item {
     Tool { id: String, title: String, detail: String, output: String, status: ToolStatus },
     Notice { text: String },
     Error { text: String },
+    /// The agent stopped at a usage limit: what it said, and when the limit resets.
+    Limit {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<i64>,
+        #[serde(default)]
+        scope: crate::limit::LimitScope,
+    },
+    /// The thread moved to another agent mid-conversation: the new one starts from a recap.
+    /// Agents by `AgentId::key()`, models by id.
+    Handoff {
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_model: Option<String>,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_model: Option<String>,
+    },
 }
 
 /// A point in an agent's own session: resuming `session` there brings back the conversation up to
@@ -377,6 +397,7 @@ const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("worktree_base", "TEXT"),
     ("native_at", "TEXT"),
     ("reopen", "TEXT"),
+    ("paused", "TEXT"),
 ];
 
 /// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
@@ -512,7 +533,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -548,6 +569,7 @@ impl Store {
             },
             native_at: r.get(29)?,
             reopen: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str(&j).ok()),
+            paused: r.get::<_, Option<String>>(31)?.and_then(|j| serde_json::from_str(&j).ok()),
         })
     }
 
@@ -609,6 +631,7 @@ impl Store {
             worktree: None,
             native_at: None,
             reopen: None,
+            paused: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -667,7 +690,8 @@ impl Store {
                 t.worktree.as_ref().map(|w| w.branch.clone()),
                 t.worktree.as_ref().map(|w| w.base.clone()),
                 t.native_at,
-                t.reopen.as_ref().and_then(|r| serde_json::to_string(r).ok())
+                t.reopen.as_ref().and_then(|r| serde_json::to_string(r).ok()),
+                t.paused.as_ref().and_then(|p| serde_json::to_string(p).ok())
             ],
         )?;
         Ok(())
@@ -842,6 +866,7 @@ impl Store {
             worktree: None,
             native_at: None,
             reopen: None,
+            paused: None,
         })
     }
 
@@ -1387,6 +1412,39 @@ mod tests {
         s.save_thread(&b).unwrap();
         assert!(s.thread(&t.id).unwrap().is_none());
         assert_eq!(s.threads().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_pause_and_its_queued_messages_survive_a_relaunch() {
+        use crate::limit::{LimitScope, Pause, Queued};
+        let dir = std::env::temp_dir().join(format!("trek-migrate-pause-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        {
+            // A database from before pauses, with a thread in it.
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute(
+                "INSERT INTO threads (id, title, agent, effort, hand_holding, source, created_at, updated_at, last_seen_at) VALUES ('old', 'Old', 'claude-code', 'high', 'auto', 'trek', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.thread("old").unwrap().unwrap().paused, None);
+        let mut pause = Pause::new("You've hit your session limit · resets 7:40pm".into(), Some(1_790_984_400_000), LimitScope::Session, 5, true);
+        pause.queued = vec![Queued { text: "then the tests".into(), images: vec![] }, Queued { text: "and the docs".into(), images: vec![dir.join("a.png")] }];
+        s.update_thread("old", |t| t.paused = Some(pause.clone())).unwrap();
+        let limit = Item::Limit { text: pause.message.clone(), resets_at: pause.resets_at, scope: LimitScope::Session };
+        let handoff = Item::Handoff { from: "claude-code".into(), from_model: Some("claude-opus-5-5".into()), to: "codex".into(), to_model: None };
+        s.append_items("old", [("l", &limit), ("h", &handoff)]).unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.thread("old").unwrap().unwrap().paused, Some(pause));
+        assert_eq!(s.items("old").unwrap(), vec![limit, handoff]);
+        s.update_thread("old", |t| t.paused = None).unwrap();
+        assert_eq!(s.thread("old").unwrap().unwrap().paused, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
