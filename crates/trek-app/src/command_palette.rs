@@ -246,6 +246,13 @@ impl CommandPalette {
         if self.open { self.dismiss(window, cx) } else { self.show(window, cx) }
     }
 
+    /// Show the palette, or leave it as it is when it's already open (⌘K from a thread window).
+    pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open {
+            self.show(window, cx);
+        }
+    }
+
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.restore = window.focused(cx);

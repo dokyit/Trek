@@ -1,7 +1,7 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
-use crate::{AgentEvent, Command, Decision, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, Billing, Command, Decision, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -283,6 +283,8 @@ enum Call {
     Start,
     /// A steer into turn `turn`; `retried` once it has gone out a second time.
     Steer { input: Value, turn: String, retried: bool },
+    /// `account/read`, sent before the session starts: how the login is billed.
+    Account,
     Other,
 }
 
@@ -572,6 +574,7 @@ impl Session {
                 tracing::debug!("codex refused a steer: {e}");
                 self.steer_failed(input, turn, retried, out);
             }
+            (Call::Account, None) => out.events.extend(account_billing(&v["result"]).map(AgentEvent::Billing)),
             (_, Some(e)) => tracing::debug!("codex request failed: {e}"),
             _ => {}
         }
@@ -932,6 +935,8 @@ pub async fn run(
 ) -> Result<()> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
+    // Which login the session uses (ChatGPT plan or API key); answered alongside thread/start.
+    let account_req = rpc.request("account/read", json!({})).await?;
 
     let (sandbox, approval, reviewer) = config.hand_holding.codex_policy();
     let mut params = json!({
@@ -973,6 +978,7 @@ pub async fn run(
     };
     let thread_id = opened["thread"]["id"].as_str().context("no thread id")?.to_string();
     let mut s = Session::new(thread_id.clone(), &config, &opened, rpc.next_id);
+    s.calls.insert(account_req, Call::Account);
     events.send(AgentEvent::Started { native_id: thread_id, model: s.model.clone() }).await?;
     if lost {
         events.send(crate::lost_session("Codex")).await?;
@@ -1015,6 +1021,17 @@ pub async fn run(
     }
     let _ = child.start_kill();
     Ok(())
+}
+
+/// How the login is billed, from an `account/read` result. Older Codex builds without the
+/// method answer with an error, which leaves billing unknown.
+fn account_billing(r: &Value) -> Option<Billing> {
+    let a = &r["account"];
+    match a["type"].as_str()? {
+        "chatgpt" => Some(Billing::Plan(a["planType"].as_str().map(crate::status::codex_plan_name))),
+        "apiKey" | "amazonBedrock" => Some(Billing::Metered),
+        _ => None,
+    }
 }
 
 /// Live model list from the user's Codex setup (includes custom providers), with efforts.
@@ -1118,6 +1135,28 @@ mod tests {
         assert_eq!(context_event(&p), Some(AgentEvent::Context { used: 84104, window: 258400 }));
         let no_window = json!({"tokenUsage":{"last":{"totalTokens":1},"total":{},"modelContextWindow":null}});
         assert_eq!(context_event(&no_window), None);
+    }
+
+    #[test]
+    fn billing_from_account_read() {
+        let plus = json!({"account":{"type":"chatgpt","email":"me@example.com","planType":"plus"},"requiresOpenaiAuth":true});
+        assert_eq!(account_billing(&plus), Some(Billing::Plan(Some("ChatGPT Plus".into()))));
+        assert_eq!(account_billing(&json!({"account":{"type":"chatgpt","email":null}})), Some(Billing::Plan(None)));
+        assert_eq!(account_billing(&json!({"account":{"type":"apiKey"}})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"account":null,"requiresOpenaiAuth":true})), None);
+        assert_eq!(account_billing(&Value::Null), None);
+
+        // The answer reaches the session by its request id, whenever it arrives; a server request
+        // that reuses the number isn't mistaken for it.
+        let mut s = session("t", false);
+        s.calls.insert(1, Call::Account);
+        let reused = feed(&mut s, &[json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"t","itemId":"c","command":"ls"}})]);
+        assert!(!reused.events.iter().any(|e| matches!(e, AgentEvent::Billing(_))));
+        let out = feed(&mut s, &[json!({"id":1,"result":plus})]);
+        assert_eq!(out.events, vec![AgentEvent::Billing(Billing::Plan(Some("ChatGPT Plus".into())))]);
+        // Older builds without the method: an error, and billing stays unknown.
+        s.calls.insert(2, Call::Account);
+        assert!(feed(&mut s, &[json!({"id":2,"error":{"code":-32601,"message":"unknown method"}})]).events.is_empty());
     }
 
     #[test]

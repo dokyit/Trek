@@ -417,13 +417,20 @@ impl SettingsView {
         const GROUPS: &[(&str, &[(&str, &[&str])])] = &[
             (
                 "Threads",
-                &[("Search threads and commands", &["⌘", "K"]), ("New thread", &["⌘", "N"]), ("Open a folder", &["⌘", "O"]), ("Settle the current thread", &["⌘", "E"]), ("Stop the agent", &["⌘", "."])],
+                &[
+                    ("Search threads and commands", &["⌘", "K"]),
+                    ("New thread", &["⌘", "N"]),
+                    ("Open a folder", &["⌘", "O"]),
+                    ("Open the thread in a new window", &["⌘", "⇧", "↩"]),
+                    ("Settle the current thread", &["⌘", "E"]),
+                    ("Stop the agent", &["⌘", "."]),
+                ],
             ),
             (
                 "Composer",
-                &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Take a snapshot", &["⌘", "⇧", "S"])],
+                &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Attach a copied image", &["⌘", "V"]), ("Take a snapshot", &["⌘", "⇧", "S"])],
             ),
-            ("Window", &[("Toggle the sidebar", &["⌘", "B"]), ("Toggle the tools panel", &["⌘", "J"]), ("Settings", &["⌘", ","]), ("Hide Trek", &["⌘", "H"]), ("Minimize", &["⌘", "M"]), ("Quit", &["⌘", "Q"])]),
+            ("Window", &[("Toggle the sidebar", &["⌘", "B"]), ("Toggle the tools panel", &["⌘", "J"]), ("Settings", &["⌘", ","]), ("Close a thread window", &["⌘", "W"]), ("Hide Trek", &["⌘", "H"]), ("Minimize", &["⌘", "M"]), ("Quit", &["⌘", "Q"])]),
         ];
         let send_cmd = self.workspace.read(cx).settings.general.send_with_cmd_enter;
         let mut out = vec![];

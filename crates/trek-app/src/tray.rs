@@ -1,6 +1,6 @@
 //! Menu-bar icon: a template glyph that shows idle / working / needs-you, plus a small menu.
 
-use crate::workspace::{Route, SettingsPage, Workspace};
+use crate::workspace::{Route, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::*;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -78,12 +78,19 @@ impl Tray {
                 let _ = cx.update(|cx| {
                     if id == ids.0 {
                         cx.activate(true);
+                        // The main window may have been closed; bring it back.
+                        if ws.read(cx).main_window.is_none() {
+                            crate::root::show_main(ws.clone(), cx);
+                        }
                     } else if id == ids.1 {
                         cx.activate(true);
-                        ws.update(cx, |ws, cx| ws.new_thread(cx));
+                        ws.update(cx, |ws, cx| {
+                            ws.new_thread(cx);
+                            cx.emit(WorkspaceEvent::ActivateMain);
+                        });
                     } else if id == ids.2 {
                         cx.activate(true);
-                        ws.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::General), cx));
+                        ws.update(cx, |ws, cx| ws.show_in_main(Route::Settings(SettingsPage::General), cx));
                     } else if id == ids.3 {
                         ws.update(cx, |ws, _| ws.shutdown_sessions());
                         cx.quit();

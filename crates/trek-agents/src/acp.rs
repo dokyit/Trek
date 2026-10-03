@@ -419,9 +419,9 @@ struct Turn {
     text: String,
     tools: HashMap<String, Tool>,
     plan_updates: u32,
-    /// The session's running cost as last reported, and where it stood when the turn began.
+    /// The session's running cost as last reported. Turns report it as is (see
+    /// `AgentEvent::TurnComplete`); the app works out what each turn added.
     cost: Option<f64>,
-    cost_before: Option<f64>,
 }
 
 impl Turn {
@@ -529,16 +529,11 @@ impl Turn {
         out
     }
 
-    /// A prompt went out: the turn's cost counts from here.
-    fn begin(&mut self) {
-        self.cost_before = self.cost;
-    }
-
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
-        let cost_usd = self.cost.map(|c| c - self.cost_before.unwrap_or(0.0)).filter(|c| *c > 0.0);
+        let cost_usd = self.cost.filter(|c| *c > 0.0);
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
@@ -809,7 +804,6 @@ pub async fn run(
                         }
                         prompt.push(json!({ "type": "text", "text": text }));
                         let params = json!({ "sessionId": s.session_id, "prompt": prompt });
-                        s.turn.begin();
                         s.prompt = Some(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
@@ -1341,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_entries_and_cost_per_turn() {
+    fn plan_entries_and_running_cost() {
         // ACP `plan` update shape (agent-client-protocol schema); OpenCode sends todos as a tool instead.
         let mut t = Turn::default();
         let ev = t.update(&json!({"sessionUpdate":"plan","entries":[
@@ -1353,12 +1347,14 @@ mod tests {
                 AgentEvent::ToolFinished { id: "plan-1".into(), output: "✓ Read\n→ Write".into(), ok: true },
             ]
         );
-        // `cost` is the session's running total: a turn is charged the difference.
+        // `cost` is the session's running total, and turns report it as such (as Claude Code's
+        // `total_cost_usd` is): the app charges each turn the difference.
         t.update(&json!({"sessionUpdate":"usage_update","used":10,"size":100,"cost":{"amount":0.5,"currency":"USD"}}));
         assert!(t.update(&json!({"sessionUpdate":"usage_update","used":0,"size":100})).is_empty());
-        t.begin();
         t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":0.75,"currency":"USD"}}));
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.25), error: None }]);
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.75), error: None }]);
+        // A turn without a new report repeats the total, which adds nothing.
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.75), error: None }]);
     }
 
     #[test]

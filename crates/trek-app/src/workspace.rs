@@ -1,10 +1,10 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
-use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Task};
+use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use trek_agents::{AcpInfo, AgentStatus, McpServer, SlashCommand, AgentEvent, Command, Decision, SessionConfig};
+use trek_agents::{AcpInfo, AgentEvent, AgentStatus, Billing, Command, Decision, McpServer, SessionConfig, SlashCommand};
 use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
@@ -20,6 +20,14 @@ pub enum Route {
     Thread(String),
     Settings(SettingsPage),
     Onboarding,
+}
+
+/// What a transcript or composer is bound to: whatever the main window shows, or one thread
+/// (a thread window, which never follows the main window's route).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    Main,
+    Thread(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +112,12 @@ pub struct LiveThread {
     pub turn_started: Option<Instant>,
     pub plan: bool,
     pub fast: bool,
+    /// Estimated spend on this thread's agent so far; money only when `billing` is metered.
     pub cost_usd: f64,
+    /// The agent's running session total at its last report (see `cost_added`).
+    cost_total: f64,
+    /// How the current session is billed, once the agent has said.
+    pub billing: Option<Billing>,
     /// Tokens in the context window and the window size, as last reported by the agent.
     pub context: Option<(u64, u64)>,
     /// Bumped on every transcript change so views can resync cheaply.
@@ -281,8 +294,8 @@ pub enum WorkspaceEvent {
     /// A toast-worthy message with an optional undo.
     Toast { message: String, undo: Option<UndoAction> },
     /// A thread needs the user or finished: an in-app toast when it's off screen, plus a system
-    /// banner / sound per the notification settings. `viewing` = the thread is on screen.
-    Attention { message: String, viewing: bool },
+    /// banner / sound per the notification settings.
+    Attention { message: String, thread: String },
     FocusComposer,
     /// Run a shell command in a new terminal tab (agent install / sign in), then rescan agents.
     RunInTerminal(String),
@@ -290,6 +303,12 @@ pub enum WorkspaceEvent {
     InsertIntoComposer(String),
     /// Attach an image to the composer (e.g. a browser screenshot).
     AttachImage(std::path::PathBuf),
+    /// Follow-ups held for a turn that stopped or failed go back into the composer showing `thread`.
+    RestoreQueued { thread: String, text: String, images: Vec<PathBuf> },
+    /// Something in a thread window changed what the main window shows: bring it forward.
+    ActivateMain,
+    /// ⌘K from a thread window: the palette opens in the main window (its commands act there).
+    OpenPalette,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +411,9 @@ pub struct Workspace {
     warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
+    pub main_window: Option<AnyWindowHandle>,
+    /// Threads open in windows of their own.
+    pub thread_windows: HashMap<String, AnyWindowHandle>,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
@@ -453,6 +475,8 @@ impl Workspace {
             settings_project: None,
             warm: None,
             overlay_open: false,
+            main_window: None,
+            thread_windows: HashMap::new(),
             applied_defaults,
             tasks: vec![],
         };
@@ -530,6 +554,82 @@ impl Workspace {
             Route::Thread(id) => self.thread(id),
             _ => None,
         }
+    }
+
+    /// The thread `scope` shows, if it shows one (the main window may be on a draft or settings).
+    pub fn thread_id_in<'a>(&'a self, scope: &'a Scope) -> Option<&'a str> {
+        scope_thread(scope, &self.route)
+    }
+
+    pub fn thread_in(&self, scope: &Scope) -> Option<&Thread> {
+        self.thread_id_in(scope).and_then(|id| self.thread(id))
+    }
+
+    /// `scope` is composing a new thread (only the main window does).
+    pub fn is_draft_in(&self, scope: &Scope) -> bool {
+        scope_is_draft(scope, &self.route)
+    }
+
+    /// Working directory for `scope`: its thread's folder, or the main window's draft project.
+    pub fn cwd_in(&self, scope: &Scope) -> Option<PathBuf> {
+        match scope {
+            Scope::Main => self.current_cwd(),
+            Scope::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+        }
+    }
+
+    pub fn git_in(&self, scope: &Scope) -> Option<&GitInfo> {
+        self.cwd_in(scope).and_then(|c| self.git_info.get(&c))
+    }
+
+    /// Where `id` is on screen: its own window, else the main window when it shows the thread.
+    /// Its own window wins, so queued follow-ups go back to that window's composer.
+    pub fn shown_in(&self, id: &str) -> Option<Scope> {
+        shown_in(id, &self.route, self.thread_windows.contains_key(id), self.main_window.is_some())
+    }
+
+    /// The thread is on screen somewhere: in the main window or a window of its own.
+    pub fn on_screen(&self, id: &str) -> bool {
+        self.shown_in(id).is_some()
+    }
+
+    /// Whether the user is looking at `thread`: it's in the frontmost Trek window, or (when no
+    /// Trek window is frontmost) in any of them.
+    pub fn viewing(&self, thread: &str, active: Option<AnyWindowHandle>) -> bool {
+        let in_main = self.main_window.is_some() && matches!(&self.route, Route::Thread(t) if t == thread);
+        viewing(in_main, self.thread_windows.get(thread).copied(), self.main_window, active)
+    }
+
+    /// A window now shows `id` on its own.
+    pub fn thread_window_opened(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
+        self.thread_windows.insert(id.to_string(), handle);
+        self.mutate_thread(id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
+        self.ensure_loaded(id, cx);
+        if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()) {
+            self.refresh_git_at(cwd, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn thread_window_closed(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
+        if forget_window(&mut self.thread_windows, id, handle) {
+            cx.notify();
+        }
+    }
+
+    /// The main window closed (thread windows may still be open; it reopens on demand).
+    pub fn main_window_closed(&mut self, handle: AnyWindowHandle, cx: &mut Context<Self>) {
+        if self.main_window == Some(handle) {
+            self.main_window = None;
+            cx.notify();
+        }
+    }
+
+    /// Navigate the main window from a thread window, and bring it forward (reopening it if it
+    /// was closed).
+    pub fn show_in_main(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.navigate(route, cx);
+        cx.emit(WorkspaceEvent::ActivateMain);
     }
 
     fn mutate_thread(&mut self, id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut Thread)) {
@@ -698,7 +798,12 @@ impl Workspace {
     }
 
     pub fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        let Some(cwd) = self.current_cwd() else { return };
+        if let Some(cwd) = self.current_cwd() {
+            self.refresh_git_at(cwd, cx);
+        }
+    }
+
+    pub fn refresh_git_at(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
@@ -712,17 +817,13 @@ impl Workspace {
         self.tasks.push(task);
     }
 
-    pub fn current_git(&self) -> Option<&GitInfo> {
-        self.current_cwd().and_then(|c| self.git_info.get(&c))
-    }
-
-    /// `git switch <branch>` in the current folder.
-    pub fn switch_branch(&mut self, branch: String, cx: &mut Context<Self>) {
-        let Some(cwd) = self.current_cwd() else { return };
+    /// `git switch <branch>` in `cwd`.
+    pub fn switch_branch(&mut self, cwd: PathBuf, branch: String, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
+            let dir = cwd.clone();
             let out = cx
                 .background_executor()
-                .spawn(async move { std::process::Command::new("git").args(["switch", &branch]).current_dir(&cwd).output() })
+                .spawn(async move { std::process::Command::new("git").args(["switch", &branch]).current_dir(&dir).output() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match out {
@@ -733,7 +834,7 @@ impl Workspace {
                     }
                     Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("git: {e}"), undo: None }),
                 }
-                this.refresh_git(cx);
+                this.refresh_git_at(cwd, cx);
             });
         });
         self.tasks.push(task);
@@ -1046,7 +1147,11 @@ impl Workspace {
     // ---------- composer prefs ----------
 
     pub fn prefs(&self) -> Prefs {
-        match self.current_thread() {
+        self.prefs_in(&Scope::Main)
+    }
+
+    pub fn prefs_in(&self, scope: &Scope) -> Prefs {
+        match self.thread_in(scope) {
             Some(t) => Prefs {
                 agent: t.agent.clone(),
                 model: t.model.clone(),
@@ -1060,8 +1165,12 @@ impl Workspace {
     }
 
     pub fn set_prefs(&mut self, prefs: Prefs, cx: &mut Context<Self>) {
-        match self.route.clone() {
-            Route::Thread(id) => {
+        self.set_prefs_in(&Scope::Main, prefs, cx);
+    }
+
+    pub fn set_prefs_in(&mut self, scope: &Scope, prefs: Prefs, cx: &mut Context<Self>) {
+        match self.thread_id_in(scope).map(str::to_string) {
+            Some(id) => {
                 let before = self.thread(&id).cloned();
                 self.mutate_thread(&id, cx, |t| {
                     t.model = prefs.model.clone();
@@ -1074,15 +1183,20 @@ impl Workspace {
                     }
                 });
                 let live = self.live.entry(id.clone()).or_default();
+                // Another agent means another login and a fresh session: what the old one cost
+                // and how it was billed say nothing about the new one, and the old agent's
+                // questions and plans go with it.
+                if before.as_ref().is_some_and(|b| b.agent != prefs.agent) {
+                    live.billing = None;
+                    live.cost_usd = 0.0;
+                    live.cost_total = 0.0;
+                    live.permissions.clear();
+                    live.picks.clear();
+                }
                 let fast_changed = live.fast != prefs.fast;
                 let plan_changed = live.plan != prefs.plan;
                 live.plan = prefs.plan;
                 live.fast = prefs.fast;
-                // The old agent's questions and plans go with it.
-                if before.as_ref().is_some_and(|b| b.agent != prefs.agent) {
-                    live.permissions.clear();
-                    live.picks.clear();
-                }
                 if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
                     // Claude reads effort, fast mode and plan at launch: restart idle sessions (they resume).
                     let relaunch = live.turn_started.is_none()
@@ -1101,13 +1215,24 @@ impl Workspace {
                         }
                     }
                 }
+                self.approve_covered_prompts(&id, prefs.hand_holding, cx);
             }
-            _ => self.draft_prefs = prefs.clone(),
-        }
-        if let Route::Thread(id) = self.route.clone() {
-            self.approve_covered_prompts(&id, prefs.hand_holding, cx);
+            None => self.draft_prefs = prefs,
         }
         cx.notify();
+    }
+
+    /// ⌘⇧A: move `scope` to the next hand-holding level (skipping Full access until it's allowed).
+    pub fn cycle_hand_holding(&mut self, scope: &Scope, cx: &mut Context<Self>) {
+        let mut p = self.prefs_in(scope);
+        let all = HandHolding::ALL;
+        let i = all.iter().position(|h| *h == p.hand_holding).unwrap_or(0);
+        let mut next = all[(i + 1) % all.len()];
+        if next == HandHolding::FullAccess && !self.settings.permissions.full_access_unlocked {
+            next = all[0];
+        }
+        p.hand_holding = next;
+        self.set_prefs_in(scope, p, cx);
     }
 
     /// Models for an agent: live data for local servers, catalog otherwise.
@@ -1281,6 +1406,21 @@ impl Workspace {
         self.send_to(&id, text, images, cx);
     }
 
+    /// Send from `scope`'s composer: the main window's (which may start a new thread) or a thread window's.
+    pub fn send_in(&mut self, scope: &Scope, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        match scope {
+            Scope::Main => self.send(text, images, cx),
+            Scope::Thread(id) => {
+                let before = self.route.clone();
+                self.send_to(id, text, images, cx);
+                // `/new` and friends open a draft in the main window.
+                if self.route != before {
+                    cx.emit(WorkspaceEvent::ActivateMain);
+                }
+            }
+        }
+    }
+
     /// Send a prompt to a specific thread (main view or a side chat).
     pub fn send_to(&mut self, id: &str, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         let id = id.to_string();
@@ -1399,6 +1539,8 @@ impl Workspace {
         let live = self.live.entry(id.to_string()).or_default();
         live.commands = Some(handle.commands);
         live.last_active = Some(Instant::now());
+        // A new process says how it's billed again (the login may have changed since).
+        live.billing = None;
         let events = handle.events;
         let id = id.to_string();
         live._events = Some(cx.spawn(async move |this, cx| {
@@ -1427,12 +1569,7 @@ impl Workspace {
     /// Costs nothing with the provider: no request is made until a prompt is sent.
     pub fn warm_up(&mut self, cx: &mut Context<Self>) {
         match self.route.clone() {
-            Route::Thread(id) => {
-                let direct = self.thread(&id).is_some_and(|t| matches!(t.agent, AgentId::Direct(_)));
-                if !direct {
-                    self.ensure_session(&id, cx);
-                }
-            }
+            Route::Thread(id) => self.warm_thread(&id, cx),
             Route::Draft { project: Some(cwd) } => {
                 if matches!(self.draft_prefs.agent, AgentId::Direct(_)) {
                     return;
@@ -1457,6 +1594,21 @@ impl Workspace {
                 self.warm = Some((key, handle, Instant::now()));
             }
             _ => {}
+        }
+    }
+
+    pub fn warm_up_in(&mut self, scope: &Scope, cx: &mut Context<Self>) {
+        match scope {
+            Scope::Main => self.warm_up(cx),
+            Scope::Thread(id) => self.warm_thread(id, cx),
+        }
+    }
+
+    /// Start an existing thread's session ahead of its next message (direct providers have no process to start).
+    fn warm_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        let direct = self.thread(id).is_some_and(|t| matches!(t.agent, AgentId::Direct(_)));
+        if !direct {
+            self.ensure_session(id, cx);
         }
     }
 
@@ -1596,6 +1748,7 @@ impl Workspace {
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
+                    AgentEvent::Billing(b) => live.billing = Some(b),
                     AgentEvent::TurnComplete { cost_usd, error } => {
                         // Models that hide their reasoning leave empty "Thought" rows behind. Removing
                         // them shifts positions; the rows' ids keep saves and views lined up.
@@ -1603,8 +1756,8 @@ impl Workspace {
                         live.streaming = None;
                         live.reasoning = None;
                         live.permissions.clear();
-                        if let Some(c) = cost_usd {
-                            live.cost_usd += c;
+                        if let Some(total) = cost_usd {
+                            live.cost_usd += cost_added(&mut live.cost_total, total);
                         }
                         // Background sub-agents are still out: the agent will pick the turn back up
                         // when they report, so the thread keeps working.
@@ -1667,7 +1820,7 @@ impl Workspace {
             let key = (t.agent.key(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
             self.agent_commands.insert(key, c);
         }
-        let viewing = self.route == Route::Thread(id.to_string());
+        let viewing = self.on_screen(id);
         // Streaming text changes nothing on the thread row: skip the database write (this runs
         // up to 60 times a second) unless something actually changed.
         let changed = finished
@@ -1703,6 +1856,9 @@ impl Workspace {
         if finished {
             self.turns_finished += 1;
             self.refresh_git(cx);
+            if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()).filter(|c| Some(c) != self.current_cwd().as_ref()) {
+                self.refresh_git_at(cwd, cx);
+            }
             self.persist_items(id, cx);
             self.search_index_changed(cx);
             let next = if continue_queue {
@@ -1725,7 +1881,7 @@ impl Workspace {
             }
         }
         if let Some(message) = notify_text {
-            cx.emit(WorkspaceEvent::Attention { message, viewing });
+            cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string() });
         }
         cx.notify();
     }
@@ -1737,12 +1893,8 @@ impl Workspace {
             return;
         }
         let text = queued.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
-        if !text.is_empty() {
-            cx.emit(WorkspaceEvent::InsertIntoComposer(text));
-        }
-        for path in queued.into_iter().flat_map(|(_, images)| images) {
-            cx.emit(WorkspaceEvent::AttachImage(path));
-        }
+        let images = queued.into_iter().flat_map(|(_, images)| images).collect();
+        cx.emit(WorkspaceEvent::RestoreQueued { thread: id.to_string(), text, images });
     }
 
     /// Save what changed in a thread's transcript: new rows, edited rows (streaming text, tool
@@ -2007,13 +2159,10 @@ impl Workspace {
                     this.mutate_thread(&id, cx, |t| t.settled_at = Some(now));
                 }
                 // Agent processes idle for a while are shut down (150–250 MB each); they resume on the next message.
-                let viewing = match &this.route {
-                    Route::Thread(id) => Some(id.clone()),
-                    _ => None,
-                };
+                let shown: Vec<String> = this.live.keys().filter(|id| this.on_screen(id)).cloned().collect();
                 for (id, live) in this.live.iter_mut() {
                     let idle = live.last_active.is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
-                    if idle && live.commands.is_some() && live.turn_started.is_none() && live.background == 0 && live.permissions.is_empty() && viewing.as_ref() != Some(id) {
+                    if idle && live.commands.is_some() && live.turn_started.is_none() && live.background == 0 && live.permissions.is_empty() && !shown.contains(id) {
                         if let Some(tx) = live.commands.take() {
                             let _ = tx.try_send(Command::Shutdown);
                         }
@@ -2201,11 +2350,24 @@ impl Workspace {
     /// Ask each installed ACP agent for its models and login state. Answered from what the agent
     /// reported last time; only a new install or version (or a missing sign-in) is asked afresh.
     pub fn probe_acp_agents(&mut self, cx: &mut Context<Self>) {
+        self.probe_acp(None, cx);
+    }
+
+    /// Probe one ACP agent (by key) that isn't known yet, e.g. one just turned back on.
+    pub fn probe_acp_agent(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.acp_info.contains_key(key) {
+            self.probe_acp(Some(key), cx);
+        }
+    }
+
+    fn probe_acp(&mut self, only: Option<&str>, cx: &mut Context<Self>) {
+        // Probing starts the agent and opens a session in its history: not for agents the user turned off.
         let ids: Vec<String> = self
             .agents
             .iter()
             .filter(|a| a.availability == Availability::Ready && matches!(a.agent, AgentId::OpenCode | AgentId::Droid | AgentId::Acp(_)))
             .map(|a| a.agent.key())
+            .filter(|k| !self.settings.disabled_agents.contains(k) && only.is_none_or(|o| o == k))
             .collect();
         for id in ids {
             let (tx, rx) = async_channel::bounded(1);
@@ -2344,8 +2506,11 @@ impl Workspace {
                 Some(format!("{} of {} tokens in context ({:.0}%).", fmt_tokens(used), fmt_tokens(window), used as f64 / window.max(1) as f64 * 100.))
             }
             "cost" => {
-                let c = self.live.get(id).map(|l| l.cost_usd).unwrap_or(0.0);
-                Some(format!("This session has cost ${c:.2} so far (API-priced estimate; subscriptions aren't billed per token)."))
+                let live = self.live.get(id);
+                let cost = live.map(|l| l.cost_usd).unwrap_or(0.0);
+                // Claude Code reports cost on every turn; ACP agents (OpenCode) only for priced models.
+                let reports_cost = agent == AgentId::ClaudeCode || cost > 0.0;
+                Some(cost_reply(reports_cost, live.and_then(|l| l.billing.as_ref()), cost))
             }
             "model" => {
                 let t = self.thread(id)?;
@@ -2662,6 +2827,100 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("permissions full", "No prompts and no sandbox"),
 ];
 
+/// The thread `scope` shows: a thread window's own, or whatever thread the main window is on.
+fn scope_thread<'a>(scope: &'a Scope, route: &'a Route) -> Option<&'a str> {
+    match (scope, route) {
+        (Scope::Thread(id), _) | (Scope::Main, Route::Thread(id)) => Some(id),
+        _ => None,
+    }
+}
+
+fn scope_is_draft(scope: &Scope, route: &Route) -> bool {
+    *scope == Scope::Main && matches!(route, Route::Draft { .. })
+}
+
+/// See `Workspace::shown_in`. `own_window`: the thread has a window of its own; `main_open`: the
+/// main window hasn't been closed.
+fn shown_in(id: &str, route: &Route, own_window: bool, main_open: bool) -> Option<Scope> {
+    if own_window {
+        Some(Scope::Thread(id.to_string()))
+    } else if main_open && matches!(route, Route::Thread(t) if t == id) {
+        Some(Scope::Main)
+    } else {
+        None
+    }
+}
+
+/// Drop `id`'s window from the registry if it's still `handle` (a newer window for the same
+/// thread may have replaced it). Returns whether anything changed.
+fn forget_window<W: PartialEq>(windows: &mut HashMap<String, W>, id: &str, handle: W) -> bool {
+    let current = windows.get(id) == Some(&handle);
+    if current {
+        windows.remove(id);
+    }
+    current
+}
+
+/// `scope`'s view of who's looking: shown in the main window (`in_main`) or its own `window`,
+/// against the frontmost Trek window (`active`, none when another app is in front).
+fn viewing<W: PartialEq + Copy>(in_main: bool, window: Option<W>, main: Option<W>, active: Option<W>) -> bool {
+    match active {
+        None => in_main || window.is_some(),
+        Some(a) => (in_main && main == Some(a)) || window == Some(a),
+    }
+}
+
+/// What a turn added to a thread's spend, given the agent's running session `total` and the
+/// total it reported last. A zero total (a failed start) is ignored. A total below the last one
+/// means the agent started counting again (a new process without a saved total, or `/clear`),
+/// so all of it is new. A resumed session that carries on from its saved total adds only the
+/// difference, which is why `last` outlives the process.
+fn cost_added(last: &mut f64, total: f64) -> f64 {
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let added = if total >= *last { total - *last } else { total };
+    *last = total;
+    added
+}
+
+/// "your Claude Max plan", or "your subscription" when the plan has no name.
+fn plan_phrase(plan: &Option<String>) -> String {
+    plan.as_deref().map(|p| format!("your {p} plan")).unwrap_or_else(|| "your subscription".into())
+}
+
+/// What the composer says about a thread's spend: `(status strip text, agent tooltip)`. Only
+/// metered sessions show a cost in the strip. On a subscription the figure is what the same
+/// tokens would cost through the API, which the plan already covers, so it stays in the tooltip.
+pub fn cost_note(billing: Option<&Billing>, cost: f64) -> (Option<String>, Option<String>) {
+    let spent = cost >= 0.005;
+    match billing {
+        Some(Billing::Metered) => (spent.then(|| format!("${cost:.2} this thread")), Some("Billed per token by your API provider".into())),
+        Some(Billing::Plan(plan)) => {
+            let plan = plan_phrase(plan);
+            (None, Some(if spent { format!("≈${cost:.2} at API prices — included in {plan}") } else { format!("Included in {plan}") }))
+        }
+        Some(Billing::Local) => (None, Some("Runs on this Mac, nothing is billed".into())),
+        None => (None, spent.then(|| format!("≈${cost:.2} at API prices"))),
+    }
+}
+
+/// The `/cost` answer. `reports_cost`: the agent reports what the session costs (Claude Code always,
+/// ACP agents for priced models).
+fn cost_reply(reports_cost: bool, billing: Option<&Billing>, cost: f64) -> String {
+    match (billing, reports_cost) {
+        (Some(Billing::Local), _) => "This session runs on a local model, so nothing is billed.".into(),
+        (Some(Billing::Plan(plan)), true) => {
+            format!("About ${cost:.2} at API prices so far. It's included in {}, so nothing is charged per token.", plan_phrase(plan))
+        }
+        (Some(Billing::Plan(plan)), false) => format!("This session is included in {}.", plan_phrase(plan)),
+        (Some(Billing::Metered), true) => format!("This session has cost ${cost:.2} so far."),
+        (Some(Billing::Metered), false) => "This session is billed per token by your API provider; the agent doesn't report what it has cost.".into(),
+        (None, true) => format!("About ${cost:.2} so far at API prices."),
+        (None, false) => "This agent doesn't report what a session costs.".into(),
+    }
+}
+
 pub fn fmt_tokens(n: u64) -> String {
     match n {
         0..=999 => n.to_string(),
@@ -2760,5 +3019,106 @@ mod tests {
         let results = SearchResults { query: "dark".into(), ..Default::default() };
         assert!(results.relevant_to("dark t") && results.relevant_to("dar"));
         assert!(!results.relevant_to("light") && !SearchResults::default().relevant_to("dark"));
+    }
+
+    #[test]
+    fn claude_running_totals_are_not_summed() {
+        // Three $1 turns report running totals 1, 2, 3: the thread has spent $3, not $6.
+        let (mut last, mut spent) = (0.0, 0.0);
+        for total in [1.0, 2.0, 3.0] {
+            spent += cost_added(&mut last, total);
+        }
+        assert_eq!(spent, 3.0);
+        // A failed start reports zero: ignored, and the next total still counts from 3.
+        spent += cost_added(&mut last, 0.0);
+        spent += cost_added(&mut last, 3.5);
+        assert_eq!(spent, 3.5);
+        // A relaunched process that resumes from its saved total carries on from it.
+        spent += cost_added(&mut last, 4.0);
+        assert_eq!(spent, 4.0);
+        // One that starts again from zero (no saved total, or /clear) adds all of its total.
+        spent += cost_added(&mut last, 0.25);
+        spent += cost_added(&mut last, 0.75);
+        assert_eq!(spent, 4.75);
+    }
+
+    #[test]
+    fn scopes_resolve_against_the_main_route() {
+        let on_a = Route::Thread("a".into());
+        let draft = Route::Draft { project: None };
+        let settings = Route::Settings(super::SettingsPage::General);
+        let window_b = Scope::Thread("b".into());
+        // The main window follows its route.
+        assert_eq!(scope_thread(&Scope::Main, &on_a), Some("a"));
+        assert_eq!(scope_thread(&Scope::Main, &draft), None);
+        assert_eq!(scope_thread(&Scope::Main, &settings), None);
+        assert!(scope_is_draft(&Scope::Main, &draft));
+        assert!(!scope_is_draft(&Scope::Main, &on_a));
+        // A thread window stays on its thread whatever the main window shows.
+        assert_eq!(scope_thread(&window_b, &on_a), Some("b"));
+        assert_eq!(scope_thread(&window_b, &draft), Some("b"));
+        assert!(!scope_is_draft(&window_b, &draft));
+    }
+
+    #[test]
+    fn queued_follow_ups_go_where_the_thread_is_shown() {
+        let on_a = Route::Thread("a".into());
+        assert_eq!(shown_in("a", &on_a, false, true), Some(Scope::Main));
+        // Its own window wins over the main window showing it too.
+        assert_eq!(shown_in("a", &on_a, true, true), Some(Scope::Thread("a".into())));
+        assert_eq!(shown_in("b", &on_a, true, true), Some(Scope::Thread("b".into())));
+        assert_eq!(shown_in("b", &on_a, false, true), None);
+        // A closed main window shows nothing, whatever its route says.
+        assert_eq!(shown_in("a", &on_a, false, false), None);
+        assert_eq!(shown_in("a", &on_a, true, false), Some(Scope::Thread("a".into())));
+    }
+
+    #[test]
+    fn closing_a_thread_window_forgets_only_that_window() {
+        let mut windows = HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert!(forget_window(&mut windows, "a", 1));
+        assert!(!windows.contains_key("a"));
+        // A window released after the thread got a newer one leaves the newer one registered.
+        windows.insert("b".into(), 3);
+        assert!(!forget_window(&mut windows, "b", 2));
+        assert_eq!(windows.get("b"), Some(&3));
+        assert!(!forget_window(&mut windows, "c", 9));
+    }
+
+    #[test]
+    fn subscription_cost_is_an_estimate_in_the_tooltip() {
+        let max = Billing::Plan(Some("Claude Max".into()));
+        assert_eq!(cost_note(Some(&max), 10.468), (None, Some("≈$10.47 at API prices — included in your Claude Max plan".into())));
+        assert_eq!(cost_note(Some(&max), 0.0), (None, Some("Included in your Claude Max plan".into())));
+        assert_eq!(cost_note(Some(&Billing::Plan(None)), 2.0).1.as_deref(), Some("≈$2.00 at API prices — included in your subscription"));
+        assert_eq!(cost_note(Some(&Billing::Metered), 0.42), (Some("$0.42 this thread".into()), Some("Billed per token by your API provider".into())));
+        assert_eq!(cost_note(Some(&Billing::Metered), 0.001).0, None);
+        assert_eq!(cost_note(Some(&Billing::Local), 0.0).0, None);
+        assert_eq!(cost_note(None, 1.0), (None, Some("≈$1.00 at API prices".into())));
+        assert_eq!(cost_note(None, 0.0), (None, None));
+    }
+
+    #[test]
+    fn cost_command_answers_per_billing() {
+        let plus = Billing::Plan(Some("ChatGPT Plus".into()));
+        assert_eq!(cost_reply(false, Some(&plus), 0.0), "This session is included in your ChatGPT Plus plan.");
+        assert!(cost_reply(true, Some(&Billing::Plan(Some("Claude Max".into()))), 3.5).starts_with("About $3.50 at API prices so far. It's included in your Claude Max plan"));
+        assert_eq!(cost_reply(true, Some(&Billing::Metered), 1.25), "This session has cost $1.25 so far.");
+        assert_eq!(cost_reply(true, Some(&Billing::Local), 0.0), "This session runs on a local model, so nothing is billed.");
+    }
+
+    #[test]
+    fn viewing_follows_the_frontmost_window() {
+        let (main, thread_win, other) = (Some(1), Some(2), Some(3));
+        // Trek in the background: on screen anywhere counts.
+        assert!(viewing(true, None, main, None));
+        assert!(viewing(false, thread_win, main, None));
+        assert!(!viewing(false, None, main, None));
+        // Trek in front: only the frontmost window counts.
+        assert!(viewing(true, None, main, main));
+        assert!(!viewing(true, None, main, thread_win));
+        assert!(viewing(false, thread_win, main, thread_win));
+        assert!(!viewing(false, thread_win, main, main));
+        assert!(!viewing(false, thread_win, main, other));
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::palette;
 use crate::time;
-use crate::workspace::{ItemRef, Route, Workspace};
+use crate::workspace::{ItemRef, Scope, Workspace};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -164,6 +164,8 @@ fn summarize(kinds: &[ToolKind]) -> String {
 
 pub struct ThreadView {
     workspace: Entity<Workspace>,
+    /// The main window's transcript follows its route; a thread window's shows one thread.
+    scope: Scope,
     scroller: Entity<MessageScrollerState>,
     current: Option<String>,
     revision: u64,
@@ -196,7 +198,7 @@ pub struct ThreadView {
 }
 
 impl ThreadView {
-    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(cx)),
@@ -207,6 +209,7 @@ impl ThreadView {
         ];
         let mut this = Self {
             workspace,
+            scope,
             scroller,
             current: None,
             revision: 0,
@@ -236,10 +239,7 @@ impl ThreadView {
     /// Bring row state in line with the workspace transcript without rebuilding everything.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let id = match &ws.route {
-            Route::Thread(id) => Some(id.clone()),
-            _ => None,
-        };
+        let id = ws.thread_id_in(&self.scope).map(str::to_string);
         let switched = id != self.current;
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let (revision, working) = live.map_or((0, false), |l| (l.revision, l.turn_started.is_some()));
@@ -344,7 +344,11 @@ impl ThreadView {
     }
 
     /// Scroll to the message `Workspace::reveal` asks for, once its thread is on screen and loaded.
+    /// Search results open in the main window; a thread window on the same thread keeps its place.
     fn reveal(&mut self, cx: &mut Context<Self>) {
+        if self.scope != Scope::Main {
+            return;
+        }
         let ws = self.workspace.read(cx);
         let Some(r) = ws.reveal.clone().filter(|r| r.seq > self.revealed) else { return };
         // Asked for another thread: the user has moved on before it loaded.
@@ -936,7 +940,7 @@ impl ThreadView {
             self.plan_md = Some((request_id.clone(), cx.new(|cx| TextViewState::markdown(&text, cx))));
         }
         let md = self.plan_md.as_ref().map(|(_, m)| m.clone());
-        let cwd = self.workspace.read(cx).current_cwd();
+        let cwd = self.workspace.read(cx).cwd_in(&self.scope);
         let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
         let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id, request_id);
         v_flex()
@@ -1102,7 +1106,7 @@ impl ThreadView {
             return v_flex().size_full().items_center().justify_center().child(Spinner::new()).into_any_element();
         }
         let a = &ws.settings.appearance;
-        let show = a.background_placement == trek_core::settings::BackgroundPlacement::NewThread && matches!(ws.route, Route::Draft { .. });
+        let show = a.background_placement == trek_core::settings::BackgroundPlacement::NewThread && ws.is_draft_in(&self.scope);
         let spec = if show { a.background.clone() } else { None };
         div().relative().size_full().child(crate::ui::hero_background(spec.as_deref(), a.background_dim, cx)).into_any_element()
     }
@@ -1117,7 +1121,7 @@ impl Render for ThreadView {
         }
         let view = cx.entity().downgrade();
         let text_size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
-        let cwd = self.workspace.read(cx).current_cwd();
+        let cwd = self.workspace.read(cx).cwd_in(&self.scope);
         let animate = self.animate(window, cx);
         let flash = self.flash;
         v_flex()

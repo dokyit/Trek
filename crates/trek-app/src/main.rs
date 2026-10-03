@@ -1,6 +1,7 @@
 //! Trek — every agent, one trail.
 
 mod assets;
+mod attachments;
 mod brand;
 mod command_palette;
 mod composer;
@@ -16,6 +17,7 @@ mod settings_view;
 mod sidebar;
 mod system;
 mod thread_view;
+mod thread_window;
 mod time;
 mod trail_path;
 mod tray;
@@ -45,7 +47,9 @@ actions!(
         HideApp,
         Minimize,
         ToggleRightPanel,
-        OpenPalette
+        OpenPalette,
+        OpenInNewWindow,
+        CloseWindow
     ]
 );
 
@@ -103,6 +107,8 @@ fn menus() -> Vec<Menu> {
         Menu {
             name: "Thread".into(),
             items: vec![
+                MenuItem::action("Open in New Window", OpenInNewWindow),
+                MenuItem::separator(),
                 MenuItem::action("Settle", SettleThread),
                 MenuItem::action("Toggle Plan Mode", TogglePlan),
                 MenuItem::action("Cycle Hand-holding", CycleHandHolding),
@@ -122,7 +128,7 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "Window".into(),
-            items: vec![MenuItem::action("Minimize", Minimize)],
+            items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Close Window", CloseWindow)],
             disabled: false,
         },
     ]
@@ -133,7 +139,14 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,trek=info".into()))
         .init();
 
-    gpui_kit::application().with_assets(assets::Assets).run(|cx| {
+    let app = gpui_kit::application().with_assets(assets::Assets);
+    // Clicking the Dock icon with every window closed brings the main window back.
+    app.on_reopen(|cx| {
+        if cx.has_global::<workspace::GlobalWorkspace>() {
+            root::show_main(workspace::workspace_global(cx), cx);
+        }
+    });
+    app.run(|cx| {
         gpui_kit::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
@@ -152,12 +165,26 @@ fn main() {
             KeyBinding::new("cmd-.", Interrupt, None),
             KeyBinding::new("cmd-j", ToggleRightPanel, None),
             KeyBinding::new("cmd-k", OpenPalette, None),
+            KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
+            // Only thread windows close with ⌘W; the main window stays put.
+            KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
         ]);
         cx.on_action(|_: &Quit, cx| {
             workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
             cx.quit();
         });
         cx.on_action(|_: &HideApp, cx| cx.hide());
+        // Windows handle these themselves; with none open, the menu and shortcuts reopen the main window.
+        cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
+        cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
+        cx.on_action(|_: &OpenSettings, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::General), cx)));
+        cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
+        cx.on_action(|_: &CheckForUpdates, cx| {
+            in_main(cx, |ws, cx| {
+                ws.check_for_updates(true, cx);
+                ws.navigate(workspace::Route::Settings(workspace::SettingsPage::Updates), cx)
+            })
+        });
         cx.set_menus(menus());
 
         let ws = workspace::init(cx);
@@ -170,17 +197,23 @@ fn main() {
         // relaunch after an update that happened while Trek was in the background, or screenshots and
         // automation while someone keeps working in another app.
         let background = std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1");
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-            window_min_size: Some(size(px(760.), px(520.))),
-            app_id: Some("dev.trek.Trek".into()),
-            focus: !background,
-            ..gpui_kit::component::TitleBar::window_options()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| root::TrekWindow::new(ws.clone(), window, cx)))
-            .expect("open window");
+        root::init(ws.clone(), cx);
+        root::open_main(ws.clone(), !background, cx).expect("open window");
+        // TREK_OPEN_THREAD_WINDOW=<thread id> also opens that thread in a window of its own, for
+        // design review of thread windows.
+        if let Ok(id) = std::env::var("TREK_OPEN_THREAD_WINDOW") {
+            thread_window::open_with_focus(ws, id.trim(), !background, cx);
+        }
         if !background {
             cx.activate(true);
         }
+    });
+}
+
+/// Act on the workspace, then bring the main window forward (reopening it if it was closed).
+fn in_main(cx: &mut App, f: impl FnOnce(&mut workspace::Workspace, &mut Context<workspace::Workspace>)) {
+    workspace::workspace_global(cx).update(cx, |ws, cx| {
+        f(ws, cx);
+        cx.emit(workspace::WorkspaceEvent::ActivateMain);
     });
 }

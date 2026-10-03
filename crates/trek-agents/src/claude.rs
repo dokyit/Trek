@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -243,6 +243,11 @@ pub async fn run(
                     let r = &v["response"];
                     let id = r["request_id"].as_str().unwrap_or_default();
                     if id == init_id {
+                        if let Some(b) = account_billing(&r["response"]["account"]) {
+                            if events.send(AgentEvent::Billing(b)).await.is_err() {
+                                return Ok(());
+                            }
+                        }
                         // Ask for context usage up front so the UI has data before the first prompt.
                         let c = ctl.request("get_context_usage", json!({}));
                         context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
@@ -327,6 +332,27 @@ fn permission_mode(v: &Value) -> Option<&str> {
     (v["type"] == "system" && matches!(v["subtype"].as_str(), Some("init" | "status"))).then(|| v["permissionMode"].as_str()).flatten()
 }
 
+/// How the login is billed, from the `account` in the `initialize` response; `None` when it
+/// doesn't say. Claude Code names the subscription only while its login is the one in use, so a
+/// subscription wins over a key that's merely present. Without one, a key is what pays.
+fn account_billing(account: &Value) -> Option<Billing> {
+    if let Some(plan) = account["subscriptionType"].as_str().filter(|s| !s.is_empty()) {
+        let name = if plan.starts_with("Claude") { plan.to_string() } else { format!("Claude {}", crate::status::capitalize(plan)) };
+        return Some(Billing::Plan(Some(name)));
+    }
+    // Bedrock, Vertex, Foundry and gateways bill the cloud account per token.
+    if account["apiProvider"].as_str().is_some_and(|p| p != "firstParty") || account["apiKeySource"].is_string() {
+        return Some(Billing::Metered);
+    }
+    match account["tokenSource"].as_str()? {
+        // A bearer token for a proxy or gateway (ANTHROPIC_AUTH_TOKEN), or a key from a helper script.
+        "ANTHROPIC_AUTH_TOKEN" | "apiKeyHelper" => Some(Billing::Metered),
+        // `claude setup-token` and hosted sessions: a subscription login whose plan isn't named.
+        "CLAUDE_CODE_OAUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR" | "CCR_OAUTH_TOKEN_FILE" => Some(Billing::Plan(None)),
+        _ => None,
+    }
+}
+
 /// `Context` from a `get_context_usage` control response (`{subtype, request_id, response}`).
 fn context_event(r: &Value) -> Option<AgentEvent> {
     if r["subtype"] != "success" {
@@ -357,10 +383,12 @@ impl Drop for TempFile {
 fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mut bool) -> Vec<AgentEvent> {
     let mut out = Vec::new();
     match v["type"].as_str() {
-        Some("system") if v["subtype"] == "init" => out.push(AgentEvent::Started {
-            native_id: v["session_id"].as_str().unwrap_or_default().to_string(),
-            model: v["model"].as_str().map(String::from),
-        }),
+        Some("system") if v["subtype"] == "init" => {
+            out.push(AgentEvent::Started {
+                native_id: v["session_id"].as_str().unwrap_or_default().to_string(),
+                model: v["model"].as_str().map(String::from),
+            });
+        }
         Some("system") if v["subtype"] == "task_started" && v["task_type"] == "local_agent" => out.push(AgentEvent::Task {
             id: v["tool_use_id"].as_str().unwrap_or_default().to_string(),
             description: v["description"].as_str().map(String::from),
@@ -511,6 +539,40 @@ mod tests {
             translate(&result, &mut pending, &mut streamed),
             vec![AgentEvent::TurnComplete { cost_usd: Some(0.12), error: None }]
         );
+    }
+
+    #[test]
+    fn billing_from_account_and_init() {
+        let max = json!({"email":"me@example.com","subscriptionType":"Claude Max","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&max), Some(Billing::Plan(Some("Claude Max".into()))));
+        assert_eq!(account_billing(&json!({"subscriptionType":"pro"})), Some(Billing::Plan(Some("Claude Pro".into()))));
+        // A key in the environment doesn't matter while a subscription is signed in.
+        let both = json!({"subscriptionType":"Claude Max","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&both), Some(Billing::Plan(Some("Claude Max".into()))));
+        assert_eq!(account_billing(&json!({"tokenSource":"none","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"apiProvider":"bedrock"})), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"apiProvider":"firstParty"})), None);
+        assert_eq!(account_billing(&Value::Null), None);
+
+
+        // A proxy or gateway token (LiteLLM, OpenRouter): the init message says apiKeySource "none",
+        // but this is per-token usage, not a subscription.
+        let gateway = json!({"tokenSource":"ANTHROPIC_AUTH_TOKEN","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&gateway), Some(Billing::Metered));
+        assert_eq!(account_billing(&json!({"tokenSource":"apiKeyHelper","apiKeySource":"apiKeyHelper","apiProvider":"firstParty"})), Some(Billing::Metered));
+        // A long-lived subscription token from `claude setup-token`, unless a key is the one in use.
+        let oauth = json!({"tokenSource":"CLAUDE_CODE_OAUTH_TOKEN","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&oauth), Some(Billing::Plan(None)));
+        let oauth_and_key = json!({"tokenSource":"CLAUDE_CODE_OAUTH_TOKEN","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"});
+        assert_eq!(account_billing(&oauth_and_key), Some(Billing::Metered));
+        // No login at all, or one that isn't in use: unknown.
+        assert_eq!(account_billing(&json!({"tokenSource":"none","apiProvider":"firstParty"})), None);
+        assert_eq!(account_billing(&json!({"tokenSource":"claude.ai","apiProvider":"firstParty"})), None);
+
+        // The init message alone never claims a subscription: "none" is also what a gateway token reports.
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let init = json!({"type":"system","subtype":"init","session_id":"s","model":"m","apiKeySource":"none"});
+        assert_eq!(translate(&init, &mut pending, &mut streamed).len(), 1);
     }
 
     #[test]

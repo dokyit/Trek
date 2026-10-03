@@ -371,6 +371,15 @@ impl Sidebar {
             let copy = |label: &'static str, text: String| PopupMenuItem::new(label).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())));
             let mut menu = menu
                 .min_w(px(210.))
+                .item(PopupMenuItem::new("Open in new window").icon(crate::assets::Lucide::SquareArrowOutUpRight).on_click({
+                    let (ws, tid) = (ws.clone(), tid.clone());
+                    move |_, _, cx| {
+                        if let Some(ws) = ws.upgrade() {
+                            crate::thread_window::open(ws, &tid, cx);
+                        }
+                    }
+                }))
+                .separator()
                 .item(item(if pinned { "Unpin thread" } else { "Pin thread" }, |ws, id, cx| ws.toggle_pin(id, cx)))
                 .item(if settled { item("Move to inbox", |ws, id, cx| ws.unsettle(id, cx)) } else { item("Settle thread", |ws, id, cx| ws.settle(id, cx)) });
             menu = menu.submenu("Snooze", window, cx, {

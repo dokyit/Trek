@@ -7,7 +7,7 @@ use crate::panels::RightPanel;
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
-use crate::workspace::{Route, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
+use crate::workspace::{Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, StyledExt as _, TitleBar, WindowExt as _, h_flex, v_flex};
@@ -40,8 +40,10 @@ const MIN_CHAT: f32 = 440.;
 impl TrekWindow {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), window, cx));
-        let composer = cx.new(|cx| Composer::new(workspace.clone(), window, cx));
-        let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), window, cx));
+        let composer = cx.new(|cx| Composer::new(workspace.clone(), Scope::Main, window, cx));
+        let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), Scope::Main, window, cx));
+        let handle = window.window_handle();
+        workspace.update(cx, |ws, _| ws.main_window = Some(handle));
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -57,9 +59,10 @@ impl TrekWindow {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
                 cx.notify();
             }),
+            // Toasts, alerts and bringing this window forward are handled app-wide (`init`), so
+            // they keep working while this window is closed.
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
-                WorkspaceEvent::Toast { message, undo } => this.toast(message.clone(), undo.clone(), window, cx),
-                WorkspaceEvent::Attention { message, viewing } => this.attention(message.clone(), *viewing, window, cx),
+                WorkspaceEvent::Toast { .. } | WorkspaceEvent::Attention { .. } | WorkspaceEvent::ActivateMain => {}
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 WorkspaceEvent::OpenTool(tool) => {
                     let tool = *tool;
@@ -74,6 +77,13 @@ impl TrekWindow {
                     let path = path.clone();
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
                 }
+                WorkspaceEvent::RestoreQueued { thread, text, images } => {
+                    // A thread window showing the thread takes them instead.
+                    if this.workspace.read(cx).shown_in(thread) == Some(Scope::Main) {
+                        this.composer.update(cx, |c, cx| c.restore(text, images, window, cx));
+                    }
+                }
+                WorkspaceEvent::OpenPalette => this.palette.update(cx, |p, cx| p.open(window, cx)),
             }),
             cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
             cx.observe_window_appearance(window, |this, window, cx| {
@@ -115,39 +125,6 @@ impl TrekWindow {
     /// (clicking the transcript leaves the composer focused).
     fn focus_anchor(&self) -> Div {
         div().absolute().size_0().track_focus(&self.focus)
-    }
-
-    /// A thread needs the user or finished: toast, banner and sound per the notification settings.
-    fn attention(&mut self, message: String, viewing: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = self.workspace.read(cx).settings.notifications.clone();
-        let alert = crate::system::alert_for(&settings, window.is_window_active(), viewing);
-        if alert.sound {
-            crate::system::play_alert_sound();
-        }
-        let note = Notification::new().message(message);
-        let note = match (alert.toast, alert.banner) {
-            (true, true) => note.in_app_and_system(),
-            (false, true) => note.system(),
-            (true, false) => note,
-            (false, false) => return,
-        };
-        window.push_notification(note, cx);
-    }
-
-    fn toast(&mut self, message: String, undo: Option<UndoAction>, window: &mut Window, cx: &mut Context<Self>) {
-        let mut note = Notification::new().message(message);
-        if let Some(action) = undo {
-            let ws = self.workspace.downgrade();
-            note = note.action(move |_, _, _| {
-                let ws = ws.clone();
-                let action = action.clone();
-                gpui_kit::component::button::Button::new("undo").label("Undo").small().on_click(move |_, _, cx| {
-                    let _ = ws.update(cx, |ws, cx| ws.undo(action.clone(), cx));
-                })
-            })
-            .autohide(true);
-        }
-        window.push_notification(note, cx);
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -213,6 +190,12 @@ impl TrekWindow {
                 )
                 .when(folder.is_some(), |el| el.child(run_button(actions, project_id, self.workspace.clone())))
                 .when_some(folder, |el, dir| el.child(open_in_button(dir)))
+                .when(thread.is_some(), |el| {
+                    el.child(
+                        crate::ui::icon_button("pop-out", crate::assets::Lucide::SquareArrowOutUpRight, "Open in new window (⌘⇧↩)")
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenInNewWindow), cx)),
+                    )
+                })
                 .child(
                     crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)")
                         .on_click(cx.listener(|this, _, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx)))),
@@ -225,6 +208,113 @@ impl TrekWindow {
                 }),
         )
     }
+}
+
+/// Open the main window: at launch, and again when something needs it after it was closed.
+/// `focus: false` leaves keyboard focus where it is (a launch in the background).
+pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        window_min_size: Some(size(px(760.), px(520.))),
+        app_id: Some("dev.trek.Trek".into()),
+        focus,
+        ..TitleBar::window_options()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| TrekWindow::new(workspace, window, cx)))?;
+    Ok(())
+}
+
+/// Bring the main window forward, reopening it if it was closed.
+pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
+    let main = workspace.read(cx).main_window;
+    if main.is_some_and(|m| m.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+        return;
+    }
+    if let Err(e) = open_main(workspace, true, cx) {
+        tracing::warn!("main window: {e:#}");
+    }
+}
+
+/// Workspace events that belong to no single window: toasts and alerts go to whichever Trek
+/// window is in front (else the main one, else any), and "show the main window" reopens it.
+/// Handled here rather than by the main window so they keep working after it's closed.
+pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
+    cx.subscribe(&workspace, |ws, event: &WorkspaceEvent, cx| match event {
+        WorkspaceEvent::Toast { message, undo } => toast(&ws, message.clone(), undo.clone(), cx),
+        WorkspaceEvent::Attention { message, thread } => attention(&ws, message.clone(), thread, cx),
+        WorkspaceEvent::ActivateMain => show_main(ws, cx),
+        _ => {}
+    })
+    .detach();
+    let ws = workspace.downgrade();
+    cx.on_window_closed(move |cx, id| {
+        let _ = ws.update(cx, |ws, cx| {
+            if let Some(main) = ws.main_window.filter(|m| m.window_id() == id) {
+                ws.main_window_closed(main, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// The Trek window with keyboard focus; `None` when another app is in front.
+fn key_window(cx: &mut App) -> Option<AnyWindowHandle> {
+    cx.windows().into_iter().find(|w| w.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false))
+}
+
+/// Where an in-app notification goes: the window in front, else the main window, else any.
+fn notice_window(workspace: &Entity<Workspace>, front: Option<AnyWindowHandle>, cx: &App) -> Option<AnyWindowHandle> {
+    front.or(workspace.read(cx).main_window).or_else(|| cx.windows().into_iter().next())
+}
+
+/// A thread needs the user or finished: toast, banner and sound per the notification settings.
+/// Decided once for all windows, so a sound or banner never doubles up.
+fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &mut App) {
+    let front = key_window(cx);
+    let ws = workspace.read(cx);
+    let alert = crate::system::alert_for(&ws.settings.notifications, front.is_some(), ws.viewing(thread, front));
+    if alert.sound {
+        crate::system::play_alert_sound();
+    }
+    match notice_window(workspace, front, cx) {
+        Some(target) => {
+            let note = Notification::new().message(message);
+            let note = match (alert.toast, alert.banner) {
+                (true, true) => note.in_app_and_system(),
+                (true, false) => note,
+                (false, true) => note.system(),
+                (false, false) => return,
+            };
+            let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
+        }
+        // No window to show a toast in: the banner can still go out.
+        None if alert.banner => cx.show_system_notification(SystemNotification {
+            tag: format!("trek-attention-{thread}").into(),
+            title: message.into(),
+            body: SharedString::default(),
+            actions: Vec::new(),
+        }),
+        None => {}
+    }
+}
+
+fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction>, cx: &mut App) {
+    let front = key_window(cx);
+    let Some(target) = notice_window(workspace, front, cx) else { return };
+    let mut note = Notification::new().message(message);
+    if let Some(action) = undo {
+        let ws = workspace.downgrade();
+        note = note
+            .action(move |_, _, _| {
+                let ws = ws.clone();
+                let action = action.clone();
+                gpui_kit::component::button::Button::new("undo").label("Undo").small().on_click(move |_, _, cx| {
+                    let _ = ws.update(cx, |ws, cx| ws.undo(action.clone(), cx));
+                })
+            })
+            .autohide(true);
+    }
+    let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
 }
 
 /// "Run" menu: the project's actions, each opening in a terminal tab.
@@ -253,7 +343,7 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, project_id: Opti
 }
 
 /// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
-fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
+pub(crate) fn open_in_button(dir: std::path::PathBuf) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     let apps: Vec<(&'static str, &'static str)> = [
         ("Finder", "Finder"),
@@ -403,18 +493,11 @@ impl Render for TrekWindow {
                     }
                 })
             }))
-            .on_action(cx.listener(|this, _: &CycleHandHolding, _, cx| {
-                this.workspace.update(cx, |ws, cx| {
-                    let mut p = ws.prefs();
-                    let all = trek_core::HandHolding::ALL;
-                    let i = all.iter().position(|h| *h == p.hand_holding).unwrap_or(0);
-                    let mut next = all[(i + 1) % all.len()];
-                    if next == trek_core::HandHolding::FullAccess && !ws.settings.permissions.full_access_unlocked {
-                        next = all[0];
-                    }
-                    p.hand_holding = next;
-                    ws.set_prefs(p, cx);
-                })
+            .on_action(cx.listener(|this, _: &CycleHandHolding, _, cx| this.workspace.update(cx, |ws, cx| ws.cycle_hand_holding(&Scope::Main, cx))))
+            .on_action(cx.listener(|this, _: &OpenInNewWindow, _, cx| {
+                if let Route::Thread(id) = this.workspace.read(cx).route.clone() {
+                    crate::thread_window::open(this.workspace.clone(), &id, cx);
+                }
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))

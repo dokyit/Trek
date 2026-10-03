@@ -29,16 +29,20 @@ credentials:
 finished work settles on its own (after a few idle days, or when you settle it), and threads can be pinned,
 snoozed, renamed and searched. Search is full text: the sidebar and the ⌘K palette find a thread by its
 title or by anything said in it (imported history included), and a message match opens the thread at that
-message. ⌘K also runs any command: new thread, settings pages, tools, theme, hand-holding. Projects get
-their own icon, defaults for new threads and title-bar actions. Trek imports your existing Claude Code,
-Codex and OpenCode history (read-only) and resumes those threads, titled by what you asked and with each
-message's time. Sessions that aren't your conversations (sub-agents, other apps' title generators, one-shot
-and temp-folder runs) are left out; Settings › Import lists them and brings back any it misjudged.
+message. ⌘K also runs any command: new thread, settings pages, tools, theme, hand-holding. Any thread can
+also open in a window of its own (⌘⇧↩ or the thread menu) with its own composer, while the main window
+carries on. Projects get their own icon, defaults for new threads and title-bar actions. Trek imports your
+existing Claude Code, Codex and OpenCode history (read-only) and resumes those threads, titled by what you
+asked and with each message's time. Sessions that aren't your conversations (sub-agents, other apps' title
+generators, one-shot and temp-folder runs) are left out; Settings › Import lists them and brings back any it
+misjudged.
 
 **A composer that knows the agent.** Model and effort per agent, four hand-holding levels (Supervised ·
 Auto-accept edits · Auto · Full access, the last one unlocked once in Settings), Plan mode on ⇧Tab,
 follow-ups that steer the running turn or wait in a queue, `@` for files, `/` for commands, `$` for skills,
-images, and app snapshots (⌘⇧S) attached straight to the message.
+images (pasted with ⌘V, dropped or picked), and app snapshots (⌘⇧S) attached straight to the message.
+Cost is shown as money only when you pay per token (an API key); on a subscription such as Claude Max the
+API-price estimate stays in a tooltip, since the plan already covers it.
 
 **Tools next to the thread** (⌘J): a real terminal, an embedded browser with element picking, screenshots
 and devtools, a live iOS Simulator mirror with touch and typing, a file explorer, source control (diff,
@@ -106,8 +110,8 @@ ad-hoc signature changes on every build, so you'd be asked again each time.
 
 Handy environment variables: `TREK_DATA_DIR=/some/folder` runs Trek against another data folder (your real
 one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens without taking focus,
-`TREK_OPEN_SETTINGS=updates` and `TREK_OPEN_TOOL=browser` open a settings page or tool at launch, and
-`TREK_ONBOARDING=1` replays onboarding.
+`TREK_OPEN_SETTINGS=updates`, `TREK_OPEN_TOOL=browser` and `TREK_OPEN_THREAD_WINDOW=<thread id>` open a
+settings page, a tool or a thread window at launch, and `TREK_ONBOARDING=1` replays onboarding.
 
 ## Releases
 
