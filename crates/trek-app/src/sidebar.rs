@@ -248,12 +248,16 @@ impl Sidebar {
         let ws = self.workspace.read(cx);
         match t.run_state {
             RunState::Working => {
-                let elapsed = ws.live.get(&t.id).and_then(|l| l.turn_started).map(|s| time::elapsed(s.elapsed())).unwrap_or_default();
+                let started = ws.live.get(&t.id).and_then(|l| l.turn_started);
+                let elapsed = started.map(|s| time::elapsed(s.elapsed())).unwrap_or_default();
+                // The loader turns an eighth with each tick of the card's clock: alive, but calm
+                // (a spinning one would redraw the whole sidebar every frame).
+                let turn = started.filter(|_| self.active && ws.motion(cx)).map_or(0, |s| s.elapsed().as_secs() % 8) as f32;
                 h_flex()
                     .gap_1()
                     .text_xs()
                     .text_color(palette::sky(cx))
-                    .child(Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(palette::sky(cx)))
+                    .child(Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(palette::sky(cx)).rotate(gpui_kit::radians(turn * std::f32::consts::FRAC_PI_4)))
                     .child(format!("Working {elapsed}"))
                     .into_any_element()
             }
@@ -328,11 +332,15 @@ impl Sidebar {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
                             .text_size(px(14.))
-                            .when(quiet, |el| el.text_color(theme.foreground.opacity(0.62)))
                             .when(t.is_unseen() && !selected, |el| el.font_medium())
-                            .child(t.title.clone()),
+                            .child(ui::title_text(
+                                SharedString::from(format!("card-title-{}", t.id)),
+                                &t.title,
+                                self.workspace.read(cx).title_reveal(&t.id),
+                                if quiet { theme.foreground.opacity(0.62) } else { theme.foreground },
+                                cx,
+                            )),
                     )
                     .child(ui::agent_glyph(&t.agent, cx)),
             )
@@ -349,14 +357,13 @@ impl Sidebar {
         let title = h_flex()
             .h(px(30.))
             .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(if selected { theme.foreground } else { theme.foreground.opacity(0.78) })
-                    .child(t.title.clone()),
-            )
+            .child(div().flex_1().min_w_0().child(ui::title_text(
+                SharedString::from(format!("line-title-{}", t.id)),
+                &t.title,
+                self.workspace.read(cx).title_reveal(&t.id),
+                if selected { theme.foreground } else { theme.foreground.opacity(0.78) },
+                cx,
+            )))
             .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(time::relative(t.updated_at)));
         let row = v_flex()
             .id(SharedString::from(format!("line-{}", t.id)))
@@ -829,10 +836,14 @@ fn live_order(inbox: Vec<Thread>, working: Vec<Thread>) -> Vec<Thread> {
 }
 
 impl Render for Sidebar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Sidebar");
         let ws = self.workspace.read(cx);
+        // A title animating in draws a frame at a time, for the moment it takes.
+        if ws.retitled.keys().any(|id| ws.title_reveal(id).is_some()) {
+            window.request_animation_frame();
+        }
         let selected = match &ws.route {
             Route::Thread(id) => Some(id.clone()),
             _ => None,

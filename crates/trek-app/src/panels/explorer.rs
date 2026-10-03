@@ -117,7 +117,11 @@ impl Render for ExplorerPanel {
                 } else {
                     div().w(px(12.)).into_any_element()
                 })
-                .child(Icon::new(if is_dir { if open { IconName::FolderOpen } else { IconName::Folder } } else { IconName::File }).small().text_color(theme.muted_foreground))
+                .child(if is_dir {
+                    Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).small().text_color(theme.muted_foreground).into_any_element()
+                } else {
+                    crate::file_icon::badge(&name, px(14.), cx)
+                })
                 .child(div().truncate().child(name))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if is_dir {

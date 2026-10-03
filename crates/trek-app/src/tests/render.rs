@@ -193,7 +193,41 @@ fn working_bar_frames_rerender_only_the_bar() {
         assert!(renders("Sidebar", &f) * 10. <= 1., "{:?}", f.renders);
         let f = frames(cx, 3 * crate::mascot::FPS as usize, period);
         assert!((2. ..=4.).contains(&(renders("Sidebar", &f) * 3. * crate::mascot::FPS as f32)), "{:?}", f.renders);
-        assert!(trek.working_bar(cx).is_some_and(|l| l.contains('…')));
+        assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Mock Swift working for ")), "{:?}", trek.working_bar(cx));
+        // The build shimmers in the bar's live group, on the bar's own frames.
+        assert!(trek.visible(cx, "live-group"));
+    });
+}
+
+#[test]
+fn bar_frames_leave_the_settled_rows_alone() {
+    run(async |cx| {
+        let (trek, id) = busy_window(cx, 10).await;
+        // Calls done before the one running now: they settle into a cached view of their own.
+        let mut events = vec![trek_agents::AgentEvent::ToolFinished { id: "tool-1".into(), output: "ok".into(), ok: true }];
+        for n in 2..=4 {
+            events.push(trek_agents::AgentEvent::ToolStarted { id: format!("tool-{n}"), title: "Read".into(), detail: format!("src/{n}.rs") });
+            events.push(trek_agents::AgentEvent::ToolFinished { id: format!("tool-{n}"), output: "ok".into(), ok: true });
+        }
+        events.push(trek_agents::AgentEvent::ToolStarted { id: "tool-5".into(), title: "Run command".into(), detail: "cargo build".into() });
+        trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+        trek.window(cx, |window, cx| {
+            window.activate_window();
+            window.blur(cx);
+        });
+        let period = Duration::from_secs(1) / crate::mascot::FPS as u32;
+        // Past the new rows' slide.
+        std::thread::sleep(Duration::from_millis(200));
+        frames(cx, 4, period);
+        let f = frames(cx, 10, period);
+        let renders = |name: &str| f.renders.iter().find(|(n, _)| *n == name).map_or(0., |(_, r)| *r);
+        assert!(renders("WorkingBar") >= 0.9, "the bar animates: {:?}", f.renders);
+        assert_eq!(renders("SettledRows"), 0., "the settled rows were laid out again: {:?}", f.renders);
+        assert_eq!(renders("ThreadView"), 0., "{:?}", f.renders);
+        assert_eq!(trek.live_group(cx).map(|g| g.len()), Some(6), "{:?}", trek.live_group(cx));
+        let read = trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "tool-3"));
+        let row = trek.read(cx, |ws, _| ws.live[&id].items.id_at(read).map(str::to_string)).expect("row");
+        assert!(trek.visible(cx, format!("live-row-{row}")), "the cached rows are on screen");
     });
 }
 

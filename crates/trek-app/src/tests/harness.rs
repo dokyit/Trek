@@ -304,6 +304,16 @@ impl Trek {
         cx.read(|cx| self.root.read(cx).working_bar.read(cx).label())
     }
 
+    /// The working bar's live group (see `WorkingBar::live_group`), `None` when there's none.
+    pub fn live_group(&self, cx: &TestAppContext) -> Option<Vec<String>> {
+        cx.read(|cx| self.root.read(cx).working_bar.read(cx).live_group())
+    }
+
+    /// The summary of the group folding away in the working bar, if one is.
+    pub fn folding(&self, cx: &TestAppContext) -> Option<String> {
+        cx.read(|cx| self.root.read(cx).working_bar.read(cx).folding())
+    }
+
     pub fn composer_text(&self, cx: &TestAppContext) -> String {
         cx.read(|cx| self.root.read(cx).composer.read(cx).text(cx))
     }

@@ -183,6 +183,23 @@ fn change_paths(item: &Value) -> Vec<String> {
     item["changes"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).map(String::from).collect()
 }
 
+/// Lines a `fileChange` added and removed: a new file's content counts as added, a deleted
+/// file's as removed, an update's unified diff line by line.
+fn change_lines(item: &Value) -> (u32, u32) {
+    item["changes"].as_array().into_iter().flatten().fold((0, 0), |(a, r), c| {
+        let diff = c["diff"].as_str().unwrap_or_default();
+        let n = diff.lines().count() as u32;
+        match c["kind"]["type"].as_str() {
+            Some("add") => (a + n, r),
+            Some("delete") => (a, r + n),
+            _ => {
+                let (a2, r2) = diff_stat(diff);
+                (a + a2 as u32, r + r2 as u32)
+            }
+        }
+    })
+}
+
 /// A message's text, to name it ("an image" when it's only images).
 fn input_text(input: &Value) -> String {
     let text: Vec<&str> = input.as_array().into_iter().flatten().filter_map(|i| i["text"].as_str()).collect();
@@ -850,7 +867,13 @@ impl Session {
                 let output = item["aggregatedOutput"].as_str().map(|o| clip(o, 8000)).unwrap_or_else(declined);
                 AgentEvent::ToolFinished { id, output, ok: status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0 }
             }
-            Some("fileChange") => AgentEvent::ToolFinished { id, output: declined(), ok: status == "completed" },
+            Some("fileChange") => {
+                let (added, removed) = change_lines(item);
+                if status == "completed" && added + removed > 0 {
+                    out.events.push(AgentEvent::ToolLines { id: id.clone(), added, removed });
+                }
+                AgentEvent::ToolFinished { id, output: declined(), ok: status == "completed" }
+            }
             Some("mcpToolCall" | "dynamicToolCall") => {
                 AgentEvent::ToolFinished { id, output: tool_output(item), ok: status != "failed" && item["success"] != false }
             }
@@ -1505,6 +1528,17 @@ mod tests {
     }
 
     #[test]
+    fn file_changes_count_their_lines() {
+        let item = json!({"changes":[
+            {"path":"/p/new.md","kind":{"type":"add"},"diff":"# New\n\nhi\n"},
+            {"path":"/p/a.rs","kind":{"type":"update","move_path":null},"diff":"@@ -1,2 +1,2 @@\n-old\n+new\n same\n"},
+            {"path":"/p/gone.txt","kind":{"type":"delete"},"diff":"x\ny\n"}
+        ]});
+        assert_eq!(change_lines(&item), (4, 3));
+        assert_eq!(change_lines(&json!({})), (0, 0));
+    }
+
+    #[test]
     fn file_change_approval_names_the_files() {
         let lines = fixture(include_str!("../fixtures/codex-file-change.jsonl"));
         let mut s = session("01a0fe61-b5ad-7aa2-ade8-be4ef1741959", false);
@@ -1518,6 +1552,8 @@ mod tests {
         assert_eq!(ok.send, vec![json!({"id":0,"result":{"decision":"accept"}})]);
         let out = feed(&mut s, &lines[3..]);
         assert!(out.events.contains(&AgentEvent::ToolFinished { id: "exec-0fe3013c-9d31-44b2-936e-e82ea3758de3".into(), output: String::new(), ok: true }));
+        // A new one-line file.
+        assert!(out.events.contains(&AgentEvent::ToolLines { id: "exec-0fe3013c-9d31-44b2-936e-e82ea3758de3".into(), added: 1, removed: 0 }));
         assert!(out.events.contains(&AgentEvent::DiffStat { additions: 1, deletions: 0 }));
 
         // Above Supervised, Codex's sandbox decides; Trek doesn't ask again.

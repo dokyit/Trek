@@ -16,6 +16,7 @@ pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
 pub use status::{AgentStatus, CommandKind, SlashCommand, UsageLimit, claude_status, codex_status};
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use trek_core::{AgentId, Effort, HandHolding};
 
@@ -130,6 +131,9 @@ pub enum AgentEvent {
     ReasoningDelta(String),
     ToolStarted { id: String, title: String, detail: String },
     ToolFinished { id: String, output: String, ok: bool },
+    /// Lines a tool call that changed a file added and removed (sent once known; a later report
+    /// for the same call replaces it).
+    ToolLines { id: String, added: u32, removed: u32 },
     /// The agent needs the user: a yes/no approval, or (`prompt`) a question or a plan to review.
     PermissionRequest { request_id: String, title: String, detail: String, prompt: Option<Prompt> },
     /// The agent settled a request on its own (it timed out, or the turn moved on): its card goes.
@@ -354,6 +358,29 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// Lines added and removed going from `old` to `new`. Lines both share at the start and the end
+/// are skipped; in between, a line counts as kept when the other side has it too (the lines of a
+/// typical edit are distinct, so this matches a line diff without running one).
+pub fn line_changes(old: &str, new: &str) -> (u32, u32) {
+    let old: Vec<&str> = old.lines().collect();
+    let new: Vec<&str> = new.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+    let (old, new) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
+    let mut left: HashMap<&str, usize> = HashMap::new();
+    for l in old {
+        *left.entry(l).or_default() += 1;
+    }
+    let mut kept = 0;
+    for l in new {
+        if let Some(n) = left.get_mut(l).filter(|n| **n > 0) {
+            *n -= 1;
+            kept += 1;
+        }
+    }
+    ((new.len() - kept) as u32, (old.len() - kept) as u32)
+}
+
 /// Read a local image as `(media_type, base64 data)`.
 pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str, String)> {
     use base64::Engine as _;
@@ -384,6 +411,18 @@ mod tests {
     fn diff_stat_ignores_headers() {
         let d = "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more\n";
         assert_eq!(diff_stat(d), (2, 1));
+    }
+
+    #[test]
+    fn line_changes_count_what_an_edit_did() {
+        assert_eq!(line_changes("a\nb\nc\n", "a\nB\nc\n"), (1, 1));
+        assert_eq!(line_changes("", "one\ntwo\n"), (2, 0), "a new file");
+        assert_eq!(line_changes("fn a() {\n}\n", "fn a() {\n    x();\n    y();\n}\n"), (2, 0));
+        assert_eq!(line_changes("x\ny\nz", ""), (0, 3));
+        // Moved lines aren't changes; repeated ones are counted as often as they're added.
+        assert_eq!(line_changes("1\n2\n3", "3\n1\n2"), (0, 0));
+        assert_eq!(line_changes("}\n", "}\n}\n}\n"), (2, 0));
+        assert_eq!(line_changes("same", "same"), (0, 0));
     }
 
     #[test]

@@ -1,10 +1,12 @@
 //! Trek — every agent, one trail.
 
+mod activity;
 mod assets;
 mod attachments;
 mod brand;
 mod command_palette;
 mod composer;
+mod file_icon;
 mod integrations;
 mod mascot;
 mod md;

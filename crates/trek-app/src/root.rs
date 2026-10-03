@@ -185,7 +185,7 @@ impl WindowTitle {
 }
 
 impl Render for WindowTitle {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("WindowTitle");
         let ws = self.workspace.read(cx);
@@ -204,6 +204,13 @@ impl Render for WindowTitle {
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
         let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
+        let reveal = match (&ws.route, &thread) {
+            (Route::Thread(_), Some(t)) => ws.title_reveal(&t.id).map(|(p, old)| (p, old.to_string())),
+            _ => None,
+        };
+        if reveal.is_some() {
+            window.request_animation_frame();
+        }
         // The project's icon and its actions (Settings → Project).
         // A thread knows its project (a worktree's folder isn't the project's).
         let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
@@ -250,7 +257,13 @@ impl Render for WindowTitle {
                                 .child(div().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })
-                        .child(div().min_w_0().truncate().font_medium().child(title))
+                        .child(div().min_w_0().font_medium().child(crate::ui::title_text(
+                            "window-title",
+                            &title,
+                            reveal.as_ref().map(|(p, old)| (*p, old.as_str())),
+                            theme.foreground,
+                            cx,
+                        )))
                         .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
                 .when_some(run_dir, |el, dir| el.child(run_button(actions, dir, project_id, self.workspace.clone())))

@@ -151,7 +151,7 @@ impl MarkdownPlugin for PathChips {
             .text_size(size)
             .font_family(theme.mono_font_family.clone())
             .text_color(theme.foreground.opacity(0.9))
-            .child(Icon::new(if dir { IconName::Folder } else { IconName::File }).size(size).text_color(theme.muted_foreground))
+            .child(if dir { Icon::new(IconName::Folder).size(size).text_color(theme.muted_foreground).into_any_element() } else { crate::file_icon::badge(trimmed, size, cx) })
             .child(label)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
             .when_some(resolved, |el, path| {

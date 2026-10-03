@@ -183,9 +183,9 @@ fn the_working_bar_follows_the_thread_on_screen() {
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.visible(cx, "working-bar"));
-        // The (cached) transcript redrew for the new rows without any refresh.
-        let group = trek.item_ix(cx, &id, |i| matches!(i, Item::Reasoning { .. }));
-        assert!(trek.visible(cx, ("tool-group", group)), "{:?}", trek.rows(cx));
+        // The build shows live in the bar, not (yet) in the transcript.
+        assert!(trek.visible(cx, "live-group"));
+        assert_eq!(trek.rows(cx), ["user"]);
         trek.press(cx, "cmd-n");
         assert_eq!(trek.working_bar(cx), None, "a draft has no working bar");
         let other = trek.send(cx, "meanwhile, explain");
@@ -217,12 +217,15 @@ fn thread_windows_have_their_own_working_bar() {
         trek.update(cx, |ws, cx| ws.new_thread(cx));
         assert!(!trek.visible(cx, "working-bar"));
         assert!(trek.visible_in(cx, own, "working-bar"));
-        // Its transcript is cached too, and still draws what streams in.
+        // Its bar shows the live group too; the transcript has it once it's over.
+        assert!(trek.visible_in(cx, own, "live-group"));
         let group = trek.item_ix(cx, &id, |i| matches!(i, Item::Reasoning { .. }));
-        assert!(trek.visible_in(cx, own, ("tool-group", group)));
+        assert!(!trek.visible_in(cx, own, ("tool-group", group)));
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(!trek.visible_in(cx, own, "working-bar"));
+        // Its transcript is cached too, and still draws what changed.
+        assert!(trek.visible_in(cx, own, ("tool-group", group)));
         let notice = trek.item_ix(cx, &id, |i| matches!(i, Item::Notice { text } if text == "Interrupted"));
         assert_eq!(notice, trek.items(cx, &id).len() - 1);
     });

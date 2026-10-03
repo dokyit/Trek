@@ -1,53 +1,9 @@
-//! While an agent works: a trail word that changes every few seconds ("Switchbacking…") and a
-//! little hiker walking back and forth along a dotted trail above the composer.
+//! While an agent works: a little hiker walking back and forth along a dotted trail above the
+//! composer, beside who's working and for how long (`working_bar`).
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use std::time::Duration;
-
-const WORDS: &[&str] = &[
-    "Trailblazing",
-    "Switchbacking",
-    "Summiting",
-    "Scrambling",
-    "Bushwhacking",
-    "Route-finding",
-    "Stacking cairns",
-    "Reading the map",
-    "Checking the compass",
-    "Fording the creek",
-    "Gaining elevation",
-    "Traversing",
-    "Acclimatizing",
-    "Scouting ahead",
-    "Marking the trail",
-    "Crossing the ridge",
-    "Breaking trail",
-    "Boulder-hopping",
-    "Topping out",
-    "Following the cairns",
-    "Charting a course",
-    "Wayfinding",
-    "Lighting the beacon",
-    "Refilling canteens",
-    "Taking the scenic route",
-    "Contouring",
-    "Peak-bagging",
-    "Setting up base camp",
-    "Lacing boots",
-    "Checking the forecast",
-    "Glissading",
-    "Hiking it out",
-];
-
-/// The word for a turn that has run `secs` seconds; `seed` keeps threads from moving in lockstep.
-pub fn word(seed: &str, secs: u64) -> &'static str {
-    let h = seed.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-    let step = secs / 4;
-    // A cheap scramble so consecutive steps don't walk the list in order.
-    let i = (h.wrapping_add(step.wrapping_mul(0x9E3779B97F4A7C15)) >> 29) as usize % WORDS.len();
-    WORDS[i]
-}
 
 /// The hiker's walk: one lap there and back in `LAP`.
 const LAP: Duration = Duration::from_secs(16);
@@ -137,31 +93,6 @@ pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
     div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full()).into_any_element()
 }
 
-/// The trail word with a soft highlight sweeping across it (a shimmer, at [`FPS`]).
-pub fn word_label(word: &str, clock: f32, still: bool, cx: &App) -> AnyElement {
-    let text = format!("{word}…");
-    let base = cx.theme().foreground.opacity(0.9);
-    if still {
-        return div().text_color(base).child(text).into_any_element();
-    }
-    let hi = crate::palette::ember(cx);
-    // The highlight is three characters wide and crosses the word (plus a pause) every ~2 s.
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let n = chars.len() as f32;
-    let head = ((clock * 9.) % (n + 10.)) - 2.;
-    let mut highlights = vec![];
-    for (i, (start, ch)) in chars.iter().enumerate() {
-        let d = (i as f32 - head).abs();
-        if d < 2.5 {
-            let k = 1. - d / 2.5;
-            // Keep ember's hue and fade its saturation in: blending hues would pass through green.
-            let color = Hsla { h: hi.h, s: hi.s * k, l: base.l + (hi.l - base.l) * k, a: base.a + (1. - base.a) * k };
-            highlights.push((*start..*start + ch.len_utf8(), HighlightStyle { color: Some(color), ..Default::default() }));
-        }
-    }
-    div().text_color(base).child(StyledText::new(text).with_highlights(highlights)).into_any_element()
-}
-
 fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
     let w = b.size.width.as_f32();
     let ground = (b.origin.y.as_f32() + HEIGHT - 2.).round();
@@ -197,13 +128,6 @@ fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, win
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn words_change_over_time() {
-        let a: std::collections::HashSet<_> = (0..60).map(|s| super::word("thread", s)).collect();
-        assert!(a.len() >= 5);
-        assert_eq!(super::word("x", 1), super::word("x", 3), "stable within a step");
-    }
-
     #[test]
     fn sprite_rows_are_even() {
         for row in super::TOP.iter().chain(super::LEGS.iter().flatten()) {

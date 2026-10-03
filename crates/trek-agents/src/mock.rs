@@ -467,6 +467,15 @@ impl Session {
         self.emit(AgentEvent::ToolFinished { id, output: output.into(), ok: true }).await
     }
 
+    /// An edit that adds `added` lines and removes `removed`.
+    async fn edit(&mut self, path: &str, output: &str, ms: u64, (added, removed): (u32, u32)) -> Step {
+        let id = self.id("tool");
+        self.tool_start(&id, "Edit", path).await?;
+        self.emit(AgentEvent::ToolLines { id: id.clone(), added, removed }).await?;
+        self.pause(paced(ms)).await?;
+        self.emit(AgentEvent::ToolFinished { id, output: output.into(), ok: true }).await
+    }
+
     async fn tools(&mut self) -> Step {
         self.think("I should look around before changing anything.").await?;
         self.tool("Run command", "ls -la", LS_OUTPUT, 250).await?;
@@ -474,8 +483,8 @@ impl Session {
         self.tool("Search", "parse_args", "src/main.rs:3:    let cfg = parse_args();\nsrc/cli.rs:12:pub fn parse_args() -> Config {", 150).await?;
         self.acknowledge_steer().await?;
         self.say("The flag parsing lives in `src/cli.rs`; I'll add the `--verbose` flag there and wire it through `src/main.rs`.").await?;
-        self.tool("Edit", "src/cli.rs", "Applied 1 edit to src/cli.rs", 220).await?;
-        self.tool("Edit", "src/main.rs", "Applied 2 edits to src/main.rs", 200).await?;
+        self.edit("src/cli.rs", "Applied 1 edit to src/cli.rs", 220, (9, 1)).await?;
+        self.edit("src/main.rs", "Applied 2 edits to src/main.rs", 200, (5, 2)).await?;
         self.emit(AgentEvent::DiffStat { additions: 14, deletions: 3 }).await?;
         self.tool("Run command", "cargo test", TEST_OUTPUT, 600).await?;
         self.say("Added a `--verbose` flag:\n\n- `src/cli.rs` parses it into `Config::verbose`\n- `src/main.rs` raises the log level when it's set\n\nAll 14 tests pass.").await
@@ -494,8 +503,11 @@ impl Session {
             Ok(()) => (format!("Wrote note {n} to NOTES.md"), true),
             Err(e) => (format!("Couldn't write NOTES.md: {e}"), false),
         };
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         let added = (text.lines().count() - before.lines().count()) as i64;
+        if ok {
+            self.emit(AgentEvent::ToolLines { id: id.clone(), added: added as u32, removed: 0 }).await?;
+        }
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         self.emit(AgentEvent::DiffStat { additions: added, deletions: 0 }).await?;
         self.say(&format!("Added note {n} to `NOTES.md`.")).await
     }
@@ -605,8 +617,8 @@ impl Session {
             Reply::Decision(Decision::Deny) => self.say("Okay — I'll keep refining the plan. What should change?").await,
             _ => {
                 self.plan = false;
-                self.tool("Edit", "src/auth.rs", "Applied 1 edit to src/auth.rs", 250).await?;
-                self.tool("Edit", "src/routes.rs", "Applied 2 edits to src/routes.rs", 250).await?;
+                self.edit("src/auth.rs", "Applied 1 edit to src/auth.rs", 250, (24, 2)).await?;
+                self.edit("src/routes.rs", "Applied 2 edits to src/routes.rs", 250, (7, 4)).await?;
                 self.emit(AgentEvent::DiffStat { additions: 31, deletions: 6 }).await?;
                 self.tool("Run command", "cargo test", TEST_OUTPUT, 500).await?;
                 self.say("Implemented the plan: every route now goes through `require_session`, and the tests pass.").await
@@ -677,9 +689,12 @@ impl Session {
             match EXPLORE[i % EXPLORE.len()] {
                 Explore::Think(text) => self.think(text).await?,
                 Explore::Say(text) => self.say(text).await?,
-                Explore::Tool(title, detail) => {
+                Explore::Tool(title, detail) | Explore::Edit(title, detail, ..) => {
                     let id = self.id("tool");
                     self.tool_start(&id, title, detail).await?;
+                    if let Explore::Edit(.., added, removed) = EXPLORE[i % EXPLORE.len()] {
+                        self.emit(AgentEvent::ToolLines { id: id.clone(), added, removed }).await?;
+                    }
                     self.pause(step).await?;
                     self.emit(AgentEvent::ToolFinished { id, output: format!("{title} {detail}: done"), ok: true }).await?;
                     self.pause(step / 4).await?;
@@ -699,6 +714,8 @@ enum Explore {
     Say(&'static str),
     /// A tool call: its title and detail, as agents report them.
     Tool(&'static str, &'static str),
+    /// A call that changes a file, with the lines it adds and removes.
+    Edit(&'static str, &'static str, u32, u32),
 }
 
 const EXPLORE: &[Explore] = &[
@@ -714,16 +731,16 @@ const EXPLORE: &[Explore] = &[
     Explore::Tool("Fetch", "https://developer.mozilla.org/en-US/docs/Web/CSS/mask-image"),
     Explore::Tool("Search the web", "css mask-image gradient text reveal"),
     Explore::Think("**Planning the change**\n\nA mask that sweeps left to right, keyed on the title so it only plays when it changes."),
-    Explore::Tool("Edit", "src/features/sessions/ui/AgentTitle.tsx"),
-    Explore::Tool("Edit", "src/shared/ui/ParticleText.tsx"),
-    Explore::Tool("Write", "src/shared/ui/reveal.css"),
+    Explore::Edit("Edit", "src/features/sessions/ui/AgentTitle.tsx", 18, 4),
+    Explore::Edit("Edit", "src/shared/ui/ParticleText.tsx", 42, 0),
+    Explore::Edit("Write", "src/shared/ui/reveal.css", 27, 0),
     Explore::Tool("Run command", "npm run typecheck"),
     Explore::Tool("Run command", "npx vitest run src/features/sessions"),
     Explore::Say("The reveal is in. Checking the native side next."),
     Explore::Tool("Read", "src-tauri/src/main.rs"),
     Explore::Tool("Run command", "rg -n \"set_title\" src-tauri/src"),
     Explore::Tool("Read", "README.md"),
-    Explore::Tool("Edit", "src-tauri/src/window.rs"),
+    Explore::Edit("Edit", "src-tauri/src/window.rs", 6, 2),
     Explore::Tool("Run command", "cargo test --manifest-path src-tauri/Cargo.toml"),
     Explore::Say("Native titles follow the same rule now."),
 ];
@@ -1092,6 +1109,10 @@ mod tests {
             // Messages between the groups, and the last word at the end.
             assert!(text(&events).contains("Titles come from"));
             assert!(text(&events).ends_with("the tests pass."));
+            // Edits say how many lines they changed.
+            if tools.len() > 13 {
+                assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolLines { added: 18, removed: 4, .. })));
+            }
         });
     }
 
