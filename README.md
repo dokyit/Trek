@@ -46,6 +46,13 @@ images (pasted with ⌘V, dropped or picked), and app snapshots (⌘⇧S) attach
 Cost is shown as money only when you pay per token (an API key); on a subscription such as Claude Max the
 API-price estimate stays in a tooltip, since the plan already covers it.
 
+**Agents that consult each other.** Any agent in Trek can hand work to another agent and model you have
+(`delegate_task`, through Trek's own MCP server): Codex reviewing Claude's plan, Opus checking a fix. Each
+sub-agent is a thread of its own in the same folder, read-only when it advises; it shows inline with its
+logo, live status and answer, and on its parent's card, and its answer comes back to the agent that asked.
+The composer's **Consult** control (or `/consult sol high, opus max: …`) picks the models to ask and how:
+advise, or discuss until they agree; then implement, or just report. Stop ends the sub-agents too.
+
 **Tools next to the thread** (⌘J): a real terminal, an embedded browser with element picking, screenshots
 and devtools, a live iOS Simulator mirror with touch and typing, a file explorer, source control (diff,
 commit, push) and a side chat. Agents get Trek's own MCP server (`trek-mcp`) for computer use and the iOS
@@ -128,7 +135,8 @@ stays untouched, and nothing reaches a real agent), with the **mock agent** stan
 
 The mock agent (`crates/trek-agents/src/mock.rs`) is a scripted agent with no process or network. Each
 prompt plays a script picked by a keyword: none (a streamed markdown answer), `tools`, `subagents 5s`,
-`permission`, `question`, `plan`, `mock:long 30s`, `mock:stream 30s` or `error`. `TREK_MOCK_AGENT=1` offers it
+`permission`, `question`, `plan`, `mock:long 30s`, `mock:stream 30s`, `error`, or `mock:consult` /
+`mock:delegate` followed by a prompt for a mock sub-agent (waiting for its answer, or woken by it). `TREK_MOCK_AGENT=1` offers it
 as "Mock agent" in the pickers, and `TREK_MOCK_PROMPT="mock:long 60s"` (with the mock on) starts a mock
 thread at launch.
 
@@ -156,7 +164,8 @@ crates/trek-agents   live sessions: Claude Code (stream-json), Codex (app-server
                      direct API / local models, the scripted mock agent; usage limits and auto titles
 crates/trek-app      the GPUI app (gpui-kit 0.7): workspace state, sidebar, thread view, composer, settings,
                      onboarding, tools panel, menu bar, notifications; headless UI tests
-crates/trek-mcp      MCP server agents use for computer use and the iOS Simulator
+crates/trek-mcp      MCP server agents use for computer use, the iOS Simulator and sub-agents
+crates/trek-ipc      the local socket protocol between Trek and its trek-mcp servers
 vendor/gpui-base     gpui-base 0.7 with Trek's small markdown patch (semibold emphasis, calmer headings)
 assets/              brand art, backgrounds, the update signing public key
 script/              bundle, release, signing identity, updater end-to-end test

@@ -114,6 +114,26 @@ pub fn preview(text: &str, max: usize) -> String {
     format!("{}…", flat[..end].trim_end())
 }
 
+/// `preview`, without the markdown marks a person would see as noise in one line: headings,
+/// list bullets, quotes, emphasis and code ticks.
+pub fn plain_preview(text: &str, max: usize) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("```"))
+        .map(|l| {
+            let l = l.trim_start().trim_start_matches('#').trim_start_matches('>').trim_start();
+            let l = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).unwrap_or(l);
+            let l = match l.split_once(". ") {
+                Some((n, rest)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => rest,
+                _ => l,
+            };
+            l.replace("**", "").replace("__", "").replace('`', "")
+        })
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    preview(&lines.join(" "), max)
+}
+
 /// How a sub-agent ended, for the agent that started it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -356,6 +376,7 @@ mod tests {
         assert!(cap(&unicode, 51, "").starts_with("éé"), "cuts on a character boundary");
         assert_eq!(preview("a\n\n  b   c", 100), "a b c");
         assert_eq!(preview("abcdef", 3), "abc…");
+        assert_eq!(plain_preview("## Findings\n\n- `sum2` is **vague**\n1. Rename it\n> ok\n```rust\n", 100), "Findings sum2 is vague Rename it ok");
     }
 
     #[test]

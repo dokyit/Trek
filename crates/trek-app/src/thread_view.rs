@@ -1180,7 +1180,7 @@ impl ThreadView {
                     None if has_result => Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted).into_any_element(),
                     None => div().into_any_element(),
                 };
-                let preview = (has_result && !open).then(|| orch::preview(&output, 240));
+                let preview = (has_result && !open).then(|| orch::plain_preview(&output, 240));
                 column(
                     v_flex()
                         .py(px(3.))

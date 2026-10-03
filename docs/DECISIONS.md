@@ -227,3 +227,39 @@ the results of what was typed.
   share it: both are warned when both run, deleting or archiving one leaves the worktree to the other, and
   removing it moves every thread in it to the project folder. A thread that leaves its worktree drops its
   checkpoints and the points its old session could be cut back to; earlier messages rewind without files.
+
+## 7. Sub-agents (consult and delegate)
+
+**Trek runs the sub-agents, not the agent.** An agent asks for one through Trek's orchestration tools
+(`trek-mcp orchestrate`: `list_models`, `delegate_task`, `task_status`, `task_result`, `cancel_task`), so it
+can reach any agent and model the user has in Trek, not just its own provider's. Each sub-agent is an
+ordinary thread with `parent_id` set: it runs in its parent's folder (worktree and all), stays out of the
+inbox (search finds it), and shows inline in its parent with its logo, live status and answer. It sees only
+the prompt it's given; for another round with the same model the agent delegates again with the findings
+so far (T3 Code's Orchestrator V2 does the same), which keeps every round's brief explicit.
+- **Advise** runs it Supervised and declines every request it makes before anyone sees it (a plan it
+  offers is kept as its advice); **implement** gives it its parent's access level, so it asks the user like
+  any thread. Trek's own tools are approved without asking: what a sub-agent does is approved in its own
+  thread.
+- Its answer is its last message in its last turn (capped). A caller still waiting (`wait`, up to 10 min by
+  default, 30 at most) gets it as the tool's result; otherwise Trek wakes the parent with a short "[Trek]
+  Sub-agent … finished" message once it's free (the transcript draws that as a note). A sub-agent stopped
+  on its parent's behalf wakes nobody.
+- Limits: two levels deep, four running per thread; an agent that has used up a usage limit takes no more.
+  Stop on the parent interrupts its sub-agents (and theirs) and ends any session that hasn't stopped five
+  seconds later; a sub-agent's session also ends with its task, so none idle on (150–250 MB each).
+
+**The channel is a Unix socket per Trek process** (`trek-ipc`), in `ipc/` in the data folder (or a private
+folder under /tmp when that path is too long for a socket address), the folder 0700 and the socket 0600.
+A connection must come from the same user (`getpeereid`), carry the process's random token and name a
+session key Trek issued for one agent session; the key is how Trek knows which thread is asking, so a
+session warmed up for a draft gets its thread when the draft is sent. Frames are JSON lines of at most
+1 MiB. Calls run side by side in trek-mcp (an agent that consults two models waits on both at once); a call
+the agent cancels drops its connection. Nothing that passes through is logged. A socket left by a process
+that crashed is swept by the next launch.
+
+**The consult control writes instructions, not plumbing.** Picking consultants in the composer (or
+`/consult`) adds a `<trek-consult>` block to the message telling the agent to call `delegate_task` for each
+of them and how to use what they say (advise or discuss, then implement or report). The block records the
+picks, so the transcript shows the message as written with a "Consulting …" line, and editing it brings
+the picks back. Any agent with MCP tools can follow it; nothing is agent-specific.

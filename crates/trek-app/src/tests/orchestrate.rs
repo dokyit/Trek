@@ -157,6 +157,13 @@ fn delegate_task_checks_what_it_is_asked() {
         assert!(ask(&trek, cx, json!({ "title": "x", "prompt": "y", "model": "mock-giant" })).unwrap_err().contains("mock-swift (Mock Swift)"));
         assert!(ask(&trek, cx, json!({ "title": "x", "prompt": "y", "mode": "yolo" })).unwrap_err().contains("advise"));
         assert!(ask(&trek, cx, json!({ "title": "x", "prompt": "y", "effort": "extreme" })).unwrap_err().contains("effort"));
+        // An agent at its usage limit takes no more.
+        trek.update(cx, |ws, _| {
+            let limit = trek_agents::UsageLimit { label: "5-hour limit".into(), percent: 100., resets_at: None, window: "5h".into() };
+            ws.agent_status.insert(mock().key(), trek_agents::AgentStatus { limits: vec![limit], ..Default::default() });
+        });
+        assert!(ask(&trek, cx, json!({ "title": "x", "prompt": "y" })).unwrap_err().contains("used up its 5-hour limit"));
+        trek.update(cx, |ws, _| _ = ws.agent_status.remove(&mock().key()));
         // Names work as well as ids; efforts are clamped to the model's.
         let child = ask(&trek, cx, json!({ "title": "x", "prompt": "explain", "model": "Mock Deep", "effort": "max", "mode": "implement" })).unwrap();
         let t = trek.read(cx, |ws, _| ws.thread(&child).cloned()).unwrap();
@@ -353,6 +360,7 @@ fn sub_agents_show_inline_and_on_their_parent_s_card() {
         // The agent's own call to delegate_task has no row: the sub-agent's stands for it.
         assert!(!trek.rows(cx).iter().any(|r| r.starts_with("group")), "{:?}", trek.rows(cx));
         assert!(trek.visible(cx, format!("card-kids-{id}")), "the parent's card shows who's at work");
+        assert!(trek.read(cx, |ws, _| ws.any_turn_running()), "the Mac stays awake while it works");
         // The sub-agent isn't in the inbox, but a search finds it.
         assert!(!trek.visible(cx, format!("card-{child}")));
         trek.update(cx, |ws, cx| ws.set_search("Second opinion".into(), cx));

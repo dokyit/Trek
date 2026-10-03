@@ -3233,7 +3233,9 @@ impl Workspace {
             threads.extend(self.threads.iter().filter(|t| t.side_of.as_deref() == Some(id)).cloned());
         }
         // Its sub-agents go too, theirs as well.
-        threads.extend(self.drop_children(id, cx));
+        let children = self.drop_children(id, cx);
+        let direct: Vec<String> = children.iter().filter(|c| c.parent_id.as_deref() == Some(id)).map(|c| c.id.clone()).collect();
+        threads.extend(children);
         let checkpoints = self.store.checkpoints(id).unwrap_or_default();
         let mut refs: HashSet<(String, PathBuf)> = HashSet::new();
         let mut guards = vec![];
@@ -3269,8 +3271,11 @@ impl Workspace {
             self.store.delete_thread(id)
         } else {
             let items: Vec<String> = checkpoints.into_iter().map(|c| c.item_id).collect();
-            self.store
-                .delete_checkpoints(id, &items)
+            // It stays (archived); its sub-agents, Trek's own, don't.
+            direct
+                .iter()
+                .try_for_each(|c| self.store.delete_thread(c))
+                .and_then(|_| self.store.delete_checkpoints(id, &items).map(|_| ()))
                 .and_then(|_| self.store.clear_items(id))
                 .and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
         };
