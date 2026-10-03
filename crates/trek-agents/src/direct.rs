@@ -37,9 +37,9 @@ pub async fn run(
     while let Ok(cmd) = commands.recv().await {
         match cmd {
             Command::Prompt { text, images } => {
-                let (message, errors) = user_message(provider.wire, &text, &images);
-                for e in errors {
-                    events.send(AgentEvent::Error(e)).await?;
+                let (message, skipped) = user_message(provider.wire, &text, &images);
+                for e in skipped {
+                    events.send(AgentEvent::Notice(format!("Image left out: {e}"))).await?;
                 }
                 history.push(message);
                 let result = match provider.wire {
@@ -62,7 +62,7 @@ pub async fn run(
                 effort = e;
             }
             Command::Answer { .. } => {}
-                    Command::Shutdown => break,
+            Command::Shutdown => break,
             Command::Interrupt | Command::Respond { .. } | Command::SetHandHolding(_) => {}
         }
     }

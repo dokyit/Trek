@@ -283,7 +283,7 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
-fn within(path: &Path, root: &Path) -> bool {
+pub(crate) fn within(path: &Path, root: &Path) -> bool {
     resolve(path).starts_with(resolve(root))
 }
 
@@ -297,19 +297,15 @@ fn auto_allow(h: HandHolding, kind: &str) -> bool {
     }
 }
 
-/// The `optionId` that best matches `decision`.
+/// The `optionId` that best matches `decision`. Only an option of the same sense will do: with
+/// none, the prompt is cancelled (which refuses it), so a "no" never picks an allow option.
 fn pick_option(options: &[Value], decision: Decision) -> Option<String> {
     let kinds: &[&str] = match decision {
         Decision::Allow => &["allow_once", "allow_always"],
         Decision::AllowForSession => &["allow_always", "allow_once"],
         Decision::Deny => &["reject_once", "reject_always"],
     };
-    kinds
-        .iter()
-        .find_map(|k| options.iter().find(|o| o["kind"] == *k))
-        .or_else(|| options.first())
-        .and_then(|o| o["optionId"].as_str())
-        .map(String::from)
+    kinds.iter().find_map(|k| options.iter().find(|o| o["kind"] == *k)).and_then(|o| o["optionId"].as_str()).map(String::from)
 }
 
 fn permission_outcome(option: Option<String>) -> Value {
@@ -785,7 +781,7 @@ pub async fn run(
         events.send(crate::lost_session(&agent.name)).await?;
     }
 
-    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompt: None, planning };
+    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompts: vec![], planning };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -805,12 +801,13 @@ pub async fn run(
                         for path in &images {
                             match crate::load_image(path) {
                                 Ok((mime, data)) => prompt.push(json!({ "type": "image", "mimeType": mime, "data": data })),
-                                Err(e) => { let _ = events.send(AgentEvent::Error(format!("{e:#}"))).await; }
+                                Err(e) => { let _ = events.send(AgentEvent::Notice(format!("Image left out: {e:#}"))).await; }
                             }
                         }
                         prompt.push(json!({ "type": "text", "text": text }));
                         let params = json!({ "sessionId": s.session_id, "prompt": prompt });
-                        s.prompt = Some(agent.rpc.request("session/prompt", params).await?);
+                        // Sent mid-turn, it's another prompt open at once: the turn ends with the last.
+                        s.prompts.push(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
                         agent.rpc.notify("session/cancel", json!({ "sessionId": s.session_id })).await?;
@@ -841,7 +838,7 @@ pub async fn run(
             }
             line = agent.lines.next_line() => {
                 let Some(line) = line? else {
-                    if s.prompt.is_some() {
+                    if !s.prompts.is_empty() {
                         bail!(agent.exited());
                     }
                     break;
@@ -877,7 +874,9 @@ struct Live {
     turn: Turn,
     /// Permission prompts awaiting the user: our request id → (JSON-RPC id, options).
     perms: HashMap<String, (Value, Vec<Value>)>,
-    prompt: Option<i64>,
+    /// `session/prompt` requests not answered yet. A message sent while a turn runs is a prompt
+    /// of its own; agents merge it into the turn, queue it, or turn it down.
+    prompts: Vec<i64>,
     /// In plan mode: edits are never approved on the user's behalf.
     planning: bool,
 }
@@ -899,14 +898,23 @@ impl Live {
             }
             (Some(_), None) => vec![],
             (None, _) => {
-                if v["id"].as_i64().is_some() && v["id"].as_i64() == self.prompt {
-                    self.prompt = None;
+                if let Some(i) = v["id"].as_i64().and_then(|id| self.prompts.iter().position(|p| *p == id)) {
+                    self.prompts.remove(i);
                     let stop = match v.get("error") {
                         Some(e) => Err(rpc_message(e)),
                         None => Ok(v["result"]["stopReason"].as_str().unwrap_or("end_turn")),
                     };
-                    self.perms.clear();
-                    self.turn.finish(stop)
+                    if self.prompts.is_empty() {
+                        self.perms.clear();
+                        self.turn.finish(stop)
+                    } else {
+                        // Others are still open: the turn goes on. A message the agent turned down
+                        // didn't reach it, so the user is told.
+                        match stop {
+                            Err(e) => vec![AgentEvent::Notice(format!("A message sent during the turn wasn't taken: {e}"))],
+                            Ok(_) => vec![],
+                        }
+                    }
                 } else {
                     if let Some(e) = v.get("error") {
                         tracing::debug!("acp request failed: {}", rpc_message(e));
@@ -998,6 +1006,8 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         return Ok(info);
     }
     let home = trek_core::paths::home();
+    // The session the probe opened, as soon as the agent says: it's deleted however the probe ends.
+    let mut opened: Option<String> = None;
     let probe = async {
         let mut agent = Agent::spawn(&agent_id, &home, &[])?;
         let fs = FsPolicy { cwd: home.clone(), full_access: false };
@@ -1005,8 +1015,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         let init = agent.handshake(&fs, &mut backlog).await?;
         let mut info = AcpInfo { auth_methods: auth_methods(&init), ..Default::default() };
         let params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
-        let mut opened = None;
-        match agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(20)).await? {
+        match agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(30)).await? {
             Ok(r) => {
                 info.models = controls(&r).models;
                 opened = r["sessionId"].as_str().map(String::from);
@@ -1019,12 +1028,15 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
             info.models = copilot_models().await;
         }
-        Ok((info, opened))
+        Ok(info)
     };
-    let (info, opened) = tokio::time::timeout(Duration::from_secs(20), probe).await.map_err(|_| anyhow!("{id} didn't respond in 20s"))??;
+    // Room for each step's own limit (initialize 30s, session/new 30s), so a slow cold start
+    // fails at a step rather than partway through one.
+    let probed = tokio::time::timeout(Duration::from_secs(90), probe).await;
     if let Some(session) = opened {
         discard_session(&agent_id, &session, &home).await;
     }
+    let info = probed.map_err(|_| anyhow!("{id} didn't respond in 90s"))??;
     ProbeCache::store(&cache, &agent_id, &bin, &info);
     Ok(info)
 }
@@ -1168,6 +1180,50 @@ mod tests {
     }
 
     #[test]
+    fn a_message_turned_down_mid_turn_leaves_the_turn_running() {
+        let dir = std::env::temp_dir().join(format!("trek-acp-steer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trek_core::paths::isolate(dir.join("data"));
+        let config = SessionConfig {
+            agent: AgentId::Acp(FAKE.into()),
+            cwd: dir.clone(),
+            model: None,
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+        };
+        let h = crate::start(config);
+        let seen = trek_core::runtime().block_on(async {
+            let mut seen = vec![];
+            // The second message is turned down at once, while the first is still running.
+            for text in ["hold", "refuse"] {
+                h.commands.send(Command::Prompt { text: text.into(), images: vec![] }).await.unwrap();
+            }
+            loop {
+                let ev = tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited");
+                let done = matches!(ev, AgentEvent::TurnComplete { .. });
+                seen.push(ev);
+                if done {
+                    break;
+                }
+            }
+            h.commands.send(Command::Shutdown).await.unwrap();
+            seen
+        });
+        let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
+        assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
+        assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { cost_usd: None, error: None }), "the turn ends with the first prompt, cleanly");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn maps_message_and_thought_chunks() {
         let mut t = Turn::default();
         let a = t.update(&(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"po"}})));
@@ -1241,6 +1297,15 @@ mod tests {
         assert_eq!(pick_option(&only_once, Decision::AllowForSession).as_deref(), Some("ok"));
         assert_eq!(pick_option(&only_once, Decision::Deny).as_deref(), Some("never"));
         assert_eq!(pick_option(&[], Decision::Allow), None);
+        // Refusing is left to `cancelled`: a "no" never becomes a yes, nor a yes a no.
+        let allow_only = vec![json!({"optionId":"yes","kind":"allow_once"}), json!({"optionId":"always","kind":"allow_always"})];
+        assert_eq!(pick_option(&allow_only, Decision::Deny), None);
+        let reject_only = vec![json!({"optionId":"no","kind":"reject_once"})];
+        assert_eq!(pick_option(&reject_only, Decision::Allow), None);
+        assert_eq!(pick_option(&reject_only, Decision::AllowForSession), None);
+        let t = Turn::default();
+        let ask = json!({"toolCall":{"toolCallId":"c1","kind":"edit","title":"Edit a.txt"},"options":reject_only});
+        assert!(matches!(t.permission(&ask, HandHolding::FullAccess, false), Ask::User { .. }), "nothing to allow it with: the user decides");
         assert_eq!(permission_outcome(None), json!({"outcome":{"outcome":"cancelled"}}));
     }
 
