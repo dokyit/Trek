@@ -97,8 +97,14 @@ fn looks_like_path(s: &str) -> bool {
     (has_sep && (has_ext || s.ends_with('/') || s.starts_with('/') || s.starts_with("~/") || s.starts_with("./"))) || (has_ext && !file.contains("..")) || dotfile
 }
 
+/// The path in a chip's text, without a `:line[:col]` after it.
+fn path_part(raw: &str) -> &str {
+    let raw = raw.trim();
+    raw.split(':').next().unwrap_or(raw)
+}
+
 fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
-    let raw = raw.trim().split(':').next().unwrap_or(raw);
+    let raw = path_part(raw);
     let p = if let Some(rest) = raw.strip_prefix("~/") {
         trek_core::paths::home().join(rest)
     } else if raw.starts_with('/') {
@@ -151,7 +157,7 @@ impl MarkdownPlugin for PathChips {
             .text_size(size)
             .font_family(theme.mono_font_family.clone())
             .text_color(theme.foreground.opacity(0.9))
-            .child(if dir { Icon::new(IconName::Folder).size(size).text_color(theme.muted_foreground).into_any_element() } else { crate::file_icon::badge(trimmed, size, cx) })
+            .child(if dir { Icon::new(IconName::Folder).size(size).text_color(theme.muted_foreground).into_any_element() } else { crate::file_icon::badge(path_part(trimmed), size, cx) })
             .child(label)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
             .when_some(resolved, |el, path| {
@@ -173,7 +179,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_path;
+    use super::{looks_like_path, path_part};
 
     #[test]
     fn spots_paths() {
@@ -183,5 +189,13 @@ mod tests {
         for p in ["turn/start", "cargo build", "foo()", "x = 1", "https://a.com/b.js", "v1.2", "--flag", "a..b"] {
             assert!(!looks_like_path(p), "{p}");
         }
+    }
+
+    #[test]
+    fn line_numbers_are_not_part_of_the_path() {
+        assert_eq!(path_part("/Users/me/app/src/main.rs:42"), "/Users/me/app/src/main.rs");
+        assert_eq!(path_part("src/lib.rs:7:3"), "src/lib.rs");
+        assert_eq!(path_part(" README.md "), "README.md");
+        assert_eq!(crate::file_icon::file_type(path_part("src/main.rs:42")), crate::file_icon::file_type("main.rs"));
     }
 }
