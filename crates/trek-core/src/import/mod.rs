@@ -273,6 +273,21 @@ pub fn load_transcript(source: ThreadSource, native_id: &str) -> anyhow::Result<
     }
 }
 
+/// Tokens a model used, as an agent's own history records them: when (unix ms), which model,
+/// how many.
+pub type UsageEntry = (i64, Option<String>, crate::types::TokenUsage);
+
+/// Token usage an imported thread's history records between `from` and `to` (unix ms). Reads
+/// the agent's files: run it off the main thread.
+pub fn load_usage(source: ThreadSource, native_id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
+    match source {
+        ThreadSource::ClaudeCode => claude::usage(native_id, from, to),
+        ThreadSource::Codex => codex::usage(native_id, from, to),
+        ThreadSource::OpenCode => opencode::usage(native_id, from, to),
+        _ => vec![],
+    }
+}
+
 /// Size in bytes of an imported thread's transcript file, when it lives in one.
 pub fn transcript_bytes(source: ThreadSource, native_id: &str) -> Option<u64> {
     let path = match source {

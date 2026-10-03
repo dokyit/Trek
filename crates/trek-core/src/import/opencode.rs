@@ -2,7 +2,8 @@
 
 use super::{Evidence, ImportedThread, Transcript, classify, clip, source_title, title_from, user_text};
 use crate::store::{Item, ToolStatus};
-use crate::types::{Effort, ThreadSource};
+use super::UsageEntry;
+use crate::types::{Effort, ThreadSource, TokenUsage};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -155,6 +156,43 @@ fn first_prompt(conn: &Connection, id: &str) -> Option<String> {
     parts.filter_map(Result::ok).filter_map(|d| serde_json::from_str::<Value>(&d).ok()).find_map(|p| {
         (p["type"] == "text" && p["synthetic"] != true).then(|| p["text"].as_str().map(String::from)).flatten().filter(|t| !t.trim().is_empty())
     })
+}
+
+/// Tokens session `id` used between `from` and `to` (unix ms), per assistant message: one per
+/// step of a turn (each round of tool calls is a message of its own), its sub-agents' sessions
+/// included (they aren't imported as threads of their own).
+pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
+    db().map(|c| usage_conn(&c, id, from, to)).unwrap_or_default()
+}
+
+fn usage_conn(conn: &Connection, id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
+    let sql = "SELECT data FROM message WHERE session_id = ?1 OR session_id IN (SELECT id FROM session WHERE parent_id = ?1) ORDER BY time_created, id";
+    let Ok(mut st) = conn.prepare(sql) else { return vec![] };
+    let Ok(rows) = st.query_map([id], |r| r.get::<_, String>(0)) else { return vec![] };
+    rows.filter_map(Result::ok)
+        .filter_map(|data| {
+            let m: Value = serde_json::from_str(&data).ok()?;
+            if m["role"] != "assistant" {
+                return None;
+            }
+            let at = m["time"]["completed"].as_i64().or(m["time"]["created"].as_i64()).filter(|at| (from..to).contains(at))?;
+            let t = &m["tokens"];
+            let n = |v: &Value| v.as_u64().unwrap_or(0);
+            // Reasoning is output the model wrote, billed as output.
+            let tokens = TokenUsage {
+                input: n(&t["input"]),
+                output: n(&t["output"]) + n(&t["reasoning"]),
+                cache_read: n(&t["cache"]["read"]),
+                cache_write: n(&t["cache"]["write"]),
+            };
+            // Named as the session's model is: `<provider>/<model>`.
+            let model = m["modelID"].as_str().filter(|id| !id.is_empty()).map(|id| match m["providerID"].as_str().filter(|p| !p.is_empty()) {
+                Some(provider) => format!("{provider}/{id}"),
+                None => id.to_string(),
+            });
+            (!tokens.is_empty()).then_some((at, model, tokens))
+        })
+        .collect()
 }
 
 pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
@@ -435,5 +473,34 @@ mod tests {
         assert_eq!(items[3], Item::TurnEnd { at: 9_400, took_secs: 8 });
         assert_eq!(items[4], Item::User { text: "now refresh".into(), images: vec![], at: Some(20_000), resume: None, aside: false });
         assert_eq!(items.len(), 6, "the stopped reply has no footer: {items:?}");
+    }
+
+    #[test]
+    fn usage_comes_from_assistant_messages() {
+        let conn = db();
+        session(&conn, "s", "/x", "t", None);
+        ask(&conn, "s", "m1", "hi", 1_000);
+        // As OpenCode stores it (a real message's fields).
+        let data = json!({ "role": "assistant", "modelID": "gpt-4.1", "providerID": "github-copilot", "time": { "created": 1_100, "completed": 2_000 },
+            "tokens": { "total": 12620, "input": 12618, "output": 2, "reasoning": 3, "cache": { "write": 0, "read": 40 } }, "finish": "stop" });
+        message(&conn, "s", "m2", data, &[json!({ "type": "text", "text": "hello" })]);
+        let got = usage_conn(&conn, "s", 0, 10_000);
+        assert_eq!(got, vec![(2_000, Some("github-copilot/gpt-4.1".into()), TokenUsage { input: 12618, output: 5, cache_read: 40, cache_write: 0 })]);
+        assert!(usage_conn(&conn, "s", 2_001, 10_000).is_empty());
+        // A turn with tools: a message per step (finish "tool-calls", then "stop"), and a
+        // sub-agent's session. Every step counts, not just the last.
+        ask(&conn, "s", "m3", "fix it", 3_000);
+        let step = |id: &str, at: i64, input: u64, finish: &str| {
+            json!({ "role": "assistant", "id": id, "modelID": "big-pickle", "time": { "created": at, "completed": at + 10 },
+                "tokens": { "input": input, "output": 20, "reasoning": 0, "cache": { "write": 0, "read": 0 } }, "finish": finish })
+        };
+        message(&conn, "s", "m4", step("m4", 3_100, 547_873, "tool-calls"), &[]);
+        message(&conn, "s", "m5", step("m5", 3_200, 841, "tool-calls"), &[]);
+        session(&conn, "kid", "/x", "Explore (@explore subagent)", Some("s"));
+        message(&conn, "kid", "k1", step("k1", 3_250, 100, "stop"), &[]);
+        message(&conn, "s", "m6", step("m6", 3_300, 365, "stop"), &[]);
+        let turn = usage_conn(&conn, "s", 3_000, i64::MAX);
+        assert_eq!(turn.len(), 4);
+        assert_eq!(turn.iter().map(|(_, _, t)| t.input).sum::<u64>(), 547_873 + 841 + 100 + 365);
     }
 }

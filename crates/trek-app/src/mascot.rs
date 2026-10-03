@@ -106,10 +106,25 @@ fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, win
     let travel = (w - sprite_w - 8.).max(0.);
     // Snap to the sprite's pixel grid so it never blurs mid-pixel.
     let left = ((b.origin.x.as_f32() + 4. + travel * pos) / PX).round() * PX;
-    let top = ground - 1. - SPRITE_H as f32 * PX;
+    sprite(left, ground - 1., PX, frame, right, window);
+}
+
+/// The hiker standing still with its feet on `ground` and its left edge at `left`, drawn with
+/// `cell`-point pixels (Basecamp marks "now" on its profile with it).
+pub fn stand(left: f32, ground: f32, cell: f32, window: &mut Window) {
+    sprite((left / cell).round() * cell, ground, cell, 1, true, window);
+}
+
+/// Width and height of the hiker drawn with `cell`-point pixels.
+pub fn size_at(cell: f32) -> (f32, f32) {
+    (SPRITE_W as f32 * cell, SPRITE_H as f32 * cell)
+}
+
+fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
+    let top = ground - SPRITE_H as f32 * cell_px;
     let cell = |x: f32, y: f32, rgb: u32, window: &mut Window| {
         let col = if right { x } else { SPRITE_W as f32 - 1. - x };
-        window.paint_quad(fill(Bounds::new(point(px(left + col * PX), px(top + y * PX)), size(px(PX), px(PX))), gpui_kit::rgb(rgb)));
+        window.paint_quad(fill(Bounds::new(point(px(left + col * cell_px), px(top + y * cell_px)), size(px(cell_px), px(cell_px))), gpui_kit::rgb(rgb)));
     };
     for (y, row) in TOP.iter().chain(LEGS[frame].iter()).enumerate() {
         for (x, ch) in row.chars().enumerate() {

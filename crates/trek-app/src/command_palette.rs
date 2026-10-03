@@ -34,6 +34,7 @@ enum Action {
     ProjectSettings(String),
     NewThread,
     OpenFolder,
+    Basecamp,
     Settings(SettingsPage),
     ToggleSidebar,
     ToggleTools,
@@ -459,6 +460,7 @@ impl CommandPalette {
         let c = Group::Commands;
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint("⌘N"), "create start chat compose");
         add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint("⌘O"), "project add repository");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week summary inbox review usage tokens stats");
         let thread = ws.current_thread().cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
             add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint("⌘E"), "done finish inbox archive");
@@ -524,6 +526,7 @@ impl CommandPalette {
             Action::NewThreadIn(path) => ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(path) }, cx)),
             Action::ProjectSettings(id) => ws.update(cx, |ws, cx| ws.open_project_settings(Some(id), cx)),
             Action::NewThread => ws.update(cx, |ws, cx| ws.new_thread(cx)),
+            Action::Basecamp => ws.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx)),
             Action::OpenFolder => ws.update(cx, |ws, cx| ws.open_folder(cx)),
             Action::Settings(SettingsPage::Project) => ws.update(cx, |ws, cx| ws.open_project_settings(None, cx)),
             Action::Settings(page) => ws.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx)),

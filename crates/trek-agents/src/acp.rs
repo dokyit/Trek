@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use trek_core::catalog::{ACP_AGENTS, ModelInfo};
-use trek_core::{AgentId, Effort, HandHolding, detect};
+use trek_core::{AgentId, Effort, HandHolding, TokenUsage, detect};
 
 /// What `acp_probe` learns about an installed ACP agent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -435,6 +435,9 @@ struct Turn {
     /// The session's running cost as last reported. Turns report it as is (see
     /// `AgentEvent::TurnComplete`); the app works out what each turn added.
     cost: Option<f64>,
+    /// Tokens the turn used, by model (`None`: the session's own): from the prompt responses'
+    /// `usage` (agents that report it), or the agent's own history where that says more.
+    tokens: Vec<(Option<String>, TokenUsage)>,
 }
 
 impl Turn {
@@ -551,6 +554,11 @@ impl Turn {
         self.tools.clear();
         let cost_usd = self.cost.filter(|c| *c > 0.0);
         let failed = stop.is_err();
+        for (model, tokens) in std::mem::take(&mut self.tokens) {
+            if !tokens.is_empty() {
+                out.push(AgentEvent::Usage { model, tokens });
+            }
+        }
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
@@ -566,6 +574,26 @@ impl Turn {
         out.push(AgentEvent::TurnComplete { cost_usd, error });
         out
     }
+}
+
+/// Count `used` toward `model`'s tokens in `tokens`.
+fn add_usage(tokens: &mut Vec<(Option<String>, TokenUsage)>, model: Option<String>, used: &TokenUsage) {
+    match tokens.iter_mut().find(|(m, _)| *m == model) {
+        Some((_, t)) => t.add(used),
+        None => tokens.push((model, *used)),
+    }
+}
+
+/// A prompt response's `usage` (ACP's session usage: totals for the turn). Input is fresh input;
+/// thought tokens are output, unless the agent already counted them there (then the parts add
+/// up to `totalTokens` without them).
+fn prompt_usage(u: &Value) -> Option<TokenUsage> {
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    let mut t = TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cachedReadTokens"), cache_write: n("cachedWriteTokens") };
+    if u["totalTokens"].as_u64() != Some(t.total()) {
+        t.output += n("thoughtTokens");
+    }
+    (!t.is_empty()).then_some(t)
 }
 
 /// How this agent switches models, if at all.
@@ -800,7 +828,7 @@ pub async fn run(
         events.send(crate::lost_session(&agent.name)).await?;
     }
 
-    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompts: vec![], planning };
+    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), turn_began: None };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -826,6 +854,7 @@ pub async fn run(
                         prompt.push(json!({ "type": "text", "text": text }));
                         let params = json!({ "sessionId": s.session_id, "prompt": prompt });
                         // Sent mid-turn, it's another prompt open at once: the turn ends with the last.
+                        s.turn_began.get_or_insert_with(trek_core::store::now_ms);
                         s.prompts.push(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
@@ -898,6 +927,9 @@ struct Live {
     prompts: Vec<i64>,
     /// In plan mode: edits are never approved on the user's behalf.
     planning: bool,
+    agent: AgentId,
+    /// When the running turn's first prompt went out (unix ms).
+    turn_began: Option<i64>,
 }
 
 impl Live {
@@ -923,8 +955,26 @@ impl Live {
                         Some(e) => Err(rpc_message(e)),
                         None => Ok(v["result"]["stopReason"].as_str().unwrap_or("end_turn")),
                     };
+                    // Each prompt answered reports its own; messages that joined the turn add theirs.
+                    if let Some(used) = prompt_usage(&v["result"]["usage"]) {
+                        add_usage(&mut self.turn.tokens, None, &used);
+                    }
                     if self.prompts.is_empty() {
                         self.perms.clear();
+                        if let Some(began) = self.turn_began.take()
+                            && self.agent == AgentId::OpenCode
+                        {
+                            // OpenCode's `usage` is the turn's last step (one model call) alone; its
+                            // own history has every step, sub-agents' included.
+                            let id = self.session_id.clone();
+                            let steps = tokio::task::spawn_blocking(move || trek_core::import::opencode::usage(&id, began, i64::MAX)).await.unwrap_or_default();
+                            if !steps.is_empty() {
+                                self.turn.tokens.clear();
+                                for (_, model, tokens) in steps {
+                                    add_usage(&mut self.turn.tokens, model, &tokens);
+                                }
+                            }
+                        }
                         self.turn.finish(stop)
                     } else {
                         // Others are still open: the turn goes on. A message the agent turned down
@@ -1603,6 +1653,20 @@ mod tests {
     fn auth_errors_are_recognised() {
         assert!(is_auth_error(&json!({"code":-32000,"message":"Authentication required"})));
         assert!(!is_auth_error(&json!({"code":-32603,"message":"Internal error"})));
+    }
+
+    #[test]
+    fn prompt_responses_report_the_turns_tokens() {
+        // As OpenCode answers `session/prompt`: its message's tokens, reasoning apart.
+        let u = json!({"totalTokens":12663,"inputTokens":12618,"outputTokens":2,"thoughtTokens":3,"cachedReadTokens":40,"cachedWriteTokens":0});
+        assert_eq!(prompt_usage(&u), Some(TokenUsage { input: 12618, output: 5, cache_read: 40, cache_write: 0 }));
+        // Thoughts already inside the output count: the parts add up without them.
+        let inside = json!({"totalTokens":120,"inputTokens":100,"outputTokens":20,"thoughtTokens":5});
+        assert_eq!(prompt_usage(&inside).map(|t| t.output), Some(20));
+        assert_eq!(prompt_usage(&Value::Null), None);
+        let mut t = Turn { tokens: vec![(None, prompt_usage(&u).unwrap())], ..Default::default() };
+        let ev = t.finish(Ok("end_turn"));
+        assert!(matches!(&ev[..], [AgentEvent::Usage { model: None, tokens }, AgentEvent::TurnComplete { .. }] if tokens.total() == 12663));
     }
 }
 

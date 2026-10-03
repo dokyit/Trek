@@ -25,6 +25,8 @@ pub enum Route {
     Draft { project: Option<PathBuf> },
     Thread(String),
     Settings(SettingsPage),
+    /// The recap of the day's (or week's) work, with what's ready for review.
+    Basecamp,
     Onboarding,
 }
 
@@ -165,6 +167,9 @@ pub struct LiveThread {
     /// The latest point the agent's session can be taken back to (`AgentEvent::Mark`); saved to
     /// the thread as turns end (`Thread::native_at`).
     pub mark: Option<String>,
+    /// The model the session said it runs (`AgentEvent::Started`), for token reports that name
+    /// none in a thread that names none either.
+    session_model: Option<String>,
     /// Messages with a file checkpoint (as the store has them).
     pub checkpointed: HashSet<String>,
     /// Messages whose checkpoint couldn't be taken, and why.
@@ -657,6 +662,8 @@ pub struct Workspace {
     pub(crate) pending_compose: Option<(String, String, Vec<PathBuf>)>,
     /// Offer Trek's scripted mock agent (`TREK_MOCK_AGENT=1`, and in tests).
     pub mock_agent: bool,
+    /// Where Basecamp goes back to (Esc): the screen it was opened from.
+    basecamp_back: Option<Route>,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
@@ -850,6 +857,7 @@ impl Workspace {
             thread_windows: HashMap::new(),
             pending_compose: None,
             mock_agent: trek_agents::mock::enabled(),
+            basecamp_back: None,
             applied_defaults,
             tasks: vec![],
             restart_countdown: None,
@@ -1280,6 +1288,11 @@ impl Workspace {
                 self.apply_project_defaults(&p.clone());
             }
         }
+        if route == Route::Basecamp && self.route != Route::Basecamp {
+            self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
+            // Plan limits for its "Left on" tiles (asked at most every 30 seconds).
+            self.refresh_usage(cx);
+        }
         self.route = route;
         self.refresh_git(cx);
         cx.emit(WorkspaceEvent::FocusComposer);
@@ -1521,6 +1534,43 @@ impl Workspace {
         }
         .or_else(|| self.workspace_projects().first().map(|p| p.path.clone()));
         self.navigate(Route::Draft { project }, cx);
+    }
+
+    /// Leave Basecamp for the screen it was opened from (a thread that's gone since: a new one).
+    pub fn leave_basecamp(&mut self, cx: &mut Context<Self>) {
+        match self.basecamp_back.take() {
+            Some(Route::Thread(id)) if self.thread(&id).is_none() => self.new_thread(cx),
+            Some(route) => self.navigate(route, cx),
+            None => self.new_thread(cx),
+        }
+    }
+
+    /// Threads waiting on the user and finished ones they haven't looked at, for Basecamp's
+    /// "Ready for review": what needs them first, then newest first.
+    pub fn ready_for_review(&self) -> Vec<&Thread> {
+        let now = now_ms();
+        let mut out: Vec<&Thread> = self
+            .threads
+            .iter()
+            .filter(|t| matches!(t.section(now), Some(Section::Inbox | Section::Pinned)) && t.run_state != RunState::Working && (t.needs_you() || t.is_unseen()))
+            .collect();
+        out.sort_by_key(|t| (!t.needs_you(), std::cmp::Reverse(t.updated_at)));
+        out
+    }
+
+    /// What a thread waiting on the user is waiting for, while its session holds the request.
+    pub fn pending_request(&self, id: &str) -> Option<&PendingPermission> {
+        self.live.get(id)?.permissions.first()
+    }
+
+    /// Mark what "Ready for review" lists read (Basecamp's "Mark all read"). What needs the
+    /// user stays.
+    pub fn mark_all_read(&mut self, cx: &mut Context<Self>) {
+        let now = now_ms();
+        let unread: Vec<String> = self.ready_for_review().into_iter().filter(|t| t.is_unseen()).map(|t| t.id.clone()).collect();
+        for id in unread {
+            self.mutate_thread(&id, cx, |t| t.last_seen_at = now.max(t.updated_at));
+        }
     }
 
     fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2235,6 +2285,11 @@ impl Workspace {
         // The agent stopped to ask the user something.
         let mut asked = false;
         let mut commands: Option<Vec<SlashCommand>> = None;
+        // Tokens the agent reported (by the model it named), kept once the batch is through.
+        let mut used: Vec<(Option<String>, trek_core::TokenUsage)> = vec![];
+        // A turn that failed (true) or was stopped: transcripts keep no turn end for it, but the
+        // time it ran counts in Basecamp.
+        let mut stopped: Option<(u32, bool)> = None;
         // Streamed text and tool calls change nothing but the transcript; mostly they only extend
         // the messages already streaming.
         let mut transcript_only = true;
@@ -2328,8 +2383,9 @@ impl Workspace {
                             run_state = Some(if live.turn_started.is_some() { RunState::Working } else { RunState::Idle });
                         }
                     }
-                    AgentEvent::Started { native_id, .. } => {
+                    AgentEvent::Started { native_id, model } => {
                         started = true;
+                        live.session_model = model.or(live.session_model.take());
                         if !native_id.is_empty() {
                             if current_native.as_ref() != Some(&native_id) {
                                 new_session = true;
@@ -2416,6 +2472,7 @@ impl Workspace {
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
+                    AgentEvent::Usage { model, tokens } => used.push((model, tokens)),
                     AgentEvent::Billing(b) => live.billing = Some(b),
                     AgentEvent::TurnComplete { cost_usd, error } => {
                         // Models that hide their reasoning leave empty "Thought" rows behind. Removing
@@ -2437,6 +2494,10 @@ impl Workspace {
                         live.close_turn(error.is_none());
                         if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
                             live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
+                        }
+                        if let Some(e) = &error {
+                            // Paused at a usage limit isn't failed, but its time on the trail counts.
+                            stopped = Some((took, e != "Interrupted" && live.limit.is_none()));
                         }
                         if let Some(h) = live.limit.take() {
                             // Paused, not failed: its limit row says why.
@@ -2481,7 +2542,8 @@ impl Workspace {
                         // The process ended mid-turn: the turn failed, and ends here like any other
                         // (saved, queued follow-ups handed back, an alert). Unless the error it
                         // reported says why, that it stopped is all there is to say.
-                        if live.turn_started.take().is_some() {
+                        if let Some(began) = live.turn_started.take() {
+                            stopped = Some((began.elapsed().as_secs() as u32, live.limit.is_none()));
                             live.close_turn(false);
                             live.streaming = None;
                             live.reasoning = None;
@@ -2500,6 +2562,25 @@ impl Workspace {
                 }
             }
             live.revision += 1;
+        }
+        if let Some((took, failed)) = stopped
+            && let Err(e) = self.store.record_stop(id, now_ms(), took, failed)
+        {
+            tracing::warn!("record stopped turn: {e:#}");
+        }
+        if !used.is_empty() {
+            let at = now_ms();
+            if let Some(t) = self.thread(id) {
+                // Unnamed, it's the thread's model (picked since the session started, maybe), or
+                // the one the session said it runs when the thread leaves it to the agent.
+                let fallback = t.model.clone().or_else(|| self.live.get(id).and_then(|l| l.session_model.clone()));
+                let agent = t.agent.clone();
+                for (model, tokens) in used {
+                    if let Err(e) = self.store.record_usage(id, at, &agent, model.or_else(|| fallback.clone()).as_deref(), &tokens) {
+                        tracing::warn!("record token usage: {e:#}");
+                    }
+                }
+            }
         }
         let mark = self.live.get(id).and_then(|l| l.mark.clone());
         if let (Some(c), Some(t)) = (commands, self.thread(id)) {
@@ -4589,9 +4670,13 @@ pub fn fmt_tokens(n: u64) -> String {
     match n {
         0..=999 => n.to_string(),
         1_000..=999_999 => format!("{:.0}K", n as f64 / 1_000.),
-        _ => {
+        1_000_000..=999_999_999 => {
             let m = n as f64 / 1_000_000.;
             if m.fract() < 0.05 { format!("{m:.0}M") } else { format!("{m:.1}M") }
+        }
+        _ => {
+            let b = n as f64 / 1_000_000_000.;
+            if b.fract() < 0.05 { format!("{b:.0}B") } else { format!("{b:.1}B") }
         }
     }
 }

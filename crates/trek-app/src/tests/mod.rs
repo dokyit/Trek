@@ -4,6 +4,7 @@
 
 mod activity;
 mod alerts;
+mod basecamp;
 mod flows;
 mod harness;
 mod inbox;

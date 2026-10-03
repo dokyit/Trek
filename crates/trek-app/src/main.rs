@@ -3,6 +3,7 @@
 mod activity;
 mod assets;
 mod attachments;
+mod basecamp;
 mod brand;
 mod command_palette;
 mod composer;
@@ -56,6 +57,7 @@ actions!(
         ToggleRightPanel,
         OpenPalette,
         OpenInNewWindow,
+        OpenBasecamp,
         CloseWindow
     ]
 );
@@ -127,6 +129,7 @@ fn menus() -> Vec<Menu> {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Search and Commands…", OpenPalette),
+                MenuItem::action("Basecamp", OpenBasecamp),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Tools Panel", ToggleRightPanel),
@@ -158,6 +161,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-j", ToggleRightPanel, None),
         KeyBinding::new("cmd-k", OpenPalette, None),
         KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
+        KeyBinding::new("cmd-shift-h", OpenBasecamp, None),
+        KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
         // Only thread windows close with ⌘W; the main window stays put.
         KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
     ]
@@ -224,6 +229,7 @@ fn app_actions(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::General), cx)));
     cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
     cx.on_action(|_: &OpenPalette, cx| root::show_palette(workspace::workspace_global(cx), cx));
+    cx.on_action(|_: &OpenBasecamp, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Basecamp, cx)));
     cx.on_action(|_: &CheckForUpdates, cx| {
         in_main(cx, |ws, cx| {
             ws.check_for_updates(true, cx);

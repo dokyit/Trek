@@ -185,6 +185,7 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
             let on_pick = on_pick.clone();
             div()
                 .id((id, i))
+                .test_support()
                 .h_full()
                 .px(px(11.))
                 .flex()

@@ -144,6 +144,28 @@ project), with `snoozed_until`, `pinned_at`, `pending_approval_count`, `pending_
 - Context menu: Pin, Rename, Mark unread, Snooze, Settle, Archive, Copy resume command, Reveal in Finder.
 - Footer: Settings, update pill, account/usage ring.
 
+### Basecamp (the day's recap)
+The sidebar is the inbox; **Basecamp** (Tent row at the top of the sidebar, ⌘K, ⌘⇧H; Esc goes back) is the
+recap of the work behind it, after Synara's Inbox, in Trek's trail language:
+- Header: "Basecamp", the greeting and date, a Today / This week switch, Mark all read.
+- **Ready for review** (left): needs-you threads first, each saying what it waits for (Approval, Question,
+  Plan to review, Failed), then finished unread ones, newest first: status icon, title, agent logo, diff
+  stat, project. One paused at a usage limit says until when (amber clock), not done and not failed. A
+  click opens the thread; Mark all read clears just the unread rows listed.
+- **Today's trek** (right): the recap in sentences with inline project badges and model logos; an
+  **elevation profile** (agent time per hour, or per three hours for the week, as a filled mountain
+  silhouette, the summit flagged in ember, the hiker standing at "now", the trail ahead dotted; hover shows a
+  stretch's numbers); then quiet tiles between hairlines: best model, worked most on, tokens (with a
+  sparkline), agent time and the turns that failed in the range, and what's left of each plan limit.
+- Data: prompts and turn ends from transcripts, failed and stopped turns (`turn_stops`), token usage recorded
+  per turn per model as agents report it (`token_usage`), imported threads read from the agents' own files
+  (continued ones too, for what they used before Trek recorded any). Each turn counts toward the model that
+  reported its tokens. A turn paused at a usage limit is work, not a failure, and the "Continue" a resume
+  at the reset sends isn't counted as the user's prompt. Nothing is claimed that wasn't reported: without tokens the recap counts turns, and
+  shares are "of the reported tokens" while some work reported none. Computed off the main thread when
+  threads change; a minute's tick moves the hiker; numbers count up for 400 ms once per visit (none with
+  reduced motion).
+
 ### Composer
 - Multiline input; `@` files/symbols/threads; `/` commands (+ skills); paste/drag images; ⌘↩ send, ↩ newline
   configurable. While running: ↩ = **steer** (inject at next step), ⌥↩ = queue (Pi/Zed/Codex pattern).

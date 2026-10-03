@@ -1,6 +1,7 @@
 //! Trek's engine: domain types, persistence, agent discovery, thread import and updates.
 //! Nothing in this crate depends on the UI toolkit.
 
+pub mod basecamp;
 pub mod catalog;
 pub mod changelog;
 pub mod checkpoint;

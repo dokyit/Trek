@@ -5,7 +5,8 @@ use super::{
     is_title_request, legacy_title_from, ms_from_rfc3339, source_title, strip_block, title_from, user_text,
 };
 use crate::store::{Item, ResumePoint, ToolStatus};
-use crate::types::{Effort, ThreadSource};
+use super::UsageEntry;
+use crate::types::{Effort, ThreadSource, TokenUsage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -279,6 +280,64 @@ fn last_turn_in(path: &Path) -> Option<String> {
         }
     }
     last
+}
+
+/// A Codex token count: a rollout's `total_token_usage` / `last_token_usage`, or the app
+/// server's `tokenUsage.total` / `.last` (the same fields in camelCase). Codex counts cached
+/// input inside `input_tokens`; here it's apart, as `TokenUsage` keeps it.
+pub fn tokens(v: &Value) -> TokenUsage {
+    let n = |snake: &str, camel: &str| v[snake].as_u64().or(v[camel].as_u64()).unwrap_or(0);
+    let input = n("input_tokens", "inputTokens");
+    let cached = n("cached_input_tokens", "cachedInputTokens");
+    TokenUsage {
+        input: input.saturating_sub(cached),
+        output: n("output_tokens", "outputTokens"),
+        cache_read: cached.min(input),
+        cache_write: n("cache_write_input_tokens", "cacheWriteInputTokens"),
+    }
+}
+
+/// Tokens thread `id` used between `from` and `to` (unix ms), per model request, from its
+/// rollout. Read from the start of the file: run it off the main thread.
+pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
+    rollout_path(id).map(|p| usage_in(&p, from, to)).unwrap_or_default()
+}
+
+/// Each `token_count` event carries the thread's running total; what a request used is how far
+/// the total moved (the same count is sometimes written twice). The first one in the file has
+/// nothing before it: its `last_token_usage` is the request's own.
+fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
+    let Ok(file) = std::fs::File::open(path) else { return vec![] };
+    let mut out = Vec::new();
+    let mut total: Option<TokenUsage> = None;
+    let mut model: Option<String> = None;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if !line.contains("\"token_count\"") && !line.contains("\"turn_context\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let p = &v["payload"];
+        if v["type"] == "turn_context" {
+            model = p["model"].as_str().map(String::from).or(model);
+            continue;
+        }
+        if p["type"] != "token_count" || p["info"].is_null() {
+            continue;
+        }
+        let now = tokens(&p["info"]["total_token_usage"]);
+        let used = match &total {
+            Some(before) => now.since(before),
+            None => tokens(&p["info"]["last_token_usage"]),
+        };
+        total = Some(now);
+        let at = v["timestamp"].as_str().and_then(ms_from_rfc3339);
+        if let Some(at) = at.filter(|at| (from..to).contains(at))
+            && !used.is_empty()
+        {
+            out.push((at, model.clone(), used));
+        }
+    }
+    out
 }
 
 pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
@@ -771,5 +830,42 @@ mod tests {
         assert_eq!(items.len(), 6, "the aborted turn has no footer: {items:?}");
         // A message sent now drops nothing: it goes after the last turn that said it ended.
         assert_eq!(last_turn_in(&path).as_deref(), Some("turn-1"));
+    }
+
+    #[test]
+    fn usage_is_how_far_the_running_total_moved() {
+        let dir = Scratch::new();
+        let count = |total: (u64, u64, u64), last: (u64, u64, u64), at: &str| {
+            let u = |(input, cached, output): (u64, u64, u64)| json!({ "input_tokens": input, "cached_input_tokens": cached, "cache_write_input_tokens": 0, "output_tokens": output, "reasoning_output_tokens": 0, "total_tokens": input + output });
+            line("event_msg", json!({ "type": "token_count", "info": { "total_token_usage": u(total), "last_token_usage": u(last), "model_context_window": 258400 }, "rate_limits": { "primary": { "used_percent": 1.0 } } }), at)
+        };
+        let body = [
+            line("turn_context", json!({ "model": "gpt-6-astra", "cwd": "/x" }), "2026-10-02T20:36:30.000Z"),
+            // From a real rollout: the totals add up request by request.
+            count((18915, 7168, 129), (18915, 7168, 129), "2026-10-02T20:36:40.361Z"),
+            count((46776, 25856, 315), (27861, 18688, 186), "2026-10-03T00:00:49.320Z"),
+            // The same count written twice adds nothing.
+            count((46776, 25856, 315), (27861, 18688, 186), "2026-10-03T00:00:49.400Z"),
+            line("event_msg", json!({ "type": "token_count", "info": null, "rate_limits": {} }), "2026-10-03T00:00:50.000Z"),
+            line("turn_context", json!({ "model": "gpt-5.6-luna" }), "2026-10-03T00:01:00.000Z"),
+            count((85381, 53504, 702), (38605, 27648, 387), "2026-10-03T00:01:02.704Z"),
+        ]
+        .join("\n");
+        let path = dir.write("rollout.jsonl", &body);
+        let from = ms_from_rfc3339("2026-10-03T00:00:00Z").unwrap();
+        let got = usage_in(&path, from, from + 86_400_000);
+        assert_eq!(
+            got.iter().map(|(_, m, t)| (m.as_deref().unwrap(), *t)).collect::<Vec<_>>(),
+            [
+                ("gpt-6-astra", TokenUsage { input: 27861 - 18688, output: 186, cache_read: 18688, cache_write: 0 }),
+                ("gpt-5.6-luna", TokenUsage { input: 38605 - 27648, output: 387, cache_read: 27648, cache_write: 0 }),
+            ]
+        );
+        // The first count in a file is its request's own.
+        let all = usage_in(&path, 0, i64::MAX);
+        assert_eq!(all[0].2.total(), 18915 + 129);
+        // The app server's camelCase shape reads the same.
+        let camel = json!({ "inputTokens": 90000, "cachedInputTokens": 5000, "outputTokens": 900, "reasoningOutputTokens": 400, "totalTokens": 90900 });
+        assert_eq!(tokens(&camel), TokenUsage { input: 85000, output: 900, cache_read: 5000, cache_write: 0 });
     }
 }
