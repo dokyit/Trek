@@ -45,6 +45,30 @@ pub fn clock(ms: i64) -> String {
     if t.date_naive() == chrono::Local::now().date_naive() { t.format("%-I:%M %p").to_string() } else { t.format("%b %-d, %-I:%M %p").to_string() }
 }
 
+/// When a usage limit resets, as of `now` (both unix ms): "2:10 AM" today, "tomorrow 2:10 AM",
+/// "Oct 9, 2:10 AM" further out.
+pub fn reset_clock(ms: i64, now: i64) -> String {
+    let local = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local));
+    let (Some(at), Some(now)) = (local(ms), local(now)) else { return String::new() };
+    let time = at.format("%-I:%M %p");
+    match (at.date_naive() - now.date_naive()).num_days() {
+        0 => time.to_string(),
+        1 => format!("tomorrow {time}"),
+        _ => at.format("%b %-d, %-I:%M %p").to_string(),
+    }
+}
+
+/// How long until `ms`, as of `now` (both unix ms): "3h 41m", "41m", "2d 4h", "under a minute".
+pub fn countdown(ms: i64, now: i64) -> String {
+    let s = ((ms - now) / 1000).max(0);
+    match s {
+        0..=59 => "under a minute".into(),
+        60..=3_599 => format!("{}m", (s + 30) / 60),
+        3_600..=86_399 => format!("{}h {}m", s / 3_600, (s % 3_600) / 60),
+        _ => format!("{}d {}h", s / 86_400, (s % 86_400) / 3_600),
+    }
+}
+
 /// "42s", "4m 02s", "1h 05m".
 pub fn took(secs: u32) -> String {
     match secs {
@@ -72,7 +96,7 @@ pub fn morning<Tz: TimeZone>(now: &DateTime<Tz>, days: i64) -> Option<DateTime<T
 
 #[cfg(test)]
 mod tests {
-    use super::morning;
+    use super::{countdown, morning, reset_clock};
     use chrono::{DateTime, FixedOffset, MappedLocalTime, NaiveDate, NaiveDateTime, Offset, TimeZone};
 
     fn at(tz: &impl TimeZone<Offset = FixedOffset>, s: &str) -> DateTime<FixedOffset> {
@@ -165,5 +189,20 @@ mod tests {
         assert_eq!(fmt(wake("2026-10-24 20:00", 1)), "2026-10-25 09:00 +02:00");
         // An ordinary summer day.
         assert_eq!(fmt(wake("2026-07-01 20:00", 1)), "2026-07-02 09:00 +02:00");
+    }
+
+    #[test]
+    fn limit_resets_read_as_a_clock_and_a_countdown() {
+        use chrono::Local;
+        let local = |s: &str| Local.from_local_datetime(&NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()).earliest().unwrap().timestamp_millis();
+        let now = local("2026-10-02 22:29");
+        assert_eq!(reset_clock(local("2026-10-02 23:40"), now), "11:40 PM");
+        assert_eq!(reset_clock(local("2026-10-03 02:10"), now), "tomorrow 2:10 AM");
+        assert_eq!(reset_clock(local("2026-10-09 15:00"), now), "Oct 9, 3:00 PM");
+        assert_eq!(countdown(now + (3 * 60 + 41) * 60_000, now), "3h 41m");
+        assert_eq!(countdown(now + 41 * 60_000, now), "41m");
+        assert_eq!(countdown(now + 30_000, now), "under a minute");
+        assert_eq!(countdown(now - 5_000, now), "under a minute");
+        assert_eq!(countdown(now + 52 * 3_600_000, now), "2d 4h");
     }
 }

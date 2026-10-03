@@ -246,6 +246,21 @@ impl Sidebar {
     fn status(&self, t: &Thread, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let ws = self.workspace.read(cx);
+        // Paused at a usage limit: until when (it's no failure, and nothing to do yet).
+        if let Some(p) = t.paused.as_ref().filter(|_| t.run_state == RunState::Idle) {
+            let text = match p.resets_at {
+                Some(at) => format!("Paused until {}", time::reset_clock(at, ws.now())),
+                None => "Paused at its limit".to_string(),
+            };
+            return div()
+                .id(SharedString::from(format!("paused-{}", t.id)))
+                .test_support()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(palette::amber(cx))
+                .child(text)
+                .into_any_element();
+        }
         match t.run_state {
             RunState::Working => {
                 let elapsed = ws.live.get(&t.id).and_then(|l| l.turn_started).map(|s| time::elapsed(s.elapsed())).unwrap_or_default();

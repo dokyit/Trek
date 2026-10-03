@@ -10,6 +10,15 @@ use trek_core::catalog::{Wire, direct_provider};
 use trek_core::settings::secrets;
 use trek_core::{AgentId, Effort};
 
+/// The error for a failed request: a usage limit for a 429 (said with `AgentEvent::LimitReached`),
+/// else `message` as it is.
+fn request_error(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, message: String) -> anyhow::Error {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return crate::limits::LimitError(crate::limits::from_response(headers, message, trek_core::store::now_ms())).into();
+    }
+    anyhow::anyhow!(message)
+}
+
 const SYSTEM: &str = "You are Trek, a coding assistant. Be direct and concise. Use Markdown with fenced code blocks.";
 
 pub async fn run(
@@ -53,6 +62,9 @@ pub async fn run(
                     }
                     Err(e) => {
                         history.pop();
+                        if let Some(crate::limits::LimitError(limit)) = e.downcast_ref() {
+                            events.send(limit.clone().event()).await?;
+                        }
                         events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some(format!("{e:#}")) }).await?;
                     }
                 }
@@ -165,12 +177,13 @@ async fn anthropic_turn(
     let resp = req.send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
+        let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
         let msg = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(String::from))
             .unwrap_or(text);
-        bail!("Anthropic API {status}: {msg}");
+        return Err(request_error(status, &headers, format!("Anthropic API {status}: {msg}")));
     }
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
@@ -259,7 +272,10 @@ async fn openai_turn(
     let resp = req.send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        bail!("{status}: {}", resp.text().await.unwrap_or_default());
+        let headers = resp.headers().clone();
+        let text = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or(text);
+        return Err(request_error(status, &headers, format!("{status}: {msg}")));
     }
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
@@ -296,6 +312,18 @@ async fn openai_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_429_is_a_limit_and_other_failures_are_not() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        let e = request_error(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers, "429 Too Many Requests: Rate limit exceeded".into());
+        let Some(crate::limits::LimitError(limit)) = e.downcast_ref() else { panic!("{e:#}") };
+        assert!(limit.resets_at.is_some_and(|at| (at - trek_core::store::now_ms() - 30_000).abs() < 5_000));
+        assert_eq!(format!("{e:#}"), "429 Too Many Requests: Rate limit exceeded");
+        let e = request_error(reqwest::StatusCode::BAD_REQUEST, &headers, "400 Bad Request: no such model".into());
+        assert!(e.downcast_ref::<crate::limits::LimitError>().is_none());
+    }
 
     #[test]
     fn sse_splits_complete_events_only() {

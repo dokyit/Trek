@@ -13,7 +13,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Si
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::catalog::DIRECT_PROVIDERS;
-use trek_core::settings::{Channel, FollowUp, NotifyMode, RunIn, Settings, ThemeChoice, secrets};
+use trek_core::settings::{Channel, FollowUp, NotifyMode, OnUsageLimit, RunIn, Settings, ThemeChoice, secrets};
 use trek_core::{AgentId, Effort, HandHolding};
 
 /// A compact dropdown button that shows the current choice.
@@ -184,6 +184,21 @@ impl SettingsView {
                             vec![(FollowUp::Steer, "Steer"), (FollowUp::Queue, "Queue")],
                             s.general.follow_up,
                             self.setter(|s, v| s.general.follow_up = v),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    Self::row(
+                        "When a usage limit is reached",
+                        match s.general.on_usage_limit {
+                            OnUsageLimit::Ask => "The thread pauses, and a bar above the prompt offers to resume it when the limit resets.",
+                            OnUsageLimit::Resume => "The thread pauses, then carries on by itself a minute after the limit resets.",
+                        },
+                        ui::segmented(
+                            "on-usage-limit",
+                            vec![(OnUsageLimit::Ask, "Ask"), (OnUsageLimit::Resume, "Resume automatically at reset")],
+                            s.general.on_usage_limit,
+                            self.setter(|s, v| s.general.on_usage_limit = v),
                             cx,
                         ),
                         cx,

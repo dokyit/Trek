@@ -4,7 +4,7 @@
 use crate::{AgentEvent, Billing, Command, Decision, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -63,7 +63,6 @@ const UNUSED_NOTIFICATIONS: &[&str] = &[
     "process/outputDelta",
     "hook/started",
     "hook/completed",
-    "account/rateLimits/updated",
     "mcpServer/startupStatus/updated",
     "thread/status/changed",
 ];
@@ -146,6 +145,63 @@ fn effort_str(e: Effort) -> Option<&'static str> {
         Effort::XHigh => Some("xhigh"),
         Effort::Max => Some("max"),
     }
+}
+
+/// A `TurnError` for a usage limit (or a rate limit Codex gave up retrying).
+fn is_limit_error(error: &Value) -> bool {
+    matches!(error["codexErrorInfo"].as_str(), Some("usageLimitExceeded" | "rateLimitExceeded"))
+}
+
+/// Copy what `update` reports over `into`, leaving what it leaves out (recursively for objects).
+fn merge(into: &mut Value, update: &Value) {
+    match (into.as_object_mut(), update.as_object()) {
+        (Some(base), Some(new)) => {
+            for (k, v) in new {
+                if v.is_null() {
+                    continue;
+                }
+                match base.get_mut(k) {
+                    Some(old) if old.is_object() && v.is_object() => merge(old, v),
+                    _ => {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        _ if !update.is_null() => *into = update.clone(),
+        _ => {}
+    }
+}
+
+/// The id of the account's main limit (`limitId`); snapshots without one are its.
+const MAIN_LIMIT: &str = "codex";
+
+/// When the usage limit a turn failed at resets, from the rate-limit snapshots by limit id: the
+/// one for the session's `model` if that's used up (a quota of its own), else the account's main
+/// one, else any used up. And which limit that is.
+fn limit_reset(snapshots: &BTreeMap<String, Value>, model: Option<&str>) -> (Option<i64>, Option<crate::LimitScope>) {
+    let own = snapshots.iter().filter(|(id, s)| *id != MAIN_LIMIT && model.is_some_and(|m| s["normalModelSlug"].as_str() == Some(m)));
+    let main = snapshots.get_key_value(MAIN_LIMIT);
+    let others = snapshots.iter().filter(|(id, _)| *id != MAIN_LIMIT);
+    own.chain(main).chain(others).find_map(|(id, s)| snapshot_reset(s, (id != MAIN_LIMIT).then_some(id))).map_or((None, None), |(at, scope)| (Some(at), Some(scope)))
+}
+
+/// When one rate-limit snapshot's used-up windows reset (the latest of them), and which limit that
+/// is: a limit of its own (`id`, not the account's main one) by its name, else by its window.
+fn snapshot_reset(snapshot: &Value, id: Option<&str>) -> Option<(i64, crate::LimitScope)> {
+    let (at, mins) = ["primary", "secondary"]
+        .iter()
+        .map(|k| &snapshot[*k])
+        .filter(|w| w["usedPercent"].as_f64().is_some_and(|p| p >= 100.))
+        .filter_map(|w| Some((w["resetsAt"].as_i64()? * 1000, w["windowDurationMins"].as_i64())))
+        .max_by_key(|(at, _)| *at)?;
+    let scope = match (id, mins) {
+        (Some(id), _) => crate::LimitScope::Model(snapshot["limitName"].as_str().unwrap_or(id).to_string()),
+        (None, Some(300)) => crate::LimitScope::Session,
+        (None, Some(10080)) => crate::LimitScope::Weekly,
+        _ => crate::LimitScope::Other,
+    };
+    Some((at, scope))
 }
 
 /// Codex passes provider errors through as raw JSON; pull out the sentence a person can read.
@@ -387,6 +443,11 @@ struct Session {
     /// Sub-agents by their thread id.
     agents: HashMap<String, SubAgent>,
     plan_updates: u32,
+    /// The account's rate limits as Codex last reported them (`account/rateLimits/updated`), by
+    /// limit id: when a usage limit resets.
+    rate_limits: BTreeMap<String, Value>,
+    /// The running turn failed at a usage limit (`usageLimitExceeded`).
+    limited: bool,
 }
 
 impl Session {
@@ -415,6 +476,8 @@ impl Session {
             recap: None,
             agents: HashMap::new(),
             plan_updates: 0,
+            rate_limits: BTreeMap::new(),
+            limited: false,
         }
     }
 
@@ -752,7 +815,15 @@ impl Session {
                 }
                 None
             }
+            // Sparse updates, one limit at a time: what's missing stays as last reported.
+            "account/rateLimits/updated" => {
+                let snapshot = &p["rateLimits"];
+                let id = snapshot["limitId"].as_str().unwrap_or(MAIN_LIMIT).to_string();
+                merge(self.rate_limits.entry(id).or_insert(Value::Null), snapshot);
+                None
+            }
             "error" if p["willRetry"] != true => {
+                self.limited |= is_limit_error(&p["error"]);
                 let msg = readable_error(p["error"]["message"].as_str().unwrap_or("Codex error"));
                 // A turn's fatal error also ends the turn, and `turn/completed` reports it.
                 if self.busy() {
@@ -781,6 +852,14 @@ impl Session {
             _ => None,
         };
         self.turn_error = None;
+        let limited = std::mem::take(&mut self.limited) || is_limit_error(&turn["error"]);
+        if let Some(message) = error.as_ref().filter(|e| limited || (*e != "Interrupted" && crate::limits::looks_like_limit(e))) {
+            let (resets_at, scope) = limit_reset(&self.rate_limits, self.model.as_deref());
+            let now = trek_core::store::now_ms();
+            let scope = scope.unwrap_or_else(|| crate::limits::scope_of(message));
+            let resets_at = resets_at.or_else(|| crate::limits::reset_from_text(message, now));
+            out.events.push(AgentEvent::LimitReached { message: message.clone(), resets_at, scope });
+        }
         let failed = error.is_some();
         // Whatever became of it, the turn is in the thread's history: one to cut back to.
         if let Some(id) = turn["id"].as_str().filter(|id| !id.is_empty()) {
@@ -1706,6 +1785,66 @@ mod tests {
         assert_eq!(out.send, vec![json!({"id":4,"method":"turn/interrupt","params":{"threadId":"t","turnId":"turn-1"}})]);
         let done = s.incoming(&json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn-1","status":"interrupted","items":[]}}}));
         assert_eq!(done.events, vec![AgentEvent::Mark("turn-1".into()), AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }]);
+    }
+
+    #[test]
+    fn a_usage_limit_ends_the_turn_with_one_limit_event() {
+        // Shapes per the app-server schema (codex-cli 0.160.0: `TurnError.codexErrorInfo`,
+        // `account/rateLimits/updated`), in the envelope of a recorded failed turn; the message
+        // as the CLI words it.
+        let lines = fixture(include_str!("../fixtures/codex-limit.jsonl"));
+        let mut s = session("01a0fe5b-ce3d-7420-b4af-d01f2ab43c6b", false);
+        s.command(prompt("keep going"));
+        let out = feed(&mut s, &lines);
+        let message = lines[2]["params"]["error"]["message"].as_str().unwrap().to_string();
+        // The reset comes from the used-up window of the snapshot, not the words.
+        assert_eq!(
+            out.events,
+            vec![
+                AgentEvent::LimitReached { message: message.clone(), resets_at: Some(1_791_007_800_000), scope: crate::LimitScope::Session },
+                AgentEvent::Mark("01a0fe5c-0a11-7c2e-9d41-5b7f0e2d1a90".into()),
+                AgentEvent::TurnComplete { cost_usd: None, error: Some(message) },
+            ]
+        );
+        // The next turn starts clean: an ordinary failure is no limit.
+        s.command(prompt("again"));
+        let other = fixture(include_str!("../fixtures/codex-turn-error.jsonl"));
+        assert!(!feed(&mut s, &other).events.iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })));
+    }
+
+    #[test]
+    fn rate_limit_updates_are_merged_and_read() {
+        let mut v = json!({"primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":10},"planType":"plus"});
+        merge(&mut v, &json!({"primary":{"usedPercent":100},"secondary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":99},"planType":null}));
+        assert_eq!(v["primary"], json!({"usedPercent":100,"windowDurationMins":300,"resetsAt":10}));
+        assert_eq!(v["planType"], "plus");
+        // Both windows used up: the later reset, the weekly one.
+        let one = |v: Value| BTreeMap::from([(MAIN_LIMIT.to_string(), v)]);
+        assert_eq!(limit_reset(&one(v), None), (Some(99_000), Some(crate::LimitScope::Weekly)));
+        assert_eq!(limit_reset(&one(json!({"primary":{"usedPercent":40,"resetsAt":10}})), None), (None, None));
+    }
+
+    #[test]
+    fn each_limit_keeps_its_own_snapshot() {
+        // As the app-server reports them: the account's main limit, and a model's quota of its own.
+        let update = |s: &mut Session, snapshot: Value| {
+            let line = json!({"method":"account/rateLimits/updated","params":{"rateLimits":snapshot}});
+            feed(s, &[line]);
+        };
+        let mut s = session("01a0fe5b-ce3d-7420-b4af-d01f2ab43c6b", false);
+        update(&mut s, json!({"limitId":"codex","limitName":null,"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":50},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":900}}));
+        update(&mut s, json!({"limitId":"base_model_inference","limitName":"gpt-reserve","normalModelSlug":"gpt-5.6-luna","primary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":700}}));
+        // A sparse update without an id is the main limit's, and leaves the other alone.
+        update(&mut s, json!({"limitId":null,"primary":{"usedPercent":100}}));
+        assert_eq!(s.rate_limits["codex"]["primary"], json!({"usedPercent":100,"windowDurationMins":300,"resetsAt":50}));
+        assert_eq!(s.rate_limits["base_model_inference"]["limitName"], "gpt-reserve");
+        assert!(s.rate_limits["codex"]["limitName"].is_null());
+        // The main limit's reset, as the main limit, for any model but the one with a quota of its own.
+        assert_eq!(limit_reset(&s.rate_limits, Some("gpt-5.6-sol")), (Some(50_000), Some(crate::LimitScope::Session)));
+        assert_eq!(limit_reset(&s.rate_limits, Some("gpt-5.6-luna")), (Some(700_000), Some(crate::LimitScope::Model("gpt-reserve".into()))));
+        // Main limit clear: the used-up one is the other's.
+        update(&mut s, json!({"limitId":"codex","primary":{"usedPercent":10}}));
+        assert_eq!(limit_reset(&s.rate_limits, None), (Some(700_000), Some(crate::LimitScope::Model("gpt-reserve".into()))));
     }
 
     #[test]

@@ -61,10 +61,10 @@ pub fn turn_start(items: &[Item], end: usize) -> Option<usize> {
     items[from..end].iter().position(|i| matches!(i, Item::User { aside: false, .. })).map(|p| from + p)
 }
 
-/// Whether `item` ends a turn: its footer, a failure, or an interruption.
+/// Whether `item` ends a turn: its footer, a failure, a usage limit, or an interruption.
 pub fn ends_turn(item: &Item) -> bool {
     match item {
-        Item::TurnEnd { .. } | Item::Error { .. } => true,
+        Item::TurnEnd { .. } | Item::Error { .. } | Item::Limit { .. } => true,
         Item::Notice { text } => text == "Interrupted" || text == INTERRUPTED_BY_QUIT,
         _ => false,
     }

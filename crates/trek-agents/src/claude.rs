@@ -257,6 +257,10 @@ struct Turns {
     /// A result held back for unread messages: its cost, and when to stop waiting for Claude to
     /// take them in (they may never come, and the turn mustn't hang).
     waiting: Option<(Option<f64>, tokio::time::Instant)>,
+    /// The limit Claude's last `rate_limit_event` said was hit: when it resets, and which it is.
+    rejected: Option<(Option<i64>, crate::LimitScope)>,
+    /// This turn has reported its limit (`AgentEvent::LimitReached`).
+    limited: bool,
 }
 
 /// How long a held result waits for Claude to start on the messages after it. It starts within
@@ -295,8 +299,40 @@ impl Turns {
             // The next turn has begun.
             self.waiting = None;
         }
+        if v["type"] == "rate_limit_event" {
+            let info = &v["rate_limit_info"];
+            // Past the limit but carrying on, paid as overage: no limit to stop at.
+            let rejected = info["status"] == "rejected" && info["isUsingOverage"] != true;
+            self.rejected = rejected.then(|| (info["resetsAt"].as_i64().map(|s| s * 1000), crate::limits::claude_scope(info["rateLimitType"].as_str().unwrap_or_default())));
+            return vec![];
+        }
         let mut out = translate(v, pending, streamed_text);
+        // The limit message gets the reset and window Claude reported for it, if it did.
+        for ev in out.iter_mut() {
+            if let AgentEvent::LimitReached { resets_at, scope, .. } = ev {
+                self.limited = true;
+                if let Some((at, kind)) = self.rejected.clone() {
+                    *resets_at = at.or(*resets_at);
+                    if *scope == crate::LimitScope::Other {
+                        *scope = kind;
+                    }
+                }
+            }
+        }
         if v["type"] == "result" {
+            // A turn that failed at a limit without saying so in a message of its own.
+            if v["is_error"] == true && !std::mem::take(&mut self.limited) && result_error(v) != "Interrupted" {
+                let text = result_error(v);
+                let limit = match self.rejected.clone() {
+                    Some((resets_at, scope)) => Some(crate::Limit { message: text.clone(), resets_at: resets_at.or_else(|| crate::limits::reset_from_text(&text, trek_core::store::now_ms())), scope }),
+                    None => crate::Limit::from_text(&text, trek_core::store::now_ms()),
+                };
+                if let Some(limit) = limit {
+                    let at = out.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap_or(out.len());
+                    out.insert(at, limit.event());
+                }
+            }
+            self.limited = false;
             // A stopped or failed turn ends here whatever was sent: Claude may drop what it hadn't
             // read yet, and a turn that waited on it would never end.
             if v["is_error"] == true || !self.unread.iter().any(|(_, mid_turn)| *mid_turn) {
@@ -672,6 +708,16 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                     _ => {}
                 }
             }
+        }
+        // Claude's own message for a usage limit ("You've hit your session limit · resets 7:40pm
+        // (America/New_York)"): the limit, not something the model said.
+        Some("assistant") if v["parent_tool_use_id"].is_null() && v["error"] == "rate_limit" => {
+            let text: Vec<&str> = v["message"]["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+            let text = text.join("\n");
+            let now = trek_core::store::now_ms();
+            let limit = crate::Limit::from_text(&text, now).unwrap_or(crate::Limit { resets_at: crate::limits::reset_from_text(&text, now), scope: crate::limits::scope_of(&text), message: text });
+            out.push(limit.event());
+            out.extend(mark(v));
         }
         Some("assistant") if v["parent_tool_use_id"].is_null() => {
             for block in v["message"]["content"].as_array().into_iter().flatten() {
@@ -1053,6 +1099,71 @@ mod tests {
         assert!(session_missing(&v));
         assert!(!session_missing(&json!({"type":"result","is_error":true,"errors":["API Error: overloaded"]})));
         assert!(!session_missing(&json!({"type":"result","is_error":false,"result":"No conversation found"})));
+    }
+
+    #[test]
+    fn a_usage_limit_is_one_limit_event_with_its_reset() {
+        // The stream as Claude Code 2.1.287 sends it at a session limit: a rejected
+        // `rate_limit_event`, its own message (no model behind it), and an error result. The
+        // message and the reset are recorded ones (the reset was 1790984400, 7:40pm in New York).
+        let lines = fixture(include_str!("../fixtures/claude-limit.jsonl"));
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let ev: Vec<AgentEvent> = lines.iter().flat_map(|v| turns.step(v, &mut pending, &mut streamed)).collect();
+        let message = "You've hit your session limit · resets 7:40pm (America/New_York)";
+        let limits: Vec<&AgentEvent> = ev.iter().filter(|e| matches!(e, AgentEvent::LimitReached { .. })).collect();
+        assert_eq!(limits, [&AgentEvent::LimitReached { message: message.into(), resets_at: Some(1_790_984_400_000), scope: crate::LimitScope::Session }]);
+        // Not an answer from the model.
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::TextDone(_) | AgentEvent::TextDelta(_))), "{ev:?}");
+        // The turn ends after it, failed.
+        let limit = ev.iter().position(|e| matches!(e, AgentEvent::LimitReached { .. })).unwrap();
+        let end = ev.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
+        assert!(limit < end);
+        assert_eq!(ev[end], AgentEvent::TurnComplete { cost_usd: Some(0.0), error: Some(message.into()) });
+
+        // Without the rate-limit event, the result alone is enough; and an ordinary failure isn't one.
+        let mut turns = Turns::default();
+        let ev = turns.step(&lines[3], &mut pending, &mut streamed);
+        assert!(matches!(&ev[..], [AgentEvent::LimitReached { scope: crate::LimitScope::Session, resets_at: Some(_), .. }, AgentEvent::TurnComplete { .. }]), "{ev:?}");
+        let overloaded = json!({"type":"result","is_error":true,"result":"API Error: 529 overloaded"});
+        assert!(!turns.step(&overloaded, &mut pending, &mut streamed).iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })));
+    }
+
+    #[test]
+    fn a_rejected_rate_limit_makes_no_limit_of_an_interrupt_or_overage() {
+        let rejected = |overage: bool| json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1790984400,"rateLimitType":"five_hour","isUsingOverage":overage}});
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        // The user stopped the turn: an interrupt, whatever the last rate-limit event said.
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        turns.step(&rejected(false), &mut pending, &mut streamed);
+        let interrupt = json!({"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools","result":""});
+        let ev = turns.step(&interrupt, &mut pending, &mut streamed);
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })), "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, AgentEvent::TurnComplete { error: Some(e), .. } if e == "Interrupted")), "{ev:?}");
+        // Paid overage carries the turn past the limit: a later failure is just a failure.
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        turns.step(&rejected(true), &mut pending, &mut streamed);
+        assert_eq!(turns.rejected, None);
+        let failed = json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"Tool crashed"});
+        assert!(!turns.step(&failed, &mut pending, &mut streamed).iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })));
+        // Without overage, the failure is the limit.
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        turns.step(&rejected(false), &mut pending, &mut streamed);
+        let ev = turns.step(&failed, &mut pending, &mut streamed);
+        assert!(ev.contains(&AgentEvent::LimitReached { message: "Tool crashed".into(), resets_at: Some(1_790_984_400_000), scope: crate::LimitScope::Session }), "{ev:?}");
+    }
+
+    #[test]
+    fn rate_limit_events_that_allow_the_turn_change_nothing() {
+        // Recorded (Claude Code 2.1.288): the event every turn starts with, a warning near the weekly limit.
+        let v: Value = serde_json::from_str(include_str!("../fixtures/claude-rate-limit-allowed.json")).unwrap();
+        let mut turns = Turns::default();
+        assert!(turns.step(&v, &mut HashMap::new(), &mut false).is_empty());
+        assert_eq!(turns.rejected, None);
     }
 
     #[test]

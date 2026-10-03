@@ -8,12 +8,14 @@ mod acp;
 mod claude;
 mod codex;
 mod direct;
+pub mod limits;
 pub mod mock;
 mod opencode;
 mod status;
 
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
+pub use limits::{Limit, LimitScope};
 pub use status::{AgentStatus, CommandKind, SlashCommand, UsageLimit, claude_status, codex_status};
 
 use std::collections::HashMap;
@@ -158,6 +160,10 @@ pub enum AgentEvent {
     /// The latest point the session can be taken back to, for `SessionConfig::resume_at`: the
     /// last message's id (Claude Code) or the last finished turn's (Codex).
     Mark(String),
+    /// The agent stopped at a usage limit (5-hour, weekly, a model's, or a provider's rate limit).
+    /// `resets_at`: unix ms, when the agent said or it could be worked out. The turn then ends
+    /// with an error saying the same.
+    LimitReached { message: String, resets_at: Option<i64>, scope: LimitScope },
     /// Something went wrong. It ends no turn by itself (an unreadable image, a refused model
     /// change): a turn that fails says so as it completes, or its session ends.
     Error(String),
@@ -175,7 +181,7 @@ pub struct SessionHandle {
 pub fn resumes_partway(agent: &AgentId, model: Option<&str>) -> bool {
     match agent {
         AgentId::ClaudeCode | AgentId::Codex => true,
-        AgentId::Direct(p) if p == mock::PROVIDER => model != Some(mock::RECAP_MODEL),
+        AgentId::Direct(p) if trek_core::catalog::is_mock(p) => model != Some(mock::RECAP_MODEL),
         _ => false,
     }
 }
@@ -187,7 +193,7 @@ pub fn session_tail(agent: &AgentId, session: &str) -> Option<String> {
     match agent {
         AgentId::ClaudeCode => trek_core::import::claude::last_message(session),
         AgentId::Codex => trek_core::import::codex::last_turn(session),
-        AgentId::Direct(p) if p == mock::PROVIDER => mock::last_mark(session),
+        AgentId::Direct(p) if trek_core::catalog::is_mock(p) => mock::last_mark(session),
         _ => None,
     }
 }
@@ -233,7 +239,7 @@ pub fn start(config: SessionConfig) -> SessionHandle {
             match &config.agent {
                 AgentId::ClaudeCode => claude::run(config, cmd_rx, events).await,
                 AgentId::Codex => codex::run(config, cmd_rx, events).await,
-                AgentId::Direct(p) if p == mock::PROVIDER => mock::run(config, cmd_rx, events).await,
+                AgentId::Direct(p) if trek_core::catalog::is_mock(p) => mock::run(config, cmd_rx, events).await,
                 AgentId::Direct(_) => direct::run(config, cmd_rx, events).await,
                 AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, events).await,
             }

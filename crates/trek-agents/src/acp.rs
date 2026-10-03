@@ -550,6 +550,7 @@ impl Turn {
         self.flush_text(&mut out);
         self.tools.clear();
         let cost_usd = self.cost.filter(|c| *c > 0.0);
+        let failed = stop.is_err();
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
@@ -558,6 +559,10 @@ impl Turn {
             Ok(_) => None,
             Err(msg) => Some(msg),
         };
+        // ACP has no word for a usage limit: agents pass on their provider's error as it reads.
+        if let Some(limit) = error.as_deref().filter(|_| failed).and_then(|e| crate::Limit::from_text(e, trek_core::store::now_ms())) {
+            out.push(limit.event());
+        }
         out.push(AgentEvent::TurnComplete { cost_usd, error });
         out
     }
@@ -1306,6 +1311,17 @@ mod tests {
         assert_eq!(err(Ok("cancelled")).as_deref(), Some("Interrupted"));
         assert!(err(Ok("refusal")).is_some());
         assert_eq!(err(Err("rate limited".into())).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn a_provider_limit_is_reported_before_the_turn_ends() {
+        // As `rpc_message` reads an agent's JSON-RPC error that passes its provider's 429 on.
+        let e = rpc_message(&json!({"code":-32603,"message":"Internal error","data":{"message":"Rate limit reached for requests. Please try again in 20s."}}));
+        let ev = Turn::default().finish(Err(e.clone()));
+        let [AgentEvent::LimitReached { message, resets_at: Some(at), scope }, AgentEvent::TurnComplete { error: Some(err), .. }] = &ev[..] else { panic!("{ev:?}") };
+        assert_eq!((message, err, scope), (&e, &e, &crate::LimitScope::Other));
+        assert!((*at - trek_core::store::now_ms() - 20_000).abs() < 5_000);
+        assert_eq!(Turn::default().finish(Err("Internal error: model not found".into())).len(), 1);
     }
 
     #[test]
