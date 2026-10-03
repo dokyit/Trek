@@ -63,7 +63,21 @@ pub struct Composer {
     /// Height of the whole composer at last layout. The window caches this view at that height
     /// (cached views need a definite size) on frames where the composer didn't change.
     height: std::rc::Rc<std::cell::Cell<Pixels>>,
+    /// The message being edited, to send again in its place.
+    editing: Option<Editing>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A message of yours the composer holds to send again in its place.
+struct Editing {
+    thread: String,
+    item: String,
+    /// Put the files back as they were when it was first sent; `None` when there's no checkpoint.
+    restore: Option<bool>,
+    /// Why the files can't be put back, when they can't.
+    why_not: &'static str,
+    /// What the composer held before (text, images): back on cancel.
+    draft: (String, Vec<PathBuf>),
 }
 
 /// True when `id` is `candidate` or a dated snapshot of it (claude-haiku-4-5-20251001).
@@ -113,7 +127,8 @@ impl Composer {
                 } else if matches!(event, InputEvent::Change) {
                     this.update_trigger(cx);
                     // The user has started typing: get the agent process up before they hit Return.
-                    let typing = { let v = state.read(cx).value(); v.trim().len() >= 2 && !v.starts_with('/') };
+                    // Not while editing: sending that starts a session of its own, after the rewind.
+                    let typing = { let v = state.read(cx).value(); v.trim().len() >= 2 && !v.starts_with('/') } && this.editing.is_none();
                     if typing {
                         let scope = this.scope.clone();
                         this.workspace.update(cx, |ws, cx| ws.warm_up_in(&scope, cx));
@@ -121,11 +136,19 @@ impl Composer {
                     cx.notify();
                 }
             }),
-            cx.observe(&workspace, |this, ws, cx| {
+            cx.observe_in(&workspace, window, |this, ws, window, cx| {
                 let cmd_enter = ws.read(cx).settings.general.send_with_cmd_enter;
                 if cmd_enter != this.cmd_enter {
                     this.cmd_enter = cmd_enter;
                     this.input.update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
+                }
+                // The message being edited is gone from view (another thread, or a rewind took it).
+                let stale = this.editing.as_ref().is_some_and(|e| {
+                    let ws = ws.read(cx);
+                    ws.thread_id_in(&this.scope) != Some(e.thread.as_str()) || ws.live.get(&e.thread).is_none_or(|l| l.items.position(&e.item).is_none())
+                });
+                if stale {
+                    this.cancel_edit(window, cx);
                 }
                 cx.notify()
             }),
@@ -154,6 +177,7 @@ impl Composer {
             picker_scroll: ScrollHandle::new(),
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
+            editing: None,
             _subscriptions: subscriptions,
         }
     }
@@ -167,12 +191,102 @@ impl Composer {
         if text.trim().is_empty() && self.outbox.paths.is_empty() {
             return;
         }
+        if self.editing.as_ref().is_some_and(|e| self.workspace.read(cx).turn_running(&e.thread)) {
+            self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn to send the edited message.".into(), undo: None }));
+            return;
+        }
         state.update(cx, |s, cx| s.set_value("", window, cx));
         self.trigger = None;
         self.sync_overlay(cx);
         let images = std::mem::take(&mut self.outbox.paths);
         let scope = self.scope.clone();
-        self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx));
+        match self.editing.take() {
+            // Sent in place of the message: the conversation goes back to just before it.
+            Some(e) => self.workspace.update(cx, |ws, cx| _ = ws.edit_and_resend(&e.thread, &e.item, text, images, e.restore.unwrap_or(false), cx)),
+            None => self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx)),
+        }
+    }
+
+    /// A message comes back into the composer: put back by a rewind, or (`edit`: its item id) to
+    /// edit and send again in its place.
+    pub fn compose(&mut self, thread: &str, text: &str, images: &[PathBuf], edit: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = edit else {
+            self.restore(text, images, window, cx);
+            return;
+        };
+        let draft = match self.editing.take() {
+            Some(e) => e.draft,
+            None => (self.input.read(cx).value().to_string(), std::mem::take(&mut self.outbox.paths)),
+        };
+        let ws = self.workspace.read(cx);
+        let checkpoint = ws.store.checkpoint(thread, &item).ok().flatten().is_some();
+        let in_repo = ws.thread(thread).and_then(|t| t.cwd.as_deref()).is_some_and(|c| trek_core::store::project_root(c).join(".git").exists());
+        let why_not = if in_repo {
+            "There's no file checkpoint from before this message (it was sent before Trek kept them, or outside Trek), so the files stay as they are."
+        } else {
+            "This folder isn't a git repository, so Trek keeps no file checkpoints for it."
+        };
+        self.editing = Some(Editing { thread: thread.to_string(), item, restore: checkpoint.then_some(true), why_not, draft });
+        self.outbox.paths = images.to_vec();
+        self.input.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.set_selected_range(text.len()..text.len(), cx);
+        });
+        self.trigger = None;
+        self.sync_overlay(cx);
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Stop editing: what the composer held before comes back.
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(e) = self.editing.take() else { return };
+        let (text, images) = e.draft;
+        self.outbox.paths = images;
+        self.input.update(cx, |s, cx| s.set_value(text, window, cx));
+        cx.notify();
+    }
+
+    /// "Editing message" above the prompt while one is.
+    fn edit_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let e = self.editing.as_ref()?;
+        let theme = cx.theme().clone();
+        let restore = match e.restore {
+            Some(on) => ui::check_row("edit-restore", "Restore files", on, false, cx)
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Put the files back as they were when this message was first sent").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(e) = this.editing.as_mut() {
+                        e.restore = e.restore.map(|on| !on);
+                    }
+                    cx.notify();
+                })),
+            None => {
+                let why = e.why_not;
+                ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(why).build(window, cx))
+            }
+        };
+        Some(
+            h_flex()
+                .id("edit-banner")
+                .test_support()
+                .px(px(14.))
+                .pt(px(10.))
+                .gap(px(8.))
+                .text_size(px(12.5))
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(crate::assets::Lucide::Pencil).xsmall())
+                .child(div().flex_1().min_w_0().truncate().child("Editing message · Esc to cancel"))
+                .child(restore)
+                .child(
+                    gpui_kit::component::button::Button::new("edit-cancel")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Close).text_color(theme.muted_foreground))
+                        .tooltip("Cancel editing")
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Tell the workspace whether one of our popovers is open (native views hide under it). Only
@@ -194,6 +308,12 @@ impl Composer {
     pub(crate) fn text(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| s.set_value(text, window, cx));
+    }
+
 
     /// Height at the last layout (zero before the first).
     pub fn height(&self) -> Pixels {
@@ -477,6 +597,11 @@ impl Composer {
     }
 
     fn picker_action(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if key == "escape" && self.trigger.is_none() && self.editing.is_some() {
+            self.cancel_edit(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         let n = self.picker_items(cx).len();
         if self.trigger.is_none() || (n == 0 && key != "escape") {
             cx.propagate();
@@ -1262,8 +1387,9 @@ impl Render for Composer {
 
                 )
             })
+            .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
+            .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
                 let me = cx.entity().downgrade();
                 move |item, window, cx| match attachments::pasted(item) {
                     Some(p) => me

@@ -112,6 +112,12 @@ pub struct Thread {
     pub import_hidden: Option<String>,
     /// The user chose to keep it although a rule matches it ("Show in sidebar" in Settings).
     pub import_kept: bool,
+    /// The latest point in the agent's session (`native_id`) that a later message can be traced
+    /// back to (see `ResumePoint::after`).
+    pub native_at: Option<String>,
+    /// How the next session picks the conversation up after a rewind or a fork; cleared once
+    /// that session has started.
+    pub reopen: Option<crate::rewind::Reopen>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -203,6 +209,10 @@ pub enum Item {
         /// When it was sent (unix ms); absent when the source didn't record it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<i64>,
+        /// Where the agent's own session stood just before it, so a rewind can take the agent
+        /// back there; absent when that isn't known (the message started a session, say).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<ResumePoint>,
     },
     Assistant { text: String },
     /// Marks the end of a response: when it finished and how long the turn took.
@@ -211,6 +221,18 @@ pub enum Item {
     Tool { id: String, title: String, detail: String, output: String, status: ToolStatus },
     Notice { text: String },
     Error { text: String },
+}
+
+/// A point in an agent's own session: resuming `session` there brings back the conversation up to
+/// it and nothing after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumePoint {
+    /// The agent's session id (a thread's `native_id`).
+    pub session: String,
+    /// The agent's id for the last thing in the session before the point: a message (Claude
+    /// Code) or a turn (Codex). Absent when the session had nothing before it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
 }
 
 /// The notice ending a turn that Trek quit (or crashed) in the middle of.
@@ -223,6 +245,21 @@ pub enum ToolStatus {
     Done,
     Failed,
     Denied,
+}
+
+/// A file checkpoint: the working tree of `repo` as message `item_id` was sent (see `checkpoint`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub item_id: String,
+    pub repo: PathBuf,
+    pub sha: String,
+    pub created_at: i64,
+}
+
+impl Checkpoint {
+    fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Checkpoint> {
+        Ok(Checkpoint { item_id: r.get(0)?, repo: PathBuf::from(r.get::<_, String>(1)?), sha: r.get(2)?, created_at: r.get(3)? })
+    }
 }
 
 /// What an import did to one session's thread.
@@ -301,6 +338,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN imported_title TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_hidden TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_kept INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN native_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN reopen TEXT", []);
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS checkpoints (
+           thread_id TEXT NOT NULL, item_id TEXT NOT NULL, repo TEXT NOT NULL, sha TEXT NOT NULL, created_at INTEGER NOT NULL,
+           PRIMARY KEY (thread_id, item_id)
+         );
+         CREATE TABLE IF NOT EXISTS retired_sessions (native_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);",
+    )?;
     migrate_items(conn)?;
     search::ensure_schema(conn)
 }
@@ -399,7 +445,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, native_at, reopen";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -429,6 +475,8 @@ impl Store {
             imported_title: r.get(23)?,
             import_hidden: r.get(24)?,
             import_kept: r.get::<_, i64>(25)? != 0,
+            native_at: r.get(26)?,
+            reopen: r.get::<_, Option<String>>(27)?.and_then(|j| serde_json::from_str(&j).ok()),
         })
     }
 
@@ -487,6 +535,8 @@ impl Store {
             imported_title: None,
             import_hidden: None,
             import_kept: false,
+            native_at: None,
+            reopen: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -536,7 +586,9 @@ impl Store {
                 t.never_settle as i64,
                 t.imported_title,
                 t.import_hidden,
-                t.import_kept as i64
+                t.import_kept as i64,
+                t.native_at,
+                t.reopen.as_ref().and_then(|r| serde_json::to_string(r).ok())
             ],
         )?;
         Ok(())
@@ -582,12 +634,25 @@ impl Store {
         Ok(open)
     }
 
-    /// Agent session ids of Trek's own threads, archived ones included.
+    /// Agent session ids of Trek's own threads, archived ones included, and the sessions threads
+    /// left behind when a rewind or a fork moved them to another (`retire_session`).
     pub fn trek_native_ids(&self) -> Result<HashSet<String>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT native_id FROM threads WHERE source = 'trek' AND native_id IS NOT NULL")?;
+            let mut st = c.prepare(
+                "SELECT native_id FROM threads WHERE source = 'trek' AND native_id IS NOT NULL UNION SELECT native_id FROM retired_sessions",
+            )?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect()
+        })
+    }
+
+    /// `thread` moved on from the agent session `native_id` (a rewind continues in a copy of it,
+    /// say). The session stays in the agent's history; imports leave it out, as they do the
+    /// sessions threads use.
+    pub fn retire_session(&self, native_id: &str, thread_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("INSERT OR REPLACE INTO retired_sessions (native_id, thread_id) VALUES (?1, ?2)", params![native_id, thread_id])?;
+            Ok(())
         })
     }
 
@@ -691,6 +756,8 @@ impl Store {
             imported_title: Some(imp.title.clone()),
             import_hidden: None,
             import_kept: false,
+            native_at: None,
+            reopen: None,
         })
     }
 
@@ -764,6 +831,7 @@ impl Store {
     pub fn delete_thread(&self, id: &str) -> Result<()> {
         self.with(|c| {
             c.execute("DELETE FROM items WHERE thread_id = ?1", [id])?;
+            c.execute("DELETE FROM checkpoints WHERE thread_id = ?1 OR thread_id IN (SELECT id FROM threads WHERE side_of = ?1)", [id])?;
             c.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
             Ok(())
         })
@@ -845,6 +913,52 @@ impl Store {
     /// Delete a thread's whole transcript.
     pub fn clear_items(&self, thread_id: &str) -> Result<usize> {
         self.with(|c| c.execute("DELETE FROM items WHERE thread_id = ?1", [thread_id]))
+    }
+
+    // ---- checkpoints ----
+
+    /// Record the file checkpoint taken as message `item_id` of `thread_id` was sent.
+    pub fn add_checkpoint(&self, thread_id: &str, item_id: &str, repo: &Path, sha: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO checkpoints (thread_id, item_id, repo, sha, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![thread_id, item_id, repo.display().to_string(), sha, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The checkpoint taken as message `item_id` was sent, if there is one.
+    pub fn checkpoint(&self, thread_id: &str, item_id: &str) -> Result<Option<Checkpoint>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT item_id, repo, sha, created_at FROM checkpoints WHERE thread_id = ?1 AND item_id = ?2",
+                params![thread_id, item_id],
+                Checkpoint::from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// A thread's checkpoints, oldest first.
+    pub fn checkpoints(&self, thread_id: &str) -> Result<Vec<Checkpoint>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT item_id, repo, sha, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at, item_id")?;
+            let rows = st.query_map([thread_id], Checkpoint::from_row)?;
+            rows.collect()
+        })
+    }
+
+    /// Forget checkpoints by message.
+    pub fn delete_checkpoints(&self, thread_id: &str, item_ids: &[String]) -> Result<usize> {
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn.transaction()?;
+        let mut n = 0;
+        for id in item_ids {
+            n += tx.execute("DELETE FROM checkpoints WHERE thread_id = ?1 AND item_id = ?2", params![thread_id, id])?;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Write what changed in a live transcript since its last save, in one transaction, and mark
@@ -938,7 +1052,7 @@ mod tests {
         let t = s.create_thread(None, AgentId::Codex, Some("gpt-6-astra".into()), Effort::Max, HandHolding::FullAccess).unwrap();
         let back = s.thread(&t.id).unwrap().unwrap();
         assert_eq!(back, t);
-        let hi = Item::User { text: "hi".into(), images: vec![], at: None };
+        let hi = Item::User { text: "hi".into(), images: vec![], at: None, resume: None };
         let hello = Item::Assistant { text: "hello".into() };
         s.append_items(&t.id, [("a", &hi), ("b", &hello)]).unwrap();
         assert_eq!(s.items(&t.id).unwrap(), vec![hi, hello]);
@@ -987,7 +1101,7 @@ mod tests {
         let s = Store::in_memory().unwrap();
         let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
         let mut tr = Transcript::default();
-        tr.push(Item::User { text: "go".into(), images: vec![], at: Some(1) });
+        tr.push(Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None });
         tr.push(Item::Reasoning { text: String::new() });
         let answer = tr.push(said("work"));
         s.save_transcript(&t.id, &mut tr).unwrap();
@@ -1066,7 +1180,7 @@ mod tests {
             let s = Store::open(&path).unwrap();
             let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
             let mut tr = Transcript::default();
-            tr.push(Item::User { text: "harbour lights".into(), images: vec![], at: None });
+            tr.push(Item::User { text: "harbour lights".into(), images: vec![], at: None, resume: None });
             tr.push(said("the harbour is dark"));
             s.save_transcript(&t.id, &mut tr).unwrap();
             // Put the table back the way the first build with ids made it: no default for `id`.
@@ -1097,6 +1211,36 @@ mod tests {
         assert_eq!(s.search("lighthouse", 5).unwrap()[0].position, Some(2));
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn checkpoints_resume_points_and_retired_sessions_are_kept() {
+        let s = Store::in_memory().unwrap();
+        let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        t.native_id = Some("s2".into());
+        t.native_at = Some("m9".into());
+        t.reopen = Some(crate::rewind::Reopen::Native { session: "s1".into(), at: Some("m3".into()), fork: true });
+        s.save_thread(&t).unwrap();
+        assert_eq!(s.thread(&t.id).unwrap().unwrap(), t);
+
+        // A message's resume point is stored with it.
+        let sent = Item::User { text: "go".into(), images: vec![], at: Some(1), resume: Some(ResumePoint { session: "s2".into(), after: Some("m9".into()) }) };
+        s.append_items(&t.id, [("u1", &sent)]).unwrap();
+        assert_eq!(s.items(&t.id).unwrap(), [sent]);
+
+        let repo = Path::new("/tmp/repo");
+        s.add_checkpoint(&t.id, "u1", repo, "aaa").unwrap();
+        s.add_checkpoint(&t.id, "u2", repo, "bbb").unwrap();
+        assert_eq!(s.checkpoint(&t.id, "u2").unwrap().map(|c| (c.repo, c.sha)), Some((repo.to_path_buf(), "bbb".to_string())));
+        assert_eq!(s.checkpoints(&t.id).unwrap().iter().map(|c| c.item_id.as_str()).collect::<Vec<_>>(), ["u1", "u2"]);
+        assert_eq!(s.delete_checkpoints(&t.id, &["u1".into(), "nope".into()]).unwrap(), 1);
+        assert!(s.checkpoint(&t.id, "u1").unwrap().is_none());
+
+        // Sessions a thread moved on from count as Trek's, so imports leave them out.
+        s.retire_session("s1", &t.id).unwrap();
+        assert_eq!(s.trek_native_ids().unwrap(), HashSet::from(["s1".to_string(), "s2".to_string()]));
+        s.delete_thread(&t.id).unwrap();
+        assert!(s.checkpoints(&t.id).unwrap().is_empty());
     }
 
     #[test]
@@ -1187,7 +1331,7 @@ mod tests {
         assert!(s.threads().unwrap().is_empty());
         s.upsert_imported(&[imported("old", "say ok"), imported("pinned", "say ok"), imported("used", "say ok")]).unwrap();
         s.update_thread(&by_native(&s, "pinned").id, |t| t.pinned_at = Some(5)).unwrap();
-        s.append_items(&by_native(&s, "used").id, [("u1", &Item::User { text: "keep going".into(), images: vec![], at: None })]).unwrap();
+        s.append_items(&by_native(&s, "used").id, [("u1", &Item::User { text: "keep going".into(), images: vec![], at: None, resume: None })]).unwrap();
         let out = s.upsert_imported(&[skip("old"), skip("pinned"), skip("used")]).unwrap();
         // Threads the user pinned or continued in Trek stay.
         assert_eq!(out.iter().map(|o| (o.hidden, o.left_out)).collect::<Vec<_>>(), [(true, true), (false, false), (false, false)]);
@@ -1293,7 +1437,7 @@ mod tests {
             t.id
         };
         let (working, asking, failed, idle, imported) = (open(RunState::Working), open(RunState::NeedsYou), open(RunState::Failed), open(RunState::Idle), open(RunState::Working));
-        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1) };
+        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1), resume: None };
         let empty_thought = Item::Reasoning { text: " ".into() };
         let partial = said("The schema change needs");
         let tool = |status| Item::Tool { id: "t1".into(), title: "Bash".into(), detail: "make migrate".into(), output: String::new(), status };

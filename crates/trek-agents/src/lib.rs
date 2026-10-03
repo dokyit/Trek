@@ -29,6 +29,15 @@ pub struct SessionConfig {
     pub plan: bool,
     /// The agent's own session id to resume.
     pub resume: Option<String>,
+    /// Resume only the conversation up to this point of `resume` (an id from `AgentEvent::Mark`):
+    /// everything after it is dropped.
+    pub resume_at: Option<String>,
+    /// Open `resume` as a copy (a fork), leaving the session itself as it is.
+    pub fork: bool,
+    /// What was said so far, for a session that starts afresh in a conversation already under
+    /// way: the first message carries it. With `resume` set it's the fallback, used if the agent
+    /// can't take its session back to `resume_at`.
+    pub recap: Option<String>,
     /// Fast mode: Claude `fastMode`, or the Codex service tier to use.
     pub fast: Option<String>,
     /// Extra MCP servers (stdio) to attach to the session, on top of the agent's own config.
@@ -142,6 +151,9 @@ pub enum AgentEvent {
     Commands(Vec<SlashCommand>),
     /// Something the user should know that isn't an error (the transcript shows it as a note).
     Notice(String),
+    /// The latest point the session can be taken back to, for `SessionConfig::resume_at`: the
+    /// last message's id (Claude Code) or the last finished turn's (Codex).
+    Mark(String),
     Error(String),
     Exited,
 }
@@ -151,11 +163,53 @@ pub struct SessionHandle {
     pub events: async_channel::Receiver<AgentEvent>,
 }
 
+/// Whether `agent` can resume its session partway (`SessionConfig::resume_at`) and fork it, so a
+/// rewind leaves the agent knowing exactly what the transcript keeps. Others start a new session
+/// with a recap. (The mock's `mock-recap` model plays an agent that can't.)
+pub fn resumes_partway(agent: &AgentId, model: Option<&str>) -> bool {
+    match agent {
+        AgentId::ClaudeCode | AgentId::Codex => true,
+        AgentId::Direct(p) if p == mock::PROVIDER => model != Some(mock::RECAP_MODEL),
+        _ => false,
+    }
+}
+
+/// The first message of a session that starts afresh in a conversation already under way.
+pub(crate) fn recap_prompt(recap: &str, text: &str) -> String {
+    format!(
+        "This conversation began in an earlier session that you can't see. Here is a recap of it, oldest first, so you can carry on where it left off:\n\n<recap>\n{recap}\n</recap>\n\n{text}"
+    )
+}
+
+/// `commands`, with `recap` put in front of the first message.
+pub(crate) fn recap_first(commands: async_channel::Receiver<Command>, recap: String) -> async_channel::Receiver<Command> {
+    let (tx, rx) = async_channel::unbounded();
+    trek_core::runtime().spawn(async move {
+        let mut recap = Some(recap);
+        while let Ok(mut cmd) = commands.recv().await {
+            if let Command::Prompt { text, .. } = &mut cmd {
+                if let Some(r) = recap.take() {
+                    *text = recap_prompt(&r, text);
+                }
+            }
+            if tx.send(cmd).await.is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// Start a session for `config.agent`.
 pub fn start(config: SessionConfig) -> SessionHandle {
     let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (ev_tx, ev_rx) = async_channel::unbounded();
     let events = ev_tx.clone();
+    // A new session gets the recap with its first message; one that resumes has it as a fallback.
+    let cmd_rx = match (&config.recap, &config.resume) {
+        (Some(recap), None) => recap_first(cmd_rx, recap.clone()),
+        _ => cmd_rx,
+    };
     supervise(
         async move {
             match &config.agent {
@@ -325,6 +379,36 @@ mod tests {
         assert_eq!(plan_row(&done).0, "All 2 steps done");
         let waiting = vec![("A".to_string(), Step::Done), ("B".into(), Step::Pending)];
         assert_eq!(plan_row(&waiting).0, "1 of 2 steps done");
+    }
+
+    #[test]
+    fn only_the_first_message_carries_the_recap() {
+        let (tx, rx) = async_channel::unbounded();
+        let out = recap_first(rx, "User: hi".into());
+        let prompt = |t: &str| Command::Prompt { text: t.into(), images: vec![] };
+        let got = trek_core::runtime().block_on(async {
+            tx.send(Command::SetHandHolding(trek_core::HandHolding::Auto)).await.unwrap();
+            tx.send(prompt("first")).await.unwrap();
+            tx.send(prompt("second")).await.unwrap();
+            drop(tx);
+            let mut got = vec![];
+            while let Ok(c) = out.recv().await {
+                got.push(c);
+            }
+            got
+        });
+        let texts: Vec<String> = got.iter().filter_map(|c| if let Command::Prompt { text, .. } = c { Some(text.clone()) } else { None }).collect();
+        assert_eq!(got.len(), 3, "everything passes through, in order");
+        assert!(texts[0].contains("<recap>\nUser: hi\n</recap>") && texts[0].ends_with("\n\nfirst"), "{}", texts[0]);
+        assert_eq!(texts[1], "second");
+    }
+
+    #[test]
+    fn which_agents_resume_partway() {
+        assert!(resumes_partway(&AgentId::ClaudeCode, None) && resumes_partway(&AgentId::Codex, Some("gpt-5.6-luna")));
+        assert!(!resumes_partway(&AgentId::OpenCode, None) && !resumes_partway(&AgentId::Direct("anthropic".into()), None));
+        let mock = AgentId::Direct(mock::PROVIDER.into());
+        assert!(resumes_partway(&mock, None) && !resumes_partway(&mock, Some(mock::RECAP_MODEL)));
     }
 
     #[test]

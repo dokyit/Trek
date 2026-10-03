@@ -150,3 +150,30 @@ tinted for a moment. The sidebar's search field matches titles as you type (subs
 same word-prefix rules as ⌘K) and adds threads whose messages match, with the matching line. Results on
 screen refresh when the index takes in more (background indexing, a finished turn); Enter in ⌘K waits for
 the results of what was typed.
+
+**Checkpoints, rewind, edit, retry and fork** (`trek_core::checkpoint`, `trek_core::rewind`,
+`Workspace::rewind` / `fork_thread`).
+- **File checkpoints are commits under `refs/trek/checkpoints/<thread>/<message>`**, made through a
+  temporary index seeded with a copy of the user's (its stat data means only changed files are read):
+  `add -A`, `write-tree`, `commit-tree -p HEAD`, `update-ref`. The user's index, HEAD, branches and stash are
+  never written; restoring reads the checkpoint into another temporary index and `checkout-index`es just the
+  files that differ, after removing files created since (ignored files are never in either tree). git is
+  run by its real path (`git --exec-path`), not macOS's `/usr/bin/git` shim, which costs ~100 ms a call. A
+  snapshot takes ~75 ms on this repo and ~130 ms on a 30,000-file one. It runs off the main thread as a turn
+  starts, and the message is held until it's done, so it always shows the files before the agent touched
+  them (a message that steers a running turn gets none). The newest 100 per thread are kept; refs go with
+  the messages a rewind removes and with deleted threads. Folders outside git get none.
+- **The agent forgets what was taken back.** Each message records where the agent's session stood when it
+  was sent (`ResumePoint`: session id and the last message uuid / turn id before it, from
+  `AgentEvent::Mark`; importers fill it in for Claude Code and Codex history). Claude Code resumes with
+  `--resume <id> --resume-session-at <uuid>` (in place: the session file keeps the old branch, later
+  resumes follow the new one) and forks with `--fork-session`; message uuids survive a fork. Codex reverts
+  in place with `thread/revert` (the turn after the point is found with `thread/turns/list`) and forks with
+  `thread/fork { lastTurnId }`; turn ids survive a fork too. Both verified live (haiku 4.5, gpt-5.6-luna).
+  A point in a session other than the thread's own (the thread is a fork) is always forked, never cut in
+  place: that session belongs to another thread. ACP and direct agents, messages without a point and
+  cut-backs that fail (the session or message is gone) start a new session whose first message carries a
+  compact recap of the conversation kept; the transcript says so.
+- Rewinding is refused while a turn runs. Sessions a thread leaves behind are recorded
+  (`retired_sessions`) so imports don't bring them back as threads; an imported thread that moves to a new
+  session becomes Trek's own.

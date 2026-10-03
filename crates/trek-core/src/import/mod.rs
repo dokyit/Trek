@@ -606,14 +606,21 @@ impl Transcript {
         // Reports of sub-agents launched before don't hold this reply open: a lost report
         // would otherwise take the footers of every later turn with it.
         self.background.clear();
-        self.items.push(Item::User { text, images, at });
+        self.items.push(Item::User { text, images, at, resume: None });
         self.start = at;
         self.last = at;
     }
 
+    /// Where the agent's session stood before the message just added (see `ResumePoint`).
+    pub fn resume_from(&mut self, point: Option<crate::store::ResumePoint>) {
+        if let Some(Item::User { resume, .. }) = self.items.last_mut() {
+            *resume = point;
+        }
+    }
+
     /// The user's answer to a question the agent asked mid-turn: shown, and the turn goes on.
     pub fn answer(&mut self, text: String, at: Option<i64>) {
-        self.items.push(Item::User { text, images: vec![], at });
+        self.items.push(Item::User { text, images: vec![], at, resume: None });
         self.touch(at);
     }
 

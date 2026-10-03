@@ -6,6 +6,7 @@ mod flows;
 mod harness;
 mod inbox;
 mod render;
+mod rewind;
 mod windows;
 
 use std::cell::RefCell;

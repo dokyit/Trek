@@ -5,9 +5,10 @@
 //! codex:    approvals | steer | plan | plan-restart | resume | subagent | interrupt | lost-thread
 //! opencode: approvals | resume | interrupt | plan | model
 //! claude:   plan | keep-planning | question | cancel | interrupt
+//! both:     rewind | fork (`claude` or `codex`)
 //!
-//! Each scenario works in its own folder under /tmp/trek-agents-e2e and exits non-zero when a
-//! check fails.
+//! Each scenario works in its own folder under /tmp/trek-agents-e2e (or `$TREK_E2E_DIR`) and
+//! exits non-zero when a check fails.
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use trek_agents::{AgentEvent, Command, Decision, Prompt, SessionConfig, SessionHandle, start};
@@ -24,6 +25,12 @@ struct Session {
 
 impl Session {
     fn start(agent: AgentId, cwd: &Path, model: &str, hand_holding: HandHolding, plan: bool, resume: Option<String>) -> Self {
+        Self::open(agent, cwd, model, hand_holding, plan, resume, None, false)
+    }
+
+    /// `start`, resuming partway (`resume_at`) or as a fork.
+    #[allow(clippy::too_many_arguments)]
+    fn open(agent: AgentId, cwd: &Path, model: &str, hand_holding: HandHolding, plan: bool, resume: Option<String>, resume_at: Option<String>, fork: bool) -> Self {
         let h = start(SessionConfig {
             agent,
             cwd: cwd.to_path_buf(),
@@ -32,10 +39,18 @@ impl Session {
             hand_holding,
             plan,
             resume,
+            resume_at,
+            fork,
+            recap: None,
             fast: None,
             mcp_servers: vec![],
         });
         Session { h, seen: vec![] }
+    }
+
+    /// The latest point the session can be taken back to.
+    fn mark(&self) -> Option<String> {
+        self.seen.iter().rev().find_map(|e| if let AgentEvent::Mark(m) = e { Some(m.clone()) } else { None })
     }
 
     async fn send(&self, cmd: Command) {
@@ -125,7 +140,8 @@ fn check(ok: bool, what: &str) {
 }
 
 fn folder(name: &str) -> PathBuf {
-    let dir = PathBuf::from("/tmp/trek-agents-e2e").join(name);
+    let base = std::env::var("TREK_E2E_DIR").unwrap_or_else(|_| "/tmp/trek-agents-e2e".into());
+    let dir = PathBuf::from(base).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -157,10 +173,78 @@ fn main() {
             ("claude", "question") => claude_question().await,
             ("claude", "cancel") => claude_cancel().await,
             ("claude", "interrupt") => interrupt(AgentId::ClaudeCode, CLAUDE, "claude-interrupt").await,
+            ("claude", "rewind") => rewind(AgentId::ClaudeCode, CLAUDE, "claude-rewind").await,
+            ("codex", "rewind") => rewind(AgentId::Codex, CODEX, "codex-rewind").await,
+            ("claude", "fork") => fork(AgentId::ClaudeCode, CLAUDE, "claude-fork").await,
+            ("codex", "fork") => fork(AgentId::Codex, CODEX, "codex-fork").await,
             _ => fail("unknown scenario"),
         }
     });
     println!("PASS");
+}
+
+const RECALL: &str = "List every word I asked you to remember, comma separated, nothing else.";
+
+/// Two turns, each with a word to remember (APPLE, then BANANA). Returns the session and the
+/// point just after the first turn.
+async fn two_words(agent: &AgentId, model: &str, cwd: &Path) -> (String, String) {
+    let mut s = Session::start(agent.clone(), cwd, model, HandHolding::Supervised, false, None);
+    s.prompt("Remember the word APPLE. Reply with just OK.").await;
+    check(s.turn(180).await.is_none(), "first turn");
+    let first = s.mark().unwrap_or_else(|| fail("no point to take the session back to"));
+    s.prompt("Also remember the word BANANA. Reply with just OK.").await;
+    check(s.turn(180).await.is_none(), "second turn");
+    check(s.mark().is_some_and(|m| m != first), "the second turn moved the point on");
+    let id = s.native_id();
+    s.stop().await;
+    (id, first)
+}
+
+/// Ask what the session remembers: (its answer, uppercased; the session's id).
+async fn words(s: &mut Session) -> (String, String) {
+    s.prompt(RECALL).await;
+    check(s.turn(180).await.is_none(), "recall turn");
+    (s.text().to_uppercase(), s.native_id())
+}
+
+/// Cut a session back to just after its first turn, in place: it forgets the second.
+async fn rewind(agent: AgentId, model: &str, name: &str) {
+    let cwd = folder(name);
+    let (id, first) = two_words(&agent, model, &cwd).await;
+    let mut s = Session::open(agent.clone(), &cwd, model, HandHolding::Supervised, false, Some(id.clone()), Some(first.clone()), false);
+    let (text, native) = words(&mut s).await;
+    check(text.contains("APPLE") && !text.contains("BANANA"), &format!("cut back to the first turn: {text}"));
+    check(native == id, "the same session");
+    check(s.seen.iter().any(|e| *e == AgentEvent::Mark(first.clone())), "the cut is reported as the latest point");
+    s.stop().await;
+    // It stays cut back: resumed again, it still knows only the first word.
+    let mut s = Session::start(agent, &cwd, model, HandHolding::Supervised, false, Some(id));
+    s.prompt("Which words have I asked you to remember so far? Comma separated, nothing else.").await;
+    check(s.turn(180).await.is_none(), "resumed turn");
+    check(!s.text().to_uppercase().contains("BANANA"), "the cut held");
+    s.stop().await;
+}
+
+/// Fork a session after its first turn, and whole: the copies know what they should, and the
+/// original keeps everything.
+async fn fork(agent: AgentId, model: &str, name: &str) {
+    let cwd = folder(name);
+    let (id, first) = two_words(&agent, model, &cwd).await;
+    let mut s = Session::open(agent.clone(), &cwd, model, HandHolding::Supervised, false, Some(id.clone()), Some(first), true);
+    let (text, native) = words(&mut s).await;
+    check(text.contains("APPLE") && !text.contains("BANANA"), &format!("forked after the first turn: {text}"));
+    check(!native.is_empty() && native != id, "a new session");
+    s.stop().await;
+    let mut s = Session::open(agent.clone(), &cwd, model, HandHolding::Supervised, false, Some(id.clone()), None, true);
+    let (text, native) = words(&mut s).await;
+    check(text.contains("APPLE") && text.contains("BANANA"), &format!("a whole fork: {text}"));
+    check(native != id, "another new session");
+    s.stop().await;
+    let mut s = Session::start(agent, &cwd, model, HandHolding::Supervised, false, Some(id.clone()));
+    let (text, native) = words(&mut s).await;
+    check(text.contains("APPLE") && text.contains("BANANA"), &format!("the original is untouched: {text}"));
+    check(native == id, "the original session");
+    s.stop().await;
 }
 
 /// Supervised: three harmless writes, answered Allow, Deny, Allow for session.

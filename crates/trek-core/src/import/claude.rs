@@ -4,7 +4,7 @@ use super::{
     Evidence, ImportedThread, Transcript, classify, clip, file_mtime_ms, is_injected, is_interruption, is_temp_dir,
     is_title_request, legacy_is_injected, legacy_title_from, ms_from_rfc3339, source_title, title_from, unwrap_pasted, user_text,
 };
-use crate::store::{Item, ToolStatus};
+use crate::store::{Item, ResumePoint, ToolStatus};
 use crate::types::{Effort, ThreadSource};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -327,9 +327,18 @@ fn tail_lines(path: &Path, bytes: u64) -> Vec<String> {
     lines
 }
 
-pub(super) fn find_session(id: &str) -> Option<PathBuf> {
+/// Session `id`'s file, in whichever project folder Claude Code keeps it.
+pub fn find_session(id: &str) -> Option<PathBuf> {
     let name = format!("{id}.jsonl");
     std::fs::read_dir(root()).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
+}
+
+/// Whether session `id` is on disk with a message `uuid` in it: somewhere
+/// `--resume-session-at` can cut it.
+pub fn has_message(id: &str, uuid: &str) -> bool {
+    let Some(file) = find_session(id).and_then(|p| std::fs::File::open(p).ok()) else { return false };
+    let needle = format!("\"uuid\":\"{uuid}\"");
+    BufReader::new(file).lines().map_while(Result::ok).any(|l| l.contains(&needle))
 }
 
 fn tool_title(name: &str, input: &Value) -> (String, String) {
@@ -357,10 +366,15 @@ pub fn load(session_id: &str) -> anyhow::Result<Vec<Item>> {
 
 fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
+    let session = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let mut t = Transcript::default();
     // A slash command, shown once the agent answers it (`/goal …`, a skill); local ones like
-    // `/model` get no answer and aren't shown.
-    let mut asked: Option<(String, Option<i64>)> = None;
+    // `/model` get no answer and aren't shown. With the message before it, to resume at.
+    let mut asked: Option<(String, Option<i64>, Option<String>)> = None;
+    // The last message of the conversation so far: where `--resume-session-at` would cut it so
+    // the next message and everything after it are gone.
+    let mut last_message: Option<String> = None;
+    let point = |after: Option<String>| Some(ResumePoint { session: session.clone(), after });
     for line in reader.lines().map_while(Result::ok) {
         // Background tasks report back as a user line when the agent is idle, or queued into
         // the running turn; either way the task is done.
@@ -375,6 +389,12 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
         }
         let at = v["timestamp"].as_str().and_then(ms_from_rfc3339);
         let content = &v["message"]["content"];
+        let before = last_message.clone();
+        if matches!(v["type"].as_str(), Some("user" | "assistant")) {
+            if let Some(uuid) = v["uuid"].as_str() {
+                last_message = Some(uuid.to_string());
+            }
+        }
         match v["type"].as_str() {
             Some("user") => {
                 for block in content.as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
@@ -404,6 +424,7 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
                     Some(text) => {
                         asked = None;
                         t.user(unwrap_pasted(&text), at);
+                        t.resume_from(point(before));
                     }
                     None if is_interruption(&raw) => {
                         asked = None;
@@ -416,14 +437,15 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
                     }
                     None => {
                         if let Some(c) = command_text(&raw) {
-                            asked = Some((c, at));
+                            asked = Some((c, at, before));
                         }
                     }
                 }
             }
             Some("assistant") => {
-                if let Some((command, at)) = asked.take() {
+                if let Some((command, at, before)) = asked.take() {
                     t.user(command, at);
+                    t.resume_from(point(before));
                 }
                 for block in content.as_array().into_iter().flatten() {
                     match block["type"].as_str() {
@@ -700,15 +722,26 @@ mod tests {
             reply("Running them", "2026-10-01T10:05:03Z"),
             user(json!([{ "type": "text", "text": "[Request interrupted by user]" }]), "2026-10-01T10:05:04Z"),
             user("never mind", "2026-10-01T10:06:00Z"),
-        ]);
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut l)| {
+            l["uuid"] = json!(format!("l{i}"));
+            l
+        })
+        .collect::<Vec<_>>());
         let items = load_file(&path).unwrap();
         let at = |s: &str| ms_from_rfc3339(s);
-        assert_eq!(items[0], Item::User { text: "fix the build".into(), images: vec![], at: at("2026-10-01T10:00:00Z") });
+        let resume = |after: Option<&str>| Some(ResumePoint { session: "a".into(), after: after.map(String::from) });
+        assert_eq!(items[0], Item::User { text: "fix the build".into(), images: vec![], at: at("2026-10-01T10:00:00Z"), resume: resume(None) });
         assert!(matches!(&items[1], Item::Tool { output, .. } if output == "error[E0425]"));
         assert_eq!(items[2], Item::Assistant { text: "Fixed the missing import.".into() });
         assert_eq!(items[3], Item::TurnEnd { at: at("2026-10-01T10:00:42Z").unwrap(), took_secs: 42 });
         // Skill bodies and task notifications aren't messages; the interrupted reply has no footer.
         assert_eq!(kinds(&items[4..]), ["user and", "assistant", "user never"]);
+        // Each message can be cut off at the last line before it.
+        assert!(matches!(&items[4], Item::User { resume: r, .. } if *r == resume(Some("l6"))));
+        assert!(matches!(&items[6], Item::User { resume: r, .. } if *r == resume(Some("l9"))));
     }
 
     /// Each item's kind, with a user message's first word and a footer's duration.

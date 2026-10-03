@@ -1,7 +1,7 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use trek_agents::{AcpInfo, AgentEvent, AgentStatus, Billing, Command, Decision, McpServer, SessionConfig, SlashCommand};
@@ -9,7 +9,8 @@ use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
 use trek_core::settings::{FollowUp, Settings};
-use trek_core::store::{Item, Project, SearchHit, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::rewind::Reopen;
+use trek_core::store::{Item, Project, ResumePoint, SearchHit, Section, Store, Thread, ToolStatus, now_ms};
 use trek_core::transcript::Transcript;
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
@@ -130,9 +131,43 @@ pub struct LiveThread {
     pub background: usize,
     /// Last prompt or agent event (idle sessions are shut down; they resume on the next message).
     pub last_active: Option<Instant>,
+    /// The latest point the agent's session can be taken back to (`AgentEvent::Mark`); saved to
+    /// the thread as turns end (`Thread::native_at`).
+    pub mark: Option<String>,
+    /// Git work for this thread (checkpoints, restoring files), done in order off the main thread.
+    git_jobs: VecDeque<GitJob>,
+    git_busy: bool,
+    /// Messages for the agent held until the git work before them is done: a turn mustn't start
+    /// before its checkpoint is taken, or before files a rewind restores are back.
+    held: Vec<Command>,
+    _git: Option<Task<()>>,
     /// A save of the transcript on its way (`persist_soon`).
     _save_soon: Option<Task<()>>,
     _events: Option<Task<()>>,
+}
+
+/// Git work queued on a thread (see `LiveThread::git_jobs`).
+#[derive(Debug, Clone)]
+enum GitJob {
+    /// Snapshot the files in `cwd` (if it's in a git repo) as message `item` goes out.
+    Checkpoint { cwd: PathBuf, item: String },
+    /// Put the files back as checkpoint `sha` of `repo` has them.
+    Restore { repo: PathBuf, sha: String },
+    /// Drop checkpoints by message (theirs left the transcript).
+    Forget { repo: PathBuf, items: Vec<String> },
+    /// Give a fork the checkpoints of the messages it copied: `(item, commit)`.
+    Link { repo: PathBuf, checkpoints: Vec<(String, String)> },
+}
+
+/// Where a fork takes its conversation up to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForkAt {
+    /// Up to just before this message (by item id); the message waits in the fork's composer.
+    Before(String),
+    /// Up to the end of the turn this `TurnEnd` (by item id) closes.
+    After(String),
+    /// The whole conversation.
+    End,
 }
 
 /// A sub-agent's progress, shown on its tool row and in the working bar.
@@ -306,6 +341,9 @@ pub enum WorkspaceEvent {
     AttachImage(std::path::PathBuf),
     /// Follow-ups held for a turn that stopped or failed go back into the composer showing `thread`.
     RestoreQueued { thread: String, text: String, images: Vec<PathBuf> },
+    /// A message goes back into the composer of `scope` (on `thread`): taken back by a rewind, or
+    /// (`edit`: its item id) to be edited and sent again in its place.
+    ComposeIn { scope: Scope, thread: String, text: String, images: Vec<PathBuf>, edit: Option<String> },
     /// Something in a thread window changed what the main window shows: bring it forward.
     ActivateMain,
     /// ⌘K from a thread window: the palette opens in the main window (its commands act there),
@@ -1528,7 +1566,7 @@ impl Workspace {
                 return;
             }
             let live = self.live.entry(id.clone()).or_default();
-            live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()) });
+            live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()), resume: None });
             live.items.push(Item::Notice { text: reply });
             live.revision += 1;
             self.persist_items(&id, cx);
@@ -1546,7 +1584,7 @@ impl Workspace {
             let (answers, secret) = typed_answers(&questions, picked, &text);
             if let Some(live) = self.live.get_mut(&id) {
                 // A secret (a token, a password) goes to the agent and nowhere else.
-                live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()) } });
+                live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()), resume: None } });
             }
             self.answer(&id, &request_id, answers, cx);
             self.persist_items(&id, cx);
@@ -1561,22 +1599,29 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let resume = self.resume_point(&id);
+        let cwd = self.thread(&id).and_then(|t| t.cwd.clone());
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
         live.drop_after_turn();
-        live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()) });
+        let ix = live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()), resume });
         live.streaming = None;
         live.reasoning = None;
         // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
         if !running {
             live.turn_started = Some(Instant::now());
             live.tasks.clear();
+            // A new turn starts from a checkpoint of the files, taken before the agent has the
+            // message (it's held until then): a rewind can put them back.
+            let in_repo = cwd.as_deref().is_some_and(|c| trek_core::store::project_root(c).join(".git").exists());
+            if let (Some(cwd), Some(item), true) = (cwd, live.items.id_at(ix).map(str::to_string), in_repo) {
+                live.git_jobs.push_back(GitJob::Checkpoint { cwd, item });
+            }
         }
         live.last_active = Some(Instant::now());
         live.revision += 1;
-        if let Some(tx) = &live.commands {
-            let _ = tx.try_send(Command::Prompt { text, images });
-        }
+        self.dispatch(&id, Command::Prompt { text, images });
+        self.run_git(&id, cx);
         self.mutate_thread(&id, cx, |t| {
             t.run_state = RunState::Working;
             t.settled_at = None;
@@ -1610,6 +1655,13 @@ impl Workspace {
             return;
         }
         let (plan, fast_on) = self.live.get(id).map(|l| (l.plan, l.fast)).unwrap_or_default();
+        // After a rewind or a fork the session picks up from part of one, or from a recap.
+        let recap = || self.live.get(id).map(|l| trek_core::rewind::recap(&l.items)).filter(|r| !r.is_empty());
+        let (resume, resume_at, fork, recap) = match thread.reopen.clone() {
+            Some(Reopen::Native { session, at, fork }) => (Some(session), at, fork, recap()),
+            Some(Reopen::Recap) => (None, None, false, recap()),
+            None => (thread.native_id.clone(), None, false, None),
+        };
         let handle = trek_agents::start(SessionConfig {
             agent: thread.agent.clone(),
             cwd: thread.cwd.clone().unwrap_or_else(trek_core::paths::home),
@@ -1617,7 +1669,10 @@ impl Workspace {
             effort: thread.effort,
             hand_holding: thread.hand_holding,
             plan,
-            resume: thread.native_id.clone(),
+            resume,
+            resume_at,
+            fork,
+            recap,
             fast: self.fast_tier(&thread.agent, thread.model.as_ref(), fast_on),
             mcp_servers: self.mcp_servers(),
         });
@@ -1677,6 +1732,9 @@ impl Workspace {
                     hand_holding: p.hand_holding,
                     plan: p.plan,
                     resume: None,
+                    resume_at: None,
+                    fork: false,
+                    recap: None,
                     fast: self.fast_tier(&p.agent, p.model.as_ref(), p.fast),
                     mcp_servers: self.mcp_servers(),
                 });
@@ -1705,6 +1763,11 @@ impl Workspace {
     pub(crate) fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
         let mut run_state: Option<RunState> = None;
         let mut native: Option<String> = None;
+        // A session started (reported its id): whatever a rewind or fork asked of it is done.
+        let mut started = false;
+        // It's another session than the thread's: its points so far are unknown.
+        let mut new_session = false;
+        let current_native = self.thread(id).and_then(|t| t.native_id.clone());
         let mut diff: Option<(i64, i64)> = None;
         let mut finished = false;
         // The turn ended cleanly: queued follow-ups may go out. After a stop or failure they go back
@@ -1722,6 +1785,14 @@ impl Workspace {
             let live = self.live.entry(id.to_string()).or_default();
             live.last_active = Some(Instant::now());
             for ev in events {
+                // A point the session can be taken back to changes nothing on screen.
+                let ev = match ev {
+                    AgentEvent::Mark(m) => {
+                        live.mark = Some(m);
+                        continue;
+                    }
+                    ev => ev,
+                };
                 // Output with no turn open: the agent woke itself (a background sub-agent finished).
                 if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
                     live.turn_started = Some(Instant::now());
@@ -1784,7 +1855,12 @@ impl Workspace {
                         }
                     }
                     AgentEvent::Started { native_id, .. } => {
+                        started = true;
                         if !native_id.is_empty() {
+                            if current_native.as_ref() != Some(&native_id) {
+                                new_session = true;
+                                live.mark = None;
+                            }
                             native = Some(native_id);
                         }
                     }
@@ -1903,6 +1979,7 @@ impl Workspace {
                         }
                         finished = true;
                     }
+                    AgentEvent::Mark(_) => {}
                     AgentEvent::Error(e) => {
                         live.items.push(Item::Error { text: e });
                         live.turn_started = None;
@@ -1924,6 +2001,7 @@ impl Workspace {
             }
             live.revision += 1;
         }
+        let mark = self.live.get(id).and_then(|l| l.mark.clone());
         if let (Some(c), Some(t)) = (commands, self.thread(id)) {
             let key = (t.agent.key(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
             self.agent_commands.insert(key, c);
@@ -1933,11 +2011,22 @@ impl Workspace {
         // up to 60 times a second) unless something actually changed.
         let changed = finished
             || diff.is_some()
-            || self.thread(id).is_some_and(|t| native.as_ref().is_some_and(|n| t.native_id.as_ref() != Some(n)) || run_state.is_some_and(|s| t.run_state != s));
+            || self.thread(id).is_some_and(|t| {
+                (started && t.reopen.is_some()) || native.as_ref().is_some_and(|n| t.native_id.as_ref() != Some(n)) || run_state.is_some_and(|s| t.run_state != s)
+            });
         if changed {
             self.mutate_thread(id, cx, |t| {
                 if let Some(n) = native {
                     t.native_id = Some(n);
+                }
+                if started {
+                    t.reopen = None;
+                }
+                // The latest point to take the session back to, kept for the next launch.
+                match mark {
+                    Some(m) => t.native_at = Some(m),
+                    None if new_session => t.native_at = None,
+                    None => {}
                 }
                 if let Some(s) = run_state {
                     t.run_state = s;
@@ -2107,10 +2196,291 @@ impl Workspace {
     }
 
     pub fn interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(tx) = self.live.get(id).and_then(|l| l.commands.clone()) {
-            let _ = tx.try_send(Command::Interrupt);
-        }
+        self.dispatch(id, Command::Interrupt);
         cx.notify();
+    }
+
+    /// Send `cmd` to `id`'s agent once the git work queued before it is done.
+    fn dispatch(&mut self, id: &str, cmd: Command) {
+        let Some(live) = self.live.get_mut(id) else { return };
+        if live.git_busy || !live.git_jobs.is_empty() {
+            live.held.push(cmd);
+        } else if let Some(tx) = &live.commands {
+            let _ = tx.try_send(cmd);
+        }
+    }
+
+    /// Do `id`'s git work one job at a time, off the main thread; what was held for it goes to
+    /// the agent once it's all done.
+    fn run_git(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id).filter(|l| !l.git_busy) else { return };
+        let Some(job) = live.git_jobs.pop_front() else {
+            let held = std::mem::take(&mut live.held);
+            if let Some(tx) = &live.commands {
+                for cmd in held {
+                    let _ = tx.try_send(cmd);
+                }
+            }
+            return;
+        };
+        live.git_busy = true;
+        let (store, thread, run) = (self.store.clone(), id.to_string(), job.clone());
+        live._git = Some(cx.spawn(async move |this, cx| {
+            let t = thread.clone();
+            let result = cx.background_executor().spawn(async move { git_job(&store, &t, run) }).await;
+            let _ = this.update(cx, |this, cx| this.git_done(&thread, job, result, cx));
+        }));
+    }
+
+    fn git_done(&mut self, id: &str, job: GitJob, result: anyhow::Result<usize>, cx: &mut Context<Self>) {
+        if let Some(live) = self.live.get_mut(id) {
+            live.git_busy = false;
+        }
+        match (job, result) {
+            (GitJob::Restore { repo, .. }, Ok(files)) => {
+                if files > 0 {
+                    let message = if files == 1 { "Restored 1 file".to_string() } else { format!("Restored {files} files") };
+                    cx.emit(WorkspaceEvent::Toast { message, undo: None });
+                }
+                self.refresh_git_at(repo, cx);
+                if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()) {
+                    self.refresh_git_at(cwd, cx);
+                }
+            }
+            (GitJob::Restore { .. }, Err(e)) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't restore the files: {e:#}"), undo: None }),
+            (_, Err(e)) => tracing::warn!("checkpoints of {id}: {e:#}"),
+            _ => {}
+        }
+        self.run_git(id, cx);
+    }
+
+    /// Where the agent's session will stand when the next message reaches it.
+    fn resume_point(&self, id: &str) -> Option<ResumePoint> {
+        let t = self.thread(id)?;
+        match &t.reopen {
+            Some(r) => r.point(),
+            None => {
+                let after = self.live.get(id).and_then(|l| l.mark.clone()).or_else(|| t.native_at.clone());
+                t.native_id.clone().map(|session| ResumePoint { session, after })
+            }
+        }
+    }
+
+    /// A turn is under way on `id` (working, waiting on the user, or with sub-agents still out).
+    pub fn turn_running(&self, id: &str) -> bool {
+        self.live.get(id).is_some_and(|l| l.turn_started.is_some() || l.background > 0)
+    }
+
+    /// Take `id` back to just before message `item`: it and everything after it leave the
+    /// transcript, the agent's next session doesn't know them either (`Reopen`), and with
+    /// `restore` the files go back to the checkpoint taken as it was sent. Returns the message
+    /// (text and images) for the composer; `None` when nothing was done (a turn is running).
+    pub fn rewind(&mut self, id: &str, item: &str, restore: bool, cx: &mut Context<Self>) -> Option<(String, Vec<PathBuf>)> {
+        if self.turn_running(id) {
+            cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn first.".into(), undo: None });
+            return None;
+        }
+        let thread = self.thread(id)?.clone();
+        let reopen = self.rewind_plan(id, item);
+        let checkpoints = self.store.checkpoints(id).unwrap_or_default();
+        let live = self.live.get_mut(id).filter(|l| l.loaded && !l.loading)?;
+        let pos = live.items.position(item)?;
+        let Item::User { text, images, .. } = live.items[pos].clone() else { return None };
+        let removed: HashSet<String> = live.items.ids()[pos..].iter().cloned().collect();
+        // The session goes; the next message starts one that knows only what's kept.
+        if let Some(tx) = live.commands.take() {
+            let _ = tx.try_send(Command::Shutdown);
+        }
+        live._events = None;
+        live.items.truncate(pos);
+        live.streaming = None;
+        live.reasoning = None;
+        live.permissions.clear();
+        live.picks.clear();
+        live.tasks.clear();
+        live.background = 0;
+        live.mark = match &reopen {
+            Some(Reopen::Native { at, .. }) => at.clone(),
+            _ => None,
+        };
+        if reopen == Some(Reopen::Recap) {
+            live.items.push(Item::Notice { text: recap_notice(&thread.agent) });
+        }
+        live.revision += 1;
+        if restore {
+            if let Some(c) = checkpoints.iter().find(|c| c.item_id == item) {
+                live.git_jobs.push_back(GitJob::Restore { repo: c.repo.clone(), sha: c.sha.clone() });
+            }
+        }
+        // The checkpoints of messages that left the transcript go too.
+        let mut gone: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for c in checkpoints.into_iter().filter(|c| removed.contains(&c.item_id)) {
+            gone.entry(c.repo).or_default().push(c.item_id);
+        }
+        live.git_jobs.extend(gone.into_iter().map(|(repo, items)| GitJob::Forget { repo, items }));
+        let mark = live.mark.clone();
+        self.persist_items(id, cx);
+        let same_session = matches!(reopen, Some(Reopen::Native { fork: false, .. }));
+        if let Some(old) = thread.native_id.as_deref().filter(|_| !same_session) {
+            if let Err(e) = self.store.retire_session(old, id) {
+                tracing::warn!("retire session {old}: {e}");
+            }
+        }
+        self.mutate_thread(id, cx, |t| {
+            t.reopen = reopen;
+            t.native_at = mark;
+            if !same_session {
+                t.native_id = None;
+                // The conversation goes on in a session Trek starts: the thread is Trek's own
+                // now, and imports no longer speak for it.
+                t.source = ThreadSource::Trek;
+            }
+            t.run_state = RunState::Idle;
+            t.updated_at = now_ms();
+            t.last_seen_at = t.updated_at;
+        });
+        self.run_git(id, cx);
+        Some((text, images.into_iter().map(PathBuf::from).collect()))
+    }
+
+    /// How the agent would pick up `id` if it were rewound to just before message `item`.
+    pub fn rewind_plan(&self, id: &str, item: &str) -> Option<Reopen> {
+        let thread = self.thread(id)?;
+        let live = self.live.get(id)?;
+        let pos = live.items.position(item)?;
+        let Item::User { resume, .. } = &live.items[pos] else { return None };
+        let native = trek_agents::resumes_partway(&thread.agent, thread.model.as_deref());
+        trek_core::rewind::reopen_before(&live.items[..pos], resume.as_ref(), thread.native_id.as_deref(), native)
+    }
+
+    /// The message that started the turn a `TurnEnd` (by item id) closes.
+    pub fn turn_start_item(&self, id: &str, end: &str) -> Option<String> {
+        let live = self.live.get(id)?;
+        let start = trek_core::rewind::turn_start(&live.items, live.items.position(end)?)?;
+        live.items.id_at(start).map(str::to_string)
+    }
+
+    /// Take back the turn a `TurnEnd` closes (see `rewind`).
+    pub fn undo_turn(&mut self, id: &str, end: &str, restore: bool, cx: &mut Context<Self>) -> Option<(String, Vec<PathBuf>)> {
+        let start = self.turn_start_item(id, end)?;
+        self.rewind(id, &start, restore, cx)
+    }
+
+    /// Take back the turn a `TurnEnd` closes and send its message again, with `model` if given.
+    pub fn retry(&mut self, id: &str, end: &str, model: Option<String>, restore: bool, cx: &mut Context<Self>) {
+        let Some((text, images)) = self.undo_turn(id, end, restore, cx) else { return };
+        if let Some(m) = model {
+            self.mutate_thread(id, cx, |t| t.model = Some(m));
+        }
+        self.send_to(id, text, images, cx);
+    }
+
+    /// Send an edited message in place of message `item`: the conversation is taken back to just
+    /// before it (see `rewind`), then the new text goes out. False when nothing was done.
+    pub fn edit_and_resend(&mut self, id: &str, item: &str, text: String, images: Vec<PathBuf>, restore: bool, cx: &mut Context<Self>) -> bool {
+        if self.rewind(id, item, restore, cx).is_none() {
+            return false;
+        }
+        self.send_to(id, text, images, cx);
+        true
+    }
+
+    /// Branch `id` into a new thread in the same project, with the same agent and model, holding
+    /// the conversation up to `at`; the agent's session is forked too (or, for agents that can't,
+    /// the new one gets a recap). The original is left as it is. The fork opens in the main
+    /// window. Returns its id.
+    pub fn fork_thread(&mut self, id: &str, at: ForkAt, scope: &Scope, cx: &mut Context<Self>) -> Option<String> {
+        if at == ForkAt::End && self.turn_running(id) {
+            cx.emit(WorkspaceEvent::Toast { message: "Wait for the turn to finish, or fork from an earlier message.".into(), undo: None });
+            return None;
+        }
+        self.ensure_loaded(id, cx);
+        if self.live.get(id).is_some_and(|l| l.loading) {
+            // History still being read from the agent's files: fork once it's in.
+            let (id, scope) = (id.to_string(), scope.clone());
+            let task = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(50)).await;
+                    let Ok(loading) = this.read_with(cx, |ws, _| ws.live.get(&id).is_some_and(|l| l.loading)) else { return };
+                    if !loading {
+                        break;
+                    }
+                }
+                let _ = this.update(cx, |this, cx| this.fork_thread(&id, at, &scope, cx));
+            });
+            self.tasks.push(task);
+            return None;
+        }
+        let thread = self.thread(id)?.clone();
+        let native = trek_agents::resumes_partway(&thread.agent, thread.model.as_deref());
+        let live = self.live.get(id)?;
+        let items = &live.items;
+        let (cut, point, message) = match &at {
+            ForkAt::Before(item) => {
+                let pos = items.position(item)?;
+                let Item::User { text, images, resume, .. } = &items[pos] else { return None };
+                (pos, Some(resume.clone()), Some((text.clone(), images.iter().map(PathBuf::from).collect::<Vec<_>>())))
+            }
+            ForkAt::After(end) => {
+                let pos = items.position(end)? + 1;
+                let next = items[pos..].iter().find_map(|i| if let Item::User { resume, .. } = i { Some(resume.clone()) } else { None });
+                (pos, next, None)
+            }
+            ForkAt::End => (items.len(), None, None),
+        };
+        let kept: Vec<Item> = items[..cut].to_vec();
+        let kept_ids: Vec<String> = items.ids()[..cut].to_vec();
+        let reopen = match point {
+            // Where the session stood as the first message left out was sent.
+            Some(point) => trek_core::rewind::reopen_before(&kept, point.as_ref(), None, native),
+            // The conversation as it stands: the whole session.
+            None => whole_session(&thread, live.mark.clone(), &kept, native),
+        };
+        let mut fork = match self.store.create_thread(thread.cwd.as_deref(), thread.agent.clone(), thread.model.clone(), thread.effort, thread.hand_holding) {
+            Ok(t) => t,
+            Err(e) => {
+                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't fork: {e}"), undo: None });
+                return None;
+            }
+        };
+        fork.title = format!("{} (fork)", thread.title);
+        fork.native_at = match &reopen {
+            Some(Reopen::Native { at, .. }) => at.clone(),
+            _ => None,
+        };
+        fork.reopen = reopen.clone();
+        let _ = self.store.save_thread(&fork);
+        let mut transcript = Transcript::unsaved(kept);
+        let new_ids: HashMap<&str, &str> = kept_ids.iter().map(String::as_str).zip(transcript.ids().iter().map(String::as_str)).collect();
+        // Its messages keep their checkpoints: the fork can take its files back too.
+        let mut links: HashMap<PathBuf, Vec<(String, String)>> = HashMap::new();
+        for c in self.store.checkpoints(id).unwrap_or_default() {
+            if let Some(new) = new_ids.get(c.item_id.as_str()) {
+                links.entry(c.repo).or_default().push((new.to_string(), c.sha));
+            }
+        }
+        if reopen == Some(Reopen::Recap) {
+            transcript.push(Item::Notice { text: recap_notice(&thread.agent) });
+        }
+        if let Err(e) = self.store.save_transcript(&fork.id, &mut transcript) {
+            tracing::warn!("save fork: {e}");
+        }
+        let fork_id = fork.id.clone();
+        let live = self.live.entry(fork_id.clone()).or_default();
+        live.items = transcript;
+        live.loaded = true;
+        live.mark = fork.native_at.clone();
+        live.git_jobs.extend(links.into_iter().map(|(repo, checkpoints)| GitJob::Link { repo, checkpoints }));
+        self.reload(cx);
+        match scope {
+            Scope::Main => self.navigate(Route::Thread(fork_id.clone()), cx),
+            Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
+        }
+        if let Some((text, images)) = message {
+            cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Main, thread: fork_id.clone(), text, images, edit: None });
+        }
+        self.run_git(&fork_id, cx);
+        Some(fork_id)
     }
 
     // ---------- inbox lifecycle ----------
@@ -2183,10 +2553,34 @@ impl Workspace {
             let _ = tx.try_send(Command::Shutdown);
         }
         self.live.remove(id);
+        // Its file checkpoints go with it, and its side chats' (they go too).
+        let checkpoints = self.store.checkpoints(id).unwrap_or_default();
+        let mut refs: Vec<(String, PathBuf)> = checkpoints.iter().map(|c| (id.to_string(), c.repo.clone())).collect();
+        if thread.source == ThreadSource::Trek {
+            for side in self.threads.iter().filter(|t| t.side_of.as_deref() == Some(id)) {
+                refs.extend(self.store.checkpoints(&side.id).unwrap_or_default().into_iter().map(|c| (side.id.clone(), c.repo)));
+            }
+        }
+        let refs: HashSet<(String, PathBuf)> = refs.into_iter().collect();
+        if !refs.is_empty() {
+            cx.background_executor()
+                .spawn(async move {
+                    for (thread, repo) in refs {
+                        if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread)) {
+                            tracing::warn!("drop checkpoints of {thread}: {e:#}");
+                        }
+                    }
+                })
+                .detach();
+        }
         let result = if thread.source == ThreadSource::Trek {
             self.store.delete_thread(id)
         } else {
-            self.store.clear_items(id).and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
+            let items: Vec<String> = checkpoints.into_iter().map(|c| c.item_id).collect();
+            self.store
+                .delete_checkpoints(id, &items)
+                .and_then(|_| self.store.clear_items(id))
+                .and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
         };
         if let Err(e) = result {
             cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't delete: {e}"), undo: None });
@@ -2915,6 +3309,77 @@ impl Workspace {
     }
 }
 
+/// One piece of a thread's git work (blocking). Returns how many files a restore changed.
+fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<usize> {
+    use trek_core::checkpoint::{KEEP, Repo};
+    let repo_at = |path: &std::path::Path| Repo::find(path).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", path.display()));
+    match job {
+        GitJob::Checkpoint { cwd, item } => {
+            // Folders outside git get no checkpoints.
+            let Some(repo) = Repo::find(&cwd) else { return Ok(0) };
+            let sha = repo.snapshot(thread, &item)?;
+            store.add_checkpoint(thread, &item, &repo.top, &sha)?;
+            prune_checkpoints(store, thread, KEEP)?;
+            Ok(0)
+        }
+        GitJob::Restore { repo, sha } => Ok(repo_at(&repo)?.restore(&sha)?.len()),
+        GitJob::Forget { repo, items } => {
+            if let Some(r) = Repo::find(&repo) {
+                r.delete(thread, &items)?;
+            }
+            store.delete_checkpoints(thread, &items)?;
+            Ok(0)
+        }
+        GitJob::Link { repo, checkpoints } => {
+            repo_at(&repo)?.link(thread, &checkpoints)?;
+            for (item, sha) in &checkpoints {
+                store.add_checkpoint(thread, item, &repo, sha)?;
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// Keep only `thread`'s newest `keep` checkpoints, so refs don't pile up in the repo.
+fn prune_checkpoints(store: &Store, thread: &str, keep: usize) -> anyhow::Result<()> {
+    let all = store.checkpoints(thread)?;
+    let Some(old) = all.len().checked_sub(keep).filter(|n| *n > 0).map(|n| &all[..n]) else { return Ok(()) };
+    let mut by_repo: HashMap<&std::path::Path, Vec<String>> = HashMap::new();
+    for c in old {
+        by_repo.entry(c.repo.as_path()).or_default().push(c.item_id.clone());
+    }
+    for (path, items) in by_repo {
+        if let Some(r) = trek_core::checkpoint::Repo::find(path) {
+            r.delete(thread, &items)?;
+        }
+        store.delete_checkpoints(thread, &items)?;
+    }
+    Ok(())
+}
+
+/// How a fork of `thread`'s whole conversation (`kept`) picks it up: the agent's session copied
+/// as it stands (`mark`: its latest point), or a recap.
+fn whole_session(thread: &Thread, mark: Option<String>, kept: &[Item], native: bool) -> Option<Reopen> {
+    if !kept.iter().any(|i| matches!(i, Item::User { .. })) {
+        return None;
+    }
+    // A rewind or fork not yet picked up says where the conversation stands.
+    let (session, at) = match &thread.reopen {
+        Some(Reopen::Native { session, at, .. }) => (Some(session.clone()), at.clone()),
+        Some(Reopen::Recap) => (None, None),
+        None => (thread.native_id.clone(), mark.or_else(|| thread.native_at.clone())),
+    };
+    match session {
+        Some(session) if native => Some(Reopen::Native { session, at, fork: true }),
+        _ => Some(Reopen::Recap),
+    }
+}
+
+/// Said in a transcript whose next session starts with a recap.
+fn recap_notice(agent: &AgentId) -> String {
+    format!("{} can't take its own session back to this point, so your next message starts a new session with a recap of the conversation so far.", agent.display_name())
+}
+
 /// One round of background indexing: everything waiting in the backfill, then up to 16 imported
 /// transcripts. Returns true while imported threads remain.
 fn index_step(store: &Store) -> bool {
@@ -3260,6 +3725,28 @@ mod tests {
         assert!(cost_reply(true, Some(&Billing::Plan(Some("Claude Max".into()))), 3.5).starts_with("About $3.50 at API prices so far. It's included in your Claude Max plan"));
         assert_eq!(cost_reply(true, Some(&Billing::Metered), 1.25), "This session has cost $1.25 so far.");
         assert_eq!(cost_reply(true, Some(&Billing::Local), 0.0), "This session runs on a local model, so nothing is billed.");
+    }
+
+    #[test]
+    fn only_the_newest_checkpoints_are_kept() {
+        let dir = std::env::temp_dir().join(format!("trek-prune-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        let s = Store::in_memory().unwrap();
+        let t = thread(&s, "checkpoints");
+        let repo = trek_core::checkpoint::Repo::find(&dir).unwrap();
+        for item in ["m1", "m2", "m3"] {
+            let sha = repo.snapshot(&t.id, item).unwrap();
+            s.add_checkpoint(&t.id, item, &repo.top, &sha).unwrap();
+        }
+        prune_checkpoints(&s, &t.id, 2).unwrap();
+        assert_eq!(s.checkpoints(&t.id).unwrap().into_iter().map(|c| c.item_id).collect::<Vec<_>>(), ["m2", "m3"]);
+        assert_eq!(repo.items(&t.id).unwrap(), ["m2", "m3"]);
+        prune_checkpoints(&s, &t.id, 2).unwrap();
+        assert_eq!(repo.items(&t.id).unwrap().len(), 2, "nothing past the limit: nothing goes");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

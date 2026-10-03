@@ -356,6 +356,9 @@ struct Session {
     turn_error: Option<String>,
     /// `fileChange` item id → its paths, for the approval card.
     edits: HashMap<String, String>,
+    /// A recap of the conversation for the first message: the thread couldn't be taken back to
+    /// where the conversation now ends, so this is a new one.
+    recap: Option<String>,
     /// Sub-agents by their thread id.
     agents: HashMap<String, SubAgent>,
     plan_updates: u32,
@@ -383,6 +386,7 @@ impl Session {
             drafting: None,
             turn_error: None,
             edits: HashMap::new(),
+            recap: None,
             agents: HashMap::new(),
             plan_updates: 0,
         }
@@ -478,7 +482,13 @@ impl Session {
     fn command(&mut self, cmd: Command) -> Out {
         let mut out = Out::default();
         match cmd {
-            Command::Prompt { text, images } => self.prompt(user_input(&text, &images), false, &mut out),
+            Command::Prompt { text, images } => {
+                let text = match self.recap.take() {
+                    Some(r) => crate::recap_prompt(&r, &text),
+                    None => text,
+                };
+                self.prompt(user_input(&text, &images), false, &mut out)
+            }
             Command::Interrupt => match self.turn.clone() {
                 Turn::Running(id) => {
                     let m = self.request("turn/interrupt", json!({ "threadId": self.thread_id, "turnId": id }), Call::Other);
@@ -732,6 +742,10 @@ impl Session {
         };
         self.turn_error = None;
         let failed = error.is_some();
+        // Whatever became of it, the turn is in the thread's history: one to cut back to.
+        if let Some(id) = turn["id"].as_str().filter(|id| !id.is_empty()) {
+            out.events.push(AgentEvent::Mark(id.to_string()));
+        }
         out.events.push(AgentEvent::TurnComplete { cost_usd: None, error });
         // Messages that missed this turn start the next one, and answer its plan.
         let mut late = std::mem::take(&mut self.after_turn).into_iter();
@@ -950,18 +964,33 @@ pub async fn run(
         params["config"] = json!({ "mcp_servers": mcp_servers_json(&config.mcp_servers) });
     }
     let mut lost = false;
-    let resumed = match &config.resume {
-        Some(thread_id) => {
-            let mut p = params.clone();
-            p["threadId"] = json!(thread_id);
-            p["excludeTurns"] = json!(true);
-            let id = rpc.request("thread/resume", p).await?;
+    // The thread couldn't be cut back or forked where asked: a new one, with the recap.
+    let mut cut_off = false;
+    let resumed = match opening(&config, &params) {
+        Some((method, p)) => {
+            let id = rpc.request(method, p).await?;
             match await_response(&mut lines, id, &mut backlog).await {
+                Ok(r) if method == "thread/resume" && config.resume_at.is_some() => {
+                    let (thread, at) = (r["thread"]["id"].as_str().unwrap_or_default().to_string(), config.resume_at.clone().unwrap_or_default());
+                    match cut_back(&mut rpc, &mut lines, &mut backlog, &thread, &at).await {
+                        Ok(()) => Some(r),
+                        Err(e) => {
+                            tracing::warn!("codex couldn't cut thread {thread} back to turn {at}, starting a new one: {e:#}");
+                            cut_off = true;
+                            None
+                        }
+                    }
+                }
                 Ok(r) => Some(r),
                 // Codex no longer has the thread (its rollout was deleted): carry on in a new one.
                 Err(e) if e.to_string().contains("no rollout found") => {
                     tracing::warn!("codex resume failed, starting a new thread: {e:#}");
                     lost = true;
+                    None
+                }
+                Err(e) if method == "thread/fork" || config.resume_at.is_some() => {
+                    tracing::warn!("codex fork failed, starting a new thread: {e:#}");
+                    cut_off = true;
                     None
                 }
                 Err(e) => return Err(e),
@@ -980,8 +1009,16 @@ pub async fn run(
     let mut s = Session::new(thread_id.clone(), &config, &opened, rpc.next_id);
     s.calls.insert(account_req, Call::Account);
     events.send(AgentEvent::Started { native_id: thread_id, model: s.model.clone() }).await?;
-    if lost {
+    if (lost || cut_off) && config.recap.is_some() {
+        s.recap = config.recap.clone();
+        events
+            .send(AgentEvent::Notice("Codex couldn't take its thread back to that point, so it continues in a new thread with a recap of this conversation.".into()))
+            .await?;
+    } else if lost {
         events.send(crate::lost_session("Codex")).await?;
+    } else if let Some(at) = config.resume_at.clone().filter(|_| config.resume.is_some()) {
+        // Taken back (or forked) to just after that turn: it's the latest point now.
+        events.send(AgentEvent::Mark(at)).await?;
     }
 
     let mut out = Out::default();
@@ -1021,6 +1058,62 @@ pub async fn run(
     }
     let _ = child.start_kill();
     Ok(())
+}
+
+/// The request that opens an existing thread: a fork (through `resume_at` when given), or a
+/// resume. `None` for a new thread. `params`: the session's settings, as `thread/start` takes them.
+fn opening(config: &SessionConfig, params: &Value) -> Option<(&'static str, Value)> {
+    let thread = config.resume.as_ref()?;
+    let mut p = params.clone();
+    p["threadId"] = json!(thread);
+    p["excludeTurns"] = json!(true);
+    if !config.fork {
+        return Some(("thread/resume", p));
+    }
+    if let Some(at) = &config.resume_at {
+        p["lastTurnId"] = json!(at);
+    }
+    Some(("thread/fork", p))
+}
+
+/// Scanning a thread's turns newest first (one `thread/turns/list` page at a time) for turn `at`:
+/// `Some(next)` once it's found, with the turn that followed it (`None`: it's the latest).
+/// `newer` carries the last turn seen from page to page.
+fn turn_after(page: &Value, at: &str, newer: &mut Option<String>) -> Option<Option<String>> {
+    for turn in page["data"].as_array().into_iter().flatten() {
+        let id = turn["id"].as_str().unwrap_or_default();
+        if id == at {
+            return Some(newer.clone());
+        }
+        *newer = Some(id.to_string());
+    }
+    None
+}
+
+/// Take `thread` back to just after turn `at`: the turns after it leave its history (files are
+/// Trek's business, not Codex's).
+async fn cut_back(rpc: &mut Rpc, lines: &mut RpcLines, backlog: &mut Vec<Value>, thread: &str, at: &str) -> Result<()> {
+    let mut cursor: Option<String> = None;
+    let mut newer = None;
+    let next = loop {
+        let mut p = json!({ "threadId": thread, "limit": 50, "sortDirection": "desc", "itemsView": "notLoaded" });
+        if let Some(c) = &cursor {
+            p["cursor"] = json!(c);
+        }
+        let id = rpc.request("thread/turns/list", p).await?;
+        let page = await_response(lines, id, backlog).await?;
+        if let Some(next) = turn_after(&page, at, &mut newer) {
+            break next;
+        }
+        cursor = page["nextCursor"].as_str().map(String::from);
+        if cursor.is_none() {
+            bail!("turn {at} isn't in thread {thread}");
+        }
+    };
+    // `at` is the latest turn: nothing to drop.
+    let Some(next) = next else { return Ok(()) };
+    let id = rpc.request("thread/revert", json!({ "threadId": thread, "beforeTurnId": next })).await?;
+    await_response(lines, id, backlog).await.map(|_| ())
 }
 
 /// How the login is billed, from an `account/read` result. Older Codex builds without the
@@ -1102,6 +1195,9 @@ mod tests {
             hand_holding: HandHolding::Supervised,
             plan,
             resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
             fast: None,
             mcp_servers: vec![],
         };
@@ -1124,6 +1220,75 @@ mod tests {
 
     fn turn_completes(events: &[AgentEvent]) -> usize {
         events.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).count()
+    }
+
+    #[test]
+    fn rewinds_and_forks_open_the_thread_where_asked() {
+        let params = json!({ "cwd": "/tmp/x", "sandbox": "read-only", "approvalPolicy": "on-request", "approvalsReviewer": "user", "model": "gpt-5.6-luna" });
+        let mut config = session_config(None);
+        assert_eq!(opening(&config, &params), None, "a new thread starts");
+        config.resume = Some("t1".into());
+        let (method, p) = opening(&config, &params).unwrap();
+        assert_eq!(method, "thread/resume");
+        assert_eq!((p["threadId"].as_str(), p["model"].as_str(), p["excludeTurns"].as_bool()), (Some("t1"), Some("gpt-5.6-luna"), Some(true)));
+        // Cut back in place: resumed, then reverted (`cut_back`).
+        config.resume_at = Some("turn-1".into());
+        assert_eq!(opening(&config, &params).unwrap().0, "thread/resume");
+        // A fork through a turn keeps the session's settings.
+        config.fork = true;
+        let (method, p) = opening(&config, &params).unwrap();
+        assert_eq!(method, "thread/fork");
+        assert_eq!((p["threadId"].as_str(), p["lastTurnId"].as_str(), p["sandbox"].as_str(), p["cwd"].as_str()), (Some("t1"), Some("turn-1"), Some("read-only"), Some("/tmp/x")));
+        config.resume_at = None;
+        assert!(opening(&config, &params).unwrap().1.get("lastTurnId").is_none(), "a whole fork");
+    }
+
+    #[test]
+    fn the_turn_after_a_point_is_found_page_by_page() {
+        // Recorded `thread/turns/list` (newest first, two a page) over three turns, and the
+        // thread after `thread/revert` dropped the last two.
+        let pages = fixture(include_str!("../fixtures/codex-turns-pages.jsonl"));
+        let (first, second, third) = ("01a100af-e7ff-7e13-9471-146425462502", "01a100b0-190f-7d31-9329-a1b44ce180d0", "01a100b0-28bc-7fb2-8882-ec579ddc4ccd");
+        // The first turn is on the second page; the turn after it is on the first.
+        let mut newer = None;
+        assert_eq!(turn_after(&pages[0]["result"], first, &mut newer), None);
+        assert!(pages[0]["result"]["nextCursor"].is_string());
+        assert_eq!(turn_after(&pages[1]["result"], first, &mut newer), Some(Some(second.to_string())));
+        // The latest turn has nothing after it.
+        assert_eq!(turn_after(&pages[0]["result"], third, &mut None), Some(None));
+        assert_eq!(turn_after(&pages[0]["result"], second, &mut None), Some(Some(third.to_string())));
+        // Reverting before the second turn left only the first.
+        let left: Vec<&str> = pages[2]["result"]["data"].as_array().unwrap().iter().filter_map(|t| t["id"].as_str()).collect();
+        assert_eq!(left, [first]);
+    }
+
+    #[test]
+    fn a_thread_that_couldnt_be_cut_back_gets_the_recap_with_its_first_message() {
+        let mut s = session("t", false);
+        s.recap = Some("User: remember APPLE\n\nAssistant: OK".into());
+        let first = s.command(prompt("which word?"));
+        let text = first.send[0]["params"]["input"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_string();
+        assert!(text.contains("<recap>\nUser: remember APPLE") && text.ends_with("which word?"), "{text}");
+        s.incoming(&json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn-1","status":"completed","items":[]}}}));
+        let next = s.command(prompt("and now?"));
+        assert_eq!(next.send[0]["params"]["input"].as_array().unwrap().last().unwrap()["text"], "and now?", "only the first message carries it");
+    }
+
+    fn session_config(resume: Option<&str>) -> SessionConfig {
+        SessionConfig {
+            agent: AgentId::Codex,
+            cwd: "/tmp/x".into(),
+            model: Some("gpt-5.6-luna".into()),
+            effort: Effort::Low,
+            hand_holding: HandHolding::Supervised,
+            plan: false,
+            resume: resume.map(String::from),
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+        }
     }
 
     #[test]
@@ -1215,8 +1380,9 @@ mod tests {
         assert!(!out.events.iter().any(|e| matches!(e, AgentEvent::TextDelta(_) | AgentEvent::TextDone(_))));
         assert_eq!(out.events[0], AgentEvent::ToolStarted { id: row.into(), title: "Plan".into(), detail: "Add `hello.txt`".into() });
         let n = out.events.len();
-        assert_eq!(n, 4);
-        assert!(matches!(&out.events[n - 3], AgentEvent::ToolFinished { id, output, ok: true } if id == row && output.starts_with("# Add `hello.txt`\n\n## Summary")));
+        assert_eq!(n, 5);
+        assert!(matches!(&out.events[n - 4], AgentEvent::ToolFinished { id, output, ok: true } if id == row && output.starts_with("# Add `hello.txt`\n\n## Summary")));
+        assert!(matches!(&out.events[n - 3], AgentEvent::Mark(_)), "the finished turn is a point to cut back to");
         assert_eq!(out.events[n - 2], AgentEvent::TurnComplete { cost_usd: None, error: None });
         let AgentEvent::PermissionRequest { request_id, prompt: Some(Prompt::Plan(plan)), .. } = &out.events[n - 1] else { panic!() };
         assert!(plan.contains("Hello, world!"));
@@ -1250,6 +1416,9 @@ mod tests {
             hand_holding: HandHolding::Supervised,
             plan: false,
             resume: Some("t".into()),
+            resume_at: None,
+            fork: false,
+            recap: None,
             fast: None,
             mcp_servers: vec![],
         };
@@ -1450,7 +1619,7 @@ mod tests {
         let out = s.incoming(&json!({"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}));
         assert_eq!(out.send, vec![json!({"id":4,"method":"turn/interrupt","params":{"threadId":"t","turnId":"turn-1"}})]);
         let done = s.incoming(&json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn-1","status":"interrupted","items":[]}}}));
-        assert_eq!(done.events, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }]);
+        assert_eq!(done.events, vec![AgentEvent::Mark("turn-1".into()), AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }]);
     }
 
     #[test]
@@ -1461,7 +1630,7 @@ mod tests {
         let out = feed(&mut s, &lines);
         assert_eq!(
             out.events,
-            vec![AgentEvent::TurnComplete {
+            vec![AgentEvent::Mark("01a0fe5b-cec1-72d0-a342-0bdf8326949a".into()), AgentEvent::TurnComplete {
                 cost_usd: None,
                 error: Some("The 'gpt-nope-9' model is not supported when using Codex with a ChatGPT account.".into())
             }]
@@ -1515,6 +1684,9 @@ mod tests {
             hand_holding: HandHolding::Supervised,
             plan: true,
             resume: Some("t".into()),
+            resume_at: None,
+            fork: false,
+            recap: None,
             fast: None,
             mcp_servers: vec![],
         };

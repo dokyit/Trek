@@ -89,7 +89,7 @@ fn deleting_removes_trek_threads_and_hides_imported_ones() {
             t.source = ThreadSource::ClaudeCode;
             t.native_id = Some("abc".into());
             ws.store.save_thread(&t).unwrap();
-            store_items(&ws.store, &t.id, vec![Item::User { text: "hi".into(), images: vec![], at: None }]);
+            store_items(&ws.store, &t.id, vec![Item::User { text: "hi".into(), images: vec![], at: None, resume: None }]);
             ws.reload(cx);
             t.id
         });
@@ -194,7 +194,7 @@ fn turns_an_earlier_run_left_open_are_closed_at_launch() {
         };
         let (working, asking) = (left_open(RunState::Working), left_open(RunState::NeedsYou));
         let tool = |status| Item::Tool { id: "t1".into(), title: "Run command".into(), detail: "./scripts/migrate.sh".into(), output: String::new(), status };
-        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1) };
+        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1), resume: None };
         store_items(&store, &working, vec![user.clone(), tool(ToolStatus::Running)]);
         store_items(&store, &asking, vec![user.clone()]);
 

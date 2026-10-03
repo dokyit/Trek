@@ -306,6 +306,31 @@ pub fn menu_surface(cx: &App) -> Div {
         .shadow_lg()
 }
 
+/// A checkbox and its label, as the question card draws its multiple-choice boxes.
+pub fn check_row(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, disabled: bool, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    let ember = crate::palette::ember(cx);
+    h_flex()
+        .id(id)
+        .gap(px(8.))
+        .text_size(px(12.5))
+        .when(!disabled, |el| el.cursor_pointer())
+        .when(disabled, |el| el.opacity(0.55))
+        .child(
+            div()
+                .size(px(14.))
+                .flex_none()
+                .rounded(px(3.))
+                .border_1()
+                .border_color(if on { ember } else { theme.foreground.opacity(0.3) })
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |el| el.child(div().size(px(7.)).rounded(px(1.)).bg(ember))),
+        )
+        .child(label.into())
+}
+
 /// A row inside a menu surface.
 pub fn menu_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();

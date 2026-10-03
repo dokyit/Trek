@@ -111,15 +111,10 @@ fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> 
     control_response(request_id, json!({ "behavior": "allow", "updatedInput": input }))
 }
 
-pub async fn run(
-    config: SessionConfig,
-    commands: async_channel::Receiver<Command>,
-    events: async_channel::Sender<AgentEvent>,
-) -> Result<()> {
-    let bin = detect::which("claude").context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
+/// The CLI's arguments for a session (MCP servers aside).
+fn cli_args(config: &SessionConfig) -> Vec<String> {
     let mode = if config.plan { "plan" } else { config.hand_holding.claude_mode() };
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args([
+    let mut args: Vec<String> = [
         "-p",
         "--input-format",
         "stream-json",
@@ -133,19 +128,62 @@ pub async fn run(
         mode,
         // Lets Trek switch a running session to Full access; it doesn't change the starting mode.
         "--allow-dangerously-skip-permissions",
-    ]);
+    ]
+    .map(String::from)
+    .to_vec();
+    let flag = |args: &mut Vec<String>, flag: &str, value: &str| args.extend([flag.to_string(), value.to_string()]);
     if let Some(model) = &config.model {
-        cmd.args(["--model", model]);
+        flag(&mut args, "--model", model);
     }
     if config.effort != Effort::Off {
-        cmd.args(["--effort", config.effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]).as_str()]);
+        flag(&mut args, "--effort", config.effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]).as_str());
     }
     if let Some(id) = &config.resume {
-        cmd.args(["--resume", id]);
+        flag(&mut args, "--resume", id);
+        // Keeps the conversation up to that message; what came after it is gone for the model.
+        if let Some(at) = &config.resume_at {
+            flag(&mut args, "--resume-session-at", at);
+        }
+        if config.fork {
+            args.push("--fork-session".into());
+        }
     }
     if config.fast.is_some() {
-        cmd.args(["--settings", r#"{"fastMode":true}"#]);
+        flag(&mut args, "--settings", r#"{"fastMode":true}"#);
     }
+    args
+}
+
+/// A session to cut back that isn't on disk with that message (deleted, or the message is from
+/// a session Claude Code no longer has) starts afresh instead, with the recap.
+async fn check_resume_point(mut config: SessionConfig) -> (SessionConfig, Option<String>) {
+    let (Some(id), Some(at)) = (config.resume.clone(), config.resume_at.clone()) else { return (config, None) };
+    let found = tokio::task::spawn_blocking(move || trek_core::import::claude::has_message(&id, &at)).await.unwrap_or(false);
+    if found {
+        return (config, None);
+    }
+    tracing::warn!("claude: session {:?} has no message {:?} to resume at; starting afresh", config.resume, config.resume_at);
+    config.resume = None;
+    config.resume_at = None;
+    config.fork = false;
+    let recap = config.recap.take();
+    (config, recap)
+}
+
+pub async fn run(
+    config: SessionConfig,
+    commands: async_channel::Receiver<Command>,
+    events: async_channel::Sender<AgentEvent>,
+) -> Result<()> {
+    let bin = detect::which("claude").context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
+    let (config, mut recap) = check_resume_point(config).await;
+    if recap.is_some() {
+        let _ = events
+            .send(AgentEvent::Notice("Claude Code couldn't take its session back to that point, so it continues in a new session with a recap of this conversation.".into()))
+            .await;
+    }
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(cli_args(&config));
     // Lives as long as the session; removed on drop.
     let _mcp_file = if config.mcp_servers.is_empty() {
         None
@@ -182,6 +220,8 @@ pub async fn run(
     // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
     let mut planning = config.plan;
     let mut in_turn = false;
+    // Resumed partway: once the session has said which it is, that message is its latest point.
+    let mut resumed_at = config.resume_at.clone();
 
     loop {
         tokio::select! {
@@ -191,6 +231,10 @@ pub async fn run(
                     Command::Prompt { text, images } => {
                         streamed_text = false;
                         in_turn = true;
+                        let text = match recap.take() {
+                            Some(r) => crate::recap_prompt(&r, &text),
+                            None => text,
+                        };
                         let (content, errors) = user_content(&text, &images);
                         for e in errors {
                             let _ = events.send(AgentEvent::Error(e)).await;
@@ -268,8 +312,12 @@ pub async fn run(
                     continue;
                 }
                 for ev in translate(&v, &mut pending, &mut streamed_text) {
+                    let started = matches!(ev, AgentEvent::Started { .. });
                     if events.send(ev).await.is_err() {
                         return Ok(());
+                    }
+                    if let Some(at) = resumed_at.take_if(|_| started) {
+                        let _ = events.send(AgentEvent::Mark(at)).await;
                     }
                 }
                 if v["type"] == "result" {
@@ -380,6 +428,11 @@ impl Drop for TempFile {
     }
 }
 
+/// A message of the conversation is a point `--resume-session-at` can cut it back to.
+fn mark(v: &Value) -> Option<AgentEvent> {
+    v["uuid"].as_str().filter(|u| !u.is_empty()).map(|u| AgentEvent::Mark(u.to_string()))
+}
+
 fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mut bool) -> Vec<AgentEvent> {
     let mut out = Vec::new();
     match v["type"].as_str() {
@@ -446,6 +499,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                     _ => {}
                 }
             }
+            out.extend(mark(v));
         }
         Some("user") if v["parent_tool_use_id"].is_null() => {
             for block in v["message"]["content"].as_array().into_iter().flatten() {
@@ -462,6 +516,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                     });
                 }
             }
+            out.extend(mark(v));
         }
         Some("result") => out.push(AgentEvent::TurnComplete {
             cost_usd: v["total_cost_usd"].as_f64(),
@@ -697,6 +752,66 @@ mod tests {
     fn todo_rows_name_the_active_step() {
         let input = json!({"todos":[{"content":"Read code","status":"completed","activeForm":"Reading code"},{"content":"Fix bug","status":"in_progress","activeForm":"Fixing the bug"}]});
         assert_eq!(tool_title("TodoWrite", &input), ("Update plan".into(), "Fixing the bug".into()));
+    }
+
+    fn config() -> SessionConfig {
+        SessionConfig {
+            agent: trek_core::AgentId::ClaudeCode,
+            cwd: "/tmp".into(),
+            model: Some("claude-haiku-4-5".into()),
+            effort: Effort::Low,
+            hand_holding: HandHolding::Supervised,
+            plan: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+        }
+    }
+
+    /// `flag value` pairs and lone flags in `args`.
+    fn has(args: &[String], want: &[&str]) -> bool {
+        args.windows(want.len()).any(|w| w.iter().zip(want).all(|(a, b)| a == b))
+    }
+
+    #[test]
+    fn resuming_partway_and_forking_pass_the_cli_flags() {
+        let mut c = config();
+        c.resume = Some("s1".into());
+        c.resume_at = Some("m7".into());
+        c.fork = true;
+        let args = cli_args(&c);
+        assert!(has(&args, &["--resume", "s1"]) && has(&args, &["--resume-session-at", "m7"]) && has(&args, &["--fork-session"]), "{args:?}");
+        // In place: the same session, cut back.
+        c.fork = false;
+        let args = cli_args(&c);
+        assert!(has(&args, &["--resume-session-at", "m7"]) && !has(&args, &["--fork-session"]));
+        // A whole fork.
+        c.resume_at = None;
+        c.fork = true;
+        let args = cli_args(&c);
+        assert!(has(&args, &["--resume", "s1"]) && has(&args, &["--fork-session"]) && !args.iter().any(|a| a == "--resume-session-at"));
+        // Nothing to resume: neither applies.
+        let args = cli_args(&config());
+        assert!(!args.iter().any(|a| a.starts_with("--resume") || a == "--fork-session"));
+    }
+
+    #[test]
+    fn every_message_is_a_point_to_resume_at() {
+        // Recorded: `--resume <id> --resume-session-at <the first answer> --fork-session`, then
+        // "list every word I asked you to remember" (claude-haiku-4-5): the copy knows only the
+        // first turn's word.
+        let lines = fixture(include_str!("../fixtures/claude-fork-at.jsonl"));
+        let ev: Vec<AgentEvent> = lines.iter().flat_map(|v| translate(v, &mut HashMap::new(), &mut false)).collect();
+        assert!(matches!(&ev[0], AgentEvent::Started { native_id, .. } if native_id == "02c2cd16-37a1-48fa-967e-cc54689d7ac7"));
+        let marks: Vec<&str> = ev.iter().filter_map(|e| if let AgentEvent::Mark(m) = e { Some(m.as_str()) } else { None }).collect();
+        assert_eq!(marks, ["d4baf339-bf60-4409-88f1-7f71f5b0ed8f", "079acfb9-e65d-471d-ad28-b5603f1d9e57"]);
+        assert!(ev.contains(&AgentEvent::TextDone("APPLE".into())));
+        // The mark follows its message's events, so the latest is the answer itself.
+        let done = ev.iter().position(|e| *e == AgentEvent::TextDone("APPLE".into())).unwrap();
+        assert_eq!(ev[done + 1], AgentEvent::Mark("079acfb9-e65d-471d-ad28-b5603f1d9e57".into()));
     }
 
     #[test]
