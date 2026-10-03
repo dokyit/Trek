@@ -360,10 +360,17 @@ impl Recap {
         self.models.first()
     }
 
-    /// Share of the reported tokens `m` used, in percent.
+    /// Share of the reported tokens `m` used, in percent. 100 only when it used them all, and
+    /// never 0 when it used some: "100%, ahead of …" would contradict itself.
     pub fn token_share(&self, m: &ModelShare) -> Option<u32> {
         let total: u64 = self.models.iter().map(|m| m.tokens).sum();
-        (total > 0 && m.tokens > 0).then(|| ((m.tokens as f64 / total as f64) * 100.).round() as u32)
+        if total == 0 || m.tokens == 0 {
+            return None;
+        }
+        if m.tokens >= total {
+            return Some(100);
+        }
+        Some((((m.tokens as f64 / total as f64) * 100.).round() as u32).clamp(1, 99))
     }
 
     /// Tokens weren't reported for every thread that worked.
@@ -622,6 +629,21 @@ mod tests {
     }
 
     #[test]
+    fn a_share_rounds_to_all_or_none_only_when_it_is() {
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let window = Range::Today.window(&now(&tz, "2026-10-03 22:30"));
+        let mut r = Recap::compute(window, at(&tz, "2026-10-03 22:30"), &day(&tz));
+        let share = |agent: AgentId, tokens| ModelShare { agent, model: None, tokens, turns: 1 };
+        r.models = vec![share(AgentId::ClaudeCode, 111_000_000), share(AgentId::Codex, 4_000)];
+        assert_eq!(r.token_share(&r.models[0]), Some(99), "another model used some");
+        assert_eq!(r.token_share(&r.models[1]), Some(1));
+        let said = r.narrative(|a, _| a.display_name()).iter().map(|s| format!("{s:?}")).collect::<String>();
+        assert!(said.contains("99%") && !said.contains("100%"), "{said}");
+        r.models.truncate(1);
+        assert_eq!(r.token_share(&r.models[0]), Some(100));
+    }
+
+    #[test]
     fn a_day_adds_up_across_agents_models_and_projects() {
         let tz = FixedOffset::east_opt(2 * 3600).unwrap();
         let window = Range::Today.window(&now(&tz, "2026-10-03 22:30"));
@@ -636,6 +658,7 @@ mod tests {
         let models: Vec<(Option<&str>, u64, usize)> = r.models.iter().map(|m| (m.model.as_deref(), m.tokens, m.turns)).collect();
         assert_eq!(models, [(Some("gpt-6-astra"), 770_000, 2), (Some("claude-opus-5-5"), 200_000, 1), (Some("claude-haiku-4-5-20251001"), 30_000, 0), (None, 0, 1)]);
         assert_eq!(r.token_share(&r.models[0]), Some(77));
+        assert_eq!(r.token_share(&r.models[3]), None, "reported no tokens");
         // 24 hourly buckets; the 09:05 turn ran 09:05–09:35, the peak.
         assert_eq!(r.buckets.len(), 24);
         assert_eq!(r.buckets[9].agent_secs, 1_800);

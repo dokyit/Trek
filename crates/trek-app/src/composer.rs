@@ -1602,6 +1602,8 @@ impl Composer {
             .child(v_flex().mt(px(6.)).border_t_1().border_color(hairline).child(rail_row).child(list))
             .child(
                 v_flex()
+                    // The switches hug their options: stretched, they'd trail an empty track.
+                    .items_start()
                     .gap(px(8.))
                     .px(px(10.))
                     .pt(px(10.))
