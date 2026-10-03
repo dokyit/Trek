@@ -35,7 +35,15 @@ trek_codesign_bundle() {
     [[ "${exe:t}" == "$main" ]] && continue
     codesign --force --sign "$id" "$exe"
   done
-  codesign --force --sign "$id" "$app"
+  # In a synced folder (iCloud Documents) the file provider can put Finder metadata back on the
+  # bundle between clearing it and signing, and codesign refuses "detritus": clear it, try again.
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    xattr -cr "$app"
+    codesign --force --sign "$id" "$app" 2>/dev/null && break
+    # The last try keeps codesign's error and, failing, stops the build.
+    (( attempt < 5 )) || codesign --force --sign "$id" "$app"
+  done
   # Not --strict: in a synced folder (iCloud Documents) Finder metadata can land on the bundle
   # right after signing. Release archives leave extended attributes out, and the updater checks
   # the unpacked copy strictly.
