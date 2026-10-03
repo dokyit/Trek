@@ -341,7 +341,7 @@ mod tests {
         session(&conn, "c-t3", "/Users/me/app", "T3 Code 8e72d07c-b653-46c1-ade2-27747b6b23a3", None);
         ask(&conn, "c-t3", "m4", "Summarize the project", 10);
         ask(&conn, "c-t3", "m5", "and the open issues", 20);
-        session(&conn, "d-empty", "/Users/tobias", "New session - 2026-10-02T19:55:56.192Z", None);
+        session(&conn, "d-empty", "/Users/someone", "New session - 2026-10-02T19:55:56.192Z", None);
         session(&conn, "e-child", "/Users/me/app", "Explore codebase (@explore subagent)", Some("a-titled"));
         ask(&conn, "e-child", "m6", "explore", 10);
         session(&conn, "f-namer", "/Users/me/app", "New session - 2026-09-09T18:27:20.681Z", None);
