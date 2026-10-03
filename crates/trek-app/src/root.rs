@@ -32,6 +32,8 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
+    /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `mascot::force_active`).
+    _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -76,6 +78,8 @@ impl TrekWindow {
                     let path = path.clone();
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
                 }
+                // The transcript views redraw themselves.
+                WorkspaceEvent::Transcript { .. } => {}
             }),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
             cx.observe_window_appearance(window, |this, window, cx| {
@@ -92,6 +96,16 @@ impl TrekWindow {
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
         }
+        // A display link's worth of frame requests (60 Hz) while macOS hides the window, so a
+        // measurement covers drawing too. GPUI draws only when something changed.
+        let hidden_frames = crate::mascot::force_active().then(|| {
+            cx.spawn_in(window, async move |_, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_micros(16_667)).await;
+                if cx.update(|window, _| crate::system::display_if_hidden(window)).is_err() {
+                    break;
+                }
+            })
+        });
         Self {
             workspace,
             sidebar,
@@ -105,6 +119,7 @@ impl TrekWindow {
             onboarding,
             composer_changed: true,
             panel_drag: None,
+            _hidden_frames: hidden_frames,
             _subscriptions: subscriptions,
         }
     }

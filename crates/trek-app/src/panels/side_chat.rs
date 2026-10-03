@@ -1,6 +1,6 @@
 //! Side chat: a quick, separate conversation next to the main thread (same project, own session).
 
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -31,6 +31,14 @@ impl SideChatPanel {
                 }
                 this.scroll.scroll_to_bottom();
                 cx.notify();
+            }),
+            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
+                if let WorkspaceEvent::Transcript { id, .. } = event
+                    && this.thread_id.as_ref() == Some(id)
+                {
+                    this.scroll.scroll_to_bottom();
+                    cx.notify();
+                }
             }),
             cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -142,6 +150,7 @@ impl Render for SideChatPanel {
                 div().p_2().border_t_1().border_color(theme.border).child(
                     div()
                         .id("side-input")
+                        .test_support()
                         .px_2()
                         .py_1()
                         .rounded(px(12.))

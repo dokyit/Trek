@@ -35,11 +35,15 @@ script/bundle.sh [--install]     # release Trek.app + update archive + manifest 
 **UI tests** (`crates/trek-app/src/tests`) run Trek's real window and views on GPUI's headless test
 platform against an in-memory database and a throwaway data folder (the Keychain stays untouched),
 with the **mock agent** standing in for real ones. `cargo test -p trek-app -- --ignored --nocapture
-rendering_cost` prints what a working-animation frame costs and how fast a 2,000-item thread opens.
+rendering_cost` prints what a working-animation frame and a batch of streamed text cost, and how fast
+a 2,000-item thread opens. Those numbers cover layout and painting only (the test platform has no
+GPU). For the whole cost, drawing included, run a build with `TREK_LAUNCH_BEHIND=1
+TREK_FORCE_ACTIVE=1 TREK_MOCK_AGENT=1 TREK_MOCK_PROMPT="mock:long 60s"` and a throwaway
+`TREK_DATA_DIR`, and sample it with `top -pid`: it keeps drawing behind other windows.
 
 **Mock agent** (`trek-agents/src/mock.rs`): a scripted agent with no process or network. Each prompt
 plays a script picked by a keyword: none (a streamed markdown answer), `tools`, `subagents 5s`,
-`permission`, `question`, `plan`, `mock:long 30s`, `error`. Development switches:
+`permission`, `question`, `plan`, `mock:long 30s`, `mock:stream 30s`, `error`. Development switches:
 
 | Variable | Effect |
 | --- | --- |
@@ -47,4 +51,4 @@ plays a script picked by a keyword: none (a streamed markdown answer), `tools`, 
 | `TREK_MOCK_AGENT=1` | offer "Mock agent" in the pickers |
 | `TREK_MOCK_PROMPT="mock:long 60s"` | with the mock on, start a mock thread at launch |
 | `TREK_LAUNCH_BEHIND=1` | open the window behind other apps without taking focus |
-| `TREK_FORCE_ACTIVE=1` | run the working animation as if the window were in front |
+| `TREK_FORCE_ACTIVE=1` | run the working animation as if the window were in front, and keep drawing while it's covered (for measurements) |

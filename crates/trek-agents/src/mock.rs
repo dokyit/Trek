@@ -10,6 +10,7 @@
 //! | `question`                   | multiple-choice questions                                     |
 //! | `plan` (or plan mode)        | a plan to approve before any change                          |
 //! | `mock:long` [dur]            | a long build that runs `dur` (default 30s)                   |
+//! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
 //! | `error`                      | a turn that fails                                             |
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
@@ -55,6 +56,7 @@ enum Script {
     Questions,
     Plan,
     Long(Duration),
+    Stream(Duration),
     Error,
 }
 
@@ -69,8 +71,9 @@ impl Script {
         let found = words.iter().enumerate().find_map(|(i, w)| {
             let key = w.strip_prefix("mock:").unwrap_or(w);
             Some(match key {
-                // Bare "long" is too common a word to start a 30-second turn.
+                // Bare "long" and "stream" are too common to start a 30-second turn.
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
+                "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "error" => Script::Error,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
@@ -88,16 +91,37 @@ impl Script {
     }
 }
 
-/// `500ms`, `30s`, `2m`.
+/// The title a thread gets after its first turn: the mock names it after its script instead of
+/// asking a model.
+pub fn title(request: &str) -> String {
+    match Script::parse(request, false) {
+        Script::Answer => "How the app starts",
+        Script::Tools => "Add a verbose flag",
+        Script::Agents(_) => "Scout the routes and error handling",
+        Script::Permission => "Apply the schema migrations",
+        Script::Questions => "Choose a database",
+        Script::Plan => "Require a session on every route",
+        Script::Long(_) => "Run the full test suite",
+        Script::Stream(_) => "Walk through the codebase",
+        Script::Error => "Fix the failing build",
+    }
+    .into()
+}
+
+/// The longest duration a prompt can ask for.
+const MAX_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `500ms`, `30s`, `2m`, at most a day.
 fn parse_duration(s: &str) -> Option<Duration> {
     let (num, unit) = s.find(|c: char| !c.is_ascii_digit()).map(|i| s.split_at(i))?;
     let n: u64 = num.parse().ok()?;
-    match unit {
-        "ms" => Some(Duration::from_millis(n)),
-        "s" => Some(Duration::from_secs(n)),
-        "m" => Some(Duration::from_secs(n * 60)),
-        _ => None,
-    }
+    let d = match unit {
+        "ms" => Duration::from_millis(n),
+        "s" => Duration::from_secs(n),
+        "m" => Duration::from_secs(n.saturating_mul(60)),
+        _ => return None,
+    };
+    Some(d.min(MAX_DURATION))
 }
 
 /// Why a turn stopped early.
@@ -212,6 +236,7 @@ impl Session {
             Script::Questions => self.questions().await?,
             Script::Plan => self.plan_turn().await?,
             Script::Long(total) => self.long(total).await?,
+            Script::Stream(total) => self.stream(total).await?,
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -461,6 +486,27 @@ impl Session {
         self.emit(AgentEvent::ToolFinished { id, output: TEST_OUTPUT.into(), ok: true }).await?;
         self.say(&format!("The full suite passed after {} — nothing to fix.", humanize(total))).await
     }
+
+    /// One long answer, streamed a token at a time (as `say` does) for `total`: section after
+    /// section of markdown with lists, code and paths.
+    async fn stream(&mut self, total: Duration) -> Step {
+        let end = tokio::time::Instant::now() + total;
+        let mut text = String::new();
+        let mut part = 0;
+        loop {
+            part += 1;
+            let section = format!("{}## Part {part}\n\n{}\n\n", if part == 1 { "" } else { "\n" }, if part % 2 == 1 { ANSWER } else { PLAN });
+            for chunk in tokens(&section) {
+                self.emit(AgentEvent::TextDelta(chunk.into())).await?;
+                text.push_str(chunk);
+                if tokio::time::Instant::now() >= end {
+                    return self.emit(AgentEvent::TextDone(text)).await;
+                }
+                // Real time, not the pace: the prompt asked for this long.
+                self.pause(Duration::from_millis(14)).await?;
+            }
+        }
+    }
 }
 
 fn humanize(d: Duration) -> String {
@@ -510,6 +556,8 @@ mod tests {
         assert_eq!(Script::parse("mock:long 2s", false), Script::Long(Duration::from_secs(2)));
         assert_eq!(Script::parse("mock:long", false), Script::Long(Duration::from_secs(30)));
         assert_eq!(Script::parse("how long is it?", false), Script::Answer, "bare `long` is just a word");
+        assert_eq!(Script::parse("mock:stream 2m", false), Script::Stream(Duration::from_secs(120)));
+        assert_eq!(Script::parse("stream the logs", false), Script::Answer);
         assert_eq!(Script::parse("send subagents 300ms", false), Script::Agents(Some(Duration::from_millis(300))));
         assert_eq!(Script::parse("ask a question", false), Script::Questions);
         assert_eq!(Script::parse("mock:permission", false), Script::Permission);
@@ -523,6 +571,17 @@ mod tests {
         assert_eq!(parse_duration("2m"), Some(Duration::from_secs(120)));
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration("10"), None);
+        // Huge values are capped rather than overflowing.
+        assert_eq!(parse_duration("999999999999999999m"), Some(MAX_DURATION));
+        assert_eq!(parse_duration("99999999999s"), Some(MAX_DURATION));
+        assert_eq!(parse_duration("99999999999999999999999s"), None, "not a u64");
+    }
+
+    #[test]
+    fn titles_follow_the_script() {
+        assert_eq!(title("explain the startup"), "How the app starts");
+        assert_eq!(title("mock:long 5s"), "Run the full test suite");
+        assert_eq!(title("ask a question"), "Choose a database");
     }
 
     #[test]
@@ -678,11 +737,27 @@ mod tests {
             let events = m.turn().await;
             assert!(text(&events).contains("Noted — use tabs"));
             assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
-            m.prompt("mock:long 30s").await;
+            // As long as a prompt can ask for: the turn runs (no overflow) until stopped.
+            m.prompt("mock:long 99999999999s").await;
             m.until(|e| matches!(e, AgentEvent::ToolStarted { .. })).await;
             m.send(Command::Interrupt).await;
             let events = m.turn().await;
             assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }));
+        });
+    }
+
+    #[test]
+    fn streams_one_answer_for_as_long_as_asked() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            let start = std::time::Instant::now();
+            m.prompt("mock:stream 300ms").await;
+            let events = m.turn().await;
+            assert!(start.elapsed() >= Duration::from_millis(300));
+            let streamed: String = events.iter().filter_map(|e| if let AgentEvent::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
+            assert!(streamed.starts_with("## Part 1\n\n## How the app starts"), "{streamed}");
+            assert_eq!(text(&events), streamed, "one message, sent whole at the end");
+            assert!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta(_))).count() > 10);
         });
     }
 

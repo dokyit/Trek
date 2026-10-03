@@ -3,7 +3,7 @@
 //! the composer is its own view (`working_bar`).
 
 use crate::palette;
-use crate::workspace::{Route, Workspace};
+use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::spinner::Spinner;
@@ -101,8 +101,8 @@ pub struct ThreadView {
     current: Option<String>,
     revision: u64,
     count: usize,
-    /// Markdown documents by transcript index, with the byte length already pushed. Built when a
-    /// row is first drawn, so opening a long thread doesn't parse all of it.
+    /// Markdown documents by transcript index, with the text they hold. Built when a row is first
+    /// drawn, so opening a long thread doesn't parse all of it.
     md: HashMap<usize, Markdown>,
     expanded: HashSet<usize>,
     /// Picks so far for the question card on screen: (request, question index) → chosen labels.
@@ -121,14 +121,16 @@ pub struct ThreadView {
 
 struct Markdown {
     state: Entity<TextViewState>,
-    pushed: usize,
+    /// The text the document holds. Items can move to another index (empty thoughts are dropped
+    /// when a turn ends), so a document only takes the tail of text that extends this.
+    text: String,
     /// Parsing finishes in the background and streamed text fades in; this view is cached, so it
     /// re-renders when the document says so.
     _changed: Subscription,
 }
 
 /// The workspace state the transcript is drawn from.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Shown {
     route: Route,
     revision: u64,
@@ -140,7 +142,15 @@ struct Shown {
 impl ThreadView {
     pub fn new(workspace: Entity<Workspace>, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
-        let subscriptions = vec![cx.observe(&workspace, |this, _, cx| this.sync(cx)), cx.observe(&scroller, |_, _, cx| cx.notify())];
+        let subscriptions = vec![
+            cx.observe(&workspace, |this, _, cx| this.sync(false, cx)),
+            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
+                if let WorkspaceEvent::Transcript { appended, .. } = event {
+                    this.sync(*appended, cx);
+                }
+            }),
+            cx.observe(&scroller, |_, _, cx| cx.notify()),
+        ];
         let mut this = Self {
             workspace,
             scroller,
@@ -157,12 +167,15 @@ impl ThreadView {
             shown: None,
             _subscriptions: subscriptions,
         };
-        this.sync(cx);
+        this.sync(false, cx);
         this
     }
 
     /// Bring row state in line with the workspace transcript without rebuilding everything.
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    /// `appended`: only text was added to the messages already streaming. Their documents redraw
+    /// this view once the new text is parsed, so it doesn't redraw before that (it would show the
+    /// same text again).
+    fn sync(&mut self, appended: bool, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
         let id = match &ws.route {
             Route::Thread(id) => Some(id.clone()),
@@ -184,7 +197,7 @@ impl ThreadView {
                 .md
                 .iter()
                 .filter_map(|(ix, m)| match l.items.get(*ix) {
-                    Some(Item::Assistant { text } | Item::Reasoning { text }) if text.len() != m.pushed => Some((*ix, text.clone())),
+                    Some(Item::Assistant { text } | Item::Reasoning { text }) if *text != m.text => Some((*ix, text.clone())),
                     _ => None,
                 })
                 .collect(),
@@ -208,9 +221,12 @@ impl ThreadView {
             self.revision = 0;
             self.scroller.update(cx, |s, cx| s.reset(0, cx));
         }
+        let quiet = appended && !switched && self.shown.as_ref().is_some_and(|s| Shown { revision, ..s.clone() } == shown);
         if self.shown.as_ref() != Some(&shown) {
             self.shown = Some(shown);
-            cx.notify();
+            if !quiet {
+                cx.notify();
+            }
         }
         if revision == self.revision && !switched {
             return;
@@ -218,14 +234,19 @@ impl ThreadView {
         self.revision = revision;
         for (ix, text) in changed {
             if let Some(m) = self.md.get_mut(&ix) {
-                let fits = text.len() > m.pushed && text.is_char_boundary(m.pushed);
-                let from = m.pushed;
-                m.pushed = text.len();
-                m.state.update(cx, |s, cx| if fits { s.push_str(&text[from..], cx) } else { s.set_text(&text, cx) });
+                // Streaming appends (parsed incrementally); anything else replaces the document.
+                match text.strip_prefix(m.text.as_str()) {
+                    Some(tail) => m.state.update(cx, |s, cx| s.push_str(tail, cx)),
+                    None => m.state.update(cx, |s, cx| s.set_text(&text, cx)),
+                }
+                m.text = text;
             }
         }
         let new_count = self.rows(cx).len();
         let old = self.count;
+        if quiet && new_count == old {
+            return;
+        }
         self.count = new_count;
         self.scroller.update(cx, |s, cx| {
             if switched || new_count < old {
@@ -256,7 +277,7 @@ impl ThreadView {
         };
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));
         let changed = cx.observe(&state, |_, _, cx| cx.notify());
-        self.md.insert(ix, Markdown { state: state.clone(), pushed: text.len(), _changed: changed });
+        self.md.insert(ix, Markdown { state: state.clone(), text, _changed: changed });
         Some(state)
     }
 
@@ -469,8 +490,11 @@ impl ThreadView {
                 )
                 .into_any_element()
             }
-            (Row::Assistant { .. }, _) => match md {
-                Some(md) => column(div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, at.cwd.clone(), cx).stream_fade(true))).into_any_element(),
+            (Row::Assistant { ix }, _) => match md {
+                Some(md) => column(div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, at.cwd.clone(), cx).stream_fade(true)))
+                    .id(("answer", ix))
+                    .test_support()
+                    .into_any_element(),
                 None => div().into_any_element(),
             },
             (Row::Reasoning { ix, open }, _) => column(
@@ -908,6 +932,13 @@ impl ThreadView {
     /// Markdown documents built so far.
     pub(crate) fn markdown_states(&self) -> usize {
         self.md.len()
+    }
+
+    /// The markdown documents built so far, by transcript index.
+    pub(crate) fn markdown_documents(&self) -> Vec<(usize, Entity<TextViewState>)> {
+        let mut docs: Vec<_> = self.md.iter().map(|(ix, m)| (*ix, m.state.clone())).collect();
+        docs.sort_by_key(|(ix, _)| *ix);
+        docs
     }
 
     /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines

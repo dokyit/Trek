@@ -103,8 +103,10 @@ fn color(c: char) -> Option<u32> {
     })
 }
 
-/// `TREK_FORCE_ACTIVE=1` runs the working animation as if the window were frontmost, so its cost can
-/// be measured while Trek stays in the background. A debugging aid, not a setting.
+/// `TREK_FORCE_ACTIVE=1` runs the working animation as if the window were frontmost, and keeps
+/// drawing the window while macOS hides it (covered, or on another Space), so the animation's full
+/// cost, drawing included, can be measured while Trek stays in the background. A measurement aid,
+/// not a setting.
 pub fn force_active() -> bool {
     static FORCE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("TREK_FORCE_ACTIVE").is_ok_and(|v| v == "1"));
     *FORCE

@@ -187,6 +187,10 @@ pub enum WorkspaceEvent {
     InsertIntoComposer(String),
     /// Attach an image to the composer (e.g. a browser screenshot).
     AttachImage(std::path::PathBuf),
+    /// Only this thread's transcript changed (streamed text, tool calls). Sent instead of a
+    /// notification, so views that don't draw transcripts aren't redrawn for every batch.
+    /// `appended`: all that changed is text added to the messages already streaming.
+    Transcript { id: String, appended: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -1183,7 +1187,7 @@ impl Workspace {
         }
     }
 
-    fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
+    pub(crate) fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
         let mut run_state: Option<RunState> = None;
         let mut native: Option<String> = None;
         let mut diff: Option<(i64, i64)> = None;
@@ -1192,6 +1196,10 @@ impl Workspace {
         // to the composer instead, so the user can rethink them.
         let mut continue_queue = false;
         let mut notify_text: Option<String> = None;
+        // Streamed text and tool calls change nothing but the transcript; mostly they only extend
+        // the messages already streaming.
+        let mut transcript_only = true;
+        let mut appended = true;
         {
             let live = self.live.entry(id.to_string()).or_default();
             live.last_active = Some(Instant::now());
@@ -1200,7 +1208,18 @@ impl Workspace {
                 if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
                     live.turn_started = Some(Instant::now());
                     run_state = Some(RunState::Working);
+                    transcript_only = false;
                 }
+                transcript_only &= matches!(
+                    ev,
+                    AgentEvent::TextDelta(_) | AgentEvent::TextDone(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. } | AgentEvent::ToolFinished { .. }
+                );
+                // Text after a thought ends the thought, which then gets a row of its own.
+                appended &= match ev {
+                    AgentEvent::TextDelta(_) => live.streaming.is_some() && live.reasoning.is_none(),
+                    AgentEvent::ReasoningDelta(_) => live.reasoning.is_some(),
+                    _ => false,
+                };
                 match ev {
                     AgentEvent::Task { id: tid, description, activity, tool_uses, done } => {
                         let known = live.tasks.iter().position(|t| t.id == tid);
@@ -1428,7 +1447,13 @@ impl Workspace {
         if let Some(message) = notify_text {
             cx.emit(WorkspaceEvent::Attention { message, viewing });
         }
-        cx.notify();
+        if transcript_only {
+            // Only the transcript views redraw; the sidebar, title bar and composer would
+            // otherwise redraw with every batch, up to 60 times a second while text streams.
+            cx.emit(WorkspaceEvent::Transcript { id: id.to_string(), appended });
+        } else {
+            cx.notify();
+        }
     }
 
     /// Put queued follow-ups back into the composer (the thread must be on screen).
@@ -1622,6 +1647,11 @@ impl Workspace {
     /// Ask a small model for a short title (through the user's Claude Code login).
     pub fn regenerate_title(&mut self, id: &str, announce: bool, cx: &mut Context<Self>) {
         let Some((request, reply)) = self.title_inputs(id) else { return };
+        // The mock agent names its own threads: it makes no model calls, titles included.
+        if self.thread(id).is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER)) {
+            self.rename(id, trek_agents::mock::title(&request), cx);
+            return;
+        }
         let claude = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
         if !claude {
             if announce {

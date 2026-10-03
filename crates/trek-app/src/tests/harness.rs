@@ -180,6 +180,25 @@ impl Trek {
         cx.run_until_parked();
     }
 
+    /// Type into whatever has focus a key at a time, without the full refresh `type_text` does:
+    /// the window draws after each key as the platform would, so cached views show only what
+    /// the key actually redrew.
+    pub fn type_live(&self, cx: &mut TestAppContext, text: &str) {
+        for c in text.chars() {
+            let mut key = gpui_kit::Keystroke::parse(&c.to_string()).expect("keystroke");
+            key.key_char = Some(c.to_string());
+            self.window(cx, |window, cx| window.dispatch_keystroke(key, cx));
+            cx.run_until_parked();
+        }
+    }
+
+    /// Press `keys` (e.g. "enter") the same way.
+    pub fn press_live(&self, cx: &mut TestAppContext, keys: &str) {
+        let key = gpui_kit::Keystroke::parse(keys).expect("keystroke");
+        self.window(cx, |window, cx| window.dispatch_keystroke(key, cx));
+        cx.run_until_parked();
+    }
+
     pub fn click(&self, cx: &mut TestAppContext, id: impl Into<gpui_kit::ElementId>) {
         let id = id.into();
         self.window(cx, |window, cx| window.click(id, cx));
@@ -201,6 +220,38 @@ impl Trek {
     /// The transcript's rows (see `ThreadView::describe`).
     pub fn rows(&self, cx: &TestAppContext) -> Vec<String> {
         cx.read(|cx| self.root.read(cx).thread_view.read(cx).describe(cx))
+    }
+
+    /// The transcript's markdown documents by transcript index, each with the source text it
+    /// holds (once parsing in flight has landed). Built only for rows that were drawn.
+    pub fn drawn_markdown(&self, cx: &mut TestAppContext) -> Vec<(usize, String)> {
+        use gpui_kit::component::text::SelectionFormat;
+        cx.run_until_parked();
+        let docs = self.thread_view(cx).read_with(cx, |v, _| v.markdown_documents());
+        docs.into_iter()
+            .map(|(ix, doc)| {
+                // Select-all copies the source in Source format.
+                let text = doc.update(cx, |d, cx| {
+                    d.set_selection_format(SelectionFormat::Source, cx);
+                    d.select_all(cx);
+                    let text = d.selected_text();
+                    d.clear_selection(cx);
+                    d.set_selection_format(SelectionFormat::Plain, cx);
+                    text
+                });
+                (ix, text)
+            })
+            .collect()
+    }
+
+    /// A thread in the project with no session, on screen. Feed it with `Workspace::apply_events`.
+    pub fn quiet_thread(&self, cx: &mut TestAppContext) -> String {
+        self.update(cx, |ws, cx| {
+            let t = ws.store.create_thread(Some(&self.project), mock(), None, trek_core::Effort::Medium, HandHolding::Auto).expect("thread");
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        })
     }
 
     /// The working bar's text, `None` while it's hidden.

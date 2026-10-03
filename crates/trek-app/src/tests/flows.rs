@@ -1,8 +1,10 @@
 //! End-to-end flows through the real window: composer, transcript, cards, working bar, shortcuts.
 //! The mock agent plays each script; see `trek_agents::mock` for what each keyword does.
 
-use super::harness::{open, open_with, run};
+use super::harness::{Trek, open, open_with, run};
 use crate::workspace::{Route, SettingsPage};
+use gpui_kit::TestAppContext;
+use trek_agents::AgentEvent;
 use trek_core::settings::FollowUp;
 use trek_core::store::{Item, ToolStatus};
 use trek_core::{HandHolding, RunState};
@@ -30,6 +32,35 @@ fn a_new_thread_streams_an_answer_and_ends_with_a_footer() {
         assert_eq!(trek.composer_text(cx), "", "the composer clears on send");
         // Context usage reached the thread.
         assert!(trek.read(cx, |ws, _| ws.live[&id].context.is_some_and(|(used, window)| used > 0 && window == 200_000)));
+    });
+}
+
+#[test]
+fn mock_threads_title_themselves_without_a_model() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.auto_title = true);
+        // Claude Code looks ready, as in the real app; titles would normally go through it.
+        trek.update(cx, |ws, _| {
+            ws.agents.push(trek_core::detect::DetectedAgent {
+                agent: trek_core::AgentId::ClaudeCode,
+                name: "Claude Code".into(),
+                path: None,
+                version: None,
+                availability: trek_core::detect::Availability::Ready,
+                models: vec![],
+                install_hint: None,
+            })
+        });
+        let id = trek.send(cx, "explain the startup");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Named by the mock as the turn ends: no title task, no `claude -p`.
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.title.clone())), Some("How the app starts".into()));
+        // Only the first turn names the thread.
+        trek.update(cx, |ws, cx| ws.rename(&id, "My title".into(), cx));
+        trek.send(cx, "mock:long 1ms");
+        let tid = id.clone();
+        trek.wait(cx, "the second turn", |ws| turn_ends(&ws.live[&tid].items) == 2).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.title.clone())), Some("My title".into()));
     });
 }
 
@@ -170,6 +201,65 @@ fn the_working_bar_follows_the_thread_on_screen() {
         trek.update(cx, |ws, cx| ws.delete_thread(&id, cx));
         assert!(trek.read(cx, |ws, _| !ws.any_turn_running()));
         assert_eq!(trek.working_bar(cx), None);
+    });
+}
+
+/// Markdown with a heading, a list, a code block and multi-byte characters.
+const STREAMED: &str = "## Café startup — what happens\n\nStartup lives in `src/main.rs`:\n\n- **Flags** are parsed first — naïvely, but fast.\n- Settings load from `config.toml`.\n\n```rust\nfn main() {\n    app::run();\n}\n```\n\nThat's all ✓.";
+
+/// Every document the transcript drew holds exactly the text of the item it's drawn for.
+fn assert_documents_match(trek: &Trek, cx: &mut TestAppContext, id: &str) {
+    let items = trek.items(cx, id);
+    let docs = trek.drawn_markdown(cx);
+    assert!(!docs.is_empty(), "no documents drawn");
+    for (ix, source) in docs {
+        if let Some(Item::Assistant { text } | Item::Reasoning { text }) = items.get(ix) {
+            assert_eq!(&source, text, "document for item {ix}");
+        }
+    }
+}
+
+#[test]
+fn streamed_answers_draw_their_full_text() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::ReasoningDelta("Looking at the entry point first.".into())], cx));
+        // A batch of tokens at a time, each drawn before the next arrives, as while streaming.
+        let chars: Vec<char> = STREAMED.chars().collect();
+        for (n, chunk) in chars.chunks(7).enumerate() {
+            let delta: String = chunk.iter().collect();
+            trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta(delta)], cx));
+            if n == 4 {
+                // Built on its first frame, mid-stream, from the text so far.
+                let answer = trek.item_ix(cx, &id, |i| matches!(i, Item::Assistant { .. }));
+                assert!(trek.drawn_markdown(cx).iter().any(|(ix, _)| *ix == answer));
+                assert_documents_match(&trek, cx, &id);
+            }
+        }
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDone(STREAMED.into()), AgentEvent::TurnComplete { cost_usd: None, error: None }], cx));
+        assert_eq!(trek.answers(cx, &id), STREAMED);
+        assert_documents_match(&trek, cx, &id);
+    });
+}
+
+#[test]
+fn documents_follow_answers_that_move() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        // Agents that hide their reasoning leave empty thoughts, dropped when the turn ends; the
+        // answers after them move up. Once to a longer answer's place, once to one of equal length.
+        for (first, second) in [("First answer.", "Second, longer answer here."), ("Alpha", "Omega")] {
+            for answer in [first, second] {
+                let events = vec![AgentEvent::ReasoningDelta(String::new()), AgentEvent::TextDelta(answer.into()), AgentEvent::TextDone(answer.into())];
+                trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+            }
+            trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }], cx));
+            assert_documents_match(&trek, cx, &id);
+        }
+        assert_eq!(trek.answers(cx, &id), "First answer.\nSecond, longer answer here.\nAlpha\nOmega");
+        assert_eq!(trek.rows(cx).iter().filter(|r| *r == "assistant").count(), 4);
     });
 }
 

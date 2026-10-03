@@ -130,20 +130,32 @@ pub struct SessionHandle {
 pub fn start(config: SessionConfig) -> SessionHandle {
     let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (ev_tx, ev_rx) = async_channel::unbounded();
-    trek_core::runtime().spawn(async move {
-        let result = match &config.agent {
-            AgentId::ClaudeCode => claude::run(config, cmd_rx, ev_tx.clone()).await,
-            AgentId::Codex => codex::run(config, cmd_rx, ev_tx.clone()).await,
-            AgentId::Direct(p) if p == mock::PROVIDER => mock::run(config, cmd_rx, ev_tx.clone()).await,
-            AgentId::Direct(_) => direct::run(config, cmd_rx, ev_tx.clone()).await,
-            AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, ev_tx.clone()).await,
-        };
-        if let Err(e) = result {
-            let _ = ev_tx.send(AgentEvent::Error(format!("{e:#}"))).await;
-        }
-        let _ = ev_tx.send(AgentEvent::Exited).await;
-    });
+    let events = ev_tx.clone();
+    supervise(
+        async move {
+            match &config.agent {
+                AgentId::ClaudeCode => claude::run(config, cmd_rx, events).await,
+                AgentId::Codex => codex::run(config, cmd_rx, events).await,
+                AgentId::Direct(p) if p == mock::PROVIDER => mock::run(config, cmd_rx, events).await,
+                AgentId::Direct(_) => direct::run(config, cmd_rx, events).await,
+                AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, events).await,
+            }
+        },
+        ev_tx,
+    );
     SessionHandle { commands: cmd_tx, events: ev_rx }
+}
+
+/// Run a session, then report how it ended: its error, if any, and `Exited`. A session that
+/// panics ends the same way, so its thread stops working instead of waiting on it forever.
+fn supervise(session: impl Future<Output = anyhow::Result<()>> + Send + 'static, events: async_channel::Sender<AgentEvent>) {
+    trek_core::runtime().spawn(async move {
+        let result = tokio::spawn(session).await.unwrap_or_else(|e| Err(anyhow::anyhow!("the agent session crashed: {e}")));
+        if let Err(e) = result {
+            let _ = events.send(AgentEvent::Error(format!("{e:#}"))).await;
+        }
+        let _ = events.send(AgentEvent::Exited).await;
+    });
 }
 
 /// Count `+`/`-` lines in a unified diff.
@@ -195,5 +207,21 @@ mod tests {
     fn diff_stat_ignores_headers() {
         let d = "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more\n";
         assert_eq!(super::diff_stat(d), (2, 1));
+    }
+
+    #[test]
+    fn a_session_that_panics_still_exits() {
+        use super::AgentEvent;
+        let (tx, rx) = async_channel::unbounded();
+        super::supervise(async { panic!("overflow when adding duration to instant") }, tx);
+        // The channel closes once the supervisor is done with it.
+        let events = trek_core::runtime().block_on(async {
+            let mut events = vec![];
+            while let Ok(e) = rx.recv().await {
+                events.push(e);
+            }
+            events
+        });
+        assert!(matches!(&events[..], [AgentEvent::Error(e), AgentEvent::Exited] if e.contains("crashed")), "{events:?}");
     }
 }
