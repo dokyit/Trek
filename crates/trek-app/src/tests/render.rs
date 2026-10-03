@@ -46,30 +46,33 @@ async fn busy_window(cx: &mut TestAppContext, settled: usize) -> (Trek, String) 
 }
 
 struct Frames {
-    per_frame: Duration,
+    /// CPU per frame on the UI thread, and in the whole process.
+    thread: Duration,
+    process: Duration,
     renders: Vec<(&'static str, f32)>,
+}
+
+impl Frames {
+    /// Share of one core at `fps` frames a second.
+    fn cpu(&self, fps: u32) -> f64 {
+        self.process.as_secs_f64() * fps as f64 * 100.
+    }
 }
 
 /// Let `n` animation frames `period` apart go by and time them. The test platform draws a window
 /// as soon as it's dirty, as the display link would on its next tick; views that weren't notified
 /// keep their cache.
-fn frames(cx: &mut TestAppContext, n: usize, period: Duration, pace: bool) -> Frames {
+fn frames(cx: &mut TestAppContext, n: usize, period: Duration) -> Frames {
     cx.run_until_parked();
     super::take_renders();
-    let mut busy = Duration::ZERO;
+    let (thread, process) = (thread_cpu(), process_cpu());
     for _ in 0..n {
-        let start = Instant::now();
-        let cpu = thread_cpu();
         cx.executor().advance_clock(period);
         cx.run_until_parked();
-        busy += thread_cpu() - cpu;
-        if pace {
-            std::thread::sleep(period.saturating_sub(start.elapsed()));
-        }
     }
     let mut renders: Vec<(&'static str, f32)> = super::take_renders().into_iter().map(|(k, v)| (k, v as f32 / n as f32)).collect();
     renders.sort_by(|a, b| a.0.cmp(b.0));
-    Frames { per_frame: busy / n as u32, renders }
+    Frames { thread: (thread_cpu() - thread) / n as u32, process: (process_cpu() - process) / n as u32, renders }
 }
 
 /// Prints the cost of the working animation, foreground (15 fps) and background (1 fps), and of
@@ -84,25 +87,21 @@ fn rendering_cost() {
         let fps = crate::mascot::FPS as u32;
         let period = Duration::from_secs(1) / fps;
         trek.window(cx, |window, _| window.activate_window());
-        // A second for the animation to settle into its rate.
-        frames(cx, fps as usize + 1, period, false);
-        let active = frames(cx, 60, period, false);
-        // Ten seconds in real time at the animation's pace, for a process-wide figure like `top`'s.
-        let (wall, cpu) = (Instant::now(), process_cpu());
-        let paced = frames(cx, 10 * fps as usize, period, true);
-        let process = (process_cpu() - cpu).as_secs_f64() / wall.elapsed().as_secs_f64() * 100.;
+        // A second for the animation to settle into its rate, then ten seconds of it.
+        frames(cx, fps as usize + 1, period);
+        let active = frames(cx, 10 * fps as usize, period);
         VisualTestContext::from_window(trek.window, cx).deactivate_window();
-        frames(cx, 2, Duration::from_secs(1), false);
-        let background = frames(cx, 10, Duration::from_secs(1), false);
-        println!(
-            "working animation, window active ({fps} fps): {:.2} ms/frame → {:.1}% CPU; paced over 10 s: {:.1}% on the UI thread, {process:.1}% for the process",
-            ms(active.per_frame),
-            ms(active.per_frame) * fps as f64 / 10.,
-            ms(paced.per_frame) * fps as f64 / 10.
-        );
-        println!("  renders per frame: {:?}", active.renders);
-        println!("working animation, window in background (1 fps): {:.2} ms/frame → {:.2}% CPU", ms(background.per_frame), ms(background.per_frame) / 10.);
-        println!("  renders per frame: {:?}", background.renders);
+        frames(cx, 2, Duration::from_secs(1));
+        let background = frames(cx, 10, Duration::from_secs(1));
+        for (label, f, rate) in [("window active", &active, fps), ("window in background", &background, 1)] {
+            println!(
+                "working animation, {label} ({rate} fps): {:.2} ms CPU per frame on the UI thread, {:.2} ms in the process → {:.2}% CPU",
+                ms(f.thread),
+                ms(f.process),
+                f.cpu(rate)
+            );
+            println!("  renders per frame: {:?}", f.renders);
+        }
 
         // Opening a long thread.
         let long = trek.update(cx, |ws, cx| {
@@ -130,16 +129,16 @@ fn working_bar_frames_rerender_only_the_bar() {
             // A focused composer blinks its cursor; that's the composer's own frame, not the bar's.
             window.blur(cx);
         });
-        frames(cx, 2, period, false);
+        frames(cx, 2, period);
         let renders = |name: &str, f: &Frames| f.renders.iter().find(|(n, _)| *n == name).map_or(0., |(_, r)| *r);
-        let f = frames(cx, 10, period, false);
+        let f = frames(cx, 10, period);
         assert!(renders("WorkingBar", &f) >= 0.9, "the bar animates: {:?}", f.renders);
-        for view in ["ThreadView", "Composer", "RightPanel"] {
+        for view in ["ThreadView", "Composer", "RightPanel", "WindowTitle"] {
             assert_eq!(renders(view, &f), 0., "{view} re-rendered on the bar's frames: {:?}", f.renders);
         }
         // The sidebar's "Working 12s" ticks once a second, on its own.
         assert!(renders("Sidebar", &f) * 10. <= 1., "{:?}", f.renders);
-        let f = frames(cx, 3 * crate::mascot::FPS as usize, period, false);
+        let f = frames(cx, 3 * crate::mascot::FPS as usize, period);
         assert!((2. ..=4.).contains(&(renders("Sidebar", &f) * 3. * crate::mascot::FPS as f32)), "{:?}", f.renders);
         assert!(trek.working_bar(cx).is_some_and(|l| l.contains('…')));
     });
@@ -154,7 +153,7 @@ fn the_cached_composer_lays_out_like_the_live_one() {
             window.activate_window();
             window.blur(cx);
         });
-        frames(cx, 2, period, false);
+        frames(cx, 2, period);
         let pill = |cx: &mut TestAppContext| trek.window(cx, |window, _| window.find("model-pill").bounds());
         // A change to the composer lays it out from its content…
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
@@ -163,10 +162,10 @@ fn the_cached_composer_lays_out_like_the_live_one() {
         let live = pill(cx);
         // …the next frame caches it at the height it measured (drawing it once more to fill the
         // cache), and frames after that reuse it.
-        let f = frames(cx, 1, period, false);
+        let f = frames(cx, 1, period);
         assert_eq!(f.renders.iter().find(|(n, _)| *n == "Composer").map(|(_, r)| *r), Some(1.));
         assert_eq!(pill(cx), live);
-        let f = frames(cx, 5, period, false);
+        let f = frames(cx, 5, period);
         assert!(!f.renders.iter().any(|(n, _)| *n == "Composer"), "{:?}", f.renders);
         assert!(live.bottom() <= gpui_kit::px(820.) && live.top() > gpui_kit::px(600.), "{live:?}");
     });

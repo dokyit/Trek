@@ -25,6 +25,7 @@ pub struct TrekWindow {
     settings_nav: Entity<SettingsNav>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,
+    title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
     /// The composer changed since the last frame: lay it out from its content again rather than
     /// reusing its cached frame (see `composer_element`).
@@ -52,6 +53,7 @@ impl TrekWindow {
             p.width = saved_width.max(crate::panels::MIN_PANEL);
             p
         });
+        let title = cx.new(|cx| WindowTitle::new(workspace.clone(), right_panel.clone(), cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
@@ -99,6 +101,7 @@ impl TrekWindow {
             settings_nav,
             right_panel,
             working_bar,
+            title,
             onboarding,
             composer_changed: true,
             panel_drag: None,
@@ -138,8 +141,27 @@ impl TrekWindow {
         }
         window.push_notification(note, cx);
     }
+}
 
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+/// The title bar: sidebar toggle, the project and thread on screen, the project's actions, "Open
+/// in", the tools panel and Settle. A view of its own so the working animation's frames reuse it.
+pub struct WindowTitle {
+    workspace: Entity<Workspace>,
+    right_panel: Entity<RightPanel>,
+    _subscription: Subscription,
+}
+
+impl WindowTitle {
+    fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&workspace, |_, _, cx| cx.notify());
+        Self { workspace, right_panel, _subscription }
+    }
+}
+
+impl Render for WindowTitle {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::tests::rendered("WindowTitle");
         let ws = self.workspace.read(cx);
         let collapsed = ws.sidebar_collapsed;
         let theme = cx.theme().clone();
@@ -436,7 +458,7 @@ impl Render for TrekWindow {
                     .child(img(crate::ui::background_source(&spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
                     .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
             })
-            .child(self.title_bar(cx))
+            .child(self.title.clone().cached(StyleRefinement::default().w_full().flex_none().h(gpui_kit::component::TITLE_BAR_HEIGHT)))
             .child(
                 h_flex()
                     .flex_1()

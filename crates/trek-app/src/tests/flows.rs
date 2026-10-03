@@ -152,6 +152,9 @@ fn the_working_bar_follows_the_thread_on_screen() {
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.visible(cx, "working-bar"));
+        // The (cached) transcript redrew for the new rows without any refresh.
+        let group = trek.item_ix(cx, &id, |i| matches!(i, Item::Reasoning { .. }));
+        assert!(trek.visible(cx, ("tool-group", group)), "{:?}", trek.rows(cx));
         trek.press(cx, "cmd-n");
         assert_eq!(trek.working_bar(cx), None, "a draft has no working bar");
         let other = trek.send(cx, "meanwhile, explain");
@@ -343,8 +346,13 @@ fn keyboard_shortcuts_reach_their_actions() {
 
         trek.press(cx, "cmd-shift-a");
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.hand_holding)), Some(HandHolding::AutoAcceptEdits));
+        assert!(trek.visible(cx, "settle"), "the title bar offers Settle");
         trek.press(cx, "cmd-e");
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some())));
+        assert!(!trek.visible(cx, "settle"));
+        // The title bar is a cached view: a workspace change alone brings the button back.
+        trek.update(cx, |ws, cx| ws.unsettle(&id, cx));
+        assert!(trek.visible(cx, "settle"));
 
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
         trek.press(cx, "cmd-j");
