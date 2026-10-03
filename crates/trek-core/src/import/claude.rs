@@ -15,11 +15,12 @@ fn root() -> PathBuf {
     crate::paths::home().join(".claude/projects")
 }
 
-pub fn scan(min_updated: i64) -> Vec<ImportedThread> {
-    scan_root(&root(), min_updated)
+/// Sessions updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
+pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
+    scan_root(&root(), min_updated, held)
 }
 
-fn scan_root(root: &Path, min_updated: i64) -> Vec<ImportedThread> {
+fn scan_root(root: &Path, min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     let Ok(dirs) = std::fs::read_dir(root) else { return vec![] };
     let mut out = Vec::new();
     for dir in dirs.flatten() {
@@ -28,10 +29,10 @@ fn scan_root(root: &Path, min_updated: i64) -> Vec<ImportedThread> {
             let path = f.path();
             if path.extension().is_some_and(|e| e == "jsonl") {
                 let updated = file_mtime_ms(&path);
-                if updated < min_updated {
+                if updated < min_updated && !path.file_stem().is_some_and(|s| held.contains(s.to_string_lossy().as_ref())) {
                     continue;
                 }
-                if let Some(t) = index_file(&path, updated, min_updated) {
+                if let Some(t) = index_file(&path, updated, min_updated, held) {
                     out.push(t);
                 }
             }
@@ -108,8 +109,8 @@ fn typed_text(v: &Value) -> Option<String> {
     content_text(&v["message"]["content"]).and_then(|t| user_text(&t).map(|_| t))
 }
 
-/// `/name args` from a slash-command wrapper, for sessions that consist of commands.
-fn command_title(text: &str) -> Option<String> {
+/// `/name args` from a slash-command wrapper.
+fn command_text(text: &str) -> Option<String> {
     let between = |open: &str, close: &str| -> Option<String> {
         let start = text.find(open)? + open.len();
         let end = text[start..].find(close)? + start;
@@ -120,7 +121,7 @@ fn command_title(text: &str) -> Option<String> {
     Some(if args.is_empty() { name } else { format!("{name} {args}") })
 }
 
-fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThread> {
+fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String>) -> Option<ImportedThread> {
     let file = std::fs::File::open(path).ok()?;
     let session_id = path.file_stem()?.to_string_lossy().to_string();
     let mut cwd: Option<PathBuf> = None;
@@ -133,6 +134,8 @@ fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThr
     let mut first_message: Option<String> = None;
     let mut legacy_first: Option<String> = None;
     let mut command: Option<String> = None;
+    // A command waiting to see whether the agent answers it (a skill, `/goal`) or not (`/model`).
+    let mut asked: Option<String> = None;
     let mut prompts = 0usize;
     let mut replied = false;
     let mut main_line = false;
@@ -187,18 +190,24 @@ fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThr
                 if v["isMeta"] != true && first_message.is_none() {
                     first_message = raw_text(content);
                 }
-                if command.is_none() {
-                    command = raw_text(content).as_deref().and_then(command_title);
-                }
                 if let Some(t) = typed_text(&v) {
                     prompts += 1;
                     first_prompt.get_or_insert(t);
+                    asked = None;
+                } else if let Some(c) = raw_text(content).as_deref().and_then(command_text) {
+                    command.get_or_insert_with(|| c.clone());
+                    asked = Some(c);
                 }
             }
             Some("assistant") => {
                 main_line = true;
                 fork_of.get_or_insert_with(|| v["forkedFrom"]["sessionId"].as_str().map(String::from));
                 replied = true;
+                // The agent answered the command: it was a request (`/goal …`, a skill).
+                if let Some(c) = asked.take() {
+                    prompts += 1;
+                    first_prompt.get_or_insert(c);
+                }
                 if model.is_none() {
                     model = v["message"]["model"].as_str().map(String::from);
                     effort = v["effort"].as_str().and_then(Effort::parse);
@@ -207,9 +216,11 @@ fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThr
             _ => {}
         }
         // Stop once there's enough to title and classify it. Whether there was only one prompt
-        // matters only for title requests and hand-started sessions in temp folders.
+        // matters only for title requests and hand-started sessions in temp folders. The
+        // prompt earlier versions titled it by may come later (they skipped pasted text).
         if first_prompt.is_some()
             && model.is_some()
+            && legacy_first.is_some()
             && (prompts > 1
                 || !(first_message.as_deref().is_some_and(is_title_request)
                     || (cwd.as_deref().is_some_and(is_temp_dir) && !is_scripted(entrypoint.as_deref()))))
@@ -230,13 +241,13 @@ fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThr
 
     // A fork is a copy of another session until something new is said in it; its own
     // messages come after the copied ones.
-    let untouched_fork = fork_of.flatten().is_some_and(|original| {
+    let untouched_fork = fork_of.flatten().is_some_and(|original_id| {
         let last_copied = tail.iter().rev().find_map(|l| {
             let v: Value = serde_json::from_str(l).ok()?;
             (v["isSidechain"] != true && matches!(v["type"].as_str(), Some("user") | Some("assistant"))).then(|| !v["forkedFrom"].is_null())
         });
-        let original = path.with_file_name(format!("{original}.jsonl"));
-        last_copied == Some(true) && original.is_file() && file_mtime_ms(&original) >= min_updated
+        let original = path.with_file_name(format!("{original_id}.jsonl"));
+        last_copied == Some(true) && original.is_file() && (file_mtime_ms(&original) >= min_updated || held.contains(&original_id))
     });
     let skip = classify(&Evidence {
         cwd: cwd.as_deref(),
@@ -247,14 +258,13 @@ fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThr
         subagent: whole && side_chain && !main_line,
         untouched_fork,
         trek: false,
-        exec: false,
+        cli_run: false,
     });
     let title = [custom_title.as_deref(), ai_title.as_deref(), summary.as_deref()]
         .into_iter()
         .flatten()
         .find_map(source_title)
-        .or_else(|| first_prompt.as_deref().map(title_from))
-        .or(command)
+        .or_else(|| first_prompt.as_deref().or(command.as_deref()).map(title_from))
         .unwrap_or_else(|| "Claude Code session".into());
     let legacy_title = custom_title.clone().or_else(|| legacy_first.as_deref().map(legacy_title_from));
 
@@ -278,6 +288,20 @@ fn index_file(path: &Path, updated: i64, min_updated: i64) -> Option<ImportedThr
 /// Print mode and the SDKs record `sdk-*`; the terminal UI and IDE extensions don't.
 fn is_scripted(entrypoint: Option<&str>) -> bool {
     entrypoint.is_some_and(|e| e.starts_with("sdk"))
+}
+
+/// Values of `<tag>…</tag>` in a raw line.
+fn tagged<'a>(line: &'a str, tag: &str) -> Vec<&'a str> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(i) = rest.find(&open) {
+        rest = &rest[i + open.len()..];
+        let Some(end) = rest.find(&close) else { break };
+        out.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    out
 }
 
 /// The value of a title line (`custom-title`, `ai-title`, `summary`).
@@ -334,7 +358,17 @@ pub fn load(session_id: &str) -> anyhow::Result<Vec<Item>> {
 fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     let mut t = Transcript::default();
+    // A slash command, shown once the agent answers it (`/goal …`, a skill); local ones like
+    // `/model` get no answer and aren't shown.
+    let mut asked: Option<(String, Option<i64>)> = None;
     for line in reader.lines().map_while(Result::ok) {
+        // Background tasks report back as a user line when the agent is idle, or queued into
+        // the running turn; either way the task is done.
+        if line.contains("<task-notification>") {
+            for id in tagged(&line, "tool-use-id") {
+                t.reported(id);
+            }
+        }
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if v["isSidechain"] == true {
             continue;
@@ -345,6 +379,9 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
             Some("user") => {
                 for block in content.as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
                     let id = block["tool_use_id"].as_str().unwrap_or_default();
+                    if v["toolUseResult"]["isAsync"] == true {
+                        t.launched(id);
+                    }
                     let output = match &block["content"] {
                         Value::String(s) => s.clone(),
                         other => content_text(other).unwrap_or_default(),
@@ -362,13 +399,32 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
                 if v["isMeta"] == true {
                     continue;
                 }
+                let raw = raw_text(content).unwrap_or_default();
                 match content_text(content).filter(|t| !is_injected(t)) {
-                    Some(text) => t.user(unwrap_pasted(&text), at),
-                    None if raw_text(content).is_some_and(|raw| is_interruption(&raw)) => t.interrupt(),
-                    None => {}
+                    Some(text) => {
+                        asked = None;
+                        t.user(unwrap_pasted(&text), at);
+                    }
+                    None if is_interruption(&raw) => {
+                        asked = None;
+                        t.interrupt();
+                    }
+                    // Idle, the agent picks up a background task's report on its own.
+                    None if raw.trim_start().starts_with("<task-notification>") => {
+                        asked = None;
+                        t.wake(at);
+                    }
+                    None => {
+                        if let Some(c) = command_text(&raw) {
+                            asked = Some((c, at));
+                        }
+                    }
                 }
             }
             Some("assistant") => {
+                if let Some((command, at)) = asked.take() {
+                    t.user(command, at);
+                }
                 for block in content.as_array().into_iter().flatten() {
                     match block["type"].as_str() {
                         Some("text") => {
@@ -463,7 +519,7 @@ mod tests {
     }
 
     fn index(path: &Path) -> ImportedThread {
-        index_file(path, 1, 0).expect("indexed")
+        index_file(path, 1, 0, &HashSet::new()).expect("indexed")
     }
 
     #[test]
@@ -508,6 +564,50 @@ mod tests {
             reply("Reviewing PR 42", "2026-10-01T10:00:05Z"),
         ]);
         assert_eq!(index(&command).title, "/review 42");
+        // A goal is the request itself, cut like any other.
+        let instruction = "make the whole app faster, audit every screen for jank, and redesign the settings so they read like the rest of the app";
+        let goal = session(&dir, "c", REPO, "cli", &[
+            json!({ "type": "user", "message": { "role": "user", "content": format!("<command-name>/goal</command-name>\n<command-message>goal</command-message>\n<command-args>{instruction}</command-args>") }, "timestamp": "2026-10-01T10:00:00Z" }),
+            user(format!("<local-command-stdout>Goal set: {instruction}</local-command-stdout>"), "2026-10-01T10:00:00Z"),
+            meta("A session-scoped Stop hook is now active", "2026-10-01T10:00:00Z"),
+            reply("On it", "2026-10-01T10:00:09Z"),
+            user("and the dock icon", "2026-10-01T10:05:00Z"),
+        ]);
+        let t = index(&goal);
+        assert_eq!(t.title, "make the whole app faster, audit every screen for jank, and…");
+        assert_eq!(t.skip, None);
+        // A local command before the first message doesn't name the session.
+        let model = session(&dir, "d", REPO, "cli", &[
+            user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>", "2026-10-01T10:00:00Z"),
+            user("<local-command-stdout>Set model to Opus</local-command-stdout>", "2026-10-01T10:00:01Z"),
+            user("fix the login bug", "2026-10-01T10:00:02Z"),
+            reply("Fixed", "2026-10-01T10:00:09Z"),
+        ]);
+        assert_eq!(index(&model).title, "fix the login bug");
+    }
+
+    #[test]
+    fn titles_earlier_versions_gave_are_found_further_in() {
+        let dir = Scratch::new();
+        // They skipped pasted text, so a session that opens with a paste was named by a later message.
+        let path = session(&dir, "a", REPO, "cli", &[
+            user("<pasted_content id=\"1\">\nPort FM Season Hub to Mac\n</pasted_content>", "2026-10-01T10:00:00Z"),
+            reply("Looking", "2026-10-01T10:00:05Z"),
+            user("start with the memory reader", "2026-10-01T10:01:00Z"),
+        ]);
+        let t = index(&path);
+        assert_eq!(t.title, "Port FM Season Hub to Mac");
+        assert_eq!(t.legacy_title.as_deref(), Some("start with the memory reader"));
+    }
+
+    #[test]
+    fn sessions_already_in_trek_are_scanned_however_old() {
+        let dir = Scratch::new();
+        session(&dir, "old", REPO, "cli", &[user("fix the build", "2026-01-01T10:00:00Z"), reply("done", "2026-01-01T10:00:05Z")]);
+        let future = i64::MAX;
+        assert!(scan_root(&dir.0, future, &HashSet::new()).is_empty());
+        let found = scan_root(&dir.0, future, &HashSet::from(["old".to_string()]));
+        assert_eq!(found.iter().map(|t| t.native_id.as_str()).collect::<Vec<_>>(), ["old"]);
     }
 
     #[test]
@@ -608,15 +708,77 @@ mod tests {
         assert_eq!(items[2], Item::Assistant { text: "Fixed the missing import.".into() });
         assert_eq!(items[3], Item::TurnEnd { at: at("2026-10-01T10:00:42Z").unwrap(), took_secs: 42 });
         // Skill bodies and task notifications aren't messages; the interrupted reply has no footer.
-        let kinds: Vec<&str> = items[4..]
+        assert_eq!(kinds(&items[4..]), ["user and", "assistant", "user never"]);
+    }
+
+    /// Each item's kind, with a user message's first word and a footer's duration.
+    fn kinds(items: &[Item]) -> Vec<String> {
+        items
             .iter()
             .map(|i| match i {
-                Item::User { .. } => "user",
-                Item::Assistant { .. } => "assistant",
-                Item::TurnEnd { .. } => "end",
-                _ => "other",
+                Item::User { text, .. } => format!("user {}", text.split(' ').next().unwrap_or_default()),
+                Item::Assistant { .. } => "assistant".into(),
+                Item::TurnEnd { took_secs, .. } => format!("end {took_secs}s"),
+                _ => "other".into(),
             })
-            .collect();
-        assert_eq!(kinds, ["user", "assistant", "user"]);
+            .collect()
+    }
+
+    fn turn_done(at: &str, ms: u64) -> Value {
+        json!({ "type": "system", "subtype": "turn_duration", "durationMs": ms, "timestamp": at })
+    }
+
+    #[test]
+    fn commands_the_agent_answered_are_messages() {
+        let dir = Scratch::new();
+        let path = session(&dir, "a", REPO, "cli", &[
+            user("what is the xcode toolchain", "2026-10-01T03:27:55Z"),
+            reply("It's the compiler", "2026-10-01T03:50:27Z"),
+            turn_done("2026-10-01T03:50:27Z", 1_352_000),
+            user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>", "2026-10-01T04:00:00Z"),
+            user("<local-command-stdout>Set model to Opus</local-command-stdout>", "2026-10-01T04:00:00Z"),
+            user("<command-name>/goal</command-name>\n<command-message>goal</command-message>\n<command-args>redesign the app</command-args>", "2026-10-01T04:18:22Z"),
+            user("<local-command-stdout>Goal set: redesign the app</local-command-stdout>", "2026-10-01T04:18:22Z"),
+            meta("A session-scoped Stop hook is now active", "2026-10-01T04:18:22Z"),
+            reply("Redesigned everything", "2026-10-01T06:45:07Z"),
+            turn_done("2026-10-01T06:45:07Z", 8_805_000),
+        ]);
+        let items = load_file(&path).unwrap();
+        assert_eq!(kinds(&items), ["user what", "assistant", "end 1352s", "user /goal", "assistant", "end 8805s"]);
+        assert!(matches!(&items[3], Item::User { text, at, .. } if text == "/goal redesign the app" && *at == ms_from_rfc3339("2026-10-01T04:18:22Z")));
+    }
+
+    #[test]
+    fn background_reports_start_turns_of_their_own() {
+        let dir = Scratch::new();
+        let notification = |task: &str, tool: &str, at: &str| {
+            user(format!("<task-notification>\n<task-id>{task}</task-id>\n<tool-use-id>{tool}</tool-use-id>\n<status>completed</status>\n</task-notification>"), at)
+        };
+        let launch = |id: &str, name: &str, at: &str| assistant(json!([{ "type": "tool_use", "id": id, "name": name, "input": { "run_in_background": true } }]), "tool_use", at);
+        let mut launched = user(json!([{ "type": "tool_result", "tool_use_id": "agent-1", "content": "Async agent launched successfully." }]), "2026-10-01T10:00:02Z");
+        launched["toolUseResult"] = json!({ "isAsync": true, "status": "async_launched" });
+        let path = session(&dir, "a", REPO, "cli", &[
+            user("record the match", "2026-10-01T10:00:00Z"),
+            launch("bash-1", "Bash", "2026-10-01T10:00:01Z"),
+            user(json!([{ "type": "tool_result", "tool_use_id": "bash-1", "content": "Command running in background" }]), "2026-10-01T10:00:01Z"),
+            reply("Recording", "2026-10-01T10:00:05Z"),
+            turn_done("2026-10-01T10:00:05Z", 5_000),
+            // Hours later: the command reports back and the agent answers on its own.
+            notification("b1", "bash-1", "2026-10-01T16:15:22Z"),
+            reply("The recording finished", "2026-10-01T16:35:05Z"),
+            turn_done("2026-10-01T16:35:05Z", 1_183_000),
+            user("research it", "2026-10-01T17:00:00Z"),
+            launch("agent-1", "Agent", "2026-10-01T17:00:01Z"),
+            launched,
+            reply("An agent is on it", "2026-10-01T17:00:03Z"),
+            turn_done("2026-10-01T17:00:03Z", 3_000),
+            // A sub-agent's report continues the reply that launched it, as live.
+            notification("a1", "agent-1", "2026-10-01T17:10:00Z"),
+            reply("Here's what it found", "2026-10-01T17:10:30Z"),
+            turn_done("2026-10-01T17:10:30Z", 30_000),
+        ]);
+        let items = load_file(&path).unwrap();
+        let ends: Vec<u32> = items.iter().filter_map(|i| if let Item::TurnEnd { took_secs, .. } = i { Some(*took_secs) } else { None }).collect();
+        assert_eq!(ends, [5, 1183, 630]);
     }
 }

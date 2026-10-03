@@ -98,9 +98,11 @@ pub struct Thread {
     pub never_settle: bool,
     /// The title the last import gave it; a different current title is one the user typed.
     pub imported_title: Option<String>,
-    /// Archived by an import: not a conversation (see `import::Skip`), or its session was
-    /// deleted. Brought back if a later import finds it as a conversation again.
-    pub hidden_by_import: bool,
+    /// Why an import archived it: the `import::Skip` rule it matched (by key), or
+    /// `import::DELETED`. Brought back if a later import finds it as a conversation again.
+    pub import_hidden: Option<String>,
+    /// The user chose to keep it although a rule matches it ("Show in sidebar" in Settings).
+    pub import_kept: bool,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -189,7 +191,7 @@ pub enum Item {
         /// Attached image paths (screenshots, snapshots).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<String>,
-        /// When it was sent (unix ms); absent on imported history.
+        /// When it was sent (unix ms); absent when the source didn't record it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<i64>,
     },
@@ -218,6 +220,8 @@ pub struct Upserted {
     pub retitled: bool,
     pub hidden: bool,
     pub restored: bool,
+    /// A rule keeps it out of the sidebar: never added, or archived by an import.
+    pub left_out: bool,
 }
 
 #[derive(Clone)]
@@ -272,7 +276,8 @@ fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN side_of TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN never_settle INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN imported_title TEXT", []);
-    let _ = conn.execute("ALTER TABLE threads ADD COLUMN hidden_by_import INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_hidden TEXT", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_kept INTEGER NOT NULL DEFAULT 0", []);
 }
 
 fn project_in(c: &Connection, path: &Path) -> rusqlite::Result<Project> {
@@ -333,7 +338,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, hidden_by_import";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -361,7 +366,8 @@ impl Store {
             side_of: r.get(21)?,
             never_settle: r.get::<_, i64>(22)? != 0,
             imported_title: r.get(23)?,
-            hidden_by_import: r.get::<_, i64>(24)? != 0,
+            import_hidden: r.get(24)?,
+            import_kept: r.get::<_, i64>(25)? != 0,
         })
     }
 
@@ -418,7 +424,8 @@ impl Store {
             side_of: None,
             never_settle: false,
             imported_title: None,
-            hidden_by_import: false,
+            import_hidden: None,
+            import_kept: false,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -431,7 +438,7 @@ impl Store {
     fn save_thread_in(c: &Connection, t: &Thread) -> rusqlite::Result<()> {
         c.execute(
             &format!(
-                "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+                "INSERT OR REPLACE INTO threads ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
                 Self::THREAD_COLS
             ),
             params![
@@ -459,7 +466,8 @@ impl Store {
                 t.side_of,
                 t.never_settle as i64,
                 t.imported_title,
-                t.hidden_by_import as i64
+                t.import_hidden,
+                t.import_kept as i64
             ],
         )?;
         Ok(())
@@ -506,26 +514,31 @@ impl Store {
                 Self::save_thread_in(c, &Self::new_imported(c, imp)?)?;
                 out.added = true;
             }
+            out.left_out = imp.skip.is_some();
             return Ok(out);
         };
         let before = t.clone();
         match imp.skip {
-            // Threads the user kept (pinned, or continued in Trek) stay where they are.
-            Some(_) if t.archived_at.is_none() && t.pinned_at.is_none() && !Self::has_items_in(c, &t.id)? => {
+            // Threads the user kept (pinned, continued in Trek, or shown anyway) stay where they are.
+            Some(rule) if t.archived_at.is_none() && t.pinned_at.is_none() && !t.import_kept && !Self::has_items_in(c, &t.id)? => {
                 t.archived_at = Some(now_ms());
-                t.hidden_by_import = true;
+                t.import_hidden = Some(rule.key().to_string());
                 out.hidden = true;
             }
-            None if t.hidden_by_import => {
+            // Archived earlier for another reason (its session was missing): record this one.
+            Some(rule) if t.import_hidden.is_some() => t.import_hidden = Some(rule.key().to_string()),
+            None if t.import_hidden.is_some() => {
                 t.archived_at = None;
-                t.hidden_by_import = false;
+                t.import_hidden = None;
                 out.restored = true;
             }
             _ => {}
         }
-        // Automatic titles follow the source; a title the user typed in Trek stays.
+        out.left_out = imp.skip.is_some() && t.archived_at.is_some() && t.import_hidden.is_some();
+        // Automatic titles follow the source; a title the user typed in Trek stays. With no
+        // record of what an earlier import called it, the current title is kept too.
         let previous = t.imported_title.as_deref().or(imp.legacy_title.as_deref());
-        if previous.is_none_or(|p| p == t.title) && t.title != imp.title {
+        if previous.is_some_and(|p| p == t.title) && t.title != imp.title {
             t.title = imp.title.clone();
             out.retitled = true;
         }
@@ -570,8 +583,46 @@ impl Store {
             side_of: None,
             never_settle: false,
             imported_title: Some(imp.title.clone()),
-            hidden_by_import: false,
+            import_hidden: None,
+            import_kept: false,
         })
+    }
+
+    /// Native ids of `source`'s imported threads the sidebar shows or an import archived: the
+    /// ones every import revisits, however old.
+    pub fn imported_native_ids(&self, source: ThreadSource) -> Result<HashSet<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT native_id FROM threads WHERE source = ?1 AND native_id IS NOT NULL AND (archived_at IS NULL OR import_hidden IS NOT NULL)",
+            )?;
+            let rows = st.query_map([source.key()], |r| r.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Show a session the import left out after all: its thread is added, or brought back if an
+    /// import archived it, and later imports leave it in the sidebar.
+    pub fn keep_imported(&self, imp: &ImportedThread) -> Result<Thread> {
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn.transaction()?;
+        let existing = tx
+            .query_row(
+                &format!("SELECT {} FROM threads WHERE source = ?1 AND native_id = ?2", Self::THREAD_COLS),
+                params![imp.source.key(), imp.native_id],
+                Self::row_to_thread,
+            )
+            .optional()?;
+        let mut t = match existing {
+            Some(t) => t,
+            None => Self::new_imported(&tx, imp)?,
+        };
+        if t.import_hidden.take().is_some() {
+            t.archived_at = None;
+        }
+        t.import_kept = true;
+        Self::save_thread_in(&tx, &t)?;
+        tx.commit()?;
+        Ok(t)
     }
 
     /// Archive imported threads of `source` whose session is no longer in the agent's history
@@ -593,7 +644,7 @@ impl Store {
         let now = now_ms();
         let mut hidden = 0;
         for (id, _) in candidates.iter().filter(|(_, native)| !known.contains(native)) {
-            hidden += tx.execute("UPDATE threads SET archived_at = ?2, hidden_by_import = 1 WHERE id = ?1", params![id, now])?;
+            hidden += tx.execute("UPDATE threads SET archived_at = ?2, import_hidden = ?3 WHERE id = ?1", params![id, now, crate::import::DELETED])?;
         }
         tx.commit()?;
         Ok(hidden)
@@ -742,22 +793,34 @@ mod tests {
         assert_eq!(by_native(&s, "auto").title, "Stadium camera fix");
         assert_eq!(by_native(&s, "mine").title, "Stadium work");
         assert_eq!(by_native(&s, "mine").imported_title.as_deref(), Some("Stadium camera fix"));
+        // Nothing on record about its old title: what it's called now may be the user's.
+        s.update_thread(&by_native(&s, "auto").id, |t| {
+            t.title = "My own name".into();
+            t.imported_title = None;
+        })
+        .unwrap();
+        assert!(!s.upsert_imported(&[imported("auto", "New auto title")]).unwrap()[0].retitled);
+        assert_eq!(by_native(&s, "auto").title, "My own name");
     }
 
     #[test]
     fn helper_sessions_are_never_added_and_old_ones_are_archived() {
         let s = Store::in_memory().unwrap();
         let skip = |id: &str| ImportedThread { skip: Some(crate::import::Skip::TempDir), ..imported(id, "say ok") };
-        assert_eq!(s.upsert_imported(&[skip("new")]).unwrap(), [Upserted::default()]);
+        assert_eq!(s.upsert_imported(&[skip("new")]).unwrap(), [Upserted { left_out: true, ..Default::default() }]);
         assert!(s.threads().unwrap().is_empty());
         s.upsert_imported(&[imported("old", "say ok"), imported("pinned", "say ok"), imported("used", "say ok")]).unwrap();
         s.update_thread(&by_native(&s, "pinned").id, |t| t.pinned_at = Some(5)).unwrap();
         s.set_items(&by_native(&s, "used").id, &[Item::User { text: "keep going".into(), images: vec![], at: None }]).unwrap();
         let out = s.upsert_imported(&[skip("old"), skip("pinned"), skip("used")]).unwrap();
         // Threads the user pinned or continued in Trek stay.
-        assert_eq!(out.iter().map(|o| o.hidden).collect::<Vec<_>>(), [true, false, false]);
+        assert_eq!(out.iter().map(|o| (o.hidden, o.left_out)).collect::<Vec<_>>(), [(true, true), (false, false), (false, false)]);
         let old = by_native(&s, "old");
-        assert!(old.archived_at.is_some() && old.hidden_by_import);
+        assert!(old.archived_at.is_some() && old.import_hidden.as_deref() == Some("temp-dir"));
+        // Still left out on the next import; a thread the user archived isn't the import's doing.
+        s.update_thread(&by_native(&s, "used").id, |t| t.archived_at = Some(6)).unwrap();
+        let out = s.upsert_imported(&[skip("old"), skip("used")]).unwrap();
+        assert_eq!(out.iter().map(|o| o.left_out).collect::<Vec<_>>(), [true, false]);
         // A fork continued since: back in the sidebar. A thread the user archived stays archived.
         s.update_thread(&by_native(&s, "pinned").id, |t| t.archived_at = Some(7)).unwrap();
         let out = s.upsert_imported(&[imported("old", "say ok"), imported("pinned", "say ok")]).unwrap();
@@ -773,12 +836,45 @@ mod tests {
         s.set_items(&by_native(&s, "continued").id, &[Item::Assistant { text: "kept in Trek".into() }]).unwrap();
         let known = HashSet::from(["here".to_string()]);
         assert_eq!(s.hide_missing(ThreadSource::ClaudeCode, &known).unwrap(), 1);
-        assert!(by_native(&s, "deleted").hidden_by_import);
+        assert_eq!(by_native(&s, "deleted").import_hidden.as_deref(), Some(crate::import::DELETED));
         assert!(by_native(&s, "continued").archived_at.is_none());
         // Other sources' threads aren't judged by this source's history.
         assert_eq!(s.hide_missing(ThreadSource::Codex, &HashSet::new()).unwrap(), 0);
         // Back on disk (restored from a backup): back in the sidebar.
         assert!(s.upsert_imported(&[imported("deleted", "t")]).unwrap()[0].restored);
+    }
+
+    #[test]
+    fn sessions_shown_anyway_stay() {
+        let s = Store::in_memory().unwrap();
+        let skip = |id: &str| ImportedThread { skip: Some(crate::import::Skip::OneShotRun), ..imported(id, "Reply with OK") };
+        // Archived by an import: brought back.
+        s.upsert_imported(&[imported("a", "Reply with OK")]).unwrap();
+        s.upsert_imported(&[skip("a")]).unwrap();
+        let kept = s.keep_imported(&skip("a")).unwrap();
+        assert_eq!(kept.id, by_native(&s, "a").id);
+        // Never added: added now.
+        s.upsert_imported(&[skip("b")]).unwrap();
+        s.keep_imported(&skip("b")).unwrap();
+        for id in ["a", "b"] {
+            let t = by_native(&s, id);
+            assert!(t.archived_at.is_none() && t.import_kept && t.import_hidden.is_none(), "{id}");
+        }
+        // Later imports leave them be.
+        assert_eq!(s.upsert_imported(&[skip("a"), skip("b")]).unwrap(), [Upserted::default(), Upserted::default()]);
+        assert_eq!(s.threads().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn imports_revisit_threads_they_hold_however_old() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_imported(&[imported("shown", "t"), imported("helper", "t"), imported("archived", "t")]).unwrap();
+        s.upsert_imported(&[ImportedThread { skip: Some(crate::import::Skip::TempDir), ..imported("helper", "t") }]).unwrap();
+        s.update_thread(&by_native(&s, "archived").id, |t| t.archived_at = Some(3)).unwrap();
+        let held = s.imported_native_ids(ThreadSource::ClaudeCode).unwrap();
+        // Shown ones and ones the import archived (they may need bringing back); not ones the user archived.
+        assert_eq!(held, HashSet::from(["shown".to_string(), "helper".to_string()]));
+        assert!(s.imported_native_ids(ThreadSource::Codex).unwrap().is_empty());
     }
 
     #[test]

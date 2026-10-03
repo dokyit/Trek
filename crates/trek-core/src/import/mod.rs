@@ -48,13 +48,16 @@ pub enum Skip {
     TitleGenerator,
     /// Ran in a system temp folder, started by a program or with a single prompt.
     TempDir,
-    /// A single-prompt `codex exec` run (scripts and agents, not the Codex SDK).
-    OneShotExec,
+    /// A single-prompt run from the command line: `codex exec` (not the Codex SDK), `opencode run`.
+    OneShotRun,
     /// Nothing typed and nothing answered: empty, or only local commands like `/clear`.
     NoUserMessage,
 }
 
 impl Skip {
+    pub const ALL: [Skip; 7] =
+        [Skip::Trek, Skip::Subagent, Skip::UntouchedFork, Skip::TitleGenerator, Skip::TempDir, Skip::OneShotRun, Skip::NoUserMessage];
+
     pub fn label(self) -> &'static str {
         match self {
             Skip::Trek => "started by Trek",
@@ -62,11 +65,27 @@ impl Skip {
             Skip::UntouchedFork => "untouched fork",
             Skip::TitleGenerator => "title generator",
             Skip::TempDir => "temp folder run",
-            Skip::OneShotExec => "one-shot exec",
+            Skip::OneShotRun => "one-shot run",
             Skip::NoUserMessage => "no message",
         }
     }
+
+    /// How the store records why the import archived a thread.
+    pub fn key(self) -> &'static str {
+        match self {
+            Skip::Trek => "trek",
+            Skip::Subagent => "subagent",
+            Skip::UntouchedFork => "untouched-fork",
+            Skip::TitleGenerator => "title-generator",
+            Skip::TempDir => "temp-dir",
+            Skip::OneShotRun => "one-shot-run",
+            Skip::NoUserMessage => "no-message",
+        }
+    }
 }
+
+/// Recorded instead of a rule when a thread was archived because its session was deleted.
+pub const DELETED: &str = "deleted";
 
 /// What a scanner learned about a session, for [`classify`].
 #[derive(Debug, Default)]
@@ -82,8 +101,8 @@ pub(crate) struct Evidence<'a> {
     pub subagent: bool,
     pub untouched_fork: bool,
     pub trek: bool,
-    /// A `codex exec` run outside the Codex SDK.
-    pub exec: bool,
+    /// A one-shot command-line run: `codex exec` outside the Codex SDK, or `opencode run`.
+    pub cli_run: bool,
 }
 
 /// The rule a session matches, strongest evidence first. Each rule needs evidence that holds
@@ -100,8 +119,8 @@ pub(crate) fn classify(e: &Evidence) -> Option<Skip> {
         Some(Skip::TitleGenerator)
     } else if e.cwd.is_some_and(is_temp_dir) && (e.scripted || e.prompts.is_some_and(|n| n <= 1)) {
         Some(Skip::TempDir)
-    } else if e.exec && single {
-        Some(Skip::OneShotExec)
+    } else if e.cli_run && single {
+        Some(Skip::OneShotRun)
     } else if e.prompts == Some(0) && !e.replied {
         Some(Skip::NoUserMessage)
     } else {
@@ -111,10 +130,15 @@ pub(crate) fn classify(e: &Evidence) -> Option<Skip> {
 
 /// System temp folders, where apps run title generators, scratch runs and tests.
 pub(crate) fn is_temp_dir(path: &Path) -> bool {
+    in_temp_dir(path, &std::env::temp_dir())
+}
+
+fn in_temp_dir(path: &Path, tmp: &Path) -> bool {
     ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/var/tmp", "/private/var/tmp"]
         .iter()
         .any(|root| path.starts_with(root))
-        || path.starts_with(std::env::temp_dir())
+        // An empty or relative TMPDIR would make every path look temporary.
+        || (tmp.is_absolute() && tmp.components().count() > 1 && path.starts_with(tmp))
 }
 
 /// A prompt written by an app to name one of its threads, not by a person.
@@ -146,15 +170,14 @@ pub struct ImportSummary {
     pub restored: usize,
     /// Threads archived because their session was deleted from the agent's history.
     pub gone: usize,
+    /// Sessions a rule keeps out of the sidebar (never added, or archived by an import), newest
+    /// first, so a misjudged one can be brought back. Trek's own sessions aren't listed.
+    pub left_out: Vec<ImportedThread>,
 }
 
 impl ImportSummary {
     pub fn total(&self) -> usize {
         self.claude_code + self.codex + self.opencode
-    }
-
-    pub fn skipped_total(&self) -> usize {
-        self.skipped.values().sum()
     }
 }
 
@@ -165,18 +188,26 @@ pub fn import_all(store: &Store, settings: &crate::settings::Import) -> ImportSu
     } else {
         crate::store::now_ms() - settings.max_age_days as i64 * 86_400_000
     };
+    // Threads already in Trek are looked at whatever their age, so imports keep fixing their
+    // titles and archiving helpers after they drop out of the "How far back" window.
+    let held = |source| {
+        store.imported_native_ids(source).unwrap_or_else(|e| {
+            tracing::warn!("import: {e}");
+            HashSet::new()
+        })
+    };
     let mut found: Vec<ImportedThread> = Vec::new();
     let mut known = Vec::new();
     if settings.claude_code {
-        found.extend(claude::scan(min_updated));
+        found.extend(claude::scan(min_updated, &held(ThreadSource::ClaudeCode)));
         known.push((ThreadSource::ClaudeCode, claude::session_ids()));
     }
     if settings.codex {
-        found.extend(codex::scan(min_updated));
+        found.extend(codex::scan(min_updated, &held(ThreadSource::Codex)));
         known.push((ThreadSource::Codex, codex::session_ids()));
     }
     if settings.opencode {
-        found.extend(opencode::scan(min_updated));
+        found.extend(opencode::scan(min_updated, &held(ThreadSource::OpenCode)));
         known.push((ThreadSource::OpenCode, opencode::session_ids()));
     }
     let mut summary = import_found(store, found);
@@ -212,15 +243,19 @@ fn import_found(store: &Store, mut found: Vec<ImportedThread>) -> ImportSummary 
     }
     match store.upsert_imported(&found) {
         Ok(outcomes) => {
-            for o in outcomes {
+            for (o, t) in outcomes.iter().zip(found) {
                 summary.new_threads += o.added as usize;
                 summary.retitled += o.retitled as usize;
                 summary.hidden += o.hidden as usize;
                 summary.restored += o.restored as usize;
+                if o.left_out && t.skip != Some(Skip::Trek) {
+                    summary.left_out.push(t);
+                }
             }
         }
         Err(e) => tracing::warn!("import: {e}"),
     }
+    summary.left_out.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     summary
 }
 
@@ -278,14 +313,30 @@ fn is_placeholder_title(title: &str) -> bool {
         || after("T3 Code").is_some_and(|r| r.len() == 36 && r.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
 }
 
+/// A stored title that is only the start of the first message: what agents call a thread before
+/// it's named, cut with or without an ellipsis. Compared with links and spacing flattened.
+pub(crate) fn copies_message(title: &str, message: &str) -> bool {
+    let trimmed = title.trim();
+    let cut = trimmed.trim_end_matches('…').trim_end_matches("...").trim();
+    if cut.is_empty() {
+        return true;
+    }
+    let flat = |s: &str| collapse_spaces(&s.lines().map(clean_line).collect::<Vec<_>>().join(" "));
+    let typed = user_text(message).unwrap_or_default();
+    let (typed_flat, cut_flat) = (flat(&typed), flat(cut));
+    collapse_spaces(message).starts_with(&collapse_spaces(cut))
+        || collapse_spaces(&typed).starts_with(&collapse_spaces(cut))
+        || typed_flat.starts_with(&cut_flat)
+        // Codex names a thread by the message as its app showed it: the request, then the names of
+        // the files attached to it, cut off.
+        || (cut.len() < trimmed.len() && !typed_flat.is_empty() && cut_flat.starts_with(&typed_flat))
+}
+
 /// What the user typed in a message, without the context agents and apps wrap around it;
 /// `None` when the whole message is injected (instructions, command output, reminders).
 pub(crate) fn user_text(raw: &str) -> Option<String> {
-    let mut text = raw.trim();
-    // Codex desktop lists attachments first and puts the message under "My request".
-    if text.starts_with("# Files mentioned by the user") || text.starts_with("# Files pasted by the user") {
-        text = text.split_once("## My request:")?.1.trim();
-    }
+    let unwrapped = codex_request(raw);
+    let text = unwrapped.as_str();
     if is_injected(text) {
         return None;
     }
@@ -293,6 +344,50 @@ pub(crate) fn user_text(raw: &str) -> Option<String> {
     // Codex goal mode is a prefix on the request itself.
     let text = text.strip_prefix("/goal ").unwrap_or(&text).trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// Files a Codex desktop message lists above the request (`## name: /path`), as (name, path).
+pub(crate) fn codex_attachments(raw: &str) -> Vec<(&str, &str)> {
+    let t = raw.trim_start();
+    if !(t.starts_with("# Files mentioned by the user") || t.starts_with("# Files pasted by the user")) {
+        return vec![];
+    }
+    let listed = t.split("## My request:").next().unwrap_or_default();
+    listed
+        .lines()
+        .filter_map(|l| {
+            let entry = l.strip_prefix("## ")?;
+            let at = entry.find(": /")?;
+            Some((entry[..at].trim(), entry[at + 2..].trim()))
+        })
+        .collect()
+}
+
+/// A Codex desktop message as the user wrote it: the in-app browser state it attaches dropped,
+/// and the request taken from under "My request" when attachments are listed first.
+pub(crate) fn codex_request(raw: &str) -> String {
+    let text = strip_block(raw, "in-app-browser-context");
+    let t = text.trim();
+    let wrapped = ["# Files mentioned by the user", "# Files pasted by the user", "## My request:"].iter().any(|p| t.starts_with(p));
+    match t.split_once("## My request:") {
+        Some((_, request)) if wrapped => request.trim().to_string(),
+        // Attachments and nothing typed.
+        None if wrapped => String::new(),
+        _ => t.to_string(),
+    }
+}
+
+/// `text` without `<tag …>…</tag>` blocks.
+pub(crate) fn strip_block(text: &str, tag: &str) -> String {
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(&open) {
+        out.push_str(&rest[..i]);
+        rest = rest[i..].find(&close).map_or("", |end| &rest[i + end + close.len()..]);
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Context injected into the user's side of the conversation: tag-wrapped blocks
@@ -306,11 +401,18 @@ pub(crate) fn is_injected(text: &str) -> bool {
     if let Some(tag) = t.strip_prefix('<') {
         return tag.starts_with(|c: char| c.is_ascii_alphabetic() || c == '/') && !tag.starts_with("pasted_content");
     }
+    // Instruction files: "# AGENTS.md instructions for /repo", or just "# AGENTS.md instructions".
+    let heading = t.lines().next().unwrap_or_default().trim_end();
+    let instructions = heading.strip_prefix("# ").and_then(|h| h.split_once(".md instructions")).is_some_and(|(file, rest)| {
+        !file.is_empty() && !file.contains(char::is_whitespace) && (rest.is_empty() || rest.starts_with(" for "))
+    });
+    if instructions {
+        return true;
+    }
     [
         "Caveat:",
         "This session is being continued from a previous conversation",
         "[Request interrupted by user",
-        "# AGENTS.md instructions for",
         "Base directory for this skill:",
         "[Image: source:",
         "[Image: original ",
@@ -385,16 +487,27 @@ fn shorten(text: &str) -> Option<String> {
 
 /// One line without heading/quote/list markers, emphasis, code ticks or link targets.
 fn clean_line(line: &str) -> String {
-    let l = line.trim().trim_start_matches(['#', '>', '*', '-', '•', ' ']);
+    let l = strip_markers(line);
     let mut out = String::with_capacity(l.len());
     let mut rest = l;
-    // [text](target) → text
+    // [text](target) → text. A '[' opens a link only when its ']' is followed by '('.
     while let Some(open) = rest.find('[') {
-        let Some(mid) = rest[open..].find("](").map(|m| open + m) else { break };
-        let Some(close) = rest[mid..].find(')').map(|c| mid + c) else { break };
-        out.push_str(&rest[..open]);
-        out.push_str(&rest[open + 1..mid]);
-        rest = &rest[close + 1..];
+        let inner = &rest[open + 1..];
+        let link = inner.find(']').and_then(|close| {
+            let target = inner[close + 1..].strip_prefix('(')?;
+            Some((close, target.find(')')? + close + 2))
+        });
+        match link {
+            Some((close, end)) => {
+                out.push_str(&rest[..open]);
+                out.push_str(&inner[..close]);
+                rest = &inner[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = inner;
+            }
+        }
     }
     out.push_str(rest);
     let out = collapse_spaces(&out.replace("**", "").replace('`', ""));
@@ -402,6 +515,20 @@ fn clean_line(line: &str) -> String {
     match out.strip_prefix('"').and_then(|o| o.strip_suffix('"')) {
         Some(inner) if !inner.contains('"') => inner.trim().to_string(),
         _ => out,
+    }
+}
+
+/// Leading heading, quote and list markers; only when a space follows, so "-1 is returned"
+/// and "#42 crashes" keep their first character.
+fn strip_markers(line: &str) -> &str {
+    let mut l = line.trim();
+    loop {
+        let hashes = l.len() - l.trim_start_matches('#').len();
+        let rest = if hashes > 0 { &l[hashes..] } else if let Some(r) = l.strip_prefix(['>', '-', '*', '•']) { r } else { return l };
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return l;
+        }
+        l = rest.trim_start();
     }
 }
 
@@ -441,24 +568,64 @@ pub(crate) fn legacy_is_injected(text: &str) -> bool {
 
 // ---- transcripts ----
 
-/// Builds an imported transcript, closing each answered turn with the footer live turns get
-/// (when the reply finished, and how long it took from the message that started it). As in a
-/// live thread, a reply runs until the user's next message: work the agent picks back up on its
-/// own (a background task reporting back, a goal nudging it on) belongs to the same reply.
+/// Builds an imported transcript, closing each finished turn with the footer live turns get:
+/// when it finished, and how long it took from what started it. That's the user's message, or,
+/// when the agent picks work back up on its own (a background command reporting back, a goal
+/// continuing), the moment it woke. As live, a turn that finishes while background sub-agents
+/// are still out isn't over: their reports continue it.
 #[derive(Default)]
 pub(crate) struct Transcript {
     pub items: Vec<Item>,
     start: Option<i64>,
     last: Option<i64>,
     done: bool,
+    /// Finished while sub-agents were still out: the reply goes on when they report.
+    held: bool,
+    /// Background sub-agents launched and not yet reported back.
+    background: HashSet<String>,
 }
 
 impl Transcript {
     pub fn user(&mut self, text: String, at: Option<i64>) {
+        self.user_with(text, vec![], at);
+    }
+
+    /// A message with attached images (paths).
+    pub fn user_with(&mut self, text: String, images: Vec<String>, at: Option<i64>) {
         self.close();
-        self.items.push(Item::User { text, images: vec![], at });
+        // Reports of sub-agents launched before don't hold this reply open: a lost report
+        // would otherwise take the footers of every later turn with it.
+        self.background.clear();
+        self.items.push(Item::User { text, images, at });
         self.start = at;
         self.last = at;
+    }
+
+    /// The user's answer to a question the agent asked mid-turn: shown, and the turn goes on.
+    pub fn answer(&mut self, text: String, at: Option<i64>) {
+        self.items.push(Item::User { text, images: vec![], at });
+        self.touch(at);
+    }
+
+    /// The agent starts a turn without a message from the user. A new reply, timed from `at`,
+    /// unless the last one is waiting for its background sub-agents.
+    pub fn wake(&mut self, at: Option<i64>) {
+        if self.held {
+            return;
+        }
+        self.close();
+        self.start = at;
+        self.last = at;
+    }
+
+    /// A sub-agent was launched in the background.
+    pub fn launched(&mut self, id: &str) {
+        self.background.insert(id.to_string());
+    }
+
+    /// A background task reported back.
+    pub fn reported(&mut self, id: &str) {
+        self.background.remove(id);
     }
 
     /// The agent wrote or did something: the reply isn't finished yet.
@@ -477,13 +644,15 @@ impl Transcript {
     /// The agent reported the turn finished.
     pub fn complete(&mut self, at: Option<i64>) {
         self.touch(at);
-        self.done = true;
+        self.held = !self.background.is_empty();
+        self.done = !self.held;
     }
 
     /// The user stopped the turn: it gets no footer.
     pub fn interrupt(&mut self) {
         self.start = None;
         self.done = false;
+        self.held = false;
     }
 
     pub fn push(&mut self, item: Item) {
@@ -498,6 +667,7 @@ impl Transcript {
         }
         self.start = None;
         self.done = false;
+        self.held = false;
     }
 
     pub fn finish(mut self) -> Vec<Item> {
@@ -576,6 +746,17 @@ mod tests {
         assert_eq!(title_from("[https://fmseasonhub.com/](https://fmseasonhub.com/) ;port it"), "https://fmseasonhub.com/ ;port it");
         assert_eq!(title_from("Hey\nWorking on Trek"), "Hey");
         assert_eq!(title_from("\"Reply with exactly: OK\""), "Reply with exactly: OK");
+        // Brackets that aren't links stay; markers need a space after them.
+        assert_eq!(title_from("[WIP] fix [docs](https://x.dev/docs) links"), "[WIP] fix docs links");
+        assert_eq!(title_from("[a] b [c](d) e"), "[a] b c e");
+        assert_eq!(title_from("-1 is returned from parse"), "-1 is returned from parse");
+        assert_eq!(title_from("#42 crashes on launch"), "#42 crashes on launch");
+        assert_eq!(title_from("## - **Fix** the build"), "Fix the build");
+        // The Codex desktop app's in-app browser state isn't part of the request.
+        let browser = "\n<in-app-browser-context source=\"ambient-ui-state\">\n# In app browser:\n- Current URL: https://x.dev/\n</in-app-browser-context>\n\n## My request:\nport this page\n";
+        assert_eq!(title_from(browser), "port this page");
+        let both = format!("# Files mentioned by the user:\n\n## a.png: /tmp/a.png\n{browser}");
+        assert_eq!(title_from(&both), "port this page");
     }
 
     #[test]
@@ -594,6 +775,8 @@ mod tests {
             "<command-name>/model</command-name>\n<command-message>model</command-message>",
             "<local-command-stdout>Set model</local-command-stdout>",
             "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>",
+            // Codex 0.155 and later.
+            "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nBe brief.\n</INSTRUCTIONS>",
             "Caveat: The messages below were generated by the user while running local commands.",
             "Base directory for this skill: /tmp/skills/claude-api",
             "[Request interrupted by user]",
@@ -605,6 +788,36 @@ mod tests {
         assert!(!is_injected("<pasted_content id=\"a\">x</pasted_content>"));
         assert_eq!(unwrap_pasted("\n\n<pasted_content id=\"a\">\nlog line\n</pasted_content>\nwhy?"), "log line\n\nwhy?");
         assert!(!is_injected("< 5 items is fine"));
+        assert!(!is_injected("# Task: write the AGENTS.md instructions for the repo"));
+    }
+
+    #[test]
+    fn stored_titles_that_copy_the_first_message_are_not_names() {
+        let first = "I've gotten Players accept contract to work(playing role and contract), I also have both";
+        assert!(copies_message("I've gotten Players accept contract to work(playing role an…", first));
+        assert!(copies_message("I've gotten Players accept contract to work(playing role an", first));
+        assert!(!copies_message("Load shortlists from game memory", first));
+        let links = "[https://macapp.supply/](https://macapp.supply/)  [https://www.raycast.com/blog/a-technical-look](https://www.raycast.com/blog/a-technical-look)";
+        assert!(copies_message("https://macapp.supply/ https://www.raycast.com/blog/a-techn…", links));
+        let attached = "# Files mentioned by the user:\n\n## shot.png: /var/folders/x/shot.png\n\n## My request:\nI really don't like two things, (how codex is called/identified)";
+        assert!(copies_message("I really don't like two things, (how codex is called/identi…", attached));
+        assert!(copies_message("# Files mentioned by the user:\n\n## shot.png", attached));
+        assert!(!copies_message("Review storage cleanup options", attached));
+        // The request followed by the names of attached files, cut off.
+        let pasted = "# Files pasted by the user:\n\n## \"--- Translated Report ---\": /tmp/pasted.txt\n\n## My request:\nfm crashed, when I launched it";
+        assert!(copies_message("fm crashed, when I launched it Translated R…", pasted));
+        // A name that only starts like the request is a name.
+        assert!(!copies_message("fm crashed, when I launched it: Steam overlay", pasted));
+    }
+
+    #[test]
+    fn temp_folders_need_a_real_temp_dir() {
+        let home = Path::new("/Users/me/code");
+        assert!(!in_temp_dir(home, Path::new("")));
+        assert!(!in_temp_dir(home, Path::new("tmp")));
+        assert!(!in_temp_dir(home, Path::new("/")));
+        assert!(in_temp_dir(Path::new("/Users/me/scratch/run"), Path::new("/Users/me/scratch")));
+        assert!(in_temp_dir(Path::new("/private/tmp/x"), Path::new("")));
     }
 
     #[test]
@@ -644,9 +857,9 @@ mod tests {
         assert_eq!(e(&|e| { e.first_message = Some(request); e.prompts = Some(1) }), Some(Skip::TitleGenerator));
         assert_eq!(e(&|e| e.first_message = Some(request)), None);
         assert_eq!(e(&|e| { e.first_message = Some("Generate a title for my blog post"); e.prompts = Some(1) }), None);
-        // One-shot exec runs.
-        assert_eq!(e(&|e| { e.exec = true; e.prompts = Some(1) }), Some(Skip::OneShotExec));
-        assert_eq!(e(&|e| e.exec = true), None);
+        // One-shot command-line runs.
+        assert_eq!(e(&|e| { e.cli_run = true; e.prompts = Some(1) }), Some(Skip::OneShotRun));
+        assert_eq!(e(&|e| e.cli_run = true), None);
         // Nothing typed: only when nothing was answered either.
         assert_eq!(e(&|e| { e.prompts = Some(0); e.replied = false }), Some(Skip::NoUserMessage));
         assert_eq!(e(&|e| e.prompts = Some(0)), None);
@@ -679,6 +892,16 @@ mod tests {
         assert_eq!(summary.new_threads, 1);
         assert_eq!(summary.skipped, BTreeMap::from([(Skip::Trek, 1), (Skip::TempDir, 1)]));
         assert_eq!(store.threads().unwrap().len(), 2);
+        // Left-out sessions are listed for bringing back; Trek's own are in the sidebar already.
+        assert_eq!(summary.left_out.iter().map(|t| t.native_id.as_str()).collect::<Vec<_>>(), ["s-tmp"]);
+        store.keep_imported(&summary.left_out[0]).unwrap();
+        let again = import_found(&store, vec![found("s-trek", None), found("s-user", None), found("s-tmp", Some(Skip::TempDir))]);
+        assert!(again.left_out.is_empty());
+        assert_eq!(store.threads().unwrap().len(), 3);
+    }
+
+    fn footers(items: &[Item]) -> Vec<(i64, u32)> {
+        items.iter().filter_map(|i| if let Item::TurnEnd { at, took_secs } = i { Some((*at, *took_secs)) } else { None }).collect()
     }
 
     #[test]
@@ -689,25 +912,60 @@ mod tests {
         t.activity(Some(2_000));
         t.complete(Some(4_500));
         t.user("research this".into(), Some(10_000));
-        t.push(Item::Assistant { text: "started a background task".into() });
+        t.push(Item::Assistant { text: "started a background command".into() });
         t.complete(Some(12_000));
-        // The task reports back and the agent carries on: still the same reply.
-        t.push(Item::Assistant { text: "the task finished".into() });
-        t.activity(Some(70_000));
-        t.complete(Some(71_000));
-        t.user("now this".into(), Some(100_000));
+        // Hours later the command reports back and the agent carries on: a turn of its own,
+        // timed from when it woke, as live.
+        t.wake(Some(3_600_000));
+        t.push(Item::Assistant { text: "the command finished".into() });
+        t.activity(Some(3_660_000));
+        t.complete(Some(3_661_000));
+        t.user("now this".into(), Some(3_700_000));
         t.push(Item::Assistant { text: "partial".into() });
         t.interrupt();
-        t.user("again".into(), Some(200_000));
+        t.user("again".into(), Some(3_800_000));
         t.push(Item::Tool { id: "1".into(), title: "Ran command".into(), detail: String::new(), output: String::new(), status: crate::store::ToolStatus::Done });
-        t.complete(Some(201_000));
-        t.user("still there?".into(), Some(300_000));
+        t.complete(Some(3_801_000));
+        t.user("still there?".into(), Some(3_900_000));
         t.push(Item::Assistant { text: "yes".into() });
-        t.activity(Some(301_000));
+        t.activity(Some(3_901_000));
         let items = t.finish();
-        let ends: Vec<_> = items.iter().filter_map(|i| if let Item::TurnEnd { at, took_secs } = i { Some((*at, *took_secs)) } else { None }).collect();
         // Interrupted replies, ones that ended on a tool call and ones still going get none.
-        assert_eq!(ends, vec![(4_500, 3), (71_000, 61)]);
+        assert_eq!(footers(&items), vec![(4_500, 3), (12_000, 2), (3_661_000, 61)]);
         assert!(matches!(items[2], Item::TurnEnd { .. }));
+    }
+
+    #[test]
+    fn background_sub_agents_keep_their_turn_open() {
+        let mut t = Transcript::default();
+        t.user("research both".into(), Some(0));
+        t.push(Item::Tool { id: "a1".into(), title: "Ran subagent".into(), detail: String::new(), output: String::new(), status: crate::store::ToolStatus::Done });
+        t.launched("a1");
+        t.push(Item::Assistant { text: "Two agents are on it".into() });
+        t.complete(Some(5_000));
+        // The agent wakes on its report: the same reply, timed from the user's message.
+        t.reported("a1");
+        t.wake(Some(600_000));
+        t.push(Item::Assistant { text: "Here's what they found".into() });
+        t.complete(Some(660_000));
+        // A question answered mid-turn is shown and doesn't restart the clock.
+        t.user("pick one".into(), Some(700_000));
+        t.push(Item::Assistant { text: "Which matters more?".into() });
+        t.answer("speed".into(), Some(710_000));
+        t.push(Item::Assistant { text: "Then the first".into() });
+        t.complete(Some(730_000));
+        let items = t.finish();
+        assert_eq!(footers(&items), vec![(660_000, 660), (730_000, 30)]);
+        assert!(matches!(&items[items.len() - 3], Item::User { text, at: Some(710_000), .. } if text == "speed"));
+        // A report that never comes doesn't hold the user's next turn.
+        let mut t = Transcript::default();
+        t.user("go".into(), Some(0));
+        t.launched("lost");
+        t.push(Item::Assistant { text: "launched".into() });
+        t.complete(Some(1_000));
+        t.user("next".into(), Some(5_000));
+        t.push(Item::Assistant { text: "done".into() });
+        t.complete(Some(8_000));
+        assert_eq!(footers(&t.finish()), vec![(8_000, 3)]);
     }
 }

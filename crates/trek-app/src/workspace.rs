@@ -358,6 +358,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Show a session the import left out after all; later imports leave it in the sidebar.
+    pub fn show_left_out(&mut self, session: &trek_core::import::ImportedThread, cx: &mut Context<Self>) {
+        match self.store.keep_imported(session) {
+            Ok(t) => {
+                if let Some(summary) = self.import_summary.as_mut() {
+                    summary.left_out.retain(|s| !(s.source == session.source && s.native_id == session.native_id));
+                }
+                cx.emit(WorkspaceEvent::Toast { message: format!("“{}” is in the sidebar", t.title), undo: None });
+            }
+            Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't show it: {e}"), undo: None }),
+        }
+        self.reload(cx);
+    }
+
     pub fn thread(&self, id: &str) -> Option<&Thread> {
         self.threads.iter().find(|t| t.id == id)
     }

@@ -13,8 +13,9 @@ fn db() -> Option<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
 }
 
-pub fn scan(min_updated: i64) -> Vec<ImportedThread> {
-    db().map(|conn| scan_conn(&conn, min_updated)).unwrap_or_default()
+/// Sessions updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
+pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
+    db().map(|conn| scan_conn(&conn, min_updated, held)).unwrap_or_default()
 }
 
 struct Row {
@@ -27,19 +28,33 @@ struct Row {
     additions: i64,
     deletions: i64,
     child: bool,
+    /// Started by `opencode run`, the one-shot command line.
+    cli_run: bool,
     /// User messages, counted up to 2.
     prompts: usize,
     replied: bool,
 }
 
-fn scan_conn(conn: &Connection, min_updated: i64) -> Vec<ImportedThread> {
-    let sql = "SELECT s.id, s.directory, s.title, s.model, s.time_created, s.time_updated,
-                      COALESCE(s.summary_additions, 0), COALESCE(s.summary_deletions, 0), s.parent_id IS NOT NULL,
-                      (SELECT COUNT(*) FROM (SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'user' LIMIT 2)),
-                      EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'assistant')
-               FROM session s WHERE s.time_archived IS NULL AND s.time_updated >= ?1";
-    let Ok(mut st) = conn.prepare(sql) else { return vec![] };
-    let rows = st.query_map([min_updated], |r| {
+fn scan_conn(conn: &Connection, min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
+    // Columns arrived over OpenCode versions; read the ones this database has.
+    let columns: HashSet<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('session')")
+        .and_then(|mut st| st.query_map([], |r| r.get::<_, String>(0))?.collect())
+        .unwrap_or_default();
+    let col = |name: &str| if columns.contains(name) { format!("s.{name}") } else { "NULL".to_string() };
+    let sql = format!(
+        "SELECT s.id, s.directory, s.title, {model}, s.time_created, s.time_updated,
+                COALESCE(s.summary_additions, 0), COALESCE(s.summary_deletions, 0), s.parent_id IS NOT NULL,
+                (SELECT COUNT(*) FROM (SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'user' LIMIT 2)),
+                EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'assistant'),
+                {permission}
+         FROM session s WHERE s.time_archived IS NULL AND (s.time_updated >= ?1 OR s.id IN (SELECT value FROM json_each(?2)))",
+        model = col("model"),
+        permission = col("permission"),
+    );
+    let Ok(mut st) = conn.prepare(&sql) else { return vec![] };
+    let held = serde_json::to_string(held).unwrap_or_else(|_| "[]".into());
+    let rows = st.query_map(rusqlite::params![min_updated, held], |r| {
         Ok(Row {
             id: r.get(0)?,
             dir: r.get(1)?,
@@ -52,6 +67,7 @@ fn scan_conn(conn: &Connection, min_updated: i64) -> Vec<ImportedThread> {
             child: r.get(8)?,
             prompts: r.get::<_, i64>(9)? as usize,
             replied: r.get(10)?,
+            cli_run: r.get::<_, Option<String>>(11)?.as_deref().is_some_and(is_cli_run),
         })
     });
     let rows: Vec<Row> = match rows {
@@ -68,15 +84,14 @@ fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
     let first = (!row.child && row.prompts > 0 && (row.prompts == 1 || own_title.is_none())).then(|| first_prompt(conn, &row.id)).flatten();
     let skip = classify(&Evidence {
         cwd: cwd.as_deref(),
-        // OpenCode doesn't record which client started a session.
-        scripted: false,
+        scripted: row.cli_run,
         prompts: Some(row.prompts),
         first_message: first.as_deref(),
         replied: row.replied,
         subagent: row.child,
         untouched_fork: false,
         trek: false,
-        exec: false,
+        cli_run: row.cli_run,
     });
     let title = own_title
         .or_else(|| first.as_deref().and_then(user_text).map(|t| title_from(&t)))
@@ -97,6 +112,13 @@ fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
         deletions: row.deletions,
         skip,
     }
+}
+
+/// `opencode run` creates its session with the interactive tools (questions, plan mode) denied,
+/// as nobody is there to answer them. OpenCode's own apps don't.
+fn is_cli_run(permission: &str) -> bool {
+    let Ok(Value::Array(rules)) = serde_json::from_str::<Value>(permission) else { return false };
+    rules.iter().any(|r| r["permission"] == "question" && r["action"] == "deny")
 }
 
 /// Every session OpenCode has; `None` when its database can't be read.
@@ -232,7 +254,7 @@ mod tests {
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL, model TEXT,
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL, model TEXT, permission TEXT,
                 time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER, summary_additions INTEGER, summary_deletions INTEGER);
              CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
              CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
@@ -266,8 +288,15 @@ mod tests {
         message(conn, session, id, data, &[json!({ "type": "text", "text": text })]);
     }
 
+    /// What `opencode run` records.
+    const RUN: &str = r#"[{"permission":"question","pattern":"*","action":"deny"},{"permission":"plan_enter","pattern":"*","action":"deny"},{"permission":"plan_exit","pattern":"*","action":"deny"}]"#;
+
+    fn set_permission(conn: &Connection, id: &str, permission: &str) {
+        conn.execute("UPDATE session SET permission = ?2 WHERE id = ?1", rusqlite::params![id, permission]).unwrap();
+    }
+
     fn scan(conn: &Connection) -> Vec<(String, String, Option<Skip>)> {
-        let mut v: Vec<_> = scan_conn(conn, 0).into_iter().map(|t| (t.native_id, t.title, t.skip)).collect();
+        let mut v: Vec<_> = scan_conn(conn, 0, &HashSet::new()).into_iter().map(|t| (t.native_id, t.title, t.skip)).collect();
         v.sort();
         v
     }
@@ -278,8 +307,23 @@ mod tests {
         session(&conn, "a-titled", "/Users/me/app", "Fix GitHub connector", None);
         ask(&conn, "a-titled", "m1", "my github connector keeps failing", 10);
         answer(&conn, "a-titled", "m2", "Checking", 11, 12, "stop");
+        // A script probing `opencode run`, never answered.
         session(&conn, "b-placeholder", "/Users/me/app", "New session - 2026-07-10T03:44:55.268Z", None);
         ask(&conn, "b-placeholder", "m3", "\"Reply with exactly: OK\"", 10);
+        set_permission(&conn, "b-placeholder", RUN);
+        // The same probe, answered and titled.
+        session(&conn, "b-probe", "/Users/me/app", "Reply with OK", None);
+        ask(&conn, "b-probe", "m30", "\"Reply with exactly: OK\"", 10);
+        answer(&conn, "b-probe", "m31", "OK", 11, 12, "stop");
+        set_permission(&conn, "b-probe", RUN);
+        // Asked once in OpenCode's own app: a conversation, answered or not.
+        session(&conn, "b-question", "/Users/me/app", "New session - 2026-07-10T03:50:00.000Z", None);
+        ask(&conn, "b-question", "m32", "why is the build slow?", 10);
+        // Other apps set their own permissions; only the run command's mark counts.
+        session(&conn, "b-app", "/Users/me/app", "Build speed", None);
+        ask(&conn, "b-app", "m33", "why is the build slow?", 10);
+        answer(&conn, "b-app", "m34", "Caching", 11, 12, "stop");
+        set_permission(&conn, "b-app", r#"[{"permission":"*","pattern":"*","action":"allow"}]"#);
         session(&conn, "c-t3", "/Users/me/app", "T3 Code 8e72d07c-b653-46c1-ade2-27747b6b23a3", None);
         ask(&conn, "c-t3", "m4", "Summarize the project", 10);
         ask(&conn, "c-t3", "m5", "and the open issues", 20);
@@ -295,7 +339,10 @@ mod tests {
             scan(&conn),
             vec![
                 ("a-titled".into(), "Fix GitHub connector".into(), None),
-                ("b-placeholder".into(), "Reply with exactly: OK".into(), None),
+                ("b-app".into(), "Build speed".into(), None),
+                ("b-placeholder".into(), "Reply with exactly: OK".into(), Some(Skip::OneShotRun)),
+                ("b-probe".into(), "Reply with OK".into(), Some(Skip::OneShotRun)),
+                ("b-question".into(), "why is the build slow?".into(), None),
                 ("c-t3".into(), "Summarize the project".into(), None),
                 ("d-empty".into(), "OpenCode session".into(), Some(Skip::NoUserMessage)),
                 ("e-child".into(), "Explore codebase (@explore subagent)".into(), Some(Skip::Subagent)),
@@ -303,6 +350,24 @@ mod tests {
                 ("g-tmp".into(), "Pong response request".into(), Some(Skip::TempDir)),
             ]
         );
+    }
+
+    #[test]
+    fn older_databases_and_old_sessions_still_scan() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER, summary_additions INTEGER, summary_deletions INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        session(&conn, "old", "/Users/me/app", "Fix GitHub connector", None);
+        ask(&conn, "old", "m1", "my github connector keeps failing", 10);
+        assert_eq!(scan(&conn), vec![("old".into(), "Fix GitHub connector".into(), None)]);
+        // Outside the window unless Trek already has it.
+        assert!(scan_conn(&conn, i64::MAX, &HashSet::new()).is_empty());
+        assert_eq!(scan_conn(&conn, i64::MAX, &HashSet::from(["old".to_string()])).len(), 1);
     }
 
     #[test]
