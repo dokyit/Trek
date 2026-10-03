@@ -546,9 +546,30 @@ fn updates_wait_for_a_turn_paused_on_a_card() {
         assert!(matches!(update_status(&trek, cx), UpdateStatus::RestartPending { .. }), "{:?}", update_status(&trek, cx));
         trek.click(cx, "allow");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        // With the turn over, the install went ahead (and stopped, as no app bundle runs here).
+        // With the turn over, the restart counts down first: the user may be typing by now.
+        assert!(matches!(update_status(&trek, cx), UpdateStatus::RestartPending { .. }), "{:?}", update_status(&trek, cx));
+        cx.executor().advance_clock(crate::workspace::RESTART_GRACE);
+        cx.run_until_parked();
+        // Then the install went ahead (and stopped, as no app bundle runs here).
         let status = update_status(&trek, cx);
         assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+    });
+}
+
+#[test]
+fn a_restart_counting_down_can_be_called_off() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:permission");
+        trek.wait_needs_you(cx, &id).await;
+        stage_fake_update(&trek, cx);
+        trek.click(cx, "allow");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.undo(crate::workspace::UndoAction::CancelRestart, cx));
+        cx.executor().advance_clock(crate::workspace::RESTART_GRACE * 2);
+        cx.run_until_parked();
+        // Nothing installed: it waits for a click on Restart, or for Trek to quit.
+        assert!(matches!(update_status(&trek, cx), UpdateStatus::Ready { .. }), "{:?}", update_status(&trek, cx));
     });
 }
 

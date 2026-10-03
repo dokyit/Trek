@@ -273,9 +273,25 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         if !focus {
             crate::system::order_back(window);
         }
+        if let Some(error) = workspace.update(cx, |ws, _| ws.store_error.take()) {
+            window.on_next_frame(move |window, cx| database_error(&error, window, cx));
+        }
         cx.new(|cx| TrekWindow::new(workspace, window, cx))
     })?;
     Ok(())
+}
+
+/// Trek's database couldn't be opened (another Trek holding it, a damaged file): this session
+/// saves nothing, so ask before the user starts working in it.
+fn database_error(error: &str, window: &mut Window, cx: &mut App) {
+    let detail = format!("{error}\n\nAnything you do now won't be saved. Quit, close any other copy of Trek, and open it again.");
+    let answer = window.prompt(gpui_kit::PromptLevel::Critical, "Trek couldn't open its database", Some(&detail), &["Quit", "Continue Without Saving"], cx);
+    cx.spawn(async move |cx| {
+        if answer.await == Ok(0) {
+            let _ = cx.update(|cx| cx.quit());
+        }
+    })
+    .detach();
 }
 
 /// Bring the main window forward, reopening it if it was closed.
@@ -410,11 +426,12 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     let mut note = Notification::new().message(message);
     if let Some(action) = undo {
         let ws = workspace.downgrade();
+        let label = if matches!(action, UndoAction::CancelRestart) { "Not now" } else { "Undo" };
         note = note
             .action(move |_, _, _| {
                 let ws = ws.clone();
                 let action = action.clone();
-                gpui_kit::component::button::Button::new("undo").label("Undo").small().on_click(move |_, _, cx| {
+                gpui_kit::component::button::Button::new("undo").label(label).small().on_click(move |_, _, cx| {
                     let _ = ws.update(cx, |ws, cx| ws.undo(action.clone(), cx));
                 })
             })
