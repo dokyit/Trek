@@ -1,7 +1,7 @@
 //! Shared visual primitives so every surface uses the same quiet, consistent styling.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::AgentId;
@@ -211,16 +211,70 @@ pub fn group(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// An update's release notes (markdown), scrolling past `max_height`.
-pub fn release_notes(id: &'static str, notes: String, max_height: Pixels, cx: &App) -> AnyElement {
+/// Several releases' notes, newest first, each under its version and date, in one scrolling
+/// column: what an update brings, or the release history. This copy's version says "Installed".
+pub fn releases_notes(id: &'static str, releases: &[trek_core::changelog::Release], max_height: Pixels, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let installed = trek_core::update::current_version();
+    let many = releases.len() > 1;
     div()
         .id(id)
+        .test_support()
         .max_h(max_height)
         .overflow_y_scroll()
-        .text_size(px(12.5))
-        .line_height(relative(1.5))
-        .text_color(cx.theme().foreground.opacity(0.85))
-        .child(gpui_kit::component::text::TextView::markdown(id, notes).selectable(true))
+        .child(v_flex().gap(px(14.)).children(releases.iter().enumerate().map(|(i, r)| {
+            let date = chrono::DateTime::parse_from_rfc3339(&r.date).ok().map(|d| d.format("%B %-d").to_string());
+            v_flex()
+                .gap(px(4.))
+                .when(i > 0, |el| el.pt(px(12.)).border_t_1().border_color(theme.foreground.opacity(0.07)))
+                .when(many || r.version == installed, |el| {
+                    el.child(
+                        h_flex()
+                            .gap(px(6.))
+                            .text_size(px(12.5))
+                            .child(div().font_semibold().child(format!("Trek {}", r.version)))
+                            .when_some(date, |el, d| el.child(div().text_color(theme.muted_foreground).child(d)))
+                            .when(r.version == installed, |el| el.child(div().text_color(theme.muted_foreground).child("· Installed"))),
+                    )
+                })
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .line_height(relative(1.5))
+                        .text_color(theme.foreground.opacity(0.85))
+                        .child(gpui_kit::component::text::TextView::markdown((id, i), quiet_headings(&r.notes)).selectable(true)),
+                )
+        })))
+        .into_any_element()
+}
+
+/// Release notes' own headings ("## Highlights") as bold lines: at markdown's heading sizes they
+/// would outweigh the version they sit under.
+fn quiet_headings(notes: &str) -> String {
+    notes
+        .lines()
+        .map(|l| match l.trim_start().strip_prefix('#') {
+            Some(rest) => format!("**{}**", rest.trim_start_matches('#').trim()),
+            None => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A quiet text link that opens `url` in the browser, with the external-link arrow.
+pub fn web_link(id: impl Into<ElementId>, label: impl Into<SharedString>, url: String, cx: &App) -> AnyElement {
+    let color = cx.theme().muted_foreground;
+    h_flex()
+        .id(id.into())
+        .test_support()
+        .gap(px(4.))
+        .text_size(px(12.))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|s| s.text_color(cx.theme().foreground))
+        .child(label.into())
+        .child(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight).size(px(11.)))
+        .on_click(move |_, _, cx| cx.open_url(&url))
         .into_any_element()
 }
 

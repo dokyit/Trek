@@ -655,25 +655,38 @@ impl Sidebar {
         // the one-click "restart into it".
         let available = matches!(update, UpdateStatus::Available { .. });
         let label_color = if ready { palette::ember(cx) } else { theme.foreground };
+        // Just updated: the pill offers what the update brought, until it's been opened.
+        let whats_new = !ready && !available && !busy && self.workspace.read(cx).whats_new().is_some();
         let updater = Popover::new("updater-popover")
             .anchor(Anchor::BottomRight)
             .appearance(false)
             .open(updater_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
                 this.updater_open = *open;
+                // Seen once the card closes: marking it on open would empty the card being read.
+                if !*open {
+                    this.workspace.update(cx, |ws, cx| {
+                        if ws.whats_new().is_some() {
+                            ws.mark_whats_new_seen(cx);
+                        }
+                    });
+                }
                 cx.notify();
             }))
             .trigger(
                 ui::Pill::new("updater")
-                    .ghost(!ready && !available)
+                    .ghost(!ready && !available && !whats_new)
                     .selected(updater_open)
                     .child(if busy {
                         Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
+                    } else if whats_new {
+                        Icon::new(crate::assets::Lucide::Sparkles).small().text_color(palette::ember(cx)).into_any_element()
                     } else {
                         let color = if ready || available { label_color } else { theme.muted_foreground };
                         Icon::new(IconName::RefreshCw).small().text_color(color).into_any_element()
                     })
-                    .when(ready || available, |el| el.child(div().text_xs().text_color(label_color).child("Update"))),
+                    .when(ready || available, |el| el.child(div().text_xs().text_color(label_color).child("Update")))
+                    .when(whats_new, |el| el.child(div().text_xs().child("What's new"))),
             )
             .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
         h_flex()
@@ -751,10 +764,27 @@ impl Sidebar {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
-        let notes = ws.update_notes().map(|u| (u.version.to_string(), u.notes.clone()));
+        let pending = ws.pending_changes();
+        let whats_new = ws.whats_new().cloned();
         let channel = format!("{:?}", ws.settings.updates.channel);
+        // What an update on offer brings, else what the one just installed brought.
+        let changes = match (pending, whats_new) {
+            (Some(c), _) => {
+                let title = match c.releases.as_slice() {
+                    [one] => format!("What's new in {}", one.version),
+                    many => format!("What's changed · {} releases", many.len()),
+                };
+                let link = c.compare.map(|url| ("Compare on GitHub", url)).or_else(|| c.releases.first().filter(|r| !r.url.is_empty()).map(|r| ("Release on GitHub", r.url.clone())));
+                Some((title, c.releases, link))
+            }
+            (None, Some(r)) => {
+                let link = (!r.url.is_empty()).then(|| ("Release on GitHub", r.url.clone()));
+                Some(("What's new".to_string(), vec![r], link))
+            }
+            (None, None) => None,
+        };
         ui::menu_surface(cx)
-            .w(px(320.))
+            .w(px(340.))
             .p(px(14.))
             .gap(px(10.))
             .child(h_flex().gap_2().child(crate::brand::logo_mark(px(16.))).child(div().text_sm().font_semibold().child(format!("Trek {}", trek_core::VERSION))).child(div().flex_1()).child(div().text_xs().text_color(theme.muted_foreground).child(channel)))
@@ -762,15 +792,16 @@ impl Sidebar {
             .when_some(view.progress, |el, p| {
                 el.child(div().h(px(5.)).w_full().rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(palette::ember(cx)).w(relative(p))))
             })
-            .when_some(notes, |el, (version, notes)| {
+            .when_some(changes, |el, (title, releases, link)| {
                 el.child(
                     v_flex()
-                        .gap(px(6.))
+                        .gap(px(8.))
                         .pt(px(10.))
                         .border_t_1()
                         .border_color(theme.foreground.opacity(0.07))
-                        .child(div().text_xs().font_medium().child(format!("What's new in {version}")))
-                        .child(ui::release_notes("updater-notes", notes, px(200.), cx)),
+                        .child(div().text_xs().font_medium().child(title))
+                        .child(ui::releases_notes("updater-notes", &releases, px(260.), cx))
+                        .when_some(link, |el, (label, url)| el.child(ui::web_link("updater-link", label, url, cx))),
                 )
             })
             .when_some(view.action, |el, action| {

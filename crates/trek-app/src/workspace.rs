@@ -703,10 +703,19 @@ impl Workspace {
         }
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
         let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
+        if trek_core::update::blocker().is_none() {
+            // A first launch has nothing new to show; one after an update shows what it brought
+            // (from a build older than "What's new", whose setting is still empty).
+            if this.settings.updates.seen_notes.is_empty() {
+                this.settings.updates.seen_notes = after_update.clone().unwrap_or_else(|| trek_core::VERSION.into());
+                this.save_settings(cx);
+            }
+            this.fetch_changelog(cx);
+        }
         if let Some(from) = after_update {
             tracing::info!("updated from {from} to {}", trek_core::VERSION);
             // Spawned so it lands after the window has subscribed to workspace events.
-            let message = format!("Trek updated to {} (from {from}).", trek_core::VERSION);
+            let message = format!("Trek updated to {} (from {from}). See what changed under What's new, at the bottom of the sidebar.", trek_core::VERSION);
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
             })
@@ -3879,11 +3888,6 @@ impl Workspace {
         crate::updater::describe_update(&self.updater.status, self.settings.updates.auto_check, trek_core::update::blocker())
     }
 
-    /// The update on offer, while it's on offer and has release notes.
-    pub fn update_notes(&self) -> Option<&trek_core::update::AvailableUpdate> {
-        self.updater.notes()
-    }
-
     pub fn run_update_action(&mut self, action: UpdateAction, cx: &mut Context<Self>) {
         match action {
             UpdateAction::Check => self.check_for_updates(true, cx),
@@ -3910,13 +3914,63 @@ impl Workspace {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
                 let auto_download = this.settings.updates.auto_download;
+                let before = this.updater.offer.as_ref().map(|o| o.version.clone());
                 if this.updater.finish_check(ticket, result, user_initiated, auto_download, now_ms()) {
                     this.download_update(cx);
+                }
+                let found = this.updater.offer.as_ref().map(|o| o.version.clone());
+                if found.is_some() && found != before {
+                    this.fetch_changelog(cx);
                 }
                 cx.notify();
             });
         });
         self.keep(task);
+    }
+
+    /// Read the published release notes (`trek_core::changelog`) for "What's new" and the release
+    /// history; an update that was found reads them again, as they now include it.
+    pub fn fetch_changelog(&mut self, cx: &mut Context<Self>) {
+        let updates = self.settings.updates.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_core::changelog::fetch(&updates).await).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            match rx.recv().await {
+                Ok(Ok(releases)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.updater.changelog = releases;
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => tracing::info!("release notes: {e:#}"),
+                Err(_) => {}
+            }
+        });
+        self.keep(task);
+    }
+
+    /// What this version brought, until the user has seen it: only after an update, and only for
+    /// a release (a dev build has no notes of its own).
+    pub fn whats_new(&self) -> Option<&trek_core::changelog::Release> {
+        if trek_core::update::blocker().is_some() || self.settings.updates.seen_notes == trek_core::VERSION {
+            return None;
+        }
+        self.updater.installed_release().filter(|r| !r.notes.is_empty())
+    }
+
+    pub fn mark_whats_new_seen(&mut self, cx: &mut Context<Self>) {
+        if self.settings.updates.seen_notes != trek_core::VERSION {
+            self.settings.updates.seen_notes = trek_core::VERSION.into();
+            self.save_settings(cx);
+            cx.notify();
+        }
+    }
+
+    /// Release notes for the update on offer: every release since this one.
+    pub fn pending_changes(&self) -> Option<crate::updater::Changes> {
+        self.updater.pending_changes(self.settings.updates.channel, trek_core::changelog::github_repo(&self.settings.updates).as_deref())
     }
 
     /// Re-check about once a day while Trek stays open (housekeeping calls this every minute).

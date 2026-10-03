@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use trek_core::settings::Channel;
+use trek_core::changelog::{self, Release};
 use trek_core::update::{AvailableUpdate, Blocker};
 
 /// A day between background checks.
@@ -74,6 +75,9 @@ pub struct Updater {
     pub status: UpdateStatus,
     /// The newest release the last check found (version, notes, download).
     pub offer: Option<AvailableUpdate>,
+    /// Every published release, newest first (`trek_core::changelog`); empty until the first
+    /// fetch.
+    pub changelog: Vec<Release>,
     /// When the background check runs next, in wall-clock ms. Not `Instant`: that stops while
     /// the Mac sleeps, and "once a day" would become once every few days on a laptop.
     next_check: Option<i64>,
@@ -201,14 +205,46 @@ impl Updater {
         }
     }
 
-    /// The update on offer, while it's on offer and has release notes.
-    pub fn notes(&self) -> Option<&AvailableUpdate> {
+    /// The update the last check found, while it's on offer (not yet installed or dropped).
+    fn offered(&self) -> Option<&AvailableUpdate> {
         let offered = matches!(
             self.status,
             UpdateStatus::Available { .. } | UpdateStatus::Downloading { .. } | UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. }
         );
-        self.offer.as_ref().filter(|o| offered && !o.notes.is_empty())
+        self.offer.as_ref().filter(|_| offered)
     }
+
+    /// What the update on offer brings: the notes of every release since this one (an update can
+    /// skip several), or the offer's own notes until the release list has been read.
+    pub fn pending_changes(&self, channel: Channel, repo: Option<&str>) -> Option<Changes> {
+        let offer = self.offered()?;
+        let current = trek_core::update::current_version();
+        let mut releases: Vec<Release> = changelog::between(&self.changelog, channel, &current, &offer.version).into_iter().cloned().collect();
+        if releases.first().is_none_or(|r| r.version != offer.version) && !offer.notes.is_empty() {
+            releases.insert(0, Release { version: offer.version.clone(), notes: offer.notes.clone(), date: offer.pub_date.clone(), url: String::new(), prerelease: !offer.version.pre.is_empty() });
+        }
+        if releases.is_empty() {
+            return None;
+        }
+        // Nightlies have no tag of their own to compare against.
+        let tagged = !offer.version.pre.starts_with("nightly") && current.pre.is_empty();
+        let compare = repo.filter(|_| tagged).map(|r| changelog::compare_url(r, &current, &offer.version));
+        Some(Changes { releases, compare })
+    }
+
+    /// This version's release, once the release list has been read.
+    pub fn installed_release(&self) -> Option<&Release> {
+        let current = trek_core::update::current_version();
+        self.changelog.iter().find(|r| r.version == current)
+    }
+}
+
+/// Release notes to show for an update: newest release first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Changes {
+    pub releases: Vec<Release>,
+    /// The code changes between the two versions on GitHub, when both are tagged there.
+    pub compare: Option<String>,
 }
 
 /// The updater's status line and next action for a state.
@@ -376,11 +412,33 @@ mod tests {
     }
 
     #[test]
+    fn an_update_shows_every_release_it_brings() {
+        let current = trek_core::update::current_version();
+        let next = |minor: u64| semver::Version::new(current.major, current.minor + minor, 0);
+        let published = |v: semver::Version| Release { notes: format!("- in {v}"), version: v, date: String::new(), url: String::new(), prerelease: false };
+        let mut u = Updater::default();
+        assert!(u.pending_changes(Channel::Stable, Some("dokyit/Trek")).is_none(), "nothing on offer");
+        staged(&mut u, Channel::Stable, &next(2).to_string(), 0);
+        // Before the release list is read: the offer's own notes.
+        let changes = u.pending_changes(Channel::Stable, Some("dokyit/Trek")).unwrap();
+        assert_eq!(changes.releases.iter().map(|r| r.notes.as_str()).collect::<Vec<_>>(), ["- faster"]);
+        // After: every release since this one, newest first; none from before or beyond.
+        u.changelog = vec![published(next(3)), published(next(2)), published(next(1)), published(current.clone())];
+        let changes = u.pending_changes(Channel::Stable, Some("dokyit/Trek")).unwrap();
+        assert_eq!(changes.releases.iter().map(|r| r.version.clone()).collect::<Vec<_>>(), [next(2), next(1)]);
+        assert_eq!(changes.compare.as_deref(), Some(format!("https://github.com/dokyit/Trek/compare/v{current}...v{}", next(2)).as_str()).filter(|_| current.pre.is_empty()));
+        assert_eq!(u.installed_release().map(|r| r.version.clone()), Some(current));
+        u.status = UpdateStatus::UpToDate;
+        assert!(u.pending_changes(Channel::Stable, None).is_none(), "installed or dropped");
+    }
+
+    #[test]
     fn release_notes_show_while_an_update_is_on_offer() {
         let mut u = Updater::default();
         staged(&mut u, Channel::Stable, "0.2.1", 0);
-        assert_eq!(u.notes().map(|n| n.notes.as_str()), Some("- faster"));
+        let notes = |u: &Updater| u.pending_changes(Channel::Stable, None).map(|c| c.releases[0].notes.clone());
+        assert_eq!(notes(&u).as_deref(), Some("- faster"));
         u.status = UpdateStatus::UpToDate;
-        assert!(u.notes().is_none());
+        assert!(notes(&u).is_none());
     }
 }

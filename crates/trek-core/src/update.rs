@@ -187,7 +187,7 @@ pub fn manifest_urls(updates: &Updates) -> Vec<String> {
         .collect()
 }
 
-fn http() -> Result<reqwest::Client> {
+pub(crate) fn http() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(format!("Trek/{}", crate::VERSION))
         .connect_timeout(std::time::Duration::from_secs(15))

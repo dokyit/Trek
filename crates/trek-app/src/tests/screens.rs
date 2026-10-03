@@ -434,3 +434,47 @@ fn a_thread_window_sends_to_its_own_thread() {
         trek.wait_done(cx, &popped, RunState::Idle).await;
     });
 }
+
+#[test]
+fn an_update_shows_every_release_it_brings_and_the_history_before_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let current = trek_core::update::current_version();
+        let next = |minor: u64| semver::Version::new(current.major, current.minor + minor, 0);
+        let release = |v: semver::Version| trek_core::changelog::Release {
+            notes: format!("- **New** in {v}\n- Fixed `something`"),
+            date: "2026-10-03T14:25:06Z".into(),
+            url: format!("https://github.com/dokyit/Trek/releases/tag/v{v}"),
+            prerelease: false,
+            version: v,
+        };
+        trek.update(cx, |ws, cx| {
+            ws.updater.changelog = vec![release(next(2)), release(next(1)), release(current.clone())];
+            ws.updater.offer = Some(trek_core::update::AvailableUpdate {
+                version: next(2),
+                notes: "- **New** in the offer".into(),
+                pub_date: String::new(),
+                artifact: trek_core::update::Artifact { url: "u".into(), sha256: "s".into(), signature: String::new() },
+            });
+            ws.updater.status = crate::workspace::UpdateStatus::Available { version: next(2).to_string() };
+            let changes = ws.pending_changes().expect("an update on offer");
+            assert_eq!(changes.releases.iter().map(|r| r.version.clone()).collect::<Vec<_>>(), [next(2), next(1)]);
+            ws.navigate(Route::Settings(SettingsPage::Updates), cx);
+        });
+        for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
+            theme(cx, choice);
+            trek.render(cx);
+            assert!(trek.visible(cx, "update-notes"), "what the update brings");
+            assert!(trek.visible(cx, "release-history"), "and the installed release before it");
+            assert!(trek.visible(cx, "compare-link"));
+            // The sidebar's update card, back in the inbox.
+            trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+            trek.render(cx);
+            trek.click(cx, "updater");
+            trek.render(cx);
+            assert!(trek.visible(cx, "updater-notes"), "the sidebar's update card lists them too");
+            trek.press(cx, "escape");
+            trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Updates), cx));
+        }
+    });
+}

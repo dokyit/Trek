@@ -370,11 +370,14 @@ pub struct Updates {
     /// Where releases come from: a GitHub releases URL, a manifest URL template with `{channel}`,
     /// or one manifest URL ending in `.json` (see `update::manifest_urls`).
     pub feed_url: String,
+    /// The version whose "What's new" the user has seen. Behind the running version after an
+    /// update, until they open it.
+    pub seen_notes: String,
 }
 
 impl Default for Updates {
     fn default() -> Self {
-        Self { channel: Channel::Stable, auto_check: true, auto_download: true, feed_url: crate::update::OFFICIAL_FEED.into() }
+        Self { channel: Channel::Stable, auto_check: true, auto_download: true, feed_url: crate::update::OFFICIAL_FEED.into(), seen_notes: String::new() }
     }
 }
 

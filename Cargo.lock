@@ -8766,6 +8766,7 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "rust-embed",
+ "semver",
  "serde_json",
  "tokio",
  "tracing",

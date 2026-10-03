@@ -2,6 +2,7 @@
 //! Nothing in this crate depends on the UI toolkit.
 
 pub mod catalog;
+pub mod changelog;
 pub mod checkpoint;
 pub mod detect;
 pub mod git;

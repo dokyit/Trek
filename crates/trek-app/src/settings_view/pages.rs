@@ -662,10 +662,19 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
-        let notes = ws.update_notes().map(|u| {
-            let date = chrono::DateTime::parse_from_rfc3339(&u.pub_date).ok().map(|d| d.format("%B %-d, %Y").to_string());
-            (u.version.to_string(), u.notes.clone(), date)
-        });
+        let pending = ws.pending_changes();
+        // The release history: what this channel has published up to the update on offer.
+        let ceiling = ws.updater.offer.as_ref().map(|o| o.version.clone()).filter(|_| pending.is_some()).unwrap_or_else(trek_core::update::current_version);
+        let history: Vec<trek_core::changelog::Release> = ws
+            .updater
+            .changelog
+            .iter()
+            .filter(|r| r.version <= ceiling && trek_core::changelog::on_channel(r, s.updates.channel))
+            .filter(|r| pending.as_ref().is_none_or(|p| !p.releases.iter().any(|q| q.version == r.version)))
+            .take(8)
+            .cloned()
+            .collect();
+        let repo = trek_core::changelog::github_repo(&s.updates);
         let action = view.action.map(|action| {
             Button::new("update-action")
                 .small()
@@ -693,16 +702,21 @@ impl SettingsView {
             .children(action.map(|b| div().flex_none().child(b)))
             .into_any_element();
         let mut page = vec![header];
-        if let Some((version, notes, date)) = notes {
+        if let Some(changes) = pending {
+            let title = match changes.releases.as_slice() {
+                [one] => format!("What's new in Trek {}", one.version),
+                many => format!("What's changed · {} releases", many.len()),
+            };
             page.push(
                 h_flex()
                     .pb(px(10.))
                     .gap(px(8.))
-                    .child(div().text_size(px(13.)).font_semibold().child(format!("What's new in Trek {version}")))
-                    .when_some(date, |el, d| el.child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(d)))
+                    .child(div().text_size(px(13.)).font_semibold().child(title))
+                    .child(div().flex_1())
+                    .when_some(changes.compare, |el, url| el.child(ui::web_link("compare-link", "Compare on GitHub", url, cx)))
                     .into_any_element(),
             );
-            page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::release_notes("update-notes", notes, px(320.), cx)).into_any_element());
+            page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::releases_notes("update-notes", &changes.releases, px(360.), cx)).into_any_element());
         }
         page.push(ui::group(
             vec![
@@ -728,6 +742,19 @@ impl SettingsView {
             ],
             cx,
         ));
+        if !history.is_empty() {
+            page.push(
+                h_flex()
+                    .pt(px(28.))
+                    .pb(px(10.))
+                    .gap(px(8.))
+                    .child(div().text_size(px(13.)).font_semibold().child("Release history"))
+                    .child(div().flex_1())
+                    .when_some(repo, |el, repo| el.child(ui::web_link("all-releases", "All releases", format!("https://github.com/{repo}/releases"), cx)))
+                    .into_any_element(),
+            );
+            page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::releases_notes("release-history", &history, px(420.), cx)).into_any_element());
+        }
         page
     }
 
