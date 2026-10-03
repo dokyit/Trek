@@ -51,6 +51,9 @@ pub struct McpServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// How long one of its tool calls may take, where the agent caps that itself (Codex: a
+    /// minute unless told). Trek's sub-agent tools can wait on a sub-agent for many minutes.
+    pub tool_timeout_secs: Option<u64>,
 }
 
 impl McpServer {

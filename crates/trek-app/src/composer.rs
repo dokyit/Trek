@@ -19,6 +19,7 @@ use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
 use std::path::PathBuf;
 use std::sync::Arc;
 use trek_core::catalog::ModelInfo;
+use trek_core::orchestrate::{Consult, Consultant, Style};
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,6 +66,15 @@ pub struct Composer {
     height: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// The message being edited, to send again in its place.
     editing: Option<Editing>,
+    /// Models to consult with the next message, and how (see `trek_core::orchestrate`).
+    consult: Consult,
+    /// Keep the consultants after sending (else they clear).
+    consult_pinned: bool,
+    consult_open: bool,
+    /// The agent whose models the consult menu lists.
+    consult_rail: Option<AgentId>,
+    /// The consultant whose effort the consult menu's side panel is picking.
+    consult_effort: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -109,6 +119,31 @@ fn model_name(models: &[ModelInfo], id: &str) -> String {
 /// The agent's default when the thread hasn't picked one: Opus 5.5 for Claude, the first live model otherwise.
 pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
     models.iter().find(|m| m.id == "claude-opus-5-5").or_else(|| models.first())
+}
+
+/// A consultant on `model` of `agent`, at `effort` (High, unless asked) within what the model takes.
+fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
+    let effort = effort.unwrap_or(Effort::High);
+    let effort = if model.efforts.is_empty() { effort } else { effort.clamp_to(&model.efforts) };
+    Consultant { agent, model: model.id.clone(), effort }
+}
+
+/// The model `query` names among the agents the user can pick: by id or name, whole or in part
+/// ("sol", "opus 5.5", "gpt-5.6-luna"), optionally after its agent ("codex sol").
+fn find_model(ws: &crate::workspace::Workspace, query: &str) -> Option<(AgentId, ModelInfo)> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    let all: Vec<(AgentId, ModelInfo)> = ws.ready_agents().into_iter().flat_map(|a| ws.models_for(&a).into_iter().map(move |m| (a.clone(), m))).collect();
+    let named = |(a, m): &&(AgentId, ModelInfo)| {
+        let agent = a.display_name().to_lowercase();
+        [m.id.to_lowercase(), m.name.to_lowercase(), format!("{agent} {}", m.name.to_lowercase()), format!("{} {}", a.key(), m.id.to_lowercase())].contains(&q)
+    };
+    all.iter()
+        .find(named)
+        .or_else(|| all.iter().find(|(_, m)| m.name.to_lowercase().contains(&q) || m.id.to_lowercase().contains(&q)))
+        .cloned()
 }
 
 pub(crate) fn hand_icon(level: HandHolding) -> Icon {
@@ -194,6 +229,11 @@ impl Composer {
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
+            consult: Consult { implement: true, ..Default::default() },
+            consult_pinned: false,
+            consult_open: false,
+            consult_rail: None,
+            consult_effort: None,
             _subscriptions: subscriptions,
         }
     }
@@ -208,6 +248,35 @@ impl Composer {
         if text.trim().is_empty() && self.outbox.paths.is_empty() {
             return;
         }
+        // `/consult <models>: <message>` picks consultants (and sends, when there's a message).
+        let text = match self.consult_command(&text, cx) {
+            Some(Ok(Some(message))) => message,
+            Some(Ok(None)) => {
+                state.update(cx, |s, cx| s.set_value("", window, cx));
+                self.trigger = None;
+                self.consult_open = true;
+                self.sync_overlay(cx);
+                cx.notify();
+                return;
+            }
+            Some(Err(why)) => {
+                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: why, undo: None }));
+                return;
+            }
+            None => text,
+        };
+        // With consultants picked, the agent is told to ask them first.
+        let text = if self.consult.consultants.is_empty() || text.trim().is_empty() || text.trim_start().starts_with('/') {
+            text
+        } else {
+            let names = self.consultant_names(cx);
+            let wrapped = trek_core::orchestrate::consult_prompt(&text, &self.consult, |c| names(c));
+            if !self.consult_pinned {
+                self.consult.consultants.clear();
+                self.consult_effort = None;
+            }
+            wrapped
+        };
         if let Some(e) = &self.editing {
             let ws = self.workspace.read(cx);
             let why = if ws.turn_running(&e.thread) {
@@ -247,6 +316,11 @@ impl Composer {
     /// A message comes back into the composer: put back by a rewind, or (`edit`: its item id) to
     /// edit and send again in its place.
     pub fn compose(&mut self, thread: &str, text: &str, images: &[PathBuf], edit: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // A message sent with consultants comes back as it was written, its consultants picked.
+        let (text, consult) = trek_core::orchestrate::split_consult(text);
+        if let Some(c) = consult {
+            self.consult = c;
+        }
         let Some(item) = edit else {
             self.restore(text, images, window, cx);
             return;
@@ -380,7 +454,7 @@ impl Composer {
         if self.scope != Scope::Main {
             return;
         }
-        let open = self.model_open || self.access_open || self.trigger.is_some();
+        let open = self.model_open || self.access_open || self.consult_open || self.trigger.is_some();
         self.workspace.update(cx, |ws, cx| {
             if ws.overlay_open != open {
                 ws.overlay_open = open;
@@ -398,6 +472,12 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn picks(&self, cx: &App) -> Vec<String> {
         self.picker_items(cx).into_iter().map(|i| i.label).collect()
+    }
+
+    /// The consultants picked for the next message (`agent/model/effort`), and whether they stay.
+    #[cfg(test)]
+    pub(crate) fn consultants(&self) -> (Vec<String>, bool) {
+        (self.consult.consultants.iter().map(Consultant::key).collect(), self.consult_pinned)
     }
 
     /// Images attached to the next message, and how many are still being saved.
@@ -453,6 +533,10 @@ impl Composer {
 
     /// Put follow-ups that never went out back into the composer.
     pub fn restore(&mut self, text: &str, images: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let (text, consult) = trek_core::orchestrate::split_consult(text);
+        if let Some(c) = consult {
+            self.consult = c;
+        }
         if !text.is_empty() {
             self.insert_text(text, window, cx);
         }
@@ -1137,6 +1221,330 @@ impl Composer {
         }
     }
 
+    // ---------- consult ----------
+
+    /// "Sol · High": a consultant as the menu and the agent's instructions name it.
+    fn consultant_names(&self, cx: &App) -> Box<dyn Fn(&Consultant) -> String> {
+        let ws = self.workspace.read(cx);
+        let models: Vec<(AgentId, Vec<ModelInfo>)> = self.consult.consultants.iter().map(|c| (c.agent.clone(), ws.models_for(&c.agent))).collect();
+        Box::new(move |c: &Consultant| {
+            let name = models.iter().find(|(a, _)| *a == c.agent).map(|(_, m)| model_name(m, &c.model)).unwrap_or_else(|| c.model.clone());
+            format!("{name} · {}", c.effort.label())
+        })
+    }
+
+    /// `/consult sol high, opus max: <message>` (also `discuss`, `report`): the consultants it
+    /// names are picked; returns the message to send, `None` when there's none (the menu opens).
+    /// `None` overall when `text` isn't the command.
+    fn consult_command(&mut self, text: &str, cx: &mut Context<Self>) -> Option<Result<Option<String>, String>> {
+        let rest = text.trim_start().strip_prefix("/consult")?;
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return None;
+        }
+        let (targets, message) = match rest.split_once(':') {
+            Some((t, m)) => (t, Some(m.trim().to_string()).filter(|m| !m.is_empty())),
+            None => (rest, None),
+        };
+        let ws = self.workspace.read(cx);
+        let mut picked = vec![];
+        for part in targets.split(',') {
+            let mut words: Vec<&str> = part.split_whitespace().collect();
+            words.retain(|w| match w.to_lowercase().as_str() {
+                "discuss" => {
+                    self.consult.style = Style::Discuss;
+                    false
+                }
+                "advise" => {
+                    self.consult.style = Style::Advise;
+                    false
+                }
+                "report" => {
+                    self.consult.implement = false;
+                    false
+                }
+                "implement" => {
+                    self.consult.implement = true;
+                    false
+                }
+                _ => true,
+            });
+            if words.is_empty() {
+                continue;
+            }
+            let effort = words.last().and_then(|w| Effort::parse(w)).filter(|_| words.len() > 1);
+            if effort.is_some() {
+                words.pop();
+            }
+            let query = words.join(" ");
+            let Some((agent, model)) = find_model(ws, &query) else { return Some(Err(format!("There's no model called “{query}” to consult."))) };
+            picked.push(consultant(agent, &model, effort));
+        }
+        if !picked.is_empty() {
+            self.consult.consultants = picked;
+        }
+        match message {
+            Some(_) if self.consult.consultants.is_empty() => Some(Err("Name a model to consult: /consult sol high: your question".into())),
+            message => Some(Ok(message)),
+        }
+    }
+
+    /// The consult menu: who's consulted, at what effort, how, and then what.
+    fn consult_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.workspace.read(cx);
+        let prefs = ws.prefs_in(&self.scope);
+        let agents = ws.ready_agents();
+        // Another agent than the thread's own comes first: a second opinion from elsewhere.
+        let rail = self.consult_rail.clone().filter(|a| agents.contains(a)).or_else(|| agents.iter().find(|a| **a != prefs.agent).cloned()).or_else(|| agents.first().cloned());
+        let models = rail.as_ref().map(|a| ws.models_for(a)).unwrap_or_default();
+        let picked_models: Vec<Vec<ModelInfo>> = self.consult.consultants.iter().map(|c| ws.models_for(&c.agent)).collect();
+        let main_agent = prefs.agent.display_name();
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let hairline = theme.foreground.opacity(0.07);
+        let me = cx.entity();
+        let empty = self.consult.consultants.is_empty();
+
+        let header = h_flex()
+            .px(px(10.))
+            .pt(px(6.))
+            .pb(px(2.))
+            .gap(px(6.))
+            .child(div().flex_1().text_size(px(13.5)).font_medium().child("Consult other models"))
+            .when(!empty, |el| {
+                el.child(
+                    div()
+                        .id("consult-clear")
+                        .test_support()
+                        .text_size(px(12.5))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child("Clear")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.consult.consultants.clear();
+                            this.consult_effort = None;
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                gpui_kit::component::button::Button::new("consult-pin")
+                    .ghost()
+                    .xsmall()
+                    .selected(self.consult_pinned)
+                    .icon(Icon::new(if self.consult_pinned { crate::assets::Lucide::Pin } else { crate::assets::Lucide::PinOff }).text_color(if self.consult_pinned { theme.foreground } else { muted }))
+                    .tooltip(if self.consult_pinned { "Kept for every message: click to clear after sending" } else { "Keep for the next messages too" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.consult_pinned = !this.consult_pinned;
+                        cx.notify();
+                    })),
+            );
+        let note = match self.consult.style {
+            Style::Advise => format!("They review and suggest; {main_agent} decides."),
+            Style::Discuss => format!("{main_agent} and they go back and forth until they agree ({} rounds at most).", trek_core::orchestrate::DISCUSS_ROUNDS),
+        };
+        let picked = v_flex().px(px(5.)).children(self.consult.consultants.iter().enumerate().map(|(i, c)| {
+            let name = picked_models.get(i).map(|m| model_name(m, &c.model)).unwrap_or_else(|| c.model.clone());
+            let choosing = self.consult_effort == Some(i);
+            ui::menu_row(("consultant", i), choosing, cx)
+                .test_support()
+                .min_h(px(32.))
+                .child(ui::agent_glyph(&c.agent, cx))
+                .child(div().flex_1().min_w_0().truncate().child(name))
+                .child(
+                    h_flex()
+                        .id(("consultant-effort", i))
+                        .test_support()
+                        .gap(px(2.))
+                        .text_color(muted)
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(c.effort.label())
+                        .child(Icon::new(IconName::ChevronRight).xsmall())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.consult_effort = if this.consult_effort == Some(i) { None } else { Some(i) };
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id(("consultant-remove", i))
+                        .test_support()
+                        .child(Icon::new(IconName::Close).xsmall().text_color(muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if i < this.consult.consultants.len() {
+                                this.consult.consultants.remove(i);
+                            }
+                            this.consult_effort = None;
+                            cx.notify();
+                        })),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.consult_effort = if this.consult_effort == Some(i) { None } else { Some(i) };
+                    cx.notify();
+                }))
+        }));
+        // Which agent's models to list: a row of tabs, so no logo sits beside a model it isn't.
+        let rail_row = h_flex().flex_wrap().gap(px(2.)).px(px(6.)).pt(px(6.)).children(agents.iter().map(|a| {
+            let active = rail.as_ref() == Some(a);
+            let (target, tip) = (a.clone(), SharedString::from(a.display_name()));
+            div()
+                .id(SharedString::from(format!("consult-rail-{}", a.key())))
+                .test_support()
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .cursor_pointer()
+                .when(active, |el| el.bg(theme.list_active))
+                .hover(|s| s.bg(theme.list_active))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .child(ui::agent_glyph(a, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.consult_rail = Some(target.clone());
+                    cx.notify();
+                }))
+        }));
+        let list = v_flex().id("consult-models").min_w_0().px(px(5.)).pt(px(4.)).max_h(px(220.)).overflow_y_scroll().children(rail.iter().flat_map(|agent| {
+            models.iter().map(|m| {
+                let on = self.consult.consultants.iter().any(|c| c.agent == *agent && same_model(&c.model, &m.id));
+                let (agent, model) = (agent.clone(), m.clone());
+                ui::menu_row(SharedString::from(format!("consult-add-{}-{}", agent.key(), m.id)), false, cx)
+                    .test_support()
+                    .min_h(px(30.))
+                    .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
+                    .when(on, |el| el.child(Icon::new(IconName::Check).small()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let at = this.consult.consultants.iter().position(|c| c.agent == agent && same_model(&c.model, &model.id));
+                        match at {
+                            Some(i) => _ = this.consult.consultants.remove(i),
+                            None => this.consult.consultants.push(consultant(agent.clone(), &model, None)),
+                        }
+                        this.consult_effort = None;
+                        cx.notify();
+                    }))
+            })
+        }));
+        let (m1, m2) = (me.clone(), me.clone());
+        let main = ui::menu_surface(cx)
+            .id("consult-menu-body")
+            .test_support()
+            .w(px(330.))
+            .p_0()
+            .pb(px(8.))
+            .child(header)
+            .child(div().px(px(10.)).pb(px(6.)).text_size(px(12.5)).line_height(relative(1.4)).text_color(muted).child(note))
+            .when(!empty, |el| el.child(picked))
+            .child(v_flex().mt(px(6.)).border_t_1().border_color(hairline).child(rail_row).child(list))
+            .child(
+                v_flex()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .pt(px(10.))
+                    .border_t_1()
+                    .border_color(hairline)
+                    .child(ui::segmented(
+                        "consult-style",
+                        vec![(Style::Advise, "Advise"), (Style::Discuss, "Discuss")],
+                        self.consult.style,
+                        move |v, _, cx| {
+                            m1.update(cx, |c, cx| {
+                                c.consult.style = v;
+                                cx.notify();
+                            })
+                        },
+                        cx,
+                    ))
+                    .child(ui::segmented(
+                        "consult-then",
+                        vec![(true, "Then implement"), (false, "Just report")],
+                        self.consult.implement,
+                        move |v, _, cx| {
+                            m2.update(cx, |c, cx| {
+                                c.consult.implement = v;
+                                cx.notify();
+                            })
+                        },
+                        cx,
+                    )),
+            );
+        let side = self.consult_effort.and_then(|i| {
+            let c = self.consult.consultants.get(i)?;
+            let efforts = picked_models.get(i).and_then(|ms| ms.iter().find(|m| same_model(&c.model, &m.id))).map(|m| m.efforts.clone()).filter(|e| !e.is_empty());
+            let efforts = efforts.unwrap_or_else(|| vec![Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]);
+            let current = c.effort;
+            Some(
+                ui::menu_surface(cx)
+                    .w(px(170.))
+                    .children(efforts.into_iter().map(|e| {
+                        ui::menu_row(SharedString::from(format!("consult-eff-{}", e.as_str())), e == current, cx)
+                            .test_support()
+                            .child(div().flex_1().child(e.label()))
+                            .when(e == current, |el| el.child(Icon::new(IconName::Check).small()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(c) = this.consult.consultants.get_mut(i) {
+                                    c.effort = e;
+                                }
+                                this.consult_effort = None;
+                                cx.notify();
+                            }))
+                    }))
+                    .into_any_element(),
+            )
+        });
+        h_flex().items_end().gap(px(6.)).child(main).children(side).into_any_element()
+    }
+
+    /// The Consult pill: quiet until models are picked, then their logos and how they'll be asked.
+    fn consult_pill(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let open = self.consult_open;
+        let empty = self.consult.consultants.is_empty();
+        let names = self.consultant_names(cx);
+        let tip: SharedString = if empty {
+            "Consult other models before answering".into()
+        } else {
+            let who: Vec<String> = self.consult.consultants.iter().map(|c| names(c)).collect();
+            format!("Consulting {}{}", who.join(", "), if self.consult_pinned { " · kept for every message" } else { "" }).into()
+        };
+        let style = match self.consult.style {
+            Style::Advise => "Advise",
+            Style::Discuss => "Discuss",
+        };
+        let logos = h_flex().children(self.consult.consultants.iter().take(4).enumerate().map(|(i, c)| {
+            div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(5.)).bg(theme.secondary).child(ui::agent_logo(&c.agent, px(14.), cx))
+        }));
+        let entity = cx.entity();
+        Popover::new("consult-menu")
+            .anchor(Anchor::BottomLeft)
+            .appearance(false)
+            .open(open)
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                this.consult_open = *open;
+                if !*open {
+                    this.consult_effort = None;
+                }
+                this.sync_overlay(cx);
+                cx.notify();
+            }))
+            .trigger(
+                Pill::new("consult-pill")
+                    .ghost(empty)
+                    .tooltip(tip)
+                    .when(empty, |p| p.child(Icon::new(crate::assets::Lucide::MessagesSquare).small().text_color(muted)).when(!compact, |p| p.child(div().text_color(muted).child("Consult"))))
+                    .when(!empty, |p| {
+                        p.child(logos)
+                            .when(!compact, |p| p.child(div().text_color(muted).child(style)))
+                            .when(self.consult_pinned, |p| p.child(Icon::new(crate::assets::Lucide::Pin).xsmall().text_color(muted)))
+                    }),
+            )
+            .content(move |_, _, cx| entity.update(cx, |c, cx| c.consult_menu(cx)))
+            .into_any_element()
+    }
+
     // ---------- access menu ----------
 
     fn access_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1480,7 +1888,8 @@ impl Render for Composer {
         let thread = ws.thread_in(&self.scope).cloned();
         let is_draft = ws.is_draft_in(&self.scope);
         let main = self.scope == Scope::Main;
-        let running = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
+        // Stop also ends sub-agents still at work after their parent's turn.
+        let running = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou) || !ws.running_children(&t.id).is_empty());
         let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
         let (cost_label, billing_tip) = crate::workspace::cost_note(live.and_then(|l| l.billing.as_ref()), live.map_or(0.0, |l| l.cost_usd));
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
@@ -1561,6 +1970,7 @@ impl Render for Composer {
         };
         let send = if running {
             square("stop")
+                .test_support()
                 .cursor_pointer()
                 .bg(palette::red(cx))
                 .child(div().size(px(10.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
@@ -1651,6 +2061,7 @@ impl Render for Composer {
                     .overflow_hidden()
                     .child(self.plus_button(cx))
                     .child(model_pill)
+                    .child(self.consult_pill(compact, cx))
                     .child(access_pill)
                     .when(is_draft, |el| {
                         el.child(

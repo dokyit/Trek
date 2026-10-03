@@ -111,6 +111,13 @@ fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> 
     control_response(request_id, json!({ "behavior": "allow", "updatedInput": input }))
 }
 
+/// The answer to a request to use one of Trek's orchestration tools (`trek-orchestrate`): allowed.
+fn trek_tool_allowed(v: &Value) -> Option<Value> {
+    let r = &v["request"];
+    let ours = v["type"] == "control_request" && r["subtype"] == "can_use_tool" && r["tool_name"].as_str()?.starts_with("mcp__trek-orchestrate__");
+    ours.then(|| control_response(v["request_id"].as_str().unwrap_or_default(), json!({ "behavior": "allow", "updatedInput": r["input"] })))
+}
+
 /// The CLI's arguments for a session (MCP servers aside).
 fn cli_args(config: &SessionConfig) -> Vec<String> {
     let mode = if config.plan { "plan" } else { config.hand_holding.claude_mode() };
@@ -462,6 +469,12 @@ pub async fn run(
                             return Ok(());
                         }
                     }
+                    continue;
+                }
+                // Trek's own sub-agent tools need no approval: what a sub-agent does is asked
+                // for in its own thread, at the level Trek gives it.
+                if let Some(answer) = trek_tool_allowed(&v) {
+                    write_line(&mut cli.stdin, &answer).await?;
                     continue;
                 }
                 for ev in turns.step(&v, &mut pending, &mut streamed_text) {
@@ -1063,8 +1076,18 @@ mod tests {
     }
 
     #[test]
+    fn trek_s_own_tools_are_allowed_without_asking() {
+        let ask = |tool: &str| json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":tool,"input":{"title":"x"}}});
+        let ok = trek_tool_allowed(&ask("mcp__trek-orchestrate__delegate_task")).unwrap();
+        assert_eq!(ok["response"]["request_id"], "r1");
+        assert_eq!(ok["response"]["response"], json!({"behavior":"allow","updatedInput":{"title":"x"}}));
+        assert_eq!(trek_tool_allowed(&ask("mcp__other__delete_everything")), None);
+        assert_eq!(trek_tool_allowed(&ask("Bash")), None);
+    }
+
+    #[test]
     fn mcp_config_shape() {
-        let servers = [crate::McpServer { name: "fs".into(), command: "npx".into(), args: vec!["-y".into(), "srv".into()], env: vec![("K".into(), "v".into())] }];
+        let servers = [crate::McpServer { name: "fs".into(), command: "npx".into(), args: vec!["-y".into(), "srv".into()], env: vec![("K".into(), "v".into())], tool_timeout_secs: None }];
         assert_eq!(
             json!({ "mcpServers": mcp_servers_json(&servers) }),
             json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})

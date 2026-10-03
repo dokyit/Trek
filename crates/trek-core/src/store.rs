@@ -121,6 +121,9 @@ pub struct Thread {
     /// How the next session picks the conversation up after a rewind or a fork; cleared once
     /// that session has started.
     pub reopen: Option<crate::rewind::Reopen>,
+    /// Set for sub-agents: the thread whose agent started this one (`delegate_task`). Hidden from
+    /// the sidebar (they show inline in their parent) but found by search.
+    pub parent_id: Option<String>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -167,6 +170,14 @@ impl Thread {
     }
 
     pub fn section(&self, now: i64) -> Option<Section> {
+        if self.parent_id.is_some() {
+            return None;
+        }
+        self.own_section(now)
+    }
+
+    /// Where the thread would sit on its own, a sub-agent too (a search lists those).
+    pub fn own_section(&self, now: i64) -> Option<Section> {
         if self.archived_at.is_some() || self.side_of.is_some() {
             return None;
         }
@@ -377,6 +388,7 @@ const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("worktree_base", "TEXT"),
     ("native_at", "TEXT"),
     ("reopen", "TEXT"),
+    ("parent_id", "TEXT"),
 ];
 
 /// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
@@ -512,7 +524,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, parent_id";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -548,6 +560,7 @@ impl Store {
             },
             native_at: r.get(29)?,
             reopen: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str(&j).ok()),
+            parent_id: r.get(31)?,
         })
     }
 
@@ -558,6 +571,15 @@ impl Store {
                 Self::THREAD_COLS
             ))?;
             let rows = st.query_map([], Self::row_to_thread)?;
+            rows.collect()
+        })
+    }
+
+    /// The sub-agents `parent` started, archived ones too, oldest first.
+    pub fn sub_agents(&self, parent: &str) -> Result<Vec<Thread>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!("SELECT {} FROM threads WHERE parent_id = ?1 ORDER BY created_at", Self::THREAD_COLS))?;
+            let rows = st.query_map([parent], Self::row_to_thread)?;
             rows.collect()
         })
     }
@@ -609,6 +631,7 @@ impl Store {
             worktree: None,
             native_at: None,
             reopen: None,
+            parent_id: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -667,7 +690,8 @@ impl Store {
                 t.worktree.as_ref().map(|w| w.branch.clone()),
                 t.worktree.as_ref().map(|w| w.base.clone()),
                 t.native_at,
-                t.reopen.as_ref().and_then(|r| serde_json::to_string(r).ok())
+                t.reopen.as_ref().and_then(|r| serde_json::to_string(r).ok()),
+                t.parent_id
             ],
         )?;
         Ok(())
@@ -842,6 +866,7 @@ impl Store {
             worktree: None,
             native_at: None,
             reopen: None,
+            parent_id: None,
         })
     }
 
@@ -911,33 +936,44 @@ impl Store {
         c.query_row("SELECT EXISTS (SELECT 1 FROM items WHERE thread_id = ?1)", [thread_id], |r| r.get(0))
     }
 
-    /// Remove a thread, its side chats and their transcripts from Trek's database. The agent
+    /// Remove a thread, its side chats, its sub-agents and their transcripts from Trek's database. The agent
     /// sessions they ran stay in the agents' own history; they're retired, so no import brings
     /// the conversation back.
     pub fn delete_thread(&self, id: &str) -> Result<()> {
         let mut conn = self.conn.lock().expect("store lock");
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT OR REPLACE INTO retired_sessions (native_id, thread_id)
-             SELECT native_id, id FROM threads WHERE (id = ?1 OR side_of = ?1) AND source = 'trek' AND native_id IS NOT NULL",
-            [id],
-        )?;
-        let gone = "SELECT id FROM threads WHERE id = ?1 OR side_of = ?1";
-        tx.execute(&format!("DELETE FROM items WHERE thread_id IN ({gone})"), [id])?;
-        tx.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({gone})"), [id])?;
-        tx.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
+        // The thread, its side chats and its sub-agents, theirs too, all the way down.
+        let ids: Vec<String> = {
+            let mut st = tx.prepare(
+                "WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT t.id FROM threads t JOIN family f ON t.side_of = f.id OR t.parent_id = f.id)
+                 SELECT id FROM family",
+            )?;
+            st.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        for gone in &ids {
+            tx.execute(
+                "INSERT OR REPLACE INTO retired_sessions (native_id, thread_id)
+                 SELECT native_id, id FROM threads WHERE id = ?1 AND source = 'trek' AND native_id IS NOT NULL",
+                [gone],
+            )?;
+            tx.execute("DELETE FROM items WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM checkpoints WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM threads WHERE id = ?1", [gone])?;
+        }
         tx.commit()?;
         Ok(())
     }
 
     /// Side chats left without their thread: ones started from a draft (`side_of = "draft"`) in
-    /// an earlier run, which nothing can reopen, and any whose thread is gone. Removed like
+    /// an earlier run, which nothing can reopen, and any whose thread is gone; and sub-agents
+    /// whose parent is gone (nothing shows them any more). Removed like
     /// `delete_thread` removes them; returns them, for their file checkpoints. For launch, before
     /// any side chat opens.
     pub fn drop_orphan_side_chats(&self) -> Result<Vec<(Thread, Vec<Checkpoint>)>> {
         let orphans: Vec<Thread> = self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM threads WHERE side_of IS NOT NULL AND side_of NOT IN (SELECT id FROM threads)",
+                "SELECT {} FROM threads WHERE (side_of IS NOT NULL AND side_of NOT IN (SELECT id FROM threads))
+                   OR (parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM threads))",
                 Self::THREAD_COLS
             ))?;
             let rows = st.query_map([], Self::row_to_thread)?;
@@ -1173,6 +1209,44 @@ mod tests {
         assert_eq!(t.section(now), Some(Section::Inbox));
         t.pinned_at = Some(now);
         assert_eq!(t.section(now), Some(Section::Pinned));
+    }
+
+    #[test]
+    fn sub_agents_stay_out_of_the_sidebar_and_go_with_their_parent() {
+        let s = Store::in_memory().unwrap();
+        let parent = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let mut child = s.create_thread(None, AgentId::Codex, Some("gpt-5.6-sol".into()), Effort::High, HandHolding::Supervised).unwrap();
+        child.parent_id = Some(parent.id.clone());
+        s.save_thread(&child).unwrap();
+        let mut grandchild = s.create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Supervised).unwrap();
+        grandchild.parent_id = Some(child.id.clone());
+        s.save_thread(&grandchild).unwrap();
+        let other = s.create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto).unwrap();
+        for t in [&child, &grandchild] {
+            s.append_items(&t.id, [("x-".to_string() + &t.id, &Item::Assistant { text: "found it".into() })].iter().map(|(i, it)| (i.as_str(), *it))).unwrap();
+        }
+
+        let back = s.thread(&child.id).unwrap().unwrap();
+        assert_eq!(back.parent_id.as_deref(), Some(parent.id.as_str()), "kept");
+        assert_eq!(s.sub_agents(&parent.id).unwrap(), [back.clone()]);
+        assert!(s.sub_agents(&other.id).unwrap().is_empty());
+        let now = now_ms();
+        assert_eq!(back.section(now), None, "not in the sidebar");
+        assert_eq!(back.own_section(now), Some(Section::Inbox), "a search can still list it");
+
+        s.delete_thread(&parent.id).unwrap();
+        for t in [&parent, &child, &grandchild] {
+            assert!(s.thread(&t.id).unwrap().is_none());
+            assert!(s.items(&t.id).unwrap().is_empty());
+        }
+        assert!(s.thread(&other.id).unwrap().is_some(), "only the family goes");
+
+        // A sub-agent whose parent left some other way is dropped at launch.
+        let mut stray = s.create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto).unwrap();
+        stray.parent_id = Some("gone".into());
+        s.save_thread(&stray).unwrap();
+        let dropped: Vec<String> = s.drop_orphan_side_chats().unwrap().into_iter().map(|(t, _)| t.id).collect();
+        assert_eq!(dropped, [stray.id]);
     }
 
     #[test]

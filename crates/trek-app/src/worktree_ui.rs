@@ -126,6 +126,10 @@ pub fn confirm_leave(ws: Entity<Workspace>, id: String, leave: Leave, window: &m
                     Leave::Delete => ("Delete", "The thread and its transcript are deleted from Trek, and its worktree with them. This can't be undone."),
                 };
                 let mut lines = vec![(intro.to_string(), false)];
+                let verb_past = if leave == Leave::Archive { "archived" } else { "deleted" };
+                if let Some(note) = ws.read(cx).sub_agents_note(&id, verb_past) {
+                    lines.push((note, false));
+                }
                 lines.extend(losses(&wt, &r, None));
                 let remove_variant = if r.uncommitted > 0 || leave == Leave::Delete { ButtonVariant::Danger } else { ButtonVariant::Primary };
                 let (keep_ws, remove_ws, keep_id, remove_id) = (ws.clone(), ws.clone(), id.clone(), id.clone());

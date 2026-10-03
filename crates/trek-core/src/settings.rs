@@ -147,13 +147,16 @@ pub struct Tools {
     pub computer_use: bool,
     /// Give agents the iOS Simulator MCP tools.
     pub simulator: bool,
+    /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
+    /// other agents and models, which Trek runs as child threads.
+    pub orchestration: bool,
     /// Extra MCP servers passed to every session.
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl Default for Tools {
     fn default() -> Self {
-        Self { computer_use: true, simulator: true, mcp_servers: vec![] }
+        Self { computer_use: true, simulator: true, orchestration: true, mcp_servers: vec![] }
     }
 }
 

@@ -207,6 +207,18 @@ fn activity(item: &Value) -> Option<String> {
     Some(clip(&s, 80))
 }
 
+/// `mcp_servers` for Codex's config: the shared shape, with a tool timeout where a server needs
+/// longer than Codex's default minute.
+fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
+    let mut out = mcp_servers_json(servers);
+    for s in servers {
+        if let (Some(secs), Some(entry)) = (s.tool_timeout_secs, out.get_mut(&s.name)) {
+            entry["tool_timeout_sec"] = json!(secs);
+        }
+    }
+    out
+}
+
 fn tool_output(item: &Value) -> String {
     let text: Vec<&str> = item["result"]["content"]
         .as_array()
@@ -669,7 +681,11 @@ impl Session {
             }
             // MCP servers asking for input mid-call: Trek has no form for it, so decline.
             "mcpServer/elicitation/request" => {
-                out.send.push(json!({ "id": rpc_id, "result": { "action": "decline" } }));
+                // Trek's own sub-agent server asks nothing itself: what comes in its name is
+                // Codex checking a call to it, which needs no approval (the sub-agent's own
+                // actions are approved in its thread).
+                let result = if p["serverName"] == "trek-orchestrate" { json!({ "action": "accept", "content": {} }) } else { json!({ "action": "decline" }) };
+                out.send.push(json!({ "id": rpc_id, "result": result }));
                 return;
             }
             "currentTime/read" => {
@@ -985,7 +1001,7 @@ pub async fn run(
     }
     if !config.mcp_servers.is_empty() {
         // Config overrides merge with the user's own `mcp_servers` (verified against 0.160).
-        params["config"] = json!({ "mcp_servers": mcp_servers_json(&config.mcp_servers) });
+        params["config"] = json!({ "mcp_servers": codex_mcp_servers(&config.mcp_servers) });
     }
     let mut lost = false;
     // The thread couldn't be cut back or forked where asked: a new one, with the recap.
@@ -1244,6 +1260,14 @@ mod tests {
 
     fn turn_completes(events: &[AgentEvent]) -> usize {
         events.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).count()
+    }
+
+    #[test]
+    fn slow_mcp_tools_get_a_longer_timeout() {
+        let server = |name: &str, timeout| crate::McpServer { name: name.into(), command: "trek-mcp".into(), args: vec![], env: vec![], tool_timeout_secs: timeout };
+        let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
+        assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
+        assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
     }
 
     #[test]
@@ -1725,6 +1749,8 @@ mod tests {
         let mut s = session("t", false);
         let out = s.incoming(&json!({"id":7,"method":"mcpServer/elicitation/request","params":{"threadId":"t"}}));
         assert_eq!(out.send, vec![json!({"id":7,"result":{"action":"decline"}})]);
+        let out = s.incoming(&json!({"id":9,"method":"mcpServer/elicitation/request","params":{"threadId":"t","serverName":"trek-orchestrate"}}));
+        assert_eq!(out.send, vec![json!({"id":9,"result":{"action":"accept","content":{}}})]);
         let out = s.incoming(&json!({"id":8,"method":"item/tool/call","params":{"threadId":"t"}}));
         assert_eq!(out.send[0]["error"]["code"], -32601);
         assert!(out.events.is_empty());

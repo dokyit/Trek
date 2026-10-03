@@ -546,6 +546,16 @@ impl SettingsView {
             ],
             cx,
         ));
+        out.push(Self::heading("Sub-agents", cx));
+        out.push(ui::group(
+            vec![Self::row(
+                "Sub-agent tools",
+                "Agents can hand work to other agents and models you have in Trek, to review or to build, and get their answers back. Each shows inline in its thread with its logo; open it to follow along.",
+                self.switch("orchestration", s.tools.orchestration, |s, v| s.tools.orchestration = v),
+                cx,
+            )],
+            cx,
+        ));
         if !bundled {
             out.push(Self::note("Trek's MCP server (trek-mcp) isn't next to this build. Run cargo build -p trek-mcp, or use the bundled app.", cx));
         }

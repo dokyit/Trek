@@ -1,11 +1,13 @@
 //! `trek-mcp` — a Model Context Protocol server over stdio.
 //!
-//! Usage: `trek-mcp computer` (macOS computer use) or `trek-mcp simulator`
-//! (iOS Simulator via `xcrun simctl` + AXe). JSON-RPC 2.0 messages are read
+//! Usage: `trek-mcp computer` (macOS computer use), `trek-mcp simulator`
+//! (iOS Simulator via `xcrun simctl` + AXe) or `trek-mcp orchestrate` (sub-agents,
+//! run by the Trek that started the agent). JSON-RPC 2.0 messages are read
 //! from stdin and written to stdout, one per line. Logs go to stderr only.
 
 mod computer;
 mod keys;
+mod orchestrate;
 mod rpc;
 mod simulator;
 mod util;
@@ -18,6 +20,7 @@ trek-mcp — Trek's MCP server (stdio, JSON-RPC 2.0, newline-delimited)
 USAGE:
     trek-mcp computer     macOS computer use (screenshot, click, type, keys, windows)
     trek-mcp simulator    iOS Simulator control (simctl + AXe)
+    trek-mcp orchestrate  sub-agents: delegate work to other agents and models in Trek
     trek-mcp --version
 ";
 
@@ -26,6 +29,11 @@ fn main() {
     let mut tools: Box<dyn rpc::ToolSet> = match arg.as_str() {
         "computer" => Box::new(computer::Computer::default()),
         "simulator" | "sim" => Box::new(simulator::Simulator::default()),
+        "orchestrate" => {
+            eprintln!("trek-mcp {} (orchestrate) ready on stdio", env!("CARGO_PKG_VERSION"));
+            orchestrate::serve(orchestrate::Orchestrate::from_env());
+            return;
+        }
         "--version" | "-V" => {
             println!("trek-mcp {}", env!("CARGO_PKG_VERSION"));
             return;

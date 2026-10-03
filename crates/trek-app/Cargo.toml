@@ -13,6 +13,7 @@ path = "src/main.rs"
 tokio.workspace = true
 trek-core.workspace = true
 trek-agents.workspace = true
+trek-ipc.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true

@@ -6,6 +6,7 @@ mod brand;
 mod command_palette;
 mod composer;
 mod integrations;
+mod ipc;
 mod mascot;
 mod md;
 mod mentions;

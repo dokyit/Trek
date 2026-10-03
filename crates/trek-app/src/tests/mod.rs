@@ -7,6 +7,7 @@ mod flows;
 mod harness;
 mod inbox;
 mod lifecycle;
+mod orchestrate;
 mod render;
 mod rewind;
 mod screens;

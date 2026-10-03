@@ -8743,6 +8743,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trek-core",
+ "trek-ipc",
 ]
 
 [[package]]
@@ -8774,6 +8775,7 @@ dependencies = [
  "tray-icon",
  "trek-agents",
  "trek-core",
+ "trek-ipc",
  "vt100",
 ]
 
@@ -8804,6 +8806,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-ipc"
+version = "0.2.1"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "trek-mcp"
 version = "0.2.1"
 dependencies = [
@@ -8811,6 +8821,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "serde_json",
+ "trek-ipc",
 ]
 
 [[package]]
