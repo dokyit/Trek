@@ -10,6 +10,12 @@ use crate::types::{AgentId, Effort};
 pub const MAX_DEPTH: usize = 2;
 /// Sub-agents one thread may have running at once.
 pub const MAX_RUNNING: usize = 4;
+/// Sub-agents one thread may start between two messages from the user: enough for four
+/// consultants over every round of a discussion, and a stop to an agent that keeps on starting
+/// them.
+pub const MAX_PER_REQUEST: usize = MAX_RUNNING * DISCUSS_ROUNDS;
+/// What a sub-agent's row says when Trek quit while it ran.
+pub const CUT_OFF: &str = "Trek quit before it finished.";
 /// The longest answer `task_result` returns (and `delegate_task` with `wait`).
 pub const RESULT_CAP: usize = 16_000;
 /// The longest answer in a wake-up message; `task_result` has the rest.
@@ -194,15 +200,23 @@ pub fn wake_summary(text: &str) -> String {
     }
 }
 
-/// Whether an agent's tool row is a call to Trek's `delegate_task` (named however the agent
-/// names MCP tools: `mcp__trek-orchestrate__delegate_task`, `delegate_task`, …).
+/// Trek's orchestration tools reach agents as the MCP server of this name.
+pub const SERVER: &str = "trek-orchestrate";
+
+/// Whether tool row `title` is Trek's own `tool`, named however the agent names MCP tools:
+/// `mcp__trek-orchestrate__delegate_task` (Claude, and Codex as Trek reports it),
+/// `trek-orchestrate_delegate_task` (OpenCode). Another server's tool of the same name isn't.
+fn is_ours(title: &str, tool: &str) -> bool {
+    title.strip_suffix(tool).is_some_and(|server| server.trim_end_matches(['_', '.', '/', ':', '-']).ends_with(SERVER))
+}
+
+/// Whether an agent's tool row is a call to Trek's `delegate_task`.
 pub fn is_delegate_call(title: &str) -> bool {
-    title.ends_with("delegate_task")
+    is_ours(title, "delegate_task")
 }
 
 /// A readable title for a row of one of Trek's other orchestration tools.
 pub fn tool_label(title: &str) -> Option<&'static str> {
-    let ours = |tool: &str| title == tool || (title.ends_with(tool) && title.contains("trek-orchestrate"));
     [
         ("list_models", "Listed the models"),
         ("task_status", "Checked on a sub-agent"),
@@ -210,7 +224,7 @@ pub fn tool_label(title: &str) -> Option<&'static str> {
         ("cancel_task", "Stopped a sub-agent"),
     ]
     .into_iter()
-    .find(|(tool, _)| ours(tool))
+    .find(|(tool, _)| is_ours(title, tool))
     .map(|(_, label)| label)
 }
 
@@ -420,10 +434,13 @@ mod tests {
     #[test]
     fn orchestration_rows_are_recognised() {
         assert!(is_delegate_call("mcp__trek-orchestrate__delegate_task"));
-        assert!(is_delegate_call("delegate_task"));
+        assert!(is_delegate_call("trek-orchestrate_delegate_task"), "OpenCode's naming");
+        assert!(!is_delegate_call("delegate_task"), "a bare name could be any server's");
+        assert!(!is_delegate_call("mcp__t3-code__delegate_task"), "another server's tool of the same name");
         assert!(!is_delegate_call("Subagent"));
         assert_eq!(tool_label("mcp__trek-orchestrate__task_status"), Some("Checked on a sub-agent"));
-        assert_eq!(tool_label("cancel_task"), Some("Stopped a sub-agent"));
+        assert_eq!(tool_label("trek-orchestrate_cancel_task"), Some("Stopped a sub-agent"));
+        assert_eq!(tool_label("cancel_task"), None);
         assert_eq!(tool_label("mcp__other__list_models"), None, "another server's tool keeps its name");
     }
 

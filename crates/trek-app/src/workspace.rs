@@ -1537,6 +1537,7 @@ impl Workspace {
             }
             live.loaded = true;
             live.revision += 1;
+            self.settle_cut_off_rows(id, cx);
             return;
         }
         let Some(thread) = thread else { return };
@@ -1576,8 +1577,11 @@ impl Workspace {
                 live.streaming = live.streaming.map(|i| i + n);
                 live.reasoning = live.reasoning.map(|i| i + n);
                 live.revision += 1;
-                // Messages sent while it loaded go out now, after the history.
+                this.settle_cut_off_rows(&id, cx);
+                // Messages sent while it loaded go out now, after the history; then reports from
+                // its sub-agents.
                 this.send_queued(&id, cx);
+                this.deliver_wakes(&id, cx);
                 cx.notify();
             });
             if let Some(items) = to_index {
@@ -2082,6 +2086,8 @@ impl Workspace {
             effort: thread.effort,
             hand_holding: thread.hand_holding,
             plan,
+            // A sub-agent that only advises can't change anything.
+            read_only: self.advising(id),
             resume,
             resume_at,
             fork,
@@ -2160,6 +2166,7 @@ impl Workspace {
                     effort: p.effort,
                     hand_holding: p.hand_holding,
                     plan: p.plan,
+                    read_only: false,
                     resume: None,
                     resume_at: None,
                     fork: false,
@@ -2645,10 +2652,14 @@ impl Workspace {
             live.revision += 1;
         }
         // A prompt can outlive its turn (Codex offers its plan once the turn is over): answering
-        // it then leaves the thread idle unless it starts new work.
+        // it then leaves the thread idle unless it starts new work, free for reports from its
+        // sub-agents that waited.
         if !still_waiting {
             let state = if running { RunState::Working } else { RunState::Idle };
             self.mutate_thread(id, cx, |t| t.run_state = state);
+            if !running {
+                self.deliver_wakes(id, cx);
+            }
         }
         cx.notify();
     }

@@ -230,7 +230,7 @@ struct Session {
 }
 
 /// The name Trek gives its orchestration MCP server in a session.
-pub const ORCHESTRATE_SERVER: &str = "trek-orchestrate";
+pub const ORCHESTRATE_SERVER: &str = trek_core::orchestrate::SERVER;
 
 pub async fn run(
     config: SessionConfig,
@@ -517,7 +517,8 @@ impl Session {
         self.say("I'll get a second opinion from another model.").await?;
         let id = self.id("tool");
         let title = "Second opinion";
-        self.tool_start(&id, "delegate_task", title).await?;
+        // Named as Claude names MCP tools.
+        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), title).await?;
         let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": "advise", "wait": wait });
         match self.ipc("delegate_task", params).await? {
             Ok(answer) => {
@@ -850,6 +851,7 @@ mod tests {
                 effort: trek_core::Effort::Low,
                 hand_holding,
                 plan,
+                read_only: false,
                 resume: None,
                 resume_at: None,
                 fork: false,
@@ -899,6 +901,7 @@ mod tests {
             effort: trek_core::Effort::Low,
             hand_holding: HandHolding::Auto,
             plan: false,
+            read_only: false,
             resume: resume.map(String::from),
             resume_at: at.map(String::from),
             fork,
@@ -1127,7 +1130,7 @@ mod tests {
             let m = Live { commands: h.commands, events: h.events };
             m.prompt("mock:consult check the cache").await;
             let events = m.turn().await;
-            assert!(events.contains(&AgentEvent::ToolStarted { id: "mock-tool-1".into(), title: "delegate_task".into(), detail: "Second opinion".into() }));
+            assert!(events.contains(&AgentEvent::ToolStarted { id: "mock-tool-1".into(), title: "mcp__trek-orchestrate__delegate_task".into(), detail: "Second opinion".into() }));
             assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: true, output, .. } if output.contains("child-1"))));
             assert!(text(&events).contains("The second opinion is in: Use a cache."), "{}", text(&events));
             // Woken with a result, it answers in a line.

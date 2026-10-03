@@ -208,10 +208,11 @@ fn auth_hint(name: &str, init: &Value) -> String {
 }
 
 /// Answers `fs/read_text_file` and `fs/write_text_file`. Writes stay inside the
-/// session's folder unless the user granted full access.
+/// session's folder unless the user granted full access, and there are none in a read-only one.
 struct FsPolicy {
     cwd: PathBuf,
     full_access: bool,
+    read_only: bool,
 }
 
 impl FsPolicy {
@@ -240,6 +241,9 @@ impl FsPolicy {
                 Ok(json!({ "content": content }))
             }
             "fs/write_text_file" => {
+                if self.read_only {
+                    return Err((-32003, format!("{} can't be changed: this session is read-only", path.display())));
+                }
                 if !self.full_access && !within(&path, &self.cwd) {
                     return Err((-32003, format!("{} is outside the project folder", path.display())));
                 }
@@ -711,7 +715,7 @@ pub async fn run(
 ) -> Result<()> {
     let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config))?;
     let mut hand_holding = config.hand_holding;
-    let mut fs = FsPolicy { cwd: config.cwd.clone(), full_access: hand_holding == HandHolding::FullAccess };
+    let mut fs = FsPolicy { cwd: config.cwd.clone(), full_access: hand_holding == HandHolding::FullAccess, read_only: config.read_only };
     let mut backlog = Vec::new();
     let init = agent.handshake(&fs, &mut backlog).await?;
     let cwd = config.cwd.display().to_string();
@@ -766,16 +770,18 @@ pub async fn run(
     {
         let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
     }
-    // Into plan mode, or out of it when a resumed session was left there.
+    // Into plan mode, or out of it when a resumed session was left there. A read-only session
+    // works in plan mode too: the agent's own tools edit files without asking Trek.
+    let plan = config.plan || config.read_only;
     let mut planning = ctl.planning;
-    if config.plan != ctl.planning
-        && let Some((method, params)) = plan_request(&ctl, &session_id, config.plan)
+    if plan != ctl.planning
+        && let Some((method, params)) = plan_request(&ctl, &session_id, plan)
         && agent.call(method, params, &fs, &mut backlog, setup).await?.is_ok()
     {
-        planning = config.plan;
+        planning = plan;
     }
     // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
-    let no_plan = (config.plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some()));
+    let no_plan = (plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
     events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
     if lost {
         events.send(crate::lost_session(&agent.name)).await?;
@@ -855,9 +861,13 @@ pub async fn run(
 }
 
 /// Why a prompt isn't sent when plan mode is on but the agent couldn't enter it.
-fn plan_refusal(agent: &str, has_plan_mode: bool) -> String {
+fn plan_refusal(agent: &str, has_plan_mode: bool, read_only: bool) -> String {
     let why = if has_plan_mode { "didn't switch to plan mode" } else { "has no plan mode" };
-    format!("{agent} {why}, so it could change files. Turn plan mode off to send this.")
+    if read_only {
+        format!("{agent} {why}, so it could change files, and this task is read-only. Ask another agent for advice.")
+    } else {
+        format!("{agent} {why}, so it could change files. Turn plan mode off to send this.")
+    }
 }
 
 /// `session/load` replays the conversation as updates; the transcript already has it. Session
@@ -1010,7 +1020,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     let mut opened: Option<String> = None;
     let probe = async {
         let mut agent = Agent::spawn(&agent_id, &home, &[])?;
-        let fs = FsPolicy { cwd: home.clone(), full_access: false };
+        let fs = FsPolicy { cwd: home.clone(), full_access: false, read_only: false };
         let mut backlog = Vec::new();
         let init = agent.handshake(&fs, &mut backlog).await?;
         let mut info = AcpInfo { auth_methods: auth_methods(&init), ..Default::default() };
@@ -1147,6 +1157,7 @@ mod tests {
             effort: Effort::Off,
             hand_holding: HandHolding::Auto,
             plan: false,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,
@@ -1191,6 +1202,7 @@ mod tests {
             effort: Effort::Off,
             hand_holding: HandHolding::Auto,
             plan: false,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,
@@ -1524,9 +1536,28 @@ mod tests {
 
     #[test]
     fn plan_mode_that_cant_be_had_is_refused() {
-        assert_eq!(plan_refusal("Grok", false), "Grok has no plan mode, so it could change files. Turn plan mode off to send this.");
-        assert!(plan_refusal("Devin", true).starts_with("Devin didn't switch to plan mode"));
+        assert_eq!(plan_refusal("Grok", false, false), "Grok has no plan mode, so it could change files. Turn plan mode off to send this.");
+        assert!(plan_refusal("Devin", true, false).starts_with("Devin didn't switch to plan mode"));
+        assert!(plan_refusal("Grok", false, true).ends_with("this task is read-only. Ask another agent for advice."));
         assert_eq!(controls(&json!({"sessionId":"s"})).plan_mode, None);
+    }
+
+    #[test]
+    fn a_read_only_session_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("trek-acp-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        let write = json!({ "path": file.display().to_string(), "content": "x" });
+        trek_core::runtime().block_on(async {
+            let ro = FsPolicy { cwd: dir.clone(), full_access: true, read_only: true };
+            let err = ro.handle("fs/write_text_file", &write).await.unwrap_err();
+            assert!(err.1.contains("read-only"), "{err:?}");
+            assert!(!file.exists());
+            let rw = FsPolicy { cwd: dir.clone(), full_access: false, read_only: false };
+            assert!(rw.handle("fs/write_text_file", &write).await.is_ok());
+            assert_eq!(ro.handle("fs/read_text_file", &json!({ "path": file.display().to_string() })).await.unwrap()["content"], "x", "reading is fine");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

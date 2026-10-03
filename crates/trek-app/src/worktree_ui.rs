@@ -102,13 +102,25 @@ pub enum Leave {
 pub fn confirm_leave(ws: Entity<Workspace>, id: String, leave: Leave, window: &mut Window, cx: &mut App) {
     let Some((title, wt)) = ws.read(cx).thread(&id).and_then(|t| Some((t.title.clone(), t.worktree.clone()?))) else { return };
     if let Some(other) = sharer_names(&ws, &id, cx) {
+        let verb_past = if leave == Leave::Archive { "archived" } else { "deleted" };
+        let sub_agents = ws.read(cx).sub_agents_note(&id, verb_past).map(|n| format!(" {n}")).unwrap_or_default();
         match leave {
-            Leave::Archive => ws.update(cx, |ws, cx| ws.archive(&id, cx)),
+            // Nothing to ask unless sub-agents go with it.
+            Leave::Archive if sub_agents.is_empty() => ws.update(cx, |ws, cx| ws.archive(&id, cx)),
+            Leave::Archive => window.open_alert_dialog(cx, move |alert, _, _| {
+                let (ws, id) = (ws.clone(), id.clone());
+                alert
+                    .title(format!("Archive “{title}”?"))
+                    .description(format!("Its worktree stays: {other} works in it too.{sub_agents}"))
+                    .footer(DialogFooter::new().child(cancel()).child(action(Button::new("wt-leave").with_variant(ButtonVariant::Primary).label("Archive"), move |cx| {
+                        ws.update(cx, |ws, cx| ws.archive(&id, cx))
+                    })))
+            }),
             Leave::Delete => window.open_alert_dialog(cx, move |alert, _, _| {
                 let (ws, id) = (ws.clone(), id.clone());
                 alert
                     .title(format!("Delete “{title}”?"))
-                    .description(format!("The thread and its transcript are deleted from Trek. This can't be undone. Its worktree stays: {other} works in it too."))
+                    .description(format!("The thread and its transcript are deleted from Trek. This can't be undone. Its worktree stays: {other} works in it too.{sub_agents}"))
                     .footer(DialogFooter::new().child(cancel()).child(action(Button::new("wt-leave").with_variant(ButtonVariant::Danger).label("Delete"), move |cx| {
                         ws.update(cx, |ws, cx| ws.delete_thread(&id, cx))
                     })))

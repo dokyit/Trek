@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use trek_agents::{AgentEvent, Command, Decision, McpServer};
 use trek_core::catalog;
-use trek_core::orchestrate::{self as orch, MAX_DEPTH, MAX_RUNNING, Mode, Outcome, Report};
+use trek_core::orchestrate::{self as orch, MAX_DEPTH, MAX_PER_REQUEST, MAX_RUNNING, Mode, Outcome, Report};
 use trek_core::store::{Item, Thread, ToolStatus, now_ms};
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
@@ -27,6 +27,8 @@ pub struct Delegation {
     cancelled: bool,
     /// How it ended, once it has. Later turns (the user carrying on in it) don't report again.
     pub outcome: Option<Outcome>,
+    /// When it ended (ms): how long it ran doesn't change when the user carries on in it.
+    ended: Option<i64>,
     /// Ends it for good if it hasn't stopped within `STOP_GRACE` of being asked to.
     _stop: Option<Task<()>>,
 }
@@ -70,8 +72,13 @@ impl TaskState {
 
 /// How long Stop gives a sub-agent to end its turn before its session is shut down.
 const STOP_GRACE: Duration = Duration::from_secs(5);
-/// The per-call limit Codex gets for Trek's orchestration tools: longer than the longest wait.
+/// The per-call limit Codex and Claude get for Trek's orchestration tools: longer than the
+/// longest wait.
 const TOOL_TIMEOUT_SECS: u64 = 1900;
+/// The longest an ACP agent's call waits for a sub-agent. ACP gives Trek no way to set an MCP
+/// call's time limit, and clients commonly give up after a minute; past this the call returns
+/// "running", and the answer comes in a wake-up message instead.
+const ACP_WAIT: Duration = Duration::from_secs(50);
 
 impl Workspace {
     /// Open Trek's end of the orchestration tools. Without it, sessions just don't get them.
@@ -111,6 +118,23 @@ impl Workspace {
         (servers, Some(key))
     }
 
+    /// Why an agent of `agent` can't consult other models (it wouldn't get `delegate_task`), for
+    /// the composer: `None` when it can.
+    pub fn consult_unavailable(&self, agent: &AgentId) -> Option<String> {
+        let mock = matches!(agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
+        if !self.settings.tools.orchestration {
+            Some("Sub-agent tools are off in Settings → Tools".into())
+        } else if self.ipc.is_none() {
+            Some("Trek couldn't open its sub-agent channel this run".into())
+        } else if matches!(agent, AgentId::Direct(_)) && !mock {
+            Some(format!("{} can't use Trek's tools: pick Claude Code, Codex or an ACP agent to consult", agent.display_name()))
+        } else if !mock && super::trek_mcp_binary().is_none() {
+            Some("Trek's tool server (trek-mcp) is missing from this build".into())
+        } else {
+            None
+        }
+    }
+
     /// `id`'s session now goes by `key`; the key of the session it replaces is retired.
     pub(super) fn adopt_ipc_session(&mut self, id: &str, key: Option<String>) {
         let old = std::mem::replace(&mut self.live.entry(id.to_string()).or_default().ipc_session, key.clone());
@@ -143,7 +167,8 @@ impl Workspace {
                         if let Some(d) = self.delegations.get_mut(&child) {
                             d.waiters.push(call.reply.clone());
                         }
-                        let _ = call.reply.try_send(Reply::Waiting(child));
+                        let wait = crate::ipc::wait_for(&call.params).min(self.longest_wait(&call.thread));
+                        let _ = call.reply.try_send(Reply::Waiting(child, wait));
                         return;
                     }
                     Ok(child) => {
@@ -193,6 +218,31 @@ impl Workspace {
         })
     }
 
+    /// How long a call from `caller`'s agent can wait on a sub-agent before its client gives up.
+    pub(crate) fn longest_wait(&self, caller: &str) -> Duration {
+        match self.thread(caller).map(|t| &t.agent) {
+            Some(AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid) => ACP_WAIT,
+            _ => Duration::MAX,
+        }
+    }
+
+    /// Whether `id` is a sub-agent that only advises, still on its task: nothing it does may
+    /// change files.
+    pub(crate) fn advising(&self, id: &str) -> bool {
+        self.delegations.get(id).is_some_and(|d| d.mode == Mode::Advise && d.outcome.is_none())
+    }
+
+    /// Sub-agents `caller` started since the user's last message (wake-ups don't count).
+    fn started_since_asked(&self, caller: &str) -> usize {
+        let since = self.live.get(caller).and_then(|l| {
+            l.items.iter().rev().find_map(|i| match i {
+                Item::User { text, at, .. } if !orch::is_wake(text) => Some(at.unwrap_or(0)),
+                _ => None,
+            })
+        });
+        self.children(caller).iter().filter(|t| since.is_none_or(|s| t.created_at >= s)).count()
+    }
+
     /// How many sub-agent levels `id` sits under.
     pub fn depth(&self, id: &str) -> usize {
         orch::depth(id, |t| self.thread(t).cloned().or_else(|| self.store.thread(t).ok().flatten()).and_then(|t| t.parent_id))
@@ -210,6 +260,11 @@ impl Workspace {
                 "This thread already has {running} sub-agents running, the most Trek allows at once. Wait for one to finish (task_status), or stop one (cancel_task)."
             ));
         }
+        if self.started_since_asked(caller) >= MAX_PER_REQUEST {
+            return Err(format!(
+                "You've started {MAX_PER_REQUEST} sub-agents since the user's last message, the most Trek allows. Report what you have and let the user decide what's next."
+            ));
+        }
         let text = |k: &str| params.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
         let title = text("title").ok_or("delegate_task needs a title: a few words naming the task.")?;
         let prompt = text("prompt").ok_or("delegate_task needs a prompt: the sub-agent's whole task, complete on its own.")?;
@@ -217,6 +272,9 @@ impl Workspace {
             None => Mode::Advise,
             Some(m) => Mode::parse(m).ok_or_else(|| format!("mode is \"advise\" or \"implement\", not “{m}”."))?,
         };
+        if mode == Mode::Implement && self.advising(caller) {
+            return Err("You're advising, read-only, so a sub-agent you start can't change files either: use mode \"advise\".".into());
+        }
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
         let models = self.models_for(&agent);
         let model = match text("model") {
@@ -254,7 +312,7 @@ impl Workspace {
         let id = child.id.clone();
         self.threads.push(child);
         self.live.entry(id.clone()).or_default().loaded = true;
-        self.delegations.insert(id.clone(), Delegation { parent: caller.to_string(), mode, plan: None, waiters: vec![], cancelled: false, outcome: None, _stop: None });
+        self.delegations.insert(id.clone(), Delegation { parent: caller.to_string(), mode, plan: None, waiters: vec![], cancelled: false, outcome: None, ended: None, _stop: None });
         self.push_task_row(caller, &id, title, cx);
         self.send_to(&id, orch::child_prompt(mode, prompt), vec![], cx);
         Ok(id)
@@ -301,6 +359,12 @@ impl Workspace {
     fn settle_task_row(&mut self, parent: &str, child: &str, status: ToolStatus, output: String, cx: &mut Context<Self>) {
         let row = orch::task_row(child);
         let is_row = |i: &Item| matches!(i, Item::Tool { id, .. } if *id == row);
+        // Not placed yet (its call hasn't reached the transcript): it goes in settled.
+        if let Some(Item::Tool { status: s, output: o, .. }) = self.live.get_mut(parent).and_then(|l| l.pending_rows.iter_mut().find(|i| is_row(i))) {
+            *s = status;
+            *o = output;
+            return;
+        }
         if let Some(live) = self.live.get_mut(parent).filter(|l| l.loaded && !l.loading) {
             if let Some(Item::Tool { status: s, output: o, .. }) = live.items.rfind_mut(is_row) {
                 *s = status;
@@ -360,30 +424,61 @@ impl Workspace {
         match t.run_state {
             RunState::NeedsYou => TaskState::NeedsYou,
             _ if busy => TaskState::Running,
-            RunState::Working if self.delegations.contains_key(child) => TaskState::Running,
+            // Started this run and not ended: between turns, it waits on sub-agents of its own.
+            _ if self.delegations.contains_key(child) => TaskState::Running,
             RunState::Failed => TaskState::Failed,
-            // Ended in an earlier run: its row says how.
+            // Ended in an earlier run: its row says how. One still "running" was cut off when
+            // Trek quit (`settle_cut_off_rows`).
             _ => match self.task_row_status(child) {
                 Some(ToolStatus::Denied) => TaskState::Cancelled,
-                Some(ToolStatus::Failed) => TaskState::Failed,
+                Some(ToolStatus::Failed | ToolStatus::Running) => TaskState::Failed,
                 _ => TaskState::Done,
             },
         }
     }
 
     fn task_row_status(&self, child: &str) -> Option<ToolStatus> {
+        self.task_row_of(child).map(|(status, _)| status)
+    }
+
+    /// The row of `child` in its parent's transcript (once that's loaded): status and output.
+    fn task_row_of(&self, child: &str) -> Option<(ToolStatus, String)> {
         let parent = self.thread(child)?.parent_id.clone()?;
         let row = orch::task_row(child);
         self.live.get(&parent)?.items.iter().rev().find_map(|i| match i {
-            Item::Tool { id, status, .. } if *id == row => Some(*status),
+            Item::Tool { id, status, output, .. } if *id == row => Some((*status, output.clone())),
             _ => None,
         })
+    }
+
+    /// Rows of sub-agents still "running" in `parent`'s transcript, just read from the store,
+    /// that no sub-agent of this run stands behind: Trek quit while they worked. They failed.
+    pub(super) fn settle_cut_off_rows(&mut self, parent: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(parent) else { return };
+        let mut changed = false;
+        for ix in 0..live.items.len() {
+            let cut_off = matches!(&live.items[ix], Item::Tool { id, status: ToolStatus::Running, .. } if orch::task_of_row(id).is_some_and(|c| !self.delegations.contains_key(c)));
+            if let (true, Some(Item::Tool { status, output, .. })) = (cut_off, live.items.get_mut(ix)) {
+                *status = ToolStatus::Failed;
+                *output = orch::CUT_OFF.into();
+                changed = true;
+            }
+        }
+        if changed {
+            live.revision += 1;
+            self.persist_items(parent, cx);
+        }
     }
 
     /// How long `child` has run (so far, or in all).
     pub fn task_elapsed(&self, child: &str) -> Duration {
         let Some(t) = self.thread(child) else { return Duration::ZERO };
-        let end = if self.task_state(child).live() { now_ms() } else { t.updated_at };
+        let end = match self.delegations.get(child).and_then(|d| d.ended) {
+            Some(ended) => ended,
+            None if self.task_state(child).live() => now_ms(),
+            // Ended in an earlier run.
+            None => t.updated_at,
+        };
         Duration::from_millis((end - t.created_at).max(0) as u64)
     }
 
@@ -407,7 +502,8 @@ impl Workspace {
             None => self.store.items(child).unwrap_or_default(),
         };
         match self.task_state(child) {
-            TaskState::Failed => orch::last_error(&items),
+            // Cut off in an earlier run, its row says so.
+            TaskState::Failed => orch::last_error(&items).or_else(|| self.task_row_of(child).map(|(_, why)| why).filter(|w| !w.is_empty())),
             _ => orch::final_answer(&items, self.delegations.get(child).and_then(|d| d.plan.as_deref())),
         }
     }
@@ -503,6 +599,11 @@ impl Workspace {
             d.cancelled = true;
         }
         self.interrupt(child, cx);
+        // Between turns (waiting on its own sub-agents) there's no turn to end: it ends now.
+        if self.live.get(child).is_none_or(|l| l.turn_started.is_none() && l.background == 0) {
+            self.end_task_now(child, cx);
+            return;
+        }
         let id = child.to_string();
         let stop = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(STOP_GRACE).await;
@@ -515,11 +616,16 @@ impl Workspace {
         }
     }
 
-    /// Stop every sub-agent of `parent` that's still at work (Stop on the parent).
+    /// Stop every sub-agent of `parent` that's still at work (Stop on the parent), and those
+    /// further down still working under one that's done.
     pub(super) fn stop_children(&mut self, parent: &str, cx: &mut Context<Self>) {
-        let running: Vec<String> = self.running_children(parent).into_iter().map(|t| t.id.clone()).collect();
-        for child in running {
-            self.stop_task(&child, cx);
+        let kids: Vec<(String, bool)> = self.children(parent).into_iter().map(|t| (t.id.clone(), self.task_state(&t.id).live())).collect();
+        for (child, live) in kids {
+            if live {
+                self.stop_task(&child, cx);
+            } else {
+                self.stop_children(&child, cx);
+            }
         }
     }
 
@@ -580,6 +686,12 @@ impl Workspace {
     pub(super) fn task_turn_ended(&mut self, id: &str, interrupted: bool, cx: &mut Context<Self>) {
         let Some(d) = self.delegations.get(id).filter(|d| d.outcome.is_none()) else { return };
         let failed = self.thread(id).is_some_and(|t| t.run_state == RunState::Failed);
+        // Sub-agents of its own still at work, or reports from them it hasn't had: it isn't
+        // done until the turn after its last wake-up.
+        let awaiting = !self.running_children(id).is_empty() || self.wakes.get(id).is_some_and(|w| !w.is_empty());
+        if awaiting && !(interrupted || d.cancelled || failed) {
+            return;
+        }
         let items = self.live.get(id).map(|l| l.items.to_vec()).unwrap_or_default();
         let outcome = if interrupted || d.cancelled {
             Outcome::Cancelled
@@ -597,6 +709,7 @@ impl Workspace {
     fn finish_task(&mut self, child: &str, outcome: Outcome, cx: &mut Context<Self>) {
         let Some(d) = self.delegations.get_mut(child).filter(|d| d.outcome.is_none()) else { return };
         d.outcome = Some(outcome.clone());
+        d.ended = Some(now_ms());
         d._stop = None;
         let (parent, waiters, silent) = (d.parent.clone(), std::mem::take(&mut d.waiters), d.cancelled);
         let (status, output) = match &outcome {
@@ -605,6 +718,8 @@ impl Workspace {
             Outcome::Cancelled => (ToolStatus::Denied, String::new()),
         };
         self.settle_task_row(&parent, child, status, output, cx);
+        // Failed or stopped, it has no use for sub-agents of its own still at work.
+        self.stop_children(child, cx);
         // Its work is done: its session (150–250 MB) goes. A message from the user starts it again.
         if let Some(tx) = self.live.get_mut(child).and_then(|l| l.commands.take()) {
             let _ = tx.try_send(Command::Shutdown);
@@ -624,8 +739,20 @@ impl Workspace {
             };
             self.wakes.entry(parent.clone()).or_default().push(report);
             self.deliver_wakes(&parent, cx);
+        } else {
+            self.parent_may_be_done(&parent, cx);
         }
         cx.notify();
+    }
+
+    /// A sub-agent of `parent` ended without news for it: if `parent` is a sub-agent itself that
+    /// was only waiting on it, idle with nothing left to hear, it's done too.
+    fn parent_may_be_done(&mut self, parent: &str, cx: &mut Context<Self>) {
+        let idle = self.live.get(parent).is_none_or(|l| l.turn_started.is_none() && l.background == 0 && l.queued.is_empty() && !l.preparing);
+        let waiting = !self.running_children(parent).is_empty() || self.wakes.get(parent).is_some_and(|w| !w.is_empty());
+        if idle && !waiting && self.delegations.get(parent).is_some_and(|d| d.outcome.is_none()) {
+            self.task_turn_ended(parent, false, cx);
+        }
     }
 
     /// Wake `parent` with its sub-agents' reports, once it's free to take them: no turn running,

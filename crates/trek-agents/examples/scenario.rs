@@ -38,6 +38,7 @@ impl Session {
             effort: Effort::Low,
             hand_holding,
             plan,
+            read_only: false,
             resume,
             resume_at,
             fork,

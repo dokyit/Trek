@@ -71,6 +71,7 @@ impl Workspace {
                 self.mutate_thread(id, cx, |t| t.run_state = RunState::Idle);
                 self.refresh_git_at(wt.path.clone(), cx);
                 self.send_queued(id, cx);
+                self.deliver_wakes(id, cx);
             }
             Err(e) => {
                 // The thread shows its worktree as missing, with a way forward. What waited for it

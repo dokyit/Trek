@@ -27,6 +27,10 @@ pub struct SessionConfig {
     pub effort: Effort,
     pub hand_holding: HandHolding,
     pub plan: bool,
+    /// Nothing may change files, whatever `hand_holding` lets through (a sub-agent that only
+    /// advises): Claude loses its editing tools, ACP agents work in plan mode and can't write
+    /// through Trek, Codex keeps the read-only sandbox `Supervised` gives it.
+    pub read_only: bool,
     /// The agent's own session id to resume.
     pub resume: Option<String>,
     /// Resume only the conversation up to this point of `resume` (an id from `AgentEvent::Mark`):

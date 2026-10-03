@@ -224,10 +224,10 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                     "prompt": { "type": "string", "description": "The complete task for the sub-agent." },
                     "agent": { "type": "string", "description": "Agent key from list_models, e.g. \"codex\" or \"claude-code\". Defaults to this thread's agent." },
                     "model": { "type": "string", "description": "Model id or name from list_models. Defaults to the agent's default model." },
-                    "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort; clamped to what the model supports. Defaults to medium." },
+                    "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort; clamped to what the model supports. Defaults to this thread's effort." },
                     "mode": { "type": "string", "enum": ["advise", "implement"], "description": "advise: read-only review or research (default). implement: may change files." },
                     "wait": { "type": "boolean", "description": "Wait for the result (true) or return at once and be woken with it (false, the default)." },
-                    "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 1800, "description": "With wait=true, how long to wait before returning \"running\" (default 600). The sub-agent keeps going either way." }
+                    "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 1800, "description": "With wait=true, how long to wait before returning \"running\" (default 600; some agents' tool calls can't wait that long, and get \"running\" sooner). The sub-agent keeps going either way." }
                 },
                 "required": ["title", "prompt"]
             }),

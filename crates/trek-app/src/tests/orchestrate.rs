@@ -2,12 +2,15 @@
 //! plays both sides (`mock:consult` waits for its sub-agent, `mock:delegate` doesn't), calling
 //! Trek over the same socket `trek-mcp orchestrate` uses; other tests call the tools directly.
 
-use super::harness::{Trek, mock, open, run};
-use crate::workspace::TaskState;
+use super::harness::{Trek, mock, open, open_with, run, store_items};
+use crate::workspace::{Route, TaskState, WorkspaceEvent};
 use gpui_kit::TestAppContext;
 use serde_json::json;
-use trek_core::store::{Item, ToolStatus};
-use trek_core::{HandHolding, RunState};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+use trek_core::store::{Item, ToolStatus, now_ms};
+use trek_core::{AgentId, Effort, HandHolding, RunState};
 
 /// The sub-agents of `id`, oldest first.
 fn children(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<String> {
@@ -379,5 +382,225 @@ fn sub_agents_show_inline_and_on_their_parent_s_card() {
         trek.render(cx);
         assert!(!trek.visible(cx, format!("card-kids-{id}")));
         assert!(trek.rows(cx).iter().any(|r| r == "subagent: Mock Swift: Second opinion (Stopped)"), "{:?}", trek.rows(cx));
+    });
+}
+
+/// Whether `id`'s agent has ended the turn in which it started a sub-agent of its own.
+fn turn_ended(ws: &crate::workspace::Workspace, id: &str) -> bool {
+    ws.live.get(id).is_some_and(|l| l.turn_started.is_none() && l.items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("pick its answer up"))))
+}
+
+#[test]
+fn a_sub_agent_waiting_on_its_own_reports_once_they_have() {
+    run(async |cx| {
+        let trek = open(cx);
+        // The root waits on its sub-agent, which starts one of its own and ends its turn.
+        let id = trek.send(cx, "mock:consult mock:delegate mock:long 800ms");
+        trek.wait(cx, "a grandchild", |ws| ws.children(&id).first().is_some_and(|c| !ws.children(&c.id).is_empty())).await;
+        let child = children(&trek, cx, &id)[0].clone();
+        let grandchild = children(&trek, cx, &child)[0].clone();
+        let c = child.clone();
+        trek.wait(cx, "the sub-agent's first turn to end", move |ws| turn_ended(ws, &c)).await;
+        // It isn't done: what it waits on hasn't reported. Its session stays for the wake-up.
+        assert_eq!(state(&trek, cx, &child), TaskState::Running);
+        assert_eq!(state(&trek, cx, &grandchild), TaskState::Running);
+        assert_eq!(trek.run_state(cx, &id), RunState::Working, "the root still waits");
+        assert!(trek.read(cx, |ws, _| ws.running_children(&id).len()) == 1, "the root's card and Stop still count it");
+        assert!(trek.read(cx, |ws, _| ws.live[&child].commands.is_some()));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // The answer the root got is the one after the wake-up, not the placeholder.
+        assert_eq!(state(&trek, cx, &grandchild), TaskState::Done);
+        assert_eq!(state(&trek, cx, &child), TaskState::Done);
+        let (status, output) = task_row(&trek, cx, &id, &child);
+        assert_eq!(status, ToolStatus::Done);
+        assert!(output.starts_with("The sub-agent reported back: The full suite passed"), "{output}");
+        assert!(trek.answers(cx, &id).contains("The second opinion is in: The sub-agent reported back"), "{}", trek.answers(cx, &id));
+    });
+}
+
+#[test]
+fn stop_reaches_a_sub_agent_waiting_between_turns_and_its_own() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:delegate mock:delegate mock:long 30s");
+        trek.wait(cx, "a grandchild at work", |ws| ws.children(&id).first().is_some_and(|c| ws.children(&c.id).first().is_some_and(|g| ws.task_state(&g.id) == TaskState::Running))).await;
+        let child = children(&trek, cx, &id)[0].clone();
+        let grandchild = children(&trek, cx, &child)[0].clone();
+        let c = child.clone();
+        trek.wait(cx, "the sub-agent's turn to end", move |ws| turn_ended(ws, &c)).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.running_children(&id).iter().map(|t| t.id.clone()).collect::<Vec<_>>()), [child.clone()]);
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        wait_task(&trek, cx, &child, TaskState::Cancelled).await;
+        wait_task(&trek, cx, &grandchild, TaskState::Cancelled).await;
+        trek.wait(cx, "both sessions to end", |ws| [&child, &grandchild].iter().all(|k| ws.live.get(*k).is_none_or(|l| l.commands.is_none()))).await;
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))), "stopped from above: nobody is woken");
+        assert!(!trek.read(cx, |ws, _| ws.work_in_flight()), "nothing left running");
+    });
+}
+
+#[test]
+fn a_sub_agent_cut_off_by_quitting_failed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (parent, child) = trek.update(cx, |ws, cx| {
+            let p = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).unwrap();
+            let mut c = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Supervised).unwrap();
+            c.parent_id = Some(p.id.clone());
+            c.title = "Review the cache".into();
+            ws.store.save_thread(&c).unwrap();
+            let row = Item::Tool { id: trek_core::orchestrate::task_row(&c.id), title: "Sub-agent".into(), detail: "Review the cache".into(), output: String::new(), status: ToolStatus::Running };
+            store_items(&ws.store, &p.id, vec![Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None, aside: false }, row]);
+            ws.reload(cx);
+            (p.id, c.id)
+        });
+        // An idle parent wasn't mid-turn at the quit, so only reading it shows the row's stale.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(parent.clone()), cx));
+        assert_eq!(task_row(&trek, cx, &parent, &child), (ToolStatus::Failed, trek_core::orchestrate::CUT_OFF.to_string()));
+        assert_eq!(state(&trek, cx, &child), TaskState::Failed);
+        let v = trek.read(cx, |ws, _| ws.task_result(&parent, &child)).unwrap();
+        assert_eq!((v["status"].as_str(), v["error"].as_str()), (Some("failed"), Some(trek_core::orchestrate::CUT_OFF)));
+        let stored = trek.read(cx, |ws, _| ws.store.items(&parent).unwrap());
+        assert!(stored.iter().any(|i| matches!(i, Item::Tool { status: ToolStatus::Failed, .. })), "saved settled");
+    });
+}
+
+#[test]
+fn advising_stays_read_only_down_the_chain_and_starts_are_bounded() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:delegate mock:long 30s");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let child = children(&trek, cx, &id)[0].clone();
+        assert!(trek.read(cx, |ws, _| ws.advising(&child)));
+        let c = child.clone();
+        let err = trek.update(cx, |ws, cx| ws.delegate(&c, &json!({ "title": "Fix it", "prompt": "fix", "agent": "direct:mock", "mode": "implement" }), cx)).unwrap_err();
+        assert!(err.contains("advising") && err.contains("\"advise\""), "{err}");
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        wait_task(&trek, cx, &child, TaskState::Cancelled).await;
+        assert!(!trek.read(cx, |ws, _| ws.advising(&child)), "once it's done, the user may carry on in it as they like");
+
+        // A dozen sub-agents between two messages from the user, and no more.
+        let q = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            for n in 0..trek_core::orchestrate::MAX_PER_REQUEST {
+                let mut t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Low, HandHolding::Supervised).unwrap();
+                t.parent_id = Some(q.clone());
+                t.title = format!("Round {n}");
+                ws.store.save_thread(&t).unwrap();
+            }
+            ws.reload(cx);
+        });
+        let start = |trek: &Trek, cx: &mut TestAppContext, q: &str| {
+            let q = q.to_string();
+            trek.update(cx, move |ws, cx| ws.delegate(&q, &json!({ "title": "One more", "prompt": "mock:long 30s", "agent": "direct:mock" }), cx))
+        };
+        let err = start(&trek, cx, &q).unwrap_err();
+        assert!(err.contains("since the user's last message"), "{err}");
+        let at = now_ms();
+        trek.wait(cx, "a new millisecond", move |_| now_ms() > at).await;
+        trek.update(cx, |ws, cx| ws.send_to(&q, "and now?".into(), vec![], cx));
+        trek.wait_done(cx, &q, RunState::Idle).await;
+        start(&trek, cx, &q).expect("the user asked again: room again");
+        trek.update(cx, |ws, cx| ws.interrupt(&q, cx));
+        let tid = q.clone();
+        trek.wait(cx, "the sub-agent to stop", move |ws| ws.running_children(&tid).is_empty()).await;
+    });
+}
+
+#[test]
+fn acp_agents_wait_less_than_their_clients_do() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (acp, mock_id) = trek.update(cx, |ws, cx| {
+            let a = ws.store.create_thread(Some(&trek.project), AgentId::OpenCode, None, Effort::Medium, HandHolding::Auto).unwrap();
+            let m = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).unwrap();
+            ws.reload(cx);
+            (a.id, m.id)
+        });
+        assert!(trek.read(cx, |ws, _| ws.longest_wait(&acp)) < Duration::from_secs(60));
+        assert_eq!(trek.read(cx, |ws, _| ws.longest_wait(&mock_id)), Duration::MAX);
+    });
+}
+
+#[test]
+fn a_parent_with_sub_agents_at_work_still_takes_a_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:delegate mock:long 30s");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let child = children(&trek, cx, &id)[0].clone();
+        trek.render(cx);
+        assert!(trek.visible(cx, "stop") && !trek.visible(cx, "send"), "an empty composer offers to stop the sub-agent");
+        trek.type_text(cx, "meanwhile, what's next?");
+        trek.render(cx);
+        assert!(trek.visible(cx, "send") && !trek.visible(cx, "stop"), "with a message, the button sends it");
+        trek.click(cx, "send");
+        assert_eq!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::User { .. })).count(), 2);
+        assert_eq!(state(&trek, cx, &child), TaskState::Running, "sending didn't stop it");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        wait_task(&trek, cx, &child, TaskState::Cancelled).await;
+    });
+}
+
+#[test]
+fn consulting_is_offered_only_where_the_agent_gets_the_tools() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.tools.orchestration = false);
+        let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        cx.update(|cx| {
+            cx.subscribe(&trek.ws, move |_, event: &WorkspaceEvent, _| {
+                if let WorkspaceEvent::Toast { message, .. } = event {
+                    sink.borrow_mut().push(message.clone());
+                }
+            })
+            .detach()
+        });
+        trek.render(cx);
+        trek.click(cx, "consult-pill");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "consult-menu-body"), "the pill doesn't open");
+        trek.type_text(cx, "/consult swift: hi");
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), "/consult swift: hi", "nothing was sent");
+        assert!(seen.borrow().last().is_some_and(|m| m.contains("Sub-agent tools are off")), "{:?}", seen.borrow());
+        assert!(consultants(&trek, cx).0.is_empty());
+        // Picked while on, then turned off: the message waits rather than going without them.
+        trek.update(cx, |ws, cx| {
+            ws.settings.tools.orchestration = true;
+            cx.notify();
+        });
+        trek.window(cx, |window, cx| trek.root.read(cx).composer.clone().update(cx, |c, cx| c.set_text("/consult swift", window, cx)));
+        trek.press(cx, "enter");
+        trek.press(cx, "escape");
+        assert_eq!(consultants(&trek, cx).0, ["direct:mock/mock-swift/high"]);
+        trek.update(cx, |ws, cx| {
+            ws.settings.tools.orchestration = false;
+            cx.notify();
+        });
+        trek.type_text(cx, "how does it start?");
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), "how does it start?");
+        assert_eq!(consultants(&trek, cx).0, ["direct:mock/mock-swift/high"], "kept for when it can go");
+        assert!(trek.read(cx, |ws, _| ws.consult_unavailable(&AgentId::Direct("openai".into()))).is_some());
+    });
+}
+
+#[test]
+fn a_finished_sub_agent_keeps_its_time() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:consult explain the startup");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let child = children(&trek, cx, &id)[0].clone();
+        let took = trek.read(cx, |ws, _| ws.task_elapsed(&child));
+        let at = now_ms();
+        trek.wait(cx, "a second to pass", move |_| now_ms() > at + 1100).await;
+        // The user carries on in it: its run for the parent took what it took.
+        trek.update(cx, |ws, cx| ws.send_to(&child, "thanks".into(), vec![], cx));
+        trek.wait_done(cx, &child, RunState::Idle).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.task_elapsed(&child)), took);
     });
 }

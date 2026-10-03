@@ -207,6 +207,16 @@ fn activity(item: &Value) -> Option<String> {
     Some(clip(&s, 80))
 }
 
+/// An MCP tool row's title: the tool's name, or for Trek's own server Claude's full name for it
+/// (`mcp__trek-orchestrate__delegate_task`), so Trek tells its tools from another server's.
+fn mcp_title(item: &Value) -> String {
+    let tool = item["tool"].as_str().unwrap_or("Tool");
+    match item["server"].as_str() {
+        Some(server) if server == trek_core::orchestrate::SERVER => format!("mcp__{server}__{tool}"),
+        _ => tool.to_string(),
+    }
+}
+
 /// `mcp_servers` for Codex's config: the shared shape, with a tool timeout where a server needs
 /// longer than Codex's default minute.
 fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
@@ -815,7 +825,7 @@ impl Session {
             Some("mcpToolCall" | "dynamicToolCall") => {
                 let args = &item["arguments"];
                 let detail = if args.as_object().is_some_and(|o| !o.is_empty()) { clip(&args.to_string(), 200) } else { String::new() };
-                (item["tool"].as_str().unwrap_or("Tool").to_string(), detail)
+                (mcp_title(item), detail)
             }
             Some("webSearch") => ("Search the web".to_string(), item["query"].as_str().unwrap_or_default().to_string()),
             Some("imageView") => ("Read".to_string(), item["path"].as_str().unwrap_or_default().to_string()),
@@ -1234,6 +1244,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,
@@ -1268,6 +1279,13 @@ mod tests {
         let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
         assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
         assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
+    }
+
+    #[test]
+    fn trek_s_own_tools_are_named_with_their_server() {
+        assert_eq!(mcp_title(&json!({ "server": "trek-orchestrate", "tool": "delegate_task" })), "mcp__trek-orchestrate__delegate_task");
+        assert_eq!(mcp_title(&json!({ "server": "t3-code", "tool": "delegate_task" })), "delegate_task", "another server's tool keeps its name");
+        assert!(!trek_core::orchestrate::is_delegate_call(&mcp_title(&json!({ "server": "t3-code", "tool": "delegate_task" }))));
     }
 
     #[test]
@@ -1330,6 +1348,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan: false,
+            read_only: false,
             resume: resume.map(String::from),
             resume_at: None,
             fork: false,
@@ -1463,6 +1482,7 @@ mod tests {
             effort: Effort::Medium,
             hand_holding: HandHolding::Supervised,
             plan: false,
+            read_only: false,
             resume: Some("t".into()),
             resume_at: None,
             fork: false,
@@ -1768,6 +1788,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan: true,
+            read_only: false,
             resume: Some("t".into()),
             resume_at: None,
             fork: false,
@@ -1947,6 +1968,7 @@ mod live {
             effort: Effort::Low,
             hand_holding: HandHolding::Auto,
             plan: false,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,

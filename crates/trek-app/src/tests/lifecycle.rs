@@ -372,6 +372,7 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
                 effort: Effort::Medium,
                 hand_holding: HandHolding::Auto,
                 plan: false,
+                read_only: false,
                 resume: None,
                 resume_at: None,
                 fork: false,

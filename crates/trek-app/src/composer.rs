@@ -121,6 +121,13 @@ pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
     models.iter().find(|m| m.id == "claude-opus-5-5").or_else(|| models.first())
 }
 
+/// `/consult`'s models and message, split at the first colon followed by a space (or ending
+/// it): model ids may have colons of their own (`qwen2.5-coder:7b`).
+fn consult_split(rest: &str) -> Option<(&str, &str)> {
+    let at = rest.char_indices().find(|&(i, c)| c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))?.0;
+    Some((&rest[..at], &rest[at + 1..]))
+}
+
 /// A consultant on `model` of `agent`, at `effort` (High, unless asked) within what the model takes.
 fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
     let effort = effort.unwrap_or(Effort::High);
@@ -265,17 +272,22 @@ impl Composer {
             }
             None => text,
         };
-        // With consultants picked, the agent is told to ask them first.
-        let text = if self.consult.consultants.is_empty() || text.trim().is_empty() || text.trim_start().starts_with('/') {
-            text
-        } else {
-            let names = self.consultant_names(cx);
-            let wrapped = trek_core::orchestrate::consult_prompt(&text, &self.consult, |c| names(c));
-            if !self.consult_pinned {
-                self.consult.consultants.clear();
-                self.consult_effort = None;
+        // With consultants picked, the agent is told to ask them first. Picks clear once it's
+        // sent (unless pinned); a message that isn't sent keeps them, and comes back as written.
+        let plain = text.clone();
+        let consulting = !(self.consult.consultants.is_empty() || text.trim().is_empty() || text.trim_start().starts_with('/'));
+        if consulting {
+            let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
+            if let Some(why) = self.workspace.read(cx).consult_unavailable(&agent) {
+                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: format!("Can't consult: {why}."), undo: None }));
+                return;
             }
-            wrapped
+        }
+        let text = if consulting {
+            let names = self.consultant_names(cx);
+            trek_core::orchestrate::consult_prompt(&text, &self.consult, |c| names(c))
+        } else {
+            text
         };
         if let Some(e) = &self.editing {
             let ws = self.workspace.read(cx);
@@ -296,20 +308,28 @@ impl Composer {
         self.sync_overlay(cx);
         let images = std::mem::take(&mut self.outbox.paths);
         let scope = self.scope.clone();
-        match self.editing.take() {
+        let sent = match self.editing.take() {
             // Sent in place of the message: the conversation goes back to just before it. What
             // the composer held before the edit comes back.
             Some(e) => {
                 let restore = e.restore == Some(true) && !matches!(&e.files, EditFiles::Changes(c) if c.is_empty());
-                let sent = self.workspace.update(cx, |ws, cx| ws.edit_and_resend(&e.thread, &e.item, text.clone(), images.clone(), restore, cx));
-                let (text, images) = if sent { e.draft.clone() } else { (text, images) };
+                let sent = self.workspace.update(cx, |ws, cx| ws.edit_and_resend(&e.thread, &e.item, text, images.clone(), restore, cx));
+                let (text, images) = if sent { e.draft.clone() } else { (plain, images) };
                 self.outbox.paths = images;
                 state.update(cx, |s, cx| s.set_value(text, window, cx));
                 if !sent {
                     self.editing = Some(e);
                 }
+                sent
             }
-            None => self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx)),
+            None => {
+                self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx));
+                true
+            }
+        };
+        if consulting && sent && !self.consult_pinned {
+            self.consult.consultants.clear();
+            self.consult_effort = None;
         }
     }
 
@@ -1241,7 +1261,11 @@ impl Composer {
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
             return None;
         }
-        let (targets, message) = match rest.split_once(':') {
+        let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
+        if let Some(why) = self.workspace.read(cx).consult_unavailable(&agent) {
+            return Some(Err(format!("Can't consult: {why}.")));
+        }
+        let (targets, message) = match consult_split(rest) {
             Some((t, m)) => (t, Some(m.trim().to_string()).filter(|m| !m.is_empty())),
             None => (rest, None),
         };
@@ -1517,6 +1541,17 @@ impl Composer {
         let logos = h_flex().children(self.consult.consultants.iter().take(4).enumerate().map(|(i, c)| {
             div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(5.)).bg(theme.secondary).child(ui::agent_logo(&c.agent, px(14.), cx))
         }));
+        // An agent that wouldn't get `delegate_task` can't consult: the pill says why, and opens
+        // only to let go of consultants already picked.
+        let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
+        if let (Some(why), true) = (self.workspace.read(cx).consult_unavailable(&agent), empty) {
+            return Pill::new("consult-pill")
+                .ghost(true)
+                .tooltip(format!("Can't consult: {why}"))
+                .child(Icon::new(crate::assets::Lucide::MessagesSquare).small().text_color(muted.opacity(0.5)))
+                .when(!compact, |p| p.child(div().text_color(muted.opacity(0.5)).child("Consult")))
+                .into_any_element();
+        }
         let entity = cx.entity();
         Popover::new("consult-menu")
             .anchor(Anchor::BottomLeft)
@@ -1888,8 +1923,8 @@ impl Render for Composer {
         let thread = ws.thread_in(&self.scope).cloned();
         let is_draft = ws.is_draft_in(&self.scope);
         let main = self.scope == Scope::Main;
-        // Stop also ends sub-agents still at work after their parent's turn.
-        let running = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou) || !ws.running_children(&t.id).is_empty());
+        let own_turn = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
+        let children_working = thread.as_ref().is_some_and(|t| !ws.running_children(&t.id).is_empty());
         let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
         let (cost_label, billing_tip) = crate::workspace::cost_note(live.and_then(|l| l.billing.as_ref()), live.map_or(0.0, |l| l.cost_usd));
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
@@ -1902,6 +1937,9 @@ impl Render for Composer {
             .unwrap_or_else(|| prefs.agent.display_name());
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty() && self.outbox.paths.is_empty() && self.outbox.saving == 0;
+        // Stop also ends sub-agents still at work after their parent's turn, unless there's a
+        // message to send: the parent is free to take it.
+        let running = own_turn || (children_working && empty);
         let thread_id = thread.as_ref().map(|t| t.id.clone());
         let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
         let compact = self.width.get() < px(600.);
@@ -1982,6 +2020,7 @@ impl Render for Composer {
                 .into_any_element()
         } else {
             square("send")
+                .test_support()
                 .bg(if empty { theme.foreground.opacity(0.08) } else { theme.foreground })
                 .when(!empty, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
                 .child(Icon::new(IconName::ArrowUp).small().text_color(if empty { theme.muted_foreground } else { theme.background }))
@@ -2185,5 +2224,19 @@ impl Render for Composer {
             .capture_action(cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)))
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
             .child(v_flex().w_full().max_w(px(760.)).children(chips).child(card).children(status))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consult_split;
+
+    #[test]
+    fn consult_splits_at_a_colon_and_space() {
+        assert_eq!(consult_split(" sol high: why?"), Some((" sol high", " why?")));
+        assert_eq!(consult_split(" qwen2.5-coder:7b high: why?"), Some((" qwen2.5-coder:7b high", " why?")), "a model id's colon stays");
+        assert_eq!(consult_split(" sol:"), Some((" sol", "")));
+        assert_eq!(consult_split(" qwen2.5-coder:7b"), None);
+        assert_eq!(consult_split(" sol"), None);
     }
 }

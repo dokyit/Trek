@@ -32,9 +32,9 @@ pub struct Call {
 /// The workspace's answer to a `Call`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
-    /// A sub-agent was started and the caller waits for its answer: another reply follows when
-    /// it ends, unless the wait runs out first.
-    Waiting(String),
+    /// A sub-agent was started and the caller waits for its answer, for as long as given:
+    /// another reply follows when it ends, unless the wait runs out first.
+    Waiting(String, Duration),
     Done(Result<Value, String>),
 }
 
@@ -76,8 +76,12 @@ impl IpcServer {
         let (tok, sess) = (Arc::<str>::from(token.as_str()), sessions.clone());
         let listener = rt.spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { continue };
-                tokio::spawn(serve(stream, tok.clone(), sess.clone(), calls_tx.clone()));
+                match listener.accept().await {
+                    Ok((stream, _)) => _ = tokio::spawn(serve(stream, tok.clone(), sess.clone(), calls_tx.clone())),
+                    // Out of file descriptors, say: the error comes straight back, so pause
+                    // rather than spin.
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
             }
         });
         Ok((IpcServer { path, token, sessions, listener }, calls))
@@ -228,7 +232,6 @@ async fn serve(stream: tokio::net::UnixStream, token: Arc<str>, sessions: Sessio
             let _ = write(&mut w, &trek_ipc::reply(&id, Err(message.into()))).await;
             continue;
         };
-        let wait = wait_for(&params);
         let (reply, replies) = async_channel::unbounded();
         if calls.send(Call { thread, method: method.to_string(), params, reply }).await.is_err() {
             let _ = write(&mut w, &trek_ipc::reply(&id, Err("Trek is shutting down.".into()))).await;
@@ -236,7 +239,7 @@ async fn serve(stream: tokio::net::UnixStream, token: Arc<str>, sessions: Sessio
         }
         let answer = match replies.recv().await {
             Ok(Reply::Done(result)) => result,
-            Ok(Reply::Waiting(child)) => {
+            Ok(Reply::Waiting(child, wait)) => {
                 // Wait for the sub-agent, for as long as asked, and for as long as the caller
                 // stays (a cancelled call drops its connection).
                 let deadline = tokio::time::sleep(wait);
@@ -363,11 +366,11 @@ mod tests {
         let held: Arc<Mutex<Vec<async_channel::Sender<Reply>>>> = Default::default();
         let keep = held.clone();
         let _answers = answer_with(calls, move |c| match c.params["case"].as_str() {
-            Some("quick") => vec![Reply::Waiting("child-1".into()), Reply::Done(Ok(json!({"id": "child-1", "status": "done"})))],
+            Some("quick") => vec![Reply::Waiting("child-1".into(), WAIT_DEFAULT), Reply::Done(Ok(json!({"id": "child-1", "status": "done"})))],
             _ => {
                 // Never answered: the wait runs out.
                 keep.lock().unwrap().push(c.reply.clone());
-                vec![Reply::Waiting("child-2".into())]
+                vec![Reply::Waiting("child-2".into(), wait_for(&c.params))]
             }
         });
         let client = server.client(&key);
