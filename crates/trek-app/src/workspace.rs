@@ -119,6 +119,9 @@ pub struct LiveThread {
     pub turn_started: Option<Instant>,
     pub plan: bool,
     pub fast: bool,
+    /// Settings the agent reads only at launch changed mid-turn: the session restarts (and
+    /// resumes) once the turn is over.
+    relaunch: bool,
     /// Estimated spend on this thread's agent so far; money only when `billing` is metered.
     pub cost_usd: f64,
     /// The agent's running session total at its last report (see `cost_added`).
@@ -1533,9 +1536,11 @@ impl Workspace {
                 live.plan = prefs.plan;
                 live.fast = prefs.fast;
                 if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
-                    // Claude reads effort, fast mode and plan at launch: restart idle sessions (they resume).
-                    let relaunch = live.turn_started.is_none()
-                        && (fast_changed || plan_changed || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort));
+                    // Claude reads effort, fast mode and plan at launch: restart idle sessions (they
+                    // resume), and running ones once their turn is over.
+                    let at_launch = fast_changed || plan_changed || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort);
+                    let relaunch = at_launch && live.turn_started.is_none();
+                    live.relaunch |= at_launch && !relaunch;
                     if before.agent != prefs.agent || relaunch {
                         let _ = tx.try_send(Command::Shutdown);
                         live.commands = None;
@@ -1924,6 +1929,9 @@ impl Workspace {
         let (resume, resume_at, fork, recap) = match thread.reopen.clone() {
             Some(Reopen::Native { session, at, fork }) => (Some(session), at, fork, recap()),
             Some(Reopen::Recap) => (None, None, false, recap()),
+            // No session of the agent's own to go back to (direct models keep none, and a thread
+            // that changed agent left its old one): the conversation so far comes as a recap.
+            None if thread.native_id.is_none() => (None, None, false, recap()),
             None => (thread.native_id.clone(), None, false, None),
         };
         let handle = trek_agents::start(SessionConfig {
@@ -1947,6 +1955,7 @@ impl Workspace {
     fn attach(&mut self, id: &str, handle: trek_agents::SessionHandle, cx: &mut Context<Self>) {
         let live = self.live.entry(id.to_string()).or_default();
         live.commands = Some(handle.commands);
+        live.relaunch = false;
         live.last_active = Some(cx.background_executor().now());
         // A new process says how it's billed again (the login may have changed since).
         live.billing = None;
@@ -2346,6 +2355,12 @@ impl Workspace {
             self.persist_items(id, cx);
             self.search_index_changed(cx);
             self.note_branch(id, turn_began, cx);
+            if let Some(live) = self.live.get_mut(id).filter(|l| l.relaunch && l.turn_started.is_none()) {
+                live.relaunch = false;
+                if let Some(tx) = live.commands.take() {
+                    let _ = tx.try_send(Command::Shutdown);
+                }
+            }
             let next = if continue_queue {
                 self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
             } else {

@@ -310,6 +310,43 @@ fn agents_that_cant_rewind_their_session_get_a_recap() {
 }
 
 #[test]
+fn a_session_with_no_history_of_its_own_restarts_with_a_recap() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = turn(&trek, cx, "apple").await;
+        turn(&trek, cx, "banana").await;
+        // Like a direct model's (it keeps none), and the session ends: idle, or a relaunch.
+        trek.update(cx, |ws, _| {
+            ws.threads.iter_mut().find(|t| t.id == id).unwrap().native_id = None;
+            let _ = ws.live.get_mut(&id).unwrap().commands.take().unwrap().try_send(trek_agents::Command::Shutdown);
+        });
+        assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | banana");
+    });
+}
+
+#[test]
+fn settings_read_at_launch_apply_once_the_turn_is_over() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = turn(&trek, cx, "apple").await;
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 600s".into(), vec![], cx));
+        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id)).await;
+        // Plan mode is read at launch: the running turn isn't cut short for it.
+        trek.update(cx, |ws, cx| {
+            let mut p = ws.prefs_in(&Scope::Main);
+            p.plan = true;
+            ws.set_prefs_in(&Scope::Main, p, cx);
+        });
+        assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_some() && ws.turn_running(&id)));
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_none()), "the session restarts after the turn");
+        // It resumes: the conversation goes on.
+        assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | mock:long 600s");
+    });
+}
+
+#[test]
 fn nothing_is_taken_back_while_a_turn_runs() {
     run(async |cx| {
         let trek = open(cx);

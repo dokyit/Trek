@@ -179,9 +179,15 @@ fn command_text(v: &Value) -> String {
     unwrap_shell(v["command"].as_str().unwrap_or_default())
 }
 
-fn change_paths(item: &Value) -> String {
-    let paths: Vec<&str> = item["changes"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();
-    paths.join(", ")
+fn change_paths(item: &Value) -> Vec<String> {
+    item["changes"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).map(String::from).collect()
+}
+
+/// A message's text, to name it ("an image" when it's only images).
+fn input_text(input: &Value) -> String {
+    let text: Vec<&str> = input.as_array().into_iter().flatten().filter_map(|i| i["text"].as_str()).collect();
+    let text = text.join(" ");
+    if text.trim().is_empty() { "an image".into() } else { format!("“{}”", clip(text.trim(), 80)) }
 }
 
 /// A sub-agent's name from its path: `/root/pong_agent` → "pong agent".
@@ -193,7 +199,7 @@ fn agent_name(path: &str) -> String {
 fn activity(item: &Value) -> Option<String> {
     let s = match item["type"].as_str()? {
         "commandExecution" => format!("Running {}", command_text(item)),
-        "fileChange" => format!("Editing {}", change_paths(item)),
+        "fileChange" => format!("Editing {}", change_paths(item).join(", ")),
         "mcpToolCall" | "dynamicToolCall" => item["tool"].as_str()?.to_string(),
         "webSearch" => "Searching the web".to_string(),
         _ => return None,
@@ -355,7 +361,9 @@ struct Session {
     /// A fatal error reported before its `turn/completed`.
     turn_error: Option<String>,
     /// `fileChange` item id → its paths, for the approval card.
-    edits: HashMap<String, String>,
+    edits: HashMap<String, Vec<String>>,
+    /// The thread's folder: edits inside it go ahead at Auto-accept edits.
+    cwd: PathBuf,
     /// A recap of the conversation for the first message: the thread couldn't be taken back to
     /// where the conversation now ends, so this is a new one.
     recap: Option<String>,
@@ -386,6 +394,7 @@ impl Session {
             drafting: None,
             turn_error: None,
             edits: HashMap::new(),
+            cwd: config.cwd.clone(),
             recap: None,
             agents: HashMap::new(),
             plan_updates: 0,
@@ -557,6 +566,9 @@ impl Session {
             return out;
         }
         match p["threadId"].as_str() {
+            // Requests are Trek's by request id, whichever thread raised them: a sub-agent's
+            // approval that Codex settles must go too.
+            _ if method == "serverRequest/resolved" => self.notification(method, p, &mut out),
             Some(t) if t != self.thread_id => self.sub_agent(t, method, p, &mut out),
             _ => self.notification(method, p, &mut out),
         }
@@ -576,8 +588,10 @@ impl Session {
             }
             (Call::Start, Some(e)) => {
                 self.turn = Turn::Idle;
-                self.held.clear();
                 self.interrupt = false;
+                // Messages sent while the turn was starting were waiting for it: say which didn't go.
+                let unsent: Vec<String> = self.held.drain(..).map(|i| input_text(&i)).collect();
+                let e = if unsent.is_empty() { e } else { format!("{e}\nNot sent to Codex: {}", unsent.join(", ")) };
                 out.events.push(AgentEvent::Error(e));
             }
             (Call::Steer { input, turn, retried }, Some(e)) => {
@@ -602,15 +616,23 @@ impl Session {
                 }
             }
             "item/fileChange/requestApproval" => {
-                // Outside Supervised, edits go ahead; Codex only asks for writes its sandbox blocks.
-                if self.hand_holding != HandHolding::Supervised {
+                // Codex only asks for writes its sandbox blocks: outside the project's writable
+                // roots, or with more room (`grantRoot`). Above Supervised, edits inside the
+                // project go ahead, as with Claude's acceptEdits; the rest are the user's call
+                // below Full access.
+                let paths = p["itemId"].as_str().and_then(|i| self.edits.get(i)).cloned().unwrap_or_default();
+                let in_project = p["grantRoot"].is_null() && !paths.is_empty() && paths.iter().all(|f| crate::acp::within(Path::new(f), &self.cwd));
+                let auto = match self.hand_holding {
+                    HandHolding::FullAccess => true,
+                    HandHolding::Supervised => false,
+                    HandHolding::AutoAcceptEdits | HandHolding::Auto => in_project,
+                };
+                if auto {
                     out.send.push(json!({ "id": rpc_id, "result": { "decision": "accept" } }));
                     return;
                 }
                 self.pending.insert(request_id.clone(), Pending::Approval(rpc_id));
-                let detail = p["itemId"]
-                    .as_str()
-                    .and_then(|i| self.edits.get(i).cloned())
+                let detail = Some(paths.join(", "))
                     .filter(|d| !d.is_empty())
                     .or(p["grantRoot"].as_str().map(String::from))
                     .or(p["reason"].as_str().map(String::from))
@@ -769,8 +791,9 @@ impl Session {
             Some("commandExecution") => ("Run command".to_string(), command_text(item)),
             Some("fileChange") => {
                 let paths = change_paths(item);
-                self.edits.insert(id.clone(), paths.clone());
-                ("Edit".to_string(), paths)
+                let detail = paths.join(", ");
+                self.edits.insert(id.clone(), paths);
+                ("Edit".to_string(), detail)
             }
             Some("mcpToolCall" | "dynamicToolCall") => {
                 let args = &item["arguments"];
@@ -1502,6 +1525,32 @@ mod tests {
         let out = feed(&mut s, &lines[..3]);
         assert!(!out.events.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })));
         assert_eq!(out.send, vec![json!({"id":0,"result":{"decision":"accept"}})]);
+
+        // A write outside the project (or one asking for more room) is the user's call below
+        // Full access: Codex asks only because its sandbox blocks it.
+        let outside: Vec<Value> = lines[..3].iter().map(|v| serde_json::from_str(&v.to_string().replace("/tmp/trek-agents-e2e/d.txt", "/Users/someone/.zshrc")).unwrap()).collect();
+        let mut wider = lines[..3].to_vec();
+        wider[2]["params"]["grantRoot"] = json!("/Users/someone");
+        for (h, ask) in [(HandHolding::AutoAcceptEdits, true), (HandHolding::Auto, true), (HandHolding::FullAccess, false)] {
+            for lines in [&outside, &wider] {
+                let mut s = session("01a0fe61-b5ad-7aa2-ade8-be4ef1741959", false);
+                s.command(Command::SetHandHolding(h));
+                let out = feed(&mut s, lines);
+                assert_eq!(out.events.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })), ask, "{h:?}");
+                assert_eq!(out.send.is_empty(), ask, "{h:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sub_agents_settled_request_goes() {
+        let mut s = session("main", false);
+        let ask = json!({"method":"item/commandExecution/requestApproval","id":7,"params":{"threadId":"kid","turnId":"k","itemId":"e1","command":"ls"}});
+        assert!(matches!(&s.incoming(&ask).events[..], [AgentEvent::PermissionRequest { request_id, .. }] if request_id == "codex-7"));
+        let resolved = json!({"method":"serverRequest/resolved","params":{"threadId":"kid","requestId":7}});
+        assert_eq!(s.incoming(&resolved).events, vec![AgentEvent::PermissionResolved { request_id: "codex-7".into() }]);
+        // Answering it now sends nothing.
+        assert!(s.command(Command::Respond { request_id: "codex-7".into(), decision: Decision::Allow }).send.is_empty());
     }
 
     #[test]
@@ -1644,6 +1693,12 @@ mod tests {
         let out = s.incoming(&json!({"id":3,"error":{"code":-32600,"message":"thread not loaded"}}));
         assert_eq!(out.events, vec![AgentEvent::Error("thread not loaded".into())]);
         assert_eq!(s.command(prompt("again")).send[0]["method"], "turn/start");
+        // Messages sent while it was starting waited for it: the error names them.
+        s.command(prompt("and this"));
+        s.command(Command::Prompt { text: String::new(), images: vec![PathBuf::from("/tmp/a.png")] });
+        let out = s.incoming(&json!({"id":4,"error":{"code":-32600,"message":"thread not loaded"}}));
+        assert_eq!(out.events, vec![AgentEvent::Error("thread not loaded\nNot sent to Codex: “and this”, an image".into())]);
+        assert!(s.held.is_empty());
     }
 
     #[test]

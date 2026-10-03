@@ -122,6 +122,8 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
+        // Each message is echoed as Claude takes it in: see `Turns`.
+        "--replay-user-messages",
         "--permission-prompt-tool",
         "stdio",
         "--permission-mode",
@@ -170,46 +172,145 @@ async fn check_resume_point(mut config: SessionConfig) -> (SessionConfig, Option
     (config, recap)
 }
 
+/// The CLI's answer to `--resume` with a session it doesn't have (deleted by hand, or cleaned up
+/// after `cleanupPeriodDays`): an error result before the session starts, then it exits.
+fn session_missing(v: &Value) -> bool {
+    v["type"] == "result"
+        && v["is_error"] == true
+        && v["errors"].as_array().into_iter().flatten().any(|e| e.as_str().is_some_and(|e| e.starts_with("No conversation found")))
+}
+
+/// A running `claude` process.
+struct Cli {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    stderr: StderrTail,
+}
+
+impl Cli {
+    fn spawn(bin: &std::path::Path, config: &SessionConfig, mcp_file: Option<&TempFile>) -> Result<Cli> {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.args(cli_args(config));
+        if let Some(file) = mcp_file {
+            cmd.arg("--mcp-config").arg(&file.0);
+        }
+        cmd.current_dir(&config.cwd)
+            .env("PATH", detect::login_path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().context("failed to start claude")?;
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+        let stderr = StderrTail::capture(child.stderr.take().unwrap(), "claude");
+        Ok(Cli { child, stdin, stdout, stderr })
+    }
+
+    /// Send the `initialize` control request; its id, to know the response.
+    async fn initialize(&mut self, ctl: &mut Control) -> Result<String> {
+        let init = ctl.request("initialize", json!({}));
+        write_line(&mut self.stdin, &init).await?;
+        Ok(init["request_id"].as_str().unwrap_or_default().to_string())
+    }
+}
+
+/// Which `result` ends the turn the app sees. A message sent while a turn runs joins that turn
+/// (Claude takes it in at its next step), or runs after it as a turn of its own with its own
+/// `result` when the turn was already ending. Claude echoes each message as it takes it in
+/// (`--replay-user-messages`), so a result that leaves a message unread isn't the end yet.
+#[derive(Default)]
+struct Turns {
+    /// Messages written that Claude hasn't echoed yet, and whether each was sent while a turn
+    /// ran. Slash commands aren't echoed (some never reach the model), so they aren't counted.
+    unread: Vec<(String, bool)>,
+    /// A result held back for unread messages: its cost, and when to stop waiting for Claude to
+    /// take them in (they may never come, and the turn mustn't hang).
+    waiting: Option<(Option<f64>, tokio::time::Instant)>,
+}
+
+/// How long a held result waits for Claude to start on the messages after it. It starts within
+/// a fraction of a second.
+const STEER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl Turns {
+    fn sent(&mut self, text: &str, mid_turn: bool) {
+        if !text.trim_start().starts_with('/') {
+            self.unread.push((text.to_string(), mid_turn));
+        }
+    }
+
+    /// The text of a message Claude echoed.
+    fn echo_text(v: &Value) -> String {
+        match &v["message"]["content"] {
+            Value::String(s) => s.clone(),
+            Value::Array(blocks) => blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""),
+            _ => String::new(),
+        }
+    }
+
+    /// Events for one line of the CLI's output: `translate`'s, less a `TurnComplete` that
+    /// messages sent since still belong to.
+    fn step(&mut self, v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mut bool) -> Vec<AgentEvent> {
+        if v["type"] == "user" && v["isReplay"] == true {
+            let text = Self::echo_text(v);
+            if let Some(i) = self.unread.iter().position(|(t, _)| *t == text) {
+                self.unread.remove(i);
+                // Claude is on it: the turn goes on until its result.
+                self.waiting = None;
+            }
+            return vec![];
+        }
+        if v["type"] == "system" && v["subtype"] == "init" {
+            // The next turn has begun.
+            self.waiting = None;
+        }
+        let mut out = translate(v, pending, streamed_text);
+        if v["type"] == "result" {
+            // A stopped or failed turn ends here whatever was sent: Claude may drop what it hadn't
+            // read yet, and a turn that waited on it would never end.
+            if v["is_error"] == true || !self.unread.iter().any(|(_, mid_turn)| *mid_turn) {
+                self.unread.clear();
+                self.waiting = None;
+            } else {
+                self.waiting = Some((v["total_cost_usd"].as_f64(), tokio::time::Instant::now() + STEER_WAIT));
+                out.retain(|e| !matches!(e, AgentEvent::TurnComplete { .. }));
+            }
+        }
+        out
+    }
+
+    /// Claude never took in what it was sent after the held result: the turn ends with it.
+    fn give_up(&mut self) -> Option<AgentEvent> {
+        let (cost_usd, _) = self.waiting.take()?;
+        tracing::warn!("claude: {} message(s) sent mid-turn were never taken in", self.unread.len());
+        self.unread.clear();
+        Some(AgentEvent::TurnComplete { cost_usd, error: None })
+    }
+}
+
 pub async fn run(
     config: SessionConfig,
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
     let bin = detect::which("claude").context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
-    let (config, mut recap) = check_resume_point(config).await;
+    let (mut config, mut recap) = check_resume_point(config).await;
     if recap.is_some() {
         let _ = events
             .send(AgentEvent::Notice("Claude Code couldn't take its session back to that point, so it continues in a new session with a recap of this conversation.".into()))
             .await;
     }
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args(cli_args(&config));
     // Lives as long as the session; removed on drop.
-    let _mcp_file = if config.mcp_servers.is_empty() {
+    let mcp_file = if config.mcp_servers.is_empty() {
         None
     } else {
-        let file = TempFile::write(
-            "mcp",
-            &serde_json::to_string(&json!({ "mcpServers": mcp_servers_json(&config.mcp_servers) }))?,
-        )?;
-        cmd.arg("--mcp-config").arg(&file.0);
-        Some(file)
+        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": mcp_servers_json(&config.mcp_servers) }))?)?)
     };
-    cmd.current_dir(&config.cwd)
-        .env("PATH", detect::login_path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn().context("failed to start claude")?;
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-    let stderr = StderrTail::capture(child.stderr.take().unwrap(), "claude");
-
+    let mut cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
     let mut ctl = Control { next_id: 0 };
-    let init = ctl.request("initialize", json!({}));
-    let init_id = init["request_id"].as_str().unwrap_or_default().to_string();
-    write_line(&mut stdin, &init).await?;
+    let mut init_id = cli.initialize(&mut ctl).await?;
     // Outstanding `get_context_usage` requests; their responses become `Context` events.
     let mut context_requests: HashSet<String> = HashSet::new();
 
@@ -220,8 +321,13 @@ pub async fn run(
     // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
     let mut planning = config.plan;
     let mut in_turn = false;
+    let mut turns = Turns::default();
     // Resumed partway: once the session has said which it is, that message is its latest point.
     let mut resumed_at = config.resume_at.clone();
+    // The session has started (`system init`); until then, the messages sent so far, to send
+    // again if the session to resume is gone and a new one starts instead.
+    let mut started = false;
+    let mut unstarted: Vec<(String, Vec<PathBuf>)> = Vec::new();
 
     loop {
         tokio::select! {
@@ -230,36 +336,46 @@ pub async fn run(
                 match cmd {
                     Command::Prompt { text, images } => {
                         streamed_text = false;
-                        in_turn = true;
+                        let mid_turn = std::mem::replace(&mut in_turn, true);
+                        if !started {
+                            unstarted.push((text.clone(), images.clone()));
+                        }
                         let text = match recap.take() {
                             Some(r) => crate::recap_prompt(&r, &text),
                             None => text,
                         };
-                        let (content, errors) = user_content(&text, &images);
-                        for e in errors {
-                            let _ = events.send(AgentEvent::Error(e)).await;
+                        let (msg, skipped) = user_message(&text, &images);
+                        for e in skipped {
+                            let _ = events.send(AgentEvent::Notice(e)).await;
                         }
-                        let msg = json!({
-                            "type": "user", "session_id": "",
-                            "message": { "role": "user", "content": content },
-                            "parent_tool_use_id": null
-                        });
-                        write_line(&mut stdin, &msg).await?;
+                        turns.sent(&text, mid_turn);
+                        write_line(&mut cli.stdin, &msg).await?;
                     }
-                    Command::Interrupt => write_line(&mut stdin, &ctl.request("interrupt", json!({}))).await?,
+                    Command::Interrupt => {
+                        write_line(&mut cli.stdin, &ctl.request("interrupt", json!({}))).await?;
+                        // Between a held result and the turn for what was sent after it, there may
+                        // be nothing for Claude to stop: the turn ends here.
+                        if turns.waiting.take().is_some() {
+                            turns.unread.clear();
+                            in_turn = false;
+                            if events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
                     Command::SetHandHolding(h) => {
                         hand_holding = h;
                         if !planning {
-                            write_line(&mut stdin, &ctl.request("set_permission_mode", json!({ "mode": h.claude_mode() }))).await?
+                            write_line(&mut cli.stdin, &ctl.request("set_permission_mode", json!({ "mode": h.claude_mode() }))).await?
                         }
                     }
                     Command::SetModel { model, .. } => {
-                        write_line(&mut stdin, &ctl.request("set_model", json!({ "model": model }))).await?
+                        write_line(&mut cli.stdin, &ctl.request("set_model", json!({ "model": model }))).await?
                     }
                     Command::Respond { request_id, decision } => {
                         let request = pending.remove(&request_id).unwrap_or(json!({}));
                         for msg in respond(&mut ctl, &request_id, &request, decision, hand_holding.claude_mode()) {
-                            write_line(&mut stdin, &msg).await?;
+                            write_line(&mut cli.stdin, &msg).await?;
                         }
                         if request["tool_name"] == "ExitPlanMode" && decision != Decision::Deny {
                             planning = false;
@@ -267,19 +383,55 @@ pub async fn run(
                     }
                     Command::Answer { request_id, answers } => {
                         let request = pending.remove(&request_id).unwrap_or(json!({}));
-                        write_line(&mut stdin, &answer(&request_id, &request, answers)).await?;
+                        write_line(&mut cli.stdin, &answer(&request_id, &request, answers)).await?;
                     }
                     Command::Shutdown => break,
                 }
             }
-            line = stdout.next_line() => {
+            _ = tokio::time::sleep_until(turns.waiting.map_or_else(tokio::time::Instant::now, |(_, at)| at)), if turns.waiting.is_some() => {
+                if let Some(ev) = turns.give_up() {
+                    in_turn = false;
+                    if events.send(ev).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            line = cli.stdout.next_line() => {
                 let Some(line) = line? else {
                     if in_turn {
-                        return Err(stderr.exited("Claude Code"));
+                        return Err(cli.stderr.exited("Claude Code"));
                     }
                     break;
                 };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if !started && config.resume.is_some() && session_missing(&v) {
+                    // Start over in a new session, with what was sent so far.
+                    tracing::warn!("claude: session {:?} is gone; starting a new one", config.resume);
+                    config.resume = None;
+                    config.resume_at = None;
+                    config.fork = false;
+                    resumed_at = None;
+                    let _ = cli.child.start_kill();
+                    cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
+                    init_id = cli.initialize(&mut ctl).await?;
+                    context_requests.clear();
+                    recap = config.recap.take();
+                    let notice = match recap {
+                        Some(_) => AgentEvent::Notice("Claude Code couldn't reopen this conversation, so it continues in a new session with a recap of it.".into()),
+                        None => crate::lost_session("Claude Code"),
+                    };
+                    let _ = events.send(notice).await;
+                    turns = Turns::default();
+                    for (i, (text, images)) in unstarted.iter().enumerate() {
+                        let text = match recap.take() {
+                            Some(r) => crate::recap_prompt(&r, text),
+                            None => text.clone(),
+                        };
+                        turns.sent(&text, i > 0);
+                        write_line(&mut cli.stdin, &user_message(&text, images).0).await?;
+                    }
+                    continue;
+                }
                 if let Some(mode) = permission_mode(&v) {
                     planning = mode == "plan";
                 }
@@ -295,7 +447,7 @@ pub async fn run(
                         // Ask for context usage up front so the UI has data before the first prompt.
                         let c = ctl.request("get_context_usage", json!({}));
                         context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
-                        write_line(&mut stdin, &c).await?;
+                        write_line(&mut cli.stdin, &c).await?;
                     } else if context_requests.remove(id) {
                         if let Some(ev) = context_event(r) {
                             if events.send(ev).await.is_err() {
@@ -303,33 +455,39 @@ pub async fn run(
                             }
                         }
                     } else if r["subtype"] == "error" {
+                        // A setting Claude wouldn't change: the turn (if any) goes on.
                         let msg = r["error"].as_str().unwrap_or("Claude Code rejected the change.").to_string();
                         tracing::warn!("claude control request {id} failed: {msg}");
-                        if events.send(AgentEvent::Error(msg)).await.is_err() {
+                        if events.send(AgentEvent::Notice(format!("Claude Code didn't apply the change: {msg}"))).await.is_err() {
                             return Ok(());
                         }
                     }
                     continue;
                 }
-                for ev in translate(&v, &mut pending, &mut streamed_text) {
-                    let started = matches!(ev, AgentEvent::Started { .. });
+                for ev in turns.step(&v, &mut pending, &mut streamed_text) {
+                    let begun = matches!(ev, AgentEvent::Started { .. });
+                    if begun {
+                        started = true;
+                        unstarted.clear();
+                    }
                     if events.send(ev).await.is_err() {
                         return Ok(());
                     }
-                    if let Some(at) = resumed_at.take_if(|_| started) {
+                    if let Some(at) = resumed_at.take_if(|_| begun) {
                         let _ = events.send(AgentEvent::Mark(at)).await;
                     }
                 }
                 if v["type"] == "result" {
-                    in_turn = false;
+                    // Held back: the turn goes on.
+                    in_turn = turns.waiting.is_some();
                     let c = ctl.request("get_context_usage", json!({}));
                     context_requests.insert(c["request_id"].as_str().unwrap_or_default().to_string());
-                    write_line(&mut stdin, &c).await?;
+                    write_line(&mut cli.stdin, &c).await?;
                 }
             }
         }
     }
-    let _ = child.start_kill();
+    let _ = cli.child.start_kill();
     Ok(())
 }
 
@@ -341,22 +499,27 @@ async fn write_line(stdin: &mut tokio::process::ChildStdin, v: &Value) -> Result
     Ok(())
 }
 
-/// Message content for a prompt: image blocks first, then the text. Unreadable images are
-/// skipped and reported.
-fn user_content(text: &str, images: &[PathBuf]) -> (Vec<Value>, Vec<String>) {
+/// A user message for a prompt: image blocks first, then the text. Unreadable images are left
+/// out, and said why.
+fn user_message(text: &str, images: &[PathBuf]) -> (Value, Vec<String>) {
     let mut content = Vec::new();
-    let mut errors = Vec::new();
+    let mut skipped = Vec::new();
     for path in images {
         match load_image(path) {
             Ok((media_type, data)) => content.push(json!({
                 "type": "image",
                 "source": { "type": "base64", "media_type": media_type, "data": data }
             })),
-            Err(e) => errors.push(format!("{e:#}")),
+            Err(e) => skipped.push(format!("Image left out: {e:#}")),
         }
     }
     content.push(json!({ "type": "text", "text": text }));
-    (content, errors)
+    let msg = json!({
+        "type": "user", "session_id": "",
+        "message": { "role": "user", "content": content },
+        "parent_tool_use_id": null
+    });
+    (msg, skipped)
 }
 
 /// Why a turn failed: its result text, else the CLI's own errors (e.g. a session that can't be
@@ -501,6 +664,8 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
             }
             out.extend(mark(v));
         }
+        // The user's own message, echoed back (see `Turns`).
+        Some("user") if v["isReplay"] == true => {}
         Some("user") if v["parent_tool_use_id"].is_null() => {
             for block in v["message"]["content"].as_array().into_iter().flatten() {
                 if block["type"] == "tool_result" {
@@ -643,8 +808,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("a.png");
         std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
-        let (content, errors) = user_content("look", &[png, dir.join("missing.png"), dir.join("x.bmp")]);
-        assert_eq!(errors.len(), 2);
+        let (msg, skipped) = user_message("look", &[png, dir.join("missing.png"), dir.join("x.bmp")]);
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped[0].starts_with("Image left out: can't read image"), "{skipped:?}");
+        let content = msg["message"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "image");
         assert_eq!(content[0]["source"]["media_type"], "image/png");
@@ -746,6 +913,87 @@ mod tests {
         );
         assert_eq!(result_error(&json!({"is_error":true,"result":"API Error: overloaded"})), "API Error: overloaded");
         assert_eq!(result_error(&json!({"is_error":true})), "The turn failed.");
+    }
+
+    /// Events for `lines` through `Turns`, with `first` sent before them and `steer` sent mid-turn.
+    fn steered(lines: &[Value], first: &str, steer: &str) -> (Vec<AgentEvent>, Turns) {
+        let mut turns = Turns::default();
+        turns.sent(first, false);
+        turns.sent(steer, true);
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let ev = lines.iter().flat_map(|v| turns.step(v, &mut pending, &mut streamed)).collect();
+        (ev, turns)
+    }
+
+    fn turn_ends(ev: &[AgentEvent]) -> usize {
+        ev.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).count()
+    }
+
+    #[test]
+    fn a_steer_run_as_its_own_turn_ends_the_turn_once() {
+        // Recorded (Claude Code 2.1.288, claude-haiku-4-5): a story, then "Now reply with just
+        // the word BANANA." while it streamed. Claude runs the second message after the first,
+        // with a result each.
+        let lines = fixture(include_str!("../fixtures/claude-steer-turn.jsonl"));
+        let first = "Write a 200 word story about a fox.";
+        let (ev, turns) = steered(&lines, first, "Now reply with just the word BANANA.");
+        assert_eq!(turn_ends(&ev), 1, "{ev:?}");
+        assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { cost_usd: Some(c), error: None }) if *c > 0.0));
+        assert!(ev.contains(&AgentEvent::TextDone("BANANA".into())));
+        assert!(turns.unread.is_empty() && turns.waiting.is_none());
+        // The echoes aren't points to resume at.
+        let echoes: Vec<&str> = lines.iter().filter(|v| v["isReplay"] == true).filter_map(|v| v["uuid"].as_str()).collect();
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Mark(m) if echoes.contains(&m.as_str()))));
+
+        // Nothing sent mid-turn: each result ends its turn, as before.
+        let mut turns = Turns::default();
+        turns.sent(first, false);
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let ev: Vec<AgentEvent> = lines.iter().flat_map(|v| turns.step(v, &mut pending, &mut streamed)).collect();
+        assert_eq!(turn_ends(&ev), 2);
+    }
+
+    #[test]
+    fn a_steer_taken_into_the_turn_ends_it_once() {
+        // Recorded: "Also end your reply with the word BANANA." sent while `sleep 6` ran. Claude
+        // takes it in after the tool call, and the turn has a single result.
+        let lines = fixture(include_str!("../fixtures/claude-steer-merged.jsonl"));
+        let (ev, turns) = steered(&lines, "Run the bash command 'sleep 6' and then say DONE.", "Also end your reply with the word BANANA.");
+        assert_eq!(turn_ends(&ev), 1, "{ev:?}");
+        assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
+        assert!(turns.waiting.is_none());
+    }
+
+    #[test]
+    fn a_held_result_gives_up_on_messages_claude_never_takes_in() {
+        let ok = json!({"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.5});
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let mut turns = Turns::default();
+        turns.sent("first", false);
+        turns.sent("steer", true);
+        assert!(turns.step(&ok, &mut pending, &mut streamed).is_empty());
+        assert_eq!(turns.give_up(), Some(AgentEvent::TurnComplete { cost_usd: Some(0.5), error: None }));
+        assert!(turns.unread.is_empty() && turns.give_up().is_none());
+
+        // A stopped turn ends whatever is unread.
+        let stopped = json!({"type":"result","is_error":true,"terminal_reason":"aborted_streaming","total_cost_usd":0.5});
+        turns.sent("steer", true);
+        let ev = turns.step(&stopped, &mut pending, &mut streamed);
+        assert!(matches!(&ev[..], [AgentEvent::TurnComplete { error: Some(e), .. }] if e == "Interrupted"));
+        assert!(turns.unread.is_empty() && turns.waiting.is_none());
+
+        // Slash commands aren't echoed, so they never hold a turn open.
+        turns.sent("/context", true);
+        assert_eq!(turn_ends(&turns.step(&ok, &mut pending, &mut streamed)), 1);
+    }
+
+    #[test]
+    fn a_missing_session_is_recognised() {
+        // Recorded: `claude --resume <unknown id>` exits at once with this result.
+        let v: Value = serde_json::from_str(r#"{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"stop_reason":null,"session_id":"0b0b0b0b-0000-4000-8000-000000000000","total_cost_usd":0,"permission_denials":[],"errors":["No conversation found with session ID: 0b0b0b0b-0000-4000-8000-000000000000"]}"#).unwrap();
+        assert!(session_missing(&v));
+        assert!(!session_missing(&json!({"type":"result","is_error":true,"errors":["API Error: overloaded"]})));
+        assert!(!session_missing(&json!({"type":"result","is_error":false,"result":"No conversation found"})));
     }
 
     #[test]

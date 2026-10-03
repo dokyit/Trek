@@ -4,11 +4,11 @@
 //!
 //! codex:    approvals | steer | plan | plan-restart | resume | subagent | interrupt | lost-thread
 //! opencode: approvals | resume | interrupt | plan | model
-//! claude:   plan | keep-planning | question | cancel | interrupt
+//! claude:   plan | keep-planning | question | cancel | interrupt | steer | lost-session
 //! both:     rewind | fork (`claude` or `codex`)
 //!
-//! Each scenario works in its own folder under /tmp/trek-agents-e2e (or `$TREK_E2E_DIR`) and
-//! exits non-zero when a check fails.
+//! Each scenario works in its own folder under /tmp/trek-agents-e2e (or `$TREK_E2E_DIR`), keeps
+//! what Trek would save there too, and exits non-zero when a check fails.
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use trek_agents::{AgentEvent, Command, Decision, Prompt, SessionConfig, SessionHandle, start};
@@ -139,9 +139,12 @@ fn check(ok: bool, what: &str) {
     }
 }
 
+fn base() -> PathBuf {
+    PathBuf::from(std::env::var("TREK_E2E_DIR").unwrap_or_else(|_| "/tmp/trek-agents-e2e".into()))
+}
+
 fn folder(name: &str) -> PathBuf {
-    let base = std::env::var("TREK_E2E_DIR").unwrap_or_else(|_| "/tmp/trek-agents-e2e".into());
-    let dir = PathBuf::from(base).join(name);
+    let dir = base().join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -153,6 +156,8 @@ fn main() {
         [a, s] => (a.as_str(), s.as_str()),
         _ => fail("usage: scenario <codex|opencode|claude> <scenario>"),
     };
+    // What the drivers save (what ACP agents report, say) stays out of the user's Trek data.
+    trek_core::paths::isolate(base().join("trek-data"));
     trek_core::runtime().block_on(async {
         match (agent, scenario) {
             ("codex", "approvals") => approvals(AgentId::Codex, CODEX, "codex-approvals").await,
@@ -173,6 +178,8 @@ fn main() {
             ("claude", "question") => claude_question().await,
             ("claude", "cancel") => claude_cancel().await,
             ("claude", "interrupt") => interrupt(AgentId::ClaudeCode, CLAUDE, "claude-interrupt").await,
+            ("claude", "steer") => claude_steer().await,
+            ("claude", "lost-session") => claude_lost_session().await,
             ("claude", "rewind") => rewind(AgentId::ClaudeCode, CLAUDE, "claude-rewind").await,
             ("codex", "rewind") => rewind(AgentId::Codex, CODEX, "codex-rewind").await,
             ("claude", "fork") => fork(AgentId::ClaudeCode, CLAUDE, "claude-fork").await,
@@ -483,5 +490,42 @@ async fn claude_cancel() {
     check(err.as_deref() == Some("Interrupted"), "turn ends as Interrupted");
     check(s.count(|e| matches!(e, AgentEvent::PermissionResolved { request_id } if *request_id == rid)) == 1, "the prompt was withdrawn");
     check(!cwd.join("cancel.txt").exists(), "nothing ran");
+    s.stop().await;
+}
+
+/// Messages sent mid-turn: one while text streams (Claude runs it after the turn, with a result
+/// of its own) and one while a command runs (Claude takes it into the turn). Either way the
+/// turn ends once.
+async fn claude_steer() {
+    let cwd = folder("claude-steer");
+    let mut s = Session::start(AgentId::ClaudeCode, &cwd, CLAUDE, HandHolding::FullAccess, false, None);
+    s.prompt("Write a 150 word story about a fox.").await;
+    s.until(120, |e| matches!(e, AgentEvent::TextDelta(_))).await;
+    s.prompt("Now reply with just the word BANANA.").await;
+    check(s.turn(180).await.is_none(), "steered turn finishes cleanly");
+    check(s.text().contains("BANANA"), "the steer was answered");
+    check(s.count(|e| matches!(e, AgentEvent::TurnComplete { .. })) == 1, "one TurnComplete for the steered turn");
+    s.prompt("Run the shell command `sleep 6`, then reply with one short sentence.").await;
+    s.until(120, |e| matches!(e, AgentEvent::ToolStarted { title, .. } if title == "Run command")).await;
+    s.prompt("Also end your reply with the word CHERRY.").await;
+    check(s.turn(180).await.is_none(), "second steered turn finishes cleanly");
+    check(s.text().contains("CHERRY"), "the steer reached the running turn");
+    check(s.count(|e| matches!(e, AgentEvent::TurnComplete { .. })) == 2, "one TurnComplete per turn");
+    check(!s.seen.iter().any(|e| matches!(e, AgentEvent::Error(_))), "no errors");
+    s.stop().await;
+}
+
+/// A session Claude Code no longer has (its transcript was cleaned up) starts a new one instead
+/// of failing every message.
+async fn claude_lost_session() {
+    let cwd = folder("claude-lost-session");
+    let gone = "0b0b0b0b-0000-4000-8000-000000000000";
+    let mut s = Session::start(AgentId::ClaudeCode, &cwd, CLAUDE, HandHolding::Supervised, false, Some(gone.into()));
+    s.prompt("Reply with just the word: hello").await;
+    let AgentEvent::Notice(why) = s.until(60, |e| matches!(e, AgentEvent::Notice(_))).await else { unreachable!() };
+    check(why.contains("without the earlier context"), "the user is told the earlier context is gone");
+    check(s.turn(120).await.is_none(), "the message is answered in the new session");
+    check(!s.native_id().is_empty() && s.native_id() != gone, "started a new session");
+    check(s.text().to_lowercase().contains("hello"), "the message reached it");
     s.stop().await;
 }
