@@ -15,9 +15,12 @@ credentials:
 
 - **Claude Code** through `claude`'s stream-json mode: permission prompts, AskUserQuestion and plan
   approval as cards, sub-agent progress, switching to Full access mid-thread.
-- **Codex** through `codex app-server` (JSON-RPC): approvals, steering a running turn, OpenAI models.
+- **Codex** through `codex app-server` (JSON-RPC): approvals, questions and plan approval as cards, plan
+  progress, sub-agent progress, steering a running turn, OpenAI models.
 - **OpenCode, Factory Droid and ACP agents** (Cursor, GitHub Copilot, Gemini CLI, Kimi, Qwen Code, Grok,
-  Devin, Goose, Amp, Pi) through the Agent Client Protocol, when they're installed.
+  Devin, Goose, Amp, Pi) through the Agent Client Protocol, when they're installed: approvals, plan
+  progress, the agent's own slash commands, resuming saved sessions. OpenCode gets "ask" rules so Trek can
+  gate its edits and commands, added only where your own OpenCode config sets none.
 - **API keys and local models**: Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, xAI, Mistral, Groq,
   custom OpenAI-compatible endpoints, Ollama, LM Studio and llama.cpp / MLX. Keys live in the macOS
   Keychain (or come from your shell's `*_API_KEY` variables). These are chat only for now.
@@ -130,7 +133,8 @@ docs/                DECISIONS.md, DESIGN.md, RESEARCH.md, RELEASING.md
 
 The engine crates don't depend on the UI toolkit. All I/O runs on one shared tokio runtime and reaches the
 UI over channels; agent output is batched per frame. Data lives in `~/Library/Application
-Support/dev.trek.Trek` (settings.toml, trek.sqlite, snapshots, updates). See
+Support/dev.trek.Trek` (settings.toml, trek.sqlite, snapshots, updates, and acp-agents: what each ACP agent
+last reported, so Trek doesn't open a session to ask again). See
 [docs/DECISIONS.md](docs/DECISIONS.md) for why things are the way they are.
 
 ## What isn't done

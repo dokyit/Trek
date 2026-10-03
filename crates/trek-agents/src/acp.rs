@@ -2,13 +2,13 @@
 //! Covers OpenCode, Droid and every ACP agent in the catalog. Trek acts as the ACP client:
 //! it answers permission prompts and `fs/*` requests; the agent keeps its own login.
 
-use crate::{AgentEvent, Command, Decision, SessionConfig, clip};
+use crate::{AgentEvent, Command, CommandKind, Decision, SessionConfig, SlashCommand, StderrTail, Step, clip, plan_row};
 use anyhow::{Context as _, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -16,7 +16,7 @@ use trek_core::catalog::{ACP_AGENTS, ModelInfo};
 use trek_core::{AgentId, Effort, HandHolding, detect};
 
 /// What `acp_probe` learns about an installed ACP agent.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AcpInfo {
     pub models: Vec<ModelInfo>,
     /// `(id, name)` of the agent's advertised login methods.
@@ -40,12 +40,22 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
     Ok((path, args.into_iter().map(String::from).collect(), name))
 }
 
+/// Extra environment for the agent. OpenCode is told to ask before edits and commands (see
+/// `opencode`); Trek then answers the prompts the thread's level covers (see `auto_allow`).
+fn launch_env(agent: &AgentId, cwd: &Path) -> Vec<(String, String)> {
+    match agent {
+        AgentId::OpenCode => crate::opencode::launch_env(cwd),
+        _ => vec![],
+    }
+}
+
 struct Agent {
     child: Child,
     rpc: Rpc,
     lines: Lines<BufReader<ChildStdout>>,
-    stderr: Arc<Mutex<Vec<String>>>,
+    stderr: StderrTail,
     name: String,
+    bin: PathBuf,
 }
 
 impl Agent {
@@ -54,6 +64,7 @@ impl Agent {
         args.extend(extra.iter().cloned());
         let mut child = tokio::process::Command::new(&bin)
             .args(&args)
+            .envs(launch_env(agent, cwd))
             .current_dir(cwd)
             .env("PATH", detect::login_path())
             .stdin(Stdio::piped())
@@ -62,31 +73,14 @@ impl Agent {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to start {}", bin.display()))?;
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let tail = stderr.clone();
-        let err = child.stderr.take().unwrap();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
-                tracing::debug!("acp stderr: {l}");
-                let mut t = tail.lock().unwrap();
-                t.push(l);
-                if t.len() > 20 {
-                    t.remove(0);
-                }
-            }
-        });
+        let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
         let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        Ok(Agent { child, rpc, lines, stderr, name })
+        Ok(Agent { child, rpc, lines, stderr, name, bin })
     }
 
     fn exited(&self) -> anyhow::Error {
-        let tail = self.stderr.lock().unwrap();
-        match tail.iter().rev().find(|l| !l.trim().is_empty()) {
-            Some(l) => anyhow!("{} exited: {}", self.name, l.trim()),
-            None => anyhow!("{} exited", self.name),
-        }
+        self.stderr.exited(&self.name)
     }
 
     /// Send a request and read until its response, answering `fs/*` requests inline and
@@ -333,8 +327,13 @@ fn kind_title(kind: &str) -> &'static str {
     }
 }
 
-fn tool_detail(tc: &Value) -> String {
+/// The row's detail: the command, else the file, else the most telling input. A command's
+/// location is just its working directory, so it doesn't count.
+fn tool_detail(tc: &Value, kind: &str) -> String {
     let input = &tc["rawInput"];
+    if let Some(steps) = todo_steps(input) {
+        return plan_row(&steps).0;
+    }
     let command = match &input["command"] {
         Value::String(s) => Some(s.clone()),
         Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")),
@@ -342,7 +341,7 @@ fn tool_detail(tc: &Value) -> String {
     };
     let location = tc["locations"].as_array().and_then(|l| l.first()).and_then(|l| l["path"].as_str()).map(String::from);
     command
-        .or(location)
+        .or(location.filter(|_| kind != "execute"))
         .or_else(|| {
             ["path", "file_path", "filePath", "filepath", "url", "query", "pattern", "description"]
                 .iter()
@@ -351,6 +350,31 @@ fn tool_detail(tc: &Value) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| clip(&s, 400))
         .unwrap_or_default()
+}
+
+/// A to-do tool's list (`rawInput.todos`, as OpenCode's todowrite sends it).
+fn todo_steps(input: &Value) -> Option<Vec<(String, Step)>> {
+    let todos = input["todos"].as_array().filter(|t| !t.is_empty())?;
+    Some(todos.iter().map(|t| (t["content"].as_str().unwrap_or_default().to_string(), step(t["status"].as_str()))).collect())
+}
+
+fn step(status: Option<&str>) -> Step {
+    match status {
+        Some("completed") => Step::Done,
+        Some("in_progress") => Step::Active,
+        _ => Step::Pending,
+    }
+}
+
+/// Rows read the same for every agent ("Run command", "Read", "Edit"); the agent's own title
+/// is kept for tools without a standard kind.
+fn row_title(tool: &Tool) -> String {
+    match tool.kind.as_str() {
+        _ if tool.todos.is_some() => "Update plan".to_string(),
+        k @ ("read" | "edit" | "delete" | "move" | "search" | "execute" | "fetch") => kind_title(k).to_string(),
+        k if tool.title.is_empty() => kind_title(k).to_string(),
+        _ => tool.title.clone(),
+    }
 }
 
 fn tool_output(tc: &Value) -> String {
@@ -384,6 +408,8 @@ struct Tool {
     title: String,
     kind: String,
     detail: String,
+    /// A to-do tool's list, shown as a checklist once it's done.
+    todos: Option<Vec<(String, Step)>>,
     started: bool,
 }
 
@@ -392,6 +418,10 @@ struct Tool {
 struct Turn {
     text: String,
     tools: HashMap<String, Tool>,
+    plan_updates: u32,
+    /// The session's running cost as last reported, and where it stood when the turn began.
+    cost: Option<f64>,
+    cost_before: Option<f64>,
 }
 
 impl Turn {
@@ -418,13 +448,19 @@ impl Turn {
             Some(kind @ ("tool_call" | "tool_call_update")) => {
                 let id = u["toolCallId"].as_str().unwrap_or_default().to_string();
                 let tool = self.tools.entry(id.clone()).or_default();
-                if let Some(t) = u["title"].as_str().filter(|t| !t.is_empty()) {
+                // The row shows the title the call had when it started.
+                if !tool.started
+                    && let Some(t) = u["title"].as_str().filter(|t| !t.is_empty())
+                {
                     tool.title = t.into();
                 }
                 if let Some(k) = u["kind"].as_str() {
                     tool.kind = k.into();
                 }
-                let detail = tool_detail(u);
+                if let Some(steps) = todo_steps(&u["rawInput"]) {
+                    tool.todos = Some(steps);
+                }
+                let detail = tool_detail(u, &tool.kind);
                 if !detail.is_empty() {
                     tool.detail = detail;
                 }
@@ -434,25 +470,75 @@ impl Turn {
                 let start = !tool.started && (done || status == "in_progress" || !tool.detail.is_empty());
                 if start {
                     tool.started = true;
-                    let title = if tool.title.is_empty() { kind_title(&tool.kind).to_string() } else { tool.title.clone() };
-                    let detail = tool.detail.clone();
+                    let (title, detail) = (row_title(tool), tool.detail.clone());
                     self.flush_text(&mut out);
                     out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail });
                 }
                 if done {
-                    self.tools.remove(&id);
-                    out.push(AgentEvent::ToolFinished { id, output: tool_output(u), ok: status == "completed" });
+                    let output = match self.tools.remove(&id).and_then(|t| t.todos) {
+                        Some(steps) if status == "completed" => plan_row(&steps).1,
+                        _ => tool_output(u),
+                    };
+                    out.push(AgentEvent::ToolFinished { id, output, ok: status == "completed" });
                 }
             }
+            // The agent's plan (ACP `plan` entries), as a checklist row.
+            Some("plan") => {
+                let steps: Vec<(String, Step)> = u["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str())))
+                    .collect();
+                if !steps.is_empty() {
+                    self.plan_updates += 1;
+                    let id = format!("plan-{}", self.plan_updates);
+                    let (detail, output) = plan_row(&steps);
+                    self.flush_text(&mut out);
+                    out.push(AgentEvent::ToolStarted { id: id.clone(), title: "Update plan".into(), detail });
+                    out.push(AgentEvent::ToolFinished { id, output, ok: true });
+                }
+            }
+            Some("usage_update") => {
+                if u["cost"]["currency"] == "USD"
+                    && let Some(c) = u["cost"]["amount"].as_f64()
+                {
+                    self.cost = Some(c);
+                }
+                // A cancelled turn reports 0 used; the window still holds the conversation.
+                if let (Some(used), Some(window)) = (u["used"].as_u64().filter(|u| *u > 0), u["size"].as_u64()) {
+                    out.push(AgentEvent::Context { used, window });
+                }
+            }
+            Some("available_commands_update") => out.push(AgentEvent::Commands(
+                u["availableCommands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| {
+                        Some(SlashCommand {
+                            name: c["name"].as_str()?.trim_start_matches('/').to_string(),
+                            description: c["description"].as_str().unwrap_or_default().to_string(),
+                            kind: CommandKind::Command,
+                        })
+                    })
+                    .collect(),
+            )),
             _ => {}
         }
         out
+    }
+
+    /// A prompt went out: the turn's cost counts from here.
+    fn begin(&mut self) {
+        self.cost_before = self.cost;
     }
 
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
+        let cost_usd = self.cost.map(|c| c - self.cost_before.unwrap_or(0.0)).filter(|c| *c > 0.0);
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
@@ -461,7 +547,7 @@ impl Turn {
             Ok(_) => None,
             Err(msg) => Some(msg),
         };
-        out.push(AgentEvent::TurnComplete { cost_usd: None, error });
+        out.push(AgentEvent::TurnComplete { cost_usd, error });
         out
     }
 }
@@ -476,6 +562,15 @@ enum ModelSwitch {
     Config(String),
 }
 
+/// How an agent enters and leaves plan mode.
+#[derive(Debug, Clone, PartialEq)]
+enum PlanSwitch {
+    /// `session/set_mode` (ACP `modes`): the plan mode id and the one to go back to.
+    Mode { plan: String, off: String },
+    /// `session/set_config_option` on a mode select (OpenCode's build/plan).
+    Config { id: String, plan: String, off: String },
+}
+
 /// Session controls advertised in a `session/new` or `session/load` result.
 #[derive(Debug, Clone)]
 struct Controls {
@@ -484,7 +579,9 @@ struct Controls {
     switch: ModelSwitch,
     /// Config option id and values for reasoning effort.
     effort: Option<(String, Vec<String>)>,
-    plan_mode: Option<String>,
+    plan_mode: Option<PlanSwitch>,
+    /// The session is in plan mode right now.
+    planning: bool,
 }
 
 fn select_options(opt: &Value) -> Vec<(String, String)> {
@@ -546,17 +643,47 @@ fn controls(result: &Value) -> Controls {
         (vec![], None, ModelSwitch::None)
     };
 
-    let plan_mode = result["modes"]["availableModes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| {
-            let id = m["id"].as_str().unwrap_or_default().to_lowercase();
-            id == "plan" || id.ends_with("#plan") || m["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("plan"))
-        })
-        .and_then(|m| m["id"].as_str().map(String::from));
+    let is_plan = |id: &str, name: Option<&str>| {
+        let id = id.to_lowercase();
+        id == "plan" || id.ends_with("#plan") || name.is_some_and(|n| n.eq_ignore_ascii_case("plan"))
+    };
+    let modes: Vec<&Value> = result["modes"]["availableModes"].as_array().into_iter().flatten().collect();
+    let (plan_mode, planning) = if let Some(plan) = modes.iter().find(|m| is_plan(m["id"].as_str().unwrap_or_default(), m["name"].as_str())) {
+        let plan = plan["id"].as_str().unwrap_or_default().to_string();
+        let current = result["modes"]["currentModeId"].as_str().unwrap_or_default();
+        let off = Some(current)
+            .filter(|c| !c.is_empty() && *c != plan)
+            .or_else(|| modes.iter().filter_map(|m| m["id"].as_str()).find(|id| *id != plan))
+            .unwrap_or_default()
+            .to_string();
+        (Some(PlanSwitch::Mode { plan: plan.clone(), off }), current == plan)
+    } else if let Some(o) = by_category("mode") {
+        let values = select_options(o);
+        match values.iter().find(|(v, n)| is_plan(v, Some(n))) {
+            Some((plan, _)) => {
+                let off = values.iter().map(|(v, _)| v.clone()).find(|v| v != plan).unwrap_or_default();
+                let id = o["id"].as_str().unwrap_or("mode").to_string();
+                (Some(PlanSwitch::Config { id, plan: plan.clone(), off }), o["currentValue"].as_str() == Some(plan.as_str()))
+            }
+            None => (None, false),
+        }
+    } else {
+        (None, false)
+    };
 
-    Controls { models, current_model, switch, effort, plan_mode }
+    Controls { models, current_model, switch, effort, plan_mode, planning }
+}
+
+/// Request params that turn plan mode on or off.
+fn plan_request(c: &Controls, session_id: &str, on: bool) -> Option<(&'static str, Value)> {
+    match c.plan_mode.as_ref()? {
+        PlanSwitch::Mode { plan, off } => {
+            Some(("session/set_mode", json!({ "sessionId": session_id, "modeId": if on { plan } else { off } })))
+        }
+        PlanSwitch::Config { id, plan, off } => {
+            Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": if on { plan } else { off } })))
+        }
+    }
 }
 
 /// Request params that switch to `model`, if the agent supports it.
@@ -595,29 +722,40 @@ pub async fn run(
     let setup = Duration::from_secs(120);
 
     let mut opened = None;
-    if let Some(id) = &config.resume
-        && init["agentCapabilities"]["loadSession"] == true
-    {
-        let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp });
-        match agent.call("session/load", params, &fs, &mut backlog, setup).await? {
-            Ok(r) => {
-                // The agent replays history as updates; the transcript already has it.
-                backlog.retain(|v| v["method"] != "session/update");
-                opened = Some((id.clone(), r));
+    // The saved conversation can't be reopened: the session starts over, and the user is told.
+    let mut lost = false;
+    if let Some(id) = &config.resume {
+        if init["agentCapabilities"]["loadSession"] == true {
+            let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp });
+            match agent.call("session/load", params, &fs, &mut backlog, setup).await? {
+                Ok(r) => {
+                    drop_replay(&mut backlog);
+                    opened = Some((id.clone(), r));
+                }
+                Err(e) => {
+                    tracing::warn!("session/load failed, starting fresh: {}", rpc_message(&e));
+                    lost = true;
+                }
             }
-            Err(e) => tracing::warn!("session/load failed, starting fresh: {}", rpc_message(&e)),
+        } else {
+            lost = true;
         }
     }
     let (session_id, result) = match opened {
         Some(s) => s,
         None => match agent.call("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), &fs, &mut backlog, setup).await? {
             Ok(r) => (r["sessionId"].as_str().context("session/new returned no sessionId")?.to_string(), r),
-            Err(e) if is_auth_error(&e) => bail!(auth_hint(&agent.name, &init)),
+            Err(e) if is_auth_error(&e) => {
+                ProbeCache::signed_out(&ProbeCache::dir(), &config.agent);
+                bail!(auth_hint(&agent.name, &init))
+            }
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         },
     };
 
     let ctl = controls(&result);
+    // What this session reports is what the next launch's probe would learn.
+    ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
     let mut model = ctl.current_model.clone();
     if let Some(want) = config.model.as_ref().filter(|m| model.as_ref() != Some(*m))
         && let Some((method, params)) = model_request(&ctl, &session_id, want)
@@ -631,15 +769,22 @@ pub async fn run(
     {
         let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
     }
-    if config.plan
-        && let Some(mode) = &ctl.plan_mode
+    // Into plan mode, or out of it when a resumed session was left there.
+    let mut planning = ctl.planning;
+    if config.plan != ctl.planning
+        && let Some((method, params)) = plan_request(&ctl, &session_id, config.plan)
+        && agent.call(method, params, &fs, &mut backlog, setup).await?.is_ok()
     {
-        let params = json!({ "sessionId": session_id, "modeId": mode });
-        let _ = agent.call("session/set_mode", params, &fs, &mut backlog, setup).await?;
+        planning = config.plan;
     }
+    // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
+    let no_plan = (config.plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some()));
     events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
+    if lost {
+        events.send(crate::lost_session(&agent.name)).await?;
+    }
 
-    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompt: None };
+    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompt: None, planning };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -651,6 +796,9 @@ pub async fn run(
             cmd = commands.recv() => {
                 let Ok(cmd) = cmd else { break };
                 match cmd {
+                    Command::Prompt { .. } if let Some(why) = &no_plan => {
+                        let _ = events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some(why.clone()) }).await;
+                    }
                     Command::Prompt { text, images } => {
                         let mut prompt = Vec::new();
                         for path in &images {
@@ -661,6 +809,7 @@ pub async fn run(
                         }
                         prompt.push(json!({ "type": "text", "text": text }));
                         let params = json!({ "sessionId": s.session_id, "prompt": prompt });
+                        s.turn.begin();
                         s.prompt = Some(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
@@ -708,6 +857,20 @@ pub async fn run(
     Ok(())
 }
 
+/// Why a prompt isn't sent when plan mode is on but the agent couldn't enter it.
+fn plan_refusal(agent: &str, has_plan_mode: bool) -> String {
+    let why = if has_plan_mode { "didn't switch to plan mode" } else { "has no plan mode" };
+    format!("{agent} {why}, so it could change files. Turn plan mode off to send this.")
+}
+
+/// `session/load` replays the conversation as updates; the transcript already has it. Session
+/// state (commands, usage) still counts.
+fn drop_replay(backlog: &mut Vec<Value>) {
+    backlog.retain(|v| {
+        v["method"] != "session/update" || matches!(v["params"]["update"]["sessionUpdate"].as_str(), Some("available_commands_update" | "usage_update"))
+    });
+}
+
 /// State of an open session between turns.
 struct Live {
     session_id: String,
@@ -715,6 +878,8 @@ struct Live {
     /// Permission prompts awaiting the user: our request id → (JSON-RPC id, options).
     perms: HashMap<String, (Value, Vec<Value>)>,
     prompt: Option<i64>,
+    /// In plan mode: edits are never approved on the user's behalf.
+    planning: bool,
 }
 
 impl Live {
@@ -772,37 +937,66 @@ impl Live {
             rpc.reply(rpc_id, reply).await?;
             return Ok(vec![]);
         }
-        let tc = &p["toolCall"];
-        let known = tc["toolCallId"].as_str().and_then(|id| self.turn.tools.get(id));
-        let kind = tc["kind"].as_str().or(known.map(|t| t.kind.as_str())).unwrap_or("other").to_string();
-        let options = p["options"].as_array().cloned().unwrap_or_default();
-        if auto_allow(hand_holding, &kind)
-            && let Some(option) = pick_option(&options, Decision::Allow)
-        {
-            rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
-            return Ok(vec![]);
+        match self.turn.permission(p, hand_holding, self.planning) {
+            Ask::Answer(option) => {
+                rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
+                Ok(vec![])
+            }
+            Ask::User { title, detail, options } => {
+                let request_id = format!("acp-{rpc_id}");
+                self.perms.insert(request_id.clone(), (rpc_id, options));
+                Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }])
+            }
         }
-        let title = tc["title"]
-            .as_str()
-            .filter(|t| !t.is_empty())
-            .map(String::from)
-            .or(known.map(|t| t.title.clone()).filter(|t| !t.is_empty()))
-            .unwrap_or_else(|| kind_title(&kind).into());
-        let detail = Some(tool_detail(tc)).filter(|d| !d.is_empty()).or(known.map(|t| t.detail.clone())).unwrap_or_default();
-        let request_id = format!("acp-{rpc_id}");
-        self.perms.insert(request_id.clone(), (rpc_id, options));
-        Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }])
     }
 }
 
-/// Start an ACP agent in the home folder, open a throwaway session and report its models and
-/// login state. `id` is a catalog id, or `opencode` / `droid`.
+/// What to do with a `session/request_permission`.
+#[derive(Debug, PartialEq)]
+enum Ask {
+    /// The thread's access level covers it: pick this option.
+    Answer(String),
+    User { title: String, detail: String, options: Vec<Value> },
+}
+
+impl Turn {
+    /// `planning`: the session is in plan mode, so an edit the agent asks to make (its own rules
+    /// would normally forbid it) goes to the user whatever the access level.
+    fn permission(&self, p: &Value, hand_holding: HandHolding, planning: bool) -> Ask {
+        let tc = &p["toolCall"];
+        let known = tc["toolCallId"].as_str().and_then(|id| self.tools.get(id));
+        let kind = tc["kind"].as_str().or(known.map(|t| t.kind.as_str())).unwrap_or("other").to_string();
+        let options = p["options"].as_array().cloned().unwrap_or_default();
+        let edit = matches!(kind.as_str(), "edit" | "delete" | "move");
+        if auto_allow(hand_holding, &kind)
+            && !(planning && edit)
+            && let Some(option) = pick_option(&options, Decision::Allow)
+        {
+            return Ask::Answer(option);
+        }
+        let title = tc["title"].as_str().filter(|t| !t.is_empty()).map(String::from).or(known.map(|t| t.title.clone())).unwrap_or_default();
+        let title = row_title(&Tool { title, kind: kind.clone(), ..Default::default() });
+        let detail = Some(tool_detail(tc, &kind)).filter(|d| !d.is_empty()).or(known.map(|t| t.detail.clone())).unwrap_or_default();
+        Ask::User { title, detail, options }
+    }
+}
+
+/// Models and login state for an installed ACP agent. ACP only reports them for an open
+/// session, and agents keep every session they open in their history, so this answers from what
+/// the agent reported last time (its last probe, or the last session Trek opened with it). Only
+/// a new install, a new version, or a missing sign-in opens a throwaway session, which is
+/// deleted again where the agent allows it. `id` is a catalog id, or `opencode` / `droid`.
 pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     let agent_id = match id {
         "opencode" => AgentId::OpenCode,
         "droid" => AgentId::Droid,
         other => AgentId::Acp(other.into()),
     };
+    let (bin, _, _) = launch_spec(&agent_id)?;
+    let cache = ProbeCache::dir();
+    if let Some(info) = ProbeCache::load(&cache, &agent_id, &bin).filter(|i| !i.needs_auth) {
+        return Ok(info);
+    }
     let home = trek_core::paths::home();
     let probe = async {
         let mut agent = Agent::spawn(&agent_id, &home, &[])?;
@@ -811,18 +1005,114 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         let init = agent.handshake(&fs, &mut backlog).await?;
         let mut info = AcpInfo { auth_methods: auth_methods(&init), ..Default::default() };
         let params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
+        let mut opened = None;
         match agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(20)).await? {
-            Ok(r) => info.models = controls(&r).models,
+            Ok(r) => {
+                info.models = controls(&r).models;
+                opened = r["sessionId"].as_str().map(String::from);
+            }
             Err(e) if is_auth_error(&e) => info.needs_auth = true,
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
         let _ = agent.child.start_kill();
+        let _ = agent.child.wait().await;
         if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
             info.models = copilot_models().await;
         }
-        Ok(info)
+        Ok((info, opened))
     };
-    tokio::time::timeout(Duration::from_secs(20), probe).await.map_err(|_| anyhow!("{id} didn't respond in 20s"))?
+    let (info, opened) = tokio::time::timeout(Duration::from_secs(20), probe).await.map_err(|_| anyhow!("{id} didn't respond in 20s"))??;
+    if let Some(session) = opened {
+        discard_session(&agent_id, &session, &home).await;
+    }
+    ProbeCache::store(&cache, &agent_id, &bin, &info);
+    Ok(info)
+}
+
+/// Delete a session Trek opened only to look at it, through the agent's own CLI. Agents
+/// without a way to do that keep it (ACP has no delete).
+async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
+    let (binary, args): (&str, [&str; 2]) = match agent {
+        AgentId::OpenCode => ("opencode", ["session", "delete"]),
+        _ => return,
+    };
+    let Some(bin) = detect::which(binary) else { return };
+    let run = tokio::process::Command::new(bin).args(args).arg(session).current_dir(cwd).env("PATH", detect::login_path()).stdin(Stdio::null()).output();
+    match tokio::time::timeout(Duration::from_secs(20), run).await {
+        Ok(Ok(out)) if out.status.success() => {}
+        Ok(Ok(out)) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        Ok(Err(e)) => tracing::warn!("couldn't delete probe session {session}: {e}"),
+        Err(_) => tracing::warn!("deleting probe session {session} timed out"),
+    }
+}
+
+/// The last thing each ACP agent reported, one file per agent under Trek's data folder. It's
+/// tied to the agent's binary: a reinstall or new version is probed afresh.
+#[derive(Debug, Serialize, Deserialize)]
+struct ProbeCache {
+    binary: String,
+    info: AcpInfo,
+}
+
+impl ProbeCache {
+    fn dir() -> PathBuf {
+        trek_core::paths::data_dir().join("acp-agents")
+    }
+
+    fn path(dir: &Path, agent: &AgentId) -> PathBuf {
+        let name: String = agent.key().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        dir.join(format!("{name}.json"))
+    }
+
+    /// Which binary this is: its real path, size and modification time.
+    fn stamp(bin: &Path) -> String {
+        let real = bin.canonicalize().unwrap_or_else(|_| bin.to_path_buf());
+        let meta = std::fs::metadata(&real).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        format!("{}:{}:{modified}", real.display(), meta.map_or(0, |m| m.len()))
+    }
+
+    fn read(dir: &Path, agent: &AgentId) -> Option<ProbeCache> {
+        serde_json::from_str(&std::fs::read_to_string(Self::path(dir, agent)).ok()?).ok()
+    }
+
+    /// What's known about the agent at `bin`, if it's still the same binary.
+    fn load(dir: &Path, agent: &AgentId, bin: &Path) -> Option<AcpInfo> {
+        Self::read(dir, agent).filter(|c| c.binary == Self::stamp(bin)).map(|c| c.info)
+    }
+
+    fn store(dir: &Path, agent: &AgentId, bin: &Path, info: &AcpInfo) {
+        ProbeCache { binary: Self::stamp(bin), info: info.clone() }.write(dir, agent);
+    }
+
+    /// Written whole, then moved into place: a probe and a session may write at once.
+    fn write(&self, dir: &Path, agent: &AgentId) {
+        let path = Self::path(dir, agent);
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let saved = std::fs::create_dir_all(dir)
+            .and_then(|_| std::fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default()))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = saved {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::debug!("couldn't save what {} reported: {e}", agent.key());
+        }
+    }
+
+    /// A session opened: its model list is the agent's current one. Agents that list no models
+    /// over ACP (Copilot) keep the list found another way.
+    fn session_opened(dir: &Path, agent: &AgentId, bin: &Path, models: &[ModelInfo], auth_methods: Vec<(String, String)>) {
+        if !models.is_empty() {
+            Self::store(dir, agent, bin, &AcpInfo { models: models.to_vec(), auth_methods, needs_auth: false });
+        }
+    }
+
+    /// The agent turned a session down for want of a sign-in: the next launch probes it again.
+    fn signed_out(dir: &Path, agent: &AgentId) {
+        if let Some(mut c) = Self::read(dir, agent).filter(|c| !c.info.needs_auth) {
+            c.info.needs_auth = true;
+            c.write(dir, agent);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -857,7 +1147,7 @@ mod tests {
             ev,
             vec![
                 AgentEvent::TextDone("Looking.".into()),
-                AgentEvent::ToolStarted { id: "t1".into(), title: "Read file".into(), detail: "/p/src/main.rs".into() },
+                AgentEvent::ToolStarted { id: "t1".into(), title: "Read".into(), detail: "/p/src/main.rs".into() },
             ]
         );
         let ev = t.update(&json!({
@@ -872,7 +1162,7 @@ mod tests {
         let mut t = Turn::default();
         assert!(t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"b","title":"bash","kind":"execute","status":"pending","rawInput":{}})).is_empty());
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"in_progress","rawInput":{"command":"ls -la"}}));
-        assert_eq!(ev, vec![AgentEvent::ToolStarted { id: "b".into(), title: "bash".into(), detail: "ls -la".into() }]);
+        assert_eq!(ev, vec![AgentEvent::ToolStarted { id: "b".into(), title: "Run command".into(), detail: "ls -la".into() }]);
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"failed","rawOutput":{"output":"boom"}}));
         assert_eq!(ev, vec![AgentEvent::ToolFinished { id: "b".into(), output: "boom".into(), ok: false }]);
     }
@@ -930,7 +1220,8 @@ mod tests {
         assert_eq!(c.switch, ModelSwitch::SetModel);
         assert_eq!(c.current_model.as_deref(), Some("b"));
         assert_eq!(c.models[0].efforts, vec![Effort::Low, Effort::High]);
-        assert_eq!(c.plan_mode.as_deref(), Some("plan"));
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Mode { plan: "plan".into(), off: "build".into() }));
+        assert!(!c.planning);
 
         let config = json!({"sessionId":"s","configOptions":[
             {"id":"model","category":"model","type":"select","currentValue":"x/1","options":[
@@ -958,6 +1249,198 @@ mod tests {
         assert!(within(&root.join("a/b.txt"), &root));
         assert!(!within(&root.join("../escape.txt"), &root));
         assert!(!within(Path::new("/etc/hosts"), &root));
+    }
+
+    /// Recorded ACP traffic (OpenCode 1.18.34, opencode/mimo-v2.6-flash-free), one message per line.
+    fn fixture(text: &str) -> Vec<Value> {
+        text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    fn updates(t: &mut Turn, lines: &[Value]) -> Vec<AgentEvent> {
+        lines.iter().filter(|v| v["method"] == "session/update").flat_map(|v| t.update(&v["params"]["update"])).collect()
+    }
+
+    #[test]
+    fn opencode_turn_maps_todos_reads_edits_usage_and_commands() {
+        let lines = fixture(include_str!("../fixtures/opencode-turn.jsonl"));
+        let mut t = Turn::default();
+        let ev = updates(&mut t, &lines);
+        assert_eq!(ev[0], AgentEvent::Commands(vec![
+            SlashCommand { name: "init".into(), description: "guided AGENTS.md setup".into(), kind: CommandKind::Command },
+            SlashCommand { name: "review".into(), description: "review changes [commit|branch|pr], defaults to uncommitted".into(), kind: CommandKind::Command },
+        ]));
+        let rows: Vec<(&str, &str)> =
+            ev.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, detail, .. } = e { Some((title.as_str(), detail.as_str())) } else { None }).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Update plan", "Read notes"),
+                ("Read", "/private/tmp/trek-agents-e2e/notes.txt"),
+                ("Update plan", "Edit notes"),
+                ("Edit", "/private/tmp/trek-agents-e2e/notes.txt"),
+                ("Update plan", "All 2 steps done"),
+            ]
+        );
+        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_a47ac35a1bd64360a32c5a34".into(), output: "→ Read notes\n○ Edit notes".into(), ok: true }));
+        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_339ea6bf075f4a0286098c91".into(), output: "Edit applied successfully.\nEdited /private/tmp/trek-agents-e2e/notes.txt".into(), ok: true }));
+        assert_eq!(ev.last(), Some(&AgentEvent::Context { used: 12761, window: 200000 }));
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("done".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }]);
+
+        // The edit prompt reads like the row it belongs to.
+        let ask = lines.iter().find(|v| v["method"] == "session/request_permission").unwrap();
+        let mut t = Turn::default();
+        let upto = lines.iter().position(|v| v == ask).unwrap();
+        updates(&mut t, &lines[..upto]);
+        let Ask::User { title, detail, .. } = t.permission(&ask["params"], HandHolding::Supervised, false) else { panic!() };
+        assert_eq!((title.as_str(), detail.as_str()), ("Edit", "/private/tmp/trek-agents-e2e/notes.txt"));
+        assert_eq!(t.permission(&ask["params"], HandHolding::AutoAcceptEdits, false), Ask::Answer("once".into()));
+        // In plan mode an edit is never approved on the user's behalf, whatever the level.
+        for level in [HandHolding::AutoAcceptEdits, HandHolding::Auto, HandHolding::FullAccess] {
+            assert!(matches!(t.permission(&ask["params"], level, true), Ask::User { .. }), "{level:?}");
+        }
+    }
+
+    #[test]
+    fn opencode_command_waits_for_its_command_and_asks() {
+        let lines = fixture(include_str!("../fixtures/opencode-permission.jsonl"));
+        let mut t = Turn::default();
+        // The pending call only knows its working directory: no row yet.
+        assert!(t.update(&lines[0]["params"]["update"]).is_empty());
+        assert_eq!(
+            t.update(&lines[1]["params"]["update"]),
+            vec![AgentEvent::ToolStarted { id: "call_66c3b2d0ebfa47829d8d907f".into(), title: "Run command".into(), detail: "touch oc1.txt".into() }]
+        );
+        let ask = &lines[2]["params"];
+        let Ask::User { title, detail, options } = t.permission(ask, HandHolding::Supervised, false) else { panic!() };
+        assert_eq!((title.as_str(), detail.as_str()), ("Run command", "touch oc1.txt"));
+        assert_eq!(pick_option(&options, Decision::Deny).as_deref(), Some("reject"));
+        assert_eq!(pick_option(&options, Decision::AllowForSession).as_deref(), Some("always"));
+        assert!(matches!(t.permission(ask, HandHolding::Auto, false), Ask::User { .. }), "Auto still asks before commands");
+        assert_eq!(t.permission(ask, HandHolding::FullAccess, false), Ask::Answer("once".into()));
+        // Plan mode keeps commands (OpenCode's plan agent may run them); only edits always ask.
+        assert_eq!(t.permission(ask, HandHolding::FullAccess, true), Ask::Answer("once".into()));
+        assert_eq!(
+            t.update(&lines[3]["params"]["update"]),
+            vec![AgentEvent::ToolFinished {
+                id: "call_66c3b2d0ebfa47829d8d907f".into(),
+                output: "The user rejected permission to use this specific tool call.".into(),
+                ok: false
+            }]
+        );
+    }
+
+    #[test]
+    fn opencode_plan_mode_is_a_config_option() {
+        let c = controls(&serde_json::from_str(include_str!("../fixtures/opencode-session-new.json")).unwrap());
+        assert_eq!(c.switch, ModelSwitch::Config("model".into()));
+        assert_eq!(c.current_model.as_deref(), Some("opencode/big-pickle"));
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Config { id: "mode".into(), plan: "plan".into(), off: "build".into() }));
+        assert!(!c.planning);
+        assert_eq!(plan_request(&c, "s", true), Some(("session/set_config_option", json!({"sessionId":"s","configId":"mode","value":"plan"}))));
+        assert_eq!(plan_request(&c, "s", false).unwrap().1["value"], "build");
+    }
+
+    #[test]
+    fn plan_entries_and_cost_per_turn() {
+        // ACP `plan` update shape (agent-client-protocol schema); OpenCode sends todos as a tool instead.
+        let mut t = Turn::default();
+        let ev = t.update(&json!({"sessionUpdate":"plan","entries":[
+            {"content":"Read","priority":"high","status":"completed"},{"content":"Write","priority":"high","status":"in_progress"}]}));
+        assert_eq!(
+            ev,
+            vec![
+                AgentEvent::ToolStarted { id: "plan-1".into(), title: "Update plan".into(), detail: "Write".into() },
+                AgentEvent::ToolFinished { id: "plan-1".into(), output: "✓ Read\n→ Write".into(), ok: true },
+            ]
+        );
+        // `cost` is the session's running total: a turn is charged the difference.
+        t.update(&json!({"sessionUpdate":"usage_update","used":10,"size":100,"cost":{"amount":0.5,"currency":"USD"}}));
+        assert!(t.update(&json!({"sessionUpdate":"usage_update","used":0,"size":100})).is_empty());
+        t.begin();
+        t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":0.75,"currency":"USD"}}));
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.25), error: None }]);
+    }
+
+    #[test]
+    fn opencode_is_told_to_ask() {
+        // What's added depends on the user's own OpenCode config (see `opencode`); it's always
+        // inline agent config, never the global permission override.
+        let cwd = std::env::temp_dir();
+        for (k, v) in launch_env(&AgentId::OpenCode, &cwd) {
+            assert_eq!(k, "OPENCODE_CONFIG_CONTENT");
+            assert!(serde_json::from_str::<Value>(&v).unwrap()["agent"].is_object());
+        }
+        assert!(launch_env(&AgentId::Droid, &cwd).is_empty());
+    }
+
+    #[test]
+    fn a_reopened_session_drops_its_replayed_history() {
+        // Recorded `session/load` (OpenCode 1.18.34): the conversation comes back as updates
+        // before the response. Commands and usage are session state, so they stay.
+        let lines = fixture(include_str!("../fixtures/opencode-load.jsonl"));
+        let commands = fixture(include_str!("../fixtures/opencode-turn.jsonl"))
+            .into_iter()
+            .find(|v| v["params"]["update"]["sessionUpdate"] == "available_commands_update")
+            .unwrap();
+        let usage = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":12132,"size":200000}}});
+        let mut backlog = lines[..3].to_vec();
+        backlog.extend([commands.clone(), usage.clone()]);
+        drop_replay(&mut backlog);
+        assert_eq!(backlog, vec![commands, usage]);
+        let c = controls(&lines[3]["result"]);
+        assert_eq!(c.current_model.as_deref(), Some("opencode/mimo-v2.6-flash-free"));
+        assert!(!c.planning);
+    }
+
+    #[test]
+    fn a_resumed_session_left_in_plan_mode_is_taken_out_of_it() {
+        // ACP `modes` (Copilot, Devin), reopened while in plan mode.
+        let loaded = json!({"modes":{"currentModeId":"plan","availableModes":[{"id":"agent","name":"Agent"},{"id":"plan","name":"Plan"},{"id":"autopilot","name":"Autopilot"}]}});
+        let c = controls(&loaded);
+        assert!(c.planning);
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Mode { plan: "plan".into(), off: "agent".into() }));
+        assert_eq!(plan_request(&c, "s", false), Some(("session/set_mode", json!({"sessionId":"s","modeId":"agent"}))));
+        // Copilot's mode ids are URLs.
+        let copilot = json!({"modes":{"currentModeId":"https://agentclientprotocol.com/protocol/session-modes#agent","availableModes":[
+            {"id":"https://agentclientprotocol.com/protocol/session-modes#agent","name":"Agent"},{"id":"https://agentclientprotocol.com/protocol/session-modes#plan","name":"Plan"}]}});
+        let c = controls(&copilot);
+        assert!(!c.planning);
+        assert_eq!(plan_request(&c, "s", true).unwrap().1["modeId"], "https://agentclientprotocol.com/protocol/session-modes#plan");
+    }
+
+    #[test]
+    fn plan_mode_that_cant_be_had_is_refused() {
+        assert_eq!(plan_refusal("Grok", false), "Grok has no plan mode, so it could change files. Turn plan mode off to send this.");
+        assert!(plan_refusal("Devin", true).starts_with("Devin didn't switch to plan mode"));
+        assert_eq!(controls(&json!({"sessionId":"s"})).plan_mode, None);
+    }
+
+    #[test]
+    fn probe_results_are_kept_per_binary() {
+        let dir = std::env::temp_dir().join(format!("trek-acp-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("agent-bin");
+        std::fs::write(&bin, "v1").unwrap();
+        let agent = AgentId::Acp("grok".into());
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin), None);
+        let model = |id: &str| ModelInfo { id: id.into(), name: id.into(), efforts: vec![], tier: 0, fast: None };
+        let info = AcpInfo { models: vec![model("a")], auth_methods: vec![("login".into(), "Log in".into())], needs_auth: false };
+        ProbeCache::store(&dir, &agent, &bin, &info);
+        assert!(dir.join("acp_grok.json").exists());
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin), Some(info.clone()));
+        // A session's list replaces it; one with no models (Copilot) leaves it alone.
+        ProbeCache::session_opened(&dir, &agent, &bin, &[model("b")], vec![]);
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().models, vec![model("b")]);
+        ProbeCache::session_opened(&dir, &agent, &bin, &[], vec![]);
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().models, vec![model("b")]);
+        // Turned away for want of a sign-in: still cached, but marked so the probe runs again.
+        ProbeCache::signed_out(&dir, &agent);
+        assert!(ProbeCache::load(&dir, &agent, &bin).unwrap().needs_auth);
+        // Another binary (an upgrade) isn't the one that was probed.
+        std::fs::write(&bin, "version 2").unwrap();
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod acp;
 mod claude;
 mod codex;
 mod direct;
+mod opencode;
 mod status;
 
 pub use acp::{AcpInfo, acp_probe};
@@ -79,6 +80,8 @@ pub struct Question {
     /// `(label, description)`
     pub options: Vec<(String, String)>,
     pub multi: bool,
+    /// The answer is a secret (a token, a password): it must not be shown or kept.
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +110,8 @@ pub enum AgentEvent {
     ToolFinished { id: String, output: String, ok: bool },
     /// The agent needs the user: a yes/no approval, or (`prompt`) a question or a plan to review.
     PermissionRequest { request_id: String, title: String, detail: String, prompt: Option<Prompt> },
+    /// The agent settled a request on its own (it timed out, or the turn moved on): its card goes.
+    PermissionResolved { request_id: String },
     /// A diff stat for the turn, when the agent reports one.
     DiffStat { additions: i64, deletions: i64 },
     TurnComplete { cost_usd: Option<f64>, error: Option<String> },
@@ -116,6 +121,10 @@ pub enum AgentEvent {
     Task { id: String, description: Option<String>, activity: Option<String>, tool_uses: Option<u64>, done: Option<bool> },
     /// How many background sub-agents are still running; the turn isn't really over until zero.
     Background(usize),
+    /// The slash commands the agent offers in this session (replaces any earlier list).
+    Commands(Vec<SlashCommand>),
+    /// Something the user should know that isn't an error (the transcript shows it as a note).
+    Notice(String),
     Error(String),
     Exited,
 }
@@ -161,6 +170,81 @@ pub fn diff_stat(diff: &str) -> (i64, i64) {
     (add, del)
 }
 
+/// Where a step of an agent's running plan (to-do list) stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Pending,
+    Active,
+    Done,
+}
+
+/// A plan update as a tool row: `(detail, output)`. The detail names the step in progress; the
+/// output is the whole checklist.
+pub(crate) fn plan_row(steps: &[(String, Step)]) -> (String, String) {
+    let done = steps.iter().filter(|(_, s)| *s == Step::Done).count();
+    let detail = match steps.iter().find(|(_, s)| *s == Step::Active) {
+        Some((text, _)) => text.clone(),
+        None if done == steps.len() => format!("All {} steps done", steps.len()),
+        None => format!("{done} of {} steps done", steps.len()),
+    };
+    let output = steps
+        .iter()
+        .map(|(text, s)| {
+            let mark = match s {
+                Step::Done => "✓",
+                Step::Active => "→",
+                Step::Pending => "○",
+            };
+            format!("{mark} {text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (clip(&detail, 200), output)
+}
+
+/// Said when an agent can't reopen a saved conversation and starts over.
+pub(crate) fn lost_session(agent: &str) -> AgentEvent {
+    AgentEvent::Notice(format!("{agent} couldn't reopen this conversation, so it continues in a new session without the earlier context."))
+}
+
+/// A plan's title for its row: its first non-empty line, without the Markdown heading marks.
+pub(crate) fn plan_title(plan: &str) -> String {
+    clip(plan.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim_start_matches('#').trim(), 200)
+}
+
+/// The last lines a child process wrote to stderr, for a readable error when it dies.
+#[derive(Clone)]
+pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl StderrTail {
+    pub(crate) fn capture(stderr: tokio::process::ChildStderr, tag: &'static str) -> Self {
+        use tokio::io::AsyncBufReadExt as _;
+        let tail = Self(Default::default());
+        let lines = tail.0.clone();
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(l)) = reader.next_line().await {
+                tracing::debug!("{tag} stderr: {l}");
+                let mut t = lines.lock().unwrap();
+                t.push_back(l);
+                if t.len() > 20 {
+                    t.pop_front();
+                }
+            }
+        });
+        tail
+    }
+
+    /// "`name` exited: <last non-empty stderr line>".
+    pub(crate) fn exited(&self, name: &str) -> anyhow::Error {
+        let tail = self.0.lock().unwrap();
+        match tail.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()) {
+            Some(l) => anyhow::anyhow!("{name} exited: {l}"),
+            None => anyhow::anyhow!("{name} exited unexpectedly"),
+        }
+    }
+}
+
 pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -189,9 +273,27 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn diff_stat_ignores_headers() {
         let d = "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more\n";
-        assert_eq!(super::diff_stat(d), (2, 1));
+        assert_eq!(diff_stat(d), (2, 1));
+    }
+
+    #[test]
+    fn plan_title_is_the_first_line() {
+        assert_eq!(plan_title("\n# Add `hello.txt`\n\n1. Write it"), "Add `hello.txt`");
+        assert_eq!(plan_title(""), "");
+    }
+
+    #[test]
+    fn plan_row_names_the_active_step() {
+        let steps = vec![("Read code".to_string(), Step::Done), ("Fix bug".into(), Step::Active), ("Test".into(), Step::Pending)];
+        assert_eq!(plan_row(&steps), ("Fix bug".into(), "✓ Read code\n→ Fix bug\n○ Test".into()));
+        let done = vec![("A".to_string(), Step::Done), ("B".into(), Step::Done)];
+        assert_eq!(plan_row(&done).0, "All 2 steps done");
+        let waiting = vec![("A".to_string(), Step::Done), ("B".into(), Step::Pending)];
+        assert_eq!(plan_row(&waiting).0, "1 of 2 steps done");
     }
 }
