@@ -8694,6 +8694,7 @@ dependencies = [
  "futures",
  "hex",
  "keyring",
+ "libc",
  "minisign-verify",
  "reqwest",
  "rusqlite",

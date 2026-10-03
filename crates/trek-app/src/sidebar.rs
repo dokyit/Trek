@@ -4,7 +4,7 @@
 use crate::palette;
 use crate::time;
 use crate::ui;
-use crate::workspace::{PanelTool, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
+use crate::workspace::{PanelTool, Route, SettingsPage, UpdateAction, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::popover::Popover;
@@ -541,7 +541,7 @@ impl Sidebar {
     fn footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let in_settings = matches!(ws.route, Route::Settings(_));
-        let update = ws.update.clone();
+        let update = ws.updater.status.clone();
         let theme = cx.theme().clone();
         let importing = ws.importing;
         let (usage_open, updater_open) = (self.usage_open, self.updater_open);
@@ -569,6 +569,10 @@ impl Sidebar {
             });
         let busy = matches!(update, UpdateStatus::Checking | UpdateStatus::Downloading { .. });
         let ready = matches!(update, UpdateStatus::Ready { .. } | UpdateStatus::RestartPending { .. });
+        // Found but not downloaded (automatic downloads off): say so, in neutral; ember is for
+        // the one-click "restart into it".
+        let available = matches!(update, UpdateStatus::Available { .. });
+        let label_color = if ready { palette::ember(cx) } else { theme.foreground };
         let updater = Popover::new("updater-popover")
             .anchor(Anchor::BottomRight)
             .appearance(false)
@@ -579,14 +583,15 @@ impl Sidebar {
             }))
             .trigger(
                 ui::Pill::new("updater")
-                    .ghost(!ready)
+                    .ghost(!ready && !available)
                     .selected(updater_open)
                     .child(if busy {
                         Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
                     } else {
-                        Icon::new(IconName::RefreshCw).small().text_color(if ready { palette::ember(cx) } else { theme.muted_foreground }).into_any_element()
+                        let color = if ready || available { label_color } else { theme.muted_foreground };
+                        Icon::new(IconName::RefreshCw).small().text_color(color).into_any_element()
                     })
-                    .when(ready, |el| el.child(div().text_xs().text_color(palette::ember(cx)).child("Update"))),
+                    .when(ready || available, |el| el.child(div().text_xs().text_color(label_color).child("Update"))),
             )
             .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
         h_flex()
@@ -663,45 +668,39 @@ impl Sidebar {
     fn updater_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let status = ws.update.clone();
+        let view = ws.update_view();
+        let notes = ws.update_notes().map(|u| (u.version.to_string(), u.notes.clone()));
         let channel = format!("{:?}", ws.settings.updates.channel);
-        let (line, action): (String, Option<(&'static str, bool)>) = match &status {
-            _ if !trek_core::update::can_update() => ("This is a local build. It updates when you rebuild it.".to_string(), None),
-            UpdateStatus::Idle | UpdateStatus::UpToDate => (format!("Trek {} is up to date.", trek_core::VERSION), Some(("Check for updates", false))),
-            UpdateStatus::Checking => ("Checking for updates…".into(), None),
-            UpdateStatus::Available { version, .. } => (format!("Trek {version} is available."), Some(("Download", false))),
-            UpdateStatus::Downloading { version, progress } => (format!("Downloading {version} · {:.0}%", progress * 100.), None),
-            UpdateStatus::Ready { version, .. } => (format!("Trek {version} is ready to install."), Some(("Restart to update", true))),
-            UpdateStatus::RestartPending { .. } => ("Restarting when your agents finish.".into(), None),
-            UpdateStatus::Failed(e) => (format!("Couldn't check for updates: {e}"), Some(("Try again", false))),
-        };
-        let progress = match status {
-            UpdateStatus::Downloading { progress, .. } => Some(progress),
-            _ => None,
-        };
         ui::menu_surface(cx)
-            .w(px(300.))
+            .w(px(320.))
             .p(px(14.))
             .gap(px(10.))
             .child(h_flex().gap_2().child(crate::brand::logo_mark(px(16.))).child(div().text_sm().font_semibold().child(format!("Trek {}", trek_core::VERSION))).child(div().flex_1()).child(div().text_xs().text_color(theme.muted_foreground).child(channel)))
-            .child(div().text_sm().text_color(theme.muted_foreground).child(line))
-            .when_some(progress, |el, p| {
+            .child(div().text_sm().text_color(theme.muted_foreground).child(view.line))
+            .when_some(view.progress, |el, p| {
                 el.child(div().h(px(5.)).w_full().rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(palette::ember(cx)).w(relative(p))))
             })
-            .when_some(action, |el, (label, primary)| {
+            .when_some(notes, |el, (version, notes)| {
+                el.child(
+                    v_flex()
+                        .gap(px(6.))
+                        .pt(px(10.))
+                        .border_t_1()
+                        .border_color(theme.foreground.opacity(0.07))
+                        .child(div().text_xs().font_medium().child(format!("What's new in {version}")))
+                        .child(ui::release_notes("updater-notes", notes, px(200.), cx)),
+                )
+            })
+            .when_some(view.action, |el, action| {
                 el.child(
                     gpui_kit::component::button::Button::new("updater-action")
                         .small()
                         .w_full()
-                        .when(primary, |b| b.primary())
-                        .when(!primary, |b| b.outline())
-                        .label(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace.update(cx, |ws, cx| match ws.update {
-                                UpdateStatus::Ready { .. } => ws.restart_to_update(cx),
-                                _ => ws.check_for_updates(true, cx),
-                            });
-                        })),
+                        .when(action == UpdateAction::Restart, |b| b.primary())
+                        .when(action != UpdateAction::Restart, |b| b.outline())
+                        .loading(view.busy)
+                        .label(action.label())
+                        .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx)))),
                 )
             })
             .into_any_element()

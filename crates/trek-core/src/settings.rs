@@ -338,20 +338,19 @@ pub struct Updates {
     pub channel: Channel,
     pub auto_check: bool,
     pub auto_download: bool,
-    /// Manifest URL; `{channel}` is substituted.
+    /// Where releases come from: a GitHub releases URL, a manifest URL template with `{channel}`,
+    /// or one manifest URL ending in `.json` (see `update::manifest_urls`).
     pub feed_url: String,
 }
 
 impl Default for Updates {
     fn default() -> Self {
-        Self {
-            channel: Channel::Stable,
-            auto_check: true,
-            auto_download: true,
-            feed_url: "https://github.com/trek-app/trek/releases/latest/download/{channel}.json".into(),
-        }
+        Self { channel: Channel::Stable, auto_check: true, auto_download: true, feed_url: crate::update::OFFICIAL_FEED.into() }
     }
 }
+
+/// The placeholder feed earlier builds saved before Trek had a published home.
+const RETIRED_FEED_PREFIX: &str = "https://github.com/trek-app/trek/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -401,12 +400,17 @@ impl Settings {
     }
 
     /// Bring older files up to date. Font sizes were saved (13 / 14) before Trek applied them; those
-    /// untouched defaults become the sizes the app actually renders at, so nothing shrinks.
+    /// untouched defaults become the sizes the app actually renders at, so nothing shrinks. The
+    /// update feed pointed at a placeholder repository before releases were published.
     pub fn migrate(&mut self) {
         let a = &mut self.appearance;
         if a.ui_font_size == 13.0 && a.transcript_font_size == 14.0 {
             a.ui_font_size = DEFAULT_UI_FONT_SIZE;
             a.transcript_font_size = DEFAULT_TRANSCRIPT_FONT_SIZE;
+        }
+        let feed = self.updates.feed_url.trim();
+        if feed.is_empty() || feed.starts_with(RETIRED_FEED_PREFIX) {
+            self.updates.feed_url = crate::update::OFFICIAL_FEED.into();
         }
     }
 
@@ -471,5 +475,18 @@ mod tests {
         s.appearance.ui_font_size = 13.0;
         s.migrate();
         assert_eq!(s.appearance.ui_font_size, 13.0);
+    }
+
+    #[test]
+    fn old_update_feed_moves_to_the_published_one() {
+        let mut s: Settings =
+            toml::from_str("[updates]\nchannel = \"beta\"\nfeed_url = \"https://github.com/trek-app/trek/releases/latest/download/{channel}.json\"\n").unwrap();
+        s.migrate();
+        assert_eq!(s.updates.feed_url, crate::update::OFFICIAL_FEED);
+        assert_eq!(s.updates.channel, Channel::Beta);
+        // A feed the user chose stays.
+        s.updates.feed_url = "http://127.0.0.1:8765/{channel}.json".into();
+        s.migrate();
+        assert_eq!(s.updates.feed_url, "http://127.0.0.1:8765/{channel}.json");
     }
 }

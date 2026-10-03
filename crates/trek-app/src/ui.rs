@@ -197,6 +197,19 @@ pub fn group(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// An update's release notes (markdown), scrolling past `max_height`.
+pub fn release_notes(id: &'static str, notes: String, max_height: Pixels, cx: &App) -> AnyElement {
+    div()
+        .id(id)
+        .max_h(max_height)
+        .overflow_y_scroll()
+        .text_size(px(12.5))
+        .line_height(relative(1.5))
+        .text_color(cx.theme().foreground.opacity(0.85))
+        .child(gpui_kit::component::text::TextView::markdown(id, notes).selectable(true))
+        .into_any_element()
+}
+
 /// MonoCode-style composer pill: a soft filled chip that can trigger a popover.
 #[derive(IntoElement)]
 pub struct Pill {

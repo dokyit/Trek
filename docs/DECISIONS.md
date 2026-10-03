@@ -86,8 +86,14 @@ Prefer the tool's own API, fall back to read-only file parsing. Index metadata o
 
 ## 5. Updater
 
-Built-in, no manual re-download. GitHub Releases feed (`latest.json` manifest: version, notes, per-arch URL,
-minisign/ed25519 signature). Flow: check on launch + every 6 h → download in background → verify signature →
-"Restart to update" pill in the sidebar footer → **restart only when all agents are idle** (Conductor's
-pattern; Claude desktop's update-kills-sessions bug is the anti-pattern). Channels: Stable / Beta / Nightly.
-Swap in Sparkle (macOS) or Velopack later if delta updates are needed.
+Built-in, no manual re-download. GitHub Releases feed: stable is the latest non-prerelease release
+(`releases/latest/download/stable.json`), beta and nightly are prereleases under fixed, moving tags
+(`releases/download/beta/beta.json`); higher channels also see the stable feed. The manifest has the
+version, notes and per-platform archive URL, SHA-256 and minisign signature; the public key is compiled in
+(`assets/update/minisign.pub`). Flow: check on launch and daily → download in the background → verify →
+unpack and inspect the bundle → "Update" pill in the sidebar footer and **Restart to update** → install
+only when no agent turn is running, or on quit (Conductor's pattern; Claude desktop's update-kills-sessions
+bug is the anti-pattern). The swap is one atomic rename with one backup kept, and never replaces a version
+that's already as new. Changing the channel drops whatever the old channel downloaded. Bundles are signed with a
+stable identity so macOS permissions survive updates. Swap in Sparkle (macOS) or Velopack later if delta
+updates are needed. Details: docs/RELEASING.md.
