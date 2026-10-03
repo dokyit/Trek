@@ -61,8 +61,7 @@ Screenshots are coming with the first public release.
 
 ## Install
 
-No release has been published yet: until the first one is, [build Trek from source](#build-from-source).
-Once there is one, download `Trek-<version>-darwin-aarch64.app.tar.gz` from
+Download `Trek-<version>-darwin-aarch64.app.tar.gz` from
 [Releases](https://github.com/dokyit/Trek/releases), unpack it (double-click) and move **Trek.app** to
 Applications. Trek needs macOS 13 or later on Apple silicon.
 
