@@ -2,7 +2,9 @@
 //! long ("Opus 5.5 working for 17s") beside the hiker on its trail; above it, the turn's live group
 //! of tool calls: a summary line ("Ran 2 commands · Exploring the project") and a row per call,
 //! the newest sliding in. When the group ends it folds into its summary, which the transcript
-//! then shows as a row of its own.
+//! then shows as a row of its own. Clicking the group opens it in the transcript instead, where
+//! each call's output can be read while the turn goes on. Under a transcript too short to reach
+//! it, the bar is drawn right under the transcript's end (`Lift`), as the next row would be.
 //!
 //! It's a view of its own with its own ticker, so its animation frames re-render only this bar
 //! (and the window around it), never the transcript, sidebar or composer. Only a fold moves the
@@ -13,7 +15,9 @@ use crate::workspace::{Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 use trek_core::store::{Item, ToolStatus};
 use trek_core::{AgentId, RunState};
@@ -32,8 +36,6 @@ const GROUP_PAD: f32 = 4.;
 pub const ROWS: usize = 6;
 /// How long a new row takes to slide in.
 const SLIDE: Duration = Duration::from_millis(180);
-/// One sweep of the shimmer across a line.
-const SWEEP: f32 = 1.8;
 
 pub struct WorkingBar {
     workspace: Entity<Workspace>,
@@ -126,7 +128,8 @@ fn group(ws: &Workspace, id: &str, tools: &[usize], headline: Option<&str>) -> O
         rows.push(LiveRow {
             id: live.items.id_at(ix).unwrap_or_default().to_string(),
             op: activity::op(title, detail, cwd.as_deref()),
-            lines: live.lines.get(call).copied(),
+            // A failed or denied change changed nothing.
+            lines: live.lines.get(call).copied().filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied)),
             running: *status == ToolStatus::Running,
             failed: matches!(status, ToolStatus::Failed | ToolStatus::Denied),
             activity: task.map(|t| {
@@ -191,7 +194,7 @@ impl WorkingBar {
             shown: None,
             active: window.is_window_active() || crate::mascot::force_active(),
             arrived: HashMap::new(),
-            settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0 }),
+            settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0, open: None }),
             settled_len: 0,
             _ticker: None,
             _subscriptions: subscriptions,
@@ -205,9 +208,7 @@ impl WorkingBar {
         let id = ws.thread_id_in(&self.scope)?;
         let live = ws.live.get(id)?;
         let thread = ws.thread(id)?;
-        // Trek's own setting: GPUI's reduce-motion flag holds toasts and spinners still in tests,
-        // where the bar's frames are what's measured.
-        let still = ws.settings.appearance.reduce_motion || !self.active;
+        let still = !ws.motion(cx) || !self.active;
         // The header shows while the thread works and isn't waiting on the user (its cards take
         // this spot then).
         let header = (thread.run_state == RunState::Working && live.permissions.is_empty()).then(|| Header {
@@ -217,8 +218,9 @@ impl WorkingBar {
             agents: live.active_tasks().max(live.background),
         });
         let current = activity::live(ws, id).and_then(|t| group(ws, id, &t.tools, t.headline.as_deref()));
-        // Folding is motion: a still bar lets the group go at once.
-        let folding = live.fold.as_ref().filter(|f| !still && f.until > Instant::now()).and_then(|f| {
+        // The transcript holds a folding group back wherever it's shown, so every bar on it shows
+        // the group until then: folding, or as it was when the bar is still.
+        let folding = live.fold.as_ref().filter(|f| f.until > Instant::now()).and_then(|f| {
             let start = live.items.position(&f.first)?;
             let tools: Vec<usize> = live.items[start..]
                 .iter()
@@ -237,7 +239,7 @@ impl WorkingBar {
     fn top_height(&self) -> f32 {
         let Some(s) = &self.shown else { return 0. };
         let folding = s.folding.as_ref().map_or(0., |(g, until)| {
-            let left = 1. - ease_out(fold_progress(*until));
+            let left = 1. - fold_eased(*until, s.still);
             GROUP_PAD + SUMMARY + (g.rows_height() + GROUP_PAD) * left
         });
         (folding + if s.group.is_some() { GROUP_PAD + SUMMARY } else { 0. }).round()
@@ -302,10 +304,12 @@ impl WorkingBar {
             None => (vec![], 0),
         };
         self.settled_len = rows.len();
+        let open = self.opener();
         self.settled.update(cx, |s, cx| {
-            if s.rows != rows || s.earlier != earlier {
+            if s.rows != rows || s.earlier != earlier || s.open.as_ref().map(|o| &o.thread) != open.as_ref().map(|o| &o.thread) {
                 s.rows = rows;
                 s.earlier = earlier;
+                s.open = open;
                 cx.notify();
             }
         });
@@ -367,28 +371,101 @@ fn fold_progress(until: Instant) -> f32 {
     1. - left / activity::FOLD.as_secs_f32()
 }
 
-/// `text` with a soft highlight sweeping across it, from `base` to `hi` at its peak: a band a
-/// few characters wide that crosses the line every `SWEEP` seconds. Still, it's just `base`.
+/// The fold's progress, eased; a still bar holds the group as it is until it goes.
+fn fold_eased(until: Instant, still: bool) -> f32 {
+    if still { 0. } else { ease_out(fold_progress(until)) }
+}
+
+/// `text` with a soft highlight sweeping across it, from `base` to `hi` at its peak. Still, it's
+/// just `base`.
+///
+/// The highlight is the same text again in brighter colours, painted only inside a band that
+/// moves along the line, rather than a colour per character: GPUI shapes a line again whenever
+/// its colour runs change, which on every frame costs more than the rest of the bar together.
 fn shimmer(text: SharedString, clock: f32, still: bool, base: Hsla, hi: Hsla) -> AnyElement {
+    let plain = div().text_color(base).child(text.clone());
     if still {
-        return div().text_color(base).child(text).into_any_element();
+        return plain.into_any_element();
     }
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let n = chars.len() as f32;
-    let width = 5.;
-    let head = (clock / SWEEP).fract() * (n + width * 2.) - width;
-    let mut highlights = vec![];
-    for (i, (start, ch)) in chars.iter().enumerate() {
-        let d = (i as f32 - head).abs();
-        if d < width {
-            // Smooth falloff from the band's centre.
-            let k = 0.5 + 0.5 * (std::f32::consts::PI * d / width).cos();
-            let mix = |a: f32, b: f32| a + (b - a) * k;
-            let color = Hsla { h: hi.h, s: mix(base.s, hi.s), l: mix(base.l, hi.l), a: mix(base.a, hi.a) };
-            highlights.push((*start..*start + ch.len_utf8(), HighlightStyle { color: Some(color), ..Default::default() }));
+    let copies = BAND.iter().map(|(half, k)| (*half, div().text_color(mix(base, hi, *k)).child(text.clone()).into_any_element())).collect();
+    Sweep { clock, base: plain.into_any_element(), copies }.into_any_element()
+}
+
+/// The shimmer's band: half-widths (px) and how far towards the highlight each step goes, widest
+/// and faintest first, so the brighter ones paint over it into a soft peak.
+const BAND: [(f32, f32); 3] = [(30., 0.35), (18., 0.7), (8., 1.)];
+/// How fast the band crosses a line, in px a second.
+const SPEED: f32 = 240.;
+
+/// `a` blended `k` of the way to `b` (in `b`'s hue: the highlight is a brighter `a`).
+fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
+    let m = |x: f32, y: f32| x + (y - x) * k;
+    Hsla { h: b.h, s: m(a.s, b.s), l: m(a.l, b.l), a: m(a.a, b.a) }
+}
+
+/// Where the band's centre is after `clock` seconds over a line `width` px wide: it comes in
+/// past the left edge, crosses, and leaves past the right before coming round again.
+fn band_centre(clock: f32, width: f32) -> f32 {
+    let edge = BAND[0].0;
+    let travel = width.max(0.) + 2. * edge;
+    (clock * SPEED) % travel - edge
+}
+
+/// The text, then its brighter copies, each painted only within its band (`shimmer`).
+struct Sweep {
+    clock: f32,
+    base: AnyElement,
+    copies: Vec<(f32, AnyElement)>,
+}
+
+impl IntoElement for Sweep {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Sweep {
+    fn band(&self, bounds: Bounds<Pixels>, half: f32) -> Bounds<Pixels> {
+        let centre = band_centre(self.clock, bounds.size.width.as_f32());
+        Bounds::new(point(bounds.origin.x + px(centre - half), bounds.origin.y), size(px(half * 2.), bounds.size.height))
+    }
+}
+
+impl Element for Sweep {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        (self.base.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+        self.base.prepaint(window, cx);
+        // Laid out at the line's own size, the copies truncate where it does, and their lines
+        // come from the text system's cache: the same text in a single colour.
+        let space = size(AvailableSpace::Definite(bounds.size.width), AvailableSpace::Definite(bounds.size.height));
+        for (_, copy) in &mut self.copies {
+            copy.layout_as_root(space, window, cx);
+            copy.prepaint_at(bounds.origin, window, cx);
         }
     }
-    div().text_color(base).child(StyledText::new(text).with_highlights(highlights)).into_any_element()
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+        self.base.paint(window, cx);
+        let bands: Vec<Bounds<Pixels>> = self.copies.iter().map(|(half, _)| self.band(bounds, *half)).collect();
+        for ((_, copy), band) in self.copies.iter_mut().zip(bands) {
+            window.with_content_mask(Some(ContentMask { bounds: band }), |window| copy.paint(window, cx));
+        }
+    }
 }
 
 /// "+12 −3" in the diff colours.
@@ -403,12 +480,31 @@ pub fn lines_chip(added: u32, removed: u32, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// Opens the live group in the transcript (`Workspace::open_live_group`): from the bar, the
+/// summary line, "+N earlier" and each row do (a row opens its own call there too).
+#[derive(Clone)]
+struct Opener {
+    workspace: Entity<Workspace>,
+    thread: String,
+}
+
+impl Opener {
+    fn on_click(&self, call: Option<&str>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+        let (workspace, thread, call) = (self.workspace.clone(), self.thread.clone(), call.map(str::to_string));
+        move |_, _, cx| workspace.update(cx, |ws, cx| ws.open_live_group(&thread, call.clone(), cx))
+    }
+}
+
 impl WorkingBar {
     /// The group's summary line: kind icon, counts, and what it's about (shimmering while live).
-    fn summary_line(g: &Group, clock: f32, live: bool, still: bool, phrase_opacity: f32, cx: &App) -> AnyElement {
+    /// `open`: it opens the group in the transcript (the live one does; a folding one is going).
+    fn summary_line(g: &Group, clock: f32, open: Option<&Opener>, still: bool, phrase_opacity: f32, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let live = open.is_some();
         h_flex()
+            .id(if live { "live-summary" } else { "fold-summary" })
+            .test_support()
             .h(px(SUMMARY))
             .gap_2()
             .text_sm()
@@ -424,6 +520,9 @@ impl WorkingBar {
                     .child(div().child("·"))
                     .child(div().min_w_0().truncate().child(shimmer(g.phrase.clone().into(), clock, still || !live, muted, theme.foreground))),
             )
+            // As the transcript's summary rows do: it opens.
+            .child(Icon::new(IconName::ChevronRight).xsmall().opacity(0.6 * phrase_opacity))
+            .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.text_color(theme.foreground)).on_click(o.on_click(None)))
             .into_any_element()
     }
 
@@ -431,24 +530,38 @@ impl WorkingBar {
     fn slide(&self, r: &LiveRow, still: bool) -> Option<f32> {
         self.arrived.get(&r.id).filter(|_| !still).map(|at| ease_out(at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()))
     }
+
+    fn opener(&self) -> Option<Opener> {
+        Some(Opener { workspace: self.workspace.clone(), thread: self.shown.as_ref()?.thread.clone() })
+    }
 }
 
 /// The hairline the rows hang from.
 fn rows_rail(cx: &App) -> Div {
-    v_flex().ml(px(7.)).pl_4().border_l_1().border_color(cx.theme().border)
+    v_flex().ml(px(7.)).pl_3().border_l_1().border_color(cx.theme().border)
 }
 
-fn earlier_line(n: usize, cx: &App) -> Div {
-    div().h(px(EARLIER)).flex().items_center().text_xs().text_color(cx.theme().muted_foreground).child(format!("+{n} earlier"))
+fn earlier_line(n: usize, open: Option<&Opener>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    h_flex()
+        .id("live-earlier")
+        .test_support()
+        .h(px(EARLIER))
+        .px(px(4.))
+        .text_xs()
+        .text_color(theme.muted_foreground)
+        .child(format!("+{n} earlier"))
+        .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.text_color(theme.foreground)).on_click(o.on_click(None)))
+        .into_any_element()
 }
 
 /// A whole group's rows, drawn as they are (a group folding away).
 fn all_rows(g: &Group, cx: &App) -> Div {
-    rows_rail(cx).when(g.earlier > 0, |el| el.child(earlier_line(g.earlier, cx))).children(g.rows.iter().map(|r| row(r, None, 0., true, cx)))
+    rows_rail(cx).when(g.earlier > 0, |el| el.child(earlier_line(g.earlier, None, cx))).children(g.rows.iter().map(|r| row(r, None, 0., true, None, cx)))
 }
 
 /// One call's row. `slide`: how far in it has slid (0 to 1), while it does.
-fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, cx: &App) -> AnyElement {
+fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, open: Option<&Opener>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let text = theme.foreground.opacity(0.85);
@@ -456,7 +569,9 @@ fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, cx: &App) -> An
         .id(SharedString::from(format!("live-row-{}", r.id)))
         .test_support()
         .h(px(ROW))
+        .px(px(4.))
         .gap(px(6.))
+        .rounded(px(4.))
         .text_size(px(12.5))
         .when_some(slide, |el, t| el.relative().top(px(5. * (1. - t))).opacity(t))
         .when(!r.op.verb.is_empty(), |el| el.child(div().flex_none().text_color(muted).child(r.op.verb.clone())))
@@ -472,22 +587,24 @@ fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, cx: &App) -> An
         .when_some(r.activity.clone(), |el, a| el.child(div().flex_none().max_w(relative(0.4)).truncate().text_xs().text_color(muted).child(a)))
         .when_some(r.lines, |el, (a, d)| el.child(lines_chip(a, d, cx)))
         .when(r.failed, |el| el.child(Icon::new(IconName::CircleX).xsmall().text_color(crate::palette::red(cx))))
+        .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(o.on_click(Some(&r.id))))
         .into_any_element()
 }
-
 
 /// The live group's rows that are done and in: "+N earlier", then the rows. Its own view, cached,
 /// so they're laid out once rather than on every frame of the bar.
 pub struct SettledRows {
     rows: Vec<LiveRow>,
     earlier: usize,
+    open: Option<Opener>,
 }
 
 impl Render for SettledRows {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("SettledRows");
-        column(rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, cx))).children(self.rows.iter().map(|r| row(r, None, 0., true, cx))))
+        let open = self.open.as_ref();
+        column(rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, open, cx))).children(self.rows.iter().map(|r| row(r, None, 0., true, open, cx))))
     }
 }
 
@@ -501,22 +618,22 @@ impl Render for BarTop {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("BarTop");
-        let Some(shown) = self.bar.upgrade().and_then(|b| b.read(cx).shown.clone()) else { return div().into_any_element() };
+        let Some((shown, open)) = self.bar.upgrade().and_then(|b| Some((b.read(cx).shown.clone()?, b.read(cx).opener()))) else { return div().into_any_element() };
         let clock = shown.header.as_ref().and_then(|h| h.started).map_or(0., |t| t.elapsed().as_secs_f32());
         let still = shown.still;
         let folding = shown.folding.as_ref().map(|(g, until)| {
-            let t = ease_out(fold_progress(*until));
+            let t = fold_eased(*until, still);
             column(
                 v_flex()
                     .id("live-fold")
                     .test_support()
                     .pt(px(GROUP_PAD))
-                    .child(WorkingBar::summary_line(g, clock, false, still, 1. - t, cx))
+                    .child(WorkingBar::summary_line(g, clock, None, still, 1. - t, cx))
                     .child(div().h(px((g.rows_height() + GROUP_PAD) * (1. - t))).overflow_hidden().opacity(1. - t).child(all_rows(g, cx))),
             )
         });
         let group = shown.group.as_ref().map(|g| {
-            column(div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, true, still, 1., cx)))
+            column(div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., cx)))
         });
         v_flex().size_full().overflow_hidden().justify_end().children(folding).children(group).into_any_element()
     }
@@ -540,7 +657,8 @@ impl Render for WorkingBar {
         // The live rows past the settled ones (running, or sliding in).
         let rows = shown.group.as_ref().map(|g| {
             let settled = self.settled_len.min(g.rows.len());
-            column(rows_rail(cx).children(g.rows[settled..].iter().map(|r| row(r, self.slide(r, still), clock, still, cx)))).pb(px(GROUP_PAD))
+            let open = self.opener();
+            column(rows_rail(cx).children(g.rows[settled..].iter().map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)))).pb(px(GROUP_PAD))
         });
         let header = shown.header.as_ref().map(|h| {
             h_flex()
@@ -597,16 +715,66 @@ fn working_for(elapsed: Option<Duration>) -> String {
 /// The bar as a window lays it out: its three parts each cached at their current height (zero
 /// while hidden), so frames that redraw other views (the sidebar's clock) reuse them, the bar's
 /// own frames redraw only the parts that move, and rows that settled aren't laid out again.
-pub fn cached(bar: &Entity<WorkingBar>, cx: &App) -> AnyElement {
+/// `tail`: where the transcript above ends (`ThreadView::tail`), which the bar follows up.
+pub fn cached(bar: &Entity<WorkingBar>, tail: Rc<Cell<Option<Pixels>>>, cx: &App) -> AnyElement {
     let b = bar.read(cx);
     let style = |h: f32| StyleRefinement::default().w_full().flex_none().h(px(h));
-    v_flex()
+    let parts = v_flex()
         .w_full()
         .flex_none()
         .child(b.top.clone().cached(style(b.top_height())))
         .child(b.settled.clone().cached(style(b.settled_height())))
-        .child(bar.clone().cached(style(b.bottom_height())))
-        .into_any_element()
+        .child(bar.clone().cached(style(b.bottom_height())));
+    Lift { tail, child: parts.into_any_element() }.into_any_element()
+}
+
+/// How far the bar is lifted to sit under a transcript ending at `tail` (the bar's own place
+/// starts at `top`): up to the transcript's end, never down.
+fn lift(top: Pixels, tail: Option<Pixels>) -> Pixels {
+    tail.map_or(px(0.), |t| (top - t).max(px(0.)))
+}
+
+/// Lifts the bar up to just under the transcript when the transcript doesn't reach down to it,
+/// so the live group and the header follow the conversation rather than wait at the bottom of
+/// an empty window (and a folded group lands right where its summary row then appears). Only its
+/// drawing moves: the space it leaves stays put, so nothing lays out again. The transcript is
+/// laid out earlier in the same frame and notes where it ends.
+struct Lift {
+    tail: Rc<Cell<Option<Pixels>>>,
+    child: AnyElement,
+}
+
+impl IntoElement for Lift {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Lift {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+        let up = lift(bounds.top(), self.tail.get());
+        window.with_element_offset(point(px(0.), -up), |window| self.child.prepaint(window, cx));
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+        self.child.paint(window, cx);
+    }
 }
 
 /// "· 1 agent out", "· 3 agents out".
@@ -652,12 +820,58 @@ impl WorkingBar {
     pub(crate) fn folding(&self) -> Option<String> {
         self.shown.as_ref()?.folding.as_ref().map(|(g, _)| g.summary.clone())
     }
+
+    /// How often the bar redraws now (`None`: it doesn't).
+    pub(crate) fn frame_interval(&self) -> Option<Duration> {
+        self.rate()
+    }
+
+    /// Rows sliding in now.
+    pub(crate) fn sliding(&self) -> usize {
+        self.arrived.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EARLIER, Group, LiveRow, ROW, ROWS, ToolKind, activity, ease_out, short_model, working_for};
+    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, short_model, working_for};
+    use gpui_kit::{Hsla, px};
     use std::time::Duration;
+
+    #[test]
+    fn the_shimmer_band_crosses_the_line_and_comes_round() {
+        let edge = BAND[0].0;
+        // It starts just off the left edge, wholly outside the line…
+        assert_eq!(band_centre(0., 300.), -edge);
+        // …crosses at its speed…
+        assert_eq!(band_centre(1., 300.), SPEED - edge);
+        // …leaves past the right edge, then starts over.
+        let lap = (300. + 2. * edge) / SPEED;
+        assert!((band_centre(lap - 0.001, 300.) - (300. + edge)).abs() < 1.);
+        assert!((band_centre(lap + 0.5, 300.) - band_centre(0.5, 300.)).abs() < 0.01);
+        // Narrow and empty lines too.
+        assert!(band_centre(0.1, 0.).is_finite());
+        // Its steps grow brighter towards the middle and narrower.
+        assert!(BAND.windows(2).all(|w| w[0].0 > w[1].0 && w[0].1 < w[1].1));
+        assert_eq!(BAND[BAND.len() - 1].1, 1., "the peak is the highlight itself");
+    }
+
+    #[test]
+    fn mixing_runs_from_one_colour_to_the_other() {
+        let a = Hsla { h: 0.1, s: 0.2, l: 0.4, a: 0.5 };
+        let b = Hsla { h: 0.6, s: 0.4, l: 0.9, a: 1. };
+        assert_eq!(mix(a, b, 1.), b);
+        assert_eq!(mix(a, b, 0.).l, a.l);
+        assert!((mix(a, b, 0.5).l - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_bar_lifts_to_a_short_transcript_only() {
+        assert_eq!(lift(px(700.), Some(px(300.))), px(400.), "up to where the transcript ends");
+        assert_eq!(lift(px(700.), Some(px(700.))), px(0.));
+        assert_eq!(lift(px(700.), Some(px(760.))), px(0.), "a long one: never down over the composer");
+        assert_eq!(lift(px(700.), None), px(0.), "its end out of view");
+    }
 
     #[test]
     fn heights_add_up() {

@@ -197,9 +197,13 @@ fn main() {
         root::init(ws.clone(), cx);
         root::open_main(ws.clone(), !background, cx).expect("open window");
         // TREK_OPEN_THREAD_WINDOW=<thread id> also opens that thread in a window of its own, for
-        // design review of thread windows.
+        // design review of thread windows; `mock`, the thread TREK_MOCK_PROMPT just started.
         if let Ok(id) = std::env::var("TREK_OPEN_THREAD_WINDOW") {
-            thread_window::open_with_focus(ws, id.trim(), !background, cx);
+            let id = match (id.trim(), &ws.read(cx).route) {
+                ("mock", workspace::Route::Thread(started)) => started.clone(),
+                (id, _) => id.to_string(),
+            };
+            thread_window::open_with_focus(ws, &id, !background, cx);
         }
         if !background {
             cx.activate(true);

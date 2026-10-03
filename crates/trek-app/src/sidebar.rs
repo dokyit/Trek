@@ -248,16 +248,14 @@ impl Sidebar {
         let ws = self.workspace.read(cx);
         match t.run_state {
             RunState::Working => {
-                let started = ws.live.get(&t.id).and_then(|l| l.turn_started);
-                let elapsed = started.map(|s| time::elapsed(s.elapsed())).unwrap_or_default();
-                // The loader turns an eighth with each tick of the card's clock: alive, but calm
-                // (a spinning one would redraw the whole sidebar every frame).
-                let turn = started.filter(|_| self.active && ws.motion(cx)).map_or(0, |s| s.elapsed().as_secs() % 8) as f32;
+                let elapsed = ws.live.get(&t.id).and_then(|l| l.turn_started).map(|s| time::elapsed(s.elapsed())).unwrap_or_default();
+                // The loader holds still and the clock beside it ticks: a spinning one would redraw
+                // the whole sidebar every frame.
                 h_flex()
                     .gap_1()
                     .text_xs()
                     .text_color(palette::sky(cx))
-                    .child(Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(palette::sky(cx)).rotate(gpui_kit::radians(turn * std::f32::consts::FRAC_PI_4)))
+                    .child(Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(palette::sky(cx)))
                     .child(format!("Working {elapsed}"))
                     .into_any_element()
             }

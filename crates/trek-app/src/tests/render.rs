@@ -29,6 +29,8 @@ fn process_cpu() -> Duration {
 /// running.
 async fn busy_window(cx: &mut TestAppContext, settled: usize) -> (Trek, String) {
     let trek = open_with(cx, |_| {});
+    // The bar's frames are what's measured: motion on (the harness turns the system's off).
+    cx.update(|cx| cx.set_reduce_motion(false));
     let id = trek.update(cx, |ws, cx| {
         populate(&ws.store, settled);
         let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");

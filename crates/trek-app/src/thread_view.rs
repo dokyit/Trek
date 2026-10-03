@@ -148,6 +148,12 @@ pub struct ThreadView {
     /// Where the transcript stops for now: the live group of tool calls (and anything after it)
     /// shows in the working bar instead (`activity::transcript_end`).
     end: Option<usize>,
+    /// The live group last opened from the working bar (`Workspace::open_live_group`), once its
+    /// row here is open.
+    opened: Option<crate::activity::Opened>,
+    /// Where the transcript's last row ends on screen, as last laid out (`None` when it's out of
+    /// view): the working bar sits just under it when the transcript doesn't reach the bar.
+    pub tail: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     expanded_gen: u64,
     /// The last `Workspace::reveal` request handled.
     revealed: u64,
@@ -262,6 +268,8 @@ impl ThreadView {
             plan_md: None,
             rows_cache: Default::default(),
             end: None,
+            opened: None,
+            tail: Default::default(),
             expanded_gen: 0,
             revealed: 0,
             flash: None,
@@ -290,6 +298,7 @@ impl ThreadView {
         let switched = id != self.current;
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let revision = live.map_or(0, |l| l.revision);
+        let opened = live.and_then(|l| l.opened.clone());
         let shown = Shown {
             thread: id.clone(),
             draft: ws.is_draft_in(&self.scope),
@@ -351,6 +360,21 @@ impl ThreadView {
         }
         self.revision = revision;
         self.end = end;
+        // A live group opened from the bar: its row opens here, with the call clicked.
+        let mut follow = false;
+        if opened != self.opened {
+            self.opened = opened.clone();
+            if let Some(o) = opened {
+                let rows = self.rows(cx);
+                let group = self.workspace.read(cx).live.get(self.current.as_deref().unwrap_or_default()).and_then(|l| l.items.position(&o.first));
+                if let Some(Row::ToolGroup { key, .. }) = group.and_then(|ix| rows.row_of(ix)).and_then(|r| rows.rows.get(r)) {
+                    self.expanded.insert(key.to_string());
+                }
+                self.expanded.extend(o.call);
+                self.expanded_gen += 1;
+                follow = true;
+            }
+        }
         for (key, now) in docs {
             let Some((ix, text)) = now else {
                 self.md.remove(&key);
@@ -386,6 +410,9 @@ impl ThreadView {
             if new_count > 0 {
                 let from = new_count.saturating_sub(2);
                 let _ = s.remeasure_items(from..new_count, cx);
+            }
+            if follow {
+                s.scroll_to_end(cx);
             }
         });
         self.reveal(cx);
@@ -888,7 +915,7 @@ impl ThreadView {
                 let icon = kind_icon(kind);
                 // Files read or changed get their type's badge; changes, the lines they touched.
                 let file = matches!(kind, ToolKind::Read | ToolKind::Edit).then(|| detail.split(", ").next().unwrap_or_default().to_string()).filter(|f| !f.is_empty());
-                let lines = live.and_then(|l| l.lines.get(&tool_id)).copied();
+                let lines = live.and_then(|l| l.lines.get(&tool_id)).copied().filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
                 let status_el = match status {
                     ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(theme.muted_foreground).into_any_element(),
                     ToolStatus::Done => Icon::new(IconName::Check).xsmall().text_color(theme.muted_foreground).into_any_element(),
@@ -1482,9 +1509,15 @@ impl Render for ThreadView {
         crate::tests::rendered("ThreadView");
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);
+        // Where the last row ends is noted as it's laid out below; until then (and when it's out
+        // of view, or a card sits under it) there's no tail.
+        let tail = self.tail.clone();
+        let forget = canvas(move |_, _, _| tail.set(None), |_, _, _, _| {}).absolute().size_0();
         let (Some(thread), false) = (self.current.clone(), rows.rows.is_empty()) else {
-            return v_flex().size_full().child(self.empty_state(cx)).children(footer);
+            return v_flex().size_full().child(forget).child(self.empty_state(cx)).children(footer);
         };
+        let tail = (footer.is_none()).then(|| self.tail.clone());
+        let last = rows.rows.len() - 1;
         let view = cx.entity().downgrade();
         let ws = self.workspace.read(cx);
         let t = ws.thread(&thread);
@@ -1505,12 +1538,21 @@ impl Render for ThreadView {
         let flash = self.flash;
         v_flex()
             .size_full()
+            .child(forget)
             .child(
                 div().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
                         Some(row) => {
                             let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
-                            ThreadView::render_row(row, ix, flash, &view, &at, cx)
+                            let el = ThreadView::render_row(row, ix, flash, &view, &at, cx);
+                            match tail.clone().filter(|_| ix == last) {
+                                Some(tail) => v_flex()
+                                    .w_full()
+                                    .child(el)
+                                    .child(canvas(move |b, _, _| tail.set(Some(b.bottom())), |_, _, _, _| {}).w_full().h(px(0.)))
+                                    .into_any_element(),
+                                None => el,
+                            }
                         }
                         None => div().into_any_element(),
                     })

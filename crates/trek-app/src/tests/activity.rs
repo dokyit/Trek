@@ -193,3 +193,110 @@ fn reduced_motion_titles_change_at_once() {
         assert!(!trek.visible(cx, format!("card-title-{id}")));
     });
 }
+
+fn bar<R>(trek: &Trek, cx: &TestAppContext, f: impl FnOnce(&crate::working_bar::WorkingBar) -> R) -> R {
+    cx.read(|cx| f(trek.root.read(cx).working_bar.read(cx)))
+}
+
+#[test]
+fn the_live_group_opens_in_the_transcript_from_the_bar() {
+    run(async |cx| {
+        let trek = open(cx);
+        with_motion(&trek, cx);
+        let id = trek.quiet_thread(cx);
+        feed(&trek, cx, &id, vec![AgentEvent::TextDelta("Let me look.".into()), start("t1", "Read", "src/main.rs"), done("t1"), start("t2", "Run command", "cargo test")]);
+        assert_eq!(trek.rows(cx), ["assistant"]);
+
+        // Its summary line opens it where every call can be read: the transcript, open.
+        trek.click(cx, "live-summary");
+        assert_eq!(trek.live_group(cx), None);
+        assert!(trek.working_bar(cx).is_some(), "the header stays");
+        assert_eq!(trek.rows(cx), ["assistant", "group: Ran 1 command and read 1 file (running)", "  tool", "  tool"]);
+        // It grows there, and doesn't fold when it ends: it's in its place already.
+        feed(&trek, cx, &id, vec![start("t3", "Search", "fn main")]);
+        assert_eq!(trek.rows(cx).len(), 5);
+        feed(&trek, cx, &id, vec![done("t2"), done("t3"), AgentEvent::TextDelta("Found it.".into())]);
+        assert_eq!(trek.folding(cx), None);
+        assert_eq!(trek.rows(cx)[4..], ["  tool".to_string(), "assistant".to_string()]);
+
+        // The next group is live in the bar again; one of its rows opens with its call open.
+        feed(&trek, cx, &id, vec![start("t4", "Edit", "src/main.rs")]);
+        assert!(trek.live_group(cx).is_some());
+        let call = item_id(&trek, cx, &id, trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "t4")));
+        trek.click(cx, format!("live-row-{call}"));
+        assert_eq!(trek.live_group(cx), None);
+        assert_eq!(trek.read(cx, |ws, _| ws.live[&id].opened.as_ref().and_then(|o| o.call.clone())), Some(call));
+        assert_eq!(trek.rows(cx).last().map(String::as_str), Some("  tool"));
+    });
+}
+
+#[test]
+fn a_window_in_the_background_holds_the_folding_group_still() {
+    run(async |cx| {
+        let trek = open(cx);
+        // Motion on, but the window isn't in front: the bar is still.
+        cx.update(|cx| cx.set_reduce_motion(false));
+        trek.window(cx, |window, cx| window.blur(cx));
+        let id = trek.quiet_thread(cx);
+        feed(&trek, cx, &id, vec![start("t1", "Run command", "ls -la")]);
+        assert_eq!(bar(&trek, cx, |b| b.frame_interval()), Some(Duration::from_secs(1)));
+        assert_eq!(bar(&trek, cx, |b| b.sliding()), 0, "nothing slides in");
+        feed(&trek, cx, &id, vec![done("t1"), AgentEvent::TextDelta("Two files.".into())]);
+        // The transcript holds the group back for the fold, so the bar shows it meanwhile, as it
+        // was, rather than leave a gap.
+        assert_eq!(trek.folding(cx).as_deref(), Some("Ran 1 command"));
+        assert!(trek.visible(cx, "live-fold"));
+        assert!(trek.rows(cx).is_empty());
+        let tid = id.clone();
+        trek.wait(cx, "the fold to finish", |ws| ws.live[&tid].fold.is_none()).await;
+        trek.render(cx);
+        assert_eq!(trek.rows(cx), ["group: Ran 1 command", "assistant"]);
+        assert!(!trek.visible(cx, "live-fold"));
+    });
+}
+
+#[test]
+fn reduced_motion_holds_the_bar_still_either_way() {
+    run(async |cx| {
+        // The system asks for less motion (the harness's default), Trek's setting doesn't.
+        let trek = open(cx);
+        trek.window(cx, |window, _| window.activate_window());
+        let id = trek.quiet_thread(cx);
+        feed(&trek, cx, &id, vec![start("t1", "Run command", "cargo build")]);
+        assert!(trek.live_group(cx).is_some());
+        assert_eq!(bar(&trek, cx, |b| (b.frame_interval(), b.sliding())), (Some(Duration::from_secs(1)), 0));
+        // Trek's setting does, the system doesn't.
+        trek.update(cx, |ws, cx| {
+            ws.settings.appearance.reduce_motion = true;
+            cx.notify();
+        });
+        cx.update(|cx| cx.set_reduce_motion(false));
+        feed(&trek, cx, &id, vec![start("t2", "Read", "src/lib.rs")]);
+        assert_eq!(bar(&trek, cx, |b| (b.frame_interval(), b.sliding())), (Some(Duration::from_secs(1)), 0));
+        // Neither: it moves at the hiker's rate, and new rows slide in.
+        trek.update(cx, |ws, cx| {
+            ws.settings.appearance.reduce_motion = false;
+            cx.notify();
+        });
+        feed(&trek, cx, &id, vec![start("t3", "Read", "src/main.rs")]);
+        assert_eq!(bar(&trek, cx, |b| b.frame_interval()), Some(Duration::from_millis(1000 / crate::mascot::FPS)));
+        assert_eq!(bar(&trek, cx, |b| b.sliding()), 1);
+    });
+}
+
+#[test]
+fn the_bar_follows_a_short_transcript_up() {
+    run(async |cx| {
+        let trek = open(cx);
+        with_motion(&trek, cx);
+        let id = trek.quiet_thread(cx);
+        feed(&trek, cx, &id, vec![AgentEvent::TextDelta("Let me look.".into()), start("t1", "Read", "src/main.rs")]);
+        trek.render(cx);
+        let view = trek.thread_view(cx);
+        let tail = cx.read(|cx| view.read(cx).tail.get()).expect("the transcript's end is on screen");
+        let group = trek.bounds(cx, "live-group").expect("the live group");
+        assert!((group.top() - tail).abs() < gpui_kit::px(1.), "right under the transcript: {group:?}, transcript ends at {tail:?}");
+        let header = trek.bounds(cx, "working-bar").expect("the header");
+        assert!(header.top() >= group.bottom(), "the header under the group");
+    });
+}

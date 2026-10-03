@@ -594,7 +594,7 @@ impl Render for TrekWindow {
                 .size_full()
                 .min_w_0()
                 .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(fill())))
-                .child(crate::working_bar::cached(&self.working_bar, cx))
+                .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
                 .child(Composer::element(&self.composer, &mut self.composer_changed, cx))
                 .into_any_element(),
         };

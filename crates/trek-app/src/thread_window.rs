@@ -243,7 +243,7 @@ impl Render for ThreadWindow {
                         .overflow_hidden()
                         // Cached as in the main window: the working bar's frames redraw only the bar.
                         .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(StyleRefinement::default().size_full())))
-                        .child(crate::working_bar::cached(&self.working_bar, cx))
+                        .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
                         .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
                 ),
             )

@@ -335,13 +335,25 @@ pub fn trail(items: &[Item]) -> Option<Trail> {
 }
 
 /// The group `id` shows live: its tail of tool calls while a turn runs and nothing waits on the
-/// user (an approval card takes the bar's place, and the transcript shows the group then).
+/// user (an approval card takes the bar's place, and the transcript shows the group then), unless
+/// the user opened it in the transcript.
 pub fn live(ws: &Workspace, id: &str) -> Option<Trail> {
     let live = ws.live.get(id)?;
     if ws.thread(id)?.run_state != RunState::Working || !live.permissions.is_empty() {
         return None;
     }
-    trail(&live.items)
+    let t = trail(&live.items)?;
+    let opened = live.opened.as_ref().is_some_and(|o| live.items.id_at(t.start) == Some(o.first.as_str()));
+    (!opened).then_some(t)
+}
+
+/// A live group opened in the transcript from the working bar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opened {
+    /// The group's first item.
+    pub first: String,
+    /// The item of the call clicked, to open with it.
+    pub call: Option<String>,
 }
 
 /// Where the transcript of `id` stops for now: at its live group (shown in the bar instead), or

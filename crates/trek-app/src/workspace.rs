@@ -142,12 +142,15 @@ pub struct LiveThread {
     pub context: Option<(u64, u64)>,
     /// Bumped on every transcript change so views can resync cheaply.
     pub revision: u64,
-    /// Lines each tool call that changed a file added and removed, by call id (this session's).
+    /// Lines each tool call that changed a file added and removed, by call id (kept in the store).
     pub lines: HashMap<String, (u32, u32)>,
     /// The group of tool calls folding into its summary row now that it's over (`activity`).
     pub fold: Option<crate::activity::Fold>,
     /// Shows the folded group in the transcript once the fold is over.
     _fold_done: Option<Task<()>>,
+    /// A live group the user opened from the working bar: it shows in the transcript instead,
+    /// open, with the call they clicked open too (`open_live_group`).
+    pub opened: Option<crate::activity::Opened>,
     /// Follow-ups held while a turn runs (`FollowUp::Queue`), sent one per finished turn.
     pub queued: Vec<(String, Vec<PathBuf>)>,
     /// Sub-agents launched this turn, keyed by the tool call that started them.
@@ -1503,6 +1506,7 @@ impl Workspace {
             return;
         }
         live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+        live.lines = self.store.tool_lines(id).unwrap_or_default();
         let rows = self.store.items_with_ids(id).unwrap_or_default();
         if !rows.is_empty() {
             live.items = Transcript::stored(rows);
@@ -2319,7 +2323,14 @@ impl Workspace {
                         live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
                     }
                     AgentEvent::ToolLines { id: tid, added, removed } => {
-                        live.lines.insert(tid, (added, removed));
+                        let lines = (added > 0 || removed > 0).then_some((added, removed));
+                        if let Err(e) = self.store.set_tool_lines(id, &tid, lines) {
+                            tracing::warn!("save tool lines: {e}");
+                        }
+                        match lines {
+                            Some(l) => live.lines.insert(tid, l),
+                            None => live.lines.remove(&tid),
+                        };
                     }
                     AgentEvent::ToolFinished { id: tid, output, ok } => {
                         if let Some(Item::Tool { output: o, status, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
@@ -2542,6 +2553,15 @@ impl Workspace {
     fn live_group_start(&self, id: &str) -> Option<String> {
         let start = crate::activity::live(self, id)?.start;
         self.live.get(id)?.items.id_at(start).map(str::to_string)
+    }
+
+    /// Show `id`'s live group in the transcript, open (and its call `call` too), rather than in
+    /// the working bar: every call can be read there, output and all, while the turn goes on.
+    pub fn open_live_group(&mut self, id: &str, call: Option<String>, cx: &mut Context<Self>) {
+        let Some(first) = self.live_group_start(id) else { return };
+        let Some(live) = self.live.get_mut(id) else { return };
+        live.opened = Some(crate::activity::Opened { first, call });
+        cx.emit(WorkspaceEvent::Transcript { id: id.to_string(), appended: false });
     }
 
     /// The live group starting at item `first` is over: the working bar folds it away while the
@@ -3023,6 +3043,13 @@ impl Workspace {
         };
         let kept: Vec<Item> = items[..cut].to_vec();
         let kept_ids: Vec<String> = items.ids()[..cut].to_vec();
+        let kept_lines: HashMap<String, (u32, u32)> = kept
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool { id: call, .. } => live.lines.get(call).map(|l| (call.clone(), *l)),
+                _ => None,
+            })
+            .collect();
         let reopen = match point {
             // Where the session stood as the first message left out was sent.
             Some(point) => trek_core::rewind::reopen_before(&kept, point.as_ref(), None, native),
@@ -3067,9 +3094,15 @@ impl Workspace {
             Ok(false) => {}
             Err(e) => tracing::warn!("save fork: {e}"),
         }
+        for (call, lines) in &kept_lines {
+            if let Err(e) = self.store.set_tool_lines(&fork.id, call, Some(*lines)) {
+                tracing::warn!("save tool lines: {e}");
+            }
+        }
         let fork_id = fork.id.clone();
         let live = self.live.entry(fork_id.clone()).or_default();
         live.items = transcript;
+        live.lines = kept_lines;
         live.loaded = true;
         live.mark = fork.native_at.clone();
         live.git_jobs.extend(links.into_iter().map(|(repo, checkpoints)| GitJob::Link { repo, checkpoints }));
