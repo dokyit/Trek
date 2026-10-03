@@ -151,6 +151,8 @@ pub struct SettingsView {
     /// Project page: the name field (and which project it currently shows), and the new-action fields.
     project_name: Entity<InputState>,
     project_name_for: Option<String>,
+    /// What new worktrees get a copy of, comma-separated (follows the project like the name).
+    worktree_copy: Entity<InputState>,
     action_name: Entity<InputState>,
     action_command: Entity<InputState>,
     /// Import page: rules whose left-out sessions are listed.
@@ -182,6 +184,19 @@ impl SettingsView {
         }));
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let action_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Test"));
+        let worktree_copy = cx.new(|cx| InputState::new(window, cx).placeholder("Nothing is copied"));
+        subs.push(cx.subscribe_in(&worktree_copy, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
+            if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
+                let list: Vec<String> = input.read(cx).value().split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
+                let Some(id) = this.project_name_for.clone() else { return };
+                this.workspace.update(cx, |ws, cx| {
+                    let Some(path) = ws.project(&id).map(|p| p.path.clone()) else { return };
+                    if ws.project_prefs(&path).worktree_copy != list {
+                        ws.update_project_prefs(&path, |pr| pr.worktree_copy = list, cx);
+                    }
+                });
+            }
+        }));
         let action_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. cargo test"));
         subs.push(cx.subscribe_in(&project_name, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
             if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
@@ -203,6 +218,7 @@ impl SettingsView {
             mcp_command,
             project_name,
             project_name_for: None,
+            worktree_copy,
             action_name,
             action_command,
             skills: None,

@@ -10,6 +10,7 @@ mod lifecycle;
 mod render;
 mod screens;
 mod windows;
+mod worktrees;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

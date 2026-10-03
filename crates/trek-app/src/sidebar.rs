@@ -4,6 +4,7 @@
 use crate::palette;
 use crate::time;
 use crate::ui;
+use crate::worktree_ui::Leave;
 use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, UpdateAction, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::DropdownMenu as _;
@@ -315,7 +316,9 @@ impl Sidebar {
                 h_flex()
                     .gap_2()
                     .child(ui::project_badge(project, self.workspace.read(cx).thread_project_icon(t).as_deref(), cx))
-                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(project.to_string()))
+                    .child(div().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(project.to_string()))
+                    .when_some(t.worktree.as_ref(), |el, wt| el.child(crate::worktree_ui::branch_chip(SharedString::from(format!("card-branch-{}", t.id)), wt, cx)))
+                    .child(div().flex_1())
                     .child(self.status(t, cx)),
             )
             .child(
@@ -389,6 +392,7 @@ impl Sidebar {
             _ => None,
         };
         let cwd = t.cwd.clone();
+        let in_worktree = t.worktree.is_some();
         let project = t.project_id.clone().and_then(|pid| self.workspace.read(cx).project(&pid).map(|p| (p.id.clone(), p.name.clone())));
         row.context_menu(move |menu, window, cx| {
             let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
@@ -490,6 +494,18 @@ impl Sidebar {
                     let pid = pid.clone();
                     let _ = ws.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
                 }));
+            }
+            // A thread in a worktree asks whether its worktree goes too.
+            let leave = |label: &'static str, leave: Leave| {
+                let (ws, tid) = (ws.clone(), tid.clone());
+                PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    if let Some(ws) = ws.upgrade() {
+                        crate::worktree_ui::confirm_leave(ws, tid.clone(), leave, window, cx);
+                    }
+                })
+            };
+            if in_worktree {
+                return menu.separator().item(leave("Archive thread…", Leave::Archive)).item(leave("Delete…", Leave::Delete).icon(crate::assets::Lucide::Trash));
             }
             menu.separator().item(item("Archive thread", |ws, id, cx| ws.archive(id, cx))).item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
                 let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());

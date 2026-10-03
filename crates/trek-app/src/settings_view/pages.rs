@@ -13,7 +13,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Si
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::catalog::DIRECT_PROVIDERS;
-use trek_core::settings::{Channel, FollowUp, NotifyMode, Settings, ThemeChoice, secrets};
+use trek_core::settings::{Channel, FollowUp, NotifyMode, RunIn, Settings, ThemeChoice, secrets};
 use trek_core::{AgentId, Effort, HandHolding};
 
 /// A compact dropdown button that shows the current choice.
@@ -210,8 +210,8 @@ impl SettingsView {
                     ),
                     cx,
                 ), Self::row(
-                    "Settle threads when their branch merges",
-                    "A thread that committed on a branch settles once that branch is merged into the default branch, here or on origin.",
+                    "Settle threads when their work is merged",
+                    "A thread that committed on a branch settles once that branch is merged into the default branch, here or on origin, or when you merge its worktree from the Git tool.",
                     self.switch("settle-on-merge", s.inbox.auto_settle_on_merge, |s, v| s.inbox.auto_settle_on_merge = v),
                     cx,
                 )],
@@ -1227,6 +1227,37 @@ impl SettingsView {
             cx,
         );
 
+        // Where new threads run; worktrees need git.
+        let w = self.workspace.clone();
+        let p2 = path.clone();
+        let run_in = ui::segmented(
+            "proj-run-in",
+            vec![(RunIn::Local, "Local"), (RunIn::Worktree, "New worktree")],
+            prefs.run_in,
+            move |r, _, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p2, |pr| pr.run_in = r, cx)),
+            cx,
+        );
+        let mut new_thread_rows = vec![
+            Self::row("Agent", "", agent_picker, cx),
+            Self::row("Model", "", model_picker, cx),
+            Self::row("Reasoning effort", "", effort_picker, cx),
+            Self::row("Hand-holding", "", hh_picker, cx),
+        ];
+        if project.is_repo {
+            new_thread_rows.push(Self::row(
+                "Runs in",
+                "The project folder, or a worktree of its own on a new branch, so threads don't edit each other's files. The composer can change it per thread.",
+                run_in,
+                cx,
+            ));
+            new_thread_rows.push(Self::row(
+                "Copy into new worktrees",
+                "Files a fresh checkout lacks because git ignores them, separated by commas. Ones git doesn't ignore aren't copied.",
+                div().w(px(240.)).child(Input::new(&self.worktree_copy).small()),
+                cx,
+            ));
+        }
+
         // Actions: named commands, run in a terminal tab from the title bar's Run menu.
         let mut action_rows: Vec<AnyElement> = prefs
             .actions
@@ -1322,15 +1353,7 @@ impl SettingsView {
             ),
             Self::heading("New threads", cx),
             Self::note("What a new thread in this project starts with. Anything left on “Trek default” follows Settings → General and Permissions.", cx),
-            ui::group(
-                vec![
-                    Self::row("Agent", "", agent_picker, cx),
-                    Self::row("Model", "", model_picker, cx),
-                    Self::row("Reasoning effort", "", effort_picker, cx),
-                    Self::row("Hand-holding", "", hh_picker, cx),
-                ],
-                cx,
-            ),
+            ui::group(new_thread_rows, cx),
             Self::heading("Actions", cx),
             Self::note("Commands you run often in this project: tests, a build, a dev server. They appear in the Run menu in the title bar and open in a terminal tab.", cx),
             ui::group(action_rows, cx),
@@ -1351,11 +1374,13 @@ impl SettingsView {
     pub(super) fn sync_project_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
         let projects = ws.workspace_projects();
-        let selected = ws.settings_project.as_ref().and_then(|id| projects.iter().find(|p| &p.id == id)).or(projects.first()).map(|p| (p.id.clone(), p.name.clone()));
-        let Some((id, name)) = selected else { return };
+        let selected = ws.settings_project.as_ref().and_then(|id| projects.iter().find(|p| &p.id == id)).or(projects.first()).map(|p| (p.id.clone(), p.name.clone(), p.path.clone()));
+        let Some((id, name, path)) = selected else { return };
         if self.project_name_for.as_deref() != Some(id.as_str()) {
+            let copy = self.workspace.read(cx).project_prefs(&path).worktree_copy.join(", ");
             self.project_name_for = Some(id);
             self.project_name.update(cx, |s, cx| s.set_value(name, window, cx));
+            self.worktree_copy.update(cx, |s, cx| s.set_value(copy, window, cx));
         }
     }
 

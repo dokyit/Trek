@@ -228,7 +228,11 @@ pub fn import_all(store: &Store, settings: &crate::settings::Import) -> ImportSu
 fn import_found(store: &Store, mut found: Vec<ImportedThread>) -> ImportSummary {
     // Trek's own threads are written to the agents' history too; don't show them twice.
     let trek: HashSet<String> = store.trek_native_ids().unwrap_or_default();
-    for t in found.iter_mut().filter(|t| t.skip.is_none() && trek.contains(&t.native_id)) {
+    // Sessions in Trek's worktrees are Trek's too, including ones a thread left behind when it
+    // moved to its project folder (with a new session: agents keep sessions per folder).
+    let worktrees = crate::worktree::worktrees_dir();
+    let in_worktree = |t: &ImportedThread| t.cwd.as_deref().is_some_and(|c| c.starts_with(&worktrees));
+    for t in found.iter_mut().filter(|t| t.skip.is_none() && (trek.contains(&t.native_id) || in_worktree(t))) {
         t.skip = Some(Skip::Trek);
     }
     let mut summary = ImportSummary::default();
@@ -897,10 +901,12 @@ mod tests {
             skip,
             legacy_title: None,
         };
-        let summary = import_found(&store, vec![found("s-trek", None), found("s-user", None), found("s-tmp", Some(Skip::TempDir))]);
+        // A session a thread left in its worktree (it runs in the project folder now).
+        let left = ImportedThread { cwd: Some(crate::worktree::worktrees_dir().join("repo/fix-it")), ..found("s-left", None) };
+        let summary = import_found(&store, vec![found("s-trek", None), found("s-user", None), found("s-tmp", Some(Skip::TempDir)), left]);
         assert_eq!(summary.claude_code, 1);
         assert_eq!(summary.new_threads, 1);
-        assert_eq!(summary.skipped, BTreeMap::from([(Skip::Trek, 1), (Skip::TempDir, 1)]));
+        assert_eq!(summary.skipped, BTreeMap::from([(Skip::Trek, 2), (Skip::TempDir, 1)]));
         assert_eq!(store.threads().unwrap().len(), 2);
         // Left-out sessions are listed for bringing back; Trek's own are in the sidebar already.
         assert_eq!(summary.left_out.iter().map(|t| t.native_id.as_str()).collect::<Vec<_>>(), ["s-tmp"]);

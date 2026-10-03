@@ -39,7 +39,7 @@ pub struct ProjectAction {
 }
 
 /// What new threads in a project start with, its icon, and its actions. `None` = Trek's default.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectPrefs {
     /// `lucide:<name>` or `file:<path>`; `None` shows the two-letter monogram.
@@ -49,6 +49,35 @@ pub struct ProjectPrefs {
     pub effort: Option<Effort>,
     pub hand_holding: Option<HandHolding>,
     pub actions: Vec<ProjectAction>,
+    /// Where new threads run (git projects).
+    pub run_in: RunIn,
+    /// Files and folders new worktrees get a copy of from the project folder (paths relative to
+    /// it): ignored ones a fresh checkout lacks, such as `.env`.
+    pub worktree_copy: Vec<String>,
+}
+
+impl Default for ProjectPrefs {
+    fn default() -> Self {
+        Self {
+            icon: None,
+            agent: None,
+            model: None,
+            effort: None,
+            hand_holding: None,
+            actions: vec![],
+            run_in: RunIn::Local,
+            worktree_copy: crate::worktree::default_copy(),
+        }
+    }
+}
+
+/// Where a thread runs: in the project folder, or in a worktree of its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunIn {
+    #[default]
+    Local,
+    Worktree,
 }
 
 impl ProjectPrefs {
@@ -466,6 +495,21 @@ mod tests {
         let partial: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
         assert_eq!(partial.general.hand_holding, HandHolding::Auto);
         assert_eq!(partial.inbox.auto_settle_days, 3);
+    }
+
+    #[test]
+    fn projects_from_before_worktrees_run_locally_and_copy_env_files() {
+        let s: Settings = toml::from_str("[projects.\"/code/app\"]\nicon = \"lucide:rocket\"\n").unwrap();
+        let p = &s.projects["/code/app"];
+        assert_eq!(p.run_in, RunIn::Local);
+        assert_eq!(p.worktree_copy, [".env", ".env.local"]);
+        assert!(!p.is_empty());
+        let mut back = p.clone();
+        back.icon = None;
+        assert!(back.is_empty(), "defaults alone don't keep a project's entry");
+        back.run_in = RunIn::Worktree;
+        let text = toml::to_string(&back).unwrap();
+        assert_eq!(toml::from_str::<ProjectPrefs>(&text).unwrap(), back);
     }
 
     #[test]

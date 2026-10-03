@@ -1010,21 +1010,108 @@ impl Composer {
             })
     }
 
-    /// Where the agent runs (this Mac) and on which branch, with a branch switcher.
+    /// Where a draft runs: the project folder, or a worktree of its own (git projects). A quiet
+    /// menu; the choice is fixed once the thread starts. `blocked`: why a worktree can't start
+    /// from the project folder right now (no branch, or no commit, to start from).
+    fn place_chip(&self, worktree: bool, blocked: Option<&'static str>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.clone();
+        let (icon, label) = if worktree { (crate::assets::Lucide::GitBranchPlus, "New worktree") } else { (crate::assets::Lucide::Laptop, "Local") };
+        gpui_kit::component::button::Button::new("env-place")
+            .ghost()
+            .small()
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .text_color(theme.foreground.opacity(0.82))
+                    .child(Icon::new(icon).small().text_color(if worktree && blocked.is_some() { palette::amber(cx) } else { theme.muted_foreground }))
+                    .child(label)
+                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
+            )
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                let pick = |label: &'static str, on: bool| {
+                    let ws = ws.clone();
+                    PopupMenuItem::new(label).checked(worktree == on).on_click(move |_, _, cx| {
+                        ws.update(cx, |ws, cx| {
+                            let mut p = ws.prefs_in(&Scope::Main);
+                            p.worktree = on;
+                            ws.set_prefs_in(&Scope::Main, p, cx);
+                        })
+                    })
+                };
+                let menu = menu
+                    .min_w(px(240.))
+                    .label("New thread runs in")
+                    .item(pick("Local: the project folder", false).icon(crate::assets::Lucide::Laptop))
+                    .item(pick("New worktree: a branch of its own", true).icon(crate::assets::Lucide::GitBranchPlus).disabled(blocked.is_some() && !worktree));
+                match blocked {
+                    Some(why) => menu.separator().label(why),
+                    None => menu,
+                }
+            })
+            .into_any_element()
+    }
+
+    /// Where the agent runs (this Mac: the project folder or the thread's worktree) and on which
+    /// branch, with a branch switcher (not for worktrees: their branch is the thread's).
     fn env_chips(&self, with_project: bool, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
         let git = ws.git_in(&self.scope).cloned();
         let cwd = ws.cwd_in(&self.scope);
         let has_cwd = cwd.is_some();
+        let is_draft = ws.is_draft_in(&self.scope);
+        let draft_worktree = ws.prefs_in(&self.scope).worktree;
+        let worktree = ws.thread_in(&self.scope).and_then(|t| t.worktree.clone());
         let theme = cx.theme().clone();
         let chip = |id: &'static str| {
             h_flex().id(id).h(px(26.)).px(px(8.)).gap(px(6.)).rounded(px(7.)).text_sm().text_color(theme.foreground.opacity(0.82))
         };
-        let local = chip("env-local")
-            .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
-            .child("Local")
-            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Runs on this Mac, in the project folder").build(window, cx));
+        // A worktree needs a branch to start from (and a commit on it). The menu shows for any git
+        // project, and whenever the draft is set to a worktree (its git state may not be in yet):
+        // what it says is what sending does, and it can always go back to Local.
+        let is_repo = git.as_ref().is_some_and(|g| g.is_repo);
+        let blocked = match &git {
+            Some(g) if g.is_repo && g.branch.is_none() => Some("The project folder isn't on a branch to start from."),
+            Some(g) if g.is_repo && g.branches.is_empty() => Some("The repository has no commits to start from."),
+            _ => None,
+        };
+        let place = if is_draft && (is_repo || draft_worktree) {
+            self.place_chip(draft_worktree, blocked, cx)
+        } else if let Some(wt) = worktree.clone() {
+            let tip = format!("Runs in a worktree of its own: {}", trek_core::paths::tildify(&wt.path));
+            chip("env-worktree")
+                .test_support()
+                .child(Icon::new(crate::assets::Lucide::GitBranchPlus).small().text_color(theme.muted_foreground))
+                .child("Worktree")
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .into_any_element()
+        } else {
+            chip("env-local")
+                .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
+                .child("Local")
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Runs on this Mac, in the project folder").build(window, cx))
+                .into_any_element()
+        };
         let branch: Option<AnyElement> = match git {
+            // The thread's own branch, off its base.
+            _ if worktree.is_some() => worktree.map(|wt| {
+                chip("env-branch")
+                    .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(palette::indigo(cx)))
+                    .child(div().text_color(theme.foreground.opacity(0.9)).child(wt.branch.clone()))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(format!("off {}", wt.base)))
+                    .into_any_element()
+            }),
+            // A draft headed for a worktree: the branch it starts from, with no switcher (switching
+            // would check another branch out in the project folder, not pick a base).
+            Some(g) if is_draft && draft_worktree && g.is_repo => Some(
+                chip("env-base")
+                    .test_support()
+                    .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(theme.muted_foreground))
+                    .when_some(g.branch.clone(), |el, b| el.child(div().text_xs().text_color(theme.muted_foreground).child("off")).child(div().text_color(theme.foreground.opacity(0.9)).child(b)))
+                    .when(g.branch.is_none(), |el| el.text_color(palette::amber(cx)).child("detached HEAD"))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("The worktree's branch starts from the branch the project folder is on").build(window, cx))
+                    .into_any_element(),
+            ),
             Some(g) if g.is_repo => {
                 let name = g.branch.clone().unwrap_or_else(|| "detached HEAD".into());
                 let on_default = g.on_default();
@@ -1082,8 +1169,39 @@ impl Composer {
         h_flex()
             .gap_1()
             .when(with_project, |el| el.child(self.project_chip(cx)))
-            .child(local)
+            .child(place)
             .children(branch)
+            .into_any_element()
+    }
+
+    /// The thread's worktree folder is gone: say so, and offer the ways on. Messages wait.
+    fn missing_worktree(&self, wt: &trek_core::worktree::Worktree, id: String, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (ws1, ws2, id2) = (self.workspace.clone(), self.workspace.clone(), id.clone());
+        h_flex()
+            .id("worktree-missing")
+            .test_support()
+            .px(px(14.))
+            .py(px(8.))
+            .gap(px(10.))
+            .border_b_1()
+            .border_color(theme.foreground.opacity(0.07))
+            .child(Icon::new(IconName::TriangleAlert).small().text_color(palette::amber(cx)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().font_medium().child("Worktree missing"))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(format!("The folder for {} is gone. Messages wait until the thread has a folder again.", wt.branch))),
+            )
+            .child(gpui_kit::component::button::Button::new("wt-recreate").small().outline().label("Recreate from branch").on_click(move |_, _, cx| {
+                let id = id.clone();
+                ws1.update(cx, |ws, cx| ws.recreate_worktree(&id, cx))
+            }))
+            .child(gpui_kit::component::button::Button::new("wt-local").small().ghost().label("Run in project folder").on_click(move |_, _, cx| {
+                let id = id2.clone();
+                ws2.update(cx, |ws, cx| ws.run_in_project_folder(&id, cx))
+            }))
             .into_any_element()
     }
 
@@ -1148,6 +1266,12 @@ impl Render for Composer {
         let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
         let compact = self.width.get() < px(600.);
         let plan = prefs.plan;
+        let preparing = live.is_some_and(|l| l.preparing);
+        let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && w.is_missing())?, t.id.clone())));
+        // Another thread edits the same folder right now: offer a worktree for the next one.
+        let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).map(|t| ws.project_dir(t));
+        // The way out is a worktree, for git projects.
+        let crowded_repo = crowded.clone().flatten().filter(|p| p.join(".git").exists());
 
         // Model pill + menu.
         let model_open = self.model_open;
@@ -1266,10 +1390,14 @@ impl Render for Composer {
                         .text_color(theme.muted_foreground)
                         .child(self.env_chips(false, cx))
                         .when(plan, |el| el.child(h_flex().gap(px(6.)).text_color(palette::indigo(cx)).child(Icon::new(crate::assets::Lucide::ListChecks).small()).child("Plan mode")))
+                        .when(preparing, |el| {
+                            el.child(h_flex().gap(px(6.)).child(gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground)).child("Creating the worktree…"))
+                        })
                         .child(div().flex_1())
 
                 )
             })
+            .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.attachment_strip(cx))
             .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
                 let me = cx.entity().downgrade();
@@ -1338,6 +1466,30 @@ impl Render for Composer {
                 )
                 .when_some(cost_label, |el, c| el.child(c))
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
+                .when(crowded.is_some(), |el| {
+                    let ws = self.workspace.clone();
+                    el.child(
+                        h_flex()
+                            .min_w_0()
+                            .gap(px(6.))
+                            .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(palette::amber(cx)))
+                            .child(div().min_w_0().truncate().child("Another thread is also editing this folder"))
+                            .when_some(crowded_repo, |el, project| el.child(
+                                div()
+                                    .id("next-in-worktree")
+                                    .test_support()
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .text_color(theme.foreground.opacity(0.85))
+                                    .hover(|s| s.text_color(theme.foreground).underline())
+                                    .child("Use a worktree next time")
+                                    .on_click(move |_, _, cx| {
+                                        let project = project.clone();
+                                        ws.update(cx, |ws, cx| ws.new_thread_in_worktree(project, cx))
+                                    }),
+                            )),
+                    )
+                })
                 .child(div().flex_1())
                 // The tools panel lives in the main window.
                 .when(main, |el| {

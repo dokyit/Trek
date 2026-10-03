@@ -121,11 +121,12 @@ impl ThreadWindow {
         let theme = cx.theme().clone();
         let thread = ws.thread(&self.id).cloned();
         let folder = thread.as_ref().and_then(|t| t.cwd.clone());
-        let root = folder.as_deref().map(trek_core::store::project_root);
+        let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
         let project = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
         let name = project.map(|p| p.name.clone()).or_else(|| folder.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()));
         let icon = root.as_ref().and_then(|r| ws.project_icon(r));
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
+        let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
         let title = thread.map(|t| t.title).unwrap_or_default();
         let transparent = ws.backdrop().is_some();
         TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
@@ -147,7 +148,8 @@ impl ThreadWindow {
                                 .child(div().flex_none().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })
-                        .child(div().truncate().font_medium().child(title)),
+                        .child(div().min_w_0().truncate().font_medium().child(title))
+                        .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
                 .when_some(folder, |el, dir| el.child(crate::root::open_in_button(dir)))
                 .when_some(settle_id, |el, id| {
@@ -192,7 +194,8 @@ impl Render for ThreadWindow {
             .on_action(cx.listener(|this, _: &TakeSnapshot, _, cx| this.composer.update(cx, |c, cx| c.snapshot_default(cx))))
             .on_action(cx.listener(|this, _: &NewThread, _, cx| {
                 // A new thread in this thread's project, composed in the main window.
-                let project = this.workspace.read(cx).thread(&this.id).and_then(|t| t.cwd.clone());
+                let ws = this.workspace.read(cx);
+                let project = ws.thread(&this.id).and_then(|t| ws.draft_folder(t));
                 this.show_in_main(Route::Draft { project }, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_in_main(Route::Settings(SettingsPage::General), cx)))

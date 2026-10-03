@@ -11,6 +11,7 @@ pub use search::{INDEX_MAX_BYTES, ImportedToIndex, SearchHit, fts_query};
 use crate::import::ImportedThread;
 use crate::transcript::Transcript;
 use crate::types::{AgentId, Effort, HandHolding, RunState, ThreadSource};
+use crate::worktree::Worktree;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -112,6 +113,8 @@ pub struct Thread {
     pub import_hidden: Option<String>,
     /// The user chose to keep it although a rule matches it ("Show in sidebar" in Settings).
     pub import_kept: bool,
+    /// The thread runs in a worktree of its own (then `cwd` is the worktree's folder).
+    pub worktree: Option<Worktree>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -287,12 +290,21 @@ fn enum_from<T: for<'de> Deserialize<'de> + Default>(s: &str) -> T {
     serde_json::from_value(serde_json::Value::String(s.into())).unwrap_or_default()
 }
 
-/// Project root for a working directory: the enclosing git repo, else the folder itself.
+/// Project root for a working directory: the enclosing git repo (the main checkout, for one of
+/// Trek's own worktrees), else the folder itself.
 pub fn project_root(cwd: &Path) -> PathBuf {
+    project_root_in(cwd, &crate::worktree::worktrees_dir())
+}
+
+/// [`project_root`], with Trek's worktrees under `trek_worktrees`. Only those belong to their main
+/// checkout: a worktree the user made themselves (by hand, or with another tool) is a project of
+/// its own, as it's opened.
+fn project_root_in(cwd: &Path, trek_worktrees: &Path) -> PathBuf {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
         if d.join(".git").exists() {
-            return d.to_path_buf();
+            let main = d.starts_with(trek_worktrees).then(|| crate::worktree::main_checkout(d)).flatten();
+            return main.unwrap_or_else(|| d.to_path_buf());
         }
         dir = d.parent();
     }
@@ -306,6 +318,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN imported_title TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_hidden TEXT", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN import_kept INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN worktree_path TEXT", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN worktree_branch TEXT", []);
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN worktree_base TEXT", []);
     migrate_items(conn)?;
     search::ensure_schema(conn)
 }
@@ -404,7 +419,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -434,6 +449,10 @@ impl Store {
             imported_title: r.get(23)?,
             import_hidden: r.get(24)?,
             import_kept: r.get::<_, i64>(25)? != 0,
+            worktree: match (r.get::<_, Option<String>>(26)?, r.get::<_, Option<String>>(27)?, r.get::<_, Option<String>>(28)?) {
+                (Some(path), Some(branch), Some(base)) => Some(Worktree { path: PathBuf::from(path), branch, base }),
+                _ => None,
+            },
         })
     }
 
@@ -492,6 +511,7 @@ impl Store {
             imported_title: None,
             import_hidden: None,
             import_kept: false,
+            worktree: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -541,7 +561,10 @@ impl Store {
                 t.never_settle as i64,
                 t.imported_title,
                 t.import_hidden,
-                t.import_kept as i64
+                t.import_kept as i64,
+                t.worktree.as_ref().map(|w| w.path.display().to_string()),
+                t.worktree.as_ref().map(|w| w.branch.clone()),
+                t.worktree.as_ref().map(|w| w.base.clone())
             ],
         )?;
         Ok(())
@@ -696,6 +719,7 @@ impl Store {
             imported_title: Some(imp.title.clone()),
             import_hidden: None,
             import_kept: false,
+            worktree: None,
         })
     }
 
@@ -1119,6 +1143,66 @@ mod tests {
         s.save_thread(&b).unwrap();
         assert!(s.thread(&t.id).unwrap().is_none());
         assert_eq!(s.threads().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn worktrees_are_kept_on_threads_and_older_databases_gain_them() {
+        let dir = std::env::temp_dir().join(format!("trek-migrate-wt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        {
+            // A database from before worktrees, with a thread in it.
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute(
+                "INSERT INTO threads (id, title, agent, effort, hand_holding, source, created_at, updated_at, last_seen_at) VALUES ('old', 'Old', 'claude-code', 'high', 'auto', 'trek', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let old = s.thread("old").unwrap().unwrap();
+        assert_eq!((old.title.as_str(), old.worktree.as_ref()), ("Old", None));
+        let wt = Worktree { path: dir.join("worktrees/repo/fix-it"), branch: "trek/fix-it".into(), base: "main".into() };
+        s.update_thread("old", |t| {
+            t.cwd = Some(wt.path.clone());
+            t.worktree = Some(wt.clone());
+        })
+        .unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.thread("old").unwrap().unwrap().worktree, Some(wt));
+        // Leaving the worktree clears all three columns.
+        s.update_thread("old", |t| t.worktree = None).unwrap();
+        assert_eq!(s.thread("old").unwrap().unwrap().worktree, None);
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn treks_own_worktrees_belong_to_their_main_checkout() {
+        let dir = std::env::temp_dir().join(format!("trek-root-{}", uuid::Uuid::new_v4()));
+        let trek = dir.join("worktrees");
+        let main = dir.join("repo");
+        let linked = |name: &str, at: &Path| {
+            std::fs::create_dir_all(main.join(".git/worktrees").join(name)).unwrap();
+            std::fs::create_dir_all(at.join("src")).unwrap();
+            std::fs::write(main.join(".git/worktrees").join(name).join("commondir"), "../..\n").unwrap();
+            std::fs::write(at.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees").join(name).display())).unwrap();
+        };
+        let (ours, theirs) = (trek.join("repo/fix-it"), dir.join("elsewhere/linked"));
+        linked("fix-it", &ours);
+        linked("linked", &theirs);
+        assert_eq!(project_root_in(&ours.join("src"), &trek), main);
+        assert_eq!(project_root_in(&main, &trek), main);
+        // One the user made themselves opens as its own project.
+        assert_eq!(project_root_in(&theirs.join("src"), &trek), theirs);
+        // A submodule's `.git` file has no `commondir`: it's a project of its own, even in there.
+        std::fs::create_dir_all(main.join(".git/modules/sub")).unwrap();
+        std::fs::create_dir_all(ours.join("sub")).unwrap();
+        std::fs::write(ours.join("sub/.git"), format!("gitdir: {}\n", main.join(".git/modules/sub").display())).unwrap();
+        assert_eq!(project_root_in(&ours.join("sub"), &trek), ours.join("sub"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn imported(id: &str, title: &str) -> ImportedThread {

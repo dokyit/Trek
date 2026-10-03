@@ -256,7 +256,7 @@ fn git_init(dir: &Path) {
 }
 
 /// Commands sent to a terminal tab from now on.
-fn runs(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<(String, Option<PathBuf>)>>> {
+pub(super) fn runs(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<(String, Option<PathBuf>)>>> {
     let seen = Rc::new(RefCell::new(vec![]));
     let sink = seen.clone();
     cx.update(|cx| {
