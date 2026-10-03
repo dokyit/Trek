@@ -13,9 +13,10 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use trek_core::catalog::DIRECT_PROVIDERS;
 use trek_core::detect::Availability;
+use trek_core::import::{ImportedThread, Skip};
 use trek_core::settings::{Settings, secrets};
 use trek_core::AgentId;
 
@@ -147,6 +148,8 @@ pub struct SettingsView {
     project_name_for: Option<String>,
     action_name: Entity<InputState>,
     action_command: Entity<InputState>,
+    /// Import page: rules whose left-out sessions are listed.
+    left_out_open: HashSet<Skip>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -202,6 +205,7 @@ impl SettingsView {
             skill_name,
             skill_desc,
             skill_home: trek_core::skills::SkillHome::ClaudeCode,
+            left_out_open: HashSet::new(),
             _subscriptions: subs,
         }
     }
@@ -685,18 +689,120 @@ impl SettingsView {
                                 .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.import_threads(cx)))),
                         )
                         .when_some(summary, |el, s| {
-                            el.child(div().text_sm().text_color(muted).child(format!(
-                                "{} Claude Code · {} Codex · {} OpenCode",
-                                s.claude_code, s.codex, s.opencode
-                            )))
+                            let mut line = format!("{} Claude Code · {} Codex · {} OpenCode", s.claude_code, s.codex, s.opencode);
+                            // Title generators, test runs and sub-agents never become threads.
+                            match s.left_out.len() {
+                                0 => {}
+                                1 => line.push_str(" · 1 helper session left out"),
+                                n => line.push_str(&format!(" · {n} helper sessions left out")),
+                            }
+                            el.child(div().text_sm().text_color(muted).child(line))
                         })
                         .into_any_element(),
                 );
+                out.extend(self.left_out_section(cx));
             }
             SettingsPage::Updates => out.extend(self.updates_page(&s, cx)),
             SettingsPage::About => out.extend(self.about_page(&s, cx)),
         }
         out
+    }
+}
+
+/// How Settings names and explains each kind of session the import leaves out.
+fn left_out_rule(rule: Skip) -> (&'static str, &'static str) {
+    match rule {
+        Skip::Trek => ("Started by Trek", "Already in the sidebar as Trek's own threads."),
+        Skip::Subagent => ("Sub-agents", "Work a sub-agent did for another thread."),
+        Skip::UntouchedFork => ("Untouched forks", "Copies of a session nothing was added to. The original is imported."),
+        Skip::TitleGenerator => ("Title generators", "Other apps asking an agent to name one of their threads."),
+        Skip::TempDir => ("Temp folder runs", "Started by a program, or a single prompt, in a system temp folder."),
+        Skip::OneShotRun => ("One-shot runs", "A single prompt run from the command line, with codex exec or opencode run."),
+        Skip::NoUserMessage => ("Empty sessions", "Nothing typed and nothing answered, or only commands like /clear."),
+    }
+}
+
+impl SettingsView {
+    /// Sessions the last import left out, grouped by rule, each one can be brought back.
+    fn left_out_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(summary) = self.workspace.read(cx).import_summary.clone() else { return vec![] };
+        if summary.left_out.is_empty() {
+            return vec![];
+        }
+        let muted = cx.theme().muted_foreground;
+        let hover = cx.theme().list_active;
+        let mut rows = vec![];
+        for rule in Skip::ALL {
+            let sessions: Vec<&ImportedThread> = summary.left_out.iter().filter(|t| t.skip == Some(rule)).collect();
+            if sessions.is_empty() {
+                continue;
+            }
+            let open = self.left_out_open.contains(&rule);
+            let (title, about) = left_out_rule(rule);
+            let toggle = h_flex()
+                .id(SharedString::from(format!("left-out-{}", rule.key())))
+                .gap(px(6.))
+                .h(px(26.))
+                .px(px(8.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .text_size(px(12.5))
+                .text_color(muted)
+                .child(sessions.len().to_string())
+                .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.left_out_open.remove(&rule) {
+                        this.left_out_open.insert(rule);
+                    }
+                    cx.notify();
+                }));
+            rows.push(Self::row(title, about, toggle, cx));
+            if open {
+                rows.extend(sessions.into_iter().map(|t| self.left_out_row(t, cx)));
+            }
+        }
+        vec![
+            Self::heading("Left out", cx),
+            Self::note("Sessions that aren't your conversations don't become threads. If one was misjudged, bring it back; imports leave it in the sidebar from then on.", cx),
+            ui::group(rows, cx),
+        ]
+    }
+
+    fn left_out_row(&self, t: &ImportedThread, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let place = t.cwd.as_deref().map(trek_core::paths::tildify).unwrap_or_default();
+        // Long temp-folder paths are cut; when it happened stays readable.
+        let meta = h_flex()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .text_color(muted)
+            .when(!place.is_empty(), |el| el.child(div().min_w_0().truncate().child(place)).child("·"))
+            .child(div().flex_none().child(crate::time::relative(t.updated_at)));
+        let session = t.clone();
+        h_flex()
+            .w_full()
+            .min_h(px(44.))
+            .gap(px(12.))
+            .py(px(8.))
+            .pl(px(12.))
+            .child(ui::agent_logo(&t.source.agent().unwrap_or(AgentId::ClaudeCode), px(14.), cx))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(div().text_size(px(13.)).truncate().child(t.title.clone()))
+                    .child(meta),
+            )
+            .child(
+                Button::new(SharedString::from(format!("left-out-show-{}-{}", t.source.key(), t.native_id)))
+                    .small()
+                    .outline()
+                    .label("Show in sidebar")
+                    .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.show_left_out(&session, cx)))),
+            )
+            .into_any_element()
     }
 }
 

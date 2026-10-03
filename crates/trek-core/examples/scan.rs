@@ -9,7 +9,9 @@ fn main() {
     let t = std::time::Instant::now();
     let store = trek_core::store::Store::in_memory().unwrap();
     let s = trek_core::import::import_all(&store, &Default::default());
-    println!("import: {s:?} in {:?}", t.elapsed());
+    println!("import: {} Claude Code, {} Codex, {} OpenCode in {:?}", s.claude_code, s.codex, s.opencode, t.elapsed());
+    let left_out: Vec<String> = s.skipped.iter().map(|(rule, n)| format!("{n} {}", rule.label())).collect();
+    println!("left out: {}", if left_out.is_empty() { "none".into() } else { left_out.join(", ") });
     println!("projects: {}", store.projects().unwrap().len());
     for th in store.threads().unwrap().iter().take(5) {
         println!("  [{}] {} — {}", th.source.label(), th.title, th.cwd.as_ref().map(|p| trek_core::paths::tildify(p)).unwrap_or_default());

@@ -25,7 +25,10 @@ credentials:
 **One inbox for all of it.** Running threads and anything waiting on you sit at the top of the sidebar;
 finished work settles on its own (after a few idle days, or when you settle it), and threads can be pinned,
 snoozed, renamed and searched. Projects get their own icon, defaults for new threads and title-bar actions.
-Trek imports your existing Claude Code, Codex and OpenCode history (read-only) and resumes those threads.
+Trek imports your existing Claude Code, Codex and OpenCode history (read-only) and resumes those threads,
+titled by what you asked and with each message's time. Sessions that aren't your conversations (sub-agents,
+other apps' title generators, one-shot and temp-folder runs) are left out; Settings › Import lists them and
+brings back any it misjudged.
 
 **A composer that knows the agent.** Model and effort per agent, four hand-holding levels (Supervised ·
 Auto-accept edits · Auto · Full access, the last one unlocked once in Settings), Plan mode on ⇧Tab,

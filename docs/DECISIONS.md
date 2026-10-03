@@ -74,6 +74,13 @@ Full access must be unlocked once in Settings → Permissions (Claude/Codex both
 Prefer the tool's own API, fall back to read-only file parsing. Index metadata only; load transcripts lazily
 (Claude Code JSONL files on this machine reach 130 MB).
 
+Helper sessions (sub-agents, untouched forks, title generators, temp-folder and one-shot runs, empty
+sessions, Trek's own) are left out by conservative rules, since a false positive hides a real conversation;
+already-imported ones are archived unless they were pinned or continued in Trek, and "Show in sidebar"
+(Settings › Import) marks a session kept so later imports leave it. Titles come from the source's own title when it's
+meaningful, else the first real user message; the imported title is stored so a rename in Trek survives
+re-import. Imported turns get the live response footer, timed wall-clock from the user's message.
+
 | Source | Where | Resume |
 |---|---|---|
 | Claude Code | `~/.claude/projects/<cwd-slug>/<id>.jsonl` | `claude -p --resume <id>` |
