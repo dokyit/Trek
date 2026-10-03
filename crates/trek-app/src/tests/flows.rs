@@ -602,3 +602,20 @@ fn transcripts_are_saved_as_turns_pause_soon_after_changes_and_on_quit() {
         assert_eq!(store.items(&quiet).expect("items"), vec![Item::Assistant { text: "Half an answer".into() }]);
     });
 }
+
+#[test]
+fn tests_run_none_of_the_users_agents_or_shells() {
+    run(async |cx| {
+        let trek = open(cx);
+        // Detection would run every agent CLI on this Mac, and then their sign-ins and probes.
+        trek.update(cx, |ws, cx| ws.detect_agents(cx));
+        assert!(trek.read(cx, |ws, _| !ws.detecting && ws.agents.is_empty()));
+        assert_eq!(std::env::var_os("HOME").map(std::path::PathBuf::from), Some(super::harness::data_dir().join("home")));
+        // A project action opens its terminal tab without running anything.
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.run_project_action(project, "touch ran.txt".into(), cx));
+        trek.render(cx);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!trek.project.join("ran.txt").exists());
+    });
+}

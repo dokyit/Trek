@@ -162,11 +162,11 @@ fn pr_label(url: &str) -> String {
     }
 }
 
-/// The thread on screen runs in a worktree: what the panel reviews.
+/// The thread on screen runs in a worktree: what the panel reviews. (Not its title: a rename
+/// mustn't start the review over.)
 #[derive(Clone, Debug, PartialEq)]
 struct Target {
     thread: String,
-    title: String,
     project: PathBuf,
     wt: Worktree,
 }
@@ -195,19 +195,23 @@ pub struct GitPanel {
     message: Entity<InputState>,
     busy: Option<&'static str>,
     turns_seen: u64,
+    /// The thread's worktree is being made (or made again): nothing to review yet.
+    preparing: bool,
     _subscriptions: Vec<Subscription>,
     _task: Option<Task<()>>,
+    /// Reading the selected file's diff; a newer selection replaces it.
+    _diff: Option<Task<()>>,
 }
 
 impl GitPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let sub = cx.observe(&workspace, |this, ws, cx| {
-            let (cwd, turns, target) = {
+            let (cwd, turns, target, preparing) = {
                 let ws = ws.read(cx);
-                (ws.current_cwd(), ws.turns_finished, Self::target_in(ws))
+                (ws.current_cwd(), ws.turns_finished, Self::target_in(ws), Self::preparing_in(ws))
             };
-            if cwd != this.cwd || turns != this.turns_seen || target != this.target {
+            if cwd != this.cwd || turns != this.turns_seen || target != this.target || preparing != this.preparing {
                 this.turns_seen = turns;
                 this.refresh(cx);
             }
@@ -225,8 +229,10 @@ impl GitPanel {
             message,
             busy: None,
             turns_seen: 0,
+            preparing: false,
             _subscriptions: vec![sub],
             _task: None,
+            _diff: None,
         };
         this.refresh(cx);
         this
@@ -234,32 +240,48 @@ impl GitPanel {
 
     fn target_in(ws: &Workspace) -> Option<Target> {
         let t = ws.current_thread()?;
-        Some(Target { thread: t.id.clone(), title: t.title.clone(), project: ws.project_dir(t)?, wt: t.worktree.clone()? })
+        Some(Target { thread: t.id.clone(), project: ws.project_dir(t)?, wt: t.worktree.clone()? })
+    }
+
+    /// The thread on screen is waiting for its worktree to be made.
+    fn preparing_in(ws: &Workspace) -> bool {
+        ws.current_thread().and_then(|t| ws.live.get(&t.id)).is_some_and(|l| l.preparing)
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let (cwd, target) = {
+        let (cwd, target, preparing) = {
             let ws = self.workspace.read(cx);
-            (ws.current_cwd(), Self::target_in(ws))
+            (ws.current_cwd(), Self::target_in(ws), Self::preparing_in(ws))
         };
-        if target != self.target {
+        if target != self.target || preparing != self.preparing {
             self.review = None;
             self.selected = None;
             self.diff.clear();
+            self._diff = None;
         }
         self.cwd = cwd;
         self.target = target.clone();
+        self.preparing = preparing;
         let Some(cwd) = self.cwd.clone() else {
             self.snap = Snapshot::default();
             cx.notify();
             return;
         };
-        self.loading = true;
-        cx.notify();
         if let Some(target) = target {
+            // Until the worktree is made there's nothing to look at (and it isn't missing).
+            if preparing {
+                self.loading = false;
+                self._task = None;
+                cx.notify();
+                return;
+            }
+            self.loading = true;
+            cx.notify();
             self.refresh_review(target, cx);
             return;
         }
+        self.loading = true;
+        cx.notify();
         self._task = Some(cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let snap = cx.background_executor().spawn(async move { snapshot(&c) }).await;
@@ -338,8 +360,10 @@ impl GitPanel {
         let (Some(cwd), Some(file)) = (self.cwd.clone(), self.snap.files.iter().find(|f| f.path == path).cloned()) else { return };
         // A worktree's diff is against where it left its base: its commits show too.
         let against_base = self.target.clone().zip(self.merge_base()).zip(self.change(&path));
-        self.selected = Some(path);
-        cx.spawn(async move |this, cx| {
+        let target = self.target.clone();
+        self.selected = Some(path.clone());
+        // Only the newest selection's diff lands: an older one still being read is dropped.
+        self._diff = Some(cx.spawn(async move |this, cx| {
             let lines = cx
                 .background_executor()
                 .spawn(async move {
@@ -350,15 +374,28 @@ impl GitPanel {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.diff = lines;
-                cx.notify();
+                if this.selected.as_deref() == Some(path.as_str()) && this.target == target {
+                    this.diff = lines;
+                    cx.notify();
+                }
             });
-        })
-        .detach();
+        }));
         cx.notify();
     }
 
     fn run(&mut self, label: &'static str, steps: Vec<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_then(label, steps, |_, _, _, _| {}, window, cx);
+    }
+
+    /// `run`, then `done` if every step succeeded.
+    fn run_then(
+        &mut self,
+        label: &'static str,
+        steps: Vec<Vec<String>>,
+        done: impl FnOnce(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(cwd) = self.cwd.clone() else { return };
         self.run_op(
             label,
@@ -370,7 +407,7 @@ impl GitPanel {
                 }
                 Ok(last)
             },
-            |_, _, _| {},
+            done,
             window,
             cx,
         );
@@ -382,7 +419,7 @@ impl GitPanel {
         &mut self,
         label: &'static str,
         op: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-        done: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+        done: impl FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -395,7 +432,7 @@ impl GitPanel {
                 match result {
                     Ok(v) => {
                         window.push_notification(format!("{label} done"), cx);
-                        done(this, v, cx);
+                        done(this, v, window, cx);
                     }
                     Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
                 }
@@ -411,17 +448,32 @@ impl GitPanel {
             window.push_notification("Write a commit message first", cx);
             return;
         }
-        self.message.update(cx, |s, cx| s.set_value("", window, cx));
+        // The message goes once the commit is made: if a hook or signing turns it down, it's
+        // still there to try again (unless the user has started another meanwhile).
+        let sent = msg.clone();
         if let Some(t) = self.target.clone() {
-            self.run_op("Commit", move || worktree::commit(&t.wt.path, &msg), |_, _, _| {}, window, cx);
+            self.run_op("Commit", move || worktree::commit(&t.wt.path, &msg), move |this, _, window, cx| this.committed(&sent, window, cx), window, cx);
             return;
         }
-        self.run("Commit", vec![vec!["add".into(), "-A".into()], vec!["commit".into(), "-m".into(), msg]], window, cx);
+        let steps = vec![vec!["add".into(), "-A".into()], vec!["commit".into(), "-m".into(), msg]];
+        self.run_then("Commit", steps, move |this, _, window, cx| this.committed(&sent, window, cx), window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn message_text(&self, cx: &App) -> String {
+        self.message.read(cx).value().to_string()
+    }
+
+    /// `message` was committed: the box empties, unless the user has started another meanwhile.
+    fn committed(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.message.read(cx).value().trim() == message {
+            self.message.update(cx, |s, cx| s.set_value("", window, cx));
+        }
     }
 
     fn push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = self.target.clone() {
-            self.run_op("Push", move || worktree::push(&t.wt), |_, _, _| {}, window, cx);
+            self.run_op("Push", move || worktree::push(&t.wt), |_, _, _, _| {}, window, cx);
             return;
         }
         let step = if self.snap.upstream.is_some() { vec!["push".to_string()] } else { vec!["push".into(), "-u".into(), "origin".into(), "HEAD".into()] };
@@ -454,15 +506,17 @@ impl GitPanel {
 
     fn create_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = self.target.clone() else { return };
-        let summary = self.workspace.read(cx).last_answer(&t.thread);
+        let ws = self.workspace.read(cx);
+        let summary = ws.last_answer(&t.thread);
+        let title = ws.thread(&t.thread).map(|t| t.title.clone()).unwrap_or_default();
         let branch = t.wt.branch.clone();
         self.run_op(
             "Pull request",
             move || {
                 let body = pr_body(summary.as_deref(), &worktree::commit_subjects(&t.wt));
-                worktree::create_pr(&t.wt, &t.title, &body)
+                worktree::create_pr(&t.wt, &title, &body)
             },
-            move |this, url, cx| {
+            move |this, url, _, cx| {
                 cx.open_url(&url);
                 this.prs.insert(branch, Some(url));
             },
@@ -510,7 +564,7 @@ impl GitPanel {
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
                     let (t, base, change) = (t.clone(), base.clone(), change.clone());
-                    let _ = me.update(cx, |this, cx| this.run_op("Revert", move || worktree::revert_file(&t.wt, &base, &change), |_, _, _| {}, window, cx));
+                    let _ = me.update(cx, |this, cx| this.run_op("Revert", move || worktree::revert_file(&t.wt, &base, &change), |_, _, _, _| {}, window, cx));
                     true
                 })
         });
@@ -635,7 +689,7 @@ impl GitPanel {
         let diff_lines = self.diff.clone();
         let add_bg = palette::emerald(cx).opacity(0.12);
         let del_bg = palette::red(cx).opacity(0.12);
-        uniform_list("git-diff", diff_lines.len(), move |range, _, cx| {
+        let list = uniform_list("git-diff", diff_lines.len(), move |range, _, cx| {
             let theme = cx.theme();
             range
                 .map(|i| {
@@ -653,8 +707,8 @@ impl GitPanel {
                 })
                 .collect()
         })
-        .size_full()
-        .into_any_element()
+        .size_full();
+        div().id("git-diff-view").test_support().size_full().child(list).into_any_element()
     }
 
     /// A worktree thread whose folder is gone.
@@ -688,6 +742,18 @@ impl GitPanel {
     /// request, merge and remove.
     fn render_review(&mut self, t: Target, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        if self.preparing {
+            return v_flex()
+                .id("git-wt-preparing")
+                .test_support()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(Spinner::new().small().color(theme.muted_foreground))
+                .child(div().text_sm().text_color(theme.muted_foreground).child(format!("Making the worktree for {}…", t.wt.branch)))
+                .into_any_element();
+        }
         let state = match self.review.clone() {
             Some(Err(e)) if e == "missing" => return self.missing(&t, cx),
             Some(Err(e)) => return v_flex().size_full().child(self.header(cx)).child(super::empty(e, cx)).into_any_element(),

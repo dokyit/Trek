@@ -107,7 +107,7 @@ fn model_name(models: &[ModelInfo], id: &str) -> String {
 }
 
 /// The agent's default when the thread hasn't picked one: Opus 5.5 for Claude, the first live model otherwise.
-fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
+pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
     models.iter().find(|m| m.id == "claude-opus-5-5").or_else(|| models.first())
 }
 
@@ -162,6 +162,10 @@ impl Composer {
                 if stale {
                     this.cancel_edit(window, cx);
                 }
+                // An open @ picker follows the folder on screen.
+                if this.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
+                    this.ensure_file_index(cx);
+                }
                 cx.notify()
             }),
             cx.observe(&model_search, |_, _, cx| cx.notify()),
@@ -195,7 +199,8 @@ impl Composer {
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.outbox.hold_send() {
+        let target = self.target(cx);
+        if self.outbox.hold_send(target) {
             cx.notify();
             return;
         }
@@ -387,6 +392,12 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn text(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
+    }
+
+    /// The open picker's rows, by label.
+    #[cfg(test)]
+    pub(crate) fn picks(&self, cx: &App) -> Vec<String> {
+        self.picker_items(cx).into_iter().map(|i| i.label).collect()
     }
 
     /// Images attached to the next message, and how many are still being saved.
@@ -599,6 +610,10 @@ impl Composer {
             let _ = this.update(cx, |this, cx| {
                 this.file_index = Some((root, Arc::new(files)));
                 this.indexing = None;
+                // The folder on screen changed meanwhile: index that one too.
+                if this.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
+                    this.ensure_file_index(cx);
+                }
                 cx.notify();
             });
         }));
@@ -646,7 +661,8 @@ impl Composer {
                     .take(6)
                     .map(|c| PickItem { label: format!("agent-{}", c.name), detail: c.description.clone(), insert: format!("@agent-{}", c.name), icon: PickIcon::Agent })
                     .collect();
-                if let Some((_, files)) = &self.file_index {
+                // Another folder's files (the window moved to a thread elsewhere) aren't offered.
+                if let Some((_, files)) = self.file_index.as_ref().filter(|(root, _)| ws.cwd_in(&self.scope).as_ref() == Some(root)) {
                     v.extend(mentions::match_files(files, &t.query, 40).into_iter().map(|f| {
                         let dir = f.ends_with('/');
                         let trimmed = f.trim_end_matches('/');
@@ -1243,8 +1259,10 @@ impl Composer {
                         })
                     })
                 };
+                // The items have icons, which would take the check's place on the left.
                 let menu = menu
                     .min_w(px(240.))
+                    .check_side(gpui_kit::component::Side::Right)
                     .label("New thread runs in")
                     .item(pick("Local: the project folder", false).icon(crate::assets::Lucide::Laptop))
                     .item(pick("New worktree: a branch of its own", true).icon(crate::assets::Lucide::GitBranchPlus).disabled(blocked.is_some() && !worktree));
@@ -1436,6 +1454,15 @@ impl Composer {
 impl Attaching for Composer {
     fn outbox(&mut self) -> &mut Outbox {
         &mut self.outbox
+    }
+
+    fn target(&self, cx: &App) -> String {
+        let ws = self.workspace.read(cx);
+        match (ws.thread_id_in(&self.scope), &ws.route) {
+            (Some(id), _) => format!("thread:{id}"),
+            (None, Route::Draft { project }) => format!("draft:{}", project.as_deref().map(|p| p.display().to_string()).unwrap_or_default()),
+            (None, _) => String::new(),
+        }
     }
 
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {

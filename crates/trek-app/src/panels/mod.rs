@@ -146,6 +146,15 @@ impl RightPanel {
         self.active.and_then(|id| self.tabs.iter().find(|t| t.id == id))
     }
 
+    /// What the Git tool's commit message box holds, while it's the tab on show.
+    #[cfg(test)]
+    pub(crate) fn git_message(&self, cx: &App) -> Option<String> {
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Git(g)) => Some(g.read(cx).message_text(cx)),
+            _ => None,
+        }
+    }
+
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
             Some(View::Browser(b)) => b.update(cx, |b, cx| b.set_visible(false, cx)),

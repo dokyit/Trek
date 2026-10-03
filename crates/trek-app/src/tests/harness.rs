@@ -2,8 +2,9 @@
 //! helpers to drive it and wait for the mock agent.
 //!
 //! Isolation: `trek_core::paths::isolate` points every write at a temp folder for this test process
-//! and keeps the Keychain out of reach; the store is in memory; notifications are off. Tests run in
-//! parallel, each on its own thread with its own GPUI app, so nothing else is shared.
+//! (each test's thread gets a folder of its own in it) and keeps the Keychain out of reach; the
+//! store is in memory; notifications are off. Tests run in parallel, each on its own thread with
+//! its own GPUI app, so nothing else is shared.
 
 use crate::root::TrekWindow;
 use crate::workspace::{GlobalWorkspace, Route, Workspace};
@@ -35,10 +36,20 @@ fn load_text_system() {
 }
 
 /// Every test in this process, UI or not, is isolated before any of them runs: the unit tests
-/// that share the binary with these never reach the user's data folder or Keychain either.
+/// that share the binary with these never reach the user's data folder or Keychain either. Home
+/// moves too, so anything that slips past Trek's own guards (an agent CLI, a login shell) finds
+/// none of the user's history or config.
 #[ctor::ctor(unsafe)]
 fn isolate_process() {
-    data_dir();
+    // Live tests (`TREK_LIVE_AGENT`) run a real agent, which needs the user's sign-in.
+    if std::env::var_os("TREK_LIVE_AGENT").is_some() {
+        data_dir();
+        return;
+    }
+    let home = data_dir().join("home");
+    let _ = std::fs::create_dir_all(&home);
+    // SAFETY: before `main`, so before any other thread could be reading the environment.
+    unsafe { std::env::set_var("HOME", &home) };
 }
 
 /// This process's throwaway data folder. Isolation is set up on first use; folders left by test
@@ -67,7 +78,9 @@ pub fn data_dir() -> &'static PathBuf {
 /// Run `test` as `#[gpui_kit::test]` would, with real text layout. Real time may pass: the mock
 /// agent runs on Trek's tokio runtime and its events wake the test from other threads.
 pub fn run(test: impl AsyncFnOnce(&mut TestAppContext)) {
-    data_dir();
+    // A data folder of the test's own (settings above all): the tests run side by side.
+    static N: AtomicUsize = AtomicUsize::new(0);
+    trek_core::paths::isolate_thread(data_dir().join("tests").join(N.fetch_add(1, Ordering::Relaxed).to_string()));
     let dispatcher = TestDispatcher::new(0);
     let exec = Arc::new(dispatcher.clone());
     let text = TEXT.get().cloned().unwrap_or_else(|| Arc::new(gpui_kit::NoopTextSystem::new()));

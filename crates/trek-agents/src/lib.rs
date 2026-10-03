@@ -154,6 +154,8 @@ pub enum AgentEvent {
     /// The latest point the session can be taken back to, for `SessionConfig::resume_at`: the
     /// last message's id (Claude Code) or the last finished turn's (Codex).
     Mark(String),
+    /// Something went wrong. It ends no turn by itself (an unreadable image, a refused model
+    /// change): a turn that fails says so as it completes, or its session ends.
     Error(String),
     Exited,
 }
@@ -370,6 +372,13 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every test in this binary is isolated before any runs: none may reach the user's data
+    /// folder or Keychain, whichever runs first.
+    #[ctor::ctor(unsafe)]
+    fn isolate_process() {
+        trek_core::paths::isolate(std::env::temp_dir().join("trek-agents-tests"));
+    }
 
     #[test]
     fn diff_stat_ignores_headers() {

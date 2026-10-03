@@ -789,6 +789,14 @@ impl Sidebar {
     }
 }
 
+/// The inbox's cards in order: what waits on the user (approvals, failures), then what's running
+/// now, then the rest of the inbox, newest first as `Thread::inbox_rank` has them. Running threads
+/// mustn't sink below a day's worth of finished ones and out of view.
+fn live_order(inbox: Vec<Thread>, working: Vec<Thread>) -> Vec<Thread> {
+    let (waiting, rest): (Vec<Thread>, Vec<Thread>) = inbox.into_iter().partition(|t| t.needs_you());
+    waiting.into_iter().chain(working).chain(rest).collect()
+}
+
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
@@ -824,7 +832,13 @@ impl Render for Sidebar {
 
         let mut list = v_flex().pt_1().pb_3();
         let mut settled: Vec<Thread> = vec![];
-        let mut live_count = 0;
+        // Inbox and Working are one run of cards: see `live_order`.
+        let live: Vec<Thread> = {
+            let of = |s: Section| sections.iter().find(|(x, _)| *x == s).map(|(_, v)| v.clone()).unwrap_or_default();
+            live_order(of(Section::Inbox), of(Section::Working))
+        };
+        let live_count = live.len();
+        let mut live = Some(live);
         for (section, threads) in sections {
             match section {
                 Section::Settled => settled = threads,
@@ -835,8 +849,7 @@ impl Render for Sidebar {
                     }
                 }
                 Section::Inbox | Section::Working => {
-                    live_count += threads.len();
-                    for t in &threads {
+                    for t in live.take().iter().flatten() {
                         list = list.child(self.card(t, &project_of(t), selected.as_deref() == Some(&t.id), cx));
                     }
                 }
@@ -955,5 +968,28 @@ impl Render for Sidebar {
             .child(self.top(cx))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().child(list).child(history))
             .child(self.footer(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_order;
+    use trek_core::store::{Store, Thread};
+    use trek_core::{AgentId, Effort, HandHolding, RunState};
+
+    fn thread(s: &Store, title: &str, state: RunState) -> Thread {
+        let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::Medium, HandHolding::Auto).unwrap();
+        t.title = title.into();
+        t.run_state = state;
+        t
+    }
+
+    #[test]
+    fn running_threads_come_after_what_waits_on_you_and_before_the_rest() {
+        let s = Store::in_memory().unwrap();
+        let inbox = vec![thread(&s, "asks", RunState::NeedsYou), thread(&s, "failed", RunState::Failed), thread(&s, "done", RunState::Idle), thread(&s, "older", RunState::Idle)];
+        let working = vec![thread(&s, "running", RunState::Working)];
+        let titles: Vec<String> = live_order(inbox, working).into_iter().map(|t| t.title).collect();
+        assert_eq!(titles, ["asks", "failed", "running", "done", "older"]);
     }
 }

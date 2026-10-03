@@ -574,11 +574,12 @@ impl Session {
                     self.running(id.to_string(), out);
                 }
             }
+            // The turn never started: it ends here, failed (an `Error` alone doesn't end a turn).
             (Call::Start, Some(e)) => {
                 self.turn = Turn::Idle;
                 self.held.clear();
                 self.interrupt = false;
-                out.events.push(AgentEvent::Error(e));
+                out.events.push(AgentEvent::TurnComplete { cost_usd: None, error: Some(e) });
             }
             (Call::Steer { input, turn, retried }, Some(e)) => {
                 tracing::debug!("codex refused a steer: {e}");
@@ -1638,11 +1639,11 @@ mod tests {
         // With no turn to end, the error is reported on its own.
         let out = s.incoming(&lines[1]);
         assert!(matches!(&out.events[..], [AgentEvent::Error(e)] if e.starts_with("The 'gpt-nope-9' model")));
-        // A refused turn/start is an error too, and the session can start the next one.
+        // A refused turn/start ends that turn, failed, and the session can start the next one.
         let mut s = session("t", false);
         s.command(prompt("hi"));
         let out = s.incoming(&json!({"id":3,"error":{"code":-32600,"message":"thread not loaded"}}));
-        assert_eq!(out.events, vec![AgentEvent::Error("thread not loaded".into())]);
+        assert_eq!(out.events, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("thread not loaded".into()) }]);
         assert_eq!(s.command(prompt("again")).send[0]["method"], "turn/start");
     }
 

@@ -59,7 +59,7 @@ impl Workspace {
             let result = cx.background_executor().spawn(async move { worktree::add(&project, &w, &copy) }).await;
             let _ = this.update(cx, |this, cx| this.worktree_ready(&id, &wt, result, cx));
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     fn worktree_ready(&mut self, id: &str, wt: &Worktree, result: Result<()>, cx: &mut Context<Self>) {
@@ -212,26 +212,42 @@ impl Workspace {
             return Task::ready(Err(anyhow::anyhow!("This thread has no worktree.")));
         };
         // Nothing may be writing in the folder while it's deleted: the sessions of threads sharing
-        // it end too.
+        // it end too, and messages to any of them wait until it's gone (or stays).
         let sharers = self.worktree_sharers(id);
-        let ended: Vec<Task<()>> = sharers.iter().chain([&id.to_string()]).map(|t| self.end_session(t, cx)).collect();
-        let id = id.to_string();
+        let threads: Vec<String> = sharers.iter().cloned().chain([id.to_string()]).collect();
+        for t in &threads {
+            self.live.entry(t.clone()).or_default().removing = true;
+        }
+        let ended: Vec<Task<()>> = threads.iter().map(|t| self.end_session(t, cx)).collect();
         cx.spawn(async move |this, cx| {
             for e in ended {
                 e.await;
             }
             let (p, w) = (project.clone(), wt.clone());
             let result = cx.background_executor().spawn(async move { worktree::remove(&p, &w, discard_uncommitted, delete_unmerged) }).await;
-            let _ = this.update(cx, |this, cx| match &result {
-                Ok(branch_deleted) => {
-                    // Forks that stayed in it move out too.
-                    for t in sharers.iter().chain([&id]) {
-                        this.leave_worktree(t, "Its worktree was removed. The thread runs in the project folder now, in a new agent session.", cx);
+            let _ = this.update(cx, |this, cx| {
+                for t in &threads {
+                    if let Some(live) = this.live.get_mut(t) {
+                        live.removing = false;
+                        live.revision += 1;
                     }
-                    let message = if *branch_deleted { format!("Removed the worktree and {}", wt.branch) } else { format!("Removed the worktree; {} is kept", wt.branch) };
-                    cx.emit(WorkspaceEvent::Toast { message, undo: None });
                 }
-                Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't remove the worktree: {e}"), undo: None }),
+                match &result {
+                    Ok(branch_deleted) => {
+                        // Forks that stayed in it move out too.
+                        for t in &threads {
+                            this.leave_worktree(t, "Its worktree was removed. The thread runs in the project folder now, in a new agent session.", cx);
+                        }
+                        let message = if *branch_deleted { format!("Removed the worktree and {}", wt.branch) } else { format!("Removed the worktree; {} is kept", wt.branch) };
+                        cx.emit(WorkspaceEvent::Toast { message, undo: None });
+                    }
+                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't remove the worktree: {e}"), undo: None }),
+                }
+                // What waited goes out: in the project folder, or the worktree that stayed.
+                for t in &threads {
+                    this.send_queued(t, cx);
+                }
+                cx.notify();
             });
             result
         })
@@ -263,7 +279,7 @@ impl Workspace {
                 let _ = this.update(cx, |this, cx| this.delete_thread(&id, cx));
             }
         });
-        self.tasks.push(task);
+        self.keep(task);
     }
 
     /// The agent's last answer in `id` (a pull request's description starts from it).

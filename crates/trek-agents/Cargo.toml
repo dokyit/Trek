@@ -16,3 +16,7 @@ reqwest.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 base64 = "0.22"
+
+[dev-dependencies]
+# Isolates the test binary before any test runs (see `tests::isolate_process` in lib.rs).
+ctor = "1"

@@ -59,7 +59,8 @@ impl SideChatPanel {
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.outbox.hold_send() {
+        let target = self.target(cx);
+        if self.outbox.hold_send(target) {
             cx.notify();
             return;
         }
@@ -85,6 +86,10 @@ impl SideChatPanel {
 impl Attaching for SideChatPanel {
     fn outbox(&mut self) -> &mut Outbox {
         &mut self.outbox
+    }
+
+    fn target(&self, _: &App) -> String {
+        self.thread_id.clone().unwrap_or_default()
     }
 
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
