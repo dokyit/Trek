@@ -251,7 +251,7 @@ impl Composer {
             None => (self.input.read(cx).value().to_string(), std::mem::take(&mut self.outbox.paths)),
         };
         let ws = self.workspace.read(cx);
-        let checkpoint = ws.store.checkpoint(thread, &item).ok().flatten();
+        let checkpoint = ws.restorable_checkpoint(thread, &item);
         let why_not = ws.no_checkpoint(thread, &item).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain();
         // Which files sending it would put back, found off the main thread.
         let check = checkpoint.as_ref().map(|c| {

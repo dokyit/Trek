@@ -146,6 +146,16 @@ impl Section {
 }
 
 impl Thread {
+    /// The conversation goes on in a session Trek started: the thread is Trek's own from now on.
+    /// The branch an import recorded is only where the agent once ran; Trek ties a thread to a
+    /// branch once it commits there (and settles it when that's merged), so it goes.
+    pub fn become_trek_thread(&mut self) {
+        if self.source != ThreadSource::Trek {
+            self.source = ThreadSource::Trek;
+            self.branch = None;
+        }
+    }
+
     pub fn is_unseen(&self) -> bool {
         self.updated_at > self.last_seen_at
     }
@@ -1373,6 +1383,20 @@ mod tests {
 
     fn by_native(s: &Store, id: &str) -> Thread {
         s.with(|c| c.query_row(&format!("SELECT {} FROM threads WHERE native_id = ?1", Store::THREAD_COLS), [id], Store::row_to_thread)).unwrap()
+    }
+
+    #[test]
+    fn an_imported_thread_trek_takes_over_drops_the_imported_branch() {
+        let s = Store::in_memory().unwrap();
+        s.upsert_imported(&[ImportedThread { branch: Some("feature".into()), ..imported("a", "fix the login bug") }]).unwrap();
+        let mut t = by_native(&s, "a");
+        assert_eq!(t.branch.as_deref(), Some("feature"));
+        t.become_trek_thread();
+        assert_eq!((t.source, t.branch), (ThreadSource::Trek, None));
+        // A thread that was Trek's all along keeps the branch it committed to.
+        t.branch = Some("feature".into());
+        t.become_trek_thread();
+        assert_eq!(t.branch.as_deref(), Some("feature"));
     }
 
     #[test]

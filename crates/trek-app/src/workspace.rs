@@ -204,6 +204,8 @@ pub enum NoCheckpoint {
     Failed(String),
     /// Sent before Trek kept checkpoints, or outside Trek (imported history).
     Missing,
+    /// It has one, but the thread's worktree is missing: it can be restored once that's back.
+    WorktreeMissing,
 }
 
 impl NoCheckpoint {
@@ -214,6 +216,7 @@ impl NoCheckpoint {
             NoCheckpoint::Steered => "files aren't restored: sent mid-turn",
             NoCheckpoint::Failed(_) => "files aren't restored: the checkpoint failed",
             NoCheckpoint::Missing => "files aren't restored: no checkpoint",
+            NoCheckpoint::WorktreeMissing => "files aren't restored: the worktree is missing",
         }
     }
 
@@ -224,7 +227,18 @@ impl NoCheckpoint {
             NoCheckpoint::Steered => "This message was sent while a turn was running, so it has no file checkpoint of its own; undo that turn to put the files back.".into(),
             NoCheckpoint::Failed(why) => format!("Trek couldn't take a file checkpoint when this was sent ({why}), so the files stay as they are."),
             NoCheckpoint::Missing => "There's no file checkpoint from before this message (it was sent before Trek kept them, outside Trek, or in a worktree since removed), so the files stay as they are.".into(),
+            NoCheckpoint::WorktreeMissing => "This thread's worktree is missing, so its files can't be restored now. To put them back too, recreate it from its branch first.".into(),
         }
+    }
+
+    /// Why message `pos` of `live` can't have its files restored now; `None` when it can.
+    /// `worktree_missing`: the thread's worktree folder is gone (see `Workspace::restorable_checkpoint`);
+    /// it was a git checkout, whatever the folder left behind looks like.
+    pub fn now(live: &LiveThread, pos: usize, in_repo: bool, worktree_missing: bool) -> Option<NoCheckpoint> {
+        if worktree_missing {
+            return Some(NoCheckpoint::of(live, pos, true).unwrap_or(NoCheckpoint::WorktreeMissing));
+        }
+        NoCheckpoint::of(live, pos, in_repo)
     }
 
     /// Why message `pos` of `live` has no checkpoint; `None` when it has one. `in_repo`: the
@@ -244,6 +258,11 @@ impl NoCheckpoint {
             NoCheckpoint::Missing
         })
     }
+}
+
+/// Whether `t` runs in a worktree whose folder is gone.
+pub fn worktree_missing(t: &Thread) -> bool {
+    t.worktree.as_ref().is_some_and(|w| w.is_missing())
 }
 
 /// Whether `cwd` is in a git repository (as checkpoints see it).
@@ -2239,7 +2258,7 @@ impl Workspace {
                     t.native_id = Some(n);
                 }
                 if left.is_some() {
-                    t.source = ThreadSource::Trek;
+                    t.become_trek_thread();
                 }
                 if started {
                     t.reopen = None;
@@ -2594,6 +2613,10 @@ impl Workspace {
         let thread = self.thread(id)?.clone();
         let reopen = self.rewind_plan(id, item);
         let checkpoints = self.store.checkpoints(id).unwrap_or_default();
+        // A missing worktree's files can't be put back. The refs of its checkpoints are in the
+        // repository the project folder shares with it, so they're dropped from there.
+        let shared = worktree_missing(&thread).then(|| self.project_dir(&thread)).flatten();
+        let restore = restore && !worktree_missing(&thread);
         let live = self.live.get_mut(id).filter(|l| l.loaded && !l.loading)?;
         let pos = live.items.position(item)?;
         let Item::User { text, images, aside: false, .. } = live.items[pos].clone() else { return None };
@@ -2626,7 +2649,7 @@ impl Workspace {
         // The checkpoints of messages that left the transcript go too.
         let mut gone: HashMap<PathBuf, Vec<String>> = HashMap::new();
         for c in checkpoints.into_iter().filter(|c| removed.contains(&c.item_id)) {
-            gone.entry(c.repo).or_default().push(c.item_id);
+            gone.entry(shared.clone().unwrap_or(c.repo)).or_default().push(c.item_id);
         }
         live.git_jobs.extend(gone.into_iter().map(|(repo, items)| GitJob::Forget { repo, items }));
         let mark = live.mark.clone();
@@ -2644,7 +2667,7 @@ impl Workspace {
                 t.native_id = None;
                 // The conversation goes on in a session Trek starts: the thread is Trek's own
                 // now, and imports no longer speak for it.
-                t.source = ThreadSource::Trek;
+                t.become_trek_thread();
             }
             t.run_state = RunState::Idle;
             t.updated_at = now_ms();
@@ -2660,10 +2683,21 @@ impl Workspace {
         !self.turn_running(id) && live.and_then(|l| l.items.position(item).map(|p| matches!(l.items[p], Item::User { aside: false, .. }))).unwrap_or(false)
     }
 
-    /// Why message `item` of `id` has no file checkpoint to go back to; `None` when it has one.
+    /// Why message `item` of `id` has no file checkpoint to go back to now; `None` when it has one.
     pub fn no_checkpoint(&self, id: &str, item: &str) -> Option<NoCheckpoint> {
         let live = self.live.get(id)?;
-        NoCheckpoint::of(live, live.items.position(item)?, in_repo(self.thread(id).and_then(|t| t.cwd.as_deref())))
+        let thread = self.thread(id);
+        NoCheckpoint::now(live, live.items.position(item)?, in_repo(thread.and_then(|t| t.cwd.as_deref())), thread.is_some_and(worktree_missing))
+    }
+
+    /// The checkpoint the files can be put back to as they were when message `item` of `id` was
+    /// sent. None while the thread's worktree is missing: there's nowhere to put them back, so a
+    /// rewind then takes back only the conversation.
+    pub fn restorable_checkpoint(&self, id: &str, item: &str) -> Option<trek_core::store::Checkpoint> {
+        if self.thread(id).is_none_or(worktree_missing) {
+            return None;
+        }
+        self.store.checkpoint(id, item).ok().flatten()
     }
 
     /// How the agent would pick up `id` if it were rewound to just before message `item`.
@@ -4233,6 +4267,11 @@ mod tests {
         assert_eq!(NoCheckpoint::of(&live, 4, false), Some(NoCheckpoint::NotGit));
         assert!(matches!(NoCheckpoint::of(&live, 5, true), Some(NoCheckpoint::Failed(why)) if why.contains("longer")));
         assert!(NoCheckpoint::Failed("boom".into()).explain().contains("(boom)"));
+        // In a worktree that's gone: checkpoints wait for it; the rest keep their reason.
+        assert_eq!(NoCheckpoint::now(&live, 0, false, true), Some(NoCheckpoint::WorktreeMissing));
+        assert_eq!(NoCheckpoint::now(&live, 2, false, true), Some(NoCheckpoint::Steered));
+        assert_eq!(NoCheckpoint::now(&live, 0, true, false), None);
+        assert_eq!(NoCheckpoint::now(&live, 4, false, false), Some(NoCheckpoint::NotGit));
     }
 
     #[test]

@@ -449,6 +449,67 @@ fn a_worktree_thread_checkpoints_rewinds_and_forks_in_its_worktree() {
     });
 }
 
+/// What the open rewind/undo confirmation says about the files, once it has checked them.
+async fn confirm_files(trek: &Trek, cx: &mut TestAppContext) -> String {
+    let view = trek.thread_view(cx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        cx.run_until_parked();
+        match view.read_with(cx, |v, _| v.confirm_files()) {
+            Some(f) if f != "checking" => return f,
+            None => panic!("no confirmation open"),
+            _ => {}
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out checking the files");
+        cx.background_executor.timer(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[test]
+fn a_thread_whose_worktree_is_missing_rewinds_only_the_conversation() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:write".into(), vec![], cx));
+        trek.wait(cx, "the second note", |ws| ws.live[&id].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 2).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        worktree::commit(&wt.path, "Add notes").unwrap();
+        assert_eq!(checkpoint_refs(&trek.project), 2);
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        trek.render(cx);
+        let toasts = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| gpui_kit::component::WindowExt::notifications(window, cx).len());
+        let before = toasts(&trek, cx);
+
+        // Undoing the last turn says the files can't come back, and doesn't try.
+        let end = trek.items(cx, &id).iter().rposition(|i| matches!(i, Item::TurnEnd { .. })).unwrap();
+        let why = trek.read(cx, |ws, _| {
+            let start = ws.turn_start_item(&id, &ws.live[&id].items.ids()[end]).unwrap();
+            ws.no_checkpoint(&id, &start)
+        });
+        assert_eq!(why, Some(crate::workspace::NoCheckpoint::WorktreeMissing));
+        trek.click(cx, ("undo-turn", end));
+        assert_eq!(confirm_files(&trek, cx).await, "unavailable");
+        trek.click(cx, "confirm-go");
+        assert_eq!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::User { .. })).count(), 1);
+        assert_eq!(trek.composer_text(cx), "mock:write");
+        // The undone message's checkpoint goes, from the repository the worktree shared; the
+        // first one's stays for when the worktree is back.
+        let tid = id.clone();
+        trek.wait(cx, "the undone checkpoint to go", move |ws| ws.store.checkpoints(&tid).unwrap().len() == 1).await;
+        assert_eq!(checkpoint_refs(&trek.project), 1);
+        assert_eq!(toasts(&trek, cx), before, "no failed restore");
+
+        // Recreated from its branch, the first message's files can be put back again.
+        trek.click(cx, "wt-recreate");
+        let tid = id.clone();
+        trek.wait(cx, "the worktree back", move |ws| !ws.live[&tid].preparing && ws.thread(&tid).and_then(|t| t.worktree.clone()).is_some_and(|w| !w.is_missing())).await;
+        trek.render(cx);
+        let end = trek.items(cx, &id).iter().rposition(|i| matches!(i, Item::TurnEnd { .. })).unwrap();
+        trek.click(cx, ("undo-turn", end));
+        assert_eq!(confirm_files(&trek, cx).await, "changes: NOTES.md");
+    });
+}
+
 #[test]
 fn a_fork_sharing_a_worktree_leaves_without_it() {
     run(async |cx| {

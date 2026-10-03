@@ -650,7 +650,7 @@ impl ThreadView {
         let live = at.workspace.read(cx).live.get(&at.thread);
         // A tooltip, with why the files won't be restored when they won't (message `pos`).
         let with_files = |tooltip: &str, pos: Option<usize>| -> SharedString {
-            match live.zip(pos).and_then(|(l, pos)| crate::workspace::NoCheckpoint::of(l, pos, at.in_repo)) {
+            match live.zip(pos).and_then(|(l, pos)| crate::workspace::NoCheckpoint::now(l, pos, at.in_repo, at.worktree_missing)) {
                 Some(why) => format!("{tooltip} ({})", why.short()).into(),
                 None => tooltip.to_string().into(),
             }
@@ -1048,7 +1048,7 @@ impl ThreadView {
             _ => ws.turn_start_item(&thread, &anchor),
         };
         let Some(message) = message else { return };
-        let checkpoint = ws.store.checkpoint(&thread, &message).ok().flatten();
+        let checkpoint = ws.restorable_checkpoint(&thread, &message);
         let files = match &checkpoint {
             Some(_) => Files::Checking,
             None => Files::Unavailable(ws.no_checkpoint(&thread, &message).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain()),
@@ -1508,6 +1508,8 @@ struct RowContext {
     last_end: Option<usize>,
     /// The thread's folder is in a git repository (it gets file checkpoints).
     in_repo: bool,
+    /// The thread's worktree is missing: no files can be restored until it's back.
+    worktree_missing: bool,
     text_size: Pixels,
     cwd: Option<std::path::PathBuf>,
     /// The search-result tint fades (the window is in front and motion isn't reduced).
@@ -1534,6 +1536,7 @@ impl Render for ThreadView {
             busy: ws.turn_running(&thread),
             last_end: ws.live.get(&thread).and_then(|l| l.items.iter().rposition(trek_core::rewind::ends_turn)),
             in_repo: crate::workspace::in_repo(t.and_then(|t| t.cwd.as_deref())),
+            worktree_missing: t.is_some_and(crate::workspace::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
             cwd: ws.cwd_in(&self.scope),

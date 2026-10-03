@@ -278,6 +278,44 @@ fn threads_settle_once_their_branch_is_merged() {
 }
 
 #[test]
+fn imported_threads_taken_over_by_a_rewind_arent_tied_to_the_branch_they_were_imported_on() {
+    run(async |cx| {
+        let trek = open(cx);
+        let repo = repo_on_a_feature_branch();
+        // Imported from the agent's history while the folder was on `feature`: it only ran there.
+        let user = |text: &str| Item::User { text: text.into(), images: vec![], at: None, resume: None, aside: false };
+        let id = trek.update(cx, |ws, cx| {
+            let mut t = ws.store.create_thread(Some(&repo), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            t.source = trek_core::ThreadSource::ClaudeCode;
+            t.native_id = Some("imported-s1".into());
+            t.branch = Some("feature".into());
+            ws.store.save_thread(&t).expect("save");
+            store_items(&ws.store, &t.id, vec![user("one"), Item::Assistant { text: "1".into() }, user("two"), Item::Assistant { text: "2".into() }]);
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        });
+        trek.render(cx);
+        git(&repo, &["checkout", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--no-edit", "feature"]);
+
+        // Rewound (the agent's session can't be cut back: Trek starts one with a recap), then
+        // talked to again.
+        let two = trek.read(cx, |ws, _| ws.live[&id].items.ids()[2].clone());
+        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &two, false, cx)).is_some());
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.source)), Some(trek_core::ThreadSource::Trek));
+        assert_eq!(branch_of(&trek, cx, &id), None);
+        trek.update(cx, |ws, cx| ws.send_to(&id, "two, again".into(), vec![], cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        settle_down(cx);
+        trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
+        settle_down(cx);
+        assert!(!settled(&trek, cx, &id));
+        assert_eq!(section_of(&trek, cx, &id), Some(Section::Inbox));
+    });
+}
+
+#[test]
 fn idle_sessions_are_shut_down_and_resume_on_the_next_message() {
     run(async |cx| {
         let trek = open(cx);
