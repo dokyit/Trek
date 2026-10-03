@@ -58,7 +58,7 @@ pub struct Basecamp {
     /// Where the profile was last laid out, to tell which stretch the pointer is over.
     profile: Rc<Cell<Option<Bounds<Pixels>>>>,
     _compute: Option<Task<()>>,
-    /// While open: a redraw a minute (the hiker walks with the clock, the day may turn over).
+    /// While open: a tick a minute (the hiker walks with the clock, the day may turn over).
     _clock: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -101,6 +101,23 @@ impl Basecamp {
         (self.profile.get(), self.hovered)
     }
 
+    /// The line over the profile, as drawn now.
+    #[cfg(test)]
+    pub fn profile_line(&self) -> Option<String> {
+        self.recap.as_deref().map(|r| profile_line(r, self.hovered))
+    }
+
+    /// Count the numbers up again, as on opening.
+    #[cfg(test)]
+    pub fn replay_count_up(&mut self) {
+        self.shown_at = None;
+    }
+
+    #[cfg(test)]
+    pub fn range(&self) -> Range {
+        self.range
+    }
+
     /// Follow the workspace: open or close with the route, and recompute when threads moved.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let open = self.workspace.read(cx).route == Route::Basecamp;
@@ -111,7 +128,7 @@ impl Basecamp {
             self._clock = open.then(|| {
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor().timer(Duration::from_secs(60)).await;
-                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    if this.update(cx, |this, cx| this.tick(now_ms(), cx)).is_err() {
                         break;
                     }
                 })
@@ -139,6 +156,19 @@ impl Basecamp {
             self.refresh(cx);
             cx.notify();
         }
+    }
+
+    /// The clock moved on to `now`: a recap still current only moves its "now" (the hiker, the
+    /// trail walked, "Updated"), one that isn't is computed again. Either way it's drawn again,
+    /// relative times and the greeting with it.
+    pub fn tick(&mut self, now: i64, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        if !self.computing
+            && let Some(recap) = self.recap.as_mut()
+        {
+            Arc::make_mut(recap).now = now;
+        }
+        cx.notify();
     }
 
     /// Compute the recap again if what it was computed from changed. One at a time: one that
@@ -181,16 +211,22 @@ impl Basecamp {
     }
 
     /// How far the numbers have counted up: 0 to 1 over `COUNT_UP`, eased; 1 with reduced motion.
-    fn progress(&mut self, window: &mut Window, cx: &App) -> f32 {
+    pub(crate) fn count_up(&mut self, cx: &App) -> f32 {
         if self.workspace.read(cx).settings.appearance.reduce_motion || cx.reduce_motion() {
             return 1.;
         }
         let started = *self.shown_at.get_or_insert_with(Instant::now);
         let t = (started.elapsed().as_secs_f32() / COUNT_UP.as_secs_f32()).min(1.);
-        if t < 1. {
+        1. - (1. - t).powi(3)
+    }
+
+    /// `count_up`, drawing again until it's done.
+    fn progress(&mut self, window: &mut Window, cx: &App) -> f32 {
+        let p = self.count_up(cx);
+        if p < 1. {
             window.request_animation_frame();
         }
-        1. - (1. - t).powi(3)
+        p
     }
 
     fn header(&self, review_unread: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -233,7 +269,11 @@ impl Basecamp {
             let ws = self.workspace.read(cx);
             threads.iter().map(|t| t.project_id.as_ref().and_then(|p| ws.project(p)).map(|p| p.name.clone())).collect()
         };
-        let rows: Vec<AnyElement> = threads.iter().zip(projects).map(|(t, project)| review_row(t, project, cx)).collect();
+        let waiting: Vec<Option<Waiting>> = {
+            let ws = self.workspace.read(cx);
+            threads.iter().map(|t| (t.run_state == RunState::NeedsYou).then(|| Waiting::of(ws.pending_request(&t.id)))).collect()
+        };
+        let rows: Vec<AnyElement> = threads.iter().zip(projects).zip(waiting).map(|((t, project), waiting)| review_row(t, project, waiting, cx)).collect();
         v_flex()
             .gap(px(4.))
             .child(
@@ -278,28 +318,7 @@ impl Basecamp {
     fn profile(&self, recap: &Recap, p: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let total = basecamp::count(recap.prompts, "prompt", "prompts");
-        let line = match self.hovered.and_then(|i| recap.buckets.get(i).map(|b| (i, b))) {
-            Some((i, b)) => {
-                let mut parts = vec![stretch_label(recap, i)];
-                if b.prompts > 0 {
-                    parts.push(basecamp::count(b.prompts, "prompt", "prompts"));
-                }
-                if b.agent_secs > 0 {
-                    parts.push(format!("{} of agent time", basecamp::duration(b.agent_secs)));
-                }
-                if b.tokens > 0 {
-                    parts.push(format!("{} tokens", fmt_tokens(b.tokens)));
-                }
-                if parts.len() == 1 {
-                    parts.push("quiet".into());
-                }
-                parts.join(" · ")
-            }
-            None => match recap.peak() {
-                Some(i) => format!("Summit {}", summit_label(recap, i)),
-                None => "A flat trail so far".into(),
-            },
-        };
+        let line = profile_line(recap, self.hovered);
         let data = Profile::of(recap, p, self.hovered, cx);
         let bounds = self.profile.clone();
         v_flex()
@@ -351,9 +370,10 @@ impl Basecamp {
         let mut tiles: Vec<AnyElement> = vec![];
         let figure = |text: String| div().text_size(px(17.)).font_medium().min_w_0().truncate().child(tween(&text, p));
         if let Some(best) = recap.best_model() {
+            let reported = if recap.tokens_complete() { "" } else { "reported " };
             let note = match recap.token_share(best) {
-                Some(100) => format!("All the tokens · {}", basecamp::count(best.turns, "turn", "turns")),
-                Some(share) => format!("{share}% of tokens · {}", basecamp::count(best.turns, "turn", "turns")),
+                Some(100) => format!("All the {reported}tokens · {}", basecamp::count(best.turns, "turn", "turns")),
+                Some(share) => format!("{share}% of {reported}tokens · {}", basecamp::count(best.turns, "turn", "turns")),
                 None if best.turns == recap.turns => format!("Every turn ({})", recap.turns),
                 None => format!("{} of {} turns", best.turns, recap.turns),
             };
@@ -398,9 +418,15 @@ impl Basecamp {
             ));
         }
         if recap.agent_secs > 0 || recap.failed > 0 {
+            // Said of the range, so a failure from before it still waiting for review (on the
+            // left) doesn't contradict it.
+            let when = match recap.window.range {
+                Range::Today => "today",
+                Range::Week => "this week",
+            };
             let note = match recap.failed {
-                0 => "Nothing failed".to_string(),
-                n => format!("{} failed", basecamp::count(n, "thread", "threads")),
+                0 => format!("Nothing failed {when}"),
+                n => format!("{} failed {when}", basecamp::count(n, "turn", "turns")),
             };
             tiles.push(tile("Your agents worked for", figure(basecamp::duration(recap.agent_secs)), note, cx));
         }
@@ -480,7 +506,7 @@ impl Render for Basecamp {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let review: Vec<Thread> = ws.ready_for_review().into_iter().cloned().collect();
-        let unread = ws.threads.iter().any(|t| t.is_unseen() && t.archived_at.is_none());
+        let unread = review.iter().any(Thread::is_unseen);
         // Room for the columns side by side, and for three tiles in a row.
         let side = if ws.sidebar_collapsed { 16. } else { crate::root::SIDEBAR_WIDTH + 8. };
         let room = window.viewport_size().width.as_f32() - side;
@@ -530,11 +556,53 @@ impl Render for Basecamp {
     }
 }
 
+/// What a thread that needs the user is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waiting {
+    Approval,
+    Question,
+    Plan,
+    /// The request went with its session (Trek was relaunched): it's asked again on reopening.
+    Unknown,
+}
+
+impl Waiting {
+    pub fn of(request: Option<&crate::workspace::PendingPermission>) -> Waiting {
+        match request.map(|r| &r.prompt) {
+            Some(Some(trek_agents::Prompt::Questions(_))) => Waiting::Question,
+            Some(Some(trek_agents::Prompt::Plan(_))) => Waiting::Plan,
+            Some(None) => Waiting::Approval,
+            None => Waiting::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Waiting::Approval => "Approval",
+            Waiting::Question => "Question",
+            Waiting::Plan => "Plan to review",
+            Waiting::Unknown => "Needs you",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Waiting::Approval => Icon::new(crate::assets::Lucide::ShieldCheck),
+            Waiting::Question => Icon::new(crate::assets::Lucide::MessageSquare),
+            Waiting::Plan => Icon::new(crate::assets::Lucide::ListChecks),
+            Waiting::Unknown => Icon::new(IconName::CircleAlert),
+        }
+    }
+}
+
 /// A row of "Ready for review": status, title, then agent, diff stat and project.
-fn review_row(t: &Thread, project: Option<String>, cx: &mut Context<Basecamp>) -> AnyElement {
+fn review_row(t: &Thread, project: Option<String>, waiting: Option<Waiting>, cx: &mut Context<Basecamp>) -> AnyElement {
     let theme = cx.theme().clone();
     let (icon, color, status): (Icon, Hsla, Option<&str>) = match t.run_state {
-        RunState::NeedsYou => (Icon::new(IconName::CircleAlert), palette::amber(cx), Some("Needs you")),
+        RunState::NeedsYou => {
+            let w = waiting.unwrap_or(Waiting::Unknown);
+            (w.icon(), palette::amber(cx), Some(w.label()))
+        }
         RunState::Failed => (Icon::new(IconName::CircleX), palette::red(cx), Some("Failed")),
         _ => (Icon::new(IconName::CircleCheck), palette::emerald(cx), None),
     };
@@ -647,6 +715,33 @@ fn narrative(spans: &[Span], p: f32, workspace: &Entity<Workspace>, cx: &App) ->
         .line_height(px(28.))
         .children(groups.into_iter().map(|g| h_flex().children(g)))
         .into_any_element()
+}
+
+
+/// The line over the profile: the hovered stretch's numbers, else where the summit was.
+fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
+    match hovered.and_then(|i| recap.buckets.get(i).map(|b| (i, b))) {
+        Some((i, b)) => {
+            let mut parts = vec![stretch_label(recap, i)];
+            if b.prompts > 0 {
+                parts.push(basecamp::count(b.prompts, "prompt", "prompts"));
+            }
+            if b.agent_secs > 0 {
+                parts.push(format!("{} of agent time", basecamp::duration(b.agent_secs)));
+            }
+            if b.tokens > 0 {
+                parts.push(format!("{} tokens", fmt_tokens(b.tokens)));
+            }
+            if parts.len() == 1 {
+                parts.push("quiet".into());
+            }
+            parts.join(" · ")
+        }
+        None => match recap.peak() {
+            Some(i) => format!("Summit {}", summit_label(recap, i)),
+            None => "A flat trail so far".into(),
+        },
+    }
 }
 
 /// `text` with every number in it scaled by `p` (0..1), decimals kept: the count-up.

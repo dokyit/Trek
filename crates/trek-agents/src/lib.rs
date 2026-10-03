@@ -460,6 +460,15 @@ mod live_usage {
 
     /// One tiny turn with a real agent: the events it sent.
     fn one_turn(agent: AgentId, model: &str) -> Vec<AgentEvent> {
+        turn_in(agent, model, None, "Reply with just the word: ok", HandHolding::Supervised)
+    }
+
+    /// The session a turn ran in.
+    fn session_of(events: &[AgentEvent]) -> String {
+        events.iter().find_map(|e| if let AgentEvent::Started { native_id, .. } = e { Some(native_id.clone()) } else { None }).expect("started")
+    }
+
+    fn turn_in(agent: AgentId, model: &str, resume: Option<String>, prompt: &str, hand_holding: HandHolding) -> Vec<AgentEvent> {
         let cwd = std::path::PathBuf::from("/tmp/trek-basecamp-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
@@ -467,9 +476,9 @@ mod live_usage {
             cwd,
             model: Some(model.into()),
             effort: Effort::Low,
-            hand_holding: HandHolding::Supervised,
+            hand_holding,
             plan: false,
-            resume: None,
+            resume,
             resume_at: None,
             fork: false,
             recap: None,
@@ -477,7 +486,7 @@ mod live_usage {
             mcp_servers: vec![],
         });
         trek_core::runtime().block_on(async {
-            session.commands.send(Command::Prompt { text: "Reply with just the word: ok".into(), images: vec![] }).await.unwrap();
+            session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();
             let mut seen = vec![];
             let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
             loop {
@@ -504,6 +513,31 @@ mod live_usage {
         let ev = one_turn(AgentId::ClaudeCode, "claude-haiku-4-5");
         let used = reported(&ev);
         assert!(used.iter().any(|(m, t)| m.as_deref().is_some_and(|m| m.starts_with("claude-haiku")) && t.output > 0), "{used:?}");
+    }
+
+    #[test]
+    #[ignore = "talks to the real Claude Code"]
+    fn claude_live_resumed_turn_counts_only_itself() {
+        let first = turn_in(AgentId::ClaudeCode, "claude-haiku-4-5", None, "Reply with just the word: ok", HandHolding::Supervised);
+        let before: u64 = reported(&first).iter().map(|(_, t)| t.total()).sum();
+        // A new process resuming the session: its totals carry the first turn's.
+        let second = turn_in(AgentId::ClaudeCode, "claude-haiku-4-5", Some(session_of(&first)), "Reply with just the word: yes", HandHolding::Supervised);
+        let used = reported(&second);
+        println!("first {before}, resumed {used:?}");
+        assert!(matches!(&used[..], [(Some(m), t)] if m.starts_with("claude-haiku") && t.output > 0 && t.output < 200), "{used:?}");
+    }
+
+    #[test]
+    #[ignore = "talks to the real OpenCode"]
+    fn opencode_live_turn_with_tools_counts_every_step() {
+        let model = std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into());
+        let ev = turn_in(AgentId::OpenCode, &model, None, "Use your shell tool to run `ls -a` here, then tell me how many entries it printed.", HandHolding::FullAccess);
+        let steps = trek_core::import::opencode::usage(&session_of(&ev), 0, i64::MAX);
+        let used = reported(&ev);
+        println!("steps {steps:?}\nreported {used:?}");
+        assert!(steps.len() > 1, "a turn with a tool call takes more than one step: {steps:?}");
+        let total = |t: &[TokenUsage]| t.iter().map(|t| t.total()).sum::<u64>();
+        assert_eq!(total(&used.iter().map(|(_, t)| *t).collect::<Vec<_>>()), total(&steps.iter().map(|(_, _, t)| *t).collect::<Vec<_>>()));
     }
 
     #[test]

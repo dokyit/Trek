@@ -91,8 +91,9 @@ pub struct ThreadActivity {
 
 /// What an imported thread's own history holds for a window.
 type Imported = Arc<(Vec<Activity>, Vec<UsageRow>)>;
-/// By (source, session, window start): the thread's `updated_at` when it was read, and what it held.
-type ImportedKey = (String, String, i64);
+/// By (source, session, window start, read until, with activity): the thread's `updated_at`
+/// when it was read (0 when what was read can't change any more), and what it held.
+type ImportedKey = (String, String, i64, i64, bool);
 static IMPORTED: LazyLock<Mutex<HashMap<ImportedKey, (i64, Imported)>>> = LazyLock::new(Default::default);
 
 /// Everything a recap of `window` needs, read from the store and (for imported threads not
@@ -102,6 +103,7 @@ pub fn gather(store: &Store, window: &Window) -> anyhow::Result<Vec<ThreadActivi
     let names: HashMap<String, String> = store.projects()?.into_iter().map(|p| (p.id, p.name)).collect();
     let ids: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
     let stored = store.with_transcripts(&ids)?;
+    let recorded_from = store.first_usage(&ids)?;
     let mut activity: HashMap<String, Vec<Activity>> = HashMap::new();
     for (thread, a) in store.activity_between(window.start, window.end)? {
         activity.entry(thread).or_default().push(a);
@@ -115,8 +117,18 @@ pub fn gather(store: &Store, window: &Window) -> anyhow::Result<Vec<ThreadActivi
         .map(|t| {
             let (activity, usage) = match (&t.native_id, t.source) {
                 (Some(native), source) if source != ThreadSource::Trek && !stored.contains(&t.id) => {
-                    let found = imported(&t, source, native, window);
+                    let found = imported(&t, source, native, window, window.end, true);
                     (found.0.clone(), found.1.clone())
+                }
+                // An imported thread continued here, in the same session: the agent's history
+                // has what it used until Trek recorded its first turn, Trek's rows the rest.
+                (Some(native), source) if source != ThreadSource::Trek => {
+                    let mut usage = usage.remove(&t.id).unwrap_or_default();
+                    let until = recorded_from.get(&t.id).map_or(window.end, |at| (*at).min(window.end));
+                    if until > window.start {
+                        usage.splice(0..0, imported(&t, source, native, window, until, false).1.iter().cloned());
+                    }
+                    (activity.remove(&t.id).unwrap_or_default(), usage)
                 }
                 _ => (activity.remove(&t.id).unwrap_or_default(), usage.remove(&t.id).unwrap_or_default()),
             };
@@ -126,19 +138,25 @@ pub fn gather(store: &Store, window: &Window) -> anyhow::Result<Vec<ThreadActivi
         .collect())
 }
 
-/// An imported thread's prompts, turns and tokens in `window`, from its agent's history. Read
-/// again only once the thread has moved on since.
-fn imported(t: &Thread, source: ThreadSource, native: &str, window: &Window) -> Imported {
-    let key = (source.key().to_string(), native.to_string(), window.start);
+/// An imported thread's tokens in `window` up to `until`, from its agent's history, and its
+/// prompts and turns there when `with_activity`. Read again only once the thread has moved on
+/// since (what lies before `until` < the window's end can't).
+fn imported(t: &Thread, source: ThreadSource, native: &str, window: &Window, until: i64, with_activity: bool) -> Imported {
+    let key = (source.key().to_string(), native.to_string(), window.start, until, with_activity);
+    let stamp = if until < window.end { 0 } else { t.updated_at };
     if let Some((at, found)) = IMPORTED.lock().expect("basecamp cache").get(&key)
-        && *at == t.updated_at
+        && *at == stamp
     {
         return found.clone();
     }
-    let items = import::load_transcript(source, native).unwrap_or_else(|e| {
-        tracing::debug!("basecamp: {} {native}: {e:#}", source.key());
+    let items = if with_activity {
+        import::load_transcript(source, native).unwrap_or_else(|e| {
+            tracing::debug!("basecamp: {} {native}: {e:#}", source.key());
+            vec![]
+        })
+    } else {
         vec![]
-    });
+    };
     let activity: Vec<Activity> = items
         .iter()
         .filter_map(|i| match i {
@@ -149,12 +167,12 @@ fn imported(t: &Thread, source: ThreadSource, native: &str, window: &Window) -> 
         .filter(|a| window.contains(a.at()))
         .collect();
     let agent = source.agent().unwrap_or_else(|| t.agent.clone());
-    let usage = import::load_usage(source, native, window.start, window.end)
+    let usage = import::load_usage(source, native, window.start, until)
         .into_iter()
         .map(|(at, model, tokens)| UsageRow { thread_id: t.id.clone(), at, agent: agent.clone(), model: model.or_else(|| t.model.clone()), tokens })
         .collect();
     let found = Arc::new((activity, usage));
-    IMPORTED.lock().expect("basecamp cache").insert(key, (t.updated_at, found.clone()));
+    IMPORTED.lock().expect("basecamp cache").insert(key, (stamp, found.clone()));
     found
 }
 
@@ -167,7 +185,8 @@ pub struct ProjectShare {
     pub tokens: u64,
 }
 
-/// A model's part in a recap: the tokens it reported and the turns of threads that use it.
+/// A model's part in a recap: the tokens it reported and the turns it took (each turn on the
+/// model the agent reported using for it, else the thread's).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelShare {
     pub agent: AgentId,
@@ -205,7 +224,8 @@ pub struct Recap {
     pub projects: Vec<ProjectShare>,
     /// Most tokens first (most turns, where no tokens were reported).
     pub models: Vec<ModelShare>,
-    /// Threads whose last turn in the window failed.
+    /// Turns in the window that failed (for threads Trek has no record of failed turns for: one
+    /// when the thread failed in the window).
     pub failed: usize,
     pub buckets: Vec<Bucket>,
 }
@@ -241,20 +261,36 @@ impl Recap {
         for t in threads {
             let mut prompts = 0;
             let mut turns = 0;
+            let mut failed = 0;
+            let usage: Vec<&UsageRow> = t.usage.iter().filter(|u| window.contains(u.at)).collect();
+            // Turns no report names a model for go to the thread's, or to the one its reports
+            // name most (a thread left on the agent's default).
+            let thread_model = t.thread.model.clone().or_else(|| busiest_model(&usage, i64::MIN, i64::MAX));
             for a in t.activity.iter().filter(|a| window.contains(a.at())) {
                 match *a {
                     Activity::Prompt { at } => {
                         prompts += 1;
                         buckets[window.bucket(at)].prompts += 1;
                     }
-                    Activity::TurnEnd { at, took_secs } => {
+                    Activity::TurnEnd { at, took_secs } | Activity::TurnStopped { at, took_secs, .. } => {
                         turns += 1;
                         recap.agent_secs += took_secs as u64;
-                        spread(&mut buckets, &window, at - took_secs as i64 * 1000, at);
+                        let began = at - took_secs as i64 * 1000;
+                        spread(&mut buckets, &window, began, at);
+                        // Reports land as the turn ends (or during it, in agents' own histories).
+                        let model = busiest_model(&usage, began - 1_000, at + 5_000).or_else(|| thread_model.clone());
+                        let i = model_at(&mut models, &t.thread.agent, model.as_deref());
+                        models[i].turns += 1;
+                        if matches!(a, Activity::TurnStopped { failed: true, .. }) {
+                            failed += 1;
+                        }
                     }
                 }
             }
-            let usage: Vec<&UsageRow> = t.usage.iter().filter(|u| window.contains(u.at)).collect();
+            if failed == 0 && t.thread.run_state == RunState::Failed && window.contains(t.thread.updated_at) {
+                failed = 1;
+            }
+            recap.failed += failed;
             if prompts == 0 && turns == 0 && usage.is_empty() {
                 continue;
             }
@@ -271,13 +307,6 @@ impl Recap {
             }
             if tokens > 0 {
                 recap.threads_with_tokens += 1;
-            }
-            if turns > 0 {
-                let i = model_at(&mut models, &t.thread.agent, t.thread.model.as_deref());
-                models[i].turns += turns;
-            }
-            if t.thread.run_state == RunState::Failed && window.contains(t.thread.updated_at) {
-                recap.failed += 1;
             }
             if let (Some(id), Some(name)) = (&t.thread.project_id, &t.project) {
                 match projects.iter_mut().find(|p| &p.id == id) {
@@ -337,6 +366,12 @@ impl Recap {
         self.threads_with_tokens > 0 && self.threads_with_tokens < self.threads
     }
 
+    /// Every thread and every model that took turns reported its tokens: shares of the tokens
+    /// are shares of all the work, not just of what was reported.
+    pub fn tokens_complete(&self) -> bool {
+        self.threads_with_tokens == self.threads && self.models.iter().all(|m| m.tokens > 0 || m.turns == 0)
+    }
+
     /// The recap in sentences, with the projects and models as badges. `label` names a model.
     pub fn narrative(&self, label: impl Fn(&AgentId, Option<&str>) -> String) -> Vec<Span> {
         let mut out = vec![];
@@ -365,15 +400,20 @@ impl Recap {
         }
         let with_tokens: Vec<&ModelShare> = self.models.iter().filter(|m| m.tokens > 0).collect();
         if let Some(best) = with_tokens.first() {
-            if with_tokens.len() == 1 {
+            if with_tokens.len() == 1 && self.tokens_complete() {
                 text(&mut out, if open { ", all on " } else { " It all ran on " });
                 out.push(model(best));
+            } else if with_tokens.len() == 1 {
+                // Others worked too, but only this one said what it used.
+                text(&mut out, if open { ", with " } else { " " });
+                out.push(model(best));
+                text(&mut out, if open { " carrying all of the reported tokens" } else { " carried all of the reported tokens" });
             } else {
                 text(&mut out, if open { ", with " } else { " " });
                 out.push(model(best));
-                text(&mut out, " carrying ");
+                text(&mut out, if open { " carrying " } else { " carried " });
                 out.push(Span::Strong(format!("{}%", self.token_share(best).unwrap_or(0))));
-                text(&mut out, if self.tokens_partial() { " of the reported tokens, ahead of " } else { " of the tokens, ahead of " });
+                text(&mut out, if self.tokens_complete() { " of the tokens, ahead of " } else { " of the reported tokens, ahead of " });
                 out.push(model(with_tokens[1]));
             }
             open = true;
@@ -398,6 +438,20 @@ impl Recap {
         }
         out
     }
+}
+
+/// The model `usage` reported the most tokens for in `[from, to]`, if any report named one.
+fn busiest_model(usage: &[&UsageRow], from: i64, to: i64) -> Option<String> {
+    let mut by: Vec<(String, &str, u64)> = vec![];
+    for u in usage.iter().filter(|u| (from..=to).contains(&u.at)) {
+        let Some(m) = u.model.as_deref() else { continue };
+        let key = model_key(m);
+        match by.iter_mut().find(|(k, ..)| *k == key) {
+            Some((_, _, n)) => *n += u.tokens.total(),
+            None => by.push((key, m, u.tokens.total())),
+        }
+    }
+    by.into_iter().max_by_key(|(.., n)| *n).map(|(_, m, _)| m.to_string())
 }
 
 /// Where `model` of `agent` is in `models`, added if it isn't yet.
@@ -679,6 +733,150 @@ mod tests {
             words(&r.narrative(model_label)),
             "This week you sent *1 prompt* across *1 thread*. All of it went into [trek], all on <Claude Opus 5.5>. Your agents were on the trail for *under a minute*."
         );
+    }
+
+    #[test]
+    fn one_model_with_tokens_among_others_isnt_called_the_only_one() {
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let t0 = at(&tz, "2026-10-03 10:00");
+        let mut claude = thread("a", AgentId::ClaudeCode, Some("claude-opus-5-5"), Some(("p", "trek")));
+        claude.activity = vec![Activity::Prompt { at: t0 }, Activity::TurnEnd { at: t0 + 60_000, took_secs: 60 }];
+        claude.usage = vec![used(&claude, t0 + 60_000, Some("claude-opus-5-5"), 5_000)];
+        // A Codex thread that took turns but said nothing of its tokens.
+        let mut codex = thread("b", AgentId::Codex, Some("gpt-5.6-luna"), Some(("p", "trek")));
+        codex.activity = vec![Activity::Prompt { at: t0 + 120_000 }, Activity::TurnEnd { at: t0 + 180_000, took_secs: 60 }];
+        let window = Range::Today.window(&now(&tz, "2026-10-03 12:00"));
+        let r = Recap::compute(window, 0, &[claude.clone(), codex]);
+        assert!(!r.tokens_complete());
+        let said = words(&r.narrative(model_label));
+        assert!(said.contains("All of it went into [trek], with <Claude Opus 5.5> carrying all of the reported tokens."), "{said}");
+        assert!(!said.contains("all on"), "{said}");
+        // On its own it is the only one.
+        let r = Recap::compute(window, 0, &[claude]);
+        assert!(r.tokens_complete());
+        assert!(words(&r.narrative(model_label)).contains(", all on <Claude Opus 5.5>."));
+    }
+
+    #[test]
+    fn turns_go_to_the_model_that_ran_them() {
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let t0 = at(&tz, "2026-10-03 10:00");
+        // Left on the agent's default: the turns go where its reports say.
+        let mut a = thread("a", AgentId::ClaudeCode, None, None);
+        a.activity = vec![Activity::TurnEnd { at: t0, took_secs: 60 }, Activity::TurnEnd { at: t0 + 3_600_000, took_secs: 60 }];
+        a.usage = vec![used(&a, t0 + 5, Some("claude-opus-5-5"), 9_000), used(&a, t0 + 5, Some("claude-haiku-4-5-20251001"), 100)];
+        // Switched model halfway: each turn on the model it ran on.
+        let mut b = thread("b", AgentId::Codex, Some("gpt-6-astra"), None);
+        b.activity = vec![Activity::TurnEnd { at: t0, took_secs: 60 }, Activity::TurnEnd { at: t0 + 3_600_000, took_secs: 60 }];
+        b.usage = vec![used(&b, t0, Some("gpt-5.6-luna"), 1_000), used(&b, t0 + 3_600_000, Some("gpt-6-astra"), 1_000)];
+        let r = Recap::compute(Range::Today.window(&now(&tz, "2026-10-03 12:00")), 0, &[a, b]);
+        let turns = |m: &str| r.models.iter().find(|x| x.model.as_deref() == Some(m)).map(|x| x.turns);
+        assert_eq!(turns("claude-opus-5-5"), Some(2));
+        assert_eq!(turns("claude-haiku-4-5-20251001"), Some(0));
+        assert_eq!((turns("gpt-5.6-luna"), turns("gpt-6-astra")), (Some(1), Some(1)));
+        assert!(r.models.iter().all(|m| m.model.is_some()), "{:?}", r.models);
+    }
+
+    #[test]
+    fn failed_and_stopped_turns_count_as_work_and_failures_are_counted_per_turn() {
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let t0 = at(&tz, "2026-10-03 10:00");
+        let mut a = thread("a", AgentId::Codex, None, None);
+        a.activity = vec![
+            Activity::Prompt { at: t0 },
+            Activity::TurnStopped { at: t0 + 1_200_000, took_secs: 1_200, failed: true },
+            Activity::Prompt { at: t0 + 2_000_000 },
+            Activity::TurnStopped { at: t0 + 2_100_000, took_secs: 100, failed: false },
+            Activity::TurnStopped { at: t0 + 3_000_000, took_secs: 10, failed: true },
+        ];
+        // Failed now, but the failure was recorded: not counted twice.
+        a.thread.run_state = RunState::Failed;
+        a.thread.updated_at = t0 + 3_000_000;
+        // Failed yesterday: not today's failure.
+        let mut b = thread("b", AgentId::Codex, None, None);
+        b.thread.run_state = RunState::Failed;
+        b.thread.updated_at = at(&tz, "2026-10-02 18:00");
+        b.activity = vec![Activity::Prompt { at: at(&tz, "2026-10-02 17:00") }];
+        let r = Recap::compute(Range::Today.window(&now(&tz, "2026-10-03 12:00")), 0, &[a, b]);
+        assert_eq!((r.turns, r.agent_secs, r.failed, r.threads), (3, 1_310, 2, 1));
+        assert_eq!(r.buckets[10].agent_secs, 1_310);
+    }
+
+    /// A time zone with one clock change at `switch` (UTC), like a real zone's spring or fall.
+    #[derive(Debug, Clone, Copy)]
+    struct Shifting {
+        switch: i64,
+        before: i32,
+        after: i32,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ShiftingOffset(Shifting, FixedOffset);
+
+    impl chrono::Offset for ShiftingOffset {
+        fn fix(&self) -> FixedOffset {
+            self.1
+        }
+    }
+
+    impl TimeZone for Shifting {
+        type Offset = ShiftingOffset;
+        fn from_offset(offset: &ShiftingOffset) -> Self {
+            offset.0
+        }
+        fn offset_from_local_date(&self, local: &NaiveDate) -> chrono::MappedLocalTime<ShiftingOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(0, 0, 0).unwrap())
+        }
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> chrono::MappedLocalTime<ShiftingOffset> {
+            let local = local.and_utc().timestamp_millis();
+            let mut fits: Vec<(i64, ShiftingOffset)> = [self.before, self.after]
+                .into_iter()
+                .map(|secs| (local - secs as i64 * 1000, secs))
+                .filter(|(utc, secs)| (*utc < self.switch) == (*secs == self.before))
+                .map(|(utc, secs)| (utc, ShiftingOffset(*self, FixedOffset::east_opt(secs).unwrap())))
+                .collect();
+            fits.sort_by_key(|(utc, _)| *utc);
+            match &fits[..] {
+                [] => chrono::MappedLocalTime::None,
+                [(_, o)] => chrono::MappedLocalTime::Single(*o),
+                [(_, a), (_, b), ..] => chrono::MappedLocalTime::Ambiguous(*a, *b),
+            }
+        }
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> ShiftingOffset {
+            self.offset_from_utc_datetime(&utc.and_hms_opt(0, 0, 0).unwrap())
+        }
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> ShiftingOffset {
+            let secs = if utc.and_utc().timestamp_millis() < self.switch { self.before } else { self.after };
+            ShiftingOffset(*self, FixedOffset::east_opt(secs).unwrap())
+        }
+    }
+
+    fn utc(s: &str) -> i64 {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap().and_utc().timestamp_millis()
+    }
+
+    #[test]
+    fn days_with_a_clock_change_are_as_long_as_they_are() {
+        const H: i64 = 3_600_000;
+        // Spring: 02:00 jumps to 03:00 (UTC+1 to UTC+2), a 23-hour day.
+        let spring = Shifting { switch: utc("2026-03-29 01:00"), before: 3600, after: 7200 };
+        let w = Range::Today.window(&spring.timestamp_millis_opt(utc("2026-03-29 10:00")).unwrap());
+        assert_eq!((w.start, w.end), (utc("2026-03-28 23:00"), utc("2026-03-29 22:00")));
+        assert_eq!(w.buckets(), 23);
+        // Autumn: 03:00 goes back to 02:00, a 25-hour day.
+        let fall = Shifting { switch: utc("2026-10-25 01:00"), before: 7200, after: 3600 };
+        let w = Range::Today.window(&fall.timestamp_millis_opt(utc("2026-10-25 10:00")).unwrap());
+        assert_eq!(w.end - w.start, 25 * H);
+        assert_eq!(w.buckets(), 25);
+        // Where the change skips midnight itself (00:00 → 01:00), the day starts at 01:00.
+        let skip = Shifting { switch: utc("2026-09-06 04:00"), before: -4 * 3600, after: -3 * 3600 };
+        let w = Range::Today.window(&skip.timestamp_millis_opt(utc("2026-09-06 15:00")).unwrap());
+        assert_eq!(w.start, utc("2026-09-06 04:00"));
+        assert_eq!(w.end - w.start, 23 * H);
+        // A week across the change: 7 days less the hour.
+        let w = Range::Week.window(&spring.timestamp_millis_opt(utc("2026-03-29 10:00")).unwrap());
+        assert_eq!(w.start, utc("2026-03-22 23:00"));
+        assert_eq!(w.end - w.start, 7 * 24 * H - H);
     }
 
     #[test]

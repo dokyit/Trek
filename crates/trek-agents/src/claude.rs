@@ -228,9 +228,14 @@ struct Turns {
     /// A result held back for unread messages: its cost, and when to stop waiting for Claude to
     /// take them in (they may never come, and the turn mustn't hang).
     waiting: Option<(Option<f64>, tokio::time::Instant)>,
-    /// Each model's tokens as the last `result` counted them: `modelUsage` runs from the start
-    /// of the process, so a turn's share is how far it moved.
+    /// Each model's tokens as the last `result` counted them: `modelUsage` runs for the whole
+    /// session, so a turn's share is how far it moved.
     models: HashMap<String, TokenUsage>,
+    /// The session was resumed (or forked) into this process: its first `modelUsage` carries
+    /// the session's earlier turns, with nothing here to tell them apart from this one's.
+    resumed: bool,
+    /// The model the session said it runs (`system init`).
+    model: Option<String>,
 }
 
 /// How long a held result waits for Claude to start on the messages after it. It starts within
@@ -268,6 +273,9 @@ impl Turns {
         if v["type"] == "system" && v["subtype"] == "init" {
             // The next turn has begun.
             self.waiting = None;
+            if let Some(m) = v["model"].as_str().filter(|m| !m.is_empty()) {
+                self.model = Some(m.to_string());
+            }
         }
         let mut out = translate(v, pending, streamed_text);
         if v["type"] == "result" {
@@ -290,16 +298,33 @@ impl Turns {
     /// What a `result` says its turn used, per model (sub-agents and Claude Code's own helper
     /// calls may run on another one). Without `modelUsage`, the turn's `usage` (its main model).
     fn usage(&mut self, v: &Value) -> Vec<AgentEvent> {
+        let u = &v["usage"];
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+        let own = TokenUsage { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens") };
         let Some(models) = v["modelUsage"].as_object() else {
-            let u = &v["usage"];
-            let n = |k: &str| u[k].as_u64().unwrap_or(0);
-            let tokens = TokenUsage { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens") };
-            return if tokens.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: None, tokens }] };
+            return if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: None, tokens: own }] };
         };
+        let totals: Vec<(&String, TokenUsage)> = models
+            .iter()
+            .map(|(model, u)| {
+                let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                (model, TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cacheReadInputTokens"), cache_write: n("cacheCreationInputTokens") })
+            })
+            .collect();
+        if std::mem::take(&mut self.resumed) {
+            // The first result of a resumed session: its totals are the baseline from here on,
+            // and the turn's own `usage` (its main model's) is all that's known of this turn.
+            // Helper and sub-agent calls in this one turn go uncounted rather than overcounted.
+            let main = self.model.as_deref().filter(|m| models.contains_key(*m)).map(String::from).or_else(|| {
+                // Which entry the turn ran on: one that holds at least the turn, the busiest.
+                let holds = |t: &TokenUsage| t.input >= own.input && t.output >= own.output && t.cache_read >= own.cache_read && t.cache_write >= own.cache_write;
+                totals.iter().filter(|(_, t)| holds(t)).max_by_key(|(_, t)| t.output).map(|(m, _)| m.to_string())
+            });
+            self.models = totals.into_iter().map(|(m, t)| (m.clone(), t)).collect();
+            return if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: main, tokens: own }] };
+        }
         let mut out = vec![];
-        for (model, u) in models {
-            let n = |k: &str| u[k].as_u64().unwrap_or(0);
-            let total = TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cacheReadInputTokens"), cache_write: n("cacheCreationInputTokens") };
+        for (model, total) in totals {
             let tokens = total.since(&self.models.get(model).copied().unwrap_or_default());
             self.models.insert(model.clone(), total);
             if !tokens.is_empty() {
@@ -349,7 +374,7 @@ pub async fn run(
     // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
     let mut planning = config.plan;
     let mut in_turn = false;
-    let mut turns = Turns::default();
+    let mut turns = Turns { resumed: config.resume.is_some(), ..Default::default() };
     // Resumed partway: once the session has said which it is, that message is its latest point.
     let mut resumed_at = config.resume_at.clone();
     // The session has started (`system init`); until then, the messages sent so far, to send
@@ -1133,5 +1158,37 @@ mod tests {
         let mut fresh = Turns::default();
         let bare = json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":3,"output_tokens":4}});
         assert_eq!(usage(fresh.step(&bare, &mut pending, &mut streamed)), vec![(None, TokenUsage { input: 3, output: 4, ..Default::default() })]);
+    }
+
+    #[test]
+    fn a_resumed_session_counts_only_its_own_turns() {
+        let mut pending = HashMap::new();
+        let mut streamed = false;
+        let usage = |ev: Vec<AgentEvent>| -> Vec<(Option<String>, TokenUsage)> {
+            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model, tokens)) } else { None }).collect()
+        };
+        // A real second turn in a new process (`--resume`): `modelUsage` carries the first
+        // turn's tokens, the helper call included, restored from the session; `usage` is the turn's.
+        let mut turns = Turns { resumed: true, ..Default::default() };
+        let init = json!({"type":"system","subtype":"init","session_id":"s","model":"claude-haiku-4-5"});
+        turns.step(&init, &mut pending, &mut streamed);
+        let resumed = json!({"type":"result","subtype":"success","is_error":false,
+            "usage":{"input_tokens":10,"cache_creation_input_tokens":1003,"cache_read_input_tokens":22021,"output_tokens":41},
+            "modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":897,"outputTokens":8,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},
+                "claude-haiku-4-5":{"inputTokens":20,"outputTokens":80,"cacheReadInputTokens":39901,"cacheCreationInputTokens":5144}}});
+        let own = TokenUsage { input: 10, output: 41, cache_read: 22021, cache_write: 1003 };
+        assert_eq!(usage(turns.step(&resumed, &mut pending, &mut streamed)), vec![(Some("claude-haiku-4-5".into()), own)]);
+        // From there on, what moved.
+        let next = json!({"type":"result","subtype":"success","is_error":false,
+            "usage":{"input_tokens":10,"cache_creation_input_tokens":500,"cache_read_input_tokens":23000,"output_tokens":30},
+            "modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":897,"outputTokens":8,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},
+                "claude-haiku-4-5":{"inputTokens":30,"outputTokens":110,"cacheReadInputTokens":62901,"cacheCreationInputTokens":5644}}});
+        assert_eq!(
+            usage(turns.step(&next, &mut pending, &mut streamed)),
+            vec![(Some("claude-haiku-4-5".into()), TokenUsage { input: 10, output: 30, cache_read: 23000, cache_write: 500 })]
+        );
+        // Without the session's model among the totals (an alias), the entry that holds the turn.
+        let mut aliased = Turns { resumed: true, model: Some("haiku".into()), ..Default::default() };
+        assert_eq!(usage(aliased.step(&resumed, &mut pending, &mut streamed)), vec![(Some("claude-haiku-4-5".into()), own)]);
     }
 }

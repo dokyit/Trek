@@ -636,6 +636,7 @@ impl Store {
             c.execute(&format!("DELETE FROM items WHERE thread_id IN ({replaced})"), args)?;
             c.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({replaced})"), args)?;
             c.execute(&format!("DELETE FROM token_usage WHERE thread_id IN ({replaced})"), args)?;
+            c.execute(&format!("DELETE FROM turn_stops WHERE thread_id IN ({replaced})"), args)?;
             c.execute("DELETE FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3", args)?;
         }
         c.execute(
@@ -930,6 +931,7 @@ impl Store {
         tx.execute(&format!("DELETE FROM items WHERE thread_id IN ({gone})"), [id])?;
         tx.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({gone})"), [id])?;
         tx.execute(&format!("DELETE FROM token_usage WHERE thread_id IN ({gone})"), [id])?;
+        tx.execute(&format!("DELETE FROM turn_stops WHERE thread_id IN ({gone})"), [id])?;
         tx.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
         tx.commit()?;
         Ok(())

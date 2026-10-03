@@ -1500,10 +1500,16 @@ impl Workspace {
         out
     }
 
-    /// Mark every unread thread read (Basecamp's "Mark all read"). What needs the user stays.
+    /// What a thread waiting on the user is waiting for, while its session holds the request.
+    pub fn pending_request(&self, id: &str) -> Option<&PendingPermission> {
+        self.live.get(id)?.permissions.first()
+    }
+
+    /// Mark what "Ready for review" lists read (Basecamp's "Mark all read"). What needs the
+    /// user stays.
     pub fn mark_all_read(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
-        let unread: Vec<String> = self.threads.iter().filter(|t| t.is_unseen() && t.archived_at.is_none()).map(|t| t.id.clone()).collect();
+        let unread: Vec<String> = self.ready_for_review().into_iter().filter(|t| t.is_unseen()).map(|t| t.id.clone()).collect();
         for id in unread {
             self.mutate_thread(&id, cx, |t| t.last_seen_at = now.max(t.updated_at));
         }
@@ -2189,6 +2195,9 @@ impl Workspace {
         let mut commands: Option<Vec<SlashCommand>> = None;
         // Tokens the agent reported (by the model it named), kept once the batch is through.
         let mut used: Vec<(Option<String>, trek_core::TokenUsage)> = vec![];
+        // A turn that failed (true) or was stopped: transcripts keep no turn end for it, but the
+        // time it ran counts in Basecamp.
+        let mut stopped: Option<(u32, bool)> = None;
         // Streamed text and tool calls change nothing but the transcript; mostly they only extend
         // the messages already streaming.
         let mut transcript_only = true;
@@ -2372,6 +2381,9 @@ impl Workspace {
                         if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
                             live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
                         }
+                        if let Some(e) = &error {
+                            stopped = Some((took, e != "Interrupted"));
+                        }
                         if let Some(e) = error {
                             if e != "Interrupted" {
                                 live.items.push(Item::Error { text: e });
@@ -2408,7 +2420,8 @@ impl Workspace {
                         // The process ended mid-turn: the turn failed, and ends here like any other
                         // (saved, queued follow-ups handed back, an alert). Unless the error it
                         // reported says why, that it stopped is all there is to say.
-                        if live.turn_started.take().is_some() {
+                        if let Some(began) = live.turn_started.take() {
+                            stopped = Some((began.elapsed().as_secs() as u32, true));
                             live.close_turn(false);
                             live.streaming = None;
                             live.reasoning = None;
@@ -2422,6 +2435,11 @@ impl Workspace {
                 }
             }
             live.revision += 1;
+        }
+        if let Some((took, failed)) = stopped
+            && let Err(e) = self.store.record_stop(id, now_ms(), took, failed)
+        {
+            tracing::warn!("record stopped turn: {e:#}");
         }
         if !used.is_empty() {
             let at = now_ms();
