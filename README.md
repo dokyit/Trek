@@ -92,8 +92,9 @@ script/bundle.sh [--install]          # dist/Trek.app, optionally copied to /App
 ```
 
 `bundle.sh` signs with `$TREK_SIGN_IDENTITY`, else the "Trek Local Signing" identity, else "Shelf Dev" (an
-older self-signed identity on the maintainer's Mac), else ad-hoc. Use a stable identity: macOS ties Accessibility and Screen Recording permission (computer use, snapshots) to the
-signing certificate, and an ad-hoc signature changes on every build, so you'd be asked again each time.
+older self-signed identity on the maintainer's Mac), else ad-hoc. Use a stable identity: macOS ties
+Accessibility and Screen Recording permission (computer use, snapshots) to the signing certificate, and an
+ad-hoc signature changes on every build, so you'd be asked again each time.
 
 Handy environment variables: `TREK_DATA_DIR=/some/folder` runs Trek against another data folder (your real
 one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens without taking focus,
@@ -103,8 +104,9 @@ one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens
 ## Releases
 
 Releases are published to GitHub by `script/release.sh <version> [--channel stable|beta|nightly]`, which
-bumps the version, builds and signs the app, signs the archive with minisign, writes the channel manifest
-and creates the GitHub release. Run it with `--dry-run` first. The full process, the channel layout, the
+sets the version, builds and signs the app, signs the archive with minisign, writes the channel manifest
+and creates the GitHub release. Only stable releases commit their version to the branch; betas and
+nightlies are tagged builds off it. Run it with `--dry-run` first. The full process, the channel layout, the
 keys and how to test an update locally are in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Architecture

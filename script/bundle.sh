@@ -3,8 +3,8 @@
 #   script/bundle.sh [--install]   (--install also copies it to /Applications)
 #
 # Signing (script/lib/sign.sh): $TREK_SIGN_IDENTITY, else "Trek Local Signing" (create it once with
-# script/signing-identity.sh), else ad-hoc. A stable identity keeps macOS's Accessibility and
-# Screen Recording grants across rebuilds; ad-hoc signatures change every build.
+# script/signing-identity.sh), else "Shelf Dev", else ad-hoc. A stable identity keeps macOS's
+# Accessibility and Screen Recording grants across rebuilds; ad-hoc signatures change every build.
 # Releases (archive, signature, manifest, GitHub) are script/release.sh.
 set -euo pipefail
 cd "${0:A:h}/.."

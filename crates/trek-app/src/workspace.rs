@@ -2207,8 +2207,8 @@ impl Workspace {
     }
 
     fn install_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
-        let bundle = match trek_core::update::install(&staged) {
-            Ok(bundle) => bundle,
+        let installed = match trek_core::update::install(&staged) {
+            Ok(installed) => installed,
             Err(e) => {
                 tracing::warn!("update install failed: {e:#}");
                 self.updater.status = UpdateStatus::Failed(format!("Couldn't install the update: {e:#}"));
@@ -2218,7 +2218,7 @@ impl Workspace {
         };
         // Installed: nothing is left for the quit hook to do.
         self.updater.status = UpdateStatus::Idle;
-        if let Err(e) = trek_core::update::relaunch(&bundle, crate::system::app_is_active()) {
+        if let Err(e) = trek_core::update::relaunch(&installed, crate::system::app_is_active()) {
             tracing::warn!("relaunch after update failed: {e:#}");
             self.updater.status = UpdateStatus::Failed("The update is installed. Quit and reopen Trek to start it.".into());
             cx.notify();

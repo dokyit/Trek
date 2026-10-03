@@ -422,35 +422,52 @@ fn check_bundle(app: &Path, id: &str, expected: &semver::Version, current: &semv
     Ok(())
 }
 
-/// Swap the staged bundle in for the running one and keep the old one as the single backup.
-/// Returns the bundle path. If anything fails before the swap, nothing has changed.
-pub fn install(staged: &Path) -> Result<PathBuf> {
-    let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
-    install_into(staged, &bundle, &crate::paths::updates_dir())?;
-    Ok(bundle)
+/// What `install` left: the app to open, and the version it replaced, if it replaced one and
+/// kept it. The relaunch puts that backup back only if the new app won't open.
+#[derive(Debug, PartialEq)]
+pub struct Installed {
+    pub bundle: PathBuf,
+    pub backup: Option<PathBuf>,
 }
 
-fn install_into(staged: &Path, bundle: &Path, updates: &Path) -> Result<()> {
+/// Swap the staged bundle in for the running one and keep the old one as the single backup.
+/// If anything fails before the swap, nothing has changed.
+pub fn install(staged: &Path) -> Result<Installed> {
+    let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
+    let backup = install_into(staged, &bundle, &crate::paths::updates_dir())?;
+    Ok(Installed { bundle, backup })
+}
+
+/// Returns the backup of the replaced version, if there is one.
+fn install_into(staged: &Path, bundle: &Path, updates: &Path) -> Result<Option<PathBuf>> {
     let result = replace_bundle(staged, bundle, updates);
     if let Some(dir) = download_dir_of(staged) {
         let _ = std::fs::remove_dir_all(dir);
     }
-    if let Ok(true) = result {
-        let _ = std::fs::write(updates.join(UPDATED_MARKER), crate::VERSION);
+    match result? {
+        Replaced::No => Ok(None),
+        Replaced::Yes { backup } => {
+            let _ = std::fs::write(updates.join(UPDATED_MARKER), crate::VERSION);
+            Ok(backup)
+        }
     }
-    result.map(|_| ())
 }
 
-/// `Ok(false)` when the app on disk is already at least the staged version: another copy of
-/// Trek updated it, or the user installed a newer one by hand. Installing would downgrade it.
-fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<bool> {
+enum Replaced {
+    /// The app on disk is already at least the staged version: another copy of Trek updated
+    /// it, or the user installed a newer one by hand. Installing would downgrade it.
+    No,
+    Yes { backup: Option<PathBuf> },
+}
+
+fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<Replaced> {
     if !staged.exists() {
         bail!("the downloaded update is gone; check again");
     }
     if let (Ok(installed), Ok(incoming)) = (bundle_version(bundle), bundle_version(staged)) {
         if installed >= incoming {
             tracing::info!("{} is already Trek {installed}; not installing {incoming}", bundle.display());
-            return Ok(false);
+            return Ok(Replaced::No);
         }
     }
     let parent = bundle.parent().context("app has no folder")?;
@@ -468,8 +485,9 @@ fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<bool> 
         let _ = std::fs::remove_dir_all(&backup);
         if std::fs::create_dir_all(&backup_dir).is_err() || move_dir(&replaced, &backup).is_err() {
             tracing::warn!("couldn't keep a backup of the previous version");
+            return Ok(Replaced::Yes { backup: None });
         }
-        Ok(true)
+        Ok(Replaced::Yes { backup: Some(backup) })
     })();
     // A swap that couldn't put the current app back leaves it in `work`: the only copy then.
     if bundle.exists() {
@@ -525,27 +543,29 @@ fn swap_by_rename(incoming: &Path, bundle: &Path) -> Result<PathBuf> {
 }
 
 /// Waits for the old process to exit, then opens the new bundle; if that fails, puts the backup
-/// back and opens it instead. Arguments: pid, bundle, backup, opener, then the opener's options.
+/// back and opens it instead. Arguments: pid, bundle, backup (empty: none), opener, then the
+/// opener's options.
 const RELAUNCH_SCRIPT: &str = r#"
     pid=$1 bundle=$2 backup=$3 opener=$4; shift 4
     while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
     "$opener" "$@" "$bundle" && exit 0
-    if [ -d "$backup" ]; then
+    if [ -n "$backup" ] && [ -d "$backup" ]; then
         /bin/mv "$bundle" "$bundle.failed" && /bin/mv "$backup" "$bundle" && /bin/rm -rf "$bundle.failed"
         "$opener" "$@" "$bundle"
     fi
 "#;
 
-fn relaunch_command(pid: u32, bundle: &Path, backup: &Path, opener: &str, open_args: &[String]) -> std::process::Command {
+fn relaunch_command(pid: u32, bundle: &Path, backup: Option<&Path>, opener: &str, open_args: &[String]) -> std::process::Command {
     let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.arg("-c").arg(RELAUNCH_SCRIPT).arg("trek-relaunch").arg(pid.to_string()).arg(bundle).arg(backup).arg(opener).args(open_args);
+    cmd.arg("-c").arg(RELAUNCH_SCRIPT).arg("trek-relaunch").arg(pid.to_string()).arg(bundle);
+    cmd.arg(backup.map(Path::as_os_str).unwrap_or_default()).arg(opener).args(open_args);
     cmd
 }
 
-/// Start the installed bundle once this process has exited. If it can't be opened, the backup
-/// goes back in its place and that is opened instead. The caller quits right after.
-pub fn relaunch(bundle: &Path, foreground: bool) -> Result<()> {
-    let backup = bundle.file_name().map(|n| crate::paths::updates_dir().join(PREVIOUS_DIR).join(n)).unwrap_or_default();
+/// Start the installed bundle once this process has exited. If it can't be opened, the version
+/// it replaced goes back in its place and that is opened instead; a bundle this update didn't
+/// replace is never rolled back. The caller quits right after.
+pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
     let mut open_args: Vec<String> = vec!["-n".into()];
     if !foreground {
         open_args.push("-g".into());
@@ -557,7 +577,7 @@ pub fn relaunch(bundle: &Path, foreground: bool) -> Result<()> {
         open_args.push(format!("{k}={v}"));
     }
     use std::os::unix::process::CommandExt as _;
-    relaunch_command(std::process::id(), bundle, &backup, "/usr/bin/open", &open_args)
+    relaunch_command(std::process::id(), &installed.bundle, installed.backup.as_deref(), "/usr/bin/open", &open_args)
         .process_group(0)
         .spawn()
         .context("couldn't schedule the relaunch")?;
@@ -786,7 +806,7 @@ mod tests {
         };
 
         let staged = stage_new("0.2.1");
-        install_into(&staged, &bundle, &updates).unwrap();
+        assert_eq!(install_into(&staged, &bundle, &updates).unwrap(), Some(updates.join("previous.noindex/Trek.app")));
         assert_eq!(contents(&bundle), "0.2.1");
         assert_eq!(contents(&updates.join("previous.noindex/Trek.app")), "0.2.0");
         assert!(!download_dir_of(&staged).unwrap().exists(), "the download folder is gone");
@@ -800,7 +820,7 @@ mod tests {
         // Something newer is already installed (another copy updated it): left alone, staged copy dropped.
         std::fs::remove_file(updates.join("updated-from")).unwrap();
         let older = stage_new("0.2.1");
-        install_into(&older, &bundle, &updates).unwrap();
+        assert_eq!(install_into(&older, &bundle, &updates).unwrap(), None, "no backup to roll back to");
         assert_eq!(contents(&bundle), "0.2.2");
         assert!(!older.exists());
         assert!(!updates.join("updated-from").exists(), "nothing was installed");
@@ -842,13 +862,19 @@ mod tests {
         write_app(&backup, "dev.trek.Trek", "old");
         let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         exited.wait().unwrap();
-        let helper = |opener: &str| relaunch_command(exited.id(), &bundle, &backup, opener, &["-n".into()]).status().unwrap();
+        let helper = |backup: Option<&Path>, opener: &str| relaunch_command(exited.id(), &bundle, backup, opener, &["-n".into()]).status().unwrap();
 
-        assert!(helper("/usr/bin/true").success());
+        assert!(helper(Some(&backup), "/usr/bin/true").success());
         assert_eq!(contents(&bundle), "new", "opened: nothing moves");
         assert!(backup.exists());
 
-        helper("/usr/bin/false");
+        // Nothing was replaced (the app on disk was already newer): a backup from an earlier
+        // update must not go back.
+        helper(None, "/usr/bin/false");
+        assert_eq!(contents(&bundle), "new");
+        assert!(backup.exists());
+
+        helper(Some(&backup), "/usr/bin/false");
         assert_eq!(contents(&bundle), "old", "the backup is back in place");
         assert!(!backup.exists());
         assert!(!dir.join("Trek.app.failed").exists());

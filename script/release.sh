@@ -3,19 +3,23 @@
 #
 #   script/release.sh <version> [--channel stable|beta|nightly] [--notes FILE] [--dry-run]
 #
-# Bumps the workspace version, builds and signs Trek.app (script/bundle.sh), packs it as
+# Sets the version, builds and signs Trek.app (script/bundle.sh), packs it as
 # Trek-<version>-darwin-<arch>.app.tar.gz, signs that with minisign, writes the channel manifest
-# (<channel>.json) and release notes, then commits "Release v<version>", tags, pushes and creates
-# the GitHub release. --dry-run stops before git and GitHub and puts the version back afterwards;
-# everything it built stays in dist/release/<version>/.
+# (<channel>.json) and release notes, then tags, pushes and creates the GitHub release. --dry-run
+# stops before git and GitHub and puts the version back afterwards; everything it built stays in
+# dist/release/<version>/.
 #
 # Channels: stable → release v<version> (marked latest); beta / nightly → the prerelease under the
 # fixed tag "beta" / "nightly", whose assets are replaced each time. Beta and nightly versions
-# carry a matching pre-release suffix (0.3.0-beta.1, 0.3.0-nightly.20261002). A nightly's version
-# is never committed (the bump is undone, as for a dry run) and it gets no version tag; the moving
-# "nightly" tag's message records it. A version must be newer than the last release of its own
-# channel and of the channels its users also get (beta: stable; nightly: stable and beta), and
-# not older than the workspace version.
+# carry a matching pre-release suffix (0.3.0-beta.1, 0.3.0-nightly.20261002).
+#
+# Only a stable release moves the branch: it commits "Release v<version>" there. A beta or nightly
+# is built from HEAD with the version set for the build only; the sources it was built from are
+# recorded as a commit off the branch (HEAD plus the version bump) that its tags point at, and the
+# working tree goes back to the workspace version. Betas are tagged v<version>; nightlies only move
+# the "nightly" tag, whose message names the version. A version must be newer than the last
+# release of its own channel and of the channels its users also get (beta: stable; nightly: stable
+# and beta), and not older than the workspace version (the last stable).
 #
 # Environment:
 #   TREK_MINISIGN_KEY          secret key (default ~/.trek-signing/minisign.key, no password)
@@ -98,6 +102,7 @@ if key(new) < key(current):
 PY
 if (( ! DRY )); then
   [[ -z $(git status --porcelain) ]] || die "the working tree has changes; commit or stash them first"
+  [[ $CHANNEL != stable ]] || git symbolic-ref -q HEAD >/dev/null || die "a stable release is committed to a branch; check one out"
   gh auth status >/dev/null 2>&1 || die "gh isn't logged in"
   # macOS ties users' Accessibility / Screen Recording grants to the certificate: every release
   # must use the same one. TREK_SIGN_IDENTITY names another on purpose (a Developer ID, say).
@@ -107,7 +112,7 @@ if (( ! DRY )); then
 fi
 
 # ---------- version ----------
-# The bump is undone on exit unless it was committed (always, for a dry run or a nightly).
+# The bump is undone on exit unless a stable release committed it to the branch.
 BACKUP=$(mktemp -d) COMMITTED=0
 cp Cargo.toml Cargo.lock "$BACKUP/"
 finish() {
@@ -115,6 +120,8 @@ finish() {
   rm -rf "$BACKUP"
 }
 trap finish EXIT
+# Interrupted (Ctrl-C, a killed build): exit, so the EXIT trap still puts the version back.
+trap 'exit 130' INT TERM HUP
 if [[ $VERSION != "$CURRENT" ]]; then
   echo "• version $CURRENT → $VERSION"
   sed -i '' '/^\[workspace\.package\]/,/^\[/s/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
@@ -139,10 +146,11 @@ echo "• $NAME  sha256 $SHA  (signature verified with assets/update/minisign.pu
 if [[ -n $NOTES_FILE ]]; then
   cp "$NOTES_FILE" "$OUT/notes.md"
 else
+  # The most recent tag, by when it was made: git's version sort puts 0.3.0-beta.1 after 0.3.0.
   case $CHANNEL in
-    stable) SINCE=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v -- - | head -1 || true) ;;
-    nightly) SINCE=$(git rev-parse -q --verify refs/tags/nightly >/dev/null && echo nightly || git tag --list 'v[0-9]*' --sort=-v:refname | head -1 || true) ;;
-    *) SINCE=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1 || true) ;;
+    stable) SINCE=$(git tag --list 'v[0-9]*' --sort=-creatordate | grep -v -- - | head -1 || true) ;;
+    nightly) SINCE=$(git rev-parse -q --verify refs/tags/nightly >/dev/null && echo nightly || git tag --list 'v[0-9]*' --sort=-creatordate | head -1 || true) ;;
+    *) SINCE=$(git tag --list 'v[0-9]*' --sort=-creatordate | head -1 || true) ;;
   esac
   RANGE=HEAD; [[ -n $SINCE ]] && RANGE="$SINCE..HEAD"
   git log --no-merges --invert-grep --grep='^Release v' --format='- %s' "$RANGE" > "$OUT/notes.md"
@@ -171,8 +179,8 @@ if (( DRY )); then
 fi
 
 # ---------- publish ----------
-# A nightly is built from HEAD as it is; only stable and beta versions land in the history.
-if [[ $CHANNEL != nightly ]]; then
+if [[ $CHANNEL == stable ]]; then
+  # The workspace version moves with stable releases only.
   if [[ $VERSION != "$CURRENT" ]]; then
     git add Cargo.toml Cargo.lock
     git commit -q -m "Release v$VERSION"
@@ -181,16 +189,26 @@ if [[ $CHANNEL != nightly ]]; then
   git tag -a "$VERSION_TAG" -m "Trek $VERSION"
   git push origin HEAD
   git push origin "refs/tags/$VERSION_TAG"
-fi
-
-if [[ $CHANNEL == stable ]]; then
   gh release create "$RELEASE_TAG" --repo "$REPO" --verify-tag --latest \
     --title "Trek $VERSION" --notes-file "$OUT/notes.md" "${ASSETS[@]}"
 else
-  # The channel tag moves to this commit, its message naming the version (the next release's
+  # What was built, as a commit off the branch: HEAD's tree with the bumped Cargo.toml and
+  # Cargo.lock. Its tags keep it; the branch and the working tree stay at the workspace version.
+  INDEX=$(mktemp)
+  GIT_INDEX_FILE=$INDEX git read-tree HEAD
+  GIT_INDEX_FILE=$INDEX git update-index --add Cargo.toml Cargo.lock
+  TREE=$(GIT_INDEX_FILE=$INDEX git write-tree)
+  rm -f "$INDEX"
+  BUILT=HEAD
+  [[ $TREE == $(git rev-parse 'HEAD^{tree}') ]] || BUILT=$(git commit-tree "$TREE" -p HEAD -m "Release v$VERSION")
+  if [[ -n $VERSION_TAG ]]; then
+    git tag -a "$VERSION_TAG" -m "Trek $VERSION" "$BUILT"
+    git push origin "refs/tags/$VERSION_TAG"
+  fi
+  # The channel tag moves to the build, its message naming the version (the next release's
   # checks read it); the release keeps its URL and swaps its assets: the archive first, the
   # manifest that points at it last, then older archives go.
-  git tag -f -a "$CHANNEL" -m "Trek $VERSION" HEAD
+  git tag -f -a "$CHANNEL" -m "Trek $VERSION" "$BUILT"
   git push -f origin "refs/tags/$CHANNEL"
   if gh release view "$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig"

@@ -61,9 +61,15 @@ Versions follow semver, which decides who gets what:
 
 `release.sh` enforces this: a new version must be newer than the last release of its own channel and of
 the channels its users also get (beta: stable; nightly: stable and beta), and not older than the
-workspace version. Stable and beta versions are committed (`Release v<version>`) and tagged; a nightly's
-version is never committed (it's built from `HEAD` with the bump undone afterwards, like a dry run), so
-a nightly never blocks the next beta. The `nightly` tag's message records the last nightly's version.
+workspace version.
+
+Only stable releases move the branch. `[workspace.package] version` in `Cargo.toml` is always the last
+stable version; a stable release commits `Release v<version>` on the branch and tags it. A beta or nightly
+is built from `HEAD` with its version set for the build only, and the exact sources it was built from
+(`HEAD` plus the version bump) are recorded as a commit off the branch that its tags point at: `v<version>`
+and the moving `beta` tag for a beta, only the moving `nightly` tag for a nightly (its message names the
+version). Afterwards the working tree is back at the workspace version, so prereleases never pile up
+version commits on `main` and a nightly never blocks the next beta.
 
 `feed_url` in settings.toml is `https://github.com/dokyit/Trek/releases` by default (settings files that
 still name the old `trek-app/trek` placeholder are migrated on load). It can also be a template with
@@ -85,7 +91,8 @@ What it does:
    suffix, beta / nightly carry theirs; newer than the channels' last releases as above), that the
    version tag doesn't exist, and — for a real release — a clean working tree, `gh` logged in and a stable
    code-signing identity (ad-hoc releases are refused).
-2. Sets `[workspace.package] version` in `Cargo.toml`.
+2. Sets `[workspace.package] version` in `Cargo.toml` for the build (undone afterwards unless a stable
+   release commits it).
 3. Runs `script/bundle.sh`: release build of `trek` and `trek-mcp`, icon, `Info.plist`
    (`CFBundleVersion` carries the full semver; the updater checks it), code signing.
 4. Packs `dist/Trek.app` without extended attributes into
@@ -93,8 +100,9 @@ What it does:
    minisign (trusted comment `Trek <version> darwin-aarch64`; Trek refuses a signature whose trusted
    comment names another version) and verifies the signature against `assets/update/minisign.pub`, so a
    mismatched key fails here rather than on users' machines.
-5. Writes `notes.md` (commit subjects since the previous tag, without merges and release commits) and the
-   manifest `<channel>.json`:
+5. Writes `notes.md` (commit subjects since the most recent tag of the channel's line — the last stable
+   tag for stable, the last version tag for beta, the `nightly` tag for nightly — without merges and
+   release commits) and the manifest `<channel>.json`:
 
    ```json
    { "version": "0.2.0", "notes": "- …", "pub_date": "2026-10-02T20:47:56Z",
@@ -103,10 +111,14 @@ What it does:
        "sha256": "…", "signature": "<the .minisig file>" } } }
    ```
 
-6. Without `--dry-run`: for stable and beta, commits `Release v<version>`, tags `v<version>` and pushes
-   both; creates the GitHub release with the archive, its `.minisig` and the manifest (or, for beta /
-   nightly, moves the channel tag and refreshes the channel's release). A nightly commits nothing: its
-   version bump is undone like a dry run's.
+6. Without `--dry-run`:
+   - stable: commits `Release v<version>` on the current branch, tags `v<version>`, pushes both and
+     creates the GitHub release (marked latest) with the archive, its `.minisig` and `stable.json`;
+   - beta / nightly: records the build as a commit off the branch, tags it (`v<version>` for a beta),
+     moves the channel tag to it, pushes the tags only, and refreshes the channel's prerelease: archive
+     first, manifest last, then older archives are deleted. The branch doesn't move and the version
+     bump is undone.
+
    With `--dry-run` the version bump is undone and nothing leaves the machine; the artifacts stay in
    `dist/release/<version>/`.
 
