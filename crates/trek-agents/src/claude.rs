@@ -708,10 +708,12 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
                         _ => String::new(),
                     };
                     let id: String = block["tool_use_id"].as_str().unwrap_or_default().into();
-                    if let Some((added, removed)) = patched {
+                    let ok = block["is_error"] != true;
+                    // A failed or denied edit changed nothing, whatever its input estimated.
+                    if let Some((added, removed)) = if ok { patched } else { Some((0, 0)) } {
                         out.push(AgentEvent::ToolLines { id: id.clone(), added, removed });
                     }
-                    out.push(AgentEvent::ToolFinished { id, output: clip(&output, 8000), ok: block["is_error"] != true });
+                    out.push(AgentEvent::ToolFinished { id, output: clip(&output, 8000), ok });
                 }
             }
             out.extend(mark(v));
@@ -786,6 +788,11 @@ mod tests {
         assert!(matches!(&ev[1], AgentEvent::ToolFinished { id, ok: true, .. } if id == "e1"));
         let write = json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"/p/n.md","content":"# N\n\nhi\n"}}]}});
         assert_eq!(translate(&write, &mut pending, &mut streamed)[1], AgentEvent::ToolLines { id: "w1".into(), added: 3, removed: 0 });
+        // A denied or failed edit changed nothing.
+        let denied = json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"e1","content":"The user doesn't want to proceed","is_error":true}]}});
+        let ev = translate(&denied, &mut pending, &mut streamed);
+        assert_eq!(ev[0], AgentEvent::ToolLines { id: "e1".into(), added: 0, removed: 0 });
+        assert!(matches!(&ev[1], AgentEvent::ToolFinished { ok: false, .. }));
         // Other tools have none.
         let read = json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/p/a.rs"}}]}});
         assert!(!translate(&read, &mut pending, &mut streamed).iter().any(|e| matches!(e, AgentEvent::ToolLines { .. })));

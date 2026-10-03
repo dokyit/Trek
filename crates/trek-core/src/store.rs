@@ -15,7 +15,7 @@ use crate::worktree::Worktree;
 use anyhow::Result;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -393,7 +393,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
            thread_id TEXT NOT NULL, item_id TEXT NOT NULL, repo TEXT NOT NULL, sha TEXT NOT NULL, created_at INTEGER NOT NULL,
            PRIMARY KEY (thread_id, item_id)
          );
-         CREATE TABLE IF NOT EXISTS retired_sessions (native_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS retired_sessions (native_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS tool_lines (
+           thread_id TEXT NOT NULL, tool_id TEXT NOT NULL, added INTEGER NOT NULL, removed INTEGER NOT NULL,
+           PRIMARY KEY (thread_id, tool_id)
+         );",
     )?;
     migrate_items(conn)?;
     search::ensure_schema(conn)
@@ -925,6 +929,7 @@ impl Store {
         let gone = "SELECT id FROM threads WHERE id = ?1 OR side_of = ?1";
         tx.execute(&format!("DELETE FROM items WHERE thread_id IN ({gone})"), [id])?;
         tx.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({gone})"), [id])?;
+        tx.execute(&format!("DELETE FROM tool_lines WHERE thread_id IN ({gone})"), [id])?;
         tx.execute("DELETE FROM threads WHERE id = ?1 OR side_of = ?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -1040,6 +1045,29 @@ impl Store {
                 params![thread_id, item_id, repo.display().to_string(), sha, now_ms()],
             )?;
             Ok(())
+        })
+    }
+
+    /// Record the lines tool call `tool_id` added and removed (`None`: it changed nothing).
+    pub fn set_tool_lines(&self, thread_id: &str, tool_id: &str, lines: Option<(u32, u32)>) -> Result<()> {
+        self.with(|c| {
+            match lines {
+                Some((added, removed)) => c.execute(
+                    "INSERT OR REPLACE INTO tool_lines (thread_id, tool_id, added, removed) VALUES (?1, ?2, ?3, ?4)",
+                    params![thread_id, tool_id, added, removed],
+                )?,
+                None => c.execute("DELETE FROM tool_lines WHERE thread_id = ?1 AND tool_id = ?2", params![thread_id, tool_id])?,
+            };
+            Ok(())
+        })
+    }
+
+    /// Lines each of a thread's tool calls added and removed, by call id.
+    pub fn tool_lines(&self, thread_id: &str) -> Result<HashMap<String, (u32, u32)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT tool_id, added, removed FROM tool_lines WHERE thread_id = ?1")?;
+            let rows = st.query_map([thread_id], |r| Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?))))?;
+            rows.collect()
         })
     }
 
@@ -1370,6 +1398,23 @@ mod tests {
         assert_eq!(s.trek_native_ids().unwrap(), HashSet::from(["s1".to_string(), "s2".to_string()]));
         s.delete_thread(&t.id).unwrap();
         assert!(s.checkpoints(&t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tool_line_counts_are_kept_per_thread() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let other = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        s.set_tool_lines(&t.id, "e1", Some((12, 3))).unwrap();
+        s.set_tool_lines(&t.id, "e2", Some((4, 0))).unwrap();
+        s.set_tool_lines(&other.id, "e1", Some((1, 1))).unwrap();
+        // The result's patch replaces the estimate; a denied edit drops it.
+        s.set_tool_lines(&t.id, "e1", Some((10, 3))).unwrap();
+        s.set_tool_lines(&t.id, "e2", None).unwrap();
+        assert_eq!(s.tool_lines(&t.id).unwrap(), HashMap::from([("e1".to_string(), (10, 3))]));
+        s.delete_thread(&t.id).unwrap();
+        assert!(s.tool_lines(&t.id).unwrap().is_empty());
+        assert_eq!(s.tool_lines(&other.id).unwrap().len(), 1);
     }
 
     #[test]
