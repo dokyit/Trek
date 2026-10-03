@@ -433,11 +433,9 @@ pub fn match_text(text: &str, ranges: &[std::ops::Range<usize>], cx: &App) -> St
 pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &str)>, color: Hsla, cx: &App) -> AnyElement {
     let Some((t, old)) = reveal else { return div().min_w_0().truncate().text_color(color).child(title.to_string()).into_any_element() };
     let (new_alpha, old_alpha) = reveal_alphas(title.chars().count(), old.chars().count(), t);
-    let ranges = |text: &str, alphas: &[f32], color: Hsla| -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
-        text.char_indices()
-            .zip(alphas)
-            .map(|((i, c), a)| (i..i + c.len_utf8(), HighlightStyle { color: Some(color.opacity(color.a * a)), ..Default::default() }))
-            .collect()
+    // Highlight colours blend over the text's own, so opacity goes through `fade_out`.
+    let ranges = |text: &str, alphas: &[f32]| -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+        text.char_indices().zip(alphas).map(|((i, c), a)| (i..i + c.len_utf8(), HighlightStyle { fade_out: Some(1. - a), ..Default::default() })).collect()
     };
     let dust = cx.theme().foreground.opacity(0.5);
     let chars = title.chars().count().max(1) as f32;
@@ -447,7 +445,7 @@ pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &s
         .test_support()
         .relative()
         .min_w_0()
-        .child(div().truncate().child(StyledText::new(title.to_string()).with_highlights(ranges(title, &new_alpha, color))))
+        .child(div().truncate().text_color(color).child(StyledText::new(title.to_string()).with_highlights(ranges(title, &new_alpha))))
         .when(!old.is_empty(), |el| {
             el.child(
                 div()
@@ -456,7 +454,8 @@ pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &s
                     .left_0()
                     .size_full()
                     .truncate()
-                    .child(StyledText::new(old.to_string()).with_highlights(ranges(old, &old_alpha, cx.theme().muted_foreground))),
+                    .text_color(cx.theme().muted_foreground)
+                    .child(StyledText::new(old.to_string()).with_highlights(ranges(old, &old_alpha))),
             )
         })
         .child(
@@ -467,7 +466,14 @@ pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &s
                 let x0 = b.origin.x.as_f32() + width * (front / chars).clamp(0., 1.);
                 let h = b.size.height.as_f32();
                 for i in 0..14u32 {
-                    let r = |k: u32| ((i.wrapping_mul(2654435761).wrapping_add(k.wrapping_mul(40503)) >> 8) % 1000) as f32 / 1000.;
+                    // A fixed scatter: each speck's own pseudo-random numbers (a small integer hash).
+                    let r = |k: u32| {
+                        let mut h = i.wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+                        h ^= h >> 15;
+                        h = h.wrapping_mul(0x2C1B_3C6D);
+                        h ^= h >> 12;
+                        (h % 1000) as f32 / 1000.
+                    };
                     // Dust drifts back from the edge and thins out as the title settles.
                     let x = x0 - r(1) * 22. * (0.4 + t);
                     let y = b.origin.y.as_f32() + 2. + r(2) * (h - 4.);
