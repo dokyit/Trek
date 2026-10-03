@@ -22,6 +22,15 @@ pub const KEEP: usize = 100;
 /// untracked files, a clean filter that hangs) it goes without one.
 pub const SNAPSHOT_LIMIT: Duration = Duration::from_secs(10);
 
+/// Untracked files bigger than this are left out of snapshots: a dataset, a video or build output
+/// missing from `.gitignore` would otherwise be copied into the user's `.git` on the next turn.
+/// Restoring leaves them as they are.
+pub const UNTRACKED_MAX: u64 = 8 << 20;
+
+/// Checkpoints of threads archived or settled this long ago are dropped (`prune_stale`), so their
+/// refs don't keep big objects alive in the user's repo for good.
+pub const STALE_AFTER_MS: i64 = 30 * 86_400_000;
+
 const REF_ROOT: &str = "refs/trek/checkpoints";
 const UNDO_ROOT: &str = "refs/trek/undo";
 
@@ -197,19 +206,42 @@ impl Repo {
 
     /// The tree the working directory holds right now: tracked and untracked files that aren't
     /// ignored, as `git add -A` sees them. Files git can't take are left out, the same way each
-    /// time (a nested repository with no commit yet, an unreadable file), rather than failing it.
+    /// time (a nested repository with no commit yet, an unreadable file), rather than failing it,
+    /// and so are untracked files over `UNTRACKED_MAX`.
     fn tree_now(&self) -> Result<String> {
         let index = TempIndex::new();
         // Starting from the user's index keeps its stat data: only files that changed are read.
         if self.index.exists() {
             std::fs::copy(&self.index, &index.0).context("copy the index")?;
         }
-        let out = self.output(Some(&index), &["add", "-A", "--ignore-errors"], None, Some(self.limit))?;
+        let started = Instant::now();
+        let big = self.big_untracked(&index)?;
+        let limit = Some(self.limit.saturating_sub(started.elapsed()));
+        let out = if big.is_empty() {
+            self.output(Some(&index), &["add", "-A", "--ignore-errors"], None, limit)?
+        } else {
+            let spec: String = std::iter::once(".".to_string()).chain(big.iter().map(|p| format!(":(exclude,literal){p}"))).map(|p| p + "\0").collect();
+            self.output(Some(&index), &["add", "-A", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(spec.as_bytes()), limit)?
+        };
         // 1: some files were left out (see above); anything else is git failing outright.
         if !matches!(out.status.code(), Some(0 | 1)) {
             bail!("git add failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
         self.run(Some(&index), &["write-tree"], None)
+    }
+
+    /// Untracked files (not ignored) over `UNTRACKED_MAX`, relative to the top folder.
+    fn big_untracked(&self, index: &TempIndex) -> Result<Vec<String>> {
+        let out = self.output(Some(index), &["ls-files", "-z", "--others", "--exclude-standard"], None, Some(self.limit))?;
+        if !out.status.success() {
+            bail!("git ls-files failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        let listed = String::from_utf8_lossy(&out.stdout);
+        Ok(listed
+            .split('\0')
+            .filter(|p| !p.is_empty() && std::fs::symlink_metadata(self.top.join(p)).is_ok_and(|m| m.is_file() && m.len() > UNTRACKED_MAX))
+            .map(str::to_string)
+            .collect())
     }
 
     /// A commit of `tree`, hung on HEAD when there is one.
@@ -360,6 +392,25 @@ impl Repo {
     }
 }
 
+/// Drop the checkpoints of threads archived or settled more than `STALE_AFTER_MS` before `now`,
+/// and of threads that are gone: refs and records. Returns how many threads lost theirs. Blocks
+/// on git.
+pub fn prune_stale(store: &crate::store::Store, now: i64) -> Result<usize> {
+    let stale = store.stale_checkpoints(now - STALE_AFTER_MS)?;
+    for (thread, checkpoints) in &stale {
+        let mut repos: Vec<&Path> = checkpoints.iter().map(|c| c.repo.as_path()).collect();
+        repos.sort();
+        repos.dedup();
+        for repo in repos {
+            if let Some(r) = Repo::find(repo) {
+                r.delete_all(thread)?;
+            }
+        }
+        store.delete_checkpoints(thread, &checkpoints.iter().map(|c| c.item_id.clone()).collect::<Vec<_>>())?;
+    }
+    Ok(stale.len())
+}
+
 /// The git command in `args` (`add`, `update-ref`), for messages.
 fn command_name<'a>(args: &[&'a str]) -> &'a str {
     let mut it = args.iter();
@@ -451,6 +502,58 @@ mod tests {
     fn sorted(mut c: Vec<FileChange>) -> Vec<(String, Change)> {
         c.sort_by(|a, b| a.path.cmp(&b.path));
         c.into_iter().map(|c| (c.path, c.change)).collect()
+    }
+
+    #[test]
+    fn big_untracked_files_are_left_out() {
+        let s = Scratch::new(true);
+        s.write("notes.txt", "small\n");
+        let big = std::fs::File::create(s.0.join("data set.bin")).unwrap();
+        big.set_len(UNTRACKED_MAX + 1).unwrap();
+        let repo = s.repo();
+        let sha = repo.snapshot("t1", "u1").unwrap();
+        let files = s.git(&["ls-tree", "-r", "--name-only", &sha]);
+        assert!(files.lines().any(|f| f == "notes.txt"));
+        assert!(!files.lines().any(|f| f == "data set.bin"), "{files}");
+        // Restoring leaves it be, whatever became of it.
+        std::fs::remove_file(s.0.join("notes.txt")).unwrap();
+        let restored = repo.restore(&sha, "t1").unwrap();
+        assert_eq!(sorted(restored.changes), [("notes.txt".to_string(), Change::Deleted)]);
+        assert_eq!(std::fs::metadata(s.0.join("data set.bin")).unwrap().len(), UNTRACKED_MAX + 1);
+    }
+
+    #[test]
+    fn checkpoints_of_threads_long_put_away_are_dropped() {
+        use crate::store::Store;
+        use crate::types::{AgentId, Effort, HandHolding};
+        let s = Scratch::new(true);
+        let repo = s.repo();
+        let store = Store::in_memory().unwrap();
+        let new = |f: &dyn Fn(&mut crate::store::Thread)| {
+            let mut t = store.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+            f(&mut t);
+            store.save_thread(&t).unwrap();
+            let sha = repo.snapshot(&t.id, "u1").unwrap();
+            store.add_checkpoint(&t.id, "u1", &repo.top, &sha).unwrap();
+            t.id
+        };
+        let now = 100 * 86_400_000;
+        let old = now - STALE_AFTER_MS - 1;
+        let active = new(&|_| {});
+        let archived = new(&|t| t.archived_at = Some(old));
+        let settled = new(&|t| t.settled_at = Some(old));
+        let pinned = new(&|t| {
+            t.settled_at = Some(old);
+            t.pinned_at = Some(old);
+        });
+        let recent = new(&|t| t.archived_at = Some(now - 1));
+        repo.restore(&store.checkpoints(&archived).unwrap()[0].sha, &archived).unwrap();
+        assert_eq!(prune_stale(&store, now).unwrap(), 2);
+        for (thread, kept) in [(&active, true), (&archived, false), (&settled, false), (&pinned, true), (&recent, true)] {
+            assert_eq!(!store.checkpoints(thread).unwrap().is_empty(), kept, "{thread}");
+            assert_eq!(!repo.items(thread).unwrap().is_empty(), kept, "{thread}");
+        }
+        assert!(s.git(&["for-each-ref", &undo_ref(&archived)]).is_empty());
     }
 
     #[test]

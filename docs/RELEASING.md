@@ -93,8 +93,9 @@ What it does:
    code-signing identity (ad-hoc releases are refused).
 2. Sets `[workspace.package] version` in `Cargo.toml` for the build (undone afterwards unless a stable
    release commits it).
-3. Runs `script/bundle.sh`: release build of `trek` and `trek-mcp`, icon, `Info.plist`
-   (`CFBundleVersion` carries the full semver; the updater checks it), code signing.
+3. Runs `script/bundle.sh` with `TREK_RELEASE_BUILD=1`: release build of `trek` and `trek-mcp`, icon,
+   `Info.plist` (`CFBundleVersion` carries the full semver; the updater checks it; `TrekRelease` marks it
+   as a release), code signing.
 4. Packs `dist/Trek.app` without extended attributes into
    `dist/release/<version>/Trek-<version>-darwin-aarch64.app.tar.gz`, records its SHA-256, signs it with
    minisign (trusted comment `Trek <version> darwin-aarch64`; Trek refuses a signature whose trusted
@@ -146,16 +147,29 @@ Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default
    it; if the second fails the current app is put back, and if even that fails it's left where the error
    says rather than deleted), keep the previous version in `updates/previous.noindex/` as the one backup,
    relaunch with `open -n`. If the new app can't be opened, the relaunch helper puts the version this
-   install replaced back and opens that (never an older backup when nothing was replaced).
+   install replaced back, writes the new version to `updates/skip-version` so the restored one doesn't
+   install it again, and opens the restored one (never an older backup when nothing was replaced). A
+   newer release is offered as usual.
 5. The new version deletes download folders of Trek processes that are gone and shows "Trek updated to
    <version>". Download folders are named after their process so that a second Trek sharing the data
    folder never deletes one that's in use.
 
-Development builds (`cargo run`, not inside an `.app`) never check for, download, install or clean up
-updates, and neither does a copy macOS runs translocated from Downloads.
+Development builds never check for, download, install or clean up updates: `cargo run`, and bundles built
+with `script/bundle.sh` on its own (no `TrekRelease` key), which would otherwise swap fresh code for an
+older published build. `TREK_UPDATE_LOCAL_BUNDLE=1` lets a local bundle update anyway. Neither does a copy
+macOS runs translocated from Downloads, nor one in a folder Trek can't write to (a standard account with
+Trek in `/Applications`): Settings → Updates says to move it to a folder you own.
 
 To roll back by hand: quit Trek, then
-`mv /Applications/Trek.app /tmp/ && mv ~/Library/Application\ Support/dev.trek.Trek/updates/previous.noindex/Trek.app /Applications/`.
+
+```sh
+cd ~/Library/Application\ Support/dev.trek.Trek/updates
+plutil -extract CFBundleVersion raw -o skip-version /Applications/Trek.app/Contents/Info.plist
+mv /Applications/Trek.app /tmp/ && mv previous.noindex/Trek.app /Applications/
+```
+
+`skip-version` keeps the version you rolled back to from downloading and installing the one you left
+again; a newer release is still offered. Delete the file to be offered that version again.
 
 ## Testing an update without publishing
 

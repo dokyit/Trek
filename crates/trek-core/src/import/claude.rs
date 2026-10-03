@@ -199,6 +199,12 @@ fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String
                     asked = Some(c);
                 }
             }
+            Some("attachment") => {
+                if let Some(text) = queued_prompt(&v) {
+                    prompts += 1;
+                    first_prompt.get_or_insert(text);
+                }
+            }
             Some("assistant") => {
                 main_line = true;
                 fork_of.get_or_insert_with(|| v["forkedFrom"]["sessionId"].as_str().map(String::from));
@@ -231,6 +237,12 @@ fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String
 
     // Tail: titles are rewritten as the session goes on, so the newest of each kind wins.
     let tail = tail_lines(path, 256 * 1024);
+    // Claude Code keeps appending bookkeeping (titles, cost, mode) long after the last message,
+    // so the file's modified time can be days late: the last message says when it was active.
+    let updated = last_message_at(&tail).unwrap_or(updated);
+    if updated < min_updated && !held.contains(&session_id) {
+        return None;
+    }
     let newest = |kind: &str, key: &str| {
         let needle = format!("\"type\":\"{kind}\"");
         tail.iter().rev().filter(|l| l.contains(&needle)).find_map(|l| title_line(l, kind, key))
@@ -255,7 +267,10 @@ fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String
         prompts: whole.then_some(prompts),
         first_message: first_message.as_deref(),
         replied,
-        subagent: whole && side_chain && !main_line,
+        // Read whole or not: a session's own messages come first, so a head with nothing but a
+        // side chain is a sub-agent's transcript (older Claude Code kept them as `agent-*.jsonl`
+        // next to the sessions, and long ones run past the head).
+        subagent: side_chain && !main_line,
         untouched_fork,
         trek: false,
         cli_run: false,
@@ -283,6 +298,27 @@ fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String
         skip,
         legacy_title,
     })
+}
+
+/// When the newest message of the main conversation in `tail` was written.
+fn last_message_at(tail: &[String]) -> Option<i64> {
+    tail.iter().rev().filter(|l| l.contains("\"timestamp\"")).find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        let message = matches!(v["type"].as_str(), Some("user" | "assistant")) && v["isSidechain"] != true;
+        message.then(|| v["timestamp"].as_str().and_then(ms_from_rfc3339)).flatten()
+    })
+}
+
+/// What the user typed while the agent was working, from the `queued_command` attachment Claude
+/// Code records when the running turn takes it in. Such a message gets no user line of its own.
+/// Background tasks reporting back queue the same way; they aren't the user's.
+fn queued_prompt(v: &Value) -> Option<String> {
+    let a = &v["attachment"];
+    if v["isSidechain"] == true || a["type"] != "queued_command" || a["origin"]["kind"] != "human" {
+        return None;
+    }
+    let text = content_text(&a["prompt"])?;
+    (!text.trim_start().starts_with("<task-notification>") && user_text(&text).is_some()).then(|| unwrap_pasted(&text))
 }
 
 /// Print mode and the SDKs record `sdk-*`; the terminal UI and IDE extensions don't.
@@ -397,6 +433,8 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
     // the next message and everything after it are gone.
     let mut last_message: Option<String> = None;
     let point = |after: Option<String>| Some(ResumePoint { session: session.clone(), after });
+    // A message typed mid-turn and shown already, in case it's also written as a user line.
+    let mut queued: Option<String> = None;
     for line in reader.lines().map_while(Result::ok) {
         // Background tasks report back as a user line when the agent is idle, or queued into
         // the running turn; either way the task is done.
@@ -441,6 +479,7 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
                 }
                 let raw = raw_text(content).unwrap_or_default();
                 match content_text(content).filter(|t| !is_injected(t)) {
+                    Some(text) if queued.as_deref() == Some(unwrap_pasted(&text).as_str()) => queued = None,
                     Some(text) => {
                         asked = None;
                         t.user(unwrap_pasted(&text), at);
@@ -462,7 +501,15 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
                     }
                 }
             }
+            // Typed while the agent was working: part of the running turn, which goes on.
+            Some("attachment") => {
+                if let Some(text) = queued_prompt(&v) {
+                    t.steer(text.clone(), vec![], at);
+                    queued = Some(text);
+                }
+            }
             Some("assistant") => {
+                queued = None;
                 if let Some((command, at, before)) = asked.take() {
                     t.user(command, at);
                     t.resume_from(point(before));
@@ -690,6 +737,38 @@ mod tests {
     }
 
     #[test]
+    fn long_sub_agent_transcripts_are_sub_agents() {
+        let dir = Scratch::new();
+        // Older Claude Code kept them next to the sessions, and they run past the head.
+        let lines: Vec<Value> = (0..460)
+            .map(|i| {
+                let mut l = if i % 2 == 0 { user("look into it", "2026-10-01T10:00:00Z") } else { reply("found it", "2026-10-01T10:00:01Z") };
+                l["isSidechain"] = json!(true);
+                l
+            })
+            .collect();
+        let path = session(&dir, "agent-1234abcd", REPO, "cli", &lines);
+        assert_eq!(index(&path).skip, Some(Skip::Subagent));
+    }
+
+    #[test]
+    fn threads_are_dated_by_their_last_message() {
+        let dir = Scratch::new();
+        // Bookkeeping lines keep coming after the last message.
+        let path = session(&dir, "a", REPO, "cli", &[
+            user("fix the build", "2026-09-28T02:10:00Z"),
+            reply("done", "2026-09-28T02:14:00Z"),
+            json!({ "type": "ai-title", "aiTitle": "Build fix" }),
+            json!({ "type": "last-prompt", "lastPrompt": "fix the build" }),
+        ]);
+        assert_eq!(index_file(&path, i64::MAX, 0, &HashSet::new()).unwrap().updated_at, ms_from_rfc3339("2026-09-28T02:14:00Z").unwrap());
+        // "How far back" goes by it too.
+        let cutoff = ms_from_rfc3339("2026-09-30T00:00:00Z").unwrap();
+        assert!(index_file(&path, i64::MAX, cutoff, &HashSet::new()).is_none());
+        assert!(index_file(&path, i64::MAX, cutoff, &HashSet::from(["a".to_string()])).is_some());
+    }
+
+    #[test]
     fn untouched_forks_are_skipped() {
         let dir = Scratch::new();
         let original = [user("plan the migration", "2026-10-01T10:00:00Z"), reply("Here's a plan", "2026-10-01T10:00:09Z")];
@@ -801,6 +880,37 @@ mod tests {
         let items = load_file(&path).unwrap();
         assert_eq!(kinds(&items), ["user what", "assistant", "end 1352s", "user /goal", "assistant", "end 8805s"]);
         assert!(matches!(&items[3], Item::User { text, at, .. } if text == "/goal redesign the app" && *at == ms_from_rfc3339("2026-10-01T04:18:22Z")));
+    }
+
+    #[test]
+    fn messages_typed_mid_turn_are_shown() {
+        let dir = Scratch::new();
+        let queued = |prompt: &str, kind: &str, at: &str| {
+            json!({ "type": "attachment", "isSidechain": false, "timestamp": at,
+                    "attachment": { "type": "queued_command", "prompt": prompt, "origin": { "kind": kind }, "humanTurn": kind == "human" } })
+        };
+        let path = session(&dir, "a", REPO, "cli", &[
+            user("set up the Xcode project", "2026-09-24T18:40:00Z"),
+            assistant(json!([{ "type": "tool_use", "id": "t1", "name": "Bash", "input": { "command": "xcodebuild" } }]), "tool_use", "2026-09-24T18:51:57Z"),
+            json!({ "type": "queue-operation", "operation": "enqueue", "content": "I opened Xcode", "timestamp": "2026-09-24T18:51:58Z" }),
+            user(json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }]), "2026-09-24T18:52:19Z"),
+            queued("I opened Xcode and did all the things", "human", "2026-09-24T18:51:58Z"),
+            queued("<task-notification>\n<task-id>b1</task-id>\n</task-notification>", "task-notification", "2026-09-24T18:52:20Z"),
+            queued("<pasted_content id=\"f8dc\">\ncrash report\n</pasted_content>", "human", "2026-09-24T18:53:00Z"),
+            reply("Built it", "2026-09-24T19:00:00Z"),
+            turn_done("2026-09-24T19:00:00Z", 1_200_000),
+            // Taken in as the next message instead: written as a user line too, shown once.
+            queued("now run it", "human", "2026-09-24T19:01:00Z"),
+            user("now run it", "2026-09-24T19:01:00Z"),
+            reply("Running", "2026-09-24T19:01:05Z"),
+            turn_done("2026-09-24T19:01:05Z", 5_000),
+        ]);
+        let items = load_file(&path).unwrap();
+        assert_eq!(kinds(&items), ["user set", "other", "user I", "user crash", "assistant", "end 1200s", "user now", "assistant", "end 5s"]);
+        assert!(matches!(&items[2], Item::User { aside: true, at, .. } if *at == ms_from_rfc3339("2026-09-24T18:51:58Z")));
+        assert!(matches!(&items[3], Item::User { text, .. } if text == "crash report"));
+        assert!(matches!(&items[6], Item::User { aside: false, .. }));
+        assert_eq!(index(&path).skip, None);
     }
 
     #[test]

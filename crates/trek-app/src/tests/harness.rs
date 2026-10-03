@@ -145,6 +145,9 @@ pub fn launch(cx: &mut TestAppContext, store: Store, settings: Settings) -> (Ent
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&crate::assets::theme_json());
         crate::apply_theme(ThemeChoice::Night, None, cx);
         cx.bind_keys(crate::key_bindings());
+        // Animations run on the real clock: a toast sliding in under load would move away from
+        // where a click was aimed between frames. With reduced motion they start finished.
+        cx.set_reduce_motion(true);
     });
     let ws = cx.new(|cx| {
         let mut ws = Workspace::with(store, settings, cx);

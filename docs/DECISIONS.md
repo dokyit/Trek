@@ -80,6 +80,11 @@ already-imported ones are archived unless they were pinned or continued in Trek,
 (Settings › Import) marks a session kept so later imports leave it. Titles come from the source's own title when it's
 meaningful, else the first real user message; the imported title is stored so a rename in Trek survives
 re-import. Imported turns get the live response footer, timed wall-clock from the user's message.
+Messages sent while the agent was working (Codex steers, Claude Code's queued messages, which it records
+only as a `queued_command` attachment) are shown in the turn they joined, as asides: the footer still
+times the turn from its first message. A thread is dated by its last message, not by the session file's
+modified time (Claude Code appends bookkeeping long after). Deleting a Trek thread retires its agent
+sessions, so no import brings the conversation back.
 
 | Source | Where | Resume |
 |---|---|---|
@@ -101,7 +106,10 @@ version, notes and per-platform archive URL, SHA-256 and minisign signature; the
 unpack and inspect the bundle → "Update" pill in the sidebar footer and **Restart to update** → install
 only when no agent turn is running, or on quit (Conductor's pattern; Claude desktop's update-kills-sessions
 bug is the anti-pattern). The swap is one atomic rename with one backup kept, and never replaces a version
-that's already as new. Changing the channel drops whatever the old channel downloaded. Bundles are signed with a
+that's already as new. Changing the channel drops whatever the old channel downloaded. A version rolled back
+from (by the relaunch helper, or by hand) is never offered again. Only release bundles update themselves:
+`cargo run` and bundles built locally with `script/bundle.sh` are development builds, and a copy in a folder
+Trek can't write to says so instead of downloading an update it could never install. Bundles are signed with a
 stable identity so macOS permissions survive updates. Swap in Sparkle (macOS) or Velopack later if delta
 updates are needed. Details: docs/RELEASING.md.
 
@@ -118,6 +126,13 @@ per-turn checkpoints. Databases from before ids are migrated on open (rows keep 
 allows an expression default only in CREATE TABLE, so tables without it are rebuilt on open, ids and keys
 unchanged. A message sent to an imported thread while its history is still being read waits ("1 queued")
 and goes out after it, so stored rows never land ahead of the history.
+Known downgrade limitation: an older build saves a thread with INSERT OR REPLACE over the columns it
+knows, so each thread it saves loses what newer builds keep on the row (the worktree link, the import
+flags, where its session stands) and each transcript it rewrites gets new ids, which orphans that thread's
+rewind points. The files and the conversation survive; review → merge and rewind don't, for those threads.
+Migrations run in one transaction that takes the write lock first: with another Trek holding it, opening
+waits, then fails without changing anything, and Trek says so instead of carrying on with a database that
+isn't saved.
 
 **Full-text search is SQLite FTS5** (bundled SQLite has it compiled in), tokenizer `unicode61` with
 diacritics folded, prefix indexes for as-you-type queries. Every word typed must match, each as a prefix.
@@ -140,6 +155,12 @@ diacritics folded, prefix indexes for as-you-type queries. Every word typed must
   title, position, item id when stored, one-line snippet with match ranges). The best match per thread is
   picked before the limit applies, so one thread with many matching messages can't crowd out the rest.
   Titles come back as written; message excerpts drop markdown emphasis and code ticks.
+- Searches run on a second, read-only connection: WAL lets it read while the main one writes, so a search
+  never holds up a save. Messages are searched once a word has three characters (one-letter words are
+  dropped from the message query), and only each index's best 2,000 matches are grouped by thread: short
+  prefixes match most of the history. Stored and imported matches come from two FTS tables whose bm25
+  scores aren't comparable (each depends on its own table's statistics), so each list is scored relative
+  to its own best match before they're merged.
 
 **⌘K palette** (`command_palette.rs`): threads (title matches, then message matches with the snippet),
 projects (new thread in it, its settings), commands (new thread, open folder, every settings page, tools
@@ -162,8 +183,9 @@ the results of what was typed.
   snapshot takes ~75 ms on this repo and ~130 ms on a 30,000-file one. It runs off the main thread as a turn
   starts, and the message is held until it's done, so it always shows the files before the agent touched
   them (a message that steers a running turn gets none). The newest 100 per thread are kept; refs go with
-  the messages a rewind removes and with deleted threads (after any snapshot still running). Folders
-  outside git get none.
+  the messages a rewind removes and with deleted threads (after any snapshot still running), and at launch
+  with threads archived or settled more than 30 days ago, so they don't keep objects alive in the user's
+  repo for good. Folders outside git get none.
 - **A snapshot never holds a turn up for long, and never fails over one path.** Reading the files is
   stopped after 10 s (a clean filter that hangs, huge untracked files); the message then goes without a
   checkpoint, and the popover says why. Stop never waits behind git work: a message still held for its
@@ -171,7 +193,8 @@ the results of what was typed.
   nested repository with no commit yet) the same way every time. Nested repositories (mode 160000: a
   clone the agent made) are left as they are by a restore, never deleted. A file that can't be put back
   doesn't stop the others; the toast names it, and the checkpoints a failed restore would have dropped are
-  kept. There's no size cap on untracked files: `.gitignore` is the way to keep artifacts out.
+  kept. Untracked files over 8 MB are left out (a dataset or a video missing from `.gitignore` would
+  otherwise be copied into the user's `.git` on the next turn), and a restore leaves them as they are.
 - **Every restore can be undone.** Before it writes anything, a restore commits the files as they are to
   `refs/trek/undo/<thread>`; the "Restored N files" toast's Undo restores that. Edit & resend restores by
   default (as the popover does) and shows the count, with the files in its tooltip, before it's sent.

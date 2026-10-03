@@ -327,6 +327,10 @@ fn is_placeholder_title(title: &str) -> bool {
         || after("T3 Code").is_some_and(|r| r.len() == 36 && r.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
 }
 
+/// Names this long that start a message are copies of it, wherever they end: Codex cuts at
+/// about 60 characters.
+const COPY_CUT: usize = 40;
+
 /// A stored title that is only the start of the first message: what agents call a thread before
 /// it's named, cut with or without an ellipsis. Compared with links and spacing flattened.
 pub(crate) fn copies_message(title: &str, message: &str) -> bool {
@@ -335,12 +339,25 @@ pub(crate) fn copies_message(title: &str, message: &str) -> bool {
     if cut.is_empty() {
         return true;
     }
+    // Only a cut copy shows where it was cut: at an ellipsis, mid-word, at about the length
+    // agents cut at, or at the end of the message. A short name ending on a word the message
+    // happens to start with ("Design", "Fix") is one the user gave it. Nobody types a name over
+    // several lines.
+    let marked = cut.len() < trimmed.len() || trimmed.contains('\n');
+    let copied = |text: String, cut: String| {
+        text.strip_prefix(&cut).is_some_and(|rest| {
+            marked
+                || rest.trim().is_empty()
+                || cut.chars().count() >= COPY_CUT
+                || (rest.starts_with(char::is_alphanumeric) && cut.ends_with(char::is_alphanumeric))
+        })
+    };
     let flat = |s: &str| collapse_spaces(&s.lines().map(clean_line).collect::<Vec<_>>().join(" "));
     let typed = user_text(message).unwrap_or_default();
     let (typed_flat, cut_flat) = (flat(&typed), flat(cut));
-    collapse_spaces(message).starts_with(&collapse_spaces(cut))
-        || collapse_spaces(&typed).starts_with(&collapse_spaces(cut))
-        || typed_flat.starts_with(&cut_flat)
+    copied(collapse_spaces(message), collapse_spaces(cut))
+        || copied(collapse_spaces(&typed), collapse_spaces(cut))
+        || copied(typed_flat.clone(), cut_flat.clone())
         // Codex names a thread by the message as its app showed it: the request, then the names of
         // the files attached to it, cut off.
         || (cut.len() < trimmed.len() && !typed_flat.is_empty() && cut_flat.starts_with(&typed_flat))
@@ -404,16 +421,54 @@ pub(crate) fn strip_block(text: &str, tag: &str) -> String {
     out
 }
 
-/// Context injected into the user's side of the conversation: tag-wrapped blocks
-/// (`<environment_context>`, `<command-name>`, `<system-reminder>`, …), instruction files,
-/// caveats and resume notes. Pasted text is the user's own, even though it comes in a tag.
+/// Tags agents and apps wrap the context they add to the user's side of the conversation in.
+const INJECTED_TAGS: &[&str] = &[
+    "bash-input",
+    "bash-stderr",
+    "bash-stdout",
+    "codex_internal_context",
+    "command-args",
+    "command-message",
+    "command-name",
+    "command-stderr",
+    "command-stdout",
+    "environment_context",
+    "fork-boilerplate",
+    "ide_diagnostics",
+    "ide_opened_file",
+    "ide_selection",
+    "image",
+    "in-app-browser-context",
+    "INSTRUCTIONS",
+    "local-command-caveat",
+    "local-command-stderr",
+    "local-command-stdout",
+    "permissions",
+    "recommended_plugins",
+    "send_user_message_question_reply",
+    "subagent_notification",
+    "system-reminder",
+    "task-notification",
+    "turn_aborted",
+    "user-prompt-submit-hook",
+    "user_instructions",
+    "user_shell_command",
+];
+
+/// Context injected into the user's side of the conversation: blocks in the tags above, or any
+/// one tag wrapping the whole message; instruction files, caveats and resume notes. A message
+/// that merely starts with markup (`<div> overflows on mobile`) is the user's, and so is pasted
+/// text, even though it comes in a tag.
 pub(crate) fn is_injected(text: &str) -> bool {
     let t = text.trim_start();
     if t.is_empty() {
         return true;
     }
     if let Some(tag) = t.strip_prefix('<') {
-        return tag.starts_with(|c: char| c.is_ascii_alphabetic() || c == '/') && !tag.starts_with("pasted_content");
+        let tag = tag.strip_prefix('/').unwrap_or(tag);
+        let name = &tag[..tag.find(|c: char| !(c.is_ascii_alphanumeric() || "_-:".contains(c))).unwrap_or(tag.len())];
+        let opens = !name.is_empty() && tag[name.len()..].starts_with(|c: char| c == '>' || c == '/' || c.is_whitespace());
+        return opens && name != "pasted_content" && (INJECTED_TAGS.contains(&name) || t.trim_end().ends_with(&format!("</{name}>")));
     }
     // Instruction files: "# AGENTS.md instructions for /repo", or just "# AGENTS.md instructions".
     let heading = t.lines().next().unwrap_or_default().trim_end();
@@ -628,6 +683,17 @@ impl Transcript {
         self.touch(at);
     }
 
+    /// A message the user sent while the agent was working, taken into the running turn: shown,
+    /// and the turn goes on, still timed from its start. Not a turn of its own, so not somewhere
+    /// to rewind to. Sent after the reply finished, it starts the next turn.
+    pub fn steer(&mut self, text: String, images: Vec<String>, at: Option<i64>) {
+        if self.done {
+            return self.user_with(text, images, at);
+        }
+        self.items.push(Item::User { text, images, at, resume: None, aside: true });
+        self.touch(at);
+    }
+
     /// The agent starts a turn without a message from the user. A new reply, timed from `at`,
     /// unless the last one is waiting for its background sub-agents.
     pub fn wake(&mut self, at: Option<i64>) {
@@ -809,6 +875,13 @@ mod tests {
         assert!(!is_injected("<pasted_content id=\"a\">x</pasted_content>"));
         assert_eq!(unwrap_pasted("\n\n<pasted_content id=\"a\">\nlog line\n</pasted_content>\nwhy?"), "log line\n\nwhy?");
         assert!(!is_injected("< 5 items is fine"));
+        // Messages that start with markup are the user's.
+        for typed in ["<Button onClick={save}> never fires, why?", "<div class=\"card\"> overflows on mobile, fix the CSS", "<section> collapses on Safari, fix it"] {
+            assert_eq!(user_text(typed).as_deref(), Some(typed));
+        }
+        // A tag wrapping the whole message is context, known or not.
+        assert!(is_injected("<new_context_kind>\nsomething\n</new_context_kind>"));
+        assert!(is_injected("</image>"));
         assert!(!is_injected("# Task: write the AGENTS.md instructions for the repo"));
     }
 
@@ -829,6 +902,13 @@ mod tests {
         assert!(copies_message("fm crashed, when I launched it Translated R…", pasted));
         // A name that only starts like the request is a name.
         assert!(!copies_message("fm crashed, when I launched it: Steam overlay", pasted));
+        // So is a short one the request happens to start with.
+        let request = "Design the settings page so it reads like the rest of the app";
+        assert!(!copies_message("Design", request));
+        assert!(!copies_message("Design the settings page", request));
+        assert!(copies_message("Design the settings page so it reads like the", request));
+        assert!(copies_message("Design the sett", request));
+        assert!(copies_message("hi", "hi"));
     }
 
     #[test]
@@ -921,6 +1001,18 @@ mod tests {
         let again = import_found(&store, vec![found("s-trek", None), found("s-user", None), found("s-tmp", Some(Skip::TempDir))]);
         assert!(again.left_out.is_empty());
         assert_eq!(store.threads().unwrap().len(), 3);
+
+        // A deleted thread's session (and its side chats') stays in the agent's history; the
+        // next import mustn't bring the conversation back.
+        let mut side = store.create_thread(None, crate::AgentId::ClaudeCode, None, Effort::High, crate::HandHolding::Auto).unwrap();
+        side.side_of = Some(own.id.clone());
+        side.native_id = Some("s-side".into());
+        store.save_thread(&side).unwrap();
+        store.delete_thread(&own.id).unwrap();
+        let after = import_found(&store, vec![found("s-trek", None), found("s-side", None), found("s-user", None)]);
+        assert_eq!(after.new_threads, 0);
+        assert_eq!(after.skipped, BTreeMap::from([(Skip::Trek, 2)]));
+        assert_eq!(store.threads().unwrap().len(), 2);
     }
 
     fn footers(items: &[Item]) -> Vec<(i64, u32)> {

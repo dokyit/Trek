@@ -509,7 +509,14 @@ pub enum UndoAction {
     Unarchive(String),
     /// Put the files of `repo` back as they were before a restore (`Restored::undo`).
     Unrestore { thread: String, repo: PathBuf, sha: String },
+    /// Call off a restart to update that's counting down (`RESTART_GRACE`); it waits for a click
+    /// or a quit again.
+    CancelRestart,
 }
+
+/// How long a restart the user asked for while agents worked waits once they're done: they may
+/// be typing the next message by then, and unsent text doesn't survive a restart.
+pub const RESTART_GRACE: Duration = Duration::from_secs(10);
 
 /// Git state of the folder on screen, for the composer's branch chip.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -619,6 +626,11 @@ pub struct Workspace {
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
     tasks: Vec<Task<()>>,
+    /// A restart the user asked for while agents worked, counting down now that they're done.
+    restart_countdown: Option<Task<()>>,
+    /// Why Trek's database couldn't be opened, until the main window has said so: this session
+    /// runs on an in-memory copy and nothing is saved.
+    pub store_error: Option<String>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -626,13 +638,42 @@ impl EventEmitter<WorkspaceEvent> for Workspace {}
 impl Workspace {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
-        let store = Store::open_default().unwrap_or_else(|e| {
-            tracing::error!("database: {e}; using in-memory store");
-            Store::in_memory().expect("in-memory store")
+        let (store, store_error) = match Store::open_default() {
+            Ok(store) => (store, None),
+            // The main window asks whether to quit or go on with nothing saved (`store_error`).
+            Err(e) => {
+                tracing::error!("database: {e:#}; nothing is saved this session");
+                (Store::in_memory().expect("in-memory store"), Some(format!("{e:#}")))
+            }
+        };
+        // Side chats an earlier run started from a draft can't be reopened: they go before any
+        // opens. Their file checkpoints go in the background, with those of threads put away
+        // long ago, which only keep objects alive in the user's repos.
+        let orphans = store.drop_orphan_side_chats().unwrap_or_else(|e| {
+            tracing::warn!("drop orphaned side chats: {e:#}");
+            vec![]
         });
+        let s = store.clone();
+        cx.background_executor()
+            .spawn(async move {
+                for (thread, checkpoints) in orphans {
+                    let mut repos: HashSet<PathBuf> = checkpoints.into_iter().map(|c| c.repo).collect();
+                    repos.extend(thread.cwd.filter(|c| in_repo(Some(c))));
+                    for repo in repos {
+                        if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread.id)) {
+                            tracing::warn!("drop checkpoints of {}: {e:#}", thread.id);
+                        }
+                    }
+                }
+                if let Err(e) = trek_core::checkpoint::prune_stale(&s, now_ms()) {
+                    tracing::warn!("prune old checkpoints: {e:#}");
+                }
+            })
+            .detach();
         // TREK_ONBOARDING=1 replays onboarding without resetting anything (design review, support).
         let replay = std::env::var("TREK_ONBOARDING").is_ok_and(|v| v == "1");
         let mut this = Self::with(store, settings, cx);
+        this.store_error = store_error;
         if replay {
             this.route = Route::Onboarding;
         }
@@ -732,6 +773,8 @@ impl Workspace {
             mock_agent: trek_agents::mock::enabled(),
             applied_defaults,
             tasks: vec![],
+            restart_countdown: None,
+            store_error: None,
         };
         this.reload(cx);
         if this.route == (Route::Draft { project: None }) {
@@ -2825,8 +2868,11 @@ impl Workspace {
         if reopen == Some(Reopen::Recap) {
             transcript.push(Item::Notice { text: recap_notice(&thread.agent) });
         }
-        if let Err(e) = self.store.save_transcript(&fork.id, &mut transcript) {
-            tracing::warn!("save fork: {e}");
+        match self.store.save_transcript(&fork.id, &mut transcript) {
+            // A long conversation's copy is indexed in the background.
+            Ok(true) => self.index_for_search(cx),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("save fork: {e}"),
         }
         let fork_id = fork.id.clone();
         let live = self.live.entry(fork_id.clone()).or_default();
@@ -3103,6 +3149,13 @@ impl Workspace {
                 self.run_git(&thread, cx);
             }
             UndoAction::Unrestore { .. } => {}
+            UndoAction::CancelRestart => {
+                self.restart_countdown = None;
+                if let UpdateStatus::RestartPending { version, staged } = self.updater.status.clone() {
+                    self.updater.status = UpdateStatus::Ready { version, staged };
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -3765,12 +3818,26 @@ impl Workspace {
         }
     }
 
+    /// Once the agents are done, a restart left pending counts down `RESTART_GRACE` first, with a
+    /// toast that can call it off.
     fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
-        if let UpdateStatus::RestartPending { staged, .. } = self.updater.status.clone() {
-            if !self.work_in_flight() {
-                self.install_update(staged, cx);
-            }
+        if !matches!(self.updater.status, UpdateStatus::RestartPending { .. }) || self.work_in_flight() || self.restart_countdown.is_some() {
+            return;
         }
+        let message = format!("Trek restarts to update in {} seconds.", RESTART_GRACE.as_secs());
+        cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::CancelRestart) });
+        self.restart_countdown = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESTART_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                this.restart_countdown = None;
+                // Work that started meanwhile is waited for again (housekeeping comes back).
+                if let UpdateStatus::RestartPending { staged, .. } = this.updater.status.clone()
+                    && !this.work_in_flight()
+                {
+                    this.install_update(staged, cx);
+                }
+            });
+        }));
     }
 
     fn install_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {

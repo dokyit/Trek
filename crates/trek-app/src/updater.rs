@@ -115,17 +115,24 @@ impl Updater {
             Err(e) => {
                 tracing::warn!("update check failed: {e}");
                 self.next_check = Some(now + RETRY_AFTER_MS);
-                self.status = if user_initiated { UpdateStatus::Failed(format!("Couldn't check for updates: {e}")) } else { UpdateStatus::Idle };
+                self.status = match &self.offer {
+                    _ if user_initiated => UpdateStatus::Failed(format!("Couldn't check for updates: {e}")),
+                    // What an earlier check found is still on offer.
+                    Some(o) => UpdateStatus::Available { version: o.version.to_string() },
+                    None => UpdateStatus::Idle,
+                };
                 false
             }
         }
     }
 
-    /// The background check is due (housekeeping asks every minute).
+    /// The background check is due (housekeeping asks every minute). An offer not downloaded yet
+    /// (automatic downloads off) is checked again too: channels replace their archives, so an old
+    /// offer's download can disappear, and a newer build may be out.
     pub fn check_due(&self, auto_check: bool, now: i64) -> bool {
         auto_check
             && self.next_check.is_none_or(|t| now >= t)
-            && matches!(self.status, UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Failed(_))
+            && matches!(self.status, UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Available { .. } | UpdateStatus::Failed(_))
     }
 
     /// Start downloading what the last check found. `None` if nothing is on offer or a download
@@ -293,6 +300,24 @@ mod tests {
         let t = u.begin_check(Channel::Stable, 25 * HOUR).unwrap();
         u.finish_check(t, Err("offline".into()), true, true, 25 * HOUR);
         assert!(matches!(&u.status, UpdateStatus::Failed(e) if e.contains("offline")), "the user asked: say why");
+    }
+
+    #[test]
+    fn offers_not_downloaded_are_checked_again() {
+        let mut u = Updater::default();
+        let t = u.begin_check(Channel::Beta, 0).unwrap();
+        assert!(!u.finish_check(t, Ok(Some(release("0.3.0-beta.1"))), false, false, 0), "automatic downloads off");
+        assert!(!u.check_due(true, HOUR));
+        assert!(u.check_due(true, 24 * HOUR));
+        // A newer build replaces the offer.
+        let t = u.begin_check(Channel::Beta, 24 * HOUR).unwrap();
+        u.finish_check(t, Ok(Some(release("0.3.0-beta.2"))), false, false, 24 * HOUR);
+        assert_eq!(u.status, UpdateStatus::Available { version: "0.3.0-beta.2".into() });
+        // Offline: the offer stays up.
+        let t = u.begin_check(Channel::Beta, 48 * HOUR).unwrap();
+        u.finish_check(t, Err("offline".into()), false, false, 48 * HOUR);
+        assert_eq!(u.status, UpdateStatus::Available { version: "0.3.0-beta.2".into() });
+        assert_eq!(u.begin_download().unwrap().update.version.to_string(), "0.3.0-beta.2");
     }
 
     #[test]
