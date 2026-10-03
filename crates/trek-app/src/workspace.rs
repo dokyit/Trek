@@ -3302,6 +3302,8 @@ impl Workspace {
             match item {
                 Item::User { text, images, .. } => {
                     out.push_str("\n## You\n");
+                    // As written: the instructions a consult adds aren't the user's words.
+                    let text = trek_core::orchestrate::split_consult(&text).0;
                     if !text.trim().is_empty() {
                         out.push_str(&format!("\n{}\n", text.trim()));
                     }
@@ -3325,7 +3327,7 @@ impl Workspace {
             None => self.store.items(id).unwrap_or_default(),
         };
         let request = items.iter().find_map(|i| match i {
-            Item::User { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            Item::User { text, .. } if !text.trim().is_empty() => Some(trek_core::orchestrate::split_consult(text).0.to_string()),
             _ => None,
         })?;
         let reply = items.iter().find_map(|i| match i {

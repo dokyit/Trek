@@ -292,6 +292,8 @@ fn the_consult_menu_picks_models_and_the_message_tells_the_agent_to_ask_them() {
         let user = trek.item_ix(cx, &id, |i| matches!(i, Item::User { .. }));
         trek.render(cx);
         assert!(trek.visible(cx, ("consulting", user)));
+        let markdown = trek.read(cx, |ws, _| ws.transcript_markdown(&id));
+        assert!(markdown.contains("How does the app start?") && !markdown.contains("trek-consult"), "copied as written");
         // Not pinned: they clear for the next message.
         assert!(consultants(&trek, cx).0.is_empty());
         trek.wait_done(cx, &id, RunState::Idle).await;
