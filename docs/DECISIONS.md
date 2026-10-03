@@ -104,3 +104,49 @@ bug is the anti-pattern). The swap is one atomic rename with one backup kept, an
 that's already as new. Changing the channel drops whatever the old channel downloaded. Bundles are signed with a
 stable identity so macOS permissions survive updates. Swap in Sparkle (macOS) or Velopack later if delta
 updates are needed. Details: docs/RELEASING.md.
+
+## 6. Transcripts, search and ⌘K
+
+**Append-only transcript rows with stable ids.** Each item is a row (`items`: uuid v7 `id`, `thread_id`,
+`seq`, JSON `data`, `created_at`). The live transcript (`trek_core::transcript::Transcript`) carries the id of
+every item and records what changed (appended, edited, removed), so a save writes only those rows, in one
+transaction. Streaming text and tool status are edits to one row; empty thoughts dropped at turn end are
+deletes, and because views and saves key on ids, the shifted positions don't matter. Ids are what later
+features hang off: edit a message, retry or fork from a point (`Store::truncate_after(thread, id)`),
+per-turn checkpoints. Databases from before ids are migrated on open (rows keep their order and timestamps).
+`id` has a SQL default (a random uuid), so an older Trek build sharing the database still saves; SQLite
+allows an expression default only in CREATE TABLE, so tables without it are rebuilt on open, ids and keys
+unchanged. A message sent to an imported thread while its history is still being read waits ("1 queued")
+and goes out after it, so stored rows never land ahead of the history.
+
+**Full-text search is SQLite FTS5** (bundled SQLite has it compiled in), tokenizer `unicode61` with
+diacritics folded, prefix indexes for as-you-type queries. Every word typed must match, each as a prefix.
+- Titles and stored messages (yours and the agent's; not tool output or thinking) are indexed by triggers,
+  so every write keeps the index current, older builds' writes included. Rows from before the index
+  existed, and big appends (an imported thread's first save, megabytes of history), skip the triggers and
+  are indexed in the background in transactions of about 256 KB of text; nothing blocks the window and
+  the store is never held for long. Only a message's first 64K characters are indexed (pasted logs
+  otherwise dominate the index).
+- Titles are keyed through a table of thread ids, not `threads.rowid`: that table has no INTEGER PRIMARY
+  KEY, so VACUUM may renumber its rowids, and an older build's INSERT OR REPLACE moves the row. Entries an
+  older build orphaned are pruned when indexing starts.
+- **Imported threads** keep their transcripts in the other agent's files until you continue them in Trek
+  (copying them would freeze them at import time). Their messages go into a separate index keyed by position
+  in `load_transcript`'s output: after each import, transcripts up to 16 MB are read in the background
+  (on this machine that is most Claude Code and Codex sessions, ~300 MB, a few seconds, once); bigger ones
+  are indexed the first time they are opened. A thread that changes outside Trek is re-indexed at the next
+  import; one continued in Trek switches to its stored, id-keyed rows.
+- `Store::search(query, limit)` returns title matches, then the best message match per thread (thread,
+  title, position, item id when stored, one-line snippet with match ranges). The best match per thread is
+  picked before the limit applies, so one thread with many matching messages can't crowd out the rest.
+  Titles come back as written; message excerpts drop markdown emphasis and code ticks.
+
+**⌘K palette** (`command_palette.rs`): threads (title matches, then message matches with the snippet),
+projects (new thread in it, its settings), commands (new thread, open folder, every settings page, tools
+panel and each tool, theme, hand-holding for the thread on screen, settle, check for updates). Commands
+rank by prefix, then word start, then all words, then substring, then keywords, then letters in order.
+Opening a message match opens its thread scrolled to that message (a long message of yours is opened up),
+tinted for a moment. The sidebar's search field matches titles as you type (substring at once, then the
+same word-prefix rules as ⌘K) and adds threads whose messages match, with the matching line. Results on
+screen refresh when the index takes in more (background indexing, a finished turn); Enter in ⌘K waits for
+the results of what was typed.

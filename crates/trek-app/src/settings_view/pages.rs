@@ -415,7 +415,10 @@ impl SettingsView {
 
     pub(super) fn shortcuts_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         const GROUPS: &[(&str, &[(&str, &[&str])])] = &[
-            ("Threads", &[("New thread", &["⌘", "N"]), ("Open a folder", &["⌘", "O"]), ("Settle the current thread", &["⌘", "E"]), ("Stop the agent", &["⌘", "."])]),
+            (
+                "Threads",
+                &[("Search threads and commands", &["⌘", "K"]), ("New thread", &["⌘", "N"]), ("Open a folder", &["⌘", "O"]), ("Settle the current thread", &["⌘", "E"]), ("Stop the agent", &["⌘", "."])],
+            ),
             (
                 "Composer",
                 &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Take a snapshot", &["⌘", "⇧", "S"])],

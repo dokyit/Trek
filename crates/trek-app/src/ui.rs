@@ -320,6 +320,38 @@ pub fn menu_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Di
         .hover(|s| s.bg(theme.list_active))
 }
 
+/// Text with the parts a search matched brought forward: matches in the foreground colour at
+/// medium weight, the rest left to the caller's (muted) colour.
+pub fn match_text(text: &str, ranges: &[std::ops::Range<usize>], cx: &App) -> StyledText {
+    let style = HighlightStyle { color: Some(cx.theme().foreground), font_weight: Some(FontWeight::MEDIUM), ..Default::default() };
+    let ranges: Vec<_> = ranges
+        .iter()
+        .filter(|r| r.start < r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+        .map(|r| (r.clone(), style))
+        .collect();
+    StyledText::new(text.to_string()).with_highlights(ranges)
+}
+
+/// Trim the start of a one-line excerpt so its first match sits about `lead` characters in (at a
+/// word start), for rows too narrow to show the excerpt whole. Ranges move with the text.
+pub fn lead_to_match(text: &str, ranges: &[std::ops::Range<usize>], lead: usize) -> (String, Vec<std::ops::Range<usize>>) {
+    let Some(first) = ranges.iter().map(|r| r.start).min().filter(|s| *s <= text.len() && text.is_char_boundary(*s)) else {
+        return (text.to_string(), ranges.to_vec());
+    };
+    let before = &text[..first];
+    let skip = before.chars().count().saturating_sub(lead);
+    if skip == 0 {
+        return (text.to_string(), ranges.to_vec());
+    }
+    let mut cut = before.char_indices().nth(skip).map_or(first, |(i, _)| i);
+    if let Some(space) = before[cut..].find(' ') {
+        cut += space + 1;
+    }
+    let out = format!("…{}", &text[cut..]);
+    let shift = |i: usize| i - cut + '…'.len_utf8();
+    (out, ranges.iter().filter(|r| r.start >= cut).map(|r| shift(r.start)..shift(r.end)).collect())
+}
+
 /// Resolve the configured background (`builtin:<name>` or a file path) into an image source.
 pub fn background_source(spec: &str) -> ImageSource {
     match spec.strip_prefix("builtin:") {
@@ -343,4 +375,21 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
             )));
     }
     el
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lead_to_match;
+
+    #[test]
+    fn excerpts_lead_with_the_match() {
+        let text = "…the long preamble before anything useful and then the stadium lights";
+        let start = text.find("stadium").unwrap();
+        let (out, ranges) = lead_to_match(text, &[start..start + 7], 10);
+        assert_eq!(out, "…then the stadium lights");
+        assert_eq!(&out[ranges[0].clone()], "stadium");
+        // Already close to the start: unchanged.
+        let (out, ranges) = lead_to_match("the stadium", &[4..11], 10);
+        assert_eq!((out.as_str(), ranges), ("the stadium", vec![4..11]));
+    }
 }

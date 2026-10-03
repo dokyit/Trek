@@ -1,5 +1,6 @@
 //! The main window: title bar, sidebar, and the routed content area.
 
+use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
@@ -24,6 +25,10 @@ pub struct TrekWindow {
     settings_nav: Entity<SettingsNav>,
     right_panel: Entity<RightPanel>,
     onboarding: Entity<Onboarding>,
+    palette: Entity<CommandPalette>,
+    /// Takes keyboard focus when whatever had it leaves the screen (the composer, once a settings
+    /// page opens): with nothing focused, keys reach none of the window's shortcuts, ⌘K included.
+    focus: FocusHandle,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
     _subscriptions: Vec<Subscription>,
@@ -46,6 +51,7 @@ impl TrekWindow {
             p.width = saved_width.max(crate::panels::MIN_PANEL);
             p
         });
+        let palette = cx.new(|cx| CommandPalette::new(workspace.clone(), right_panel.clone(), window, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
@@ -69,6 +75,7 @@ impl TrekWindow {
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
                 }
             }),
+            cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
@@ -88,7 +95,26 @@ impl TrekWindow {
         if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
             workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
         }
-        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, panel_drag: None, _subscriptions: subscriptions }
+        Self {
+            workspace,
+            sidebar,
+            thread_view,
+            composer,
+            settings,
+            settings_nav,
+            right_panel,
+            onboarding,
+            palette,
+            focus: cx.focus_handle(),
+            panel_drag: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Where `focus` lives: inside the window's action handlers, and too small to take clicks
+    /// (clicking the transcript leaves the composer focused).
+    fn focus_anchor(&self) -> Div {
+        div().absolute().size_0().track_focus(&self.focus)
     }
 
     /// A thread needs the user or finished: toast, banner and sound per the notification settings.
@@ -284,6 +310,7 @@ impl Render for TrekWindow {
                 .text_color(cx.theme().foreground)
                 .child(TitleBar::new())
                 .child(self.onboarding.clone())
+                .child(self.focus_anchor())
                 .into_any_element();
         }
         let in_settings = matches!(route, Route::Settings(_));
@@ -391,6 +418,7 @@ impl Render for TrekWindow {
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
             .bg(cx.theme().sidebar)
             .when_some(backdrop.clone(), |el, (spec, dim)| {
                 let side = cx.theme().sidebar;
@@ -398,6 +426,7 @@ impl Render for TrekWindow {
                     .child(img(crate::ui::background_source(&spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
                     .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
             })
+            .child(self.focus_anchor())
             .child(self.title_bar(cx))
             .child(
                 h_flex()
@@ -477,6 +506,8 @@ impl Render for TrekWindow {
                         )
                     }),
             )
+            // ⌘K, drawn over everything else in the window.
+            .child(self.palette.clone())
             .into_any_element()
     }
 }

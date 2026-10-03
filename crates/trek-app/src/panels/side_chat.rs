@@ -70,7 +70,7 @@ impl Render for SideChatPanel {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
-        let items: Vec<Item> = live.map(|l| l.items.clone()).unwrap_or_default();
+        let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
         let working = live.is_some_and(|l| l.turn_started.is_some());
         let prefs = ws.prefs();
         let id = self.thread_id.clone().unwrap_or_default();

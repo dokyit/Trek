@@ -187,7 +187,7 @@ pub(crate) fn session_ids() -> Option<HashSet<String>> {
     st.query_map([], |r| r.get::<_, String>(0)).ok()?.collect::<rusqlite::Result<_>>().ok()
 }
 
-fn rollout_path(id: &str) -> Option<PathBuf> {
+pub(super) fn rollout_path(id: &str) -> Option<PathBuf> {
     let conn = db()?;
     conn.query_row("SELECT rollout_path FROM threads WHERE id = ?1", [id], |r| r.get::<_, String>(0))
         .optional()

@@ -327,7 +327,7 @@ fn tail_lines(path: &Path, bytes: u64) -> Vec<String> {
     lines
 }
 
-fn find_session(id: &str) -> Option<PathBuf> {
+pub(super) fn find_session(id: &str) -> Option<PathBuf> {
     let name = format!("{id}.jsonl");
     std::fs::read_dir(root()).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
 }

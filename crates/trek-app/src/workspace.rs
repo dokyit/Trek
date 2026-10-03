@@ -1,7 +1,7 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Task};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use trek_agents::{AcpInfo, AgentStatus, McpServer, SlashCommand, AgentEvent, Command, Decision, SessionConfig};
@@ -9,7 +9,8 @@ use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
 use trek_core::settings::{FollowUp, Settings};
-use trek_core::store::{Item, Project, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::store::{Item, Project, SearchHit, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::transcript::Transcript;
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +89,9 @@ pub struct PendingPermission {
 /// In-memory state of an open thread: transcript plus its live agent session, if any.
 #[derive(Default)]
 pub struct LiveThread {
-    pub items: Vec<Item>,
+    /// The transcript, with each item's stable id. Change it through `Transcript`'s methods so
+    /// saves (`persist_items`) write just the rows that changed.
+    pub items: Transcript,
     pub loaded: bool,
     pub loading: bool,
     /// Index of the assistant item currently streaming.
@@ -148,6 +151,29 @@ impl LiveThread {
             self.settle_prompt(&rid);
         }
     }
+
+    /// Stable ids of the transcript's items, parallel to `items` (they survive reloads once saved).
+    pub fn item_ids(&self) -> &[String] {
+        self.items.ids()
+    }
+}
+
+/// A message to bring into view: by stable id, or by position for history that isn't stored in
+/// Trek (an imported thread you haven't continued here).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ItemRef {
+    Id(String),
+    Position(usize),
+}
+
+impl ItemRef {
+    pub fn of_hit(hit: &SearchHit) -> Option<ItemRef> {
+        match (&hit.item_id, hit.position) {
+            (Some(id), _) => Some(ItemRef::Id(id.clone())),
+            (None, Some(p)) => Some(ItemRef::Position(p)),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Answers for a question card when the user typed their own: `typed` answers the first question
@@ -161,6 +187,62 @@ fn typed_answers(questions: &[trek_agents::Question], picked: impl Fn(usize) -> 
         .filter_map(|(i, q)| if i == target { Some(typed.to_string()) } else { picked(i) }.map(|a| (q.question.clone(), a)))
         .collect();
     (answers, questions.get(target).is_some_and(|q| q.secret))
+}
+
+/// Scroll the transcript to a message once the thread is on screen (search results).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reveal {
+    pub thread: String,
+    pub item: ItemRef,
+    /// Increases with every request, so the view can tell a new one from one it has handled.
+    pub seq: u64,
+}
+
+/// Full-text results for the sidebar's search text.
+#[derive(Debug, Default)]
+pub struct SearchResults {
+    /// The text they answer; while a newer search runs, results for a text it extends (or that
+    /// extends it) stay up rather than blink out.
+    pub query: String,
+    /// Threads whose title matched: word prefixes, in any order, accents folded.
+    pub titles: HashSet<String>,
+    /// Threads whose messages matched, with the best match in each.
+    pub messages: HashMap<String, SearchHit>,
+}
+
+impl SearchResults {
+    fn from_hits(query: String, hits: Vec<SearchHit>) -> Self {
+        let mut out = SearchResults { query, ..Default::default() };
+        for h in hits {
+            if h.position.is_some() {
+                out.messages.insert(h.thread_id.clone(), h);
+            } else {
+                out.titles.insert(h.thread_id);
+            }
+        }
+        out
+    }
+
+    /// Whether these results can stand in for `query`'s while its own search runs.
+    fn relevant_to(&self, query: &str) -> bool {
+        !self.query.is_empty() && (query.starts_with(&self.query) || self.query.starts_with(query))
+    }
+
+    fn title_matches(&self, query: &str, t: &Thread) -> bool {
+        // The plain substring test answers at once, before the full-text results are in.
+        t.title.to_lowercase().contains(query) || self.titles.contains(&t.id)
+    }
+
+    /// Whether `t` belongs in the list while searching for `query` (trimmed and lowercased, not
+    /// empty).
+    pub fn matches(&self, query: &str, t: &Thread) -> bool {
+        self.title_matches(query, t) || self.messages.contains_key(&t.id)
+    }
+
+    /// The message that put `t` in the list, when its title didn't.
+    pub fn content_hit(&self, query: &str, t: &Thread) -> Option<&SearchHit> {
+        if self.title_matches(query, t) { None } else { self.messages.get(&t.id) }
+    }
 }
 
 /// What a pre-warmed draft session was started with; it's used only if the draft still matches.
@@ -278,7 +360,20 @@ pub struct Workspace {
     pub updater: crate::updater::Updater,
     pub sidebar_collapsed: bool,
     pub settled_open: bool,
+    /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
+    /// Full-text results for `search`.
+    pub search_results: SearchResults,
+    _search_task: Option<Task<()>>,
+    /// Bumped when the search index takes in more than a turn's worth (background indexing, a
+    /// finished turn), so searches on screen can run again.
+    pub search_epoch: u64,
+    /// The message the transcript should scroll to next (`open_thread_at`).
+    pub reveal: Option<Reveal>,
+    /// Imported transcripts and older rows are being added to the search index.
+    indexing: bool,
+    /// More was handed to the index while it ran (a big save): go round once more.
+    index_again: bool,
     pub project_filter: Option<String>,
     /// Bumped whenever any agent turn finishes (tools refresh on it).
     pub turns_finished: u64,
@@ -341,6 +436,12 @@ impl Workspace {
             sidebar_collapsed: false,
             settled_open: false,
             search: String::new(),
+            search_results: SearchResults::default(),
+            _search_task: None,
+            search_epoch: 0,
+            reveal: None,
+            indexing: false,
+            index_again: false,
             project_filter: None,
             turns_finished: 0,
             git_info: HashMap::new(),
@@ -364,6 +465,8 @@ impl Workspace {
         this.refresh_git(cx);
         if this.settings.onboarding.completed {
             this.import_threads(cx);
+        } else {
+            this.index_for_search(cx);
         }
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
         let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
@@ -410,6 +513,8 @@ impl Workspace {
             Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't show it: {e}"), undo: None }),
         }
         self.reload(cx);
+        // Its messages become searchable like the rest of the import's.
+        self.index_for_search(cx);
     }
 
     pub fn thread(&self, id: &str) -> Option<&Thread> {
@@ -525,10 +630,10 @@ impl Workspace {
     /// Threads grouped into sidebar sections, filtered by search and project.
     pub fn sections(&self) -> Vec<(Section, Vec<&Thread>)> {
         let now = now_ms();
-        let q = self.search.to_lowercase();
+        let q = self.search.trim().to_lowercase();
         let mut map: HashMap<Section, Vec<&Thread>> = HashMap::new();
         for t in &self.threads {
-            if !q.is_empty() && !t.title.to_lowercase().contains(&q) {
+            if !q.is_empty() && !self.search_results.matches(&q, t) {
                 continue;
             }
             if let Some(p) = &self.project_filter {
@@ -649,6 +754,103 @@ impl Workspace {
         self.refresh_git(cx);
         cx.emit(WorkspaceEvent::FocusComposer);
         cx.notify();
+    }
+
+    /// Open a thread scrolled to one of its messages (a search result).
+    pub fn open_thread_at(&mut self, id: &str, item: ItemRef, cx: &mut Context<Self>) {
+        let seq = self.reveal.as_ref().map_or(1, |r| r.seq + 1);
+        self.reveal = Some(Reveal { thread: id.to_string(), item, seq });
+        self.navigate(Route::Thread(id.to_string()), cx);
+    }
+
+    // ---------- search ----------
+
+    /// Set the sidebar's search text. Titles are matched as you type; the full-text search runs
+    /// in the background and its threads join the list when the results arrive.
+    pub fn set_search(&mut self, text: String, cx: &mut Context<Self>) {
+        if text == self.search {
+            return;
+        }
+        self.search = text;
+        // Results for an unrelated text would list the wrong threads until the new ones arrive.
+        if !self.search_results.relevant_to(self.search.trim()) {
+            self.search_results = SearchResults::default();
+        }
+        self.run_search(cx);
+    }
+
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search.trim().to_string();
+        if trek_core::store::fts_query(&query).is_none() {
+            self.search_results = SearchResults::default();
+            self._search_task = None;
+            cx.notify();
+            return;
+        }
+        let store = self.store.clone();
+        self._search_task = Some(cx.spawn(async move |this, cx| {
+            let q = query.clone();
+            let hits = cx.background_executor().spawn(async move { store.search(&q, 500) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search.trim() != query {
+                    return;
+                }
+                this.search_results = match hits {
+                    Ok(hits) => SearchResults::from_hits(query, hits),
+                    Err(e) => {
+                        tracing::warn!("search: {e}");
+                        SearchResults::default()
+                    }
+                };
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The index took in new text: searches on screen run again.
+    fn search_index_changed(&mut self, cx: &mut Context<Self>) {
+        self.search_epoch += 1;
+        if !self.search.trim().is_empty() {
+            self.run_search(cx);
+        }
+        cx.notify();
+    }
+
+    /// Fill the search index in the background: rows waiting for it (saved before it existed, or
+    /// appended in bulk), then imported threads' transcripts that are new or changed since the
+    /// last run (small ones only; bigger ones are indexed when opened, see `ensure_loaded`). Runs
+    /// at launch, after every import and after big saves; searches on screen refresh as it goes.
+    fn index_for_search(&mut self, cx: &mut Context<Self>) {
+        if self.indexing {
+            self.index_again = true;
+            return;
+        }
+        self.indexing = true;
+        self.index_again = false;
+        let store = self.store.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let s = store.clone();
+            if let Err(e) = cx.background_executor().spawn(async move { s.prune_search() }).await {
+                tracing::warn!("search prune: {e}");
+            }
+            loop {
+                let s = store.clone();
+                let more = cx.background_executor().spawn(async move { index_step(&s) }).await;
+                if this.update(cx, |this, cx| this.search_index_changed(cx)).is_err() {
+                    return;
+                }
+                if !more {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.indexing = false;
+                if this.index_again {
+                    this.index_for_search(cx);
+                }
+            });
+        });
+        self.tasks.push(task);
     }
 
     // ---------- projects: preferences ----------
@@ -781,9 +983,9 @@ impl Workspace {
         if live.loaded || live.loading {
             return;
         }
-        let items = self.store.items(id).unwrap_or_default();
-        if !items.is_empty() {
-            live.items = items;
+        let rows = self.store.items_with_ids(id).unwrap_or_default();
+        if !rows.is_empty() {
+            live.items = Transcript::stored(rows);
             live.loaded = true;
             live.revision += 1;
             return;
@@ -795,23 +997,48 @@ impl Workspace {
         };
         live.loading = true;
         let id = id.to_string();
+        let store = self.store.clone();
         let task = cx.spawn(async move |this, cx| {
-            let source = thread.source;
+            let (source, updated_at) = (thread.source, thread.updated_at);
+            // History read from the agent's own files stays there until the thread is continued
+            // here. Unless this version is in the search index already, a copy goes there too (the
+            // only way big transcripts get indexed), made off the main thread like the read.
+            let (s, tid) = (store.clone(), id.clone());
             let result = cx
                 .background_executor()
-                .spawn(async move { trek_core::import::load_transcript(source, &native) })
+                .spawn(async move {
+                    let items = trek_core::import::load_transcript(source, &native)?;
+                    let to_index = (!s.imported_indexed(&tid, updated_at).unwrap_or(false)).then(|| items.clone());
+                    anyhow::Ok((items, to_index))
+                })
                 .await;
+            let (items, to_index) = match result {
+                Ok((items, to_index)) => (items, to_index),
+                Err(e) => (vec![Item::Error { text: format!("Couldn't load this thread: {e}") }], None),
+            };
             let _ = this.update(cx, |this, cx| {
                 let live = this.live.entry(id.clone()).or_default();
                 live.loading = false;
                 live.loaded = true;
-                match result {
-                    Ok(items) => live.items = items,
-                    Err(e) => live.items = vec![Item::Error { text: format!("Couldn't load this thread: {e}") }],
-                }
+                // Anything that arrived meanwhile (a warmed-up session's error, say) wasn't saved
+                // (`persist_items` waits for the history) and goes after it.
+                let n = items.len();
+                live.items.prepend_unsaved(items);
+                live.streaming = live.streaming.map(|i| i + n);
+                live.reasoning = live.reasoning.map(|i| i + n);
                 live.revision += 1;
+                // Messages sent while it loaded go out now, after the history.
+                this.send_queued(&id, cx);
                 cx.notify();
             });
+            if let Some(items) = to_index {
+                let tid = id.clone();
+                match cx.background_executor().spawn(async move { store.index_imported(&tid, Some(&items), updated_at) }).await {
+                    Ok(true) => _ = this.update(cx, |this, cx| this.search_index_changed(cx)),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("search index {id}: {e}"),
+                }
+            }
         });
         self.tasks.push(task);
     }
@@ -1061,6 +1288,14 @@ impl Workspace {
         if text.is_empty() && images.is_empty() {
             return;
         }
+        // The thread's history is still being read from the agent's files: hold the message until
+        // it's in, so it lands after it (`ensure_loaded` sends it).
+        if let Some(live) = self.live.get_mut(&id).filter(|l| l.loading) {
+            live.queued.push((text, images));
+            live.revision += 1;
+            cx.notify();
+            return;
+        }
         if let Some(reply) = self.run_builtin_command(&id, &text, cx) {
             if reply.is_empty() {
                 return;
@@ -1069,7 +1304,7 @@ impl Workspace {
             live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()) });
             live.items.push(Item::Notice { text: reply });
             live.revision += 1;
-            self.persist_items(&id);
+            self.persist_items(&id, cx);
             cx.notify();
             return;
         }
@@ -1087,7 +1322,7 @@ impl Workspace {
                 live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()) } });
             }
             self.answer(&id, &request_id, answers, cx);
-            self.persist_items(&id);
+            self.persist_items(&id, cx);
             return;
         }
         // Queue mode: hold follow-ups until the running turn finishes (see `apply_events`).
@@ -1119,7 +1354,16 @@ impl Workspace {
             t.updated_at = now_ms();
             t.last_seen_at = t.updated_at;
         });
-        self.persist_items(&id);
+        self.persist_items(&id, cx);
+    }
+
+    /// Send what was queued while nothing ran (a thread whose history was loading): the first
+    /// message starts a turn, and the rest wait for it as queued follow-ups do.
+    fn send_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+        while self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
+            let Some((text, images)) = self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0))) else { break };
+            self.send_to(id, text, images, cx);
+        }
     }
 
     fn fast_tier(&self, agent: &AgentId, model: Option<&String>, fast_on: bool) -> Option<String> {
@@ -1263,7 +1507,7 @@ impl Workspace {
                                 Some(true) => ToolStatus::Done,
                                 Some(false) => ToolStatus::Failed,
                             };
-                            if let Some(Item::Tool { status: st, .. }) = live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                            if let Some(Item::Tool { status: st, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
                                 *st = status;
                             }
                         }
@@ -1289,9 +1533,9 @@ impl Workspace {
                         let ix = match live.streaming {
                             Some(ix) => ix,
                             None => {
-                                live.items.push(Item::Assistant { text: String::new() });
-                                live.streaming = Some(live.items.len() - 1);
-                                live.items.len() - 1
+                                let ix = live.items.push(Item::Assistant { text: String::new() });
+                                live.streaming = Some(ix);
+                                ix
                             }
                         };
                         if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
@@ -1306,7 +1550,9 @@ impl Workspace {
                                     *text = t;
                                 }
                             }
-                            None if !t.trim().is_empty() => live.items.push(Item::Assistant { text: t }),
+                            None if !t.trim().is_empty() => {
+                                live.items.push(Item::Assistant { text: t });
+                            }
                             None => {}
                         }
                         live.reasoning = None;
@@ -1315,9 +1561,9 @@ impl Workspace {
                         let ix = match live.reasoning {
                             Some(ix) => ix,
                             None => {
-                                live.items.push(Item::Reasoning { text: String::new() });
-                                live.reasoning = Some(live.items.len() - 1);
-                                live.items.len() - 1
+                                let ix = live.items.push(Item::Reasoning { text: String::new() });
+                                live.reasoning = Some(ix);
+                                ix
                             }
                         };
                         if let Some(Item::Reasoning { text }) = live.items.get_mut(ix) {
@@ -1330,9 +1576,7 @@ impl Workspace {
                         live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
                     }
                     AgentEvent::ToolFinished { id: tid, output, ok } => {
-                        if let Some(Item::Tool { output: o, status, .. }) =
-                            live.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
-                        {
+                        if let Some(Item::Tool { output: o, status, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
                             *o = output;
                             // A background sub-agent's tool call returns at once; it's done when its task is.
                             if !live.tasks.iter().any(|t| t.id == tid && t.done.is_none()) {
@@ -1353,7 +1597,8 @@ impl Workspace {
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
                     AgentEvent::TurnComplete { cost_usd, error } => {
-                        // Models that hide their reasoning leave empty "Thought" rows behind.
+                        // Models that hide their reasoning leave empty "Thought" rows behind. Removing
+                        // them shifts positions; the rows' ids keep saves and views lined up.
                         live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
                         live.streaming = None;
                         live.reasoning = None;
@@ -1370,9 +1615,9 @@ impl Workspace {
                         for t in live.tasks.iter_mut().filter(|t| t.done.is_none()) {
                             t.done = Some(error.is_none());
                         }
-                        for i in live.items.iter_mut() {
-                            if let Item::Tool { status, .. } = i {
-                                if *status == ToolStatus::Running {
+                        for ix in 0..live.items.len() {
+                            if matches!(live.items[ix], Item::Tool { status: ToolStatus::Running, .. }) {
+                                if let Some(Item::Tool { status, .. }) = live.items.get_mut(ix) {
                                     *status = if error.is_none() { ToolStatus::Done } else { ToolStatus::Failed };
                                 }
                             }
@@ -1450,7 +1695,7 @@ impl Workspace {
         }
         // Save the transcript every so often mid-turn, so a quit or crash loses seconds, not the turn.
         if !finished && self.live.get(id).is_some_and(|l| l.turn_started.is_some() && l.last_persist.is_none_or(|t| t.elapsed() > Duration::from_secs(10))) {
-            self.persist_items(id);
+            self.persist_items(id, cx);
             if let Some(l) = self.live.get_mut(id) {
                 l.last_persist = Some(Instant::now());
             }
@@ -1458,7 +1703,8 @@ impl Workspace {
         if finished {
             self.turns_finished += 1;
             self.refresh_git(cx);
-            self.persist_items(id);
+            self.persist_items(id, cx);
+            self.search_index_changed(cx);
             let next = if continue_queue {
                 self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
             } else {
@@ -1499,9 +1745,16 @@ impl Workspace {
         }
     }
 
-    fn persist_items(&self, id: &str) {
-        if let Some(live) = self.live.get(id) {
-            let _ = self.store.set_items(id, &live.items);
+    /// Save what changed in a thread's transcript: new rows, edited rows (streaming text, tool
+    /// status and output) and removed rows. Cheap enough to run mid-turn. A big first save (an
+    /// imported thread's history) is indexed for search in the background. Nothing is saved while
+    /// the history is still being read: it has to be written first (`ensure_loaded`).
+    fn persist_items(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id).filter(|l| !l.loading) else { return };
+        match self.store.save_transcript(id, &mut live.items) {
+            Ok(true) => self.index_for_search(cx),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("save transcript: {e}"),
         }
     }
 
@@ -1640,7 +1893,7 @@ impl Workspace {
         let result = if thread.source == ThreadSource::Trek {
             self.store.delete_thread(id)
         } else {
-            self.store.set_items(id, &[]).and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
+            self.store.clear_items(id).and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
         };
         if let Err(e) = result {
             cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't delete: {e}"), undo: None });
@@ -1655,7 +1908,7 @@ impl Workspace {
     /// The conversation as Markdown (your messages and the agent's answers; tool calls left out).
     pub fn transcript_markdown(&self, id: &str) -> String {
         let items = match self.live.get(id).filter(|l| l.loaded) {
-            Some(l) => l.items.clone(),
+            Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
         };
         let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
@@ -1672,7 +1925,7 @@ impl Workspace {
 
     fn title_inputs(&self, id: &str) -> Option<(String, String)> {
         let items = match self.live.get(id).filter(|l| l.loaded) {
-            Some(l) => l.items.clone(),
+            Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
         };
         let request = items.iter().find_map(|i| match i {
@@ -2156,6 +2409,7 @@ impl Workspace {
                     }
                 }
                 this.reload(cx);
+                this.index_for_search(cx);
             });
         });
         self.tasks.push(task);
@@ -2341,6 +2595,39 @@ impl Workspace {
     }
 }
 
+/// One round of background indexing: everything waiting in the backfill, then up to 16 imported
+/// transcripts. Returns true while imported threads remain.
+fn index_step(store: &Store) -> bool {
+    loop {
+        match store.backfill_search(500) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => {
+                tracing::warn!("search backfill: {e}");
+                break;
+            }
+        }
+    }
+    let batch = match store.imported_to_index(16) {
+        Ok(batch) => batch,
+        Err(e) => {
+            tracing::warn!("search index: {e}");
+            return false;
+        }
+    };
+    for t in &batch {
+        let items = match trek_core::import::transcript_bytes(t.source, &t.native_id) {
+            Some(n) if n > trek_core::store::INDEX_MAX_BYTES => None,
+            _ => trek_core::import::load_transcript(t.source, &t.native_id).ok(),
+        };
+        if let Err(e) = store.index_imported(&t.thread_id, items.as_deref(), t.updated_at) {
+            tracing::warn!("search index {}: {e}", t.thread_id);
+            return false;
+        }
+    }
+    !batch.is_empty()
+}
+
 /// The settings that seed a new thread's composer.
 fn default_prefs_key(s: &Settings) -> (String, Option<String>, Effort, HandHolding) {
     let g = &s.general;
@@ -2434,5 +2721,44 @@ mod tests {
         live.drop_after_turn();
         assert_eq!(live.permissions.iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(), vec!["codex-7"]);
         assert!(live.picks.is_empty());
+    }
+
+    fn thread(s: &Store, title: &str) -> Thread {
+        let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        t.title = title.into();
+        s.save_thread(&t).unwrap();
+        t
+    }
+
+    #[test]
+    fn sidebar_search_lists_title_and_message_matches() {
+        let s = Store::in_memory().unwrap();
+        let lights = thread(&s, "Stadium lighting");
+        let kits = thread(&s, "Kit colours");
+        let other = thread(&s, "Unrelated");
+        let mut tr = Transcript::default();
+        tr.push(Item::Assistant { text: "the stadium shader tints the kits".into() });
+        s.save_transcript(&kits.id, &mut tr).unwrap();
+
+        let q = "stad light";
+        let results = SearchResults::from_hits(q.into(), s.search(q, 50).unwrap());
+        // Word prefixes find the title the substring test misses; no message line under it.
+        assert!(results.matches(q, &lights) && results.content_hit(q, &lights).is_none());
+        assert!(!results.matches(q, &kits) && !results.matches(q, &other));
+
+        let q = "shader";
+        let results = SearchResults::from_hits(q.into(), s.search(q, 50).unwrap());
+        assert!(results.matches(q, &kits));
+        assert_eq!(results.content_hit(q, &kits).and_then(|h| h.position), Some(0));
+        assert!(!results.matches(q, &lights));
+        // Typed straight into the title: matched before the full-text search answers.
+        assert!(SearchResults::default().matches("colo", &kits));
+    }
+
+    #[test]
+    fn results_stand_in_only_for_related_text() {
+        let results = SearchResults { query: "dark".into(), ..Default::default() };
+        assert!(results.relevant_to("dark t") && results.relevant_to("dar"));
+        assert!(!results.relevant_to("light") && !SearchResults::default().relevant_to("dark"));
     }
 }

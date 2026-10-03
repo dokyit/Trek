@@ -269,6 +269,16 @@ pub fn load_transcript(source: ThreadSource, native_id: &str) -> anyhow::Result<
     }
 }
 
+/// Size in bytes of an imported thread's transcript file, when it lives in one.
+pub fn transcript_bytes(source: ThreadSource, native_id: &str) -> Option<u64> {
+    let path = match source {
+        ThreadSource::ClaudeCode => claude::find_session(native_id),
+        ThreadSource::Codex => codex::rollout_path(native_id),
+        _ => None,
+    }?;
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
 // ---- titles ----
 
 const TITLE_MAX: usize = 60;
