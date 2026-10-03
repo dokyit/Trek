@@ -2,7 +2,7 @@
 //! the ⌘K palette from the keyboard, pasting an image, project actions and image icons.
 
 use super::harness::{Trek, launch, mock, new_project, open, populate, run, store_items, transcript};
-use crate::workspace::{Route, SettingsPage, WorkspaceEvent};
+use crate::workspace::{PanelTool, Route, SettingsPage, WorkspaceEvent};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, ClipboardItem, TestAppContext};
 use std::cell::RefCell;
@@ -99,6 +99,7 @@ fn first_run_onboarding_from_an_empty_data_folder() {
 fn every_screen_renders_in_both_themes() {
     run(async |cx| {
         let trek = open(cx);
+        std::fs::write(trek.project.join("README.md"), "# Demo").expect("a file to mention");
         let id = trek.update(cx, |ws, cx| {
             let t = ws.store.create_thread(Some(&trek.project), mock(), None, trek_core::Effort::Medium, HandHolding::Auto).expect("thread");
             store_items(&ws.store, &t.id, transcript(3));
@@ -113,6 +114,27 @@ fn every_screen_renders_in_both_themes() {
             assert_eq!(cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark()), choice == ThemeChoice::Night);
             trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
             trek.render(cx);
+            // The composer's menus: model, access, attach, and the / @ $ pickers.
+            for (pill, opens) in [("model-pill", Some("model-menu-body")), ("access-pill", Some("access-menu-body")), ("attach", None)] {
+                trek.click(cx, pill);
+                trek.render(cx);
+                if let Some(opens) = opens {
+                    assert!(trek.visible(cx, opens), "{pill} opens {opens}");
+                }
+                trek.press(cx, "escape");
+                trek.render(cx);
+            }
+            // Commands, the project's files (listed off the main thread), and skills (the mock
+            // agent has none, so that picker stays shut).
+            for (trigger, opens) in [("/", true), ("@", true), ("$", false)] {
+                trek.type_text(cx, trigger);
+                until(cx, &format!("the {trigger} picker"), |cx| {
+                    trek.render(cx);
+                    trek.visible(cx, "picker-list") == opens
+                });
+                trek.press(cx, "backspace");
+                trek.render(cx);
+            }
             // A thread with code, paths and tool rows, then each kind of card over it.
             trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
             trek.render(cx);
@@ -123,11 +145,18 @@ fn every_screen_renders_in_both_themes() {
                 trek.render(cx);
                 trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::PermissionResolved { request_id: rid.into() }], cx));
             }
-            // The palette over it, then the right panel's tools.
+            // The palette over it, then the right panel's tools. The terminal (a shell), the
+            // browser (a native web view) and the simulator (Xcode's tools) reach outside the
+            // test, so only the panels drawn by Trek alone are opened here.
             trek.press(cx, "cmd-k");
             trek.render(cx);
             assert!(trek.visible(cx, "palette"));
             trek.press(cx, "escape");
+            let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+            for tool in [PanelTool::Git, PanelTool::Explorer, PanelTool::SideChat] {
+                trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
+                trek.render(cx);
+            }
             for page in &pages {
                 trek.update(cx, |ws, cx| ws.navigate(Route::Settings(*page), cx));
                 trek.render(cx);
@@ -286,6 +315,61 @@ fn project_actions_run_in_the_project_folder() {
         // An action with nothing to run does nothing.
         trek.update(cx, |ws, cx| ws.run_project_action(project.clone(), "  ".into(), cx));
         assert_eq!(ran.borrow().len(), 2);
+    });
+}
+
+#[test]
+fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_init(&trek.project);
+        let ran = runs(&trek, cx);
+        let project = trek.project.clone();
+        let pid = trek.read(cx, |ws, _| ws.projects.iter().find(|p| p.path == project).map(|p| p.id.clone())).expect("project");
+        let id = trek.update(cx, |ws, cx| {
+            let t = ws.store.create_thread(Some(&project), mock(), None, trek_core::Effort::Medium, HandHolding::Auto).expect("thread");
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        });
+        let open_thread = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+            trek.render(cx);
+        };
+
+        // No actions yet: the menu's only choice is adding one, on this project's settings.
+        trek.render(cx);
+        assert!(trek.visible(cx, "run-actions"));
+        trek.click(cx, "run-actions");
+        // Up wraps to the menu's last item, "Add an action…".
+        trek.press(cx, "up");
+        trek.press(cx, "enter");
+        assert!(ran.borrow().is_empty());
+        assert_eq!(trek.read(cx, |ws, _| (ws.route.clone(), ws.settings_project.clone())), (Route::Settings(SettingsPage::Project), Some(pid)));
+
+        // Added, then edited: the menu runs what's saved now.
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.actions = vec![ProjectAction { name: "Test".into(), command: "cargo test".into() }], cx));
+        open_thread(&trek, cx);
+        trek.click(cx, "run-actions");
+        trek.press(cx, "down");
+        trek.press(cx, "enter");
+        assert_eq!(ran.borrow().last(), Some(&("cargo test".to_string(), Some(project.clone()))));
+        trek.update(cx, |ws, cx| {
+            ws.update_project_prefs(&project, |p| {
+                p.actions[0].command = "cargo test --workspace".into();
+                p.actions.push(ProjectAction { name: "Serve".into(), command: "npm run dev".into() });
+            }, cx)
+        });
+        open_thread(&trek, cx);
+        for (presses, command) in [(1, "cargo test --workspace"), (2, "npm run dev")] {
+            trek.click(cx, "run-actions");
+            for _ in 0..presses {
+                trek.press(cx, "down");
+            }
+            trek.press(cx, "enter");
+            assert_eq!(ran.borrow().last(), Some(&(command.to_string(), Some(project.clone()))));
+        }
+        assert_eq!(ran.borrow().len(), 3);
     });
 }
 

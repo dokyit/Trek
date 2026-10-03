@@ -90,6 +90,12 @@ fn snoozes_end_in_the_morning_and_wake_back_into_the_inbox() {
         assert_eq!(section_of(&trek, cx, &settled), Some(Section::Snoozed));
         trek.update(cx, |ws, cx| ws.unsnooze(&settled, cx));
         assert_eq!(section_of(&trek, cx, &settled), Some(Section::Inbox));
+        // It gets the full wait too, though it last changed ten days ago.
+        let woke = now_ms();
+        trek.update(cx, |ws, cx| ws.tidy_inbox(woke, cx));
+        assert_eq!(section_of(&trek, cx, &settled), Some(Section::Inbox));
+        trek.update(cx, |ws, cx| ws.tidy_inbox(woke + 3 * DAY + 1000, cx));
+        assert_eq!(section_of(&trek, cx, &settled), Some(Section::Settled));
     });
 }
 
@@ -115,10 +121,18 @@ fn threads_settle_after_days_unless_told_never_to() {
         for (id, why) in [(&kept, "never settle"), (&recent, "too recent"), (&unread, "unread"), (&failed, "needs the user")] {
             assert_eq!(section_of(&trek, cx, id), Some(Section::Inbox), "{why}");
         }
-        // Moved back to the inbox by hand, it stays there.
+        // Moved back to the inbox by hand, it stays there, its last activity unchanged.
+        let active = trek.read(cx, |ws, _| ws.thread(&stale).unwrap().updated_at);
         trek.update(cx, |ws, cx| ws.unsettle(&stale, cx));
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
         assert_eq!(section_of(&trek, cx, &stale), Some(Section::Inbox));
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&stale).unwrap().updated_at), active);
+        // A failure settled by hand and taken back is a failure again.
+        trek.update(cx, |ws, cx| ws.settle(&failed, cx));
+        assert_eq!(section_of(&trek, cx, &failed), Some(Section::Settled));
+        trek.update(cx, |ws, cx| ws.unsettle(&failed, cx));
+        assert_eq!(section_of(&trek, cx, &failed), Some(Section::Inbox));
+        assert_eq!(trek.run_state(cx, &failed), RunState::Failed);
         // Following Trek's setting again, it settles with the rest.
         trek.update(cx, |ws, cx| ws.set_never_settle(&kept, false, cx));
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
@@ -135,21 +149,53 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
+fn commit(dir: &Path, file: &str, date: Option<&str>) {
+    std::fs::write(dir.join(file), file).unwrap();
+    git(dir, &["add", "."]);
+    let mut cmd = Command::new("git");
+    cmd.args(["commit", "-q", "-m", file]).current_dir(dir);
+    if let Some(date) = date {
+        cmd.env("GIT_AUTHOR_DATE", date).env("GIT_COMMITTER_DATE", date);
+    }
+    assert!(cmd.output().expect("git").status.success(), "commit {file}");
+}
+
 /// A repository on `main` with one commit, now on branch `feature` with a commit of its own.
+/// Both were made long ago: no turn of the test's made them.
 fn repo_on_a_feature_branch() -> std::path::PathBuf {
     let dir = new_project("repo");
     git(&dir, &["init", "-q", "-b", "main"]);
     for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test"), ("commit.gpgsign", "false")] {
         git(&dir, &["config", k, v]);
     }
-    std::fs::write(dir.join("README.md"), "hi").unwrap();
-    git(&dir, &["add", "."]);
-    git(&dir, &["commit", "-q", "-m", "first"]);
+    commit(&dir, "README.md", Some("2020-01-01T09:00:00"));
     git(&dir, &["checkout", "-q", "-b", "feature"]);
-    std::fs::write(dir.join("feature.rs"), "fn main() {}").unwrap();
-    git(&dir, &["add", "."]);
-    git(&dir, &["commit", "-q", "-m", "feature"]);
+    commit(&dir, "feature.rs", Some("2020-01-01T10:00:00"));
     dir
+}
+
+/// A turn on `id` that commits `file` while it runs (the mock stops for an approval meanwhile).
+async fn commit_during_a_turn(trek: &Trek, cx: &mut TestAppContext, id: &str, repo: &Path, file: &str) {
+    trek.update(cx, |ws, cx| ws.send_to(id, "mock:permission".into(), vec![], cx));
+    trek.wait_needs_you(cx, id).await;
+    commit(repo, file, None);
+    let request = trek.request(cx, id);
+    trek.update(cx, |ws, cx| ws.respond(id, &request, trek_agents::Decision::Allow, cx));
+    trek.wait_done(cx, id, RunState::Idle).await;
+}
+
+/// Let `note_branch` and `settle_merged`, which run git off the main thread, finish.
+fn settle_down(cx: &mut TestAppContext) {
+    std::thread::sleep(Duration::from_millis(300));
+    cx.run_until_parked();
+}
+
+fn branch_of(trek: &Trek, cx: &TestAppContext, id: &str) -> Option<String> {
+    trek.read(cx, |ws, _| ws.thread(id).and_then(|t| t.branch.clone()))
+}
+
+fn settled(trek: &Trek, cx: &TestAppContext, id: &str) -> bool {
+    trek.read(cx, |ws, _| ws.thread(id).is_some_and(|t| t.settled_at.is_some()))
 }
 
 #[test]
@@ -157,53 +203,77 @@ fn threads_settle_once_their_branch_is_merged() {
     run(async |cx| {
         let trek = open(cx);
         let repo = repo_on_a_feature_branch();
-        let (id, other) = trek.update(cx, |ws, cx| {
+        let (id, chat) = trek.update(cx, |ws, cx| {
             let t = ws.store.create_thread(Some(&repo), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
-            let other = ws.store.create_thread(Some(&repo), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            let chat = ws.store.create_thread(Some(&repo), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
             ws.reload(cx);
             ws.navigate(Route::Thread(t.id.clone()), cx);
-            (t.id, other.id)
+            (t.id, chat.id)
         });
-        trek.update(cx, |ws, cx| ws.send_to(&id, "add the feature".into(), vec![], cx));
-        trek.wait_done(cx, &id, RunState::Idle).await;
+        // A thread that only talks while the folder is on the branch isn't tied to it.
+        trek.update(cx, |ws, cx| ws.send_to(&chat, "how does it start?".into(), vec![], cx));
+        trek.wait_done(cx, &chat, RunState::Idle).await;
+        settle_down(cx);
+        assert_eq!(branch_of(&trek, cx, &chat), None);
+
+        // One that commits on it is.
+        commit_during_a_turn(&trek, cx, &id, &repo, "work.rs").await;
         let tid = id.clone();
         trek.wait(cx, "the branch to be noted", |ws| ws.thread(&tid).and_then(|t| t.branch.clone()).as_deref() == Some("feature")).await;
         assert_eq!(trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().branch), Some("feature".into()), "saved");
         // Not merged yet: nothing settles.
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
-        std::thread::sleep(Duration::from_millis(300));
+        settle_down(cx);
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().settled_at), None);
+        settle_down(cx);
+        assert!(!settled(&trek, cx, &id));
 
         git(&repo, &["checkout", "-q", "main"]);
         git(&repo, &["merge", "-q", "--no-edit", "feature"]);
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
         trek.wait(cx, "the merged thread to settle", |ws| ws.thread(&tid).is_some_and(|t| t.settled_at.is_some())).await;
-        // A thread that never worked on the branch stays where it is.
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&other).unwrap().settled_at), None);
+        assert!(!settled(&trek, cx, &chat));
         // Moved back to the inbox, the merged thread stays there.
         trek.update(cx, |ws, cx| ws.unsettle(&id, cx));
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
-        std::thread::sleep(Duration::from_millis(300));
-        cx.run_until_parked();
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().settled_at), None);
+        settle_down(cx);
+        assert!(!settled(&trek, cx, &id));
 
-        // Off in Settings: a merge settles nothing, and no branch is noted.
-        let again = trek.update(cx, |ws, cx| {
-            ws.settings.inbox.auto_settle_on_merge = false;
-            let t = ws.store.create_thread(Some(&repo), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
-            ws.reload(cx);
-            t.id
-        });
+        // Settled by hand before its branch merged, then picked up again (back to the inbox, or a
+        // follow-up): the merge doesn't send it away again.
         git(&repo, &["checkout", "-q", "-b", "second"]);
-        std::fs::write(repo.join("second.rs"), "").unwrap();
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-q", "-m", "second"]);
-        trek.update(cx, |ws, cx| ws.send_to(&again, "more".into(), vec![], cx));
-        trek.wait_done(cx, &again, RunState::Idle).await;
-        std::thread::sleep(Duration::from_millis(300));
-        cx.run_until_parked();
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&again).unwrap().branch.clone()), None);
+        commit_during_a_turn(&trek, cx, &id, &repo, "second.rs").await;
+        trek.wait(cx, "the second branch to be noted", |ws| ws.thread(&tid).and_then(|t| t.branch.clone()).as_deref() == Some("second")).await;
+        trek.update(cx, |ws, cx| ws.settle(&id, cx));
+        git(&repo, &["checkout", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--no-edit", "second"]);
+        trek.update(cx, |ws, cx| ws.unsettle(&id, cx));
+        trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
+        settle_down(cx);
+        assert!(!settled(&trek, cx, &id));
+        trek.update(cx, |ws, cx| ws.send_to(&id, "thanks again".into(), vec![], cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        settle_down(cx);
+        trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
+        settle_down(cx);
+        assert!(!settled(&trek, cx, &id));
+
+        // A branch deleted unmerged (or squashed) is no longer watched.
+        git(&repo, &["checkout", "-q", "-b", "third"]);
+        commit_during_a_turn(&trek, cx, &id, &repo, "third.rs").await;
+        trek.wait(cx, "the third branch to be noted", |ws| ws.thread(&tid).and_then(|t| t.branch.clone()).as_deref() == Some("third")).await;
+        git(&repo, &["checkout", "-q", "main"]);
+        git(&repo, &["branch", "-q", "-D", "third"]);
+        trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
+        trek.wait(cx, "the gone branch to be dropped", |ws| ws.thread(&tid).is_some_and(|t| t.branch.is_none())).await;
+        assert!(!settled(&trek, cx, &id));
+
+        // Off in Settings: no branch is noted.
+        trek.update(cx, |ws, _| ws.settings.inbox.auto_settle_on_merge = false);
+        git(&repo, &["checkout", "-q", "-b", "fourth"]);
+        commit_during_a_turn(&trek, cx, &id, &repo, "fourth.rs").await;
+        settle_down(cx);
+        assert_eq!(branch_of(&trek, cx, &id), None);
     });
 }
 
@@ -311,14 +381,24 @@ fn a_session_that_dies_mid_turn_fails_the_turn_and_hands_back_queued_messages() 
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
         let id = trek.quiet_thread(cx);
-        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::TextDelta("Working on it".into())], cx));
+        let events = vec![
+            trek_agents::AgentEvent::TextDelta("Working on it".into()),
+            trek_agents::AgentEvent::ToolStarted { id: "t1".into(), title: "Bash".into(), detail: "npm test".into() },
+            trek_agents::AgentEvent::Task { id: "t1".into(), description: Some("Run the tests".into()), activity: None, tool_uses: None, done: None },
+        ];
+        trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
         trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().queued.push(("then deploy".into(), vec![])));
         trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::Exited], cx));
         assert_eq!(trek.run_state(cx, &id), RunState::Failed);
         assert_eq!(trek.read(cx, |ws, _| ws.live[&id].turn_started), None);
         assert_eq!(trek.composer_text(cx), "then deploy");
-        // Saved as it stopped.
-        assert!(trek.read(cx, |ws, _| ws.store.items(&id).unwrap().iter().any(|i| matches!(i, Item::Assistant { .. }))));
+        // The command it was running ended with it, and the transcript says why the turn stopped.
+        assert_eq!(trek.read(cx, |ws, _| ws.live[&id].active_tasks()), 0);
+        let saved = trek.read(cx, |ws, _| ws.store.items(&id).unwrap());
+        assert!(saved.iter().any(|i| matches!(i, Item::Tool { status: ToolStatus::Failed, .. })), "{saved:?}");
+        assert!(!saved.iter().any(|i| matches!(i, Item::Tool { status: ToolStatus::Running, .. })));
+        assert!(matches!(saved.last(), Some(Item::Error { text }) if text.contains("stopped unexpectedly")), "{saved:?}");
+        assert!(saved.iter().any(|i| matches!(i, Item::Assistant { .. })));
     });
 }
 
@@ -360,5 +440,27 @@ fn markdown_copies_messages_images_and_errors_but_not_the_work() {
         // A thread on screen copies what's live, the same way.
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
         assert_eq!(trek.read(cx, |ws, _| ws.transcript_markdown(&id)), md);
+    });
+}
+
+#[test]
+fn answers_picked_on_the_question_card_are_in_the_transcript_and_the_markdown() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.auto_title = true);
+        let id = trek.send(cx, "mock:questions");
+        trek.wait_needs_you(cx, &id).await;
+        let request = trek.request(cx, &id);
+        let answers = vec![
+            ("Which database should the service use?".to_string(), "Postgres".to_string()),
+            ("What should ship with it?".to_string(), "Migrations, Seed data".to_string()),
+        ];
+        trek.update(cx, |ws, cx| ws.answer(&id, &request, answers, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let md = trek.read(cx, |ws, _| ws.transcript_markdown(&id));
+        assert!(md.contains("## You\n\nmock:questions\n\n## You\n\nDatabase: Postgres\nExtras: Migrations, Seed data\n"), "{md}");
+        assert!(md.contains("**Postgres**"), "the agent's reply follows: {md}");
+        // Saved with the rest of the turn, and the thread still got its title from the first message.
+        assert!(trek.read(cx, |ws, _| ws.store.items(&id).unwrap()).iter().any(|i| matches!(i, Item::User { text, .. } if text.starts_with("Database: Postgres"))));
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()), "Choose a database");
     });
 }

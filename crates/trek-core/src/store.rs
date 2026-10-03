@@ -141,8 +141,10 @@ impl Thread {
         self.updated_at > self.last_seen_at
     }
 
+    /// Waiting on the user: a question or approval, or a failure they haven't settled (settling
+    /// it is acknowledging it; it stays Failed, so moving it back to the inbox brings it back).
     pub fn needs_you(&self) -> bool {
-        self.run_state == RunState::NeedsYou || self.run_state == RunState::Failed
+        self.run_state == RunState::NeedsYou || (self.run_state == RunState::Failed && self.settled_at.is_none())
     }
 
     pub fn section(&self, now: i64) -> Option<Section> {
@@ -168,10 +170,11 @@ impl Thread {
         Some(Section::Inbox)
     }
 
-    /// Whether auto-settle applies now. A snoozed thread is left alone until it wakes, and then
-    /// gets the full wait again: it came back to the inbox to be looked at.
+    /// Whether auto-settle applies now: the wait runs from the thread's last activity, the last
+    /// time the user looked at it (or moved it back to the inbox), or the end of its snooze. A
+    /// snoozed thread is left alone until it wakes, then gets the full wait again.
     pub fn should_auto_settle(&self, now: i64, after_days: u32) -> bool {
-        let last_seen_in_inbox = self.updated_at.max(self.snoozed_until.unwrap_or(0));
+        let last_seen_in_inbox = self.updated_at.max(self.last_seen_at).max(self.snoozed_until.unwrap_or(0));
         after_days > 0
             && !self.never_settle
             && self.settled_at.is_none()
@@ -1286,6 +1289,28 @@ mod tests {
         for state in [RunState::Working, RunState::NeedsYou, RunState::Failed] {
             assert!(!Thread { run_state: state, ..base.clone() }.should_auto_settle(later, 3), "{state:?}");
         }
+    }
+
+    #[test]
+    fn auto_settle_waits_from_the_last_look() {
+        const DAY: i64 = 86_400_000;
+        let base = thread();
+        // Last active 10 days ago, looked at (or moved back to the inbox) a day ago.
+        let looked = Thread { updated_at: base.updated_at - 10 * DAY, last_seen_at: base.updated_at - DAY, ..base };
+        assert!(!looked.should_auto_settle(looked.last_seen_at + 2 * DAY, 3));
+        assert!(looked.should_auto_settle(looked.last_seen_at + 3 * DAY + 1, 3));
+    }
+
+    #[test]
+    fn a_settled_failure_no_longer_needs_the_user_but_is_still_a_failure() {
+        let now = now_ms();
+        let failed = Thread { run_state: RunState::Failed, ..thread() };
+        assert!(failed.needs_you());
+        let settled = Thread { settled_at: Some(now), ..failed.clone() };
+        assert!(!settled.needs_you());
+        assert_eq!(settled.section(now), Some(Section::Settled));
+        // A settled thread that asks again is back in the inbox.
+        assert_eq!(Thread { run_state: RunState::NeedsYou, ..settled }.section(now), Some(Section::Inbox));
     }
 
     #[test]

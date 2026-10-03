@@ -195,12 +195,17 @@ fn the_dock_badge_counts_threads_waiting_on_the_user() {
         trek.update(cx, |ws, cx| ws.mark_unread(&finished, cx));
         assert_eq!(badge(), 2);
 
-        // Answering clears it; so does settling a failure (it's been seen to).
+        // Answering clears it; so does settling a failure (it's been seen to). Undone, the
+        // failure is back.
         trek.update(cx, |ws, cx| ws.respond(&asking, &format!("{asking}-ask"), Decision::Allow, cx));
         assert_eq!(badge(), 1);
         trek.update(cx, |ws, cx| ws.settle(&failing, cx));
         assert_eq!(badge(), 0);
-        assert_eq!(trek.run_state(cx, &failing), RunState::Idle);
+        trek.update(cx, |ws, cx| ws.undo(crate::workspace::UndoAction::Unsettle(failing.clone()), cx));
+        assert_eq!(badge(), 1);
+        assert_eq!(trek.run_state(cx, &failing), RunState::Failed);
+        trek.update(cx, |ws, cx| ws.settle(&failing, cx));
+        assert_eq!(badge(), 0);
 
         // A settled thread that asks again is back in the inbox, and on the badge.
         ask(&trek, cx, &failing);

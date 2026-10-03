@@ -45,12 +45,31 @@ pub fn unmerged_branch(cwd: &Path) -> Option<String> {
     refs.iter().all(|r| ahead(cwd, r, &branch).is_some_and(|n| n > 0)).then_some(branch)
 }
 
-/// Whether `branch` (one `unmerged_branch` reported) has been merged: every commit on it is in
-/// the default branch, locally or on origin. A branch that's gone, or squashed into a new commit,
-/// can't be told apart from abandoned work, so it doesn't count.
-pub fn is_merged(cwd: &Path, branch: &str) -> bool {
-    let Some((default, refs)) = default_refs(cwd) else { return false };
-    branch != default && refs.iter().any(|r| ahead(cwd, r, branch) == Some(0))
+/// `unmerged_branch`, if its last commit was made at or after `since` (seconds since the epoch):
+/// a branch a turn that began then committed to, rather than one the folder just happened to be on.
+pub fn branch_committed_since(cwd: &Path, since: i64) -> Option<String> {
+    let branch = unmerged_branch(cwd)?;
+    let at: i64 = git(cwd, &["log", "-1", "--format=%ct", &format!("refs/heads/{branch}")])?.parse().ok()?;
+    (at >= since).then_some(branch)
+}
+
+/// Where a branch `unmerged_branch` reported stands now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchState {
+    Unmerged,
+    /// Every commit on it is in the default branch, locally or on origin.
+    Merged,
+    /// Deleted (often after a squash merge), or the folder is no longer a repository. Nothing
+    /// tells merged from abandoned work any more, so it isn't worth checking again.
+    Gone,
+}
+
+pub fn branch_state(cwd: &Path, branch: &str) -> BranchState {
+    if git(cwd, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_none() {
+        return BranchState::Gone;
+    }
+    let Some((default, refs)) = default_refs(cwd) else { return BranchState::Gone };
+    if branch != default && refs.iter().any(|r| ahead(cwd, r, branch) == Some(0)) { BranchState::Merged } else { BranchState::Unmerged }
 }
 
 #[cfg(test)]
@@ -88,19 +107,19 @@ mod tests {
         assert_eq!(unmerged_branch(&dir), None);
         run(&dir, &["checkout", "-q", "-b", "feature"]);
         assert_eq!(unmerged_branch(&dir), None);
-        assert!(!is_merged(&dir, "main"), "the default branch is never 'merged'");
+        assert_eq!(branch_state(&dir, "main"), BranchState::Unmerged, "the default branch is never 'merged'");
         commit(&dir, "work");
         assert_eq!(unmerged_branch(&dir).as_deref(), Some("feature"));
-        assert!(!is_merged(&dir, "feature"));
+        assert_eq!(branch_state(&dir, "feature"), BranchState::Unmerged);
         // More work on main doesn't merge it.
         run(&dir, &["checkout", "-q", "main"]);
         commit(&dir, "elsewhere");
-        assert!(!is_merged(&dir, "feature"));
+        assert_eq!(branch_state(&dir, "feature"), BranchState::Unmerged);
         run(&dir, &["merge", "-q", "--no-edit", "feature"]);
-        assert!(is_merged(&dir, "feature"));
-        // Deleted after the merge: can't tell, so not merged.
+        assert_eq!(branch_state(&dir, "feature"), BranchState::Merged);
+        // Deleted after the merge: can't tell, and not worth asking again.
         run(&dir, &["branch", "-q", "-d", "feature"]);
-        assert!(!is_merged(&dir, "feature"));
+        assert_eq!(branch_state(&dir, "feature"), BranchState::Gone);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -123,10 +142,21 @@ mod tests {
         run(&clone, &["push", "-q", "origin", "feature:main"]);
         run(&clone, &["fetch", "-q", "origin"]);
         assert_eq!(ahead(&clone, "refs/heads/main", "feature"), Some(1));
-        assert!(is_merged(&clone, "feature"));
+        assert_eq!(branch_state(&clone, "feature"), BranchState::Merged);
         for dir in [clone, origin, src] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn a_branch_counts_for_a_turn_only_if_committed_to_since_it_began() {
+        let dir = repo("since");
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        commit(&dir, "work");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert_eq!(branch_committed_since(&dir, now - 60).as_deref(), Some("feature"));
+        assert_eq!(branch_committed_since(&dir, now + 60), None, "on the branch, but nothing committed since");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -134,7 +164,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("trek-git-none-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(unmerged_branch(&dir), None);
-        assert!(!is_merged(&dir, "feature"));
+        assert_eq!(branch_state(&dir, "feature"), BranchState::Gone);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

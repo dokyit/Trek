@@ -152,6 +152,21 @@ impl LiveThread {
         self.tasks.iter().filter(|t| t.done.is_none()).count()
     }
 
+    /// The turn is over: open sub-agents and running tool rows end with it, done or failed.
+    fn close_turn(&mut self, ok: bool) {
+        for t in self.tasks.iter_mut().filter(|t| t.done.is_none()) {
+            t.done = Some(ok);
+        }
+        for ix in 0..self.items.len() {
+            if matches!(self.items[ix], Item::Tool { status: ToolStatus::Running, .. }) {
+                if let Some(Item::Tool { status, .. }) = self.items.get_mut(ix) {
+                    *status = if ok { ToolStatus::Done } else { ToolStatus::Failed };
+                }
+            }
+        }
+        self.background = 0;
+    }
+
     /// The prompt `request_id` is settled: its card and picks go.
     fn settle_prompt(&mut self, request_id: &str) {
         self.permissions.retain(|p| p.request_id != request_id);
@@ -193,6 +208,27 @@ impl ItemRef {
 /// Answers for a question card when the user typed their own: `typed` answers the first question
 /// nothing was picked for (the last one if all have picks), picks answer the rest, and questions
 /// left open go unanswered. Also says whether the typed answer is a secret.
+/// Card answers as the user's message: the answer alone for one question, else one line per
+/// question under its short header. Secret answers are left out; `true` if there were any.
+fn answers_text(questions: &[trek_agents::Question], answers: &[(String, String)]) -> (String, bool) {
+    let mut secret = false;
+    let mut lines = Vec::new();
+    for (question, answer) in answers {
+        let q = questions.iter().find(|q| q.question == *question);
+        if q.is_some_and(|q| q.secret) {
+            secret = true;
+            continue;
+        }
+        let label = q.map(|q| if q.header.trim().is_empty() { q.question.as_str() } else { q.header.as_str() }).unwrap_or(question);
+        lines.push((label.trim().to_string(), answer.trim().to_string()));
+    }
+    let text = match lines.as_slice() {
+        [(_, answer)] if answers.len() == 1 => answer.clone(),
+        _ => lines.iter().map(|(label, answer)| format!("{label}: {answer}")).collect::<Vec<_>>().join("\n"),
+    };
+    (text, secret)
+}
+
 fn typed_answers(questions: &[trek_agents::Question], picked: impl Fn(usize) -> Option<String>, typed: &str) -> (Vec<(String, String)>, bool) {
     let target = (0..questions.len()).find(|i| picked(*i).is_none()).unwrap_or(questions.len().saturating_sub(1));
     let answers = questions
@@ -419,6 +455,8 @@ pub struct Workspace {
     pub(crate) warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
     /// A `settle_merged` pass is running.
     checking_merges: bool,
+    /// When `tidy_inbox` last ran: snoozes that ended since then bring their threads back.
+    tidied_at: i64,
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
     pub main_window: Option<AnyWindowHandle>,
@@ -535,6 +573,7 @@ impl Workspace {
             settings_project: None,
             warm: None,
             checking_merges: false,
+            tidied_at: 0,
             overlay_open: false,
             main_window: None,
             thread_windows: HashMap::new(),
@@ -1557,7 +1596,7 @@ impl Workspace {
                 // A secret (a token, a password) goes to the agent and nowhere else.
                 live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()) } });
             }
-            self.answer(&id, &request_id, answers, cx);
+            self.send_answers(&id, &request_id, answers, cx);
             self.persist_items(&id, cx);
             return;
         }
@@ -1729,12 +1768,16 @@ impl Workspace {
         // the messages already streaming.
         let mut transcript_only = true;
         let mut appended = true;
+        let mut turn_began: Option<i64>;
         {
             let live = self.live.entry(id.to_string()).or_default();
             live.last_active = Some(cx.background_executor().now());
+            // When the turn ending here began, as wall time (`note_branch`).
+            turn_began = live.turn_started.map(|t| now_ms() - t.elapsed().as_millis() as i64);
             for ev in events {
                 // Output with no turn open: the agent woke itself (a background sub-agent finished).
                 if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
+                    turn_began = Some(now_ms());
                     live.turn_started = Some(Instant::now());
                     run_state = Some(RunState::Working);
                     transcript_only = false;
@@ -1884,17 +1927,7 @@ impl Workspace {
                             continue;
                         }
                         let took = live.turn_started.take().map(|t| t.elapsed().as_secs() as u32).unwrap_or(0);
-                        for t in live.tasks.iter_mut().filter(|t| t.done.is_none()) {
-                            t.done = Some(error.is_none());
-                        }
-                        for ix in 0..live.items.len() {
-                            if matches!(live.items[ix], Item::Tool { status: ToolStatus::Running, .. }) {
-                                if let Some(Item::Tool { status, .. }) = live.items.get_mut(ix) {
-                                    *status = if error.is_none() { ToolStatus::Done } else { ToolStatus::Failed };
-                                }
-                            }
-                        }
-                        live.background = 0;
+                        live.close_turn(error.is_none());
                         if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
                             live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
                         }
@@ -1916,6 +1949,9 @@ impl Workspace {
                         finished = true;
                     }
                     AgentEvent::Error(e) => {
+                        live.close_turn(false);
+                        live.streaming = None;
+                        live.reasoning = None;
                         live.items.push(Item::Error { text: e });
                         live.turn_started = None;
                         run_state = Some(RunState::Failed);
@@ -1931,6 +1967,10 @@ impl Workspace {
                         // The process ended mid-turn without saying why: the turn failed, and
                         // ends here like any other (saved, queued follow-ups handed back, an alert).
                         if live.turn_started.take().is_some() {
+                            live.close_turn(false);
+                            live.streaming = None;
+                            live.reasoning = None;
+                            live.items.push(Item::Error { text: "The agent stopped unexpectedly.".into() });
                             run_state.get_or_insert(RunState::Failed);
                             finished = true;
                         }
@@ -1987,7 +2027,7 @@ impl Workspace {
             }
             self.persist_items(id, cx);
             self.search_index_changed(cx);
-            self.note_branch(id, cx);
+            self.note_branch(id, turn_began, cx);
             let next = if continue_queue {
                 self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
             } else {
@@ -2089,8 +2129,28 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Answer the agent's questions: `(question, chosen labels)`.
+    /// Answer the agent's questions from the question card: `(question, chosen labels)`. The
+    /// answers go in the transcript as the user's message, as typed ones do (`send_to`); secret
+    /// ones never do.
     pub fn answer(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let questions = self.live.get(id).and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id)).and_then(|p| match &p.prompt {
+            Some(trek_agents::Prompt::Questions(q)) => Some(q.clone()),
+            _ => None,
+        });
+        if let (Some(questions), Some(live)) = (questions, self.live.get_mut(id)) {
+            let (text, secret) = answers_text(&questions, &answers);
+            if !text.is_empty() {
+                live.items.push(Item::User { text, images: vec![], at: Some(now_ms()) });
+            }
+            if secret {
+                live.items.push(Item::Notice { text: "Private answer sent".into() });
+            }
+        }
+        self.send_answers(id, request_id, answers, cx);
+        self.persist_items(id, cx);
+    }
+
+    fn send_answers(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
         let mut still_waiting = false;
         if let Some(live) = self.live.get_mut(id) {
             live.settle_prompt(request_id);
@@ -2132,28 +2192,30 @@ impl Workspace {
 
     // ---------- inbox lifecycle ----------
 
+    /// Out of the inbox. A failure settled stays Failed but no longer needs the user
+    /// (`Thread::needs_you`); undone, it's back in the inbox as it was.
     pub fn settle(&mut self, id: &str, cx: &mut Context<Self>) {
         self.mutate_thread(id, cx, |t| {
-            // Settling a failed turn is the user acknowledging it; left Failed, it would stay in
-            // the inbox (and on the Dock badge) as needing them.
-            if t.run_state == RunState::Failed {
-                t.run_state = RunState::Idle;
-            }
             t.settled_at = Some(now_ms());
             t.pinned_at = None;
             t.snoozed_until = None;
             t.last_seen_at = t.updated_at.max(t.last_seen_at);
+            // Dealt with: a merge of its branch later has nothing left to settle.
+            t.branch = None;
         });
         cx.emit(WorkspaceEvent::Toast { message: "Settled".into(), undo: Some(UndoAction::Unsettle(id.into())) });
     }
 
-    /// Back to the inbox, and counted as looked at now: auto-settle would otherwise send an old
-    /// thread straight back on its next pass.
+    /// Back to the inbox, and counted as looked at now: auto-settle (which waits from the last
+    /// look) or a merge of its branch would otherwise send an old thread straight back. Its last
+    /// activity stays as it was, and an unread thread stays unread.
     pub fn unsettle(&mut self, id: &str, cx: &mut Context<Self>) {
         self.mutate_thread(id, cx, |t| {
             t.settled_at = None;
-            t.updated_at = now_ms().max(t.updated_at);
-            t.last_seen_at = t.updated_at;
+            t.branch = None;
+            if !t.is_unseen() {
+                t.last_seen_at = now_ms().max(t.last_seen_at);
+            }
         });
     }
 
@@ -2166,12 +2228,14 @@ impl Workspace {
         self.mutate_thread(id, cx, |t| {
             t.snoozed_until = Some(now_ms() + hours * 3_600_000);
             t.settled_at = None;
+            t.branch = None;
         });
         cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed for {hours} h"), undo: None });
     }
 
+    /// Wake it now, as if its snooze had just run out: auto-settle gives it the full wait again.
     pub fn unsnooze(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.mutate_thread(id, cx, |t| t.snoozed_until = None);
+        self.mutate_thread(id, cx, |t| t.snoozed_until = Some(now_ms()));
     }
 
     pub fn mark_unread(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2200,6 +2264,7 @@ impl Workspace {
         self.mutate_thread(id, cx, |t| {
             t.snoozed_until = Some(at.timestamp_millis());
             t.settled_at = None;
+            t.branch = None;
         });
         cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {}", at.format("%a %-I:%M %p")), undo: None });
     }
@@ -2319,9 +2384,11 @@ impl Workspace {
             return;
         }
         let Some(live) = self.live.get(id) else { return };
-        let users: Vec<&String> = live.items.iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).collect();
-        // Only on the first turn, and only if the title is still the automatic one.
-        if users.len() != 1 || t.title != trek_core::import_title(users[0]) || users[0].starts_with('/') {
+        let Some(first) = live.items.iter().find_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }) else { return };
+        // Only on the first turn (answers to the agent's questions on the way are messages too),
+        // and only if the title is still the automatic one.
+        let turns = live.items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count();
+        if turns > 1 || t.title != trek_core::import_title(first) || first.starts_with('/') {
             return;
         }
         self.regenerate_title(id, false, cx);
@@ -2351,7 +2418,7 @@ impl Workspace {
                 }
                 this.maybe_check_for_updates(cx);
                 this.maybe_restart_for_update(cx);
-                cx.notify();
+                // No redraw otherwise: the views that show times keep their own clocks.
             });
             if alive.is_err() {
                 break;
@@ -2361,28 +2428,36 @@ impl Workspace {
     }
 
     /// Settle threads left alone for the configured days and ones whose branch merged. Snoozes
-    /// that have ended need nothing: `Thread::section` puts them back in the inbox as of `now`, so
-    /// the redraw this ends with is what brings them back on screen.
+    /// that have ended need nothing but a redraw: `Thread::section` puts them back in the inbox
+    /// as of `now`.
     pub(crate) fn tidy_inbox(&mut self, now: i64, cx: &mut Context<Self>) {
+        let since = std::mem::replace(&mut self.tidied_at, now);
+        if self.threads.iter().any(|t| t.snoozed_until.is_some_and(|u| u > since && u <= now)) {
+            cx.notify();
+        }
         let days = self.settings.inbox.auto_settle_days;
         let due: Vec<String> = self.threads.iter().filter(|t| t.should_auto_settle(now, days)).map(|t| t.id.clone()).collect();
         for id in due {
-            self.mutate_thread(&id, cx, |t| t.settled_at = Some(now));
+            self.mutate_thread(&id, cx, |t| {
+                t.settled_at = Some(now);
+                t.branch = None;
+            });
         }
         self.settle_merged(cx);
-        cx.notify();
     }
 
-    /// After a turn, remember the branch the thread's folder is on if it holds unmerged commits,
-    /// so the thread can settle once that branch is merged (`settle_merged`).
-    fn note_branch(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.settings.inbox.auto_settle_on_merge {
-            return;
-        }
+    /// After a turn that began at `began` (ms), remember the branch the thread's folder is on if
+    /// it holds unmerged commits and was committed to during the turn, so the thread can settle
+    /// once that branch is merged (`settle_merged`). A thread that only read or talked on a
+    /// branch isn't tied to it.
+    fn note_branch(&mut self, id: &str, began: Option<i64>, cx: &mut Context<Self>) {
+        let Some(began) = began.filter(|_| self.settings.inbox.auto_settle_on_merge) else { return };
         let Some(cwd) = self.thread(id).filter(|t| t.source == ThreadSource::Trek).and_then(|t| t.cwd.clone()) else { return };
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
-            let Some(branch) = cx.background_executor().spawn(async move { trek_core::git::unmerged_branch(&cwd) }).await else { return };
+            // Commit times are in whole seconds.
+            let since = began.div_euclid(1000);
+            let Some(branch) = cx.background_executor().spawn(async move { trek_core::git::branch_committed_since(&cwd, since) }).await else { return };
             let _ = this.update(cx, |this, cx| {
                 if this.thread(&id).is_some_and(|t| t.branch.as_ref() != Some(&branch)) {
                     this.mutate_thread(&id, cx, |t| t.branch = Some(branch));
@@ -2401,7 +2476,7 @@ impl Workspace {
         let candidates: Vec<(String, PathBuf, String)> = self
             .threads
             .iter()
-            .filter(|t| t.source == ThreadSource::Trek && t.settled_at.is_none() && t.pinned_at.is_none() && !t.never_settle && t.run_state == RunState::Idle)
+            .filter(|t| t.source == ThreadSource::Trek && t.settled_at.is_none())
             .filter_map(|t| Some((t.id.clone(), t.cwd.clone()?, t.branch.clone()?)))
             .collect();
         if candidates.is_empty() {
@@ -2409,20 +2484,30 @@ impl Workspace {
         }
         self.checking_merges = true;
         cx.spawn(async move |this, cx| {
-            let merged: Vec<String> = cx
+            use trek_core::git::BranchState;
+            let checked: Vec<(String, String, BranchState)> = cx
                 .background_executor()
-                .spawn(async move { candidates.into_iter().filter(|(_, cwd, branch)| trek_core::git::is_merged(cwd, branch)).map(|(id, ..)| id).collect() })
+                .spawn(async move { candidates.into_iter().map(|(id, cwd, branch)| (id, branch.clone(), trek_core::git::branch_state(&cwd, &branch))).collect() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.checking_merges = false;
                 let now = now_ms();
-                for id in merged {
-                    // Still idle and unsettled: the user may have picked it up again meanwhile.
-                    // Its branch is forgotten: moved back to the inbox, it stays there.
-                    if this.thread(&id).is_some_and(|t| t.settled_at.is_none() && t.run_state == RunState::Idle) {
+                for (id, branch, state) in checked {
+                    let Some(t) = this.thread(&id).filter(|t| t.branch.as_ref() == Some(&branch) && t.settled_at.is_none()) else { continue };
+                    // Merged while the thread sat idle in the inbox: done with. Merged while it was
+                    // busy, pinned, kept or snoozed, it stays where the user put it. Either way, or
+                    // once the branch is gone, there's nothing left to watch for.
+                    let settle = state == BranchState::Merged
+                        && t.run_state == RunState::Idle
+                        && t.pinned_at.is_none()
+                        && !t.never_settle
+                        && !t.snoozed_until.is_some_and(|u| u > now);
+                    if state != BranchState::Unmerged {
                         this.mutate_thread(&id, cx, |t| {
-                            t.settled_at = Some(now);
                             t.branch = None;
+                            if settle {
+                                t.settled_at = Some(now);
+                            }
                         });
                     }
                 }
@@ -3242,6 +3327,19 @@ mod tests {
         assert_eq!(answers[1], ("Token?".to_string(), "s3cr3t".to_string()));
         assert!(secret);
         assert!(!typed_answers(&qs, |_| None, "me").1);
+    }
+
+    #[test]
+    fn card_answers_read_as_the_users_message_without_secrets() {
+        let one = [q("Which database?", false)];
+        assert_eq!(answers_text(&one, &[("Which database?".into(), "SQLite".into())]), ("SQLite".to_string(), false));
+        let db = Question { header: "Database".into(), ..q("Which database?", false) };
+        let qs = [db, q("What ships with it?", false), q("Token?", true)];
+        let answers = [("Which database?".to_string(), "Postgres".to_string()), ("What ships with it?".into(), "Migrations, Backups".into()), ("Token?".into(), "s3cr3t".into())];
+        let (text, secret) = answers_text(&qs, &answers);
+        assert_eq!(text, "Database: Postgres\nWhat ships with it?: Migrations, Backups");
+        assert!(secret);
+        assert_eq!(answers_text(&qs, &answers[2..]), (String::new(), true));
     }
 
     #[test]

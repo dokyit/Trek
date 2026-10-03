@@ -37,10 +37,15 @@ async fn busy_window(cx: &mut TestAppContext, settled: usize) -> (Trek, String) 
         ws.navigate(Route::Thread(t.id.clone()), cx);
         t.id
     });
-    trek.update(cx, |ws, cx| ws.send("mock:long 600s".into(), vec![], cx));
-    let tid = id.clone();
-    trek.wait(cx, "the long turn to start", |ws| ws.live.get(&tid).is_some_and(|l| l.items.iter().any(|i| matches!(i, trek_core::store::Item::Tool { title, .. } if title == "Run command" && l.turn_started.is_some()))))
-        .await;
+    // A long turn under way, as the mock's `mock:long` starts one, but with no agent session
+    // behind it: nothing arrives in real time (the mock reports its context every ten seconds)
+    // while a test counts what redraws.
+    let events = vec![
+        trek_agents::AgentEvent::ReasoningDelta("This needs the full test suite; it takes a while.".into()),
+        trek_agents::AgentEvent::ToolStarted { id: "tool-1".into(), title: "Run command".into(), detail: "cargo test --workspace".into() },
+    ];
+    trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+    assert_eq!(trek.run_state(cx, &id), RunState::Working);
     trek.render(cx);
     (trek, id)
 }
