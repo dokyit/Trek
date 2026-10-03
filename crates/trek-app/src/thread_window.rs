@@ -66,6 +66,8 @@ pub struct ThreadWindow {
     composer_changed: bool,
     /// The window title as last set (the thread's title).
     title: String,
+    /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `system::hidden_frames`).
+    _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -110,7 +112,8 @@ impl ThreadWindow {
         ];
         let c = composer.clone();
         window.defer(cx, move |window, cx| c.update(cx, |c, cx| c.focus(window, cx)));
-        Self { workspace, id, thread_view, composer, working_bar, composer_changed: true, title, _subscriptions: subscriptions }
+        let _hidden_frames = crate::system::hidden_frames(window, cx);
+        Self { workspace, id, thread_view, composer, working_bar, composer_changed: true, title, _hidden_frames, _subscriptions: subscriptions }
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -193,12 +196,7 @@ impl Render for ThreadWindow {
                 this.show_in_main(Route::Draft { project }, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_in_main(Route::Settings(SettingsPage::General), cx)))
-            .on_action(cx.listener(|this, _: &OpenPalette, _, cx| {
-                this.workspace.update(cx, |_, cx| {
-                    cx.emit(WorkspaceEvent::ActivateMain);
-                    cx.emit(WorkspaceEvent::OpenPalette);
-                })
-            }))
+            .on_action(cx.listener(|this, _: &OpenPalette, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenPalette))))
             .on_action(cx.listener(|this, _: &About, _, cx| this.show_in_main(Route::Settings(SettingsPage::About), cx)))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| {
                 this.workspace.update(cx, |ws, cx| ws.check_for_updates(true, cx));

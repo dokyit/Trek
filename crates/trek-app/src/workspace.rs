@@ -130,7 +130,8 @@ pub struct LiveThread {
     pub background: usize,
     /// Last prompt or agent event (idle sessions are shut down; they resume on the next message).
     pub last_active: Option<Instant>,
-    last_persist: Option<Instant>,
+    /// A save of the transcript on its way (`persist_soon`).
+    _save_soon: Option<Task<()>>,
     _events: Option<Task<()>>,
 }
 
@@ -307,7 +308,8 @@ pub enum WorkspaceEvent {
     RestoreQueued { thread: String, text: String, images: Vec<PathBuf> },
     /// Something in a thread window changed what the main window shows: bring it forward.
     ActivateMain,
-    /// ⌘K from a thread window: the palette opens in the main window (its commands act there).
+    /// ⌘K from a thread window: the palette opens in the main window (its commands act there),
+    /// reopened if it was closed (`root::show_palette`).
     OpenPalette,
     /// Only this thread's transcript changed (streamed text, tool calls). Sent instead of a
     /// notification, so views that don't draw transcripts aren't redrawn for every batch.
@@ -351,7 +353,8 @@ fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     GitInfo {
         is_repo: true,
         branch: run(&["branch", "--show-current"]).filter(|b| !b.is_empty()),
-        changed: run(&["status", "--porcelain"]).map(|s| s.lines().count()).unwrap_or(0),
+        // Every untracked file, not their folders, so the count matches the Git panel's list.
+        changed: run(&["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0),
         ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
         default_branch: run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
             .and_then(|s| s.split_once('/').map(|(_, b)| b.to_string()))
@@ -459,11 +462,6 @@ impl Workspace {
             })
             .detach();
         }
-        cx.on_app_quit(|this, _| {
-            this.install_on_quit();
-            async {}
-        })
-        .detach();
         if this.settings.updates.auto_check {
             this.check_for_updates(false, cx);
         }
@@ -483,6 +481,13 @@ impl Workspace {
     /// The model over `store` and `settings` alone: no agent detection, import, update check or
     /// housekeeping is started (`new` adds those). Tests build on this.
     pub fn with(store: Store, settings: Settings, cx: &mut Context<Self>) -> Self {
+        // No session runs yet: turns an earlier run left open (it quit or crashed mid-turn, or
+        // with a card up) are over, and saying otherwise would leave them "Working" for good.
+        match store.close_interrupted_turns() {
+            Ok(closed) if !closed.is_empty() => tracing::info!("turns an earlier run left open, now closed: {}", closed.len()),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("close interrupted turns: {e}"),
+        }
         let route = if settings.onboarding.completed { Route::Draft { project: None } } else { Route::Onboarding };
         let applied_defaults = default_prefs_key(&settings);
         let draft_prefs = Prefs {
@@ -538,6 +543,14 @@ impl Workspace {
             let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
             this.route = Route::Draft { project: first };
         }
+        cx.on_app_quit(|this, _| {
+            // What streamed since the last save is kept (a turn paused on a card, say); the next
+            // launch closes the turns left open.
+            this.persist_all();
+            this.install_on_quit();
+            async {}
+        })
+        .detach();
         this
     }
 
@@ -632,7 +645,34 @@ impl Workspace {
         if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()) {
             self.refresh_git_at(cwd, cx);
         }
+        if let Some(t) = self.thread(id).filter(|t| t.agent == AgentId::ClaudeCode) {
+            let cwd = t.cwd.clone().unwrap_or_else(trek_core::paths::home);
+            self.fetch_claude_commands(cwd, cx);
+        }
         cx.notify();
+    }
+
+    /// Learn Claude Code's commands and skills in `cwd` (a thread window's folder; the status
+    /// check covers the main window's), unless they're known. Sends no prompt.
+    fn fetch_claude_commands(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        let key = (AgentId::ClaudeCode.key(), cwd);
+        let ready = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
+        if !ready || self.settings.disabled_agents.contains(&key.0) || self.agent_commands.contains_key(&key) {
+            return;
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        let dir = key.1.clone();
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_agents::claude_status(&dir).await).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(Ok(st)) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.agent_commands.insert(key, st.commands);
+                cx.notify();
+            });
+        });
+        self.tasks.push(task);
     }
 
     pub fn thread_window_closed(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
@@ -641,10 +681,14 @@ impl Workspace {
         }
     }
 
-    /// The main window closed (thread windows may still be open; it reopens on demand).
+    /// The main window closed (thread windows may still be open; it reopens on demand). What it
+    /// left here goes with it: a reopened window must neither scroll back to an old search hit
+    /// nor keep the browser hidden for a palette or menu that closed with it.
     pub fn main_window_closed(&mut self, handle: AnyWindowHandle, cx: &mut Context<Self>) {
         if self.main_window == Some(handle) {
             self.main_window = None;
+            self.reveal = None;
+            self.overlay_open = false;
             cx.notify();
         }
     }
@@ -809,6 +853,15 @@ impl Workspace {
         self.threads
             .iter()
             .any(|t| t.run_state == RunState::Working && self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()))
+    }
+
+    /// Quitting now would cut agent work short: a turn under way, whether it's working or paused
+    /// on an approval, a question or a plan; sub-agents still out; or a plan offered after its
+    /// turn, waiting for an answer (it lives only in memory). Updates wait until there's none.
+    pub fn work_in_flight(&self) -> bool {
+        self.live
+            .values()
+            .any(|l| (l.commands.is_some() && (l.turn_started.is_some() || l.background > 0)) || l.permissions.iter().any(|p| p.after_turn))
     }
 
     // ---------- navigation ----------
@@ -1658,6 +1711,8 @@ impl Workspace {
         // to the composer instead, so the user can rethink them.
         let mut continue_queue = false;
         let mut notify_text: Option<String> = None;
+        // The agent stopped to ask the user something.
+        let mut asked = false;
         let mut commands: Option<Vec<SlashCommand>> = None;
         // Streamed text and tool calls change nothing but the transcript; mostly they only extend
         // the messages already streaming.
@@ -1797,6 +1852,7 @@ impl Workspace {
                         let after_turn = live.turn_started.is_none();
                         live.permissions.push(PendingPermission { request_id, title, detail, prompt, after_turn });
                         run_state = Some(RunState::NeedsYou);
+                        asked = true;
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
@@ -1898,11 +1954,14 @@ impl Workspace {
                 }
             });
         }
-        // Save the transcript every so often mid-turn, so a quit or crash loses seconds, not the turn.
-        if !finished && self.live.get(id).is_some_and(|l| l.turn_started.is_some() && l.last_persist.is_none_or(|t| t.elapsed() > Duration::from_secs(10))) {
-            self.persist_items(id, cx);
-            if let Some(l) = self.live.get_mut(id) {
-                l.last_persist = Some(Instant::now());
+        // Mid-turn, what changed is saved a second later (only changed rows are written), so a
+        // crash loses a second at most. A turn that stops to ask is saved as it stops: the user
+        // may well leave it waiting, or quit.
+        if !finished {
+            if asked {
+                self.persist_items(id, cx);
+            } else {
+                self.persist_soon(id, cx);
             }
         }
         if finished {
@@ -1953,6 +2012,30 @@ impl Workspace {
         let text = queued.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let images = queued.into_iter().flat_map(|(_, images)| images).collect();
         cx.emit(WorkspaceEvent::RestoreQueued { thread: id.to_string(), text, images });
+    }
+
+    /// Save `id`'s transcript a second from now, unless a save is on its way already.
+    fn persist_soon(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id).filter(|l| l._save_soon.is_none() && l.items.is_dirty()) else { return };
+        let id = id.to_string();
+        live._save_soon = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(l) = this.live.get_mut(&id) {
+                    l._save_soon = None;
+                }
+                this.persist_items(&id, cx);
+            });
+        }));
+    }
+
+    /// Save every open transcript's unsaved changes (Trek is quitting).
+    fn persist_all(&mut self) {
+        for (id, live) in self.live.iter_mut().filter(|(_, l)| !l.loading) {
+            if let Err(e) = self.store.save_transcript(id, &mut live.items) {
+                tracing::warn!("save transcript {id}: {e}");
+            }
+        }
     }
 
     /// Save what changed in a thread's transcript: new rows, edited rows (streaming text, tool
@@ -2376,6 +2459,7 @@ impl Workspace {
         self.usage_loading = true;
         let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
         let (tx, rx) = async_channel::bounded(1);
+        let folder = cwd.clone();
         trek_core::runtime().spawn(async move {
             let (a, b) = tokio::join!(
                 async { if claude { Some(trek_agents::claude_status(&cwd).await) } else { None } },
@@ -2392,6 +2476,8 @@ impl Workspace {
                             if agent == AgentId::Codex && !st.models.is_empty() {
                                 this.codex_models = st.models.clone();
                             }
+                            // Its commands include the folder's own (project commands, skills).
+                            this.agent_commands.insert((agent.key(), folder.clone()), st.commands.clone());
                             this.agent_status.insert(agent.key(), st);
                         }
                         Some(Err(e)) => {
@@ -2451,15 +2537,21 @@ impl Workspace {
         }
     }
 
-    /// Slash commands for an agent: Trek's own first, then the agent's commands and skills.
-    pub fn slash_commands(&self, agent: &AgentId) -> Vec<SlashCommand> {
+    /// Slash commands for an agent in `scope`'s folder: Trek's own first, then the agent's
+    /// commands and skills (project ones are the folder's own).
+    pub fn slash_commands(&self, scope: &Scope, agent: &AgentId) -> Vec<SlashCommand> {
         let mut out: Vec<SlashCommand> = BUILTIN_COMMANDS
             .iter()
             .map(|(n, d)| SlashCommand { name: n.to_string(), description: d.to_string(), kind: trek_agents::CommandKind::Command })
             .collect();
-        let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
-        let offered = self.agent_commands.get(&(agent.key(), cwd)).into_iter().flatten();
-        for c in self.agent_status.get(&agent.key()).into_iter().flat_map(|st| st.commands.iter()).chain(offered) {
+        let cwd = self.cwd_in(scope).unwrap_or_else(trek_core::paths::home);
+        // What the agent offered in this folder; the last status check (made for the main
+        // window's folder) only until then.
+        let commands = match self.agent_commands.get(&(agent.key(), cwd)) {
+            Some(offered) => offered.as_slice(),
+            None => self.agent_status.get(&agent.key()).map_or(&[][..], |st| st.commands.as_slice()),
+        };
+        for c in commands {
             if !out.iter().any(|o| o.name == c.name) {
                 out.push(c.clone());
             }
@@ -2761,10 +2853,10 @@ impl Workspace {
         }
     }
 
-    /// Install now if no agent turn is running; otherwise once the last one finishes.
+    /// Install now unless agent work is in flight (`work_in_flight`); otherwise once it's over.
     pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
         if let UpdateStatus::Ready { version, staged } = self.updater.status.clone() {
-            if self.any_turn_running() {
+            if self.work_in_flight() {
                 self.updater.status = UpdateStatus::RestartPending { version, staged };
                 cx.emit(WorkspaceEvent::Toast { message: "Trek will restart when your agents finish.".into(), undo: None });
                 cx.notify();
@@ -2776,7 +2868,7 @@ impl Workspace {
 
     fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
         if let UpdateStatus::RestartPending { staged, .. } = self.updater.status.clone() {
-            if !self.any_turn_running() {
+            if !self.work_in_flight() {
                 self.install_update(staged, cx);
             }
         }

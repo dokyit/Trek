@@ -6,6 +6,7 @@ mod flows;
 mod harness;
 mod inbox;
 mod render;
+mod windows;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -2,7 +2,7 @@
 //! The mock agent plays each script; see `trek_agents::mock` for what each keyword does.
 
 use super::harness::{Trek, open, open_with, run};
-use crate::workspace::{Route, SettingsPage};
+use crate::workspace::{Route, SettingsPage, UpdateStatus};
 use gpui_kit::{Focusable as _, TestAppContext};
 use trek_agents::AgentEvent;
 use trek_core::settings::FollowUp;
@@ -518,5 +518,87 @@ fn keyboard_shortcuts_reach_their_actions() {
 
         trek.press(cx, "cmd-,");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(SettingsPage::General));
+    });
+}
+
+/// An update staged at a path that doesn't exist: installing it can only fail, here as in a test
+/// binary, which isn't an app bundle anyway.
+fn stage_fake_update(trek: &Trek, cx: &mut TestAppContext) {
+    let staged = super::harness::data_dir().join("no-such-update/Trek.app");
+    trek.update(cx, |ws, cx| {
+        ws.updater.status = UpdateStatus::Ready { version: "9.9.9".into(), staged };
+        ws.restart_to_update(cx);
+    });
+}
+
+fn update_status(trek: &Trek, cx: &TestAppContext) -> UpdateStatus {
+    trek.read(cx, |ws, _| ws.updater.status.clone())
+}
+
+#[test]
+fn updates_wait_for_a_turn_paused_on_a_card() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:permission");
+        trek.wait_needs_you(cx, &id).await;
+        // Waiting for the user isn't idle: restarting would end the turn behind the card.
+        stage_fake_update(&trek, cx);
+        assert!(matches!(update_status(&trek, cx), UpdateStatus::RestartPending { .. }), "{:?}", update_status(&trek, cx));
+        trek.click(cx, "allow");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // With the turn over, the install went ahead (and stopped, as no app bundle runs here).
+        let status = update_status(&trek, cx);
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+    });
+}
+
+#[test]
+fn updates_wait_for_a_plan_offered_after_its_turn() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        // Codex offers its plan once the turn is over; the card lives only in memory.
+        let plan = AgentEvent::PermissionRequest {
+            request_id: "codex-plan-turn-1".into(),
+            title: "Plan".into(),
+            detail: String::new(),
+            prompt: Some(trek_agents::Prompt::Plan("1. Add the route\n2. Test it".into())),
+        };
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![AgentEvent::TextDelta("Here's the plan.".into())], cx);
+            ws.apply_events(&id, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }, plan], cx);
+        });
+        assert_eq!(trek.run_state(cx, &id), RunState::NeedsYou);
+        stage_fake_update(&trek, cx);
+        assert!(matches!(update_status(&trek, cx), UpdateStatus::RestartPending { .. }), "{:?}", update_status(&trek, cx));
+        // Answered, there's nothing left a restart would lose.
+        trek.update(cx, |ws, cx| ws.respond(&id, "codex-plan-turn-1", trek_agents::Decision::Deny, cx));
+        assert!(!trek.read(cx, |ws, _| ws.work_in_flight()));
+    });
+}
+
+#[test]
+fn transcripts_are_saved_as_turns_pause_soon_after_changes_and_on_quit() {
+    run(async |cx| {
+        let trek = open(cx);
+        let store = trek.read(cx, |ws, _| ws.store.clone());
+        let id = trek.send(cx, "mock:permission");
+        trek.wait_needs_you(cx, &id).await;
+        // Everything up to the card is stored as the turn stops for it: the text, the command.
+        let stored = store.items(&id).expect("items");
+        assert_eq!(stored, trek.items(cx, &id));
+        assert!(stored.iter().any(|i| matches!(i, Item::Tool { status: ToolStatus::Running, .. })), "{stored:?}");
+
+        // Streamed text is saved a second after it arrives.
+        let quiet = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&quiet, vec![AgentEvent::TextDelta("Half an ans".into())], cx));
+        assert!(store.items(&quiet).expect("items").is_empty(), "not on every batch");
+        trek.wait(cx, "the save", |ws| ws.store.items(&quiet).is_ok_and(|i| i == vec![Item::Assistant { text: "Half an ans".into() }])).await;
+
+        // Whatever came since is saved when Trek quits.
+        trek.update(cx, |ws, cx| ws.apply_events(&quiet, vec![AgentEvent::TextDelta("wer".into())], cx));
+        assert_eq!(store.items(&quiet).expect("items"), vec![Item::Assistant { text: "Half an ans".into() }]);
+        cx.quit();
+        assert_eq!(store.items(&quiet).expect("items"), vec![Item::Assistant { text: "Half an answer".into() }]);
     });
 }

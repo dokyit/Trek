@@ -1,12 +1,12 @@
 //! The inbox lifecycle and project handling through the workspace API (what the sidebar's menus
 //! and Settings → Project call).
 
-use super::harness::{Trek, mock, new_project, open, open_with, run, store_items};
-use crate::workspace::{Route, UndoAction, WorkspaceEvent};
-use gpui_kit::TestAppContext;
+use super::harness::{Trek, mock, new_project, open, open_with, run, settings, store_items};
+use crate::workspace::{Route, UndoAction, Workspace, WorkspaceEvent};
+use gpui_kit::{AppContext as _, TestAppContext};
 use std::cell::RefCell;
 use std::rc::Rc;
-use trek_core::store::{Item, Section, now_ms};
+use trek_core::store::{Item, Section, Store, ToolStatus, now_ms};
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
 /// Toast messages the workspace raises from now on.
@@ -177,5 +177,35 @@ fn removing_a_project_archives_its_threads() {
             assert!(ws.workspace_projects().iter().any(|p| p.id == pid));
             assert!(!ws.settings.hidden_projects.contains(&key));
         });
+    });
+}
+
+#[test]
+fn turns_an_earlier_run_left_open_are_closed_at_launch() {
+    run(async |cx| {
+        // What a quit in the middle of two turns leaves: one working, one waiting on a card.
+        let store = Store::in_memory().expect("store");
+        let project = new_project("project");
+        let left_open = |state: RunState| {
+            let mut t = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Supervised).expect("thread");
+            t.run_state = state;
+            store.save_thread(&t).expect("save");
+            t.id
+        };
+        let (working, asking) = (left_open(RunState::Working), left_open(RunState::NeedsYou));
+        let tool = |status| Item::Tool { id: "t1".into(), title: "Run command".into(), detail: "./scripts/migrate.sh".into(), output: String::new(), status };
+        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1) };
+        store_items(&store, &working, vec![user.clone(), tool(ToolStatus::Running)]);
+        store_items(&store, &asking, vec![user.clone()]);
+
+        let ws = cx.new(|cx| Workspace::with(store.clone(), settings(), cx));
+        ws.read_with(cx, |ws, _| {
+            for id in [&working, &asking] {
+                assert_eq!(ws.thread(id).map(|t| t.run_state), Some(RunState::Idle));
+            }
+            assert_eq!(ws.needs_you_count(), 0, "no Dock badge for cards that are gone");
+        });
+        let notice = Item::Notice { text: trek_core::store::INTERRUPTED_BY_QUIT.into() };
+        assert_eq!(store.items(&working).expect("items"), vec![user, tool(ToolStatus::Failed), notice]);
     });
 }

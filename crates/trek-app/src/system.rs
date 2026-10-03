@@ -139,6 +139,20 @@ pub fn order_back(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 pub fn order_back(_: &Window) {}
 
+/// With `TREK_FORCE_ACTIVE`, a display link's worth of frame requests (60 Hz) for `window` while
+/// macOS hides it, so measurements and screenshots of a window kept behind others
+/// (`TREK_BACKGROUND`) cover drawing too. Every Trek window keeps one for as long as it's open.
+pub fn hidden_frames<V: 'static>(window: &mut Window, cx: &mut Context<V>) -> Option<Task<()>> {
+    crate::mascot::force_active().then(|| {
+        cx.spawn_in(window, async move |_, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_micros(16_667)).await;
+            if cx.update(|window, _| display_if_hidden(window)).is_err() {
+                break;
+            }
+        })
+    })
+}
+
 /// Have Core Animation draw `window` now if macOS counts it as hidden (covered by other windows,
 /// or on another Space), where GPUI's display link is stopped. GPUI draws and presents the frame
 /// if anything changed. Only for `TREK_FORCE_ACTIVE` measurements.

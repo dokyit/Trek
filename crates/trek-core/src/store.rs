@@ -213,6 +213,9 @@ pub enum Item {
     Error { text: String },
 }
 
+/// The notice ending a turn that Trek quit (or crashed) in the middle of.
+pub const INTERRUPTED_BY_QUIT: &str = "Interrupted: Trek closed before this turn finished";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
@@ -546,6 +549,39 @@ impl Store {
         Ok(Some(t))
     }
 
+    /// Close the turns an earlier run left open (it quit or crashed mid-turn, or while a card was
+    /// waiting): no session is behind them any more. Each thread goes back to idle; in its stored
+    /// transcript, tool calls still running are marked failed, empty thoughts go, and a notice
+    /// says the turn was cut short. Returns the threads closed. For launch, before any session
+    /// starts.
+    pub fn close_interrupted_turns(&self) -> Result<Vec<String>> {
+        let open: Vec<String> = self.with(|c| {
+            let mut st = c.prepare("SELECT id FROM threads WHERE run_state IN (?1, ?2)")?;
+            let rows = st.query_map(params![enum_str(&RunState::Working), enum_str(&RunState::NeedsYou)], |r| r.get(0))?;
+            rows.collect()
+        })?;
+        for id in &open {
+            let rows = self.items_with_ids(id)?;
+            // With nothing stored, the history is still the agent's own (an imported thread):
+            // a lone notice would hide it.
+            if !rows.is_empty() {
+                let mut t = Transcript::stored(rows);
+                t.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
+                for ix in 0..t.len() {
+                    if matches!(t[ix], Item::Tool { status: ToolStatus::Running, .. }) {
+                        if let Some(Item::Tool { status, .. }) = t.get_mut(ix) {
+                            *status = ToolStatus::Failed;
+                        }
+                    }
+                }
+                t.push(Item::Notice { text: INTERRUPTED_BY_QUIT.into() });
+                self.save_transcript(id, &mut t)?;
+            }
+            self.update_thread(id, |t| t.run_state = RunState::Idle)?;
+        }
+        Ok(open)
+    }
+
     /// Agent session ids of Trek's own threads, archived ones included.
     pub fn trek_native_ids(&self) -> Result<HashSet<String>> {
         self.with(|c| {
@@ -609,6 +645,10 @@ impl Store {
             out.retitled = true;
         }
         t.imported_title = Some(imp.title.clone());
+        // Earlier imports kept OpenCode's model as its raw JSON, which no agent understands.
+        if t.model.as_deref().is_some_and(|m| m.starts_with('{')) {
+            t.model = imp.model.clone();
+        }
         if t.updated_at < imp.updated_at {
             // Activity that happened outside Trek isn't "unread" here.
             if t.last_seen_at >= t.updated_at {
@@ -1229,5 +1269,53 @@ mod tests {
         assert!(t.should_auto_settle(later, 3));
         t.updated_at += 1; // unseen
         assert!(!t.should_auto_settle(later, 3));
+    }
+
+    #[test]
+    fn imports_repair_models_kept_as_raw_json() {
+        let s = Store::in_memory().unwrap();
+        let with_model = |id: &str, model: &str| ImportedThread { model: Some(model.into()), ..imported(id, "t") };
+        s.upsert_imported(&[with_model("a", r#"{"id":"deepseek-v4-flash-free","providerID":"opencode"}"#), with_model("b", "gpt-4.1")]).unwrap();
+        s.update_thread(&by_native(&s, "b").id, |t| t.model = Some("picked-in-trek".into())).unwrap();
+        s.upsert_imported(&[with_model("a", "opencode/deepseek-v4-flash-free"), with_model("b", "github-copilot/gpt-4.1")]).unwrap();
+        assert_eq!(by_native(&s, "a").model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+        // A model that isn't raw JSON is the thread's own (possibly picked in Trek): it stays.
+        assert_eq!(by_native(&s, "b").model.as_deref(), Some("picked-in-trek"));
+    }
+
+    #[test]
+    fn turns_left_open_by_a_quit_are_closed_at_launch() {
+        let s = Store::in_memory().unwrap();
+        let open = |state: RunState| {
+            let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+            t.run_state = state;
+            s.save_thread(&t).unwrap();
+            t.id
+        };
+        let (working, asking, failed, idle, imported) = (open(RunState::Working), open(RunState::NeedsYou), open(RunState::Failed), open(RunState::Idle), open(RunState::Working));
+        let user = Item::User { text: "run the migrations".into(), images: vec![], at: Some(1) };
+        let empty_thought = Item::Reasoning { text: " ".into() };
+        let partial = said("The schema change needs");
+        let tool = |status| Item::Tool { id: "t1".into(), title: "Bash".into(), detail: "make migrate".into(), output: String::new(), status };
+        let running = tool(ToolStatus::Running);
+        s.append_items(&working, [("u", &user), ("r", &empty_thought), ("p", &partial), ("t", &running)]).unwrap();
+        s.append_items(&asking, [("u2", &user)]).unwrap();
+
+        let mut closed = s.close_interrupted_turns().unwrap();
+        closed.sort();
+        let mut expected = vec![working.clone(), asking.clone(), imported.clone()];
+        expected.sort();
+        assert_eq!(closed, expected);
+        for id in [&working, &asking, &imported] {
+            assert_eq!(s.thread(id).unwrap().unwrap().run_state, RunState::Idle);
+        }
+        assert_eq!(s.thread(&failed).unwrap().unwrap().run_state, RunState::Failed, "a failure still needs the user");
+        let notice = Item::Notice { text: INTERRUPTED_BY_QUIT.into() };
+        assert_eq!(s.items(&working).unwrap(), vec![user.clone(), partial, tool(ToolStatus::Failed), notice.clone()]);
+        assert_eq!(s.items(&asking).unwrap(), vec![user, notice]);
+        // No stored transcript (history still in the agent's files): nothing is added.
+        assert!(s.items(&imported).unwrap().is_empty());
+        assert!(s.items(&idle).unwrap().is_empty());
+        assert!(s.close_interrupted_turns().unwrap().is_empty(), "closed once");
     }
 }

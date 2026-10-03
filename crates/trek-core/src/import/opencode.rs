@@ -2,7 +2,7 @@
 
 use super::{Evidence, ImportedThread, Transcript, classify, clip, source_title, title_from, user_text};
 use crate::store::{Item, ToolStatus};
-use crate::types::ThreadSource;
+use crate::types::{Effort, ThreadSource};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -96,15 +96,15 @@ fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
     let title = own_title
         .or_else(|| first.as_deref().and_then(user_text).map(|t| title_from(&t)))
         .unwrap_or_else(|| "OpenCode session".into());
+    let (model, effort) = row.model.as_deref().map(session_model).unwrap_or_default();
     ImportedThread {
         source: ThreadSource::OpenCode,
         native_id: row.id,
         legacy_title: Some(if row.title.is_empty() { "OpenCode session".into() } else { row.title }),
         title,
         cwd,
-        // Stored as JSON ({"providerID","modelID"}) in newer versions.
-        model: row.model.map(|m| serde_json::from_str::<Value>(&m).ok().and_then(|v| v["modelID"].as_str().map(String::from)).unwrap_or(m)),
-        effort: None,
+        model,
+        effort,
         branch: None,
         created_at: row.created,
         updated_at: row.updated,
@@ -112,6 +112,20 @@ fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
         deletions: row.deletions,
         skip,
     }
+}
+
+/// The session's model as OpenCode's ACP agent names it (`<provider>/<model>`, what continuing the
+/// thread asks for), and its variant as an effort. The column holds JSON: `{"id","providerID",
+/// "variant"}` now, `{"providerID","modelID"}` in older versions; plain text is taken as it is.
+fn session_model(raw: &str) -> (Option<String>, Option<Effort>) {
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return (Some(raw.trim().to_string()).filter(|m| !m.is_empty()), None);
+    };
+    let model = v["modelID"].as_str().or(v["id"].as_str()).filter(|m| !m.is_empty()).map(|m| match v["providerID"].as_str().filter(|p| !p.is_empty()) {
+        Some(provider) => format!("{provider}/{m}"),
+        None => m.to_string(),
+    });
+    (model, v["variant"].as_str().and_then(Effort::parse))
 }
 
 /// `opencode run` creates its session with the interactive tools (questions, plan mode) denied,
@@ -348,6 +362,38 @@ mod tests {
                 ("e-child".into(), "Explore codebase (@explore subagent)".into(), Some(Skip::Subagent)),
                 ("f-namer".into(), "Generate a title that will help the user recognize this…".into(), Some(Skip::TitleGenerator)),
                 ("g-tmp".into(), "Pong response request".into(), Some(Skip::TempDir)),
+            ]
+        );
+    }
+
+    #[test]
+    fn models_are_named_as_the_acp_agent_names_them() {
+        let conn = db();
+        let models = [
+            ("current", r#"{"id":"gpt-5.4-mini","providerID":"github-copilot","variant":"medium"}"#),
+            ("no-variant", r#"{"id":"deepseek-v4-flash-free","providerID":"opencode"}"#),
+            ("slashed", r#"{"id":"z-ai/glm-5.2","providerID":"openrouter","variant":"default"}"#),
+            ("older", r#"{"providerID":"anthropic","modelID":"claude-sonnet-4-5"}"#),
+            ("broken", r#"{"id":"","providerID":"claude-sonnet-4.5","variant":"default"}"#),
+            ("plain", "gpt-4.1"),
+        ];
+        for (id, model) in models {
+            session(&conn, id, "/Users/me/app", "Fix GitHub connector", None);
+            conn.execute("UPDATE session SET model = ?2 WHERE id = ?1", rusqlite::params![id, model]).unwrap();
+            ask(&conn, id, &format!("{id}-m"), "my github connector keeps failing", 10);
+        }
+        let mut found: Vec<_> = scan_conn(&conn, 0, &HashSet::new()).into_iter().map(|t| (t.native_id, t.model, t.effort)).collect();
+        found.sort();
+        let row = |id: &str, model: Option<&str>, effort| (id.to_string(), model.map(String::from), effort);
+        assert_eq!(
+            found,
+            vec![
+                row("broken", None, None),
+                row("current", Some("github-copilot/gpt-5.4-mini"), Some(Effort::Medium)),
+                row("no-variant", Some("opencode/deepseek-v4-flash-free"), None),
+                row("older", Some("anthropic/claude-sonnet-4-5"), None),
+                row("plain", Some("gpt-4.1"), None),
+                row("slashed", Some("openrouter/z-ai/glm-5.2"), None),
             ]
         );
     }

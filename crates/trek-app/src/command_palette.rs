@@ -601,6 +601,7 @@ impl Render for CommandPalette {
             .child(
                 ui::menu_surface(cx)
                     .id("palette")
+                    .test_support()
                     .w(px(WIDTH))
                     .max_w(relative(0.9))
                     .p_0()

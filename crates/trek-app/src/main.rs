@@ -177,22 +177,7 @@ fn main() {
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
         cx.bind_keys(key_bindings());
-        cx.on_action(|_: &Quit, cx| {
-            workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
-            cx.quit();
-        });
-        cx.on_action(|_: &HideApp, cx| cx.hide());
-        // Windows handle these themselves; with none open, the menu and shortcuts reopen the main window.
-        cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
-        cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
-        cx.on_action(|_: &OpenSettings, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::General), cx)));
-        cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
-        cx.on_action(|_: &CheckForUpdates, cx| {
-            in_main(cx, |ws, cx| {
-                ws.check_for_updates(true, cx);
-                ws.navigate(workspace::Route::Settings(workspace::SettingsPage::Updates), cx)
-            })
-        });
+        app_actions(cx);
         cx.set_menus(menus());
 
         let ws = workspace::init(cx);
@@ -216,6 +201,27 @@ fn main() {
         if !background {
             cx.activate(true);
         }
+    });
+}
+
+/// Actions the app handles itself. Windows handle the rest of these; with none open, the menu and
+/// shortcuts reopen the main window.
+fn app_actions(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| {
+        workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
+        cx.quit();
+    });
+    cx.on_action(|_: &HideApp, cx| cx.hide());
+    cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
+    cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
+    cx.on_action(|_: &OpenSettings, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::General), cx)));
+    cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
+    cx.on_action(|_: &OpenPalette, cx| root::show_palette(workspace::workspace_global(cx), cx));
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        in_main(cx, |ws, cx| {
+            ws.check_for_updates(true, cx);
+            ws.navigate(workspace::Route::Settings(workspace::SettingsPage::Updates), cx)
+        })
     });
 }
 

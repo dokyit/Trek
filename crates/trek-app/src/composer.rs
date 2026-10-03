@@ -404,7 +404,7 @@ impl Composer {
         let ws = self.workspace.read(cx);
         let agent = ws.prefs_in(&self.scope).agent;
         let q = t.query.to_lowercase();
-        let commands = ws.slash_commands(&agent);
+        let commands = ws.slash_commands(&self.scope, &agent);
         let matches = |name: &str, desc: &str| q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q);
         let rank = |name: &str| if name.to_lowercase().starts_with(&q) { 0 } else { 1 };
         let mut items: Vec<PickItem> = match t.kind {

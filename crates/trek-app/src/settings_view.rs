@@ -371,6 +371,8 @@ impl SettingsView {
                     (if n > 0 { format!("Signed in · {n} models") } else { "Signed in".into() }, false)
                 }
                 (_, _, Some(Err(e))) => (e.lines().next().unwrap_or("Couldn't start").to_string(), true),
+                // Agents that are off aren't asked (asking starts them).
+                (_, None, None) if !on => ("Off".into(), false),
                 (AgentId::ClaudeCode | AgentId::Codex, None, None) if ws.usage_loading => ("Checking account…".into(), false),
                 (_, None, None) if a.availability == Availability::NeedsLogin => ("Not signed in".into(), true),
                 _ => ("Checking account…".into(), false),

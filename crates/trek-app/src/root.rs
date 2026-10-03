@@ -69,10 +69,10 @@ impl TrekWindow {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
                 cx.notify();
             }),
-            // Toasts, alerts and bringing this window forward are handled app-wide (`init`), so
-            // they keep working while this window is closed.
+            // Toasts, alerts, the palette from elsewhere and bringing this window forward are
+            // handled app-wide (`init`), so they keep working while this window is closed.
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| match event {
-                WorkspaceEvent::Toast { .. } | WorkspaceEvent::Attention { .. } | WorkspaceEvent::ActivateMain => {}
+                WorkspaceEvent::Toast { .. } | WorkspaceEvent::Attention { .. } | WorkspaceEvent::ActivateMain | WorkspaceEvent::OpenPalette => {}
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 WorkspaceEvent::OpenTool(tool) => {
                     let tool = *tool;
@@ -93,7 +93,6 @@ impl TrekWindow {
                         this.composer.update(cx, |c, cx| c.restore(text, images, window, cx));
                     }
                 }
-                WorkspaceEvent::OpenPalette => this.palette.update(cx, |p, cx| p.open(window, cx)),
                 // The transcript views redraw themselves.
                 WorkspaceEvent::Transcript { .. } => {}
             }),
@@ -118,16 +117,7 @@ impl TrekWindow {
         if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
             workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
         }
-        // A display link's worth of frame requests (60 Hz) while macOS hides the window, so a
-        // measurement covers drawing too. GPUI draws only when something changed.
-        let hidden_frames = crate::mascot::force_active().then(|| {
-            cx.spawn_in(window, async move |_, cx| loop {
-                cx.background_executor().timer(std::time::Duration::from_micros(16_667)).await;
-                if cx.update(|window, _| crate::system::display_if_hidden(window)).is_err() {
-                    break;
-                }
-            })
-        });
+        let hidden_frames = crate::system::hidden_frames(window, cx);
         Self {
             workspace,
             sidebar,
@@ -288,6 +278,21 @@ pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
     }
 }
 
+/// ⌘K from a thread window or with no window open: the palette opens in the main window (its
+/// commands act there), which comes forward, reopened if it was closed. Opened here rather than
+/// through an event to the window, as a window opened just now hears none until later.
+pub fn show_palette(workspace: Entity<Workspace>, cx: &mut App) {
+    show_main(workspace.clone(), cx);
+    let Some(main) = workspace.read(cx).main_window else { return };
+    let _ = main.update(cx, |root, window, cx| {
+        let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+        if let Some(trek) = view.and_then(|v| v.downcast::<TrekWindow>().ok()) {
+            let palette = trek.read(cx).palette.clone();
+            palette.update(cx, |p, cx| p.open(window, cx));
+        }
+    });
+}
+
 /// Workspace events that belong to no single window: toasts and alerts go to whichever Trek
 /// window is in front (else the main one, else any), and "show the main window" reopens it.
 /// Handled here rather than by the main window so they keep working after it's closed.
@@ -296,6 +301,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         WorkspaceEvent::Toast { message, undo } => toast(&ws, message.clone(), undo.clone(), cx),
         WorkspaceEvent::Attention { message, thread } => attention(&ws, message.clone(), thread, cx),
         WorkspaceEvent::ActivateMain => show_main(ws, cx),
+        WorkspaceEvent::OpenPalette => show_palette(ws, cx),
         _ => {}
     })
     .detach();

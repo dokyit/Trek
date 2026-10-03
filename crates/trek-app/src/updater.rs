@@ -22,7 +22,8 @@ pub enum UpdateStatus {
     Downloading { version: String, progress: f32 },
     /// Verified and unpacked at `staged`: installs on "Restart to update" or when Trek quits.
     Ready { version: String, staged: PathBuf },
-    /// Ready, waiting for running agent turns to finish.
+    /// Ready, waiting for agent work to be over: running or paused turns, plans waiting for an
+    /// answer (`Workspace::work_in_flight`).
     RestartPending { version: String, staged: PathBuf },
     /// A full sentence for the user ("Couldn't download Trek 0.2.1: …").
     Failed(String),

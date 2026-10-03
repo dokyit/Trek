@@ -584,9 +584,17 @@ pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
     Ok(())
 }
 
+/// What the relaunched Trek runs with: where its data lives and how it's set up, never the
+/// one-time launch flags (`TREK_MOCK_PROMPT`, `TREK_OPEN_*`, `TREK_ONBOARDING`, measurement aids),
+/// which would fire again after every update.
+const RELAUNCH_KEEPS: &[&str] = &["TREK_DATA_DIR", "TREK_UPDATE_PUBKEY", "TREK_UPDATE_AUTO_RESTART", "TREK_MOCK_AGENT", "TREK_AXE_PATH", "RUST_LOG"];
+
 fn relaunch_env(foreground: bool) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> =
-        std::env::vars().filter(|(k, _)| (k.starts_with("TREK_") && k != "TREK_BACKGROUND") || k == "RUST_LOG").collect();
+    relaunch_env_from(std::env::vars(), foreground)
+}
+
+fn relaunch_env_from(vars: impl Iterator<Item = (String, String)>, foreground: bool) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = vars.filter(|(k, _)| RELAUNCH_KEEPS.contains(&k.as_str())).collect();
     if !foreground {
         env.push(("TREK_BACKGROUND".into(), "1".into()));
     }
@@ -882,10 +890,28 @@ mod tests {
     }
 
     #[test]
-    fn relaunch_keeps_trek_environment() {
-        let env = relaunch_env(false);
-        assert!(env.contains(&("TREK_BACKGROUND".into(), "1".into())));
-        assert!(env.iter().all(|(k, _)| k.starts_with("TREK_") || k == "RUST_LOG"));
-        assert!(!relaunch_env(true).iter().any(|(k, _)| k == "TREK_BACKGROUND"));
+    fn relaunch_keeps_setup_but_not_launch_flags() {
+        let vars = [
+            ("TREK_DATA_DIR", "/tmp/trek-data"),
+            ("TREK_UPDATE_PUBKEY", "RWQ…"),
+            ("TREK_MOCK_AGENT", "1"),
+            ("RUST_LOG", "warn,trek=info"),
+            ("TREK_MOCK_PROMPT", "mock:long 60s"),
+            ("TREK_OPEN_THREAD_WINDOW", "0199"),
+            ("TREK_OPEN_SETTINGS", "updates"),
+            ("TREK_OPEN_TOOL", "browser"),
+            ("TREK_ONBOARDING", "1"),
+            ("TREK_FORCE_ACTIVE", "1"),
+            ("TREK_BACKGROUND", "1"),
+            ("HOME", "/Users/me"),
+        ];
+        let from = |foreground| relaunch_env_from(vars.iter().map(|(k, v)| (k.to_string(), v.to_string())), foreground);
+        let keys = |env: Vec<(String, String)>| env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(keys(from(true)), ["TREK_DATA_DIR", "TREK_UPDATE_PUBKEY", "TREK_MOCK_AGENT", "RUST_LOG"]);
+        // In the background it opens behind other apps again, whatever this launch was.
+        let env = from(false);
+        assert!(env.contains(&("TREK_DATA_DIR".into(), "/tmp/trek-data".into())));
+        assert_eq!(env.last(), Some(&("TREK_BACKGROUND".into(), "1".into())));
+        assert_eq!(env.iter().filter(|(k, _)| k == "TREK_BACKGROUND").count(), 1);
     }
 }
