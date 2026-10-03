@@ -271,7 +271,15 @@ impl Basecamp {
         };
         let waiting: Vec<Option<Waiting>> = {
             let ws = self.workspace.read(cx);
-            threads.iter().map(|t| (t.run_state == RunState::NeedsYou).then(|| Waiting::of(ws.pending_request(&t.id)))).collect()
+            let sub_agents = ws.waiting_on_sub_agents();
+            threads
+                .iter()
+                .map(|t| match t.run_state {
+                    RunState::NeedsYou => Some(Waiting::of(ws.pending_request(&t.id))),
+                    _ if sub_agents.contains(&t.id) => Some(Waiting::SubAgent),
+                    _ => None,
+                })
+                .collect()
         };
         let now = self.workspace.read(cx).now();
         let rows: Vec<AnyElement> = threads.iter().zip(projects).zip(waiting).map(|((t, project), waiting)| review_row(t, project, waiting, now, cx)).collect();
@@ -565,6 +573,8 @@ pub enum Waiting {
     Plan,
     /// The request went with its session (Trek was relaunched): it's asked again on reopening.
     Unknown,
+    /// A sub-agent of the thread's waits on an approval: its row in the thread opens it.
+    SubAgent,
 }
 
 impl Waiting {
@@ -583,6 +593,7 @@ impl Waiting {
             Waiting::Question => "Question",
             Waiting::Plan => "Plan to review",
             Waiting::Unknown => "Needs you",
+            Waiting::SubAgent => "Sub-agent needs you",
         }
     }
 
@@ -592,6 +603,7 @@ impl Waiting {
             Waiting::Question => Icon::new(crate::assets::Lucide::MessageSquare),
             Waiting::Plan => Icon::new(crate::assets::Lucide::ListChecks),
             Waiting::Unknown => Icon::new(IconName::CircleAlert),
+            Waiting::SubAgent => Icon::new(crate::assets::Lucide::ShieldCheck),
         }
     }
 }
@@ -600,14 +612,14 @@ impl Waiting {
 fn review_row(t: &Thread, project: Option<String>, waiting: Option<Waiting>, now: i64, cx: &mut Context<Basecamp>) -> AnyElement {
     let theme = cx.theme().clone();
     // `key` names the status for tests (`review-paused-<id>`).
-    let (key, icon, color, status): (&str, Icon, Hsla, Option<SharedString>) = match t.run_state {
-        RunState::NeedsYou => {
-            let w = waiting.unwrap_or(Waiting::Unknown);
+    let (key, icon, color, status): (&str, Icon, Hsla, Option<SharedString>) = match (t.run_state, waiting) {
+        (RunState::NeedsYou, w) | (_, w @ Some(Waiting::SubAgent)) => {
+            let w = w.unwrap_or(Waiting::Unknown);
             ("needs", w.icon(), palette::amber(cx), Some(w.label().into()))
         }
-        RunState::Failed => ("failed", Icon::new(IconName::CircleX), palette::red(cx), Some("Failed".into())),
+        (RunState::Failed, _) => ("failed", Icon::new(IconName::CircleX), palette::red(cx), Some("Failed".into())),
         // Stopped at a usage limit, to go on at its reset: not done, and no failure either.
-        RunState::Idle if t.paused.is_some() => {
+        (RunState::Idle, _) if t.paused.is_some() => {
             let until = match t.paused.as_ref().and_then(|p| p.resets_at) {
                 Some(at) => format!("Paused until {}", crate::time::reset_clock(at, now)),
                 None => "Paused at its limit".to_string(),

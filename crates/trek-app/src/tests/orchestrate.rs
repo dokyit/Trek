@@ -628,3 +628,65 @@ fn a_finished_sub_agent_keeps_its_time() {
         assert_eq!(trek.read(cx, |ws, _| ws.task_elapsed(&child)), took);
     });
 }
+
+#[test]
+fn a_sub_agent_row_goes_after_its_call_when_text_follows_in_the_same_batch() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        // A turn is open, and Trek hears of the sub-agent before the agent's report of its call.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("I'll get a second opinion.".into()), AgentEvent::TextDone("I'll get a second opinion.".into())], cx));
+        let child = trek.update(cx, |ws, cx| ws.delegate(&id, &json!({ "title": "Second opinion", "prompt": "mock:long 30s" }), cx)).unwrap();
+        let row = trek_core::orchestrate::task_row(&child);
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::Tool { id, .. } if *id == row)), "it waits for the call");
+        // The call, its result and the start of the next message, all at once.
+        let call = format!("mcp__{}__delegate_task", trek_agents::mock::ORCHESTRATE_SERVER);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::ToolStarted { id: "call-1".into(), title: call, detail: "Second opinion".into() },
+                    AgentEvent::ToolFinished { id: "call-1".into(), output: "{}".into(), ok: true },
+                    AgentEvent::TextDelta("It's ".into()),
+                    AgentEvent::TextDelta("on it.".into()),
+                    AgentEvent::TextDone("It's on it.".into()),
+                ],
+                cx,
+            )
+        });
+        let items = trek.items(cx, &id);
+        let assistants: Vec<&str> = items.iter().filter_map(|i| if let Item::Assistant { text } = i { Some(text.as_str()) } else { None }).collect();
+        assert_eq!(assistants, ["I'll get a second opinion.", "It's on it."], "{items:?}");
+        let call_ix = items.iter().position(|i| matches!(i, Item::Tool { id, .. } if id == "call-1")).unwrap();
+        assert!(matches!(&items[call_ix + 1], Item::Tool { id, .. } if *id == row), "{items:?}");
+        assert!(matches!(&items[call_ix + 2], Item::Assistant { text } if text == "It's on it."), "{items:?}");
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+    });
+}
+
+#[test]
+fn a_sub_agent_waiting_on_an_approval_shows_on_its_parent_everywhere() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let child = trek.update(cx, |ws, cx| ws.delegate(&id, &json!({ "title": "Write it", "prompt": "mock:permission", "mode": "implement" }), cx)).unwrap();
+        wait_task(&trek, cx, &child, TaskState::NeedsYou).await;
+        // The Dock badge counts one thing to do, and the inbox and Basecamp both show where it is.
+        assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 1);
+        assert_eq!(trek.read(cx, |ws, _| ws.ready_for_review().iter().map(|t| t.id.clone()).collect::<Vec<_>>()), [id.clone()]);
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("card-sub-needs-{id}")), "the parent's card says it");
+        assert!(!trek.visible(cx, format!("card-{child}")), "the sub-agent has no card of its own");
+        trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("review-needs-{id}")));
+        assert_eq!(crate::basecamp::Waiting::SubAgent.label(), "Sub-agent needs you");
+        // Stopped, it asks nothing any more.
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        wait_task(&trek, cx, &child, TaskState::Cancelled).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 0);
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("review-needs-{id}")));
+    });
+}

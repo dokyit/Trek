@@ -1238,12 +1238,14 @@ impl Workspace {
 
     /// Threads waiting on the user (approval or failure), as the inbox shows them: a settled
     /// thread that asks again is back in the inbox, so it counts too. Archived ones don't, nor do
-    /// side chats: the inbox doesn't list them, so nothing there could settle them. A sub-agent
-    /// counts while it waits on an approval (a failed one reports to its parent instead).
+    /// side chats: the inbox doesn't list them, so nothing there could settle them. Sub-agents
+    /// aren't listed either: one waiting on an approval counts as its parent's card, which says
+    /// so (a failed one reports to its parent instead).
     pub fn needs_you_count(&self) -> usize {
+        let sub_agents = self.waiting_on_sub_agents();
         self.threads
             .iter()
-            .filter(|t| t.needs_you() && t.archived_at.is_none() && t.side_of.is_none() && (t.parent_id.is_none() || t.run_state == RunState::NeedsYou))
+            .filter(|t| t.parent_id.is_none() && t.archived_at.is_none() && t.side_of.is_none() && (t.needs_you() || sub_agents.contains(&t.id)))
             .count()
     }
 
@@ -1600,15 +1602,22 @@ impl Workspace {
     }
 
     /// Threads waiting on the user and finished ones they haven't looked at, for Basecamp's
-    /// "Ready for review": what needs them first, then newest first.
+    /// "Ready for review": what needs them first, then newest first. A thread whose sub-agent
+    /// waits on an approval needs them, working or not.
     pub fn ready_for_review(&self) -> Vec<&Thread> {
         let now = now_ms();
+        let sub_agents = self.waiting_on_sub_agents();
+        let needs = |t: &Thread| t.needs_you() || sub_agents.contains(&t.id);
         let mut out: Vec<&Thread> = self
             .threads
             .iter()
-            .filter(|t| matches!(t.section(now), Some(Section::Inbox | Section::Pinned)) && t.run_state != RunState::Working && (t.needs_you() || t.is_unseen()))
+            .filter(|t| match t.section(now) {
+                Some(_) if sub_agents.contains(&t.id) => true,
+                Some(Section::Inbox | Section::Pinned) => t.run_state != RunState::Working && (t.needs_you() || t.is_unseen()),
+                _ => false,
+            })
             .collect();
-        out.sort_by_key(|t| (!t.needs_you(), std::cmp::Reverse(t.updated_at)));
+        out.sort_by_key(|t| (!needs(t), std::cmp::Reverse(t.updated_at)));
         out
     }
 
@@ -1821,6 +1830,9 @@ impl Workspace {
                     };
                     if past_limit && self.pause(&id).is_some() {
                         self.end_pause(&id, false, cx);
+                        // Reports from sub-agents held while it was paused go to the new agent now,
+                        // ahead of whatever the user sends next.
+                        self.deliver_wakes(&id, cx);
                     }
                 }
             }
@@ -2518,6 +2530,9 @@ impl Workspace {
                         live.streaming = None;
                         live.reasoning = None;
                         live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
+                        // A sub-agent row waiting for this call goes right after it, before any
+                        // text later in the batch opens a new message.
+                        live.place_task_rows(false);
                     }
                     AgentEvent::ToolLines { id: tid, added, removed } => {
                         let lines = (added > 0 || removed > 0).then_some((added, removed));

@@ -8,6 +8,7 @@ use super::{Scope, Workspace};
 use crate::ipc::{Call, Reply};
 use gpui_kit::{Context, Task};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::time::Duration;
 use trek_agents::{AgentEvent, Command, Decision, McpServer};
 use trek_core::catalog;
@@ -28,6 +29,11 @@ pub struct Delegation {
     cancelled: bool,
     /// How it ended, once it has. Later turns (the user carrying on in it) don't report again.
     pub outcome: Option<Outcome>,
+    /// When it began its current stretch of work (ms, on `Workspace::now`): when it started, or
+    /// when it took its task back up after a usage limit.
+    since: i64,
+    /// Time it worked before a usage limit paused it (ms): the pause itself doesn't count.
+    worked: i64,
     /// When it ended (ms): how long it ran doesn't change when the user carries on in it.
     ended: Option<i64>,
     /// It failed at a usage limit and its thread is paused until the limit resets: resumed, it
@@ -316,7 +322,11 @@ impl Workspace {
         let id = child.id.clone();
         self.threads.push(child);
         self.live.entry(id.clone()).or_default().loaded = true;
-        self.delegations.insert(id.clone(), Delegation { parent: caller.to_string(), mode, plan: None, waiters: vec![], cancelled: false, outcome: None, ended: None, limited: false, _stop: None });
+        let since = self.now();
+        self.delegations.insert(
+            id.clone(),
+            Delegation { parent: caller.to_string(), mode, plan: None, waiters: vec![], cancelled: false, outcome: None, since, worked: 0, ended: None, limited: false, _stop: None },
+        );
         self.push_task_row(caller, &id, title, cx);
         self.send_to(&id, orch::child_prompt(mode, prompt), vec![], cx);
         Ok(id)
@@ -415,6 +425,27 @@ impl Workspace {
         self.children(parent).into_iter().filter(|t| self.task_state(&t.id).live()).collect()
     }
 
+    /// Threads with a sub-agent under them (at any depth) waiting on the user's approval.
+    /// Sub-agents stay out of the inbox, so the cards of those above them carry the request.
+    pub fn waiting_on_sub_agents(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for t in self.threads.iter().filter(|t| t.parent_id.is_some() && t.run_state == RunState::NeedsYou) {
+            let mut up = t.parent_id.clone();
+            while let Some(p) = up.take() {
+                if out.len() > self.threads.len() || !out.insert(p.clone()) {
+                    break;
+                }
+                up = self.thread(&p).and_then(|p| p.parent_id.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether a sub-agent under `id` waits on the user's approval (`waiting_on_sub_agents`).
+    pub fn sub_agent_needs_you(&self, id: &str) -> bool {
+        self.waiting_on_sub_agents().contains(id)
+    }
+
     /// Every sub-agent under `id`, theirs too, archived ones included.
     fn descendants(&self, id: &str) -> Vec<Thread> {
         let mut out = vec![];
@@ -491,16 +522,16 @@ impl Workspace {
         }
     }
 
-    /// How long `child` has run (so far, or in all).
+    /// How long `child` has worked (so far, or in all), time paused at a usage limit aside.
     pub fn task_elapsed(&self, child: &str) -> Duration {
         let Some(t) = self.thread(child) else { return Duration::ZERO };
-        let end = match self.delegations.get(child).and_then(|d| d.ended) {
-            Some(ended) => ended,
-            None if self.task_state(child).live() => now_ms(),
+        let ms = match self.delegations.get(child) {
+            Some(d) => d.worked + (d.ended.unwrap_or_else(|| self.now()) - d.since).max(0),
+            None if self.task_state(child).live() => now_ms() - t.created_at,
             // Ended in an earlier run.
-            None => t.updated_at,
+            None => t.updated_at - t.created_at,
         };
-        Duration::from_millis((end - t.created_at).max(0) as u64)
+        Duration::from_millis(ms.max(0) as u64)
     }
 
     /// "Sol", "Opus 5.5": the short name of the model `t` runs.
@@ -738,10 +769,15 @@ impl Workspace {
     /// Sub-agent `id`, stopped by a usage limit, resumes at the reset (`send_resume`): it takes its
     /// task back up, its row runs again, and it reports to its parent when it's done.
     pub(super) fn task_resumed(&mut self, id: &str, cx: &mut Context<Self>) {
+        let now = self.now();
         let Some(d) = self.delegations.get_mut(id).filter(|d| d.limited && !d.cancelled) else { return };
         d.limited = false;
         d.outcome = None;
-        d.ended = None;
+        // The clock picks up where it stopped: the wait for the reset isn't work.
+        if let Some(ended) = d.ended.take() {
+            d.worked += (ended - d.since).max(0);
+        }
+        d.since = now;
         let parent = d.parent.clone();
         self.settle_task_row(&parent, id, ToolStatus::Running, String::new(), cx);
     }
@@ -762,9 +798,10 @@ impl Workspace {
     /// and its answer reaches the parent: the calls waiting for it, else a message that wakes
     /// the parent (not when the parent's side stopped it).
     fn finish_task(&mut self, child: &str, outcome: Outcome, cx: &mut Context<Self>) {
+        let now = self.now();
         let Some(d) = self.delegations.get_mut(child).filter(|d| d.outcome.is_none()) else { return };
         d.outcome = Some(outcome.clone());
-        d.ended = Some(now_ms());
+        d.ended = Some(now);
         d._stop = None;
         let (parent, waiters, silent) = (d.parent.clone(), std::mem::take(&mut d.waiters), d.cancelled);
         let (status, output) = match &outcome {

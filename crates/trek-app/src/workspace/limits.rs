@@ -399,6 +399,7 @@ impl Workspace {
 
     /// At launch: resumes that came due while Trek was closed go once it's up, with a word.
     pub(super) fn resume_overdue(&mut self, cx: &mut Context<Self>) {
+        self.drop_lost_resumes(cx);
         let now = self.now();
         let overdue = self.threads.iter().filter(|t| t.paused.as_ref().is_some_and(|p| p.resume && p.is_over(now))).count();
         if overdue > 0 {
@@ -415,6 +416,27 @@ impl Workspace {
             .detach();
         }
         self.schedule_limits(cx);
+    }
+
+    /// At launch: a sub-agent paused at its limit when Trek quit has lost its task with the run
+    /// that started it. Its parent heard it failed, and nothing would carry an answer back, so it
+    /// isn't resumed on its own: at the reset its pause just lifts. What the user queued in its
+    /// thread still goes, and "Resume at reset" there still works: that's them carrying on in it.
+    fn drop_lost_resumes(&mut self, cx: &mut Context<Self>) {
+        let lost: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|t| t.parent_id.is_some() && !self.delegations.contains_key(&t.id))
+            .filter(|t| t.paused.as_ref().is_some_and(|p| p.resume && p.queued.is_empty()))
+            .map(|t| t.id.clone())
+            .collect();
+        for id in lost {
+            self.mutate_thread(&id, cx, |t| {
+                if let Some(p) = t.paused.as_mut() {
+                    p.resume = false;
+                }
+            });
+        }
     }
 
     /// The thread moved from one agent to another mid-conversation: a divider says so (the new

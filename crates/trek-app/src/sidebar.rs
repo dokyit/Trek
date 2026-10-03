@@ -258,6 +258,17 @@ impl Sidebar {
     fn status(&self, t: &Thread, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let ws = self.workspace.read(cx);
+        // A sub-agent of its own waits on an approval: sub-agents have no cards, so this one says it.
+        if t.run_state != RunState::NeedsYou && ws.sub_agent_needs_you(&t.id) {
+            return div()
+                .id(SharedString::from(format!("card-sub-needs-{}", t.id)))
+                .test_support()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(palette::amber(cx))
+                .child("Sub-agent needs you")
+                .into_any_element();
+        }
         // Paused at a usage limit: until when (it's no failure, and nothing to do yet).
         if let Some(p) = t.paused.as_ref().filter(|_| t.run_state == RunState::Idle) {
             let text = match p.resets_at {
