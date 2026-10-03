@@ -8,6 +8,7 @@ mod harness;
 mod inbox;
 mod lifecycle;
 mod render;
+mod rewind;
 mod screens;
 mod windows;
 mod worktrees;

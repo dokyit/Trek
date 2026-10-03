@@ -31,7 +31,9 @@ snoozed, renamed and searched. Search is full text: the sidebar and the ⌘K pal
 title or by anything said in it (imported history included), and a message match opens the thread at that
 message. ⌘K also runs any command: new thread, settings pages, tools, theme, hand-holding. Any thread can
 also open in a window of its own (⌘⇧↩ or the thread menu) with its own composer, while the main window
-carries on. Projects get their own icon, defaults for new threads and title-bar actions. Trek imports your
+carries on. Any message can be edited and sent again, any turn undone or retried (with another model if
+you like) and any point forked into a new thread; the agent forgets what was taken back, and in a git repo
+the files go back too, from a checkpoint Trek takes as each turn starts. Projects get their own icon, defaults for new threads and title-bar actions. Trek imports your
 existing Claude Code, Codex and OpenCode history (read-only) and resumes those threads, titled by what you
 asked and with each message's time. Sessions that aren't your conversations (sub-agents, other apps' title
 generators, one-shot and temp-folder runs) are left out; Settings › Import lists them and brings back any it

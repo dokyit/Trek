@@ -2,7 +2,7 @@
 //! one that disappeared, the actions that end it (merging into the base, removing it), and the
 //! warning for threads that share a folder instead.
 
-use super::{Route, Workspace, WorkspaceEvent};
+use super::{GitJob, Route, Workspace, WorkspaceEvent};
 use anyhow::Result;
 use gpui_kit::{Context, Task};
 use std::path::PathBuf;
@@ -21,6 +21,12 @@ impl Workspace {
     /// in a worktree (the next thread gets a worktree of its own, or none).
     pub fn draft_folder(&self, t: &Thread) -> Option<PathBuf> {
         if t.worktree.is_some() { self.project_dir(t) } else { t.cwd.clone() }
+    }
+
+    /// The other listed threads working in `id`'s worktree (a fork stays in its thread's).
+    pub fn worktree_sharers(&self, id: &str) -> Vec<String> {
+        let Some(path) = self.thread(id).and_then(|t| t.worktree.as_ref()).map(|w| w.path.clone()) else { return vec![] };
+        self.threads.iter().filter(|o| o.id != id && o.worktree.as_ref().is_some_and(|w| w.path == path)).map(|o| o.id.clone()).collect()
     }
 
     /// `id`'s worktree and the project folder it belongs to.
@@ -89,33 +95,52 @@ impl Workspace {
     }
 
     /// The thread no longer has a worktree (removed, or given up on): back to the project folder.
+    /// The agent session it had there is left behind, and with it the points a rewind could take
+    /// it back to; so are its file checkpoints, which were of the worktree.
     fn leave_worktree(&mut self, id: &str, notice: &str, cx: &mut Context<Self>) {
         let Some(project) = self.thread(id).and_then(|t| self.project_dir(t)) else {
             // Archived meanwhile: its stored row moves to the project folder.
             if let Some((project, _)) = self.stored_worktree(id) {
                 let _ = self.store.update_thread(id, |t| {
                     t.worktree = None;
-                    t.cwd = Some(project);
+                    t.cwd = Some(project.clone());
                     t.native_id = None;
+                    t.native_at = None;
+                    t.reopen = None;
                 });
+                self.forget_worktree_checkpoints(id, project, cx);
             }
             return;
         };
         self.end_session(id, cx).detach();
+        self.forget_worktree_checkpoints(id, project.clone(), cx);
         self.mutate_thread(id, cx, |t| {
             t.worktree = None;
             t.cwd = Some(project.clone());
             t.native_id = None;
+            t.native_at = None;
+            t.reopen = None;
             if t.run_state == RunState::Failed {
                 t.run_state = RunState::Idle;
             }
         });
         if let Some(live) = self.live.get_mut(id) {
+            live.mark = None;
             live.items.push(Item::Notice { text: notice.into() });
             live.revision += 1;
         }
         self.persist_items(id, cx);
         self.refresh_git_at(project, cx);
+    }
+
+    /// `id`'s file checkpoints go with its worktree. They were all taken in it (a thread never
+    /// moves into one), and their refs live in the repository the project folder shares with it.
+    fn forget_worktree_checkpoints(&mut self, id: &str, project: PathBuf, cx: &mut Context<Self>) {
+        let items: Vec<String> = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+        if !items.is_empty() {
+            self.live.entry(id.to_string()).or_default().git_jobs.push_back(GitJob::Forget { repo: project, items });
+            self.run_git(id, cx);
+        }
     }
 
     /// Merge the thread's branch into its base in the project folder. A merge settles the thread
@@ -186,15 +211,23 @@ impl Workspace {
         let Some((project, wt)) = self.worktree_of(id).or_else(|| self.stored_worktree(id)) else {
             return Task::ready(Err(anyhow::anyhow!("This thread has no worktree.")));
         };
-        let ended = self.end_session(id, cx);
+        // Nothing may be writing in the folder while it's deleted: the sessions of threads sharing
+        // it end too.
+        let sharers = self.worktree_sharers(id);
+        let ended: Vec<Task<()>> = sharers.iter().chain([&id.to_string()]).map(|t| self.end_session(t, cx)).collect();
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
-            ended.await;
+            for e in ended {
+                e.await;
+            }
             let (p, w) = (project.clone(), wt.clone());
             let result = cx.background_executor().spawn(async move { worktree::remove(&p, &w, discard_uncommitted, delete_unmerged) }).await;
             let _ = this.update(cx, |this, cx| match &result {
                 Ok(branch_deleted) => {
-                    this.leave_worktree(&id, "Its worktree was removed. The thread runs in the project folder now, in a new agent session.", cx);
+                    // Forks that stayed in it move out too.
+                    for t in sharers.iter().chain([&id]) {
+                        this.leave_worktree(t, "Its worktree was removed. The thread runs in the project folder now, in a new agent session.", cx);
+                    }
                     let message = if *branch_deleted { format!("Removed the worktree and {}", wt.branch) } else { format!("Removed the worktree; {} is kept", wt.branch) };
                     cx.emit(WorkspaceEvent::Toast { message, undo: None });
                 }
@@ -252,19 +285,17 @@ impl Workspace {
     }
 
     /// A turn is under way on `t` in this process (working, or paused on a card).
-    fn turn_running(&self, t: &Thread) -> bool {
+    fn turn_under_way(&self, t: &Thread) -> bool {
         matches!(t.run_state, RunState::Working | RunState::NeedsYou) && self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some())
     }
 
-    /// `id` works in its project folder while another thread does too: they may well edit the
-    /// same files. Threads in worktrees of their own don't count.
+    /// `id` works in a checkout while another thread does too: they may well edit the same files.
+    /// Threads in worktrees of their own don't count; a fork working in its thread's does.
     pub fn sharing_folder(&self, id: &str) -> bool {
         let Some(t) = self.thread(id) else { return false };
-        let Some(dir) = t.cwd.as_deref().filter(|_| t.worktree.is_none() && self.turn_running(t)) else { return false };
+        let Some(dir) = t.cwd.as_deref().filter(|_| self.turn_under_way(t)) else { return false };
         let root = worktree::checkout_root(dir);
-        self.threads.iter().any(|o| {
-            o.id != t.id && o.worktree.is_none() && self.turn_running(o) && o.cwd.as_deref().is_some_and(|c| worktree::checkout_root(c) == root)
-        })
+        self.threads.iter().any(|o| o.id != t.id && self.turn_under_way(o) && o.cwd.as_deref().is_some_and(|c| worktree::checkout_root(c) == root))
     }
 
     /// Compose a new thread in `project` that runs in a worktree of its own (main window).

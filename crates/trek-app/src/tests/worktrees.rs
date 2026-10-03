@@ -393,3 +393,82 @@ fn a_worktree_threads_project_actions_run_in_its_worktree() {
         assert_eq!(ran.borrow().last(), Some(&("true".to_string(), Some(project))));
     });
 }
+
+fn checkpoint_refs(dir: &Path) -> usize {
+    git(dir, &["for-each-ref", "--format=%(refname)", "refs/trek/checkpoints/"]).unwrap().lines().count()
+}
+
+#[test]
+fn a_worktree_thread_checkpoints_rewinds_and_forks_in_its_worktree() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:write".into(), vec![], cx));
+        trek.wait(cx, "the second note", |ws| ws.live[&id].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 2).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let notes = || std::fs::read_to_string(wt.path.join("NOTES.md")).unwrap();
+        assert_eq!(notes(), "# Notes\n\n- Note 1\n- Note 2\n");
+        // Checkpoints of the worktree, their refs in the repository it shares with the project.
+        assert!(trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap()).len() == 2);
+        assert_eq!(checkpoint_refs(&trek.project), 2);
+
+        // Rewinding puts the worktree's files back; the project folder is untouched.
+        let second = trek.read(cx, |ws, _| {
+            let items = &ws.live[&id].items;
+            let ix = items.iter().rposition(|i| matches!(i, Item::User { .. })).unwrap();
+            items.ids()[ix].clone()
+        });
+        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &second, true, cx)).is_some());
+        let path = wt.path.join("NOTES.md");
+        trek.wait(cx, "the restore", move |_| std::fs::read_to_string(&path).is_ok_and(|n| n == "# Notes\n\n- Note 1\n")).await;
+        assert!(clean(&trek.project) && !trek.project.join("NOTES.md").exists());
+
+        // A fork stays in the worktree, with the checkpoints of the messages it copied.
+        let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, crate::workspace::ForkAt::End, &Scope::Main, cx)).expect("a fork");
+        trek.wait(cx, "the fork's checkpoints", |ws| ws.live[&fork].checkpointed.len() == 1).await;
+        let f = trek.read(cx, |ws, _| ws.thread(&fork).cloned()).unwrap();
+        assert_eq!((f.worktree.as_ref(), f.cwd.as_ref()), (Some(&wt), Some(&wt.path)));
+        assert_eq!(trek.read(cx, |ws, _| ws.project_dir(&f)), Some(trek.project.clone()));
+        assert_eq!(trek.read(cx, |ws, _| ws.worktree_sharers(&id)), [fork.clone()]);
+        assert_eq!(checkpoint_refs(&trek.project), 2);
+
+        // Removing the worktree moves both threads to the project folder. Their checkpoints were
+        // of the worktree, so they go.
+        let lose = trek.update(cx, |ws, cx| ws.worktree_removal(&id, cx)).await.unwrap().uncommitted;
+        trek.update(cx, |ws, cx| ws.remove_worktree(&id, lose, false, cx)).await.unwrap();
+        for t in [&id, &fork] {
+            let t = trek.read(cx, |ws, _| ws.thread(t).cloned()).unwrap();
+            assert_eq!((t.worktree, t.cwd, t.native_id), (None, Some(trek.project.clone()), None));
+        }
+        let (a, b) = (id.clone(), fork.clone());
+        trek.wait(cx, "the checkpoints to go", move |ws| ws.store.checkpoints(&a).unwrap().is_empty() && ws.store.checkpoints(&b).unwrap().is_empty()).await;
+        assert_eq!(checkpoint_refs(&trek.project), 0);
+        // Earlier messages say why their files can't come back.
+        let why = trek.read(cx, |ws, _| crate::workspace::NoCheckpoint::of(&ws.live[&id], 0, true));
+        assert_eq!(why, Some(crate::workspace::NoCheckpoint::Missing));
+    });
+}
+
+#[test]
+fn a_fork_sharing_a_worktree_leaves_without_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, wt) = worktree_thread(&trek, cx).await;
+        let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, crate::workspace::ForkAt::End, &Scope::Main, cx)).expect("a fork");
+        // Deleting the fork asks only about the thread: the worktree is the other's too.
+        let (ws, tid) = (trek.ws.clone(), fork.clone());
+        trek.window(cx, |window, cx| confirm_leave(ws, tid, Leave::Delete, window, cx));
+        dialog_open(&trek, cx);
+        assert!(!trek.visible(cx, "wt-keep"));
+        trek.click(cx, "wt-leave");
+        let tid = fork.clone();
+        trek.wait(cx, "the fork to go", move |ws| ws.thread(&tid).is_none()).await;
+        assert!(wt.path.join("NOTES.md").exists(), "the worktree stays");
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.worktree.clone())), Some(wt.clone()));
+        // Alone in it again, the thread is asked as before.
+        let (ws, tid) = (trek.ws.clone(), id.clone());
+        trek.window(cx, |window, cx| confirm_leave(ws, tid, Leave::Archive, window, cx));
+        dialog_open(&trek, cx);
+        assert!(trek.visible(cx, "wt-keep"));
+    });
+}

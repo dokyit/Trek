@@ -413,6 +413,12 @@ impl Sidebar {
                         }
                     }
                 }))
+                .item(PopupMenuItem::new("Fork thread").icon(crate::assets::Lucide::GitFork).on_click({
+                    let (ws, tid) = (ws.clone(), tid.clone());
+                    move |_, _, cx| {
+                        let _ = ws.update(cx, |ws, cx| ws.fork_thread(&tid, crate::workspace::ForkAt::End, &crate::workspace::Scope::Main, cx));
+                    }
+                }))
                 .separator()
                 .item(item(if pinned { "Unpin thread" } else { "Pin thread" }, |ws, id, cx| ws.toggle_pin(id, cx)))
                 .item(if settled { item("Move to inbox", |ws, id, cx| ws.unsettle(id, cx)) } else { item("Settle thread", |ws, id, cx| ws.settle(id, cx)) });

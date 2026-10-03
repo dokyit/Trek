@@ -4,7 +4,7 @@ use super::{
     Evidence, ImportedThread, Transcript, classify, clip, codex_attachments, codex_request, copies_message, is_injected, is_temp_dir,
     is_title_request, legacy_title_from, ms_from_rfc3339, source_title, strip_block, title_from, user_text,
 };
-use crate::store::{Item, ToolStatus};
+use crate::store::{Item, ResumePoint, ToolStatus};
 use crate::types::{Effort, ThreadSource};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
@@ -247,14 +247,40 @@ fn question_reply(text: &str) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
-    let path = rollout_path(id).ok_or_else(|| anyhow::anyhow!("rollout not found"))?;
-    load_rollout(&path)
+/// The turn a rollout line says ended (finished or stopped), if it says one did.
+fn ended_turn(v: &Value) -> Option<&str> {
+    let p = &v["payload"];
+    (v["type"] == "event_msg" && matches!(p["type"].as_str(), Some("task_complete" | "turn_aborted"))).then(|| p["turn_id"].as_str()).flatten()
 }
 
-fn load_rollout(path: &Path) -> anyhow::Result<Vec<Item>> {
+/// The last turn of thread `id` that ended: where a message sent now goes after.
+pub fn last_turn(id: &str) -> Option<String> {
+    last_turn_in(&rollout_path(id)?)
+}
+
+fn last_turn_in(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut last = None;
+    for line in BufReader::new(file).lines().map_while(Result::ok).filter(|l| l.contains("\"turn_id\"")) {
+        if let Some(turn) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(ended_turn) {
+            last = Some(turn.to_string());
+        }
+    }
+    last
+}
+
+pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
+    let path = rollout_path(id).ok_or_else(|| anyhow::anyhow!("rollout not found"))?;
+    load_rollout(&path, id)
+}
+
+/// The transcript of thread `id` from its rollout file.
+fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     let mut t = Transcript::default();
+    // The last turn that ended: where the thread can be cut back to drop the next message's turn.
+    let mut last_turn: Option<String> = None;
+    let point = |after: &Option<String>| Some(ResumePoint { session: id.to_string(), after: after.clone() });
     // A goal the user set from the goal bar rather than in a message, until its turn starts.
     let mut goal: Option<(String, Option<i64>)> = None;
     // The goal shown for the current turn: typed as "/goal …", the message itself is recorded
@@ -271,8 +297,14 @@ fn load_rollout(path: &Path) -> anyhow::Result<Vec<Item>> {
                     goal_shown = None;
                     t.wake(at);
                 }
-                Some("task_complete") => t.complete(at),
-                Some("turn_aborted") => t.interrupt(),
+                Some("task_complete") => {
+                    t.complete(at);
+                    last_turn = ended_turn(&v).map(String::from).or(last_turn);
+                }
+                Some("turn_aborted") => {
+                    t.interrupt();
+                    last_turn = ended_turn(&v).map(String::from).or(last_turn);
+                }
                 Some("thread_goal_updated") => {
                     let g = &p["goal"];
                     // Progress and pauses update the same goal; a new one starts unused.
@@ -300,6 +332,7 @@ fn load_rollout(path: &Path) -> anyhow::Result<Vec<Item>> {
                             if let Some((objective, set_at)) = goal.take() {
                                 goal_shown = Some(objective.clone());
                                 t.user(objective, set_at.or(at));
+                                t.resume_from(point(&last_turn));
                             }
                         } else if !text.trim().is_empty() {
                             goal = None;
@@ -308,6 +341,7 @@ fn load_rollout(path: &Path) -> anyhow::Result<Vec<Item>> {
                             }
                             let (text, images) = sent_message(&text);
                             t.user_with(text, images, at);
+                            t.resume_from(point(&last_turn));
                         }
                     }
                     Some("assistant") => {
@@ -557,7 +591,7 @@ mod tests {
             complete("2026-08-21T01:01:00Z"),
         ];
         let path = dir.write("rollout.jsonl", &lines.join("\n"));
-        let items = load_rollout(&path).unwrap();
+        let items = load_rollout(&path, "t").unwrap();
         let shown: Vec<String> = items
             .iter()
             .map(|i| match i {
@@ -613,7 +647,7 @@ mod tests {
             event(json!({ "type": "task_complete" }), "2026-08-17T04:00:30Z"),
         ];
         let path = dir.write("rollout.jsonl", &lines.join("\n"));
-        let users: Vec<(String, Vec<String>)> = load_rollout(&path)
+        let users: Vec<(String, Vec<String>)> = load_rollout(&path, "t")
             .unwrap()
             .into_iter()
             .filter_map(|i| if let Item::User { text, images, .. } = i { Some((text, images)) } else { None })
@@ -638,18 +672,22 @@ mod tests {
             line("response_item", json!({ "type": "function_call", "name": "exec_command", "call_id": "c1", "arguments": "{\"cmd\":\"ls\"}" }), "2026-09-06T22:15:30Z"),
             line("response_item", json!({ "type": "function_call_output", "call_id": "c1", "output": "a b" }), "2026-09-06T22:15:31Z"),
             said("assistant", "Done: forget the network.", "2026-09-06T22:16:29.090Z"),
-            line("event_msg", json!({ "type": "task_complete" }), "2026-09-06T22:16:29.201Z"),
+            line("event_msg", json!({ "type": "task_complete", "turn_id": "turn-1" }), "2026-09-06T22:16:29.201Z"),
             said("user", "do it for me", "2026-09-06T22:17:08Z"),
             said("assistant", "Working on it", "2026-09-06T22:17:11Z"),
             line("event_msg", json!({ "type": "turn_aborted" }), "2026-09-06T22:17:20Z"),
             said("user", "<turn_aborted>The user interrupted the previous turn.</turn_aborted>", "2026-09-06T22:17:30Z"),
         ];
         let path = dir.write("rollout.jsonl", &lines.join("\n"));
-        let items = load_rollout(&path).unwrap();
-        assert_eq!(items[0], Item::User { text: "reset eduroam".into(), images: vec![], at: ms_from_rfc3339("2026-09-06T22:15:24.832Z") });
+        let items = load_rollout(&path, "t").unwrap();
+        let resume = |after: Option<&str>| Some(ResumePoint { session: "t".into(), after: after.map(String::from) });
+        assert_eq!(items[0], Item::User { text: "reset eduroam".into(), images: vec![], at: ms_from_rfc3339("2026-09-06T22:15:24.832Z"), resume: resume(None), aside: false });
         assert!(matches!(&items[1], Item::Tool { title, detail, output, .. } if title == "Ran command" && detail == "ls" && output == "a b"));
         assert_eq!(items[3], Item::TurnEnd { at: ms_from_rfc3339("2026-09-06T22:16:29.201Z").unwrap(), took_secs: 64 });
-        assert!(matches!(&items[4], Item::User { text, .. } if text == "do it for me"));
+        // The second message drops the turn after the first one ended.
+        assert!(matches!(&items[4], Item::User { text, resume: r, .. } if text == "do it for me" && *r == resume(Some("turn-1"))));
         assert_eq!(items.len(), 6, "the aborted turn has no footer: {items:?}");
+        // A message sent now drops nothing: it goes after the last turn that said it ended.
+        assert_eq!(last_turn_in(&path).as_deref(), Some("turn-1"));
     }
 }

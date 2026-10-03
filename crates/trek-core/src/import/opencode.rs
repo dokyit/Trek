@@ -429,11 +429,11 @@ mod tests {
         let aborted = json!({ "role": "assistant", "time": { "created": 20_500 }, "error": { "name": "MessageAbortedError" } });
         message(&conn, "s", "m5", aborted, &[json!({ "type": "text", "text": "Refreshing" })]);
         let items = load_conn(&conn, "s").unwrap();
-        assert_eq!(items[0], Item::User { text: "connect copilot".into(), images: vec![], at: Some(1_000) });
+        assert_eq!(items[0], Item::User { text: "connect copilot".into(), images: vec![], at: Some(1_000), resume: None, aside: false });
         assert!(matches!(&items[1], Item::Tool { detail, .. } if detail == "ls"));
         assert_eq!(items[2], Item::Assistant { text: "Connected.".into() });
         assert_eq!(items[3], Item::TurnEnd { at: 9_400, took_secs: 8 });
-        assert_eq!(items[4], Item::User { text: "now refresh".into(), images: vec![], at: Some(20_000) });
+        assert_eq!(items[4], Item::User { text: "now refresh".into(), images: vec![], at: Some(20_000), resume: None, aside: false });
         assert_eq!(items.len(), 6, "the stopped reply has no footer: {items:?}");
     }
 }

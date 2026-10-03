@@ -41,6 +41,7 @@ enum Action {
     Theme(ThemeChoice),
     HandHolding(HandHolding),
     Settle(String),
+    Fork(String),
     CheckForUpdates,
 }
 
@@ -424,6 +425,9 @@ impl CommandPalette {
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
             add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint("⌘E"), "done finish inbox archive");
         }
+        if let Some(t) = thread.as_ref() {
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::GitFork)), "Fork thread", Action::Fork(t.id.clone())), "branch copy duplicate conversation");
+        }
         // Hand-holding applies to the thread on screen, or to the next new thread.
         if matches!(ws.route, Route::Thread(_) | Route::Draft { .. }) {
             let current = ws.prefs().hand_holding;
@@ -508,6 +512,7 @@ impl CommandPalette {
                 }
             }),
             Action::Settle(id) => ws.update(cx, |ws, cx| ws.settle(&id, cx)),
+            Action::Fork(id) => ws.update(cx, |ws, cx| _ = ws.fork_thread(&id, crate::workspace::ForkAt::End, &crate::workspace::Scope::Main, cx)),
             Action::CheckForUpdates => ws.update(cx, |ws, cx| {
                 ws.check_for_updates(true, cx);
                 ws.navigate(Route::Settings(SettingsPage::Updates), cx);

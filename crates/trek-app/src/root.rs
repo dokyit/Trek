@@ -93,6 +93,12 @@ impl TrekWindow {
                         this.composer.update(cx, |c, cx| c.restore(text, images, window, cx));
                     }
                 }
+                WorkspaceEvent::ComposeIn { scope: Scope::Main, thread, text, images, edit } => {
+                    if this.workspace.read(cx).thread_id_in(&Scope::Main) == Some(thread.as_str()) {
+                        this.composer.update(cx, |c, cx| c.compose(thread, text, images, edit.clone(), window, cx));
+                    }
+                }
+                WorkspaceEvent::ComposeIn { .. } => {}
                 // The transcript views redraw themselves.
                 WorkspaceEvent::Transcript { .. } => {}
             }),

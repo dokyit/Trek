@@ -2,10 +2,12 @@
 //! Nothing in this crate depends on the UI toolkit.
 
 pub mod catalog;
+pub mod checkpoint;
 pub mod detect;
 pub mod git;
 pub mod import;
 pub mod paths;
+pub mod rewind;
 pub mod settings;
 pub mod skills;
 pub mod store;

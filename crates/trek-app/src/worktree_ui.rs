@@ -66,6 +66,17 @@ fn losses(wt: &Worktree, r: &Removal, delete_unmerged: Option<bool>) -> Vec<(Str
     out
 }
 
+/// The other threads working in `id`'s worktree, named: “Title”, or “Title” and 2 more.
+fn sharer_names(ws: &Entity<Workspace>, id: &str, cx: &App) -> Option<String> {
+    let ws = ws.read(cx);
+    let others = ws.worktree_sharers(id);
+    let first = ws.thread(others.first()?)?.title.clone();
+    Some(match others.len() {
+        1 => format!("“{first}”"),
+        n => format!("“{first}” and {}", plural(n - 1, "more", "more")),
+    })
+}
+
 /// A footer button that closes the dialog and runs `f`.
 fn action(button: Button, f: impl Fn(&mut App) + 'static) -> DialogAction {
     DialogAction::new().child(button.on_click(move |_, _, cx| f(cx)))
@@ -86,8 +97,24 @@ pub enum Leave {
 /// state is checked first, so the question names uncommitted work that would be lost; removing
 /// loses no more than that (anything written since stops it). A deleted thread takes its worktree
 /// with it: nothing in Trek would lead back to one left behind. An archived one can keep it.
+/// A worktree another thread works in too (a fork) stays, and isn't asked about.
 pub fn confirm_leave(ws: Entity<Workspace>, id: String, leave: Leave, window: &mut Window, cx: &mut App) {
     let Some((title, wt)) = ws.read(cx).thread(&id).and_then(|t| Some((t.title.clone(), t.worktree.clone()?))) else { return };
+    if let Some(other) = sharer_names(&ws, &id, cx) {
+        match leave {
+            Leave::Archive => ws.update(cx, |ws, cx| ws.archive(&id, cx)),
+            Leave::Delete => window.open_alert_dialog(cx, move |alert, _, _| {
+                let (ws, id) = (ws.clone(), id.clone());
+                alert
+                    .title(format!("Delete “{title}”?"))
+                    .description(format!("The thread and its transcript are deleted from Trek. This can't be undone. Its worktree stays: {other} works in it too."))
+                    .footer(DialogFooter::new().child(cancel()).child(action(Button::new("wt-leave").with_variant(ButtonVariant::Danger).label("Delete"), move |cx| {
+                        ws.update(cx, |ws, cx| ws.delete_thread(&id, cx))
+                    })))
+            }),
+        }
+        return;
+    }
     let check = ws.update(cx, |ws, cx| ws.worktree_removal(&id, cx));
     window
         .spawn(cx, async move |cx| {
@@ -133,12 +160,16 @@ pub fn confirm_leave(ws: Entity<Workspace>, id: String, leave: Leave, window: &m
 /// base doesn't have.
 pub fn confirm_remove(ws: Entity<Workspace>, id: String, window: &mut Window, cx: &mut App) {
     let Some(wt) = ws.read(cx).thread(&id).and_then(|t| t.worktree.clone()) else { return };
+    let others = sharer_names(&ws, &id, cx);
     let check = ws.update(cx, |ws, cx| ws.worktree_removal(&id, cx));
     window
         .spawn(cx, async move |cx| {
             let Some(r) = check.await else { return };
             let _ = cx.update(|window, cx| {
                 let mut lines = vec![(format!("Removes {}. The thread runs in the project folder afterwards.", trek_core::paths::tildify(&wt.path)), false)];
+                if let Some(other) = &others {
+                    lines.push((format!("{other} works in it too, and moves to the project folder as well."), false));
+                }
                 lines.extend(losses(&wt, &r, Some(true)));
                 let danger = if r.uncommitted > 0 { ButtonVariant::Danger } else { ButtonVariant::Primary };
                 let discard = r.uncommitted;

@@ -13,20 +13,59 @@
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
 //! | `error`                      | a turn that fails                                             |
 //! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
+//! | `recall`                     | the messages it remembers from this conversation             |
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
 //! Every turn also reports context usage. A prompt sent mid-turn steers it.
+//!
+//! Like Claude Code and Codex, it keeps each session's history (in memory, for the process) and
+//! can resume one partway or fork it (`SessionConfig::resume_at`, `fork`); its `mock-recap`
+//! model can't, as ACP agents can't, so rewinds give it a recap instead.
 //!
 //! Selected by `AgentId::Direct("mock")`. Trek offers it only when `TREK_MOCK_AGENT=1` (and in
 //! its own tests).
 
 use crate::{AgentEvent, Billing, Command, Decision, Prompt, Question, SessionConfig};
 use anyhow::Result;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use trek_core::HandHolding;
 
 pub use trek_core::catalog::MOCK_PROVIDER as PROVIDER;
+
+/// The mock's model that can't resume a session partway (see `crate::resumes_partway`).
+pub const RECAP_MODEL: &str = "mock-recap";
+
+/// Every mock session's history, by session id: each message with the mark of the turn it
+/// belongs to, oldest first. The mock's stand-in for an agent's session files.
+static HISTORY: LazyLock<Mutex<HashMap<String, Vec<(String, String)>>>> = LazyLock::new(Default::default);
+
+fn new_id(kind: &str) -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("mock-{kind}-{nanos:x}-{}", N.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The messages the mock remembers in session `id`, oldest first.
+pub fn remembered(id: &str) -> Vec<String> {
+    HISTORY.lock().unwrap().get(id).map(|h| h.iter().map(|(_, m)| m.clone()).collect()).unwrap_or_default()
+}
+
+/// The mark of the last turn in session `id` (see `crate::session_tail`).
+pub fn last_mark(id: &str) -> Option<String> {
+    HISTORY.lock().unwrap().get(id)?.last().map(|(mark, _)| mark.clone())
+}
+
+/// A message that came with a recap of the conversation: the messages the recap holds, and the
+/// message itself.
+fn split_recap(text: &str) -> (Vec<String>, &str) {
+    let Some((head, message)) = text.split_once("</recap>") else { return (vec![], text) };
+    let recap = head.split_once("<recap>").map_or("", |(_, r)| r);
+    let said = recap.split("\n\n").filter_map(|e| e.trim().strip_prefix("User: ")).map(|e| e.trim().to_string()).collect();
+    (said, message.trim_start())
+}
 
 /// The mock shows up in pickers when `TREK_MOCK_AGENT=1`.
 pub fn enabled() -> bool {
@@ -60,6 +99,7 @@ enum Script {
     Stream(Duration),
     Error,
     Write,
+    Recall,
 }
 
 impl Script {
@@ -84,6 +124,7 @@ impl Script {
                 "plan" => Script::Plan,
                 "agents" | "subagents" | "sub-agents" => Script::Agents(duration_after(i)),
                 "tools" => Script::Tools,
+                "recall" => Script::Recall,
                 _ => return None,
             })
         });
@@ -109,6 +150,7 @@ pub fn title(request: &str) -> String {
         Script::Stream(_) => "Walk through the codebase",
         Script::Error => "Fix the failing build",
         Script::Write => "Add a note",
+        Script::Recall => "What was said",
     }
     .into()
 }
@@ -161,6 +203,10 @@ struct Session {
     steer: Vec<String>,
     /// Background sub-agents still out: (tool call id, description).
     background: Vec<(String, String)>,
+    /// The session's id, under which its history is kept.
+    native_id: String,
+    /// The mark of the turn under way: messages sent during it share it.
+    mark: String,
 }
 
 pub async fn run(
@@ -168,10 +214,11 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
-    let native_id = config.resume.clone().unwrap_or_else(|| {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        format!("mock-{nanos:x}")
-    });
+    let (native_id, resumed_at, recap) = open_session(&config);
+    let commands = match recap {
+        Some(r) => crate::recap_first(commands, r),
+        None => commands,
+    };
     let mut s = Session {
         cwd: config.cwd.clone(),
         commands,
@@ -184,9 +231,14 @@ pub async fn run(
         next_id: 0,
         steer: vec![],
         background: vec![],
+        native_id: native_id.clone(),
+        mark: String::new(),
     };
     if s.emit(AgentEvent::Started { native_id, model: Some(config.model.clone().unwrap_or_else(|| "mock-swift".into())) }).await.is_err() {
         return Ok(());
+    }
+    if let Some(at) = resumed_at {
+        let _ = s.emit(AgentEvent::Mark(at)).await;
     }
     // Nothing leaves the Mac, so nothing is billed.
     let _ = s.emit(AgentEvent::Billing(Billing::Local)).await;
@@ -207,6 +259,33 @@ pub async fn run(
     Ok(())
 }
 
+/// The session `config` asks for: its id, the point it was resumed at (if partway), and the
+/// recap to use because it couldn't be (the history is gone, or the point isn't in it).
+fn open_session(config: &SessionConfig) -> (String, Option<String>, Option<String>) {
+    let mut sessions = HISTORY.lock().unwrap();
+    let Some(from) = &config.resume else {
+        let id = new_id("session");
+        sessions.insert(id.clone(), vec![]);
+        // A new session: the recap reaches it with the first message (`crate::start`).
+        return (id, None, None);
+    };
+    let mut history = sessions.get(from).cloned().unwrap_or_default();
+    let mut recap = None;
+    if let Some(at) = &config.resume_at {
+        match history.iter().rposition(|(mark, _)| mark == at) {
+            Some(ix) => history.truncate(ix + 1),
+            None => {
+                history.clear();
+                recap = config.recap.clone();
+            }
+        }
+    }
+    let id = if config.fork || recap.is_some() { new_id("session") } else { from.clone() };
+    sessions.insert(id.clone(), history);
+    let at = config.resume_at.clone().filter(|_| recap.is_none());
+    (id, at, recap)
+}
+
 impl Session {
     async fn emit(&self, ev: AgentEvent) -> Step {
         self.events.send(ev).await.map_err(|_| Stop::Closed)
@@ -217,8 +296,23 @@ impl Session {
         format!("mock-{kind}-{}", self.next_id)
     }
 
+    /// Keep a message in the session's history, with the turn under way.
+    fn remember(&self, text: &str) {
+        let (recapped, message) = split_recap(text);
+        let mut sessions = HISTORY.lock().unwrap();
+        let history = sessions.entry(self.native_id.clone()).or_default();
+        history.extend(recapped.into_iter().map(|m| ("recap".to_string(), m)));
+        history.push((self.mark.clone(), message.to_string()));
+    }
+
     /// One prompt, start to finish (including an early stop). Errs only when the session is over.
     async fn turn(&mut self, text: &str) -> Step {
+        self.mark = new_id("turn");
+        self.remember(text);
+        // The turn is in the history now: cutting the session back to its mark keeps it whole.
+        self.emit(AgentEvent::Mark(self.mark.clone())).await?;
+        let text = split_recap(text).1.to_string();
+        let text = text.as_str();
         self.context += 1_200 + text.len() as u64 / 3;
         self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
         let script = Script::parse(text, self.plan);
@@ -251,6 +345,12 @@ impl Session {
             Script::Long(total) => self.long(total).await?,
             Script::Stream(total) => self.stream(total).await?,
             Script::Write => self.write().await?,
+            Script::Recall => {
+                let mut said = remembered(&self.native_id);
+                said.pop();
+                let text = if said.is_empty() { "I don't remember anything from before this message.".to_string() } else { format!("I remember: {}", said.join(" | ")) };
+                self.say(&text).await?;
+            }
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -302,7 +402,10 @@ impl Session {
     /// Commands that arrive while a turn runs and no request is pending.
     fn handle_midturn(&mut self, cmd: std::result::Result<Command, async_channel::RecvError>) -> Step {
         match cmd {
-            Ok(Command::Prompt { text, .. }) => self.steer.push(text),
+            Ok(Command::Prompt { text, .. }) => {
+                self.remember(&text);
+                self.steer.push(text);
+            }
             Ok(Command::Interrupt) => return Err(Stop::Interrupted),
             Ok(Command::SetHandHolding(h)) => self.hand_holding = h,
             Ok(Command::Shutdown) | Err(_) => return Err(Stop::Closed),
@@ -506,14 +609,16 @@ impl Session {
     }
 
     /// A long build: one command that runs for most of `total`, with a context update every ten
-    /// seconds. Steering is acknowledged within a quarter second.
+    /// seconds at demo pace (none at pace zero: tests would otherwise see them land depending on
+    /// how fast the machine runs them). Steering is acknowledged within a quarter second.
     async fn long(&mut self, total: Duration) -> Step {
         let started = tokio::time::Instant::now();
         self.think("This needs the full test suite; it takes a while.").await?;
         let id = self.id("tool");
         self.tool_start(&id, "Run command", "cargo test --workspace").await?;
         let end = started + total;
-        let mut next_context = started + Duration::from_secs(10);
+        let every = paced(10_000);
+        let mut next_context = if every.is_zero() { end } else { started + every };
         loop {
             let now = tokio::time::Instant::now();
             if now >= end {
@@ -521,10 +626,8 @@ impl Session {
             }
             self.pause((end - now).min(Duration::from_millis(250))).await?;
             self.acknowledge_steer().await?;
-            // Context grows as the build runs, at demo pace only: unpaced (tests), nothing but
-            // what a test drives arrives mid-turn, however slowly its machine runs it.
-            if PACE.load(Ordering::Relaxed) > 0 && tokio::time::Instant::now() >= next_context {
-                next_context += Duration::from_secs(10);
+            if tokio::time::Instant::now() >= next_context && next_context < end {
+                next_context += every;
                 self.context += 800;
                 self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
             }
@@ -656,6 +759,9 @@ mod tests {
                 hand_holding,
                 plan,
                 resume: None,
+                resume_at: None,
+                fork: false,
+                recap: None,
                 fast: None,
                 mcp_servers: vec![],
             };
@@ -691,6 +797,79 @@ mod tests {
 
     fn text(events: &[AgentEvent]) -> String {
         events.iter().filter_map(|e| if let AgentEvent::TextDone(t) = e { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("\n")
+    }
+
+    fn config(resume: Option<&str>, at: Option<&str>, fork: bool, recap: Option<&str>) -> SessionConfig {
+        SessionConfig {
+            agent: trek_core::AgentId::Direct(PROVIDER.into()),
+            cwd: PathBuf::from("/tmp"),
+            model: None,
+            effort: trek_core::Effort::Low,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            resume: resume.map(String::from),
+            resume_at: at.map(String::from),
+            fork,
+            recap: recap.map(String::from),
+            fast: None,
+            mcp_servers: vec![],
+        }
+    }
+
+    #[test]
+    fn sessions_resume_partway_fork_or_fall_back_to_a_recap() {
+        let said = |m: &str, t: &str| (m.to_string(), t.to_string());
+        HISTORY.lock().unwrap().insert("s".into(), vec![said("m1", "one"), said("m2", "two"), said("m2", "steered"), said("m3", "three")]);
+        // A fork through a turn copies the history up to it; the session is left as it was.
+        let (fork, at, recap) = open_session(&config(Some("s"), Some("m2"), true, Some("recap")));
+        assert!(fork != "s" && at.as_deref() == Some("m2") && recap.is_none());
+        assert_eq!(remembered(&fork), ["one", "two", "steered"]);
+        assert_eq!(remembered("s").len(), 4);
+        // In place: the same session, cut back.
+        let (id, at, _) = open_session(&config(Some("s"), Some("m1"), false, None));
+        assert_eq!((id.as_str(), at.as_deref()), ("s", Some("m1")));
+        assert_eq!(remembered("s"), ["one"]);
+        // A point it doesn't have: a new session, with the recap to go with the first message.
+        let (id, at, recap) = open_session(&config(Some("s"), Some("gone"), false, Some("User: one")));
+        assert!(id != "s" && at.is_none() && recap.as_deref() == Some("User: one"));
+        assert!(remembered(&id).is_empty());
+        // Resumed whole, and new.
+        assert_eq!(open_session(&config(Some("s"), None, false, None)).0, "s");
+        assert!(open_session(&config(None, None, false, None)).0.starts_with("mock-session-"));
+    }
+
+    #[test]
+    fn a_session_taken_back_remembers_only_what_was_kept() {
+        trek_core::runtime().block_on(async {
+            set_pace(0.);
+            let open = |c: SessionConfig| {
+                let h = crate::start(c);
+                Live { commands: h.commands, events: h.events }
+            };
+            let m = open(config(None, None, false, None));
+            let started = m.until(|e| matches!(e, AgentEvent::Started { .. })).await;
+            let Some(AgentEvent::Started { native_id, .. }) = started.last() else { panic!() };
+            let mark = |events: &[AgentEvent]| events.iter().find_map(|e| if let AgentEvent::Mark(m) = e { Some(m.clone()) } else { None }).unwrap();
+            m.prompt("apple").await;
+            let first = mark(&m.turn().await);
+            m.prompt("banana").await;
+            m.turn().await;
+            m.prompt("recall").await;
+            assert_eq!(text(&m.turn().await), "I remember: apple | banana");
+            m.send(Command::Shutdown).await;
+
+            // Cut back to the first turn: the second is forgotten.
+            let back = open(config(Some(native_id), Some(&first), false, None));
+            let started = back.until(|e| matches!(e, AgentEvent::Mark(_))).await;
+            assert!(started.contains(&AgentEvent::Started { native_id: native_id.clone(), model: Some("mock-swift".into()) }));
+            back.prompt("recall").await;
+            assert_eq!(text(&back.turn().await), "I remember: apple");
+
+            // A new session primed with a recap remembers what the recap says.
+            let recapped = open(config(None, None, false, Some("User: apple\n\nAssistant: OK\n\nUser: cherry")));
+            recapped.prompt("recall").await;
+            assert_eq!(text(&recapped.turn().await), "I remember: apple | cherry");
+        });
     }
 
     #[test]

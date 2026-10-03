@@ -27,6 +27,12 @@ pub struct AcpInfo {
 
 /// Binary and arguments that start `agent` as an ACP server.
 fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
+    // Tests talk to a stand-in agent (fixtures/fake-acp.pl).
+    #[cfg(test)]
+    if *agent == AgentId::Acp(tests::FAKE.into()) {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-acp.pl");
+        return Ok((PathBuf::from("/usr/bin/perl"), vec![script.into()], "Fake".into()));
+    }
     let (binary, args, name, hint): (&str, Vec<&str>, String, &str) = match agent {
         AgentId::OpenCode => ("opencode", vec!["acp"], "OpenCode".into(), "curl -fsSL https://opencode.ai/install | bash"),
         AgentId::Droid => ("droid", vec!["exec", "--output-format", "acp"], "Droid".into(), "curl -fsSL https://app.factory.ai/cli | sh"),
@@ -1112,6 +1118,54 @@ impl ProbeCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ACP agent id that runs fixtures/fake-acp.pl (see `launch_spec`).
+    pub(super) const FAKE: &str = "test-fake";
+
+    #[test]
+    fn a_rewound_session_starts_over_with_a_recap() {
+        // A rewind or fork of an ACP thread (`Reopen::Recap`): no session to resume, a recap.
+        let dir = std::env::temp_dir().join(format!("trek-acp-recap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trek_core::paths::isolate(dir.join("data"));
+        let config = SessionConfig {
+            agent: AgentId::Acp(FAKE.into()),
+            cwd: dir.clone(),
+            model: None,
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: Some("User: remember APPLE\n\nAssistant: OK".into()),
+            fast: None,
+            mcp_servers: vec![],
+        };
+        let h = crate::start(config);
+        trek_core::runtime().block_on(async {
+            let turn = async || loop {
+                match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited") {
+                    AgentEvent::TurnComplete { error, .. } => return error,
+                    AgentEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            };
+            for text in ["what did I ask?", "and now?"] {
+                h.commands.send(Command::Prompt { text: text.into(), images: vec![] }).await.unwrap();
+                assert_eq!(turn().await, None);
+            }
+            h.commands.send(Command::Shutdown).await.unwrap();
+        });
+        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let methods: Vec<&str> = log.iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(methods, ["initialize", "session/new", "session/prompt", "session/prompt"]);
+        let prompts: Vec<&str> = log.iter().filter(|m| m["method"] == "session/prompt").map(|m| m["params"]["prompt"][0]["text"].as_str().unwrap()).collect();
+        assert!(prompts[0].contains("<recap>\nUser: remember APPLE\n\nAssistant: OK\n</recap>") && prompts[0].ends_with("what did I ask?"), "{}", prompts[0]);
+        assert_eq!(prompts[1], "and now?", "only the first message carries it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn maps_message_and_thought_chunks() {

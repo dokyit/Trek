@@ -150,3 +150,57 @@ tinted for a moment. The sidebar's search field matches titles as you type (subs
 same word-prefix rules as ⌘K) and adds threads whose messages match, with the matching line. Results on
 screen refresh when the index takes in more (background indexing, a finished turn); Enter in ⌘K waits for
 the results of what was typed.
+
+**Checkpoints, rewind, edit, retry and fork** (`trek_core::checkpoint`, `trek_core::rewind`,
+`Workspace::rewind` / `fork_thread`).
+- **File checkpoints are commits under `refs/trek/checkpoints/<thread>/<message>`**, made through a
+  temporary index seeded with a copy of the user's (its stat data means only changed files are read):
+  `add -A`, `write-tree`, `commit-tree -p HEAD`, `update-ref`. The user's index, HEAD, branches and stash are
+  never written; restoring reads the checkpoint into another temporary index and `checkout-index`es just the
+  files that differ, after removing files created since (ignored files are never in either tree). git is
+  run by its real path (`git --exec-path`), not macOS's `/usr/bin/git` shim, which costs ~100 ms a call. A
+  snapshot takes ~75 ms on this repo and ~130 ms on a 30,000-file one. It runs off the main thread as a turn
+  starts, and the message is held until it's done, so it always shows the files before the agent touched
+  them (a message that steers a running turn gets none). The newest 100 per thread are kept; refs go with
+  the messages a rewind removes and with deleted threads (after any snapshot still running). Folders
+  outside git get none.
+- **A snapshot never holds a turn up for long, and never fails over one path.** Reading the files is
+  stopped after 10 s (a clean filter that hangs, huge untracked files); the message then goes without a
+  checkpoint, and the popover says why. Stop never waits behind git work: a message still held for its
+  checkpoint simply never reaches the agent. `add -A --ignore-errors` leaves out what git can't take (a
+  nested repository with no commit yet) the same way every time. Nested repositories (mode 160000: a
+  clone the agent made) are left as they are by a restore, never deleted. A file that can't be put back
+  doesn't stop the others; the toast names it, and the checkpoints a failed restore would have dropped are
+  kept. There's no size cap on untracked files: `.gitignore` is the way to keep artifacts out.
+- **Every restore can be undone.** Before it writes anything, a restore commits the files as they are to
+  `refs/trek/undo/<thread>`; the "Restored N files" toast's Undo restores that. Edit & resend restores by
+  default (as the popover does) and shows the count, with the files in its tooltip, before it's sent.
+- **The agent forgets what was taken back.** Each message records where the agent's session stood when it
+  was sent (`ResumePoint`: session id and the last message uuid / turn id before it, from
+  `AgentEvent::Mark`; importers fill it in for Claude Code and Codex history). Claude Code resumes with
+  `--resume <id> --resume-session-at <uuid>` (in place: the session file keeps the old branch, later
+  resumes follow the new one) and forks with `--fork-session`; message uuids survive a fork. Codex reverts
+  in place with `thread/revert` (the turn after the point is found with `thread/turns/list`) and forks with
+  `thread/fork { lastTurnId }`; turn ids survive a fork too. Both verified live (haiku 4.5, gpt-5.6-luna).
+  A point in a session other than the thread's own (the thread is a fork) is always forked, never cut in
+  place: that session belongs to another thread. ACP and direct agents, messages without a point and
+  cut-backs that fail (the session or message is gone) start a new session whose first message carries a
+  compact recap of the conversation kept; the transcript says so.
+- **A thread that doesn't know where its session stands finds out before it sends.** Imported threads,
+  and ones an older Trek kept, have no latest point; their next message is held while the point is read
+  from the agent's own files (`trek_agents::session_tail`: the last message uuid of the Claude Code
+  session, the last ended turn of the Codex rollout), so it can still be cut back natively.
+- **Commands Trek answers itself (`/model`, `/cost`) and typed answers to the agent's questions are
+  asides** (`Item::User::aside`): they don't start turns and aren't rewind points (they keep only Copy).
+  Undo, Retry and Fork sit on every turn's end: its footer, its error, or its "Interrupted" line; a turn the
+  agent started itself (a sub-agent reporting back) has nothing to undo, and says so.
+- Rewinding is refused while a turn runs. Sessions a thread leaves behind are recorded
+  (`retired_sessions`), whether a rewind or fork planned it or the agent moved to a new session itself
+  (a cut-back that failed, `/clear`), so imports don't bring them back as threads; an imported thread that
+  moves to a new session becomes Trek's own.
+- **In worktrees.** A worktree thread's checkpoints are of its worktree (its own index; the refs live in
+  the repository it shares with the project folder). A fork of a worktree thread works in the same
+  worktree, since its files and the agent's session are there (agents keep sessions per folder). The two
+  share it: both are warned when both run, deleting or archiving one leaves the worktree to the other, and
+  removing it moves every thread in it to the project folder. A thread that leaves its worktree drops its
+  checkpoints and the points its old session could be cut back to; earlier messages rewind without files.

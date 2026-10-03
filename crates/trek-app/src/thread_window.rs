@@ -93,10 +93,14 @@ impl ThreadWindow {
                 cx.notify();
             }),
             cx.subscribe_in(&workspace, window, |this, _, event: &WorkspaceEvent, window, cx| {
-                if let WorkspaceEvent::RestoreQueued { thread, text, images } = event {
-                    if *thread == this.id {
+                match event {
+                    WorkspaceEvent::RestoreQueued { thread, text, images } if *thread == this.id => {
                         this.composer.update(cx, |c, cx| c.restore(text, images, window, cx));
                     }
+                    WorkspaceEvent::ComposeIn { scope: Scope::Thread(t), thread, text, images, edit } if *t == this.id => {
+                        this.composer.update(cx, |c, cx| c.compose(thread, text, images, edit.clone(), window, cx));
+                    }
+                    _ => {}
                 }
             }),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
