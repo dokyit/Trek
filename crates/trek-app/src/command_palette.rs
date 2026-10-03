@@ -20,7 +20,10 @@ const RECENT: usize = 6;
 const TITLE_HITS: usize = 6;
 const MESSAGE_HITS: usize = 8;
 const PROJECTS: usize = 6;
-const COMMANDS: usize = 12;
+/// Enough for every settings page ("settings" lists them all).
+const COMMANDS: usize = 20;
+/// Title matches further in than this are brought forward, so the matched words stay in view.
+const TITLE_LEAD: usize = 32;
 
 /// What choosing an entry does.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,7 +103,9 @@ impl Entry {
 /// How well `query` matches a command or project: higher is better, `None` is no match. Case
 /// is ignored. The label starting with the query beats a word in it starting with the query,
 /// which beats every query word starting some word, then a substring, then a keyword, then the
-/// query's letters appearing in order (a typo-tolerant last resort).
+/// query's letters appearing in order (a typo-tolerant last resort). Within the first two, the
+/// whole label or a whole word scores a little higher; other ties keep the candidates' order
+/// ("settings" lists the settings pages in the order Settings shows them).
 pub fn score(query: &str, label: &str, keywords: &str) -> Option<u32> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -109,20 +114,22 @@ pub fn score(query: &str, label: &str, keywords: &str) -> Option<u32> {
     let label = label.to_lowercase();
     let words = |s: &str| s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect::<Vec<_>>();
     let label_words = words(&label);
-    // Shorter labels win ties: "Git" over "Git settings" for "git".
-    let tighter = 100u32.saturating_sub(label.chars().count() as u32);
-    if label.starts_with(&q) {
-        return Some(1000 + tighter);
+    if label == q {
+        return Some(1100);
+    }
+    if let Some(rest) = label.strip_prefix(&q) {
+        let whole_word = !rest.starts_with(char::is_alphanumeric);
+        return Some(1000 + if whole_word { 10 } else { 0 });
     }
     if label_words.iter().any(|w| w.starts_with(&q)) {
-        return Some(800 + tighter);
+        return Some(800 + if label_words.contains(&q) { 10 } else { 0 });
     }
     let query_words = words(&q);
     if !query_words.is_empty() && query_words.iter().all(|qw| label_words.iter().any(|w| w.starts_with(qw.as_str()))) {
-        return Some(600 + tighter);
+        return Some(600);
     }
     if label.contains(&q) {
-        return Some(400 + tighter);
+        return Some(400);
     }
     // Below here a one- or two-letter query would match nearly everything.
     if q.chars().count() < 3 {
@@ -130,13 +137,40 @@ pub fn score(query: &str, label: &str, keywords: &str) -> Option<u32> {
     }
     let keyword_words = words(&keywords.to_lowercase());
     if !query_words.is_empty() && query_words.iter().all(|qw| keyword_words.iter().chain(&label_words).any(|w| w.starts_with(qw.as_str()))) {
-        return Some(300 + tighter);
+        return Some(300);
     }
     let mut chars = label.chars();
     if q.chars().filter(|c| !c.is_whitespace()).all(|c| chars.any(|l| l == c)) {
-        return Some(100 + tighter);
+        return Some(100);
     }
     None
+}
+
+/// Where row `selected` sits among the list's children, which include a label before each
+/// group's first row. Moving onto a group's first row brings its label into view too, so that
+/// row reports the label's place.
+fn scroll_target(groups: &[Group], selected: usize) -> Option<usize> {
+    let mut labels = 0;
+    for (i, g) in groups.iter().enumerate() {
+        let first_of_group = i == 0 || groups[i - 1] != *g;
+        if first_of_group {
+            labels += 1;
+        }
+        if i == selected {
+            return Some(if first_of_group { i + labels - 1 } else { i + labels });
+        }
+    }
+    None
+}
+
+/// The search results the Threads group shows: title matches, then message matches (one per
+/// thread, `Store::search` sees to that) from threads not listed already.
+fn thread_hits(hits: &[SearchHit]) -> Vec<&SearchHit> {
+    let (titles, messages): (Vec<&SearchHit>, Vec<&SearchHit>) = hits.iter().partition(|h| h.position.is_none());
+    let titles: Vec<&SearchHit> = titles.into_iter().take(TITLE_HITS).collect();
+    let listed: std::collections::HashSet<&str> = titles.iter().map(|h| h.thread_id.as_str()).collect();
+    let messages = messages.into_iter().filter(|h| !listed.contains(h.thread_id.as_str())).take(MESSAGE_HITS);
+    titles.into_iter().chain(messages).collect()
 }
 
 /// Titles can hold line breaks (a pasted first message); rows show them on one line.
@@ -162,6 +196,10 @@ pub struct CommandPalette {
     /// Full-text results and the query they answer (kept on screen until the next ones arrive).
     hits: Vec<SearchHit>,
     hits_for: String,
+    /// `Workspace::search_epoch` the hits were searched at; a newer one searches again.
+    epoch: u64,
+    /// Enter came before the results for the current text: confirm once they're in.
+    confirm_when_ready: bool,
     scroll: ScrollHandle,
     /// Where focus was before the palette opened; it goes back there on close.
     restore: Option<FocusHandle>,
@@ -172,12 +210,20 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads, projects and commands"));
-        let subscriptions = vec![cx.subscribe(&input, |this, state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                let q = state.read(cx).value().to_string();
-                this.set_query(q, cx);
-            }
-        })];
+        let subscriptions = vec![
+            cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let q = state.read(cx).value().to_string();
+                    this.set_query(q, window, cx);
+                }
+            }),
+            // The index took in more (background indexing, a finished turn): search again.
+            cx.observe_in(&workspace, window, |this, ws, window, cx| {
+                if this.open && ws.read(cx).search_epoch != this.epoch && !this.query.trim().is_empty() {
+                    this.search(window, cx);
+                }
+            }),
+        ];
         Self {
             workspace,
             right_panel,
@@ -187,6 +233,8 @@ impl CommandPalette {
             selected: 0,
             hits: vec![],
             hits_for: String::new(),
+            epoch: 0,
+            confirm_when_ready: false,
             scroll: ScrollHandle::new(),
             restore: None,
             _search: None,
@@ -206,7 +254,7 @@ impl CommandPalette {
             s.set_value("", window, cx);
             s.focus(window, cx);
         });
-        self.set_query(String::new(), cx);
+        self.set_query(String::new(), window, cx);
         self.set_overlay(true, cx);
         cx.notify();
     }
@@ -217,6 +265,7 @@ impl CommandPalette {
         }
         self.open = false;
         self._search = None;
+        self.confirm_when_ready = false;
         if let Some(h) = self.restore.take() {
             h.focus(window, cx);
         }
@@ -234,11 +283,23 @@ impl CommandPalette {
         });
     }
 
-    fn set_query(&mut self, query: String, cx: &mut Context<Self>) {
+    fn set_query(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
         self.query = query;
         self.selected = 0;
         self.scroll.scroll_to_item(0);
+        self.search(window, cx);
+    }
+
+    /// Results for the current text are still on their way.
+    fn pending(&self) -> bool {
+        let q = self.query.trim();
+        !q.is_empty() && self.hits_for != q
+    }
+
+    fn search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let q = self.query.trim().to_string();
+        let ws = self.workspace.read(cx);
+        self.epoch = ws.search_epoch;
         if trek_core::store::fts_query(&q).is_none() {
             self.hits.clear();
             self.hits_for = q;
@@ -246,11 +307,13 @@ impl CommandPalette {
             cx.notify();
             return;
         }
-        let store = self.workspace.read(cx).store.clone();
-        self._search = Some(cx.spawn(async move |this, cx| {
+        let store = ws.store.clone();
+        self._search = Some(cx.spawn_in(window, async move |this, cx| {
             let query = q.clone();
-            let hits = cx.background_executor().spawn(async move { store.search(&query, TITLE_HITS.max(MESSAGE_HITS) * 2) }).await;
-            let _ = this.update(cx, |this, cx| {
+            // Title matches crowd out message matches from the same thread, so ask for enough
+            // of each that MESSAGE_HITS remain.
+            let hits = cx.background_executor().spawn(async move { store.search(&query, TITLE_HITS + MESSAGE_HITS) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
                 match hits {
                     Ok(hits) => this.hits = hits,
                     Err(e) => {
@@ -259,6 +322,9 @@ impl CommandPalette {
                     }
                 }
                 this.hits_for = q;
+                if std::mem::take(&mut this.confirm_when_ready) {
+                    this.confirm(this.selected, window, cx);
+                }
                 cx.notify();
             });
         }));
@@ -272,25 +338,25 @@ impl CommandPalette {
         let project_name = |pid: &Option<String>| pid.as_ref().and_then(|p| ws.project(p)).map(|p| p.name.clone());
         let mut out = Vec::new();
 
-        // Threads: titles that match, then messages (one per thread, threads not already listed).
         if searching {
-            let (titles, messages): (Vec<&SearchHit>, Vec<&SearchHit>) = self.hits.iter().partition(|h| h.position.is_none());
-            let mut listed = std::collections::HashSet::new();
-            for h in titles.into_iter().take(TITLE_HITS) {
+            for h in thread_hits(&self.hits) {
                 let Some(t) = ws.thread(&h.thread_id) else { continue };
-                listed.insert(h.thread_id.clone());
-                let mut e = Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), h.snippet.clone(), Action::OpenThread(t.id.clone()));
-                e.label_ranges = h.ranges.clone();
-                if let Some(p) = project_name(&t.project_id) {
-                    e = e.hint(p);
-                }
-                out.push(e);
-            }
-            for h in messages.into_iter().filter(|h| !listed.contains(&h.thread_id)).take(MESSAGE_HITS) {
-                let (Some(t), Some(at)) = (ws.thread(&h.thread_id), ItemRef::of_hit(h)) else { continue };
-                let mut e = Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), one_line(&t.title), Action::OpenMessage(t.id.clone(), at));
-                let (snippet, ranges) = ui::lead_to_match(&h.snippet, &h.ranges, 32);
-                e.snippet = Some((snippet.into(), ranges));
+                let mut e = match ItemRef::of_hit(h) {
+                    // A message: the thread's title, and the excerpt under it.
+                    Some(at) => {
+                        let mut e = Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), one_line(&t.title), Action::OpenMessage(t.id.clone(), at));
+                        let (snippet, ranges) = ui::lead_to_match(&h.snippet, &h.ranges, 32);
+                        e.snippet = Some((snippet.into(), ranges));
+                        e
+                    }
+                    None => {
+                        // Long titles (an imported thread's first prompt) can hide the match past the cut.
+                        let (label, ranges) = ui::lead_to_match(&h.snippet, &h.ranges, TITLE_LEAD);
+                        let mut e = Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), label, Action::OpenThread(t.id.clone()));
+                        e.label_ranges = ranges;
+                        e
+                    }
+                };
                 if let Some(p) = project_name(&t.project_id) {
                     e = e.hint(p);
                 }
@@ -382,25 +448,13 @@ impl CommandPalette {
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let entries = self.entries(cx);
-        let n = entries.len();
-        if n == 0 {
+        let groups: Vec<Group> = self.entries(cx).iter().map(|e| e.group).collect();
+        if groups.is_empty() {
             return;
         }
-        self.selected = (self.selected as isize + delta).rem_euclid(n as isize) as usize;
-        // The list's children include the group labels: find the selected row among them.
-        let mut child = 0;
-        for (i, e) in entries.iter().enumerate() {
-            if i == 0 || entries[i - 1].group != e.group {
-                child += 1;
-            }
-            if i == self.selected {
-                // Bring the group label along when moving onto a group's first row.
-                let first_of_group = i == 0 || entries[i - 1].group != e.group;
-                self.scroll.scroll_to_item(if first_of_group { child - 1 } else { child });
-                break;
-            }
-            child += 1;
+        self.selected = (self.selected as isize + delta).rem_euclid(groups.len() as isize) as usize;
+        if let Some(child) = scroll_target(&groups, self.selected) {
+            self.scroll.scroll_to_item(child);
         }
         cx.notify();
     }
@@ -456,7 +510,12 @@ impl CommandPalette {
             Glyph::Project(name, icon) => ui::project_badge(&name, icon.as_deref(), cx),
             Glyph::Icon(i) => i.size(px(14.)).text_color(theme.muted_foreground).into_any_element(),
         };
-        let label = div().min_w_0().truncate().child(ui::match_text(&e.label, &e.label_ranges, cx));
+        // Matched words in full colour against a quieter rest, so they read at a glance.
+        let label = div()
+            .min_w_0()
+            .truncate()
+            .when(!e.label_ranges.is_empty(), |el| el.text_color(theme.foreground.opacity(0.72)))
+            .child(ui::match_text(&e.label, &e.label_ranges, cx));
         let text = match e.snippet {
             Some((snippet, ranges)) => v_flex()
                 .flex_1()
@@ -506,7 +565,7 @@ impl Render for CommandPalette {
         let entries = self.entries(cx);
         self.selected = self.selected.min(entries.len().saturating_sub(1));
         let searching = !self.query.trim().is_empty();
-        let pending = searching && self.hits_for != self.query.trim();
+        let pending = self.pending();
         let mut list = v_flex().id("palette-list").max_h(px(400.)).overflow_y_scroll().track_scroll(&self.scroll).pb(px(5.));
         let mut group = None;
         let empty = entries.is_empty();
@@ -551,8 +610,12 @@ impl Render for CommandPalette {
                     }))
                     .capture_action(cx.listener(|this, _: &Enter, window, cx| {
                         cx.stop_propagation();
-                        let ix = this.selected;
-                        this.confirm(ix, window, cx);
+                        // Rows on screen may answer the text as it was a keystroke ago.
+                        if this.pending() {
+                            this.confirm_when_ready = true;
+                        } else {
+                            this.confirm(this.selected, window, cx);
+                        }
                     }))
                     .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                         cx.stop_propagation();
@@ -588,7 +651,8 @@ impl Render for CommandPalette {
 
 #[cfg(test)]
 mod tests {
-    use super::{rank, score};
+    use super::{COMMANDS as CAP, Group, MESSAGE_HITS, TITLE_HITS, rank, score, scroll_target, thread_hits};
+    use trek_core::store::SearchHit;
 
     fn ranked(query: &str, labels: &[(&str, &str)]) -> Vec<String> {
         rank(query, labels.iter().map(|(l, k)| (l.to_string(), l.to_string(), k.to_string())).collect())
@@ -609,7 +673,8 @@ mod tests {
 
     #[test]
     fn prefixes_beat_word_starts_beat_substrings_beat_keywords() {
-        assert_eq!(ranked("open", COMMANDS), ["Open Git", "Open folder…", "Open Terminal"]);
+        // Equally good matches keep the order they were offered in.
+        assert_eq!(ranked("open", COMMANDS), ["Open folder…", "Open Terminal", "Open Git"]);
         // "theme" starts a label, then shows up only in keywords.
         assert_eq!(ranked("theme", COMMANDS), ["Theme: Night", "Settings: Appearance"]);
         assert_eq!(ranked("appear", COMMANDS), ["Settings: Appearance", "Theme: Night"]);
@@ -635,8 +700,48 @@ mod tests {
     }
 
     #[test]
-    fn ties_go_to_the_shorter_label_then_the_original_order() {
-        assert_eq!(ranked("git", &[("Git settings", ""), ("Git", ""), ("Gitlab", "")]), ["Git", "Gitlab", "Git settings"]);
-        assert_eq!(ranked("x", &[("Xa", ""), ("Xb", "")]), ["Xa", "Xb"]);
+    fn whole_labels_and_words_break_ties_then_the_original_order() {
+        assert_eq!(ranked("git", &[("Gitlab", ""), ("Git settings", ""), ("Git", "")]), ["Git", "Git settings", "Gitlab"]);
+        assert_eq!(ranked("term", &[("Open Terminals", ""), ("Open Term", "")]), ["Open Term", "Open Terminals"]);
+        assert_eq!(ranked("x", &[("Xb", ""), ("Xa", "")]), ["Xb", "Xa"]);
+    }
+
+    #[test]
+    fn settings_lists_every_page_in_page_order() {
+        let labels: Vec<String> = crate::settings_view::pages().map(|p| format!("Settings: {}", p.label())).collect();
+        let offered: Vec<(&str, &str)> = labels.iter().map(|l| (l.as_str(), "")).chain(COMMANDS.iter().copied()).collect();
+        let found = ranked("settings", &offered);
+        assert!(labels.len() <= CAP, "{} pages, {CAP} rows", labels.len());
+        assert_eq!(found[..labels.len()], labels[..]);
+    }
+
+    #[test]
+    fn keyboard_moves_scroll_rows_and_group_labels_into_view() {
+        use Group::*;
+        let groups = [Threads, Threads, Projects, Commands, Commands];
+        // Children: [Threads label, t0, t1, Projects label, p0, Commands label, c0, c1].
+        let targets: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i).unwrap()).collect();
+        assert_eq!(targets, [0, 2, 3, 5, 7]);
+        assert_eq!(scroll_target(&groups, 5), None);
+        assert_eq!(scroll_target(&[], 0), None);
+    }
+
+    #[test]
+    fn message_matches_fill_in_after_titles_from_other_threads() {
+        let hit = |thread: usize, position: Option<usize>| SearchHit {
+            thread_id: format!("t{thread}"),
+            title: format!("Thread {thread}"),
+            position,
+            item_id: None,
+            snippet: String::new(),
+            ranges: vec![],
+        };
+        // What Store::search returns: titles first, then the best message per thread.
+        let hits: Vec<SearchHit> = (0..TITLE_HITS + 2).map(|t| hit(t, None)).chain((0..TITLE_HITS + MESSAGE_HITS).map(|t| hit(t, Some(t)))).collect();
+        let rows: Vec<(String, Option<usize>)> = thread_hits(&hits).into_iter().map(|h| (h.thread_id.clone(), h.position)).collect();
+        let titles: Vec<_> = (0..TITLE_HITS).map(|t| (format!("t{t}"), None)).collect();
+        // Threads past the title cap still show up by their message; listed ones don't twice.
+        let messages: Vec<_> = (TITLE_HITS..TITLE_HITS + MESSAGE_HITS).map(|t| (format!("t{t}"), Some(t))).collect();
+        assert_eq!(rows, [titles, messages].concat());
     }
 }

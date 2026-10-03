@@ -217,6 +217,9 @@ pub enum ToolStatus {
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+    /// Held while an imported transcript is (re)indexed: that runs over many transactions, and
+    /// two passes over the same thread mustn't interleave.
+    indexer: Arc<Mutex<()>>,
 }
 
 const SCHEMA: &str = r#"
@@ -238,9 +241,14 @@ CREATE INDEX IF NOT EXISTS threads_project ON threads(project_id, updated_at);
 "#;
 
 /// Transcript rows. `pk` is the full-text index's rowid; `id` is the item's stable identity.
+/// Trek passes uuid v7 ids; the default (a random v4 uuid) is for older Trek builds sharing the
+/// database, which insert rows without one. SQLite only takes an expression default in CREATE
+/// TABLE (not ADD COLUMN), hence the table rebuilds in `migrate_items`.
 const ITEMS_TABLE: &str = "CREATE TABLE IF NOT EXISTS items (
-  pk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL, seq INTEGER NOT NULL,
-  data TEXT NOT NULL, created_at INTEGER NOT NULL,
+  pk INTEGER PRIMARY KEY,
+  id TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-'
+    || substr('89ab', 1 + (random() & 3), 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6)))),
+  thread_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL,
   UNIQUE (thread_id, seq)
 )";
 
@@ -274,20 +282,24 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Give every transcript row a stable id. Early databases keyed rows by (thread, seq) alone and
 /// rewrote whole transcripts on every save; their rows move into the new table as they are,
-/// keeping their order and timestamps.
+/// keeping their order and timestamps. Tables from before `id` had a default are rebuilt with
+/// their ids and keys unchanged.
 fn migrate_items(conn: &Connection) -> rusqlite::Result<()> {
     let exists = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'")?.exists([])?;
     if !exists {
         return conn.execute_batch(ITEMS_TABLE);
     }
-    if conn.prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'id'")?.exists([])? {
+    let id_default: Option<Option<String>> = conn.query_row("SELECT dflt_value FROM pragma_table_info('items') WHERE name = 'id'", [], |r| r.get(0)).optional()?;
+    if matches!(id_default, Some(Some(_))) {
         return Ok(());
     }
     let tx = conn.unchecked_transaction()?;
-    tx.execute_batch("ALTER TABLE items RENAME TO items_v1")?;
+    tx.execute_batch("ALTER TABLE items RENAME TO items_old")?;
     tx.execute_batch(ITEMS_TABLE)?;
-    {
-        let mut read = tx.prepare("SELECT thread_id, seq, data, created_at FROM items_v1 ORDER BY thread_id, seq")?;
+    if id_default.is_some() {
+        tx.execute_batch("INSERT INTO items (pk, id, thread_id, seq, data, created_at) SELECT pk, id, thread_id, seq, data, created_at FROM items_old")?;
+    } else {
+        let mut read = tx.prepare("SELECT thread_id, seq, data, created_at FROM items_old ORDER BY thread_id, seq")?;
         let mut write = tx.prepare("INSERT INTO items (id, thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         let mut rows = read.query([])?;
         while let Some(r) = rows.next()? {
@@ -295,16 +307,18 @@ fn migrate_items(conn: &Connection) -> rusqlite::Result<()> {
             write.execute(params![crate::transcript::new_id(), thread, seq, data, at])?;
         }
     }
-    tx.execute_batch("DROP TABLE items_v1")?;
+    // The search triggers moved to the old table with the rename and go with it: have
+    // `search::ensure_schema` set the index up again.
+    tx.execute_batch("DROP TABLE items_old")?;
+    if tx.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_state'")?.exists([])? {
+        tx.execute_batch("DELETE FROM search_state WHERE key = 'version'")?;
+    }
     tx.commit()
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
-        migrate(&conn)?;
-        Ok(Store { conn: Arc::new(Mutex::new(conn)) })
+        Store::with_connection(Connection::open(path)?)
     }
 
     pub fn open_default() -> Result<Store> {
@@ -312,10 +326,13 @@ impl Store {
     }
 
     pub fn in_memory() -> Result<Store> {
-        let conn = Connection::open_in_memory()?;
+        Store::with_connection(Connection::open_in_memory()?)
+    }
+
+    fn with_connection(conn: Connection) -> Result<Store> {
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Store { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Store { conn: Arc::new(Mutex::new(conn)), indexer: Arc::default() })
     }
 
     fn with<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> Result<R> {
@@ -639,12 +656,15 @@ impl Store {
     }
 
     /// Write what changed in a live transcript since its last save, in one transaction, and mark
-    /// it saved. Nothing is written when nothing changed.
-    pub fn save_transcript(&self, thread_id: &str, transcript: &mut Transcript) -> Result<()> {
+    /// it saved. Nothing is written when nothing changed. Returns true when the new rows were too
+    /// much text to index on the spot (an imported transcript's first save): they're searchable
+    /// once `backfill_search` has run.
+    pub fn save_transcript(&self, thread_id: &str, transcript: &mut Transcript) -> Result<bool> {
         let changes = transcript.changes();
         if changes.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
+        let defer = search::defer_indexing(changes.appended.iter().map(|(_, item)| *item));
         {
             let mut conn = self.conn.lock().expect("store lock");
             let tx = conn.transaction()?;
@@ -652,23 +672,31 @@ impl Store {
             for (id, item) in &changes.changed {
                 update_row(&tx, id, item)?;
             }
-            append_rows(&tx, thread_id, changes.appended)?;
+            if defer {
+                search::append_unindexed(&tx, thread_id, changes.appended)?;
+            } else {
+                append_rows(&tx, thread_id, changes.appended)?;
+            }
             tx.commit()?;
         }
         transcript.mark_saved();
-        Ok(())
+        Ok(defer)
     }
 }
 
-fn append_rows<'a>(c: &Connection, thread_id: &str, items: impl IntoIterator<Item = (&'a str, &'a Item)>) -> rusqlite::Result<()> {
+/// Insert rows after a thread's last one. Returns the first and last new `pk`.
+fn append_rows<'a>(c: &Connection, thread_id: &str, items: impl IntoIterator<Item = (&'a str, &'a Item)>) -> rusqlite::Result<Option<(i64, i64)>> {
     let mut seq: i64 = c.query_row("SELECT COALESCE(MAX(seq), -1) + 1 FROM items WHERE thread_id = ?1", [thread_id], |r| r.get(0))?;
     let mut st = c.prepare_cached("INSERT INTO items (id, thread_id, seq, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)")?;
     let now = now_ms();
+    let mut pks = None;
     for (id, item) in items {
         st.execute(params![id, thread_id, seq, serde_json::to_string(item).unwrap_or_default(), now])?;
+        let pk = c.last_insert_rowid();
+        pks = Some((pks.map_or(pk, |(first, _)| first), pk));
         seq += 1;
     }
-    Ok(())
+    Ok(pks)
 }
 
 fn update_row(c: &Connection, id: &str, item: &Item) -> rusqlite::Result<usize> {
@@ -833,6 +861,48 @@ mod tests {
         let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
         s.with(|c| c.execute("UPDATE items SET thread_id = ?1 WHERE thread_id = 'a'", [&t.id])).unwrap();
         assert_eq!(s.search("second", 5).unwrap()[0].position, Some(1));
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ids_without_a_default_get_one_and_keep_their_rows() {
+        let dir = std::env::temp_dir().join(format!("trek-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        let (thread, rows) = {
+            let s = Store::open(&path).unwrap();
+            let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+            let mut tr = Transcript::default();
+            tr.push(Item::User { text: "harbour lights".into(), images: vec![], at: None });
+            tr.push(said("the harbour is dark"));
+            s.save_transcript(&t.id, &mut tr).unwrap();
+            // Put the table back the way the first build with ids made it: no default for `id`.
+            s.with(|c| {
+                c.execute_batch(
+                    "PRAGMA writable_schema = ON;
+                     UPDATE sqlite_master SET sql = 'CREATE TABLE items (pk INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE (thread_id, seq))' WHERE type = 'table' AND name = 'items';
+                     PRAGMA writable_schema = OFF;",
+                )
+            })
+            .unwrap();
+            let pks: Vec<(i64, String)> = s.with(|c| c.prepare("SELECT pk, id FROM items ORDER BY seq")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()).unwrap();
+            (t.id, pks)
+        };
+        {
+            let c = Connection::open(&path).unwrap();
+            let insert = c.execute("INSERT INTO items (thread_id, seq, data, created_at) VALUES ('x', 0, '{}', 1)", []);
+            assert!(insert.is_err(), "the reconstructed table has no default");
+        }
+        let s = Store::open(&path).unwrap();
+        let pks: Vec<(i64, String)> = s.with(|c| c.prepare("SELECT pk, id FROM items ORDER BY seq")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()).unwrap();
+        assert_eq!(pks, rows);
+        // The index is set up again (triggers included) and refilled in the background.
+        while s.backfill_search(100).unwrap() {}
+        assert_eq!(s.search("harbour", 5).unwrap()[0].item_id.as_deref(), Some(rows[0].1.as_str()));
+        let data = serde_json::to_string(&said("lighthouse keeper")).unwrap();
+        s.with(|c| c.execute("INSERT INTO items (thread_id, seq, data, created_at) VALUES (?1, 2, ?2, 1)", params![thread, data])).unwrap();
+        assert_eq!(s.search("lighthouse", 5).unwrap()[0].position, Some(2));
         drop(s);
         let _ = std::fs::remove_dir_all(dir);
     }

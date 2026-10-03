@@ -26,6 +26,9 @@ pub struct TrekWindow {
     right_panel: Entity<RightPanel>,
     onboarding: Entity<Onboarding>,
     palette: Entity<CommandPalette>,
+    /// Takes keyboard focus when whatever had it leaves the screen (the composer, once a settings
+    /// page opens): with nothing focused, keys reach none of the window's shortcuts, ⌘K included.
+    focus: FocusHandle,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
     _subscriptions: Vec<Subscription>,
@@ -72,6 +75,7 @@ impl TrekWindow {
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
                 }
             }),
+            cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
@@ -86,7 +90,26 @@ impl TrekWindow {
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
         }
-        Self { workspace, sidebar, thread_view, composer, settings, settings_nav, right_panel, onboarding, palette, panel_drag: None, _subscriptions: subscriptions }
+        Self {
+            workspace,
+            sidebar,
+            thread_view,
+            composer,
+            settings,
+            settings_nav,
+            right_panel,
+            onboarding,
+            palette,
+            focus: cx.focus_handle(),
+            panel_drag: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Where `focus` lives: inside the window's action handlers, and too small to take clicks
+    /// (clicking the transcript leaves the composer focused).
+    fn focus_anchor(&self) -> Div {
+        div().absolute().size_0().track_focus(&self.focus)
     }
 
     /// A thread needs the user or finished: toast, banner and sound per the notification settings.
@@ -282,6 +305,7 @@ impl Render for TrekWindow {
                 .text_color(cx.theme().foreground)
                 .child(TitleBar::new())
                 .child(self.onboarding.clone())
+                .child(self.focus_anchor())
                 .into_any_element();
         }
         let in_settings = matches!(route, Route::Settings(_));
@@ -397,6 +421,7 @@ impl Render for TrekWindow {
                     .child(img(crate::ui::background_source(&spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
                     .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
             })
+            .child(self.focus_anchor())
             .child(self.title_bar(cx))
             .child(
                 h_flex()

@@ -47,9 +47,58 @@ struct Rows {
 
 impl Rows {
     fn row_of(&self, item: usize) -> Option<usize> {
-        let last = self.rows.len().checked_sub(1)?;
-        Some(self.item_row.get(item).copied().unwrap_or(last).min(last))
+        row_of(&self.item_row, self.rows.len(), item)
     }
+}
+
+fn row_of(item_row: &[usize], rows: usize, item: usize) -> Option<usize> {
+    let last = rows.checked_sub(1)?;
+    Some(item_row.get(item).copied().unwrap_or(last).min(last))
+}
+
+/// What a row shows, by item position.
+#[derive(Debug, PartialEq)]
+enum Slot {
+    /// A message, notice or turn end: a row of its own.
+    Item(usize),
+    /// Consecutive tool calls and finished thoughts, folded into one row.
+    Group(Vec<usize>),
+}
+
+/// How a transcript lays out as rows, and which row shows each item. A live thought (the
+/// working bar shows it) and an empty one have no row: they map to the row after them, the
+/// group they sit in, or past the end when nothing follows.
+fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usize>) {
+    let mut slots = Vec::new();
+    let mut item_row = vec![0; items.len()];
+    let mut group: Vec<usize> = Vec::new();
+    let flush = |group: &mut Vec<usize>, slots: &mut Vec<Slot>, item_row: &mut [usize]| {
+        if group.is_empty() {
+            return;
+        }
+        for &ix in group.iter() {
+            item_row[ix] = slots.len();
+        }
+        slots.push(Slot::Group(std::mem::take(group)));
+    };
+    for (ix, item) in items.iter().enumerate() {
+        match item {
+            Item::Tool { .. } => group.push(ix),
+            Item::Reasoning { text } => {
+                item_row[ix] = slots.len();
+                if live_reasoning != Some(ix) && !text.trim().is_empty() {
+                    group.push(ix);
+                }
+            }
+            _ => {
+                flush(&mut group, &mut slots, &mut item_row);
+                item_row[ix] = slots.len();
+                slots.push(Slot::Item(ix));
+            }
+        }
+    }
+    flush(&mut group, &mut slots, &mut item_row);
+    (slots, item_row)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -306,7 +355,14 @@ impl ThreadView {
             ItemRef::Id(id) => live.items.position(id),
             ItemRef::Position(p) => Some(*p),
         };
+        // A long message of yours shows ten lines until opened; the match may lie further down.
+        let open = item.filter(|ix| matches!(live.items.get(*ix), Some(Item::User { .. }))).and_then(|ix| live.item_ids().get(ix).cloned());
         self.revealed = r.seq;
+        if let Some(key) = open {
+            if self.expanded.insert(key) {
+                self.expanded_gen += 1;
+            }
+        }
         let Some(row) = item.and_then(|ix| self.rows(cx).row_of(ix)) else { return };
         self.flash = Some((row, r.seq));
         let seq = r.seq;
@@ -319,7 +375,10 @@ impl ThreadView {
                 }
             });
         }));
-        self.scroller.update(cx, |s, cx| _ = s.scroll_to_item(row, cx));
+        self.scroller.update(cx, |s, cx| {
+            let _ = s.remeasure_items(row..row + 1, cx);
+            let _ = s.scroll_to_item(row, cx);
+        });
         cx.notify();
     }
 
@@ -340,99 +399,89 @@ impl ThreadView {
         let ws = self.workspace.read(cx);
         let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return Rows { rows: vec![], item_row: vec![] } };
         let ids = live.item_ids();
-        let mut out: Vec<Row> = Vec::new();
-        let mut item_row = vec![0; live.items.len()];
-        let mut pending: Vec<(usize, Row, ToolKind, bool)> = Vec::new();
-        let flush = |pending: &mut Vec<(usize, Row, ToolKind, bool)>, out: &mut Vec<Row>, item_row: &mut [usize]| {
-            if pending.is_empty() {
-                return;
-            }
-            let ix = pending[0].0;
-            let key: SharedString = ids[ix].clone().into();
-            let kinds: Vec<ToolKind> = pending.iter().map(|p| p.2).collect();
-            let tool_kinds: Vec<ToolKind> = kinds.iter().copied().filter(|k| *k != ToolKind::Thought).collect();
-            let running = pending.iter().any(|p| p.3);
-            for p in pending.iter() {
-                item_row[p.0] = out.len();
-            }
-            let tools: Vec<Row> = pending.drain(..).map(|p| p.1).collect();
-            out.push(Row::ToolGroup {
-                ix,
-                open: self.expanded.contains(key.as_ref()),
-                key,
-                summary: summarize(&tool_kinds).into(),
-                kind: tool_kinds.last().copied().unwrap_or(ToolKind::Thought),
-                running,
-                tools,
-            });
-        };
-        for (ix, item) in live.items.iter().enumerate() {
-            let key = &ids[ix];
-            if let Item::Tool { id: tool_id, title, detail, output, status } = item {
-                // A running sub-agent shows what it's doing right now.
-                let activity = live.tasks.iter().find(|t| &t.id == tool_id && t.done.is_none()).map(|t| {
-                    let steps = if t.tool_uses == 1 { "1 step".to_string() } else { format!("{} steps", t.tool_uses) };
-                    SharedString::from(if t.activity.is_empty() { steps } else { format!("{} · {steps}", t.activity) })
-                });
-                pending.push((
-                    ix,
-                    Row::Tool {
+        let (slots, item_row) = layout(&live.items, live.reasoning);
+        let rows = slots
+            .into_iter()
+            .map(|slot| match slot {
+                Slot::Group(members) => {
+                    let ix = members[0];
+                    let key: SharedString = ids[ix].clone().into();
+                    let mut kinds = Vec::with_capacity(members.len());
+                    let mut running = false;
+                    let tools: Vec<Row> = members
+                        .into_iter()
+                        .filter_map(|ix| {
+                            let key = &ids[ix];
+                            match &live.items[ix] {
+                                Item::Tool { id: tool_id, title, detail, output, status } => {
+                                    // A running sub-agent shows what it's doing right now.
+                                    let activity = live.tasks.iter().find(|t| &t.id == tool_id && t.done.is_none()).map(|t| {
+                                        let steps = if t.tool_uses == 1 { "1 step".to_string() } else { format!("{} steps", t.tool_uses) };
+                                        SharedString::from(if t.activity.is_empty() { steps } else { format!("{} · {steps}", t.activity) })
+                                    });
+                                    kinds.push(tool_kind(title));
+                                    running |= *status == ToolStatus::Running;
+                                    Some(Row::Tool {
+                                        ix,
+                                        key: key.clone().into(),
+                                        title: title.clone().into(),
+                                        detail: detail.clone().into(),
+                                        output: output.clone().into(),
+                                        status: *status,
+                                        open: self.expanded.contains(key),
+                                        activity,
+                                    })
+                                }
+                                // Finished thoughts fold into the group; live thinking has no row
+                                // (the trail bar above the composer is the one "working" indicator).
+                                _ => self.md.get(key).map(|(md, _)| {
+                                    kinds.push(ToolKind::Thought);
+                                    Row::Reasoning { ix, key: key.clone().into(), md: md.clone(), live: false, open: self.expanded.contains(key) }
+                                }),
+                            }
+                        })
+                        .collect();
+                    let tool_kinds: Vec<ToolKind> = kinds.into_iter().filter(|k| *k != ToolKind::Thought).collect();
+                    Row::ToolGroup {
                         ix,
-                        key: key.clone().into(),
-                        title: title.clone().into(),
-                        detail: detail.clone().into(),
-                        output: output.clone().into(),
-                        status: *status,
-                        open: self.expanded.contains(key),
-                        activity,
-                    },
-                    tool_kind(title),
-                    *status == ToolStatus::Running,
-                ));
-                continue;
-            }
-            if let Item::Reasoning { text } = item {
-                // Live thinking has no row of its own: the trail bar above the composer is the
-                // one "working" indicator. Finished thoughts fold into the tool group.
-                item_row[ix] = out.len();
-                if live.reasoning != Some(ix) && !text.trim().is_empty() {
-                    if let Some((md, _)) = self.md.get(key) {
-                        let row = Row::Reasoning { ix, key: key.clone().into(), md: md.clone(), live: false, open: self.expanded.contains(key) };
-                        pending.push((ix, row, ToolKind::Thought, false));
+                        open: self.expanded.contains(key.as_ref()),
+                        key,
+                        summary: summarize(&tool_kinds).into(),
+                        kind: tool_kinds.last().copied().unwrap_or(ToolKind::Thought),
+                        running,
+                        tools,
                     }
                 }
-                continue;
-            }
-            flush(&mut pending, &mut out, &mut item_row);
-            item_row[ix] = out.len();
-            out.push(match item {
-                Item::User { text, images, at } => {
-                    Row::User { ix, key: key.clone().into(), text: text.clone().into(), open: self.expanded.contains(key), images: images.clone(), at: *at }
+                Slot::Item(ix) => {
+                    let key = &ids[ix];
+                    match &live.items[ix] {
+                        Item::User { text, images, at } => {
+                            Row::User { ix, key: key.clone().into(), text: text.clone().into(), open: self.expanded.contains(key), images: images.clone(), at: *at }
+                        }
+                        Item::TurnEnd { at, took_secs } => {
+                            // Everything the agent said since the last message of yours.
+                            let start = live.items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
+                            let text = live.items[start..ix]
+                                .iter()
+                                .filter_map(|i| if let Item::Assistant { text } = i { Some(text.trim()) } else { None })
+                                .filter(|t| !t.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            Row::TurnEnd { ix, text: text.into(), at: *at, took_secs: *took_secs }
+                        }
+                        Item::Assistant { .. } => match self.md.get(key) {
+                            Some((s, _)) => Row::Assistant(s.clone()),
+                            None => Row::Notice("".into()),
+                        },
+                        // Notices are plain text; drop the light markdown the built-in commands use.
+                        Item::Notice { text } => Row::Notice(text.replace("**", "").replace('`', "").into()),
+                        Item::Error { text } => Row::Error(text.clone().into()),
+                        Item::Tool { .. } | Item::Reasoning { .. } => unreachable!("grouped by layout()"),
+                    }
                 }
-                Item::TurnEnd { at, took_secs } => {
-                    // Everything the agent said since the last message of yours.
-                    let start = live.items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
-                    let text = live.items[start..ix]
-                        .iter()
-                        .filter_map(|i| if let Item::Assistant { text } = i { Some(text.trim()) } else { None })
-                        .filter(|t| !t.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    Row::TurnEnd { ix, text: text.into(), at: *at, took_secs: *took_secs }
-                }
-                Item::Assistant { .. } => match self.md.get(key) {
-                    Some((s, _)) => Row::Assistant(s.clone()),
-                    None => Row::Notice("".into()),
-                },
-                Item::Reasoning { .. } => unreachable!(),
-                // Notices are plain text; drop the light markdown the built-in commands use.
-                Item::Notice { text } => Row::Notice(text.replace("**", "").replace('`', "").into()),
-                Item::Error { text } => Row::Error(text.clone().into()),
-                Item::Tool { .. } => unreachable!(),
-            });
-        }
-        flush(&mut pending, &mut out, &mut item_row);
-        Rows { rows: out, item_row }
+            })
+            .collect();
+        Rows { rows, item_row }
     }
 
     /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
@@ -1025,5 +1074,60 @@ impl Render for ThreadView {
                 ),
             )
             .children(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Slot, layout, row_of};
+    use trek_core::store::{Item, ToolStatus};
+
+    fn user(t: &str) -> Item {
+        Item::User { text: t.into(), images: vec![], at: None }
+    }
+    fn said(t: &str) -> Item {
+        Item::Assistant { text: t.into() }
+    }
+    fn thought(t: &str) -> Item {
+        Item::Reasoning { text: t.into() }
+    }
+    fn tool(id: &str) -> Item {
+        Item::Tool { id: id.into(), title: "Ran ls".into(), detail: String::new(), output: String::new(), status: ToolStatus::Done }
+    }
+
+    #[test]
+    fn tool_calls_and_finished_thoughts_fold_into_one_row() {
+        let items = [user("go"), thought("plan"), tool("a"), tool("b"), said("done"), Item::TurnEnd { at: 1, took_secs: 2 }];
+        let (slots, item_row) = layout(&items, None);
+        assert_eq!(slots, [Slot::Item(0), Slot::Group(vec![1, 2, 3]), Slot::Item(4), Slot::Item(5)]);
+        assert_eq!(item_row, [0, 1, 1, 1, 2, 3]);
+        // A message hit on the answer lands on its own row, past the folded group.
+        assert_eq!(row_of(&item_row, slots.len(), 4), Some(2));
+    }
+
+    #[test]
+    fn empty_and_live_thoughts_point_at_the_next_row() {
+        // An empty thought between two messages; a live one at the tail.
+        let items = [user("go"), thought(" "), said("answer"), tool("a"), thought("still thinking")];
+        let (slots, item_row) = layout(&items, Some(4));
+        assert_eq!(slots, [Slot::Item(0), Slot::Item(2), Slot::Group(vec![3])]);
+        assert_eq!(item_row[1], 1);
+        // The live thought sits inside the open group (it isn't flushed yet), so it maps there.
+        assert_eq!(item_row[4], 2);
+        // Nothing after it: clamped to the last row.
+        let items = [user("go"), thought("live")];
+        let (slots, item_row) = layout(&items, Some(1));
+        assert_eq!(slots, [Slot::Item(0)]);
+        assert_eq!(row_of(&item_row, slots.len(), 1), Some(0));
+        assert_eq!(row_of(&item_row, slots.len(), 9), Some(0));
+        assert_eq!(row_of(&[], 0, 0), None);
+    }
+
+    #[test]
+    fn groups_split_at_messages() {
+        let items = [tool("a"), said("between"), thought("t"), tool("b"), user("next")];
+        let (slots, item_row) = layout(&items, None);
+        assert_eq!(slots, [Slot::Group(vec![0]), Slot::Item(1), Slot::Group(vec![2, 3]), Slot::Item(4)]);
+        assert_eq!(item_row, [0, 1, 2, 2, 3]);
     }
 }

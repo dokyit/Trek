@@ -244,10 +244,10 @@ impl Sidebar {
     fn content_hit(&self, t: &Thread, cx: &App) -> Option<SearchHit> {
         let ws = self.workspace.read(cx);
         let q = ws.search.trim().to_lowercase();
-        if q.is_empty() || t.title.to_lowercase().contains(&q) {
+        if q.is_empty() {
             return None;
         }
-        ws.search_hits.get(&t.id).cloned()
+        ws.search_results.content_hit(&q, t).cloned()
     }
 
     /// Open a thread from the list; a thread found by its messages opens at the match.

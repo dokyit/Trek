@@ -72,6 +72,17 @@ impl Transcript {
         self.ids.iter().position(|i| i == id)
     }
 
+    /// Put history that isn't in the store (read from another agent while this transcript was
+    /// collecting items) in front of everything here. Only for transcripts with nothing stored
+    /// yet: rows are appended in transcript order, after the thread's last stored one.
+    pub fn prepend_unsaved(&mut self, history: Vec<Item>) {
+        debug_assert!(self.ids.iter().all(|id| self.unsaved.contains(id)) && self.removed.is_empty(), "stored rows would end up out of order");
+        let ids: Vec<String> = history.iter().map(|_| new_id()).collect();
+        self.unsaved.extend(ids.iter().cloned());
+        self.ids.splice(0..0, ids);
+        self.items.splice(0..0, history);
+    }
+
     /// Append an item; returns its index.
     pub fn push(&mut self, item: Item) -> usize {
         let id = new_id();
@@ -256,5 +267,16 @@ mod tests {
         assert_eq!(t.ids().len(), 2);
         assert_ne!(t.ids()[0], t.ids()[1]);
         assert_eq!(appended(&t), vec![text("1"), text("2")]);
+    }
+
+    #[test]
+    fn history_read_late_goes_before_what_arrived_meanwhile() {
+        let mut t = Transcript::default();
+        let ix = t.push(text("arrived while loading"));
+        let id = t.ids()[ix].clone();
+        t.prepend_unsaved(vec![text("old 1"), text("old 2")]);
+        assert_eq!(t.position(&id), Some(2));
+        assert_eq!(t.ids().len(), 3);
+        assert_eq!(appended(&t), vec![text("old 1"), text("old 2"), text("arrived while loading")]);
     }
 }
