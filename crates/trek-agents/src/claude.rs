@@ -140,6 +140,13 @@ fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> 
     control_response(request_id, json!({ "behavior": "allow", "updatedInput": input }))
 }
 
+/// The answer to a request to use one of Trek's orchestration tools (`trek-orchestrate`): allowed.
+fn trek_tool_allowed(v: &Value) -> Option<Value> {
+    let r = &v["request"];
+    let ours = v["type"] == "control_request" && r["subtype"] == "can_use_tool" && r["tool_name"].as_str()?.starts_with("mcp__trek-orchestrate__");
+    ours.then(|| control_response(v["request_id"].as_str().unwrap_or_default(), json!({ "behavior": "allow", "updatedInput": r["input"] })))
+}
+
 /// The CLI's arguments for a session (MCP servers aside).
 fn cli_args(config: &SessionConfig) -> Vec<String> {
     let mode = if config.plan { "plan" } else { config.hand_holding.claude_mode() };
@@ -182,7 +189,24 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
     if config.fast.is_some() {
         flag(&mut args, "--settings", r#"{"fastMode":true}"#);
     }
+    // Denied tools stay denied whatever the user's allow rules say; asking to run anything else
+    // still comes to Trek, which declines it for a session that only advises.
+    if config.read_only {
+        flag(&mut args, "--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit");
+    }
     args
+}
+
+/// `mcpServers` for `--mcp-config`, with a per-server `timeout` (ms) where a server's calls may
+/// run long: it lifts both Claude Code's limit on one call and its idle limit (half an hour).
+fn claude_mcp_servers(servers: &[crate::McpServer]) -> Value {
+    let mut out = mcp_servers_json(servers);
+    for s in servers {
+        if let (Some(secs), Some(entry)) = (s.tool_timeout_secs, out.get_mut(&s.name)) {
+            entry["timeout"] = json!(secs * 1000);
+        }
+    }
+    out
 }
 
 /// A session to cut back that isn't on disk with that message (deleted, or the message is from
@@ -424,7 +448,7 @@ pub async fn run(
     let mcp_file = if config.mcp_servers.is_empty() {
         None
     } else {
-        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": mcp_servers_json(&config.mcp_servers) }))?)?)
+        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": claude_mcp_servers(&config.mcp_servers) }))?)?)
     };
     let mut cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
     let mut ctl = Control { next_id: 0 };
@@ -580,6 +604,12 @@ pub async fn run(
                             return Ok(());
                         }
                     }
+                    continue;
+                }
+                // Trek's own sub-agent tools need no approval: what a sub-agent does is asked
+                // for in its own thread, at the level Trek gives it.
+                if let Some(answer) = trek_tool_allowed(&v) {
+                    write_line(&mut cli.stdin, &answer).await?;
                     continue;
                 }
                 for ev in turns.step(&v, &mut pending, &mut streamed_text) {
@@ -1233,6 +1263,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan: false,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,
@@ -1286,12 +1317,33 @@ mod tests {
     }
 
     #[test]
+    fn trek_s_own_tools_are_allowed_without_asking() {
+        let ask = |tool: &str| json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":tool,"input":{"title":"x"}}});
+        let ok = trek_tool_allowed(&ask("mcp__trek-orchestrate__delegate_task")).unwrap();
+        assert_eq!(ok["response"]["request_id"], "r1");
+        assert_eq!(ok["response"]["response"], json!({"behavior":"allow","updatedInput":{"title":"x"}}));
+        assert_eq!(trek_tool_allowed(&ask("mcp__other__delete_everything")), None);
+        assert_eq!(trek_tool_allowed(&ask("Bash")), None);
+    }
+
+    #[test]
     fn mcp_config_shape() {
-        let servers = [crate::McpServer { name: "fs".into(), command: "npx".into(), args: vec!["-y".into(), "srv".into()], env: vec![("K".into(), "v".into())] }];
+        let servers = [crate::McpServer { name: "fs".into(), command: "npx".into(), args: vec!["-y".into(), "srv".into()], env: vec![("K".into(), "v".into())], tool_timeout_secs: None }];
         assert_eq!(
             json!({ "mcpServers": mcp_servers_json(&servers) }),
             json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})
         );
+        let trek = crate::McpServer { name: "trek-orchestrate".into(), command: "trek-mcp".into(), args: vec![], env: vec![], tool_timeout_secs: Some(1900) };
+        let out = claude_mcp_servers(&[trek, servers[0].clone()]);
+        assert_eq!(out["trek-orchestrate"]["timeout"], 1_900_000, "Trek's tools may wait long on a sub-agent");
+        assert!(out["fs"].get("timeout").is_none(), "others keep Claude Code's default");
+    }
+
+    #[test]
+    fn a_read_only_session_has_no_editing_tools() {
+        let args = cli_args(&SessionConfig { read_only: true, ..config() });
+        assert!(has(&args, &["--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit"]), "{args:?}");
+        assert!(!cli_args(&config()).iter().any(|a| a == "--disallowedTools"));
     }
 
     #[test]

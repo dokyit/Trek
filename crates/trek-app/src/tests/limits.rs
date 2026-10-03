@@ -591,3 +591,81 @@ fn a_side_chat_shows_its_limit_and_carries_on() {
         assert!(pause(&trek, cx, &id).is_none());
     });
 }
+
+/// The sub-agent row of `child` in `parent`'s transcript: (status, output).
+fn task_row(trek: &Trek, cx: &TestAppContext, parent: &str, child: &str) -> (trek_core::store::ToolStatus, String) {
+    let row = trek_core::orchestrate::task_row(child);
+    trek.items(cx, parent)
+        .into_iter()
+        .find_map(|i| match i {
+            Item::Tool { id, status, output, .. } if id == row => Some((status, output)),
+            _ => None,
+        })
+        .expect("a row for the sub-agent")
+}
+
+fn wakes(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<String> {
+    said(trek, cx, id).into_iter().filter(|t| trek_core::orchestrate::is_wake(t)).collect()
+}
+
+#[test]
+fn a_sub_agent_at_its_limit_reports_it_and_takes_its_task_back_up_at_the_reset() {
+    use crate::workspace::TaskState;
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        let seen = events(&trek, cx);
+        let id = trek.quiet_thread(cx);
+        let child = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Refactor", "prompt": "mock:limit 5s", "mode": "implement" }), cx)).unwrap();
+        let c = child.clone();
+        trek.wait(cx, "the sub-agent to stop at its limit", |ws| ws.task_state(&c) == TaskState::Failed).await;
+        let (status, why) = task_row(&trek, cx, &id, &child);
+        assert_eq!(status, trek_core::store::ToolStatus::Failed);
+        assert!(why.starts_with("It hit its 5-hour limit, which resets "), "{why}");
+        assert!(pause(&trek, cx, &child).is_some(), "paused, to resume at the reset");
+        // Its parent hears it (woken: it wasn't waiting); the user isn't alerted for a sub-agent.
+        let p = id.clone();
+        trek.wait(cx, "the parent to hear it", |ws| !ws.turn_running(&p) && ws.live[&p].items.iter().any(|i| matches!(i, Item::User { text, .. } if text.contains("failed: It hit its 5-hour limit")))).await;
+        assert!(!seen.borrow().iter().any(|m| m.contains("Refactor")), "{:?}", seen.borrow());
+        // The agent takes no more work until then.
+        let again = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "More", "prompt": "explain" }), cx));
+        assert!(again.unwrap_err().contains("used up its 5-hour limit (it resets "));
+
+        // Resumed at the reset (from its own thread), it picks the task back up and reports.
+        trek.update(cx, |ws, cx| ws.resume_at_reset(&child, cx));
+        lift(&trek, cx, &child);
+        let resets = pause(&trek, cx, &child).unwrap().resets_at.unwrap();
+        let now = trek.read(cx, |ws, _| ws.now());
+        skip(cx, ((resets - now) / 1000) as u64 + (RESUME_GRACE_MS / 1000) as u64 + 10);
+        trek.wait(cx, "the sub-agent to finish its task", |ws| ws.task_state(&c) == TaskState::Done).await;
+        assert!(task_row(&trek, cx, &id, &child).1.starts_with("## How the app starts"));
+        trek.wait(cx, "the parent to hear the answer", |ws| ws.live[&p].items.iter().any(|i| matches!(i, Item::User { text, .. } if text.contains("finished:")))).await;
+        assert_eq!(wakes(&trek, cx, &id).len(), 2, "once at the limit, once with its answer");
+    });
+}
+
+#[test]
+fn a_parent_paused_at_its_limit_hears_its_sub_agents_once_the_limit_lifts() {
+    use crate::workspace::TaskState;
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        let id = hit_limit(&trek, cx, "mock:limit 5s").await;
+        // Its own agent is at its limit: the sub-agent runs on another.
+        let mine = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Same", "prompt": "explain" }), cx));
+        assert!(mine.unwrap_err().contains("used up its 5-hour limit"));
+        let child = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Review", "prompt": "explain", "agent": "direct:mock-relay" }), cx)).unwrap();
+        let c = child.clone();
+        trek.wait(cx, "the sub-agent to finish", |ws| ws.task_state(&c) == TaskState::Done).await;
+        cx.run_until_parked();
+        assert!(wakes(&trek, cx, &id).is_empty(), "held while paused: it would only meet the limit");
+        lift(&trek, cx, &id);
+        let resets = pause(&trek, cx, &id).unwrap().resets_at.unwrap();
+        let now = trek.read(cx, |ws, _| ws.now());
+        skip(cx, ((resets - now) / 1000) as u64 + 10);
+        assert!(pause(&trek, cx, &id).is_none(), "the limit lifted");
+        let p = id.clone();
+        trek.wait(cx, "the wake-up", |ws| !ws.turn_running(&p) && ws.live[&p].items.iter().any(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text)))).await;
+        assert!(trek.answers(cx, &id).contains("The sub-agent reported back"), "{}", trek.answers(cx, &id));
+    });
+}

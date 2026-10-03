@@ -326,7 +326,12 @@ impl Sidebar {
     /// T3-style card: project · status on top, title below, agent glyph at the end.
     fn card(&self, t: &Thread, project: &str, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let quiet = t.run_state == RunState::Idle && !t.is_unseen() && !selected;
+        // Its sub-agents at work, by logo.
+        let kids: Vec<(trek_core::AgentId, String)> = {
+            let ws = self.workspace.read(cx);
+            ws.running_children(&t.id).into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect()
+        };
+        let quiet = t.run_state == RunState::Idle && !t.is_unseen() && !selected && kids.is_empty();
         let id = t.id.clone();
         let hit = self.content_hit(t, cx);
         let row = v_flex()
@@ -367,6 +372,20 @@ impl Sidebar {
                                 cx,
                             )),
                     )
+                    .when(!kids.is_empty(), |el| {
+                        let tip = SharedString::from(format!("Sub-agents at work:\n{}", kids.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n")));
+                        let ring = if selected { theme.list_active } else { theme.sidebar };
+                        el.child(
+                            h_flex()
+                                .id(SharedString::from(format!("card-kids-{}", t.id)))
+                                .test_support()
+                                .flex_none()
+                                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                                .children(kids.iter().take(3).enumerate().map(|(i, (a, _))| {
+                                    div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(4.)).bg(ring).child(ui::agent_logo(a, px(12.), cx))
+                                })),
+                        )
+                    })
                     .child(ui::agent_glyph(&t.agent, cx)),
             )
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-2.))))
@@ -425,6 +444,10 @@ impl Sidebar {
         };
         let cwd = t.cwd.clone();
         let in_worktree = t.worktree.is_some();
+        let (archive_note, delete_note) = {
+            let ws = self.workspace.read(cx);
+            (ws.sub_agents_note(&t.id, "archived"), ws.sub_agents_note(&t.id, "deleted"))
+        };
         let project = t.project_id.clone().and_then(|pid| self.workspace.read(cx).project(&pid).map(|p| (p.id.clone(), p.name.clone())));
         row.context_menu(move |menu, window, cx| {
             let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
@@ -545,18 +568,39 @@ impl Sidebar {
             if in_worktree {
                 return menu.separator().item(leave("Archive thread…", Leave::Archive)).item(leave("Delete…", Leave::Delete).icon(crate::assets::Lucide::Trash));
             }
-            menu.separator().item(item("Archive thread", |ws, id, cx| ws.archive(id, cx))).item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
-                let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
-                move |_, window, cx| {
+            // A thread with sub-agents asks first: they go with it.
+            let archive = match archive_note.clone() {
+                None => item("Archive thread", |ws, id, cx| ws.archive(id, cx)),
+                Some(note) => PopupMenuItem::new("Archive thread…").on_click({
                     let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
+                    move |_, window, cx| {
+                        let (ws, tid, title, note) = (ws.clone(), tid.clone(), title.clone(), note.clone());
+                        window.open_alert_dialog(cx, move |alert, _, _| {
+                            let (ws, tid) = (ws.clone(), tid.clone());
+                            alert.title(format!("Archive “{title}”?")).description(note.clone()).confirm().ok_text("Archive").on_ok(move |_, _, cx| {
+                                let _ = ws.update(cx, |ws, cx| ws.archive(&tid, cx));
+                                true
+                            })
+                        });
+                    }
+                }),
+            };
+            menu.separator().item(archive).item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
+                let (ws, tid, title, delete_note) = (ws.clone(), tid.clone(), title.clone(), delete_note.clone());
+                move |_, window, cx| {
+                    let (ws, tid, title, delete_note) = (ws.clone(), tid.clone(), title.clone(), delete_note.clone());
                     window.open_alert_dialog(cx, move |alert, _, _| {
                         let (ws, tid) = (ws.clone(), tid.clone());
+                        let base = if imported {
+                            "It leaves Trek for good. The original stays in the agent's own history."
+                        } else {
+                            "The thread and its transcript are deleted from Trek. This can't be undone."
+                        };
                         alert
                             .title(format!("Delete “{title}”?"))
-                            .description(if imported {
-                                "It leaves Trek for good. The original stays in the agent's own history."
-                            } else {
-                                "The thread and its transcript are deleted from Trek. This can't be undone."
+                            .description(match &delete_note {
+                                Some(note) => format!("{base} {note}"),
+                                None => base.to_string(),
                             })
                             .confirm()
                             .ok_text("Delete")

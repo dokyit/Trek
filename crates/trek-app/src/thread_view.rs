@@ -2,7 +2,7 @@
 //! plus the cards the agent puts to the user (approvals, questions, plans). The working bar above
 //! the composer is its own view (`working_bar`).
 
-use crate::activity::{ToolKind, kind_icon, summarize, tool_kind};
+use crate::activity::{Place, ToolKind, kind_icon, placement, summarize, tool_kind};
 use crate::palette;
 use crate::workspace::{ForkAt, ItemRef, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::Button;
@@ -20,7 +20,9 @@ use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use trek_agents::Decision;
 use trek_core::checkpoint::{Change, FileChange};
+use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
+use crate::workspace::TaskState;
 
 const COLUMN: f32 = 760.;
 /// How long a message a search result led to stays tinted (it holds, then fades).
@@ -41,6 +43,11 @@ enum Row {
     Tool { ix: usize, key: SharedString, open: bool, activity: Option<SharedString> },
     /// Consecutive tool calls folded into one summary line ("Ran 3 commands and edited 2 files").
     ToolGroup { ix: usize, key: SharedString, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
+    /// A sub-agent: one Trek runs as a thread of its own (`delegate_task`), or the agent's own
+    /// (Claude's Task, Codex's agents). `open`: its answer shows in full.
+    SubAgent { ix: usize, key: SharedString, open: bool },
+    /// Trek woke the agent with what its sub-agents came back with (a message the user didn't write).
+    Wake { ix: usize, key: SharedString, open: bool },
     Notice { ix: usize },
     Error { ix: usize },
     /// The agent stopped at a usage limit.
@@ -59,6 +66,8 @@ impl Row {
             | Row::Reasoning { ix, .. }
             | Row::Tool { ix, .. }
             | Row::ToolGroup { ix, .. }
+            | Row::SubAgent { ix, .. }
+            | Row::Wake { ix, .. }
             | Row::Notice { ix }
             | Row::Error { ix }
             | Row::Limit { ix }
@@ -110,9 +119,29 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
         }
         slots.push(Slot::Group(std::mem::take(group)));
     };
+    // Rows without a row of their own map to the row that comes next (resolved as it comes).
+    let mut hidden: Vec<usize> = Vec::new();
+    let resolve = |hidden: &mut Vec<usize>, item_row: &mut [usize], row: usize| {
+        for h in hidden.drain(..) {
+            item_row[h] = row;
+        }
+    };
     for (ix, item) in items.iter().enumerate() {
         match item {
-            Item::Tool { .. } => group.push(ix),
+            Item::Tool { .. } => match placement(item) {
+                Place::Group => {
+                    // The group's row is the next one pushed.
+                    resolve(&mut hidden, &mut item_row, slots.len());
+                    group.push(ix);
+                }
+                Place::Hidden => hidden.push(ix),
+                Place::Own => {
+                    flush(&mut group, &mut slots, &mut item_row);
+                    resolve(&mut hidden, &mut item_row, slots.len());
+                    item_row[ix] = slots.len();
+                    slots.push(Slot::Item(ix));
+                }
+            },
             Item::Reasoning { text } => {
                 item_row[ix] = slots.len();
                 if live_reasoning != Some(ix) && !text.trim().is_empty() {
@@ -121,12 +150,14 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
             }
             _ => {
                 flush(&mut group, &mut slots, &mut item_row);
+                resolve(&mut hidden, &mut item_row, slots.len());
                 item_row[ix] = slots.len();
                 slots.push(Slot::Item(ix));
             }
         }
     }
     flush(&mut group, &mut slots, &mut item_row);
+    resolve(&mut hidden, &mut item_row, slots.len());
     (slots, item_row)
 }
 
@@ -175,6 +206,8 @@ pub struct ThreadView {
     shown: Option<Shown>,
     /// The confirmation open over a message or a turn's footer (rewind, undo, retry).
     confirm: Option<Confirm>,
+    /// Redraws while a sub-agent in this thread works: its time ticks and its dot breathes.
+    _ticker: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -239,6 +272,8 @@ struct Shown {
     /// Where the transcript stops (`ThreadView::end`), which moves without a new revision too.
     end: Option<usize>,
     appearance: trek_core::settings::Appearance,
+    /// Where its sub-agents stand: they move on without a new transcript revision.
+    tasks: Vec<(String, TaskState)>,
 }
 
 /// One side of a handoff divider: the model with its agent's name ("Claude Opus 5.5", "Codex
@@ -278,7 +313,7 @@ impl ThreadView {
             }),
             cx.observe(&scroller, |_, _, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
-                this.active = window.is_window_active();
+                this.active = window.is_window_active() || crate::mascot::force_active();
                 if this.flash.is_some() {
                     cx.notify();
                 }
@@ -304,9 +339,10 @@ impl ThreadView {
             flash: None,
             _flash_timer: None,
             fonts: (0., 0.),
-            active: window.is_window_active(),
+            active: window.is_window_active() || crate::mascot::force_active(),
             shown: None,
             confirm: None,
+            _ticker: None,
             _subscriptions: subscriptions,
         };
         this.sync(false, cx);
@@ -337,8 +373,10 @@ impl ThreadView {
             picks: live.map(|l| l.picks.clone()).unwrap_or_default(),
             end: id.as_ref().and_then(|id| crate::activity::transcript_end(ws, id)),
             appearance: ws.settings.appearance.clone(),
+            tasks: id.as_ref().map(|id| ws.children(id).into_iter().map(|t| (t.id.clone(), ws.task_state(&t.id))).collect()).unwrap_or_default(),
         };
         let end = shown.end;
+        let ticking = ws.any_task_live_in(&self.scope);
         // Only the documents already built need updating: they follow their item to where it moved
         // and to its new text (while streaming, a longer tail). Those whose item left the
         // transcript go (`None`).
@@ -347,7 +385,7 @@ impl ThreadView {
             for (key, m) in &self.md {
                 let ix = if l.items.id_at(m.ix) == Some(key.as_str()) { Some(m.ix) } else { l.items.position(key) };
                 let now = ix.and_then(|ix| match &l.items[ix] {
-                    Item::Assistant { text } | Item::Reasoning { text } => Some((ix, text)),
+                    Item::Assistant { text } | Item::Reasoning { text } | Item::Tool { output: text, .. } => Some((ix, text)),
                     _ => None,
                 });
                 match now {
@@ -377,6 +415,9 @@ impl ThreadView {
             self.scroller.update(cx, |s, cx| s.reset(0, cx));
         }
         let quiet = appended && !switched && self.shown.as_ref().is_some_and(|s| Shown { revision, ..s.clone() } == shown);
+        // A sub-agent that moved on may have changed its row's height (its answer's preview).
+        let tasks_moved = !switched && (revision != self.revision || self.shown.as_ref().is_some_and(|s| s.tasks != shown.tasks));
+        self.sync_ticker(ticking, cx);
         if self.shown.as_ref() != Some(&shown) {
             self.shown = Some(shown);
             if !quiet {
@@ -384,6 +425,9 @@ impl ThreadView {
             }
         }
         if revision == self.revision && !switched && end == self.end {
+            if tasks_moved {
+                self.remeasure_sub_agents(cx);
+            }
             self.reveal(cx);
             return;
         }
@@ -444,7 +488,46 @@ impl ThreadView {
                 s.scroll_to_end(cx);
             }
         });
+        if tasks_moved {
+            self.remeasure_sub_agents(cx);
+        }
         self.reveal(cx);
+        cx.notify();
+    }
+
+    /// Redraw on a ticker while a sub-agent works: fast enough for its dot to breathe while the
+    /// window is in front, once a second (for its time) otherwise.
+    fn sync_ticker(&mut self, live: bool, cx: &mut Context<Self>) {
+        if !live {
+            self._ticker = None;
+            return;
+        }
+        if self._ticker.is_some() {
+            return;
+        }
+        self._ticker = Some(cx.spawn(async move |this, cx| loop {
+            let Ok(fast) = this.update(cx, |this, cx| {
+                cx.notify();
+                this.active && !this.workspace.read(cx).settings.appearance.reduce_motion
+            }) else {
+                break;
+            };
+            let wait = if fast { std::time::Duration::from_millis(1000 / PULSE_FPS) } else { std::time::Duration::from_secs(1) };
+            cx.background_executor().timer(wait).await;
+        }));
+    }
+
+    /// Measure the sub-agent rows again (their answers' previews come and go).
+    fn remeasure_sub_agents(&mut self, cx: &mut Context<Self>) {
+        let rows: Vec<usize> = self.rows(cx).rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::SubAgent { .. })).map(|(i, _)| i).collect();
+        if rows.is_empty() {
+            return;
+        }
+        self.scroller.update(cx, |s, cx| {
+            for r in rows {
+                let _ = s.remeasure_items(r..r + 1, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -456,7 +539,8 @@ impl ThreadView {
         let ws = self.workspace.read(cx);
         let items = &ws.live.get(self.current.as_ref()?)?.items;
         let text = match (items.id_at(ix) == Some(key)).then(|| items.get(ix)).flatten()? {
-            Item::Assistant { text } | Item::Reasoning { text } => text.clone(),
+            // A sub-agent's answer is markdown too.
+            Item::Assistant { text } | Item::Reasoning { text } | Item::Tool { output: text, .. } => text.clone(),
             _ => return None,
         };
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));
@@ -581,14 +665,16 @@ impl ThreadView {
                 Slot::Item(ix) => {
                     let key = &ids[ix];
                     match &live.items[ix] {
+                        Item::User { text, .. } if orch::is_wake(text) => Row::Wake { ix, key: key.clone().into(), open: self.expanded.contains(key) },
                         Item::User { .. } => Row::User { ix, key: key.clone().into(), open: self.expanded.contains(key) },
+                        Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) },
                         Item::TurnEnd { .. } => Row::TurnEnd { ix },
                         Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into() },
                         Item::Notice { .. } => Row::Notice { ix },
                         Item::Error { .. } => Row::Error { ix },
                         Item::Limit { .. } => Row::Limit { ix },
                         Item::Handoff { .. } => Row::Handoff { ix },
-                        Item::Tool { .. } | Item::Reasoning { .. } => unreachable!("grouped by layout()"),
+                        Item::Reasoning { .. } => unreachable!("grouped by layout()"),
                     }
                 }
             })
@@ -613,7 +699,7 @@ impl ThreadView {
     fn render_row(row: Row, row_ix: usize, flash: Option<u64>, view: &WeakEntity<ThreadView>, at: &RowContext, cx: &mut App) -> AnyElement {
         // Documents and nested rows need the app mutably; everything else only reads it.
         let md = match &row {
-            Row::Assistant { ix, key } | Row::Reasoning { ix, key, open: true } => view.update(cx, |this, cx| this.markdown(key, *ix, cx)).ok().flatten(),
+            Row::Assistant { ix, key } | Row::Reasoning { ix, key, open: true } | Row::SubAgent { ix, key, open: true } => view.update(cx, |this, cx| this.markdown(key, *ix, cx)).ok().flatten(),
             _ => None,
         };
         let children: Vec<AnyElement> = match &row {
@@ -756,8 +842,29 @@ impl ThreadView {
                 .into_any_element()
         };
         match (row, item) {
-            (Row::User { ix, key, open }, Item::User { text, images, at: sent, aside, .. }) => {
-                let text = SharedString::from(text);
+            (Row::User { ix, key, open }, Item::User { text: full, images, at: sent, aside, .. }) => {
+                // A message sent with consultants shows as written, with who it consults under it.
+                let (said, consult) = orch::split_consult(&full);
+                let consulting = consult.map(|c| {
+                    let ws = at.workspace.read(cx);
+                    let who: Vec<String> = c
+                        .consultants
+                        .iter()
+                        .map(|k| {
+                            let models = ws.models_for(&k.agent);
+                            let name = models.iter().find(|m| crate::composer::same_model(&k.model, &m.id)).map(|m| m.name.clone()).unwrap_or_else(|| k.model.clone());
+                            format!("{name} · {}", k.effort.label())
+                        })
+                        .collect();
+                    let how = match (c.style, c.implement) {
+                        (orch::Style::Advise, true) => "advice, then implement",
+                        (orch::Style::Advise, false) => "advice only",
+                        (orch::Style::Discuss, true) => "discuss, then implement",
+                        (orch::Style::Discuss, false) => "discuss, then report",
+                    };
+                    (c.consultants.iter().map(|k| k.agent.clone()).collect::<Vec<_>>(), format!("Consulting {} · {how}", who.join(", ")))
+                });
+                let text = SharedString::from(said.to_string());
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
                 let copy_text = text.clone();
@@ -765,7 +872,7 @@ impl ThreadView {
                 let busy = at.busy;
                 let (ws, thread, scope, item) = (at.workspace.clone(), at.thread.clone(), at.scope.clone(), key.to_string());
                 let edit = {
-                    let (ws, thread, scope, item, text) = (ws.clone(), thread.clone(), scope.clone(), item.clone(), text.to_string());
+                    let (ws, thread, scope, item, text) = (ws.clone(), thread.clone(), scope.clone(), item.clone(), full.clone());
                     let images: Vec<std::path::PathBuf> = images.iter().map(std::path::PathBuf::from).collect();
                     action(("edit-user", ix), Icon::new(crate::assets::Lucide::Pencil), if busy { "Stop the running turn to edit".into() } else { with_files("Edit and send again", Some(ix)) })
                         .disabled(busy)
@@ -850,6 +957,19 @@ impl ThreadView {
                                 )
                             }),
                     ))
+                    .when_some(consulting, |el, (agents, line)| {
+                        el.child(
+                            h_flex()
+                                .id(("consulting", ix))
+                                .test_support()
+                                .gap(px(6.))
+                                .max_w(relative(0.78))
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(h_flex().children(agents.iter().take(4).enumerate().map(|(i, a)| div().when(i > 0, |el| el.ml(px(-4.))).child(crate::ui::agent_logo(a, px(13.), cx)))))
+                                .child(div().min_w_0().truncate().child(line)),
+                        )
+                    })
                     .child(meta),
                 ))
                 .into_any_element()
@@ -954,11 +1074,17 @@ impl ThreadView {
                 };
                 let has_output = !output.is_empty();
                 let subagent = title == "Subagent";
-                let label = SharedString::from(if subagent { detail.clone() } else { title });
+                // Trek's own orchestration tools read as what they did; their arguments are noise.
+                let ours = orch::tool_label(&title).or_else(|| orch::is_delegate_call(&title).then_some("Couldn't start a sub-agent"));
+                let label = SharedString::from(match ours {
+                    Some(l) => l.to_string(),
+                    None if subagent => detail.clone(),
+                    None => title,
+                });
                 let code = activity.is_none();
                 let detail = match activity {
                     Some(a) => a,
-                    None if subagent => SharedString::default(),
+                    None if subagent || ours.is_some() => SharedString::default(),
                     None => detail.into(),
                 };
                 v_flex()
@@ -1009,6 +1135,127 @@ impl ThreadView {
                     })
                     .into_any_element()
             }
+            (Row::SubAgent { ix, key, open }, Item::Tool { id: row_id, detail, output, status, .. }) => {
+                let ws = at.workspace.read(cx);
+                let sub = SubAgentRow::read(ws, &at.thread, &at.agent, &row_id, &detail, &output, status);
+                let finished = !sub.state.live();
+                let has_result = finished && !output.trim().is_empty() && sub.state != TaskState::Failed;
+                let dot = match sub.state {
+                    TaskState::Running => palette::sky(cx),
+                    TaskState::NeedsYou => palette::amber(cx),
+                    TaskState::Done => palette::emerald(cx),
+                    TaskState::Failed => palette::red(cx),
+                    TaskState::Cancelled => muted.opacity(0.7),
+                };
+                // A slow breath while it works (the view re-renders on a ticker meanwhile).
+                let breath = if sub.state == TaskState::Running && at.pulse { 0.45 + 0.55 * (0.5 - 0.5 * (at.clock * std::f32::consts::TAU / 2.4).cos()) } else { 1. };
+                let logo = div()
+                    .relative()
+                    .flex_none()
+                    .size(px(22.))
+                    .child(match &sub.agent {
+                        Some(a) => crate::ui::agent_logo(a, px(22.), cx),
+                        None => Icon::new(crate::assets::Lucide::Users).size(px(18.)).text_color(muted).into_any_element(),
+                    })
+                    .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(9.)).rounded_full().border_2().border_color(theme.background).bg(dot.opacity(breath)));
+                let opener = match sub.child.clone() {
+                    Some(child) => {
+                        let ws = at.workspace.clone();
+                        Button::new(("subagent-open", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::ChevronRight).text_color(muted))
+                            .tooltip("Open the sub-agent's thread")
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                crate::thread_window::open(ws.clone(), &child, cx);
+                            })
+                            .into_any_element()
+                    }
+                    None if has_result => Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted).into_any_element(),
+                    None => div().into_any_element(),
+                };
+                let preview = (has_result && !open).then(|| orch::plain_preview(&output, 240));
+                column(
+                    v_flex()
+                        .py(px(3.))
+                        .child(
+                            h_flex()
+                                .id(("subagent", ix))
+                                .test_support()
+                                .gap(px(10.))
+                                .px(px(8.))
+                                .py(px(6.))
+                                .mx(px(-8.))
+                                .rounded(px(8.))
+                                .when(has_result, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
+                                .child(logo)
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().text_size(px(13.5)).font_medium().truncate().child(sub.label))
+                                        .child(div().text_size(px(12.5)).text_color(muted).truncate().child(sub.detail)),
+                                )
+                                .when_some(sub.elapsed, |el, d| el.child(div().flex_none().text_xs().text_color(muted).child(crate::time::elapsed(d))))
+                                .child(opener),
+                        )
+                        .when_some(preview, |el, p| {
+                            el.child(div().pl(px(32.)).pr(px(28.)).pb(px(2.)).text_size(px(12.5)).line_height(relative(1.45)).text_color(muted).line_clamp(2).child(p))
+                        })
+                        .when_some(md.filter(|_| open && has_result), |el, md| {
+                            el.child(
+                                div()
+                                    .ml(px(10.))
+                                    .mt_1()
+                                    .pl(px(21.))
+                                    .border_l_1()
+                                    .border_color(theme.foreground.opacity(0.07))
+                                    .text_size(text_size * 0.93)
+                                    .line_height(relative(1.55))
+                                    .child(crate::md::view(&md, at.cwd.clone(), cx)),
+                            )
+                        }),
+                )
+                .into_any_element()
+            }
+            (Row::Wake { ix, key, open }, Item::User { text, .. }) => column(
+                v_flex()
+                    .py_1()
+                    .child(
+                        h_flex()
+                            .id(("wake", ix))
+                            .test_support()
+                            .gap(px(8.))
+                            .text_size(px(12.5))
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(Icon::new(crate::assets::Lucide::CornerDownRight).xsmall())
+                            .child(div().min_w_0().truncate().child(orch::wake_summary(&text)))
+                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
+                            .on_click(toggle(key.clone())),
+                    )
+                    .when(open, |el| {
+                        el.child(
+                            div()
+                                .id(("wake-text", ix))
+                                .mt_1()
+                                .ml(px(6.))
+                                .pl(px(15.))
+                                .border_l_1()
+                                .border_color(theme.foreground.opacity(0.07))
+                                .max_h(px(320.))
+                                .overflow_y_scroll()
+                                .text_size(px(12.5))
+                                .line_height(relative(1.5))
+                                .text_color(muted)
+                                .whitespace_normal()
+                                .child(text),
+                        )
+                    }),
+            )
+            .into_any_element(),
             // Notices are plain text; drop the light markdown the built-in commands use.
             (Row::Notice { ix }, Item::Notice { text }) => {
                 // An interrupted turn can be taken back or tried again from here.
@@ -1568,6 +1815,95 @@ impl ThreadView {
     }
 }
 
+/// What a sub-agent row shows.
+struct SubAgentRow {
+    /// Whose logo it wears: the agent running it.
+    agent: Option<trek_core::AgentId>,
+    /// "Sol: Review the cache design"
+    label: String,
+    /// Where it stands, and what it's doing or why it failed.
+    detail: String,
+    state: TaskState,
+    elapsed: Option<std::time::Duration>,
+    /// The thread it runs in, for one Trek runs.
+    child: Option<String>,
+}
+
+impl SubAgentRow {
+    /// The row for transcript item `row_id` of `thread` (whose agent is `agent`).
+    fn read(ws: &Workspace, thread: &str, agent: &trek_core::AgentId, row_id: &str, detail: &str, output: &str, status: ToolStatus) -> SubAgentRow {
+        let by_status = match status {
+            ToolStatus::Running => TaskState::Running,
+            ToolStatus::Done => TaskState::Done,
+            ToolStatus::Failed => TaskState::Failed,
+            ToolStatus::Denied => TaskState::Cancelled,
+        };
+        let with_error = |state: TaskState| match state {
+            TaskState::Failed if !output.trim().is_empty() => format!("{} · {}", state.label(), orch::preview(output, 140)),
+            _ => state.label().to_string(),
+        };
+        if let Some(child) = orch::task_of_row(row_id) {
+            let Some(t) = ws.thread(child) else {
+                // Its thread is gone (deleted, or archived on its own): what the row kept.
+                let state = if by_status == TaskState::Running { TaskState::Cancelled } else { by_status };
+                return SubAgentRow { agent: None, label: detail.to_string(), detail: with_error(state), state, elapsed: None, child: None };
+            };
+            let state = ws.task_state(child);
+            let detail = match state {
+                TaskState::Running => {
+                    // Its latest step, worded as the working bar words it ("Read src/auth.rs").
+                    let step = ws.live.get(child).and_then(|l| {
+                        l.items.iter().rev().find_map(|i| match i {
+                            Item::Tool { title, detail, .. } => {
+                                let op = crate::activity::op(title, detail, t.cwd.as_deref());
+                                let words = if op.verb.is_empty() || op.text.is_empty() { format!("{}{}", op.verb, op.text) } else { format!("{} {}", op.verb, op.text) };
+                                Some(orch::preview(&words, 90))
+                            }
+                            _ => None,
+                        })
+                    });
+                    step.map_or_else(|| state.label().to_string(), |s| format!("{} · {s}", state.label()))
+                }
+                other => with_error(other),
+            };
+            return SubAgentRow {
+                agent: Some(t.agent.clone()),
+                label: format!("{}: {}", ws.model_label(t), t.title),
+                detail,
+                state,
+                elapsed: Some(ws.task_elapsed(child)),
+                child: Some(child.to_string()),
+            };
+        }
+        // One of the agent's own.
+        let task = ws.live.get(thread).and_then(|l| l.tasks.iter().find(|t| t.id == row_id));
+        let state = match task.map(|t| t.done) {
+            Some(None) => TaskState::Running,
+            Some(Some(true)) => TaskState::Done,
+            Some(Some(false)) => TaskState::Failed,
+            None => by_status,
+        };
+        let steps = |n: u64| if n == 1 { "1 step".to_string() } else { format!("{n} steps") };
+        let line = match task {
+            Some(t) if state == TaskState::Running && !t.activity.is_empty() => format!("{} · {}", t.activity, steps(t.tool_uses)),
+            Some(t) if t.tool_uses > 0 => format!("{} · {}", state.label(), steps(t.tool_uses)),
+            _ => with_error(state),
+        };
+        SubAgentRow {
+            agent: Some(agent.clone()),
+            label: if detail.trim().is_empty() { "Sub-agent".into() } else { detail.to_string() },
+            detail: line,
+            state,
+            elapsed: task.map(|t| t.ended.unwrap_or_else(std::time::Instant::now).saturating_duration_since(t.started)),
+            child: None,
+        }
+    }
+}
+
+/// Frames a second for a working sub-agent's breathing dot (once a second when the window is in
+/// the background or motion is reduced).
+const PULSE_FPS: u64 = 5;
+
 /// What every row of one render shares.
 struct RowContext {
     workspace: Entity<Workspace>,
@@ -1587,6 +1923,9 @@ struct RowContext {
     cwd: Option<std::path::PathBuf>,
     /// The search-result tint fades (the window is in front and motion isn't reduced).
     animate: bool,
+    /// Working sub-agents' dots breathe, at `clock` (seconds).
+    pulse: bool,
+    clock: f32,
 }
 
 impl Render for ThreadView {
@@ -1620,6 +1959,8 @@ impl Render for ThreadView {
             text_size: px(ws.settings.appearance.transcript_font_size()),
             cwd: ws.cwd_in(&self.scope),
             animate: self.animate(window, cx),
+            pulse: self.animate(window, cx) && self._ticker.is_some(),
+            clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,
         };
         let flash = self.flash;
         v_flex()
@@ -1684,10 +2025,22 @@ impl ThreadView {
     }
 
     /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines
-    /// under an open group), "end", "notice", "error".
+    /// under an open group), "subagent: Sol: Review (Running)", "wake", "end", "notice", "error".
     pub(crate) fn describe(&self, cx: &App) -> Vec<String> {
-        fn line(row: &Row, out: &mut Vec<String>, indent: &str) {
+        let ws = self.workspace.read(cx);
+        let thread = self.current.clone().unwrap_or_default();
+        let agent = ws.thread(&thread).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode);
+        let items = ws.live.get(&thread).map(|l| l.items.to_vec()).unwrap_or_default();
+        let line = |row: &Row, out: &mut Vec<String>, indent: &str| {
             out.push(match row {
+                Row::SubAgent { ix, .. } => match items.get(*ix) {
+                    Some(Item::Tool { id, detail, output, status, .. }) => {
+                        let sub = SubAgentRow::read(ws, &thread, &agent, id, detail, output, *status);
+                        format!("{indent}subagent: {} ({})", sub.label, sub.detail)
+                    }
+                    _ => format!("{indent}subagent"),
+                },
+                Row::Wake { .. } => format!("{indent}wake"),
                 Row::User { .. } => format!("{indent}user"),
                 Row::TurnEnd { .. } => format!("{indent}end"),
                 Row::Assistant { .. } => format!("{indent}assistant"),
@@ -1699,15 +2052,15 @@ impl ThreadView {
                 Row::Limit { .. } => format!("{indent}limit"),
                 Row::Handoff { .. } => format!("{indent}handoff"),
             });
-            if let Row::ToolGroup { open: true, tools, .. } = row {
-                for t in tools {
-                    line(t, out, "  ");
-                }
-            }
-        }
+        };
         let mut out = vec![];
         for row in self.rows(cx).rows.iter() {
             line(row, &mut out, "");
+            if let Row::ToolGroup { open: true, tools, .. } = row {
+                for t in tools {
+                    line(t, &mut out, "  ");
+                }
+            }
         }
         out
     }
@@ -1768,6 +2121,20 @@ mod tests {
         assert_eq!(row_of(&item_row, slots.len(), 1), Some(0));
         assert_eq!(row_of(&item_row, slots.len(), 9), Some(0));
         assert_eq!(row_of(&[], 0, 0), None);
+    }
+
+    #[test]
+    fn sub_agents_get_rows_of_their_own_and_stand_for_the_call_that_started_them() {
+        let call = |status| Item::Tool { id: "c".into(), title: "mcp__trek-orchestrate__delegate_task".into(), detail: String::new(), output: String::new(), status };
+        let task = Item::Tool { id: trek_core::orchestrate::task_row("child"), title: "Sub-agent".into(), detail: "Review".into(), output: String::new(), status: ToolStatus::Running };
+        let native = Item::Tool { id: "n".into(), title: "Subagent".into(), detail: "Scout".into(), output: String::new(), status: ToolStatus::Running };
+        let items = [user("go"), tool("a"), call(ToolStatus::Running), task, tool("b"), native, said("done")];
+        let (slots, item_row) = layout(&items, None);
+        assert_eq!(slots, [Slot::Item(0), Slot::Group(vec![1]), Slot::Item(3), Slot::Group(vec![4]), Slot::Item(5), Slot::Item(6)]);
+        assert_eq!(item_row[2], 2, "the hidden call maps to the sub-agent's row");
+        // A call that failed started nothing: it shows, with why.
+        let (slots, _) = layout(&[call(ToolStatus::Failed)], None);
+        assert_eq!(slots, [Slot::Group(vec![0])]);
     }
 
     #[test]

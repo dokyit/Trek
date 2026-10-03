@@ -358,7 +358,7 @@ fn tzif_offset(data: &[u8], t: i64) -> Option<i32> {
 /// Whether usage window `l` holds back a thread on `model` that a limit in `scope` stopped. The
 /// account's own windows ("5-hour limit", "Weekly limit") hold back every model; one on a model or
 /// surface ("Weekly · Fable", "5-hour · gpt-reserve") only that one.
-fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool {
+pub fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool {
     let Some((_, name)) = l.label.split_once('·') else { return !l.label.contains("(scoped)") };
     let name = name.trim().to_lowercase();
     let Some(word) = name.split_whitespace().next() else { return false };

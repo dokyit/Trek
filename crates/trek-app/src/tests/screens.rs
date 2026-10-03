@@ -116,8 +116,8 @@ fn every_screen_renders_in_both_themes() {
             assert_eq!(cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark()), choice == ThemeChoice::Night);
             trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
             trek.render(cx);
-            // The composer's menus: model, access, attach, and the / @ $ pickers.
-            for (pill, opens) in [("model-pill", Some("model-menu-body")), ("access-pill", Some("access-menu-body")), ("attach", None)] {
+            // The composer's menus: model, consult, access, attach, and the / @ $ pickers.
+            for (pill, opens) in [("model-pill", Some("model-menu-body")), ("consult-pill", Some("consult-menu-body")), ("access-pill", Some("access-menu-body")), ("attach", None)] {
                 trek.click(cx, pill);
                 trek.render(cx);
                 if let Some(opens) = opens {

@@ -150,7 +150,8 @@ impl Store {
 
     /// Prompts, turn ends and stopped turns with a time in `[from, to)`, by thread: transcript
     /// entries in transcript order, then the stops. Only threads active since `from` are looked
-    /// through. The "Continue" a resume at a limit's reset sends on its own isn't the user's.
+    /// through. The "Continue" a resume at a limit's reset sends on its own isn't the user's, nor
+    /// is a sub-agent's brief or the message Trek wakes an agent with when its sub-agents report.
     pub fn activity_between(&self, from: i64, to: i64) -> Result<Vec<(String, Activity)>> {
         self.reading(|c| {
             let mut st = c.prepare(
@@ -160,10 +161,11 @@ impl Store {
                    AND json_extract(i.data, '$.kind') IN ('user', 'turn_end')
                    AND COALESCE(json_extract(i.data, '$.aside'), 0) = 0
                    AND NOT (json_extract(i.data, '$.kind') = 'user' AND json_extract(i.data, '$.text') IS ?3)
+                   AND NOT (json_extract(i.data, '$.kind') = 'user' AND (t.parent_id IS NOT NULL OR substr(json_extract(i.data, '$.text'), 1, ?4) = ?5))
                    AND json_extract(i.data, '$.at') >= ?1 AND json_extract(i.data, '$.at') < ?2
                  ORDER BY i.thread_id, i.seq",
             )?;
-            let rows = st.query_map(params![from, to, crate::limit::CONTINUE], |r| {
+            let rows = st.query_map(params![from, to, crate::limit::CONTINUE, crate::orchestrate::WAKE_PREFIX.chars().count() as i64, crate::orchestrate::WAKE_PREFIX], |r| {
                 let kind: String = r.get(1)?;
                 let at: i64 = r.get(2)?;
                 let activity = match kind.as_str() {

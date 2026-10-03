@@ -146,7 +146,8 @@ impl Workspace {
         }
         // A resume that met the limit again moves on without a word: the bar and the card say it,
         // and the alert for the limit went when it was first hit.
-        if resuming.is_none() {
+        // A sub-agent's limit goes to its parent, as its failure (`task_turn_ended`), not to the user.
+        if resuming.is_none() && thread.parent_id.is_none() {
             cx.emit(WorkspaceEvent::Attention { message: notice, thread: id.to_string() });
         }
         self.schedule_limits(cx);
@@ -307,6 +308,8 @@ impl Workspace {
                 self.resume_when_clear(&id, cx);
             } else {
                 self.mutate_thread(&id, cx, |t| t.paused = None);
+                // Sub-agents that reported while it was paused wake it now.
+                self.deliver_wakes(&id, cx);
             }
         }
         self.schedule_limits(cx);
@@ -366,7 +369,7 @@ impl Workspace {
         });
         self.send_resume(id, &pause, cx);
         let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
-        if pause.tries == 0 && self.thread(id).is_some_and(|t| t.side_of.is_none()) {
+        if pause.tries == 0 && self.thread(id).is_some_and(|t| t.side_of.is_none() && t.parent_id.is_none()) {
             cx.emit(WorkspaceEvent::Attention { message: format!("Resumed: {title}"), thread: id.to_string() });
         }
     }
@@ -375,6 +378,9 @@ impl Workspace {
     /// The thread's history is read first, so the agent (or the recap it starts from) has it.
     fn send_resume(&mut self, id: &str, pause: &Pause, cx: &mut Context<Self>) {
         self.ensure_loaded(id, cx);
+        // A sub-agent takes its task back up, before its session starts (an advising one's is
+        // read-only).
+        self.task_resumed(id, cx);
         let mut messages = pause.messages().into_iter();
         let Some(first) = messages.next() else { return };
         let running = self.turn_running(id);

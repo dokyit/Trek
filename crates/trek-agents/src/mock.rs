@@ -17,6 +17,12 @@
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
 //! | `recall`                     | the messages it remembers from this conversation             |
+//! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
+//! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
+//!
+//! A sub-agent's prompt is whatever follows the keyword, so `mock:consult mock:long 2s` starts
+//! one that works for two seconds (and `mock:consult mock:consult hi` one that consults in turn).
+//! A message Trek sends to wake it with a sub-agent's answer gets a short reply.
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
 //! Every turn also reports context and token usage. A prompt sent mid-turn steers it. Once a
@@ -114,11 +120,19 @@ enum Script {
     Write,
     Recall,
     Limit(Duration),
+    /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
+    Delegate { wait: bool },
+    /// Trek woke it with what a sub-agent came back with.
+    Wake,
 }
 
 impl Script {
     /// The script a prompt asks for. `plan` is the session's plan mode: every turn ends in a plan.
     fn parse(text: &str, plan: bool) -> Script {
+        // Before any keyword: a sub-agent's answer may mention "error" or "plan".
+        if trek_core::orchestrate::is_wake(text) {
+            return Script::Wake;
+        }
         let words: Vec<String> = text
             .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '-').to_lowercase())
@@ -134,6 +148,8 @@ impl Script {
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write,
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
+                "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
+                "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "error" => Script::Error,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
@@ -169,6 +185,8 @@ pub fn title(request: &str) -> String {
         Script::Write => "Add a note",
         Script::Recall => "What was said",
         Script::Limit(_) => "Refactor the parser",
+        Script::Delegate { .. } => "Get a second opinion",
+        Script::Wake => "A sub-agent reported back",
     }
     .into()
 }
@@ -227,7 +245,12 @@ struct Session {
     mark: String,
     /// The model it plays, named in its token reports.
     model: String,
+    /// The way to Trek's orchestration tools, when Trek gave the session them.
+    orchestrate: Option<trek_ipc::Client>,
 }
+
+/// The name Trek gives its orchestration MCP server in a session.
+pub const ORCHESTRATE_SERVER: &str = trek_core::orchestrate::SERVER;
 
 pub async fn run(
     config: SessionConfig,
@@ -254,6 +277,7 @@ pub async fn run(
         native_id: native_id.clone(),
         mark: String::new(),
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
+        orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(&m.env)),
     };
     if s.emit(AgentEvent::Started { native_id, model: Some(s.model.clone()) }).await.is_err() {
         return Ok(());
@@ -342,7 +366,7 @@ impl Session {
         if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| *u > trek_core::store::now_ms()) {
             script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()) as u64));
         }
-        match self.play(script).await {
+        match self.play(script, text).await {
             Ok(()) => {}
             Err(Stop::Interrupted) => {
                 self.steer.clear();
@@ -357,8 +381,14 @@ impl Session {
         self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await
     }
 
-    async fn play(&mut self, script: Script) -> Step {
+    async fn play(&mut self, script: Script, text: &str) -> Step {
         match script {
+            Script::Delegate { wait } => self.delegate(text, wait).await?,
+            Script::Wake => {
+                let body = text.split_once(":\n\n").map_or(text, |(_, b)| b);
+                let gist = trek_core::orchestrate::preview(body.split("\n\n---\n\n").next().unwrap_or(body), 160);
+                self.say(&format!("The sub-agent reported back: {gist}")).await?;
+            }
             Script::Answer => {
                 self.think("The user wants an overview. I'll keep it short and point at the files that matter.").await?;
                 self.say(ANSWER).await?;
@@ -535,6 +565,65 @@ impl Session {
         self.emit(AgentEvent::DiffStat { additions: 14, deletions: 3 }).await?;
         self.tool("Run command", "cargo test", TEST_OUTPUT, 600).await?;
         self.say("Added a `--verbose` flag:\n\n- `src/cli.rs` parses it into `Config::verbose`\n- `src/main.rs` raises the log level when it's set\n\nAll 14 tests pass.").await
+    }
+
+    /// Ask a mock sub-agent, through Trek, for a second opinion on whatever follows the keyword.
+    async fn delegate(&mut self, text: &str, wait: bool) -> Step {
+        let lower = text.to_lowercase();
+        let task = ["mock:consult", "mock:delegate"]
+            .iter()
+            .find_map(|k| lower.find(k).map(|at| text[at + k.len()..].trim()))
+            .filter(|t| !t.is_empty())
+            .unwrap_or("Review how the app starts and say what you'd change.")
+            .to_string();
+        self.say("I'll get a second opinion from another model.").await?;
+        let id = self.id("tool");
+        let title = "Second opinion";
+        // Named as Claude names MCP tools.
+        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), title).await?;
+        let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": "advise", "wait": wait });
+        match self.ipc("delegate_task", params).await? {
+            Ok(answer) => {
+                let output = serde_json::to_string_pretty(&answer).unwrap_or_default();
+                self.emit(AgentEvent::ToolFinished { id, output, ok: true }).await?;
+                match answer["result"].as_str() {
+                    Some(r) if wait => self.say(&format!("The second opinion is in: {}", trek_core::orchestrate::preview(r, 160))).await,
+                    _ => self.say("It's on it. I'll pick its answer up when it reports back.").await,
+                }
+            }
+            Err(e) => {
+                self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
+                self.say(&format!("I couldn't get a second opinion: {e}")).await
+            }
+        }
+    }
+
+    /// One call to Trek's orchestration tools, as `trek-mcp orchestrate` would make it. The user
+    /// can stop the turn while it waits: the call's connection is dropped.
+    async fn ipc(&mut self, method: &str, params: serde_json::Value) -> Step<std::result::Result<serde_json::Value, String>> {
+        let Some(client) = self.orchestrate.clone() else { return Ok(Err("Trek's sub-agent tools aren't in this session.".into())) };
+        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+        let method = method.to_string();
+        let mut call = tokio::task::spawn_blocking(move || {
+            let mut conn = client.connect()?;
+            if let Ok(h) = conn.handle() {
+                let _ = handle_tx.send(h);
+            }
+            conn.call(&method, &params)
+        });
+        loop {
+            tokio::select! {
+                done = &mut call => return Ok(done.unwrap_or_else(|e| Err(e.to_string()))),
+                cmd = self.commands.recv() => {
+                    if let Err(stop) = self.handle_midturn(cmd) {
+                        if let Ok(h) = handle_rx.try_recv() {
+                            let _ = h.shutdown(std::net::Shutdown::Both);
+                        }
+                        return Err(stop);
+                    }
+                }
+            }
+        }
     }
 
     /// Add a line to `NOTES.md` in the session's folder: a real change, for worktree reviews.
@@ -852,6 +941,10 @@ mod tests {
         assert_eq!(Script::parse("mock:limit 5s", false), Script::Limit(Duration::from_secs(5)));
         assert_eq!(Script::parse("mock:limit", false), Script::Limit(Duration::from_secs(5)));
         assert_eq!(Script::parse("the rate limit", false), Script::Answer, "bare `limit` is just a word");
+        assert_eq!(Script::parse("mock:consult mock:long 2s", false), Script::Delegate { wait: true }, "the first keyword is the parent's");
+        assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });
+        assert_eq!(Script::parse("consult a friend", false), Script::Answer);
+        assert_eq!(Script::parse("[Trek] Sub-agent “x” failed: error", false), Script::Wake);
     }
 
     #[test]
@@ -898,6 +991,7 @@ mod tests {
                 effort: trek_core::Effort::Low,
                 hand_holding,
                 plan,
+                read_only: false,
                 resume: None,
                 resume_at: None,
                 fork: false,
@@ -947,6 +1041,7 @@ mod tests {
             effort: trek_core::Effort::Low,
             hand_holding: HandHolding::Auto,
             plan: false,
+            read_only: false,
             resume: resume.map(String::from),
             resume_at: at.map(String::from),
             fork,
@@ -1167,6 +1262,65 @@ mod tests {
             if tools.len() > 13 {
                 assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolLines { added: 18, removed: 4, .. })));
             }
+        });
+    }
+
+    #[test]
+    fn consults_a_sub_agent_through_trek() {
+        use std::io::{BufReader, Write as _};
+        let dir = std::env::temp_dir().join(format!("trek-mock-ipc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // Trek's side: one delegate_task, answered as a finished sub-agent.
+        let trek = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut r = BufReader::new(stream.try_clone().unwrap());
+            let mut w = stream;
+            let hello: serde_json::Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
+            assert_eq!(trek_ipc::parse_hello(&hello).map(|h| (h.1.to_string(), h.2.to_string())), Some(("tok".into(), "ses".into())));
+            w.write_all(trek_ipc::encode(&serde_json::json!({"ok": true})).as_bytes()).unwrap();
+            let req: serde_json::Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
+            let answer = serde_json::json!({"id": "child-1", "status": "done", "result": "Use a cache."});
+            w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(answer))).as_bytes()).unwrap();
+            req
+        });
+        trek_core::runtime().block_on(async {
+            set_pace(0.);
+            let env = vec![(trek_ipc::ENV_SOCKET.to_string(), path.display().to_string()), (trek_ipc::ENV_TOKEN.into(), "tok".into()), (trek_ipc::ENV_SESSION.into(), "ses".into())];
+            let server = crate::McpServer { name: ORCHESTRATE_SERVER.into(), command: "trek-mcp".into(), args: vec!["orchestrate".into()], env, tool_timeout_secs: None };
+            let h = crate::start(SessionConfig { mcp_servers: vec![server], ..config(None, None, false, None) });
+            let m = Live { commands: h.commands, events: h.events };
+            m.prompt("mock:consult check the cache").await;
+            let events = m.turn().await;
+            assert!(events.contains(&AgentEvent::ToolStarted { id: "mock-tool-1".into(), title: "mcp__trek-orchestrate__delegate_task".into(), detail: "Second opinion".into() }));
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: true, output, .. } if output.contains("child-1"))));
+            assert!(text(&events).contains("The second opinion is in: Use a cache."), "{}", text(&events));
+            // Woken with a result, it answers in a line.
+            m.prompt(&trek_core::orchestrate::wake_text(&[trek_core::orchestrate::Report {
+                id: "child-1".into(),
+                title: "Second opinion".into(),
+                model: "Mock Swift".into(),
+                outcome: trek_core::orchestrate::Outcome::Failed("The mock agent hit an error".into()),
+            }]))
+            .await;
+            assert!(text(&m.turn().await).starts_with("The sub-agent reported back"), "not read as `mock:error`");
+        });
+        let req = trek.join().unwrap();
+        assert_eq!(req["method"], "delegate_task");
+        assert_eq!(req["params"]["prompt"], "check the cache");
+        assert_eq!(req["params"]["wait"], true);
+        assert_eq!(req["params"]["mode"], "advise");
+        let _ = std::fs::remove_dir_all(dir);
+
+        // Without Trek's tools the call fails, and the turn says so.
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("mock:delegate").await;
+            let events = m.turn().await;
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. })));
+            assert!(text(&events).contains("couldn't get a second opinion"));
         });
     }
 

@@ -10,6 +10,7 @@ mod harness;
 mod inbox;
 mod lifecycle;
 mod limits;
+mod orchestrate;
 mod render;
 mod rewind;
 mod screens;

@@ -280,6 +280,28 @@ fn activity(item: &Value) -> Option<String> {
     Some(clip(&s, 80))
 }
 
+/// An MCP tool row's title: the tool's name, or for Trek's own server Claude's full name for it
+/// (`mcp__trek-orchestrate__delegate_task`), so Trek tells its tools from another server's.
+fn mcp_title(item: &Value) -> String {
+    let tool = item["tool"].as_str().unwrap_or("Tool");
+    match item["server"].as_str() {
+        Some(server) if server == trek_core::orchestrate::SERVER => format!("mcp__{server}__{tool}"),
+        _ => tool.to_string(),
+    }
+}
+
+/// `mcp_servers` for Codex's config: the shared shape, with a tool timeout where a server needs
+/// longer than Codex's default minute.
+fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
+    let mut out = mcp_servers_json(servers);
+    for s in servers {
+        if let (Some(secs), Some(entry)) = (s.tool_timeout_secs, out.get_mut(&s.name)) {
+            entry["tool_timeout_sec"] = json!(secs);
+        }
+    }
+    out
+}
+
 fn tool_output(item: &Value) -> String {
     let text: Vec<&str> = item["result"]["content"]
         .as_array()
@@ -758,7 +780,11 @@ impl Session {
             }
             // MCP servers asking for input mid-call: Trek has no form for it, so decline.
             "mcpServer/elicitation/request" => {
-                out.send.push(json!({ "id": rpc_id, "result": { "action": "decline" } }));
+                // Trek's own sub-agent server asks nothing itself: what comes in its name is
+                // Codex checking a call to it, which needs no approval (the sub-agent's own
+                // actions are approved in its thread).
+                let result = if p["serverName"] == "trek-orchestrate" { json!({ "action": "accept", "content": {} }) } else { json!({ "action": "decline" }) };
+                out.send.push(json!({ "id": rpc_id, "result": result }));
                 return;
             }
             "currentTime/read" => {
@@ -938,7 +964,7 @@ impl Session {
             Some("mcpToolCall" | "dynamicToolCall") => {
                 let args = &item["arguments"];
                 let detail = if args.as_object().is_some_and(|o| !o.is_empty()) { clip(&args.to_string(), 200) } else { String::new() };
-                (item["tool"].as_str().unwrap_or("Tool").to_string(), detail)
+                (mcp_title(item), detail)
             }
             Some("webSearch") => ("Search the web".to_string(), item["query"].as_str().unwrap_or_default().to_string()),
             Some("imageView") => ("Read".to_string(), item["path"].as_str().unwrap_or_default().to_string()),
@@ -1132,7 +1158,7 @@ pub async fn run(
     }
     if !config.mcp_servers.is_empty() {
         // Config overrides merge with the user's own `mcp_servers` (verified against 0.160).
-        params["config"] = json!({ "mcp_servers": mcp_servers_json(&config.mcp_servers) });
+        params["config"] = json!({ "mcp_servers": codex_mcp_servers(&config.mcp_servers) });
     }
     let mut lost = false;
     // The thread couldn't be cut back or forked where asked: a new one, with the recap.
@@ -1365,6 +1391,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,
@@ -1391,6 +1418,21 @@ mod tests {
 
     fn turn_completes(events: &[AgentEvent]) -> usize {
         events.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).count()
+    }
+
+    #[test]
+    fn slow_mcp_tools_get_a_longer_timeout() {
+        let server = |name: &str, timeout| crate::McpServer { name: name.into(), command: "trek-mcp".into(), args: vec![], env: vec![], tool_timeout_secs: timeout };
+        let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
+        assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
+        assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
+    }
+
+    #[test]
+    fn trek_s_own_tools_are_named_with_their_server() {
+        assert_eq!(mcp_title(&json!({ "server": "trek-orchestrate", "tool": "delegate_task" })), "mcp__trek-orchestrate__delegate_task");
+        assert_eq!(mcp_title(&json!({ "server": "t3-code", "tool": "delegate_task" })), "delegate_task", "another server's tool keeps its name");
+        assert!(!trek_core::orchestrate::is_delegate_call(&mcp_title(&json!({ "server": "t3-code", "tool": "delegate_task" }))));
     }
 
     #[test]
@@ -1453,6 +1495,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan: false,
+            read_only: false,
             resume: resume.map(String::from),
             resume_at: None,
             fork: false,
@@ -1586,6 +1629,7 @@ mod tests {
             effort: Effort::Medium,
             hand_holding: HandHolding::Supervised,
             plan: false,
+            read_only: false,
             resume: Some("t".into()),
             resume_at: None,
             fork: false,
@@ -1945,6 +1989,8 @@ mod tests {
         let mut s = session("t", false);
         let out = s.incoming(&json!({"id":7,"method":"mcpServer/elicitation/request","params":{"threadId":"t"}}));
         assert_eq!(out.send, vec![json!({"id":7,"result":{"action":"decline"}})]);
+        let out = s.incoming(&json!({"id":9,"method":"mcpServer/elicitation/request","params":{"threadId":"t","serverName":"trek-orchestrate"}}));
+        assert_eq!(out.send, vec![json!({"id":9,"result":{"action":"accept","content":{}}})]);
         let out = s.incoming(&json!({"id":8,"method":"item/tool/call","params":{"threadId":"t"}}));
         assert_eq!(out.send[0]["error"]["code"], -32601);
         assert!(out.events.is_empty());
@@ -1962,6 +2008,7 @@ mod tests {
             effort: Effort::Low,
             hand_holding: HandHolding::Supervised,
             plan: true,
+            read_only: false,
             resume: Some("t".into()),
             resume_at: None,
             fork: false,
@@ -2177,6 +2224,7 @@ mod live {
             effort: Effort::Low,
             hand_holding: HandHolding::Auto,
             plan: false,
+            read_only: false,
             resume: None,
             resume_at: None,
             fork: false,

@@ -30,6 +30,10 @@ pub struct SessionConfig {
     pub effort: Effort,
     pub hand_holding: HandHolding,
     pub plan: bool,
+    /// Nothing may change files, whatever `hand_holding` lets through (a sub-agent that only
+    /// advises): Claude loses its editing tools, ACP agents work in plan mode and can't write
+    /// through Trek, Codex keeps the read-only sandbox `Supervised` gives it.
+    pub read_only: bool,
     /// The agent's own session id to resume.
     pub resume: Option<String>,
     /// Resume only the conversation up to this point of `resume` (an id from `AgentEvent::Mark`):
@@ -54,6 +58,9 @@ pub struct McpServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// How long one of its tool calls may take, where the agent caps that itself (Codex: a
+    /// minute unless told). Trek's sub-agent tools can wait on a sub-agent for many minutes.
+    pub tool_timeout_secs: Option<u64>,
 }
 
 impl McpServer {
@@ -529,6 +536,7 @@ mod live_usage {
             recap: None,
             fast: None,
             mcp_servers: vec![],
+            read_only: false,
         });
         trek_core::runtime().block_on(async {
             session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();

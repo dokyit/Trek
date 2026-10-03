@@ -26,7 +26,7 @@ impl Workspace {
     /// The other listed threads working in `id`'s worktree (a fork stays in its thread's).
     pub fn worktree_sharers(&self, id: &str) -> Vec<String> {
         let Some(path) = self.thread(id).and_then(|t| t.worktree.as_ref()).map(|w| w.path.clone()) else { return vec![] };
-        self.threads.iter().filter(|o| o.id != id && o.worktree.as_ref().is_some_and(|w| w.path == path)).map(|o| o.id.clone()).collect()
+        self.threads.iter().filter(|o| o.id != id && o.parent_id.is_none() && o.worktree.as_ref().is_some_and(|w| w.path == path)).map(|o| o.id.clone()).collect()
     }
 
     /// `id`'s worktree and the project folder it belongs to.
@@ -71,6 +71,7 @@ impl Workspace {
                 self.mutate_thread(id, cx, |t| t.run_state = RunState::Idle);
                 self.refresh_git_at(wt.path.clone(), cx);
                 self.send_queued(id, cx);
+                self.deliver_wakes(id, cx);
             }
             Err(e) => {
                 // The thread shows its worktree as missing, with a way forward. What waited for it
@@ -311,7 +312,9 @@ impl Workspace {
         let Some(t) = self.thread(id) else { return false };
         let Some(dir) = t.cwd.as_deref().filter(|_| self.turn_under_way(t)) else { return false };
         let root = worktree::checkout_root(dir);
-        self.threads.iter().any(|o| o.id != t.id && self.turn_under_way(o) && o.cwd.as_deref().is_some_and(|c| worktree::checkout_root(c) == root))
+        // Its own sub-agents work there on its behalf.
+        let family = |x: &Thread| x.parent_id.as_deref() == Some(t.id.as_str()) || t.parent_id.as_deref() == Some(x.id.as_str()) || (x.parent_id.is_some() && x.parent_id == t.parent_id);
+        self.threads.iter().any(|o| o.id != t.id && !family(o) && self.turn_under_way(o) && o.cwd.as_deref().is_some_and(|c| worktree::checkout_root(c) == root))
     }
 
     /// Compose a new thread in `project` that runs in a worktree of its own (main window).

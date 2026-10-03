@@ -1,0 +1,10 @@
+[package]
+name = "trek-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The local channel between a running Trek and the trek-mcp servers its agents start"
+
+[dependencies]
+serde_json.workspace = true
+libc = "0.2"

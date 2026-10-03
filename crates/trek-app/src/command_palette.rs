@@ -416,7 +416,8 @@ impl CommandPalette {
                 out.push(e);
             }
         } else {
-            let mut recent: Vec<_> = ws.threads.iter().filter(|t| t.side_of.is_none() && t.archived_at.is_none()).collect();
+            // Sub-agents show in their parent; a search still finds them.
+            let mut recent: Vec<_> = ws.threads.iter().filter(|t| t.side_of.is_none() && t.parent_id.is_none() && t.archived_at.is_none()).collect();
             recent.sort_by_key(|t| -t.updated_at);
             for t in recent.into_iter().take(RECENT) {
                 let mut e = Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), one_line(&t.title), Action::OpenThread(t.id.clone()));

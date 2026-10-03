@@ -12,6 +12,7 @@ repository = "https://github.com/dokyit/Trek"
 [workspace.dependencies]
 trek-core = { path = "crates/trek-core" }
 trek-agents = { path = "crates/trek-agents" }
+trek-ipc = { path = "crates/trek-ipc" }
 gpui-kit = { version = "=0.7.0", features = ["tree-sitter", "tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-css", "tree-sitter-diff", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java", "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust", "tree-sitter-swift", "tree-sitter-toml", "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml"] }
 anyhow = "1"
 thiserror = "2"

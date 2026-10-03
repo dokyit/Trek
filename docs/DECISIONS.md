@@ -264,3 +264,63 @@ transcript, naming each side's agent and model ("Claude Opus 5.5 → Codex Sol";
 written down as it was). Switching back before sending removes it; another model of the same agent is no handoff. A
 usage-limit pause ends with the switch (its queued messages go back to the composer); a model-only switch
 ends it only for a limit on that model.
+
+## 8. Sub-agents (consult and delegate)
+
+**Trek runs the sub-agents, not the agent.** An agent asks for one through Trek's orchestration tools
+(`trek-mcp orchestrate`: `list_models`, `delegate_task`, `task_status`, `task_result`, `cancel_task`), so it
+can reach any agent and model the user has in Trek, not just its own provider's. Each sub-agent is an
+ordinary thread with `parent_id` set: it runs in its parent's folder (worktree and all), stays out of the
+inbox (search finds it), and shows inline in its parent with its logo, live status and answer. It sees only
+the prompt it's given; for another round with the same model the agent delegates again with the findings
+so far (T3 Code's Orchestrator V2 does the same), which keeps every round's brief explicit.
+- **Advise** runs it Supervised, read-only, and declines every request it makes before anyone sees it (a
+  plan it offers is kept as its advice). Read-only is enforced per agent, not just asked for: Claude Code
+  starts without its editing tools (`--disallowedTools`, which no allow rule overrides), Codex keeps its
+  read-only sandbox, ACP agents work in plan mode (one without a plan mode can't advise) and can't write
+  through Trek. Claude Code's plan mode wasn't used: it wouldn't stop allow-listed commands either, and its
+  ExitPlanMode adds a refusal to every answer. What's left open is a Bash command the user allow-listed in
+  Claude Code, which it runs without asking. An advising sub-agent's own sub-agents advise too.
+  **Implement** gives it its parent's access level, so it asks the user like any thread. Trek's own tools
+  are approved without asking: what a sub-agent does is approved in its own thread.
+- Its answer is its last message in its last turn (capped). A sub-agent that started sub-agents of its own
+  isn't done until they've reported and it has had its say after the last of them. A caller still waiting
+  (`wait`, up to 10 min by default, 30 at most) gets it as the tool's result; otherwise Trek wakes the
+  parent with a short "[Trek] Sub-agent … finished" message once it's free (the transcript draws that as a
+  note). A sub-agent stopped on its parent's behalf wakes nobody. Claude Code and Codex are told the
+  orchestration server's calls may take that long; ACP gives Trek no way to say so, so an ACP agent's wait
+  returns "running" after 50 s and the answer comes as a wake-up.
+- Limits: two levels deep, four running per thread, twelve started between two messages from the user
+  (four consultants over every round of a discussion); an agent that has used up a usage limit takes no
+  more. Stop on the parent interrupts its sub-agents (and theirs) and ends any session that hasn't stopped
+  five seconds later; a sub-agent's session also ends with its task, so none idle on (150–250 MB each). A
+  sub-agent Trek quit on shows as failed ("Trek quit before it finished") when its parent is next opened.
+
+**With usage limits, live activity and Basecamp.** A sub-agent that hits a usage limit pauses like any
+thread and fails to its parent with the reset ("It hit its 5-hour limit, which resets 3:27 PM"), so the
+agent can ask another model; until the reset `delegate_task` turns that agent (or that model, for a
+model's own limit) down. Resumed at the reset (from its thread, or on its own if Settings says so) it takes
+its task back up: its row runs again and its answer wakes the parent. Stop or archiving the parent ends
+such a pause. A parent paused at its limit hears its sub-agents once the limit lifts, since a wake-up sent
+earlier would only meet the limit; a sub-agent's limit alerts nobody (its parent hears it). The working
+bar's live group ends at a sub-agent's row, which stays in the transcript with its status ticking; its step
+line is worded the way the bar words calls ("Read src/auth.rs"). Basecamp counts sub-agents' turns and
+tokens under their own models, but not as the user's threads or prompts (wake-ups aren't prompts either),
+and doesn't list them for review.
+
+**The channel is a Unix socket per Trek process** (`trek-ipc`), in `ipc/` in the data folder (or a private
+folder under /tmp when that path is too long for a socket address), the folder 0700 and the socket 0600.
+A connection must come from the same user (`getpeereid`), carry the process's random token and name a
+session key Trek issued for one agent session; the key is how Trek knows which thread is asking, so a
+session warmed up for a draft gets its thread when the draft is sent. Frames are JSON lines of at most
+1 MiB. Calls run side by side in trek-mcp (an agent that consults two models waits on both at once); a call
+the agent cancels drops its connection. Nothing that passes through is logged. A socket left by a process
+that crashed is swept by the next launch.
+
+**The consult control writes instructions, not plumbing.** Picking consultants in the composer (or
+`/consult`) adds a `<trek-consult>` block to the message telling the agent to call `delegate_task` for each
+of them and how to use what they say (advise or discuss, then implement or report). The block records the
+picks, so the transcript shows the message as written with a "Consulting …" line, and editing it brings
+the picks back. Any agent with MCP tools can follow it; nothing is agent-specific. Where the agent
+wouldn't get the tools (a direct API model, the Sub-agent tools switch off), the control says why instead
+of opening.

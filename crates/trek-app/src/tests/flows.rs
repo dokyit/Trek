@@ -109,11 +109,13 @@ fn sub_agents_report_progress_and_keep_the_turn_open() {
         assert!(trek.visible(cx, "working-bar"));
         // Their calls stay "running" (the tool call returned at once; the agent is still out).
         assert!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::Tool { title, status: ToolStatus::Running, .. } if title == "Subagent")).count() == 2);
-        let group = trek.item_ix(cx, &id, |i| matches!(i, Item::Tool { title, .. } if title == "Subagent"));
-        assert!(trek.rows(cx).contains(&"group: Started 2 agents (running)".to_string()), "{:?}", trek.rows(cx));
-        trek.click(cx, ("tool-group", group));
+        // Each is a row of its own, as sub-agents Trek runs are, with what it's doing now.
+        let first = trek.item_ix(cx, &id, |i| matches!(i, Item::Tool { title, .. } if title == "Subagent"));
+        let rows = trek.rows(cx);
+        assert!(rows.contains(&"subagent: Map the HTTP routes (Running)".to_string()) && rows.contains(&"subagent: Audit error handling (Running)".to_string()), "{rows:?}");
+        assert!(trek.visible(cx, ("subagent", first)));
         trek.wait(cx, "progress from a sub-agent", |ws| ws.live[&tid].tasks.iter().any(|t| t.activity == "Reading src/routes.rs")).await;
-        assert!(trek.rows(cx).contains(&"  tool (Reading src/routes.rs · 2 steps)".to_string()), "{:?}", trek.rows(cx));
+        assert!(trek.rows(cx).contains(&"subagent: Map the HTTP routes (Reading src/routes.rs · 2 steps)".to_string()), "{:?}", trek.rows(cx));
 
         trek.wait_done(cx, &id, RunState::Idle).await;
         let items = trek.items(cx, &id);

@@ -8,7 +8,8 @@ use crate::workspace::Workspace;
 use gpui_kit::component::{Icon, IconName};
 use std::path::Path;
 use trek_core::RunState;
-use trek_core::store::Item;
+use trek_core::orchestrate as orch;
+use trek_core::store::{Item, ToolStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ToolKind {
@@ -113,6 +114,26 @@ fn capitalize(text: &str) -> String {
     chars.next().map(|f| f.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
+/// Where a tool call goes in the transcript.
+#[derive(Debug, PartialEq)]
+pub enum Place {
+    /// Folded into the tool group around it.
+    Group,
+    /// A row of its own: sub-agents (Trek's, and the agent's own).
+    Own,
+    /// No row: the agent's call to `delegate_task`, which the sub-agent's own row stands for
+    /// (unless it failed: then it says why).
+    Hidden,
+}
+
+pub fn placement(item: &Item) -> Place {
+    match item {
+        Item::Tool { id, title, .. } if orch::task_of_row(id).is_some() || title == "Subagent" => Place::Own,
+        Item::Tool { title, status, .. } if orch::is_delegate_call(title) && *status != ToolStatus::Failed => Place::Hidden,
+        _ => Place::Group,
+    }
+}
+
 /// One tool call as a live row: a muted verb ("Read", "Find"), then what it acted on, verbatim
 /// and in monospace. Commands are their own words, with no verb.
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +147,10 @@ pub struct Op {
 /// The row for a tool call titled `title` with `detail`, paths shown relative to `cwd`.
 pub fn op(title: &str, detail: &str, cwd: Option<&Path>) -> Op {
     let detail = detail.trim();
+    // Trek's own orchestration tools read as what they did; their arguments are noise.
+    if let Some(label) = orch::tool_label(title).or_else(|| orch::is_delegate_call(title).then_some("Couldn't start a sub-agent")) {
+        return Op { verb: label.to_string(), text: String::new(), file: None };
+    }
     let path = |d: &str| relative(d, cwd);
     let (verb, text, file) = match tool_kind(title) {
         ToolKind::Command => (String::new(), first_line(detail), None),
@@ -186,6 +211,9 @@ fn file_name(path: &str) -> &str {
 /// one, unless the call under way says something more specific ("Editing auth.rs", "Running
 /// tests"); otherwise read from that call ("Exploring the project").
 pub fn phrase(title: &str, detail: &str, headline: Option<&str>) -> String {
+    if orch::tool_label(title).is_some() || orch::is_delegate_call(title) {
+        return "Working with sub-agents".to_string();
+    }
     let specific = match tool_kind(title) {
         ToolKind::Edit => Some(format!("{} {}", if title.starts_with("Wr") { "Writing" } else { "Editing" }, file_name(detail.trim()))),
         ToolKind::Command => Some(command_phrase(detail)).filter(|p| !matches!(*p, EXPLORING | RUNNING)).map(str::to_string),
@@ -312,10 +340,17 @@ pub fn trail(items: &[Item]) -> Option<Trail> {
     let mut headline_found = None;
     for (ix, item) in items.iter().enumerate().rev() {
         match item {
-            Item::Tool { .. } => {
-                tools.push(ix);
-                start = Some(ix);
-            }
+            Item::Tool { .. } => match placement(item) {
+                Place::Group => {
+                    tools.push(ix);
+                    start = Some(ix);
+                }
+                // A sub-agent's row stays in the transcript, where its status keeps ticking: it
+                // ends the trail like a message does.
+                Place::Own => break,
+                // The call that started one has no row (the sub-agent's stands for it).
+                Place::Hidden => {}
+            },
             Item::Reasoning { text } => {
                 if headline_found.is_none() {
                     headline_found = headline(text);
@@ -382,7 +417,7 @@ pub fn lines_label(added: u32, removed: u32) -> (Option<String>, Option<String>)
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolKind, Trail, command_phrase, headline, lines_label, op, phrase, summarize, tool_kind, trail};
+    use super::{Place, ToolKind, Trail, command_phrase, headline, lines_label, op, phrase, placement, summarize, tool_kind, trail};
     use std::path::Path;
     use trek_core::store::{Item, ToolStatus};
 
@@ -523,6 +558,29 @@ mod tests {
         assert_eq!(trail(&items).map(|t| t.start), Some(2));
         // Text after the calls ends the group.
         assert_eq!(trail(&[tool("a"), said("done")]), None);
+    }
+
+    #[test]
+    fn sub_agents_stay_in_the_transcript_and_end_the_trail() {
+        let item = |id: &str, title: &str, status| Item::Tool { id: id.into(), title: title.into(), detail: String::new(), output: String::new(), status };
+        let call = item("c", "mcp__trek-orchestrate__delegate_task", ToolStatus::Running);
+        let row = item(&trek_core::orchestrate::task_row("child"), "Sub-agent", ToolStatus::Running);
+        let native = item("n", "Subagent", ToolStatus::Running);
+        assert_eq!(placement(&row), Place::Own);
+        assert_eq!(placement(&native), Place::Own);
+        assert_eq!(placement(&call), Place::Hidden);
+        assert_eq!(placement(&item("c", "mcp__trek-orchestrate__delegate_task", ToolStatus::Failed)), Place::Group, "a call that failed says why");
+        assert_eq!(placement(&item("x", "mcp__other__delegate_task", ToolStatus::Running)), Place::Group, "another server's tool");
+        // The sub-agent's row, after the call that started it: nothing for the bar.
+        assert_eq!(trail(&[tool("a"), call.clone(), row.clone()]), None);
+        assert_eq!(trail(&[tool("a"), native]), None);
+        // Before its row arrives, the call alone is no group either.
+        assert_eq!(trail(&[call.clone()]), None);
+        // Calls after a sub-agent's row are a group of their own.
+        assert_eq!(trail(&[tool("a"), call, row, tool("b")]).map(|t| (t.start, t.tools)), Some((3, vec![3])));
+        // Trek's own tools read as what they did.
+        assert_eq!(op("mcp__trek-orchestrate__task_status", "{\"id\":\"x\"}", None).verb, "Checked on a sub-agent");
+        assert_eq!(phrase("mcp__trek-orchestrate__list_models", "", Some("Picking a model")), "Working with sub-agents");
     }
 
     #[test]

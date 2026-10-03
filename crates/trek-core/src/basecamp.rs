@@ -294,7 +294,12 @@ impl Recap {
             if prompts == 0 && turns == 0 && usage.is_empty() {
                 continue;
             }
-            recap.threads += 1;
+            // A sub-agent's work counts (its turns and tokens, under its own model), but it isn't
+            // a thread of the user's.
+            let own = t.thread.parent_id.is_none();
+            if own {
+                recap.threads += 1;
+            }
             recap.prompts += prompts;
             recap.turns += turns;
             let mut tokens = 0;
@@ -305,7 +310,7 @@ impl Recap {
                 let i = model_at(&mut models, &u.agent, u.model.as_deref());
                 models[i].tokens += u.tokens.total();
             }
-            if tokens > 0 {
+            if tokens > 0 && own {
                 recap.threads_with_tokens += 1;
             }
             if let (Some(id), Some(name)) = (&t.thread.project_id, &t.project) {
@@ -926,5 +931,46 @@ mod tests {
         let r = Recap::compute(window, p + 120_000, &got);
         assert_eq!((r.prompts, r.turns, r.tokens.total()), (1, 1, 1_055));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sub_agents_work_under_their_models_but_are_no_threads_or_prompts_of_the_users() {
+        let s = Store::in_memory().unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let window = Range::Today.window(&now(&tz, "2099-10-03 12:00"));
+        let p = window.start + 3_600_000;
+        let user = |text: &str, at: i64| Item::User { text: text.into(), images: vec![], at: Some(at), resume: None, aside: false };
+        let parent = s.create_thread(None, AgentId::ClaudeCode, Some("claude-opus-5-5".into()), Effort::High, HandHolding::Auto).unwrap();
+        let mut child = s.create_thread(None, AgentId::Codex, Some("gpt-6.1-sol".into()), Effort::High, HandHolding::Supervised).unwrap();
+        child.parent_id = Some(parent.id.clone());
+        s.save_thread(&child).unwrap();
+        for id in [&parent.id, &child.id] {
+            s.update_thread(id, |t| t.updated_at = window.start + 1).unwrap();
+        }
+        let wake = crate::orchestrate::wake_text(&[crate::orchestrate::Report {
+            id: child.id.clone(),
+            title: "Review".into(),
+            model: "Sol".into(),
+            outcome: crate::orchestrate::Outcome::Done("Looks right.".into()),
+        }]);
+        let mut parent_items = crate::transcript::Transcript::unsaved(vec![
+            user("Ask Sol", p),
+            Item::Assistant { text: "Asked.".into() },
+            Item::TurnEnd { at: p + 10_000, took_secs: 10 },
+            user(&wake, p + 70_000),
+            Item::Assistant { text: "Sol agrees.".into() },
+            Item::TurnEnd { at: p + 80_000, took_secs: 10 },
+        ]);
+        s.save_transcript(&parent.id, &mut parent_items).unwrap();
+        let mut child_items =
+            crate::transcript::Transcript::unsaved(vec![user("Review the cache", p + 5_000), Item::Assistant { text: "Looks right.".into() }, Item::TurnEnd { at: p + 65_000, took_secs: 60 }]);
+        s.save_transcript(&child.id, &mut child_items).unwrap();
+        s.record_usage(&child.id, p + 65_000, &AgentId::Codex, Some("gpt-6.1-sol"), &TokenUsage { input: 100, output: 900, cache_read: 0, cache_write: 0 }).unwrap();
+        let got = gather(&s, &window).unwrap();
+        let r = Recap::compute(window, p + 120_000, &got);
+        assert_eq!((r.prompts, r.threads, r.turns), (1, 1, 3), "the user asked once, in one thread; three turns were worked");
+        assert_eq!(r.agent_secs, 80);
+        let sol = r.models.iter().find(|m| m.model.as_deref() == Some("gpt-6.1-sol")).expect("the sub-agent's model");
+        assert_eq!((sol.tokens, sol.turns), (1_000, 1));
     }
 }
