@@ -458,6 +458,8 @@ impl Composer {
                 }))
                 .into_any_element(),
         );
+        // Without a reset time, nothing sends them on its own: "Try again" (or the next message) does.
+        let waits_for = if pause.resets_at.is_some() { "Sends when your limit resets" } else { "Sends when you try again" };
         let queued = pause.queued.iter().enumerate().map(|(ix, q)| {
             let ws = self.workspace.clone();
             let id = id.to_string();
@@ -472,7 +474,7 @@ impl Composer {
                 .border_color(theme.foreground.opacity(0.07))
                 .child(Icon::new(crate::assets::Lucide::Clock).xsmall().text_color(theme.muted_foreground))
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground.opacity(0.85)).child(text))
-                .when(!compact, |el| el.child(div().flex_none().text_color(theme.muted_foreground).child("Sends when your limit resets")))
+                .when(!compact, |el| el.child(div().flex_none().text_color(theme.muted_foreground).child(waits_for)))
                 .child(
                     gpui_kit::component::button::Button::new(("limit-unqueue", ix))
                         .ghost()

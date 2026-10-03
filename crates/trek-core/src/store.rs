@@ -254,7 +254,8 @@ pub enum Item {
         scope: crate::limit::LimitScope,
     },
     /// The thread moved to another agent mid-conversation: the new one starts from a recap.
-    /// Agents by `AgentId::key()`, models by id.
+    /// Agents by `AgentId::key()`, models by id, and each side as it was named then ("Claude
+    /// Opus 5.5"), so a renamed model or a later default doesn't change it.
     Handoff {
         from: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +263,10 @@ pub enum Item {
         to: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_name: Option<String>,
     },
 }
 
@@ -1436,7 +1441,7 @@ mod tests {
         pause.queued = vec![Queued { text: "then the tests".into(), images: vec![] }, Queued { text: "and the docs".into(), images: vec![dir.join("a.png")] }];
         s.update_thread("old", |t| t.paused = Some(pause.clone())).unwrap();
         let limit = Item::Limit { text: pause.message.clone(), resets_at: pause.resets_at, scope: LimitScope::Session };
-        let handoff = Item::Handoff { from: "claude-code".into(), from_model: Some("claude-opus-5-5".into()), to: "codex".into(), to_model: None };
+        let handoff = Item::Handoff { from: "claude-code".into(), from_model: Some("claude-opus-5-5".into()), to: "codex".into(), to_model: None, from_name: Some("Claude Opus 5.5".into()), to_name: None };
         s.append_items("old", [("l", &limit), ("h", &handoff)]).unwrap();
         drop(s);
         let s = Store::open(&path).unwrap();

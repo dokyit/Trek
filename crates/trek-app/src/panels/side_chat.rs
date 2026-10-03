@@ -105,6 +105,8 @@ impl Render for SideChatPanel {
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
         let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
         let working = live.is_some_and(|l| l.turn_started.is_some());
+        let now = ws.now();
+        let amber = crate::palette::amber(cx);
         let prefs = ws.prefs();
         let id = self.thread_id.clone().unwrap_or_default();
         v_flex()
@@ -174,6 +176,20 @@ impl Render for SideChatPanel {
                                         .into_any_element(),
                                 ),
                                 Item::Error { text } => Some(div().text_xs().text_color(crate::palette::red(cx)).child(text).into_any_element()),
+                                // No pause here: the row says it, and the next message tries again.
+                                Item::Limit { text, resets_at, scope } => Some(
+                                    h_flex()
+                                        .id(("side-limit", i))
+                                        .test_support()
+                                        .gap_2()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx))
+                                        .child(Icon::new(crate::assets::Lucide::Gauge).xsmall().text_color(amber))
+                                        .child(div().flex_none().font_weight(FontWeight::MEDIUM).text_color(amber).child("Usage limit reached"))
+                                        .child(div().min_w_0().truncate().child(crate::thread_view::limit_when(&scope, resets_at, now)))
+                                        .into_any_element(),
+                                ),
                                 _ => None,
                             }))
                             .when(working, |el| el.child(div().text_color(theme.muted_foreground).child("Working…"))),

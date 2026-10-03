@@ -233,8 +233,9 @@ the results of what was typed.
 **One event for every agent.** `AgentEvent::LimitReached { message, resets_at, scope }` comes just before
 the `TurnComplete` of a turn that failed at a limit, and the transcript keeps one `Item::Limit` row in
 place of the error. Where the reset comes from, best first: the agent's own report (Claude's
-`rate_limit_event` with `status: rejected`, Codex's `account/rateLimits/updated` window at 100 % with
-`codexErrorInfo: usageLimitExceeded`, a 429's `retry-after` / `anthropic-ratelimit-*-reset` /
+`rate_limit_event` with `status: rejected` and no overage, Codex's `account/rateLimits/updated` window at
+100 % with `codexErrorInfo: usageLimitExceeded` (kept per `limitId`; a model's own quota first, then the
+account's), a 429's `retry-after` / `anthropic-ratelimit-*-reset` /
 `x-ratelimit-reset-*`), then the words of the message ("resets 7:40pm (America/New_York)", "try again at
 Oct 3rd, 2026 2:10 AM", "try again in 6m0s"; named zones read from the system's zone database), then the
 used-up window in the agent's status (`limits::reset_from_usage`). ACP has no word for a limit, so its
@@ -244,14 +245,22 @@ errors are classified by their text.
 to resume, and the messages typed meanwhile. A paused thread is Idle, not Failed (nothing to fix); the
 sidebar says "Paused until 2:10 AM". It survives quitting: at launch, overdue resumes go after a short
 delay, with a toast. One timer serves every thread and sleeps at most 30 s, so a Mac asleep through a
-reset still resumes on waking. The resume goes a minute after the reset (`RESUME_GRACE_MS`); Claude Code
-and Codex are asked for their usage first, and a limit still there moves the resume to its new reset. A
-reset already past when reported (clock skew, a late reset) is tried again in 5 minutes, never in a loop.
-Default is Ask (a bar offers Resume at reset, Snooze until reset, Switch agent…); Settings → General can
-make it resume on its own. A scheduled resume holds no keep-awake: only the turn it starts does.
+reset still resumes on waking. The resume goes a minute after the reset (`RESUME_GRACE_MS`), after the
+thread's history is read (an unopened thread's agent gets its recap). Claude Code and Codex are asked for
+their usage first (the timer waits for the answer); only the windows that apply to the thread count
+(`limits::limited_until`: the account's own, and a model's only for that model), and one still used up
+moves the resume to its reset. A resume that meets the limit again puts the message it sent back at the
+front of the queue and says nothing more (one alert when the limit is hit, one when the thread resumes).
+A reset already past when reported (clock skew, a late reset) is tried again in 5 minutes, then 10, 20,
+40, up to an hour. Without a reset time nothing waits for one: the next message (or Try again) sends
+what was queued and itself. Retry and Edit on a paused turn are asked for now and end the pause. Side
+chats aren't paused: their panel shows the limit row, and the next message tries again. Default is Ask
+(a bar offers Resume at reset, Snooze until reset, Switch agent…); Settings → General can make it resume
+on its own. A scheduled resume holds no keep-awake: only the turn it starts does.
 
 **Handoff.** Switching a thread to another agent clears its session (and any rewind's way back into the
 old one) so the next session starts from `rewind::recap`, and puts an `Item::Handoff` divider in the
-transcript. Switching back before sending removes it; another model of the same agent is no handoff. A
+transcript, naming each side's agent and model ("Claude Opus 5.5 → Codex Sol"; the default model is
+written down as it was). Switching back before sending removes it; another model of the same agent is no handoff. A
 usage-limit pause ends with the switch (its queued messages go back to the composer); a model-only switch
 ends it only for a limit on that model.

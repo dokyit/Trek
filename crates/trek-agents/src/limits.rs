@@ -103,11 +103,13 @@ pub fn reset_from_text(message: &str, now: i64) -> Option<i64> {
 /// `reset_from_text`, with `offset` giving a zone's UTC offset in seconds at an instant (`None`:
 /// the local zone).
 fn reset_in(message: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i32>) -> Option<i64> {
-    // Older Claude Code: "Claude AI usage limit reached|1759000000".
+    // Older Claude Code: "Claude AI usage limit reached|1759000000". Only an epoch counts (seconds
+    // or milliseconds): "Rate limit exceeded | 5 requests per minute" names no time.
     if let Some((_, tail)) = message.rsplit_once('|') {
-        let digits: String = tail.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<i64>() {
-            return Some(if digits.len() >= 13 { n } else { n * 1000 });
+        let digits = tail.trim();
+        if (10..=13).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) {
+            let n = digits.parse::<i64>().ok()?;
+            return Some(if digits.len() == 13 { n } else { n * 1000 });
         }
     }
     // ASCII lowercase keeps byte offsets, so a match points into `message` too.
@@ -212,8 +214,8 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
         i += 1;
     }
     let time = time?;
-    let off = offset(zone.filter(|z| !z.is_empty()), now)?;
-    let fixed = chrono::FixedOffset::east_opt(off)?;
+    let zone = zone.filter(|z| !z.is_empty());
+    let fixed = chrono::FixedOffset::east_opt(offset(zone, now)?)?;
     let local_now = chrono::DateTime::from_timestamp_millis(now)?.with_timezone(&fixed).naive_local();
     let at = match (month, day) {
         (Some(m), Some(d)) => {
@@ -235,7 +237,10 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
             at
         }
     };
-    Some(fixed.from_local_datetime(&at).single()?.timestamp_millis())
+    // The zone's offset then, not now: a reset on the far side of a daylight-saving change.
+    let guess = fixed.from_local_datetime(&at).single()?.timestamp_millis();
+    let then = chrono::FixedOffset::east_opt(offset(zone, guess)?)?;
+    Some(then.from_local_datetime(&at).single()?.timestamp_millis())
 }
 
 /// "7:40pm", "2:10" + "AM", "3pm", "14:10": the time, and how many extra words it took.
@@ -277,12 +282,30 @@ fn system_offset(zone: Option<&str>, at: i64) -> Option<i32> {
         None => local(),
         Some("UTC" | "GMT" | "Z" | "utc") => Some(0),
         Some(name) if Some(name) == local_zone_name().as_deref() => local(),
-        Some(name) => {
-            let valid = !name.contains("..") && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'));
-            let data = valid.then(|| std::fs::read(std::path::Path::new("/usr/share/zoneinfo").join(name)).ok()).flatten()?;
-            tzif_offset(&data, at / 1000)
-        }
+        Some(name) => tzif_offset(&read_zone(name)?, at / 1000),
     }
+}
+
+/// The TZif file of zone `name` ("America/New_York"). The name comes from an agent's message, so
+/// only a plain name inside the zone database is read, and only as much as a zone file holds.
+fn read_zone(name: &str) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let plain = !name.starts_with(['/', '.', '-', '+'])
+        && !name.contains("..")
+        && name.split('/').all(|part| !part.is_empty())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'));
+    if !plain {
+        return None;
+    }
+    let path = std::path::Path::new("/usr/share/zoneinfo").join(name);
+    // A regular file: not a device, a pipe or a folder.
+    if !std::fs::symlink_metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    const MAX: u64 = 256 * 1024;
+    let mut data = vec![];
+    std::fs::File::open(&path).ok()?.take(MAX).read_to_end(&mut data).ok()?;
+    Some(data)
 }
 
 /// The Mac's zone name ("Europe/Berlin"), from where /etc/localtime points.
@@ -332,13 +355,31 @@ fn tzif_offset(data: &[u8], t: i64) -> Option<i32> {
     Some(i32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?))
 }
 
-/// When a limit in `scope` resets, judged by the agent's usage windows: the latest reset among
-/// the windows used up, else the window the scope names. For a limit message without a time.
-pub fn reset_from_usage(limits: &[UsageLimit], scope: &LimitScope, now: i64) -> Option<i64> {
-    let ahead = || limits.iter().filter(|l| l.resets_at.is_some_and(|r| r > now));
-    if let Some(at) = ahead().filter(|l| l.percent >= 99.5).filter_map(|l| l.resets_at).max() {
+/// Whether usage window `l` holds back a thread on `model` that a limit in `scope` stopped. The
+/// account's own windows ("5-hour limit", "Weekly limit") hold back every model; one on a model or
+/// surface ("Weekly · Fable", "5-hour · gpt-reserve") only that one.
+fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool {
+    let Some((_, name)) = l.label.split_once('·') else { return !l.label.contains("(scoped)") };
+    let name = name.trim().to_lowercase();
+    let Some(word) = name.split_whitespace().next() else { return false };
+    matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains(word)) || model.is_some_and(|m| m.to_lowercase().contains(word))
+}
+
+/// Until when the agent's usage windows still hold back a thread on `model` that a limit in
+/// `scope` stopped: the latest reset among the windows that apply to it and are used up. `None`
+/// when none is (the thread can go on).
+pub fn limited_until(limits: &[UsageLimit], scope: &LimitScope, model: Option<&str>, now: i64) -> Option<i64> {
+    limits.iter().filter(|l| l.percent >= 99.5 && applies(l, scope, model)).filter_map(|l| l.resets_at).filter(|r| *r > now).max()
+}
+
+/// When a limit in `scope` resets, judged by the agent's usage windows: when those used up that
+/// apply to the thread's `model` reset (`limited_until`), else the window the scope names. For a
+/// limit message without a time.
+pub fn reset_from_usage(limits: &[UsageLimit], scope: &LimitScope, model: Option<&str>, now: i64) -> Option<i64> {
+    if let Some(at) = limited_until(limits, scope, model, now) {
         return Some(at);
     }
+    let ahead = || limits.iter().filter(|l| l.resets_at.is_some_and(|r| r > now));
     let named = |l: &&UsageLimit| match scope {
         LimitScope::Session => l.window == "5h",
         LimitScope::Weekly => l.window == "7d" && !l.label.contains('·'),
@@ -417,6 +458,20 @@ mod tests {
         assert_eq!(reset_in("Claude AI usage limit reached|1790984400", now, &zones), Some(1_790_984_400_000));
         // No zone: the Mac's own.
         assert_eq!(reset_in("5-hour limit reached ∙ resets 11pm", now, &zones), Some(ms("2026-10-03T03:00:00Z")));
+        // A bar and a small number is no epoch.
+        assert_eq!(reset_in("Rate limit exceeded | 5 requests per minute", now, &zones), None);
+        assert_eq!(reset_in("Claude AI usage limit reached|1790984400000", now, &zones), Some(1_790_984_400_000));
+    }
+
+    #[test]
+    fn a_reset_across_a_daylight_saving_change_takes_the_offset_then() {
+        // New York leaves summer time at 2am on Nov 1, 2026 (06:00 UTC).
+        let new_york = |_: Option<&str>, at: i64| Some(if at < ms("2026-11-01T06:00:00Z") { -4 * 3600 } else { -5 * 3600 });
+        let now = ms("2026-10-30T16:00:00Z");
+        let weekly = "You've hit your weekly limit · resets Nov 2, 3pm (America/New_York)";
+        assert_eq!(reset_in(weekly, now, &new_york), Some(ms("2026-11-02T20:00:00Z")));
+        // Before the change, the summer offset still holds.
+        assert_eq!(reset_in("resets Oct 31, 3pm (America/New_York)", now, &new_york), Some(ms("2026-10-31T19:00:00Z")));
     }
 
     #[test]
@@ -467,14 +522,29 @@ mod tests {
     #[test]
     fn usage_windows_stand_in_for_a_message_without_a_time() {
         let limits = [window("5-hour limit", "5h", 100., 5_000), window("Weekly limit", "7d", 40., 90_000), window("Weekly · Fable", "7d", 100., 70_000)];
-        // Used-up windows all have to reset: the latest of them.
-        assert_eq!(reset_from_usage(&limits, &LimitScope::Other, 1_000), Some(70_000));
+        // The used-up windows that apply to the thread all have to reset: Fable's only on Fable.
+        assert_eq!(reset_from_usage(&limits, &LimitScope::Other, None, 1_000), Some(5_000));
+        assert_eq!(reset_from_usage(&limits, &LimitScope::Other, Some("claude-fable-5-1"), 1_000), Some(70_000));
+        assert_eq!(reset_from_usage(&limits, &LimitScope::Model("Fable".into()), None, 1_000), Some(70_000));
         // Only past resets used up: the window the limit names.
-        assert_eq!(reset_from_usage(&limits, &LimitScope::Weekly, 80_000), Some(90_000));
+        assert_eq!(reset_from_usage(&limits, &LimitScope::Weekly, None, 80_000), Some(90_000));
         let fresh = [window("5-hour limit", "5h", 20., 5_000), window("Weekly limit", "7d", 40., 90_000)];
-        assert_eq!(reset_from_usage(&fresh, &LimitScope::Session, 0), Some(5_000));
-        assert_eq!(reset_from_usage(&fresh, &LimitScope::Other, 0), None);
-        assert_eq!(reset_from_usage(&[window("Weekly · Fable", "7d", 10., 7)], &LimitScope::Model("Fable".into()), 0), Some(7));
+        assert_eq!(reset_from_usage(&fresh, &LimitScope::Session, None, 0), Some(5_000));
+        assert_eq!(reset_from_usage(&fresh, &LimitScope::Other, None, 0), None);
+        assert_eq!(reset_from_usage(&[window("Weekly · Fable", "7d", 10., 7)], &LimitScope::Model("Fable".into()), None, 0), Some(7));
+    }
+
+    #[test]
+    fn a_limit_is_still_in_force_only_where_its_windows_apply() {
+        let limits = [window("5-hour limit", "5h", 100., 5_000), window("Weekly · Fable", "7d", 100., 900_000), window("Weekly (scoped)", "7d", 100., 800_000)];
+        // A Sonnet thread at its 5-hour limit goes on once that resets, Fable's week regardless.
+        assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-sonnet-5-5"), 1_000), Some(5_000));
+        assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-sonnet-5-5"), 6_000), None);
+        // A Fable thread waits for the Fable week, by its model or its limit's name.
+        assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-fable-5-1"), 6_000), Some(900_000));
+        assert_eq!(limited_until(&limits, &LimitScope::Model("Fable".into()), None, 6_000), Some(900_000));
+        // Nothing used up, nothing in force.
+        assert_eq!(limited_until(&[window("5-hour limit", "5h", 98., 5_000)], &LimitScope::Session, None, 0), None);
     }
 
     #[test]
@@ -519,6 +589,11 @@ mod tests {
         }
         assert_eq!(system_offset(Some("UTC"), winter), Some(0));
         assert_eq!(system_offset(Some("../../etc/passwd"), winter), None);
+        // Agent text names no file outside the zone database, and no device or folder in it.
+        assert_eq!(system_offset(Some("/dev/zero"), winter), None);
+        assert_eq!(system_offset(Some("/etc/passwd"), winter), None);
+        assert_eq!(system_offset(Some("America"), winter), None);
+        assert_eq!(system_offset(Some("America//New_York"), winter), None);
         assert_eq!(system_offset(Some("Nowhere/Atlantis"), winter), None);
     }
 }

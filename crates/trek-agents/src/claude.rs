@@ -272,8 +272,9 @@ impl Turns {
         }
         if v["type"] == "rate_limit_event" {
             let info = &v["rate_limit_info"];
-            self.rejected = (info["status"] == "rejected")
-                .then(|| (info["resetsAt"].as_i64().map(|s| s * 1000), crate::limits::claude_scope(info["rateLimitType"].as_str().unwrap_or_default())));
+            // Past the limit but carrying on, paid as overage: no limit to stop at.
+            let rejected = info["status"] == "rejected" && info["isUsingOverage"] != true;
+            self.rejected = rejected.then(|| (info["resetsAt"].as_i64().map(|s| s * 1000), crate::limits::claude_scope(info["rateLimitType"].as_str().unwrap_or_default())));
             return vec![];
         }
         let mut out = translate(v, pending, streamed_text);
@@ -291,7 +292,7 @@ impl Turns {
         }
         if v["type"] == "result" {
             // A turn that failed at a limit without saying so in a message of its own.
-            if v["is_error"] == true && !std::mem::take(&mut self.limited) {
+            if v["is_error"] == true && !std::mem::take(&mut self.limited) && result_error(v) != "Interrupted" {
                 let text = result_error(v);
                 let limit = match self.rejected.clone() {
                     Some((resets_at, scope)) => Some(crate::Limit { message: text.clone(), resets_at: resets_at.or_else(|| crate::limits::reset_from_text(&text, trek_core::store::now_ms())), scope }),
@@ -1068,6 +1069,33 @@ mod tests {
         assert!(matches!(&ev[..], [AgentEvent::LimitReached { scope: crate::LimitScope::Session, resets_at: Some(_), .. }, AgentEvent::TurnComplete { .. }]), "{ev:?}");
         let overloaded = json!({"type":"result","is_error":true,"result":"API Error: 529 overloaded"});
         assert!(!turns.step(&overloaded, &mut pending, &mut streamed).iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })));
+    }
+
+    #[test]
+    fn a_rejected_rate_limit_makes_no_limit_of_an_interrupt_or_overage() {
+        let rejected = |overage: bool| json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1790984400,"rateLimitType":"five_hour","isUsingOverage":overage}});
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        // The user stopped the turn: an interrupt, whatever the last rate-limit event said.
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        turns.step(&rejected(false), &mut pending, &mut streamed);
+        let interrupt = json!({"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools","result":""});
+        let ev = turns.step(&interrupt, &mut pending, &mut streamed);
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })), "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, AgentEvent::TurnComplete { error: Some(e), .. } if e == "Interrupted")), "{ev:?}");
+        // Paid overage carries the turn past the limit: a later failure is just a failure.
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        turns.step(&rejected(true), &mut pending, &mut streamed);
+        assert_eq!(turns.rejected, None);
+        let failed = json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"Tool crashed"});
+        assert!(!turns.step(&failed, &mut pending, &mut streamed).iter().any(|e| matches!(e, AgentEvent::LimitReached { .. })));
+        // Without overage, the failure is the limit.
+        let mut turns = Turns::default();
+        turns.sent("keep going", false);
+        turns.step(&rejected(false), &mut pending, &mut streamed);
+        let ev = turns.step(&failed, &mut pending, &mut streamed);
+        assert!(ev.contains(&AgentEvent::LimitReached { message: "Tool crashed".into(), resets_at: Some(1_790_984_400_000), scope: crate::LimitScope::Session }), "{ev:?}");
     }
 
     #[test]

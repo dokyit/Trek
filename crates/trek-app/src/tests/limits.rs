@@ -261,7 +261,7 @@ fn overdue_resumes_go_after_a_relaunch() {
             super::harness::store_items(&store, &t.id, vec![user, limit]);
             // Trek quit while the thread waited for its reset, which has passed since.
             let mut pause = Pause::new("You've hit your session limit · resets 2:10am".into(), Some(now_ms() - 120_000), LimitScope::Session, 0, true);
-            pause.queued.push(trek_core::limit::Queued { text: "and then the docs".into(), images: vec![] });
+            pause.queued.push(trek_core::limit::Queued { text: "recall".into(), images: vec![] });
             store.update_thread(&t.id, |t| t.paused = Some(pause)).unwrap();
             t.id
         };
@@ -272,12 +272,16 @@ fn overdue_resumes_go_after_a_relaunch() {
         let seen = events(&trek, cx);
         cx.run_until_parked();
         assert!(seen.borrow().iter().any(|m| m.contains("resumes in a moment")), "{:?}", seen.borrow());
-        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
         assert!(pause(&trek, cx, &id).is_some(), "not at once");
+        // The thread isn't opened: the resume reads its history itself.
         skip(cx, 10);
-        trek.wait_done(cx, &id, RunState::Idle).await;
         let thread = id.clone();
-        trek.wait(cx, "the queued message", |ws| ws.live.get(&thread).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::User { text, .. } if text == "and then the docs")))).await;
+        trek.wait(cx, "the queued message", |ws| ws.live.get(&thread).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::User { text, .. } if text == "recall")))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["mock:limit 5s", "recall"]);
+        // The new session started from a recap of that history.
+        let answer = trek.answers(cx, &id);
+        assert!(answer.lines().last().is_some_and(|l| l.contains("mock:limit 5s")), "{answer}");
         assert!(pause(&trek, cx, &id).is_none());
         assert_eq!(trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().paused), None);
         let _ = std::fs::remove_dir_all(dir);
@@ -302,14 +306,22 @@ fn another_agent_takes_over_with_a_handoff_and_a_recap() {
         // Another model of the same agent is no handoff.
         set(&trek, cx, mock(), Some("mock-deep"));
         assert!(handoffs(&trek, cx).is_empty());
-        // There and back before sending: nothing to show.
+        // There and back before sending: nothing to show. The default model is written down.
         set(&trek, cx, relay.clone(), None);
+        assert!(matches!(handoffs(&trek, cx).as_slice(), [Item::Handoff { to_model: Some(m), .. }] if m == "relay-swift"));
         set(&trek, cx, mock(), Some("mock-deep"));
         assert!(handoffs(&trek, cx).is_empty());
         set(&trek, cx, relay.clone(), Some("relay-swift"));
         assert_eq!(
             handoffs(&trek, cx),
-            [Item::Handoff { from: mock().key(), from_model: Some("mock-deep".into()), to: relay.key(), to_model: Some("relay-swift".into()) }]
+            [Item::Handoff {
+                from: mock().key(),
+                from_model: Some("mock-deep".into()),
+                to: relay.key(),
+                to_model: Some("relay-swift".into()),
+                from_name: Some("Mock Deep".into()),
+                to_name: Some("Relay Swift".into())
+            }]
         );
         assert!(trek.rows(cx).iter().any(|r| r == "handoff"));
         let ix = trek.item_ix(cx, &id, |i| matches!(i, Item::Handoff { .. }));
@@ -391,5 +403,191 @@ fn live_handoff_carries_the_conversation() {
         let last = trek.answers(cx, &id).to_uppercase().lines().last().unwrap_or_default().to_string();
         assert!(last.contains("APPLE"), "Codex knows the conversation from the recap: {last}");
         println!("live handoff: ok ({last})");
+    });
+}
+
+#[test]
+fn a_resume_that_meets_the_limit_again_keeps_its_messages_and_waits_longer() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.on_usage_limit = OnUsageLimit::Resume);
+        test_clock(&trek, cx);
+        let seen = events(&trek, cx);
+        let id = hit_limit(&trek, cx, "mock:limit 5s").await;
+        trek.send(cx, "first follow-up");
+        trek.send(cx, "second follow-up");
+        // The mock's limit doesn't lift: the resume sends the first message into it.
+        skip(cx, 75);
+        let thread = id.clone();
+        let limits = |ws: &crate::workspace::Workspace, n: usize| ws.live.get(&thread).is_some_and(|l| l.items.iter().filter(|i| matches!(i, Item::Limit { .. })).count() == n);
+        trek.wait(cx, "the resume to meet the limit", |ws| limits(ws, 2) && !ws.turn_running(&thread) && ws.pause(&thread).is_some()).await;
+        let p = pause(&trek, cx, &id).unwrap();
+        // Nothing the user wrote is lost: the message it sent goes again, first.
+        assert_eq!(p.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["first follow-up", "second follow-up"]);
+        assert_eq!((p.resume, p.tries), (true, 1));
+        // The mock's reset is long gone by this clock: tried again in five minutes, then ten.
+        let now = trek.read(cx, |ws, _| ws.now());
+        assert!(p.resets_at.is_some_and(|at| (at - now - trek_core::limit::late_retry(1)).abs() < 10_000), "{p:?} at {now}");
+        let alerts = |seen: &Rc<RefCell<Vec<String>>>, prefix: &str| seen.borrow().iter().filter(|m| m.starts_with(prefix)).count();
+        // One alert for the limit and one for the resume; the second meeting is quiet.
+        assert_eq!((alerts(&seen, "Paused until "), alerts(&seen, "Usage limit reached"), alerts(&seen, "Resumed: ")), (1, 0, 1), "{:?}", seen.borrow());
+
+        let wait = ((p.resets_at.unwrap() - now) / 1000) as u64 + RESUME_GRACE_MS as u64 / 1000 + 10;
+        skip(cx, wait);
+        let thread = id.clone();
+        trek.wait(cx, "the next try to meet the limit", |ws| limits(ws, 3) && !ws.turn_running(&thread) && ws.pause(&thread).is_some()).await;
+        let p = pause(&trek, cx, &id).unwrap();
+        assert_eq!((p.tries, p.queued.len()), (2, 2));
+        assert_eq!(alerts(&seen, "Resumed: "), 1, "no news: {:?}", seen.borrow());
+
+        // Then it lifts: both messages go, in order.
+        lift(&trek, cx, &id);
+        let now = trek.read(cx, |ws, _| ws.now());
+        skip(cx, ((p.resets_at.unwrap() - now) / 1000) as u64 + RESUME_GRACE_MS as u64 / 1000 + 10);
+        let thread = id.clone();
+        trek.wait(cx, "both messages to go", |ws| ws.pause(&thread).is_none() && ws.live.get(&thread).is_some_and(|l| l.queued.is_empty() && l.turn_started.is_none())).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let all = said(&trek, cx, &id);
+        assert_eq!(all[all.len() - 2..], ["first follow-up", "second follow-up"], "{all:?}");
+    });
+}
+
+/// A usage report for the probe to answer with: `(label, window, percent, resets in ms from now)`.
+fn usage(now: i64, windows: &[(&str, &str, f32, i64)]) -> Option<trek_agents::AgentStatus> {
+    let limits = windows.iter().map(|(label, window, percent, after)| trek_agents::UsageLimit { label: (*label).into(), percent: *percent, resets_at: Some(now + after), window: (*window).into() }).collect();
+    Some(trek_agents::AgentStatus { limits, ..Default::default() })
+}
+
+#[test]
+fn the_usage_check_before_a_resume_waits_quietly_and_moves_the_resume_on() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.on_usage_limit = OnUsageLimit::Resume);
+        test_clock(&trek, cx);
+        // Asked about its usage, the agent answers when the test says.
+        type Answer = async_channel::Sender<Option<trek_agents::AgentStatus>>;
+        let asked: Rc<RefCell<Vec<Answer>>> = Rc::default();
+        let calls = asked.clone();
+        trek.update(cx, |ws, _| {
+            ws.usage_probe = Some(Rc::new(move |_, _| {
+                let (tx, rx) = async_channel::bounded(1);
+                calls.borrow_mut().push(tx);
+                rx
+            }))
+        });
+        let id = hit_limit(&trek, cx, "mock:limit 5s").await;
+        skip(cx, 75);
+        assert_eq!(asked.borrow().len(), 1, "asked once at the reset");
+        // While it answers, no timer spins: nothing else is paused.
+        assert!(trek.read(cx, |ws, _| ws.limit_timer.is_none()));
+        skip(cx, 60);
+        assert_eq!(asked.borrow().len(), 1);
+        assert_eq!(said(&trek, cx, &id), ["mock:limit 5s"]);
+
+        // The session window is still used up for an hour; Fable's week is no matter to this model.
+        let now = trek.read(cx, |ws, _| ws.now());
+        let answer = asked.borrow()[0].clone();
+        answer.try_send(usage(now, &[("5-hour limit", "5h", 100., 3_600_000), ("Weekly · Fable", "7d", 100., 3 * 86_400_000)])).unwrap();
+        cx.run_until_parked();
+        let p = pause(&trek, cx, &id).expect("still paused");
+        assert_eq!(p.resets_at, Some(now + 3_600_000));
+        assert!(p.resume);
+        assert!(trek.read(cx, |ws, _| ws.limit_timer.is_some()), "waiting for the new reset");
+
+        // At that reset it's clear: "continue" goes.
+        lift(&trek, cx, &id);
+        skip(cx, 3_600 + RESUME_GRACE_MS as u64 / 1000 + 10);
+        assert_eq!(asked.borrow().len(), 2);
+        let now = trek.read(cx, |ws, _| ws.now());
+        let answer = asked.borrow()[1].clone();
+        answer.try_send(usage(now, &[("5-hour limit", "5h", 3., 5 * 3_600_000), ("Weekly · Fable", "7d", 100., 2 * 86_400_000)])).unwrap();
+        cx.run_until_parked();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["mock:limit 5s", CONTINUE]);
+        assert!(pause(&trek, cx, &id).is_none());
+    });
+}
+
+#[test]
+fn retrying_or_editing_a_paused_turn_sends_it_now() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = hit_limit(&trek, cx, "mock:limit 2m").await;
+        trek.send(cx, "waiting for the reset");
+        let item_id = |trek: &Trek, cx: &TestAppContext, f: fn(&Item) -> bool| {
+            let ix = trek.item_ix(cx, &id, f);
+            trek.read(cx, |ws, _| ws.live[&id].items.id_at(ix).map(str::to_string)).expect("an item id")
+        };
+        // Retry with another model: sent at once, not queued for the reset.
+        let end = item_id(&trek, cx, |i| matches!(i, Item::Limit { .. }));
+        let before = pause(&trek, cx, &id).unwrap();
+        trek.update(cx, |ws, cx| ws.retry(&id, &end, Some("mock-deep".into()), false, cx));
+        assert_eq!(trek.composer_text(cx), "waiting for the reset", "what waited comes back to the composer");
+        let thread = id.clone();
+        trek.wait(cx, "the retried turn", |ws| ws.pause(&thread).is_some() && !ws.turn_running(&thread)).await;
+        // It went to the agent (and ran into the limit, still there), rather than into the queue.
+        assert_eq!(said(&trek, cx, &id), ["mock:limit 2m"]);
+        assert_eq!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::Limit { .. })).count(), 1);
+        let after = pause(&trek, cx, &id).unwrap();
+        assert!(after.queued.is_empty() && after.since >= before.since && !after.resume, "{after:?}");
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.model.clone())).as_deref(), Some("mock-deep"));
+
+        // Edit and send again, once the limit has lifted: it goes, and the thread carries on.
+        lift(&trek, cx, &id);
+        let user = item_id(&trek, cx, |i| matches!(i, Item::User { .. }));
+        assert!(trek.update(cx, |ws, cx| ws.edit_and_resend(&id, &user, "explain the startup".into(), vec![], false, cx)));
+        assert!(pause(&trek, cx, &id).is_none());
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["explain the startup"]);
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::Limit { .. })));
+    });
+}
+
+#[test]
+fn without_a_reset_time_the_next_message_tries_again() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let user = Item::User { text: "explain the startup".into(), images: vec![], at: Some(1), resume: None, aside: false };
+        trek.update(cx, |ws, cx| {
+            ws.live.get_mut(&id).unwrap().items.push(user);
+            let limit = AgentEvent::LimitReached { message: "API Error: 429 rate_limit_error".into(), resets_at: None, scope: LimitScope::Other };
+            ws.apply_events(&id, vec![limit, AgentEvent::TurnComplete { cost_usd: None, error: Some("API Error: 429 rate_limit_error".into()) }], cx)
+        });
+        assert!(pause(&trek, cx, &id).is_some_and(|p| p.resets_at.is_none()));
+        trek.render(cx);
+        assert!(trek.visible(cx, "limit-retry") && !trek.visible(cx, "limit-resume"));
+        // Nothing would ever send it at a reset nobody knows: it goes now.
+        trek.send(cx, "try once more");
+        assert!(pause(&trek, cx, &id).is_none());
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["explain the startup", "try once more"]);
+    });
+}
+
+#[test]
+fn a_side_chat_shows_its_limit_and_carries_on() {
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(crate::workspace::PanelTool::SideChat, window, cx)));
+        trek.click(cx, "side-input");
+        trek.type_live(cx, "mock:limit 2m");
+        trek.press_live(cx, "enter");
+        let side = |ws: &crate::workspace::Workspace| ws.threads.iter().find(|t| t.side_of.is_some()).map(|t| t.id.clone());
+        trek.wait(cx, "the side chat's limit", |ws| side(ws).is_some_and(|id| !ws.turn_running(&id) && ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Limit { .. }))))).await;
+        let id = trek.read(cx, |ws, _| side(ws)).unwrap();
+        // No pause and no bar to wait behind: the panel shows the limit, once.
+        assert!(pause(&trek, cx, &id).is_none());
+        let items = trek.items(cx, &id);
+        assert!(!items.iter().any(|i| matches!(i, Item::Error { .. })), "{items:?}");
+        let ix = trek.item_ix(cx, &id, |i| matches!(i, Item::Limit { .. }));
+        trek.render(cx);
+        assert!(trek.visible(cx, ("side-limit", ix)));
+        // The next message goes to the agent (which meets its limit again), not to a queue.
+        trek.update(cx, |ws, cx| ws.send_to(&id, "explain the startup".into(), vec![], cx));
+        let thread = id.clone();
+        trek.wait(cx, "the second message", |ws| !ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.items.iter().filter(|i| matches!(i, Item::Limit { .. })).count() == 2)).await;
+        assert_eq!(said(&trek, cx, &id), ["mock:limit 2m", "explain the startup"]);
+        assert!(pause(&trek, cx, &id).is_none());
     });
 }

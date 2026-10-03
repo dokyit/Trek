@@ -169,7 +169,7 @@ pub struct LiveThread {
     /// A usage limit the running turn reported: the thread pauses when the turn ends.
     limit: Option<limits::Hit>,
     /// The running turn is a resume after a usage limit: hitting the limit again resumes again.
-    resuming: bool,
+    resuming: Option<limits::Resuming>,
     /// A save of the transcript on its way (`persist_soon`).
     _save_soon: Option<Task<()>>,
     _events: Option<Task<()>>,
@@ -654,11 +654,14 @@ pub struct Workspace {
     /// Wall-clock time for usage limits (tests set their own).
     pub clock: Clock,
     /// Wakes when the next usage-limit pause ends (`schedule_limits`).
-    limit_timer: Option<Task<()>>,
+    pub(crate) limit_timer: Option<Task<()>>,
     /// No resume goes before this (unix ms): just after launch, Trek finds its feet first.
     resumes_from: i64,
     /// Threads whose agent is being asked whether its limit really reset.
     limit_checks: HashSet<String>,
+    /// Asks agents for their usage windows before a resume; Claude Code's and Codex's own report
+    /// when unset (tests set their own).
+    pub usage_probe: Option<limits::UsageProbe>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -839,6 +842,7 @@ impl Workspace {
             limit_timer: None,
             resumes_from: 0,
             limit_checks: HashSet::new(),
+            usage_probe: None,
         };
         this.reload(cx);
         if this.route == (Route::Draft { project: None }) {
@@ -1962,10 +1966,13 @@ impl Workspace {
         // Queue mode: hold follow-ups until the running turn finishes (see `apply_events`).
         let running = self.live.get(&id).is_some_and(|l| l.turn_started.is_some() && l.commands.is_some());
         // Paused at a usage limit: it goes when the limit resets.
-        if !running && self.pause(&id).is_some() {
-            self.queue_for_reset(&id, text, images, cx);
-            return;
-        }
+        let (text, images) = match running {
+            false => match self.send_while_paused(&id, text, images, cx) {
+                Some(message) => message,
+                None => return,
+            },
+            true => (text, images),
+        };
         if running && self.settings.general.follow_up == FollowUp::Queue {
             let live = self.live.entry(id.clone()).or_default();
             live.queued.push((text, images));
@@ -2385,7 +2392,7 @@ impl Workspace {
                             run_state = Some(RunState::Idle);
                             continue_queue = false;
                         } else if let Some(e) = error {
-                            live.resuming = false;
+                            live.resuming = None;
                             if e != "Interrupted" {
                                 live.items.push(Item::Error { text: e });
                                 run_state = Some(RunState::Failed);
@@ -2397,7 +2404,7 @@ impl Workspace {
                                 interrupted = true;
                             }
                         } else {
-                            live.resuming = false;
+                            live.resuming = None;
                             run_state = Some(RunState::Idle);
                             continue_queue = true;
                         }
@@ -2965,6 +2972,8 @@ impl Workspace {
         if let Some(m) = model {
             self.mutate_thread(id, cx, |t| t.model = Some(m));
         }
+        // Asked for now, by hand: no waiting for a usage limit's reset.
+        self.end_pause(id, false, cx);
         self.send_to(id, text, images, cx);
     }
 
@@ -2974,6 +2983,7 @@ impl Workspace {
         if self.rewind(id, item, restore, cx).is_none() {
             return false;
         }
+        self.end_pause(id, false, cx);
         self.send_to(id, text, images, cx);
         true
     }

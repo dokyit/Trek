@@ -571,6 +571,28 @@ mod tests {
     }
 
     #[test]
+    fn recorded_windows_tell_whether_a_limit_still_holds() {
+        use crate::limits::{LimitScope, limited_until};
+        let now = 1_790_900_000_000;
+        // Claude: the session window used up, and Fable's week.
+        let mut usage = claude_usage();
+        usage["rate_limits"]["limits"][0]["percent"] = json!(100);
+        usage["rate_limits"]["limits"][2]["percent"] = json!(100);
+        let claude = claude_limits(&usage);
+        assert_eq!(limited_until(&claude, &LimitScope::Session, Some("claude-sonnet-5-5"), now), Some(1_790_927_999_568));
+        assert_eq!(limited_until(&claude, &LimitScope::Session, Some("claude-fable-5-1"), now), Some(1_791_471_600_000));
+        // After the session reset, only Fable's week holds anything back.
+        assert_eq!(limited_until(&claude, &LimitScope::Session, Some("claude-sonnet-5-5"), 1_790_928_000_000), None);
+        // Codex: a model's quota used up holds back that limit, not the account's.
+        let mut r = codex_rate_limits();
+        r["rateLimitsByLimitId"]["base_model_inference"]["primary"]["usedPercent"] = json!(100);
+        let codex = codex_limits(&r);
+        assert_eq!(limited_until(&codex, &LimitScope::Session, Some("gpt-5.6-sol"), now), None);
+        assert_eq!(limited_until(&codex, &LimitScope::Model("gpt-reserve".into()), Some("gpt-5.6-luna"), now), Some(1_791_526_579_000));
+        assert_eq!(limited_until(&codex_limits(&codex_rate_limits()), &LimitScope::Session, None, now), None);
+    }
+
+    #[test]
     fn codex_account_and_skills() {
         let mut s = AgentStatus::default();
         apply_codex_account(&mut s, &json!({"account":{"type":"chatgpt","email":"me@example.com","planType":"plus"},"requiresOpenaiAuth":true}));

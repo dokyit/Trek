@@ -39,9 +39,19 @@ pub const RESUME_GRACE_MS: i64 = 60_000;
 /// gone (its clock and the Mac's disagree, or the reset is running late): soon, but no loop.
 pub const LATE_RESET_RETRY_MS: i64 = 5 * 60_000;
 
-/// When to count on a limit having reset, as of `now`: as reported, unless that's already past.
-pub fn reset_ahead(resets_at: Option<i64>, now: i64) -> Option<i64> {
-    resets_at.map(|at| if at <= now { now + LATE_RESET_RETRY_MS } else { at })
+/// The longest wait between tries at a reset that keeps being late.
+pub const MAX_LATE_RETRY_MS: i64 = 60 * 60_000;
+
+/// How long to wait before trying again at a reset already gone, after `tries` resumes in a row
+/// met the limit again: twice as long each time, up to an hour.
+pub fn late_retry(tries: u32) -> i64 {
+    (LATE_RESET_RETRY_MS << tries.min(8)).min(MAX_LATE_RETRY_MS)
+}
+
+/// When to count on a limit having reset, as of `now`: as reported, unless that's already past
+/// (then in a while; longer after `tries` resumes that met the limit again).
+pub fn reset_ahead(resets_at: Option<i64>, now: i64, tries: u32) -> Option<i64> {
+    resets_at.map(|at| if at <= now { now + late_retry(tries) } else { at })
 }
 
 /// What a resume sends when the user queued nothing of their own.
@@ -73,11 +83,19 @@ pub struct Pause {
     /// Messages the user sent while the thread was paused, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<Queued>,
+    /// How many resumes in a row met the limit again: the first resume is news, the later ones
+    /// aren't, and a reset that keeps being late is tried less often (`reset_ahead`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tries: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Pause {
     pub fn new(message: String, resets_at: Option<i64>, scope: LimitScope, since: i64, resume: bool) -> Pause {
-        Pause { message, resets_at, scope, since, resume, queued: vec![] }
+        Pause { message, resets_at, scope, since, resume, queued: vec![], tries: 0 }
     }
 
     /// When the resume goes out: shortly after the reset. `None` without a reset time or a resume.
@@ -137,9 +155,13 @@ mod tests {
 
     #[test]
     fn a_reset_already_past_is_tried_again_in_a_while() {
-        assert_eq!(reset_ahead(Some(10_000), 5_000), Some(10_000));
-        assert_eq!(reset_ahead(Some(5_000), 5_000), Some(5_000 + LATE_RESET_RETRY_MS));
-        assert_eq!(reset_ahead(None, 5_000), None);
+        assert_eq!(reset_ahead(Some(10_000), 5_000, 3), Some(10_000));
+        assert_eq!(reset_ahead(Some(5_000), 5_000, 0), Some(5_000 + LATE_RESET_RETRY_MS));
+        assert_eq!(reset_ahead(None, 5_000, 2), None);
+        // Late again and again: twice as long each time, up to an hour.
+        let waits: Vec<i64> = (0..6).map(|tries| reset_ahead(Some(0), 0, tries).unwrap() / 60_000).collect();
+        assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+        assert_eq!(late_retry(u32::MAX), MAX_LATE_RETRY_MS);
     }
 
     #[test]

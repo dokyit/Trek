@@ -4,9 +4,11 @@
 
 use super::{Workspace, WorkspaceEvent};
 use gpui_kit::{Context, Task};
+use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use trek_agents::LimitScope;
+use trek_agents::{AgentStatus, LimitScope};
 use trek_core::limit::{Pause, Queued};
 use trek_core::settings::OnUsageLimit;
 use trek_core::store::{Item, now_ms};
@@ -48,6 +50,32 @@ pub(crate) struct Hit {
     pub scope: LimitScope,
 }
 
+/// A turn that resumes a thread after its usage limit: the message of the user's it sent (sent
+/// again if the limit is still there), and how many resumes before it met the limit again.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Resuming {
+    pub sent: Option<Queued>,
+    pub tries: u32,
+}
+
+/// Asks an agent for its usage windows before a resume, answering on the channel (`None`: it
+/// couldn't say). Claude Code and Codex report them; tests answer for any agent.
+pub type UsageProbe = Rc<dyn Fn(&AgentId, &Path) -> async_channel::Receiver<Option<AgentStatus>>>;
+
+/// Claude Code's and Codex's own usage report (`claude_status`, `codex_status`), off the main thread.
+fn ask_agent(agent: &AgentId, cwd: &Path) -> async_channel::Receiver<Option<AgentStatus>> {
+    let (tx, rx) = async_channel::bounded(1);
+    let (agent, cwd) = (agent.clone(), cwd.to_path_buf());
+    trek_core::runtime().spawn(async move {
+        let status = match agent {
+            AgentId::ClaudeCode => trek_agents::claude_status(&cwd).await,
+            _ => trek_agents::codex_status(&cwd).await,
+        };
+        let _ = tx.send(status.ok()).await;
+    });
+    rx
+}
+
 impl Workspace {
     pub fn now(&self) -> i64 {
         self.clock.now()
@@ -59,28 +87,42 @@ impl Workspace {
     }
 
     /// When the reset is unknown, the agent's usage windows may know it (`AgentStatus::limits`).
-    fn reset_from_status(&self, agent: &AgentId, scope: &LimitScope) -> Option<i64> {
+    fn reset_from_status(&self, agent: &AgentId, model: Option<&str>, scope: &LimitScope) -> Option<i64> {
         let status = self.agent_status.get(&agent.key())?;
-        trek_agents::limits::reset_from_usage(&status.limits, scope, self.now())
+        trek_agents::limits::reset_from_usage(&status.limits, scope, model, self.now())
     }
 
     /// The turn of `id` ended at a usage limit: pause the thread until it resets. Messages queued
     /// behind the turn wait for the reset too. A thread that hits the limit again keeps the
-    /// user's choices (`Pause::renewed`); one that hit it while resuming resumes again.
+    /// user's choices (`Pause::renewed`); one that hit it while resuming resumes again, quietly,
+    /// with what it had sent.
     pub(super) fn pause_at_limit(&mut self, id: &str, hit: Hit, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
+        // A side chat has no bar to wait behind: its panel shows the limit row, and what's typed
+        // there next goes to the agent as usual.
+        if thread.side_of.is_some() {
+            if let Some(l) = self.live.get_mut(id) {
+                l.resuming = None;
+            }
+            return;
+        }
         let now = self.now();
-        let resets_at = trek_core::limit::reset_ahead(hit.resets_at.or_else(|| self.reset_from_status(&thread.agent, &hit.scope)), now);
         let (resuming, queued) = match self.live.get_mut(id) {
-            Some(l) => (std::mem::take(&mut l.resuming), std::mem::take(&mut l.queued)),
-            None => (false, vec![]),
+            Some(l) => (l.resuming.take(), std::mem::take(&mut l.queued)),
+            None => (None, vec![]),
         };
-        let auto = self.settings.general.on_usage_limit == OnUsageLimit::Resume || resuming;
-        let fresh = Pause::new(hit.message, resets_at, hit.scope, now, auto);
+        let tries = resuming.as_ref().map_or(0, |r| r.tries + 1);
+        let reported = hit.resets_at.or_else(|| self.reset_from_status(&thread.agent, thread.model.as_deref(), &hit.scope));
+        let resets_at = trek_core::limit::reset_ahead(reported, now, tries);
+        let auto = self.settings.general.on_usage_limit == OnUsageLimit::Resume || resuming.is_some();
+        let mut fresh = Pause::new(hit.message, resets_at, hit.scope, now, auto);
+        fresh.tries = tries;
         let mut pause = match thread.paused {
             Some(old) => old.renewed(fresh),
             None => fresh,
         };
+        // What the resume sent of the user's met the limit too: it goes again, first.
+        pause.queued.extend(resuming.as_ref().and_then(|r| r.sent.clone()));
         pause.queued.extend(queued.into_iter().map(|(text, images)| Queued { text, images }));
         // Something the user typed waits for the reset: that's asking for the resume.
         pause.resume |= !pause.queued.is_empty();
@@ -102,7 +144,9 @@ impl Workspace {
             self.status_fetched_at = 0;
             self.refresh_usage(cx);
         }
-        if thread.side_of.is_none() {
+        // A resume that met the limit again moves on without a word: the bar and the card say it,
+        // and the alert for the limit went when it was first hit.
+        if resuming.is_none() {
             cx.emit(WorkspaceEvent::Attention { message: notice, thread: id.to_string() });
         }
         self.schedule_limits(cx);
@@ -110,11 +154,14 @@ impl Workspace {
 
     /// Fill in resets the agents' usage windows now know (after `refresh_usage`).
     pub(super) fn fill_unknown_resets(&mut self, cx: &mut Context<Self>) {
-        let unknown: Vec<(String, AgentId, LimitScope)> =
-            self.threads.iter().filter_map(|t| t.paused.as_ref().filter(|p| p.resets_at.is_none()).map(|p| (t.id.clone(), t.agent.clone(), p.scope.clone()))).collect();
+        let unknown: Vec<(String, AgentId, Option<String>, LimitScope)> = self
+            .threads
+            .iter()
+            .filter_map(|t| t.paused.as_ref().filter(|p| p.resets_at.is_none()).map(|p| (t.id.clone(), t.agent.clone(), t.model.clone(), p.scope.clone())))
+            .collect();
         let mut any = false;
-        for (id, agent, scope) in unknown {
-            if let Some(at) = self.reset_from_status(&agent, &scope) {
+        for (id, agent, model, scope) in unknown {
+            if let Some(at) = self.reset_from_status(&agent, model.as_deref(), &scope) {
                 self.mutate_thread(&id, cx, |t| {
                     if let Some(p) = t.paused.as_mut() {
                         p.resets_at = Some(at);
@@ -195,24 +242,42 @@ impl Workspace {
             l.revision += 1;
         }
         if send {
-            self.send_resume(id, pause.messages(), cx);
+            self.send_resume(id, &pause, cx);
         } else {
             self.hand_back(id, pause.queued, cx);
         }
         self.schedule_limits(cx);
     }
 
-    /// Queue `text` to go when `id`'s limit resets (it was typed while the thread is paused).
-    pub(super) fn queue_for_reset(&mut self, id: &str, text: String, images: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
-        self.update_pause(id, cx, |p| {
-            p.queued.push(Queued { text, images });
-            p.resume = true;
-        });
+    /// `text` was typed while `id` is paused. With a reset to wait for, it waits for it, after
+    /// what's queued already. With none, the user is trying again: the pause ends and what was
+    /// queued goes first. Handed back when it's to go the usual way.
+    pub(super) fn send_while_paused(&mut self, id: &str, text: String, images: Vec<std::path::PathBuf>, cx: &mut Context<Self>) -> Option<(String, Vec<std::path::PathBuf>)> {
+        let Some(pause) = self.pause(id).cloned() else { return Some((text, images)) };
+        if pause.resets_at.is_some() {
+            self.update_pause(id, cx, |p| {
+                p.queued.push(Queued { text, images });
+                p.resume = true;
+            });
+            return None;
+        }
+        self.mutate_thread(id, cx, |t| t.paused = None);
+        self.schedule_limits(cx);
+        if pause.queued.is_empty() {
+            return Some((text, images));
+        }
+        let mut pause = pause;
+        pause.queued.push(Queued { text, images });
+        pause.tries = 0;
+        self.send_resume(id, &pause, cx);
+        None
     }
 
-    /// Set the timer for the next pause to end (one timer for all threads), or none.
+    /// Set the timer for the next pause to end (one timer for all threads), or none. A thread whose
+    /// agent is being asked about its limit waits for the answer (`resume_when_clear`).
     pub(crate) fn schedule_limits(&mut self, cx: &mut Context<Self>) {
-        let next = trek_core::limit::next_end(self.threads.iter().filter_map(|t| t.paused.as_ref()));
+        let checking = &self.limit_checks;
+        let next = trek_core::limit::next_end(self.threads.iter().filter(|t| !checking.contains(&t.id)).filter_map(|t| t.paused.as_ref()));
         let Some(next) = next else {
             self.limit_timer = None;
             return;
@@ -231,7 +296,11 @@ impl Workspace {
         let due: Vec<(String, bool)> = if now < self.resumes_from {
             vec![]
         } else {
-            self.threads.iter().filter_map(|t| t.paused.as_ref().filter(|p| p.is_over(now)).map(|p| (t.id.clone(), p.resume))).collect()
+            self.threads
+                .iter()
+                .filter(|t| !self.limit_checks.contains(&t.id))
+                .filter_map(|t| t.paused.as_ref().filter(|p| p.is_over(now)).map(|p| (t.id.clone(), p.resume)))
+                .collect()
         };
         for (id, resume) in due {
             if resume {
@@ -247,43 +316,47 @@ impl Workspace {
     /// Code and Codex report their usage windows): still used up, the pause moves to the new reset.
     fn resume_when_clear(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.thread(id).cloned() else { return };
-        let checkable = matches!(t.agent, AgentId::ClaudeCode | AgentId::Codex) && !trek_core::paths::isolated();
-        if !checkable {
+        let probe: Option<UsageProbe> = match &self.usage_probe {
+            Some(p) => Some(p.clone()),
+            None if matches!(t.agent, AgentId::ClaudeCode | AgentId::Codex) && !trek_core::paths::isolated() => Some(Rc::new(ask_agent)),
+            None => None,
+        };
+        let Some(probe) = probe else {
             self.resume_now(id, cx);
             return;
-        }
+        };
         if !self.limit_checks.insert(id.to_string()) {
             return;
         }
-        let (tx, rx) = async_channel::bounded(1);
-        let (agent, cwd) = (t.agent.clone(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
-        trek_core::runtime().spawn(async move {
-            let status = match agent {
-                AgentId::ClaudeCode => trek_agents::claude_status(&cwd).await,
-                _ => trek_agents::codex_status(&cwd).await,
-            };
-            let _ = tx.send(status).await;
-        });
+        let rx = probe(&t.agent, &t.cwd.clone().unwrap_or_else(trek_core::paths::home));
         let id = id.to_string();
         let task: Task<()> = cx.spawn(async move |this, cx| {
-            let status = rx.recv().await.ok().and_then(Result::ok);
+            let status = rx.recv().await.ok().flatten();
             let _ = this.update(cx, |this, cx| {
                 this.limit_checks.remove(&id);
                 let now = this.now();
-                let still = status.as_ref().and_then(|s| s.limits.iter().filter(|l| l.percent >= 99.5).filter_map(|l| l.resets_at).filter(|at| *at > now).max());
+                // The user called the resume off (or moved on) meanwhile.
+                let Some(pause) = this.pause(&id).filter(|p| p.resume).cloned() else {
+                    this.schedule_limits(cx);
+                    return;
+                };
+                let model = this.thread(&id).and_then(|t| t.model.clone());
+                let still = status.as_ref().and_then(|s| trek_agents::limits::limited_until(&s.limits, &pause.scope, model.as_deref(), now));
+                if let Some(s) = status {
+                    this.agent_status.insert(t.agent.key(), s);
+                }
                 match still {
                     Some(at) => this.update_pause(&id, cx, |p| p.resets_at = Some(at)),
                     None => this.resume_now(&id, cx),
                 }
-                if let Some(s) = status {
-                    this.agent_status.insert(t.agent.key(), s);
-                }
+                this.schedule_limits(cx);
             });
         });
         self.keep(task);
     }
 
-    /// The limit has reset: send what waited for it (or "continue"), in order, and say so.
+    /// The limit has reset: send what waited for it (or "continue"), in order, and say so (once:
+    /// not again for each try after a resume that met the limit again).
     fn resume_now(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(pause) = self.pause(id).cloned() else { return };
         // A turn running (the user carried on by hand): what's queued follows it.
@@ -291,23 +364,25 @@ impl Workspace {
             t.paused = None;
             t.snoozed_until = None;
         });
-        self.send_resume(id, pause.messages(), cx);
+        self.send_resume(id, &pause, cx);
         let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
-        if self.thread(id).is_some_and(|t| t.side_of.is_none()) {
+        if pause.tries == 0 && self.thread(id).is_some_and(|t| t.side_of.is_none()) {
             cx.emit(WorkspaceEvent::Attention { message: format!("Resumed: {title}"), thread: id.to_string() });
         }
     }
 
-    /// Send `messages` to `id`: the first starts a turn, the rest queue behind it.
-    fn send_resume(&mut self, id: &str, messages: Vec<Queued>, cx: &mut Context<Self>) {
-        let mut messages = messages.into_iter();
+    /// Send what `pause` held for `id`: the first message starts a turn, the rest queue behind it.
+    /// The thread's history is read first, so the agent (or the recap it starts from) has it.
+    fn send_resume(&mut self, id: &str, pause: &Pause, cx: &mut Context<Self>) {
+        self.ensure_loaded(id, cx);
+        let mut messages = pause.messages().into_iter();
         let Some(first) = messages.next() else { return };
         let running = self.turn_running(id);
         let live = self.live.entry(id.to_string()).or_default();
         if running {
             live.queued.push((first.text, first.images));
         } else {
-            live.resuming = true;
+            live.resuming = Some(Resuming { sent: (!pause.queued.is_empty()).then(|| first.clone()), tries: pause.tries });
             self.send_to(id, first.text, first.images, cx);
         }
         let live = self.live.entry(id.to_string()).or_default();
@@ -340,18 +415,25 @@ impl Workspace {
     /// agent starts from a recap). Switching back and forth before sending leaves one divider,
     /// or none once it's back where it started.
     pub(super) fn note_handoff(&mut self, id: &str, from: (&AgentId, Option<String>), to: (&AgentId, Option<String>)) -> bool {
+        // Each side as it is now: the model it ran (the default, if none was picked) and its name.
+        let side = |agent: &AgentId, model: Option<String>| {
+            let models = self.models_for(agent);
+            let model = model.or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()));
+            let name = crate::thread_view::handoff_name(agent, model.as_deref().map(|m| crate::composer::model_name(&models, m)).as_deref());
+            (agent.key(), model, name)
+        };
+        let (mut from, to) = (side(from.0, from.1), side(to.0, to.1));
         let Some(live) = self.live.get_mut(id) else { return false };
         if !live.items.iter().any(|i| matches!(i, Item::User { aside: false, .. })) {
             return false;
         }
-        let (mut from_key, mut from_model) = (from.0.key(), from.1);
-        if let Some(Item::Handoff { from, from_model: m, .. }) = live.items.last() {
-            (from_key, from_model) = (from.clone(), m.clone());
+        if let Some(Item::Handoff { from: key, from_model, from_name, .. }) = live.items.last() {
+            from = (key.clone(), from_model.clone(), from_name.clone().unwrap_or_default());
             let last = live.items.len() - 1;
             live.items.truncate(last);
         }
-        if from_key != to.0.key() {
-            live.items.push(Item::Handoff { from: from_key, from_model, to: to.0.key(), to_model: to.1 });
+        if from.0 != to.0 {
+            live.items.push(Item::Handoff { from: from.0, from_model: from.1, to: to.0, to_model: to.1, from_name: Some(from.2), to_name: Some(to.2) });
         }
         live.revision += 1;
         true
