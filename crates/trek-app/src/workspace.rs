@@ -1534,9 +1534,12 @@ impl Workspace {
     /// waiting for an answer; or messages that haven't reached an agent yet (waiting for a
     /// worktree, for history to load or for git work, or queued behind a turn). All of those live
     /// only in memory. An agent CLI update under way or about to start, too: a restart would cut
-    /// its package manager off mid-install. Updates wait until there's none.
+    /// its package manager off mid-install. One waiting on its agent's background work isn't
+    /// about to start (a dev server can run all day), and a restart ends that work anyway.
+    /// Updates wait until there's none.
     pub fn work_in_flight(&self) -> bool {
-        self.agent_updates.running() || self.agent_updates.queued() || self.live.values().any(|l| {
+        let update_due = self.agent_updates.queued_where(|a| self.agent_hold(a) != Some(Hold::Background));
+        self.agent_updates.running() || update_due || self.live.values().any(|l| {
             (l.commands.is_some() && (l.turn_started.is_some() || l.background_agents().next().is_some()))
                 || l.permissions.iter().any(|p| p.after_turn)
                 || l.preparing

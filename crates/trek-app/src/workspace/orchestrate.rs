@@ -259,10 +259,7 @@ impl Workspace {
                     let result = self.task_result(&call.thread, &child);
                     // Read now, its answer needn't wake the agent later, nor after a restart.
                     if result.as_ref().is_ok_and(|_| !self.task_state(&child).live()) {
-                        if let Some(w) = self.wakes.get_mut(&call.thread).filter(|w| w.iter().any(|r| r.id == child)) {
-                            w.retain(|r| r.id != child);
-                            let _ = self.store.drop_report(&child);
-                        }
+                        self.heard(&call.thread, &child);
                     }
                     result
                 }
@@ -1037,6 +1034,25 @@ impl Workspace {
             });
         });
         self.keep(task);
+    }
+
+    /// `parent`'s agent read `child`'s answer itself: no message brings it again, whether it's
+    /// in line for the next wake-up or kept for after the user's turn (`parked`). The parked
+    /// notice already in the transcript keeps its count.
+    fn heard(&mut self, parent: &str, child: &str) {
+        let mut had = false;
+        for line in [&mut self.wakes, &mut self.parked] {
+            if let Some(w) = line.get_mut(parent).filter(|w| w.iter().any(|r| r.id == child)) {
+                w.retain(|r| r.id != child);
+                had = true;
+                if w.is_empty() {
+                    line.remove(parent);
+                }
+            }
+        }
+        if had {
+            let _ = self.store.drop_report(child);
+        }
     }
 
     /// `id` had its turn cut off by the last quit with reports kept for it: a turn of the user's

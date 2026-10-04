@@ -221,6 +221,11 @@ impl AgentUpdates {
         self.jobs.values().any(|j| *j == Job::Queued)
     }
 
+    /// Some update is asked for whose agent (given by key) passes `f`.
+    pub fn queued_where(&self, f: impl Fn(&str) -> bool) -> bool {
+        self.jobs.iter().any(|(id, j)| *j == Job::Queued && self.agent_of(id).is_some_and(&f))
+    }
+
     pub fn running(&self) -> bool {
         self.jobs.values().any(|j| *j == Job::Running)
     }

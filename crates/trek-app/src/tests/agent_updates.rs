@@ -5,7 +5,7 @@
 
 use super::harness::{Trek, mock, open, open_with, run};
 use crate::agent_updates::{Job, Runner};
-use crate::workspace::{Route, SettingsPage};
+use crate::workspace::{Route, SettingsPage, UpdateStatus};
 use gpui_kit::TestAppContext;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -310,6 +310,31 @@ fn an_update_waits_for_its_agents_background_work() {
         assert!(trek.read(cx, |ws, _| ws.live[&t].background.is_empty()));
         assert_eq!(runs.load(Ordering::SeqCst), 1);
         assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_none()), "its idle session went before the files changed");
+    });
+}
+
+#[test]
+fn an_update_waiting_on_a_dev_server_doesnt_hold_back_trek_restarting() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        // A dev server with no end, and the agent's update waiting on it.
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        assert_eq!(job(&trek, cx, "mock"), Some(Job::Queued));
+        assert!(!trek.read(cx, |ws, _| ws.work_in_flight()), "it isn't about to start");
+        // Trek's own update counts down and goes ahead; the restart ends the server anyway.
+        let staged = super::harness::data_dir().join("no-such-update/Trek.app");
+        trek.update(cx, |ws, cx| {
+            ws.updater.status = UpdateStatus::Ready { version: "9.9.9".into(), staged };
+            ws.restart_to_update(cx);
+        });
+        cx.executor().advance_clock(crate::workspace::RESTART_GRACE);
+        cx.run_until_parked();
+        let status = trek.read(cx, |ws, _| ws.updater.status.clone());
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+        assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty()), "the server was still running");
     });
 }
 

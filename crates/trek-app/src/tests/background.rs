@@ -400,7 +400,7 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
         let dir = new_project("relaunch");
         let db = dir.join("trek.sqlite");
         let project = new_project("project");
-        let (parent, done, cut, busy, nested) = {
+        let (parent, done, cut, busy, busy_done, nested) = {
             let store = Store::open(&db).expect("store");
             let thread = |title: &str, parent: Option<&str>| {
                 let mut t = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
@@ -430,7 +430,7 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
             let nested = thread("Nested", Some(&parent));
             let grandkid = thread("Deep", Some(&nested));
             store.await_report(&nested, &grandkid).unwrap();
-            (parent, done, cut, busy, nested)
+            (parent, done, cut, busy, busy_done, nested)
         };
         let mut s = settings();
         s.user_projects.push(project.display().to_string());
@@ -453,14 +453,21 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
         // And its transcript says so, under the turn the quit cut off.
         let said = trek.read(cx, |ws, _| ws.store.items(&busy).unwrap());
         assert!(matches!(&said[said.len() - 2..], [Item::Notice { text: cut }, Item::Notice { text: kept }] if cut == trek_core::store::INTERRUPTED_BY_QUIT && kept.starts_with("2 sub-agents' reports are kept")), "{said:?}");
-        // The user picks it up: once that turn is over, it hears both.
+        // The user picks it up, and its agent collects the scout's answer itself.
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(busy.clone()), cx));
+        let (reply, answer) = async_channel::bounded(1);
+        let call = crate::ipc::Call { thread: busy.clone(), method: "task_result".into(), params: json!({ "id": busy_done }), reply };
+        trek.update(cx, |ws, cx| ws.handle_call(call, cx));
+        let got = answer.try_recv();
+        assert!(matches!(&got, Ok(crate::ipc::Reply::Done(Ok(_)))), "{got:?}");
+        assert_eq!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap().len()), 1, "read, it isn't kept");
+        // Once that turn is over, it hears the rest.
         trek.send(cx, "carry on");
         wait_woken(&trek, cx, &busy).await;
         trek.wait_done(cx, &busy, RunState::Idle).await;
         let woke = wakes(&trek, cx, &busy);
         assert_eq!(woke.len(), 1, "{woke:?}");
-        assert!(woke[0].contains("Found it.") && woke[0].contains(trek_core::orchestrate::CUT_OFF), "{}", woke[0]);
+        assert!(!woke[0].contains("Found it.") && woke[0].contains(trek_core::orchestrate::CUT_OFF), "{}", woke[0]);
         let items = trek.items(cx, &busy);
         let carry = items.iter().position(|i| matches!(i, Item::User { text, .. } if text == "carry on")).unwrap();
         let wake = items.iter().position(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))).unwrap();
