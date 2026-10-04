@@ -11,6 +11,7 @@ pub mod import;
 pub mod limit;
 pub mod orchestrate;
 pub mod paths;
+pub mod pricing;
 pub mod rewind;
 pub mod settings;
 pub mod skills;

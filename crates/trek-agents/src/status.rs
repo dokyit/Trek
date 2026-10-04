@@ -1,7 +1,8 @@
 //! Account, plan, usage limits, slash commands and models for the vendor CLIs, read without
 //! sending a prompt (free). Claude: `initialize` + `get_usage` + `get_context_usage` control
 //! requests on an idle stream-json session. Codex: `account/read`, `account/rateLimits/read`,
-//! `skills/list` and `model/list` on `codex app-server`.
+//! `skills/list` and `model/list` on `codex app-server`. Devin: `devin auth status`, and the
+//! quota its terminal UI shows for `/usage`.
 
 use crate::codex::{Rpc, RpcLines, await_response, fetch_models, start_app_server};
 use anyhow::{Context as _, Result};
@@ -52,6 +53,10 @@ pub struct AgentStatus {
     pub commands: Vec<SlashCommand>,
     pub models: Vec<ModelInfo>,
     pub logged_in: bool,
+    /// How the login pays for tokens: a plan, or per token.
+    pub billing: Option<crate::Billing>,
+    /// Something the plan reports besides its limits (Devin's on-demand balance), as it said it.
+    pub note: Option<String>,
     /// Partial failures (some data may still be present).
     pub error: Option<String>,
 }
@@ -153,6 +158,7 @@ pub async fn claude_status(cwd: &Path) -> Result<AgentStatus> {
     let usage = responses.get("u1").unwrap_or(&null);
     let context = responses.get("c1").unwrap_or(&null);
     apply_claude_init(&mut status, init, context);
+    status.billing = crate::claude::account_billing(&init["account"]);
     if status.plan.is_none() {
         status.plan = usage["subscription_type"].as_str().filter(|s| !s.is_empty()).map(|s| format!("Claude {}", capitalize(s)));
     }
@@ -291,7 +297,10 @@ pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
     let deadline = tokio::time::Instant::now() + TIMEOUT;
 
     match call(&mut rpc, &mut lines, &mut backlog, deadline, "account/read", json!({})).await {
-        Ok(r) => apply_codex_account(&mut status, &r),
+        Ok(r) => {
+            apply_codex_account(&mut status, &r);
+            status.billing = crate::codex::account_billing(&r);
+        }
         Err(e) => status.add_error(format!("account: {e:#}")),
     }
     if status.logged_in {
@@ -446,6 +455,224 @@ pub(crate) fn capitalize(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
     }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Devin
+
+/// Status of the user's Devin login: account and plan from `devin auth status`, and the plan's
+/// daily and weekly quota from the `/usage` panel of Devin's terminal UI. Devin reports its
+/// quota nowhere else (not over ACP, not with `--print`), so the UI runs in a pseudo-terminal
+/// of its own, offscreen, in an empty folder; typing `/usage` there sends no prompt and starts
+/// no session. Credentials stay with Devin: nothing of `auth status` but the email and the
+/// plan's name is kept, and none of it is logged.
+pub async fn devin_status() -> Result<AgentStatus> {
+    let bin = detect::which("devin").context("Devin isn't installed (curl -fsSL https://cli.devin.ai/install.sh | bash)")?;
+    let out = tokio::time::timeout(
+        TIMEOUT,
+        tokio::process::Command::new(&bin).args(["auth", "status"]).env("PATH", detect::login_path()).stdin(Stdio::null()).kill_on_drop(true).output(),
+    )
+    .await
+    .context("devin auth status timed out")??;
+    let mut status = devin_account(&String::from_utf8_lossy(&out.stdout));
+    if !status.logged_in {
+        return Ok(status);
+    }
+    let dir = std::env::temp_dir().join("trek-devin-usage");
+    std::fs::create_dir_all(&dir)?;
+    match tokio::task::spawn_blocking(move || devin_usage_screen(&bin, &dir)).await? {
+        Ok(screen) => {
+            let now = chrono::Local::now();
+            status.limits = devin_limits(&screen, now.fixed_offset());
+            status.note = devin_note(&screen);
+            if status.limits.is_empty() {
+                status.add_error(if screen.contains("Failed to fetch quota") { "Devin couldn't fetch its quota" } else { "Devin didn't report its quota" });
+            }
+        }
+        Err(e) => status.add_error(format!("{e:#}")),
+    }
+    Ok(status)
+}
+
+/// What `devin auth status` says: signed in or not, the email, and the plan ("Tier: Devin Pro").
+fn devin_account(text: &str) -> AgentStatus {
+    let field = |name: &str| {
+        text.lines().find_map(|l| l.trim().strip_prefix(name).map(|v| v.trim().to_string())).filter(|v| !v.is_empty())
+    };
+    let logged_in = text.lines().next().is_some_and(|l| l.trim_start().starts_with("Logged in"));
+    let plan = field("Tier:").or_else(|| field("Plan:").map(|p| format!("Devin {p}")));
+    let plan = plan.filter(|_| logged_in);
+    // Usage comes out of the plan's quota (on-demand credits only past it).
+    let billing = plan.clone().map(|p| crate::Billing::Plan(Some(p)));
+    AgentStatus { logged_in, account: field("Email:").filter(|_| logged_in), plan, billing, ..Default::default() }
+}
+
+/// Run Devin's terminal UI in `dir`, ask it for `/usage`, and return the screen once the quota
+/// is on it (or the UI gave up fetching it).
+fn devin_usage_screen(bin: &Path, dir: &Path) -> Result<String> {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    let (rows, cols) = (40, 140);
+    let pty = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+    let mut cmd = CommandBuilder::new(bin);
+    // The folder is Trek's own and empty; nothing to trust, and the prompt would wait forever.
+    cmd.args(["--respect-workspace-trust", "false"]);
+    cmd.cwd(dir);
+    cmd.env("PATH", detect::login_path());
+    cmd.env("TERM", "xterm-256color");
+    let mut child = pty.slave.spawn_command(cmd)?;
+    drop(pty.slave);
+    let mut reader = pty.master.try_clone_reader()?;
+    let mut writer = pty.master.take_writer()?;
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 16 * 1024];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    // Feed the screen until `done` says so, or `limit` runs out. Terminal queries (cursor
+    // position, device attributes) are answered as a terminal would.
+    let mut pump = |limit: Duration, done: &dyn Fn(&str) -> bool, writer: &mut Box<dyn Write + Send>| -> String {
+        let end = std::time::Instant::now() + limit;
+        loop {
+            let screen = parser.screen().contents();
+            if done(&screen) || std::time::Instant::now() >= end {
+                return screen;
+            }
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
+                parser.process(&chunk);
+                if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                    let (r, c) = parser.screen().cursor_position();
+                    let _ = write!(writer, "\x1b[{};{}R", r + 1, c + 1);
+                }
+                if chunk.windows(3).any(|w| w == b"\x1b[c") || chunk.windows(4).any(|w| w == b"\x1b[0c") {
+                    let _ = writer.write_all(b"\x1b[?62;c");
+                }
+            }
+        }
+    };
+    let result = (|| {
+        let ready = pump(Duration::from_secs(20), &|s| s.contains('❭') || s.contains("Trust "), &mut writer);
+        if ready.contains("Trust ") && !ready.contains('❭') {
+            anyhow::bail!("Devin asked to trust a folder before showing its quota");
+        }
+        if !ready.contains('❭') {
+            anyhow::bail!("Devin's terminal UI didn't start");
+        }
+        writer.write_all(b"/usage")?;
+        pump(Duration::from_millis(600), &|_| false, &mut writer);
+        // Close the command list it opened, then run the command as typed.
+        writer.write_all(b"\x1b")?;
+        pump(Duration::from_millis(300), &|_| false, &mut writer);
+        writer.write_all(b"\r")?;
+        // "Fetching quota…" stays above the bars once they're in.
+        let fetched = |s: &str| s.contains("% used") || s.contains("Failed to fetch quota");
+        let screen = pump(Duration::from_secs(20), &fetched, &mut writer);
+        // The panel draws in one go; a moment more for anything after the bars.
+        Ok(if screen.contains("% used") { pump(Duration::from_millis(300), &|_| false, &mut writer) } else { screen })
+    })();
+    // Quit as a user would (twice Ctrl-C), so Devin lets go of the session it opened; kill it
+    // if it lingers.
+    for _ in 0..2 {
+        let _ = writer.write_all(b"\x03");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let end = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// The quota bars of Devin's `/usage` panel, as its screen shows them:
+/// `Daily   ■■■■  12% used  · resets in 5h 10m` and
+/// `Weekly  ■■■■  3% used  · resets Oct 4, 4:00 AM (UTC-4)`. Without the panel, the header's
+/// `Pro · 88% remaining (resets in 5h 10m)` stands for the plan's quota.
+fn devin_limits(screen: &str, now: chrono::DateTime<chrono::FixedOffset>) -> Vec<UsageLimit> {
+    let mut out = Vec::new();
+    for line in screen.lines().map(str::trim) {
+        let Some(at) = line.find("% used") else { continue };
+        let Some(percent) = number_before(&line[..at]) else { continue };
+        let name = line.split_whitespace().next().unwrap_or_default();
+        let window = match name {
+            "Daily" => "24h",
+            "Weekly" => "7d",
+            "Monthly" => "30d",
+            _ => "",
+        };
+        let resets_at = line.split_once("resets ").and_then(|(_, r)| devin_reset(r, now));
+        out.push(UsageLimit { label: format!("{name} limit"), percent, resets_at, window: window.into() });
+    }
+    if out.is_empty()
+        && let Some(line) = screen.lines().map(str::trim).find(|l| l.contains("% remaining"))
+        && let Some(left) = number_before(&line[..line.find("% remaining").unwrap_or(0)])
+    {
+        let resets_at = line.split_once("resets ").and_then(|(_, r)| devin_reset(r.trim_end_matches(')'), now));
+        out.push(UsageLimit { label: "Quota".into(), percent: (100.0 - left).clamp(0.0, 100.0), resets_at, window: String::new() });
+    }
+    out
+}
+
+/// The number that ends `text` ("■■■ 12" → 12).
+fn number_before(text: &str) -> Option<f32> {
+    let digits: String = text.trim_end().chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.').collect::<Vec<_>>().into_iter().rev().collect();
+    digits.parse().ok()
+}
+
+/// When a Devin quota resets: `in 5h 10m` (from `now`), or `Oct 4, 4:00 AM (UTC-4)`. Unix ms.
+fn devin_reset(text: &str, now: chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
+    use chrono::{Datelike, NaiveDateTime, TimeZone};
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("in ") {
+        let mut secs = 0i64;
+        for part in rest.split_whitespace() {
+            let (n, unit) = part.split_at(part.find(|c: char| !c.is_ascii_digit())?);
+            let n: i64 = n.parse().ok()?;
+            secs += n * match unit {
+                "d" => 86_400,
+                "h" => 3_600,
+                "m" => 60,
+                "s" => 1,
+                _ => return None,
+            };
+        }
+        return Some(now.timestamp_millis() + secs * 1000);
+    }
+    let (when, zone) = match text.split_once(" (") {
+        Some((w, z)) => (w.trim(), Some(z.trim_end_matches(')').trim())),
+        None => (text, None),
+    };
+    let offset = match zone {
+        Some(z) => {
+            let z = z.strip_prefix("UTC").or_else(|| z.strip_prefix("GMT"))?;
+            if z.is_empty() {
+                0
+            } else {
+                let sign = if z.starts_with('-') { -1 } else { 1 };
+                let (h, m) = z[1..].split_once(':').unwrap_or((&z[1..], "0"));
+                sign * (h.parse::<i32>().ok()? * 3_600 + m.parse::<i32>().ok()? * 60)
+            }
+        }
+        None => now.offset().local_minus_utc(),
+    };
+    let tz = chrono::FixedOffset::east_opt(offset)?;
+    let at = |year: i32| NaiveDateTime::parse_from_str(&format!("{year} {when}"), "%Y %b %d, %I:%M %p").ok().and_then(|t| tz.from_local_datetime(&t).single());
+    let this_year = at(now.year())?;
+    // Late December showing an early-January reset.
+    let t = if this_year.timestamp() < now.timestamp() - 86_400 { at(now.year() + 1)? } else { this_year };
+    Some(t.timestamp_millis())
+}
+
+/// A balance line on the `/usage` panel (on-demand credits past the quota), as Devin wrote it.
+fn devin_note(screen: &str) -> Option<String> {
+    screen.lines().map(str::trim).find(|l| l.to_lowercase().contains("balance")).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 #[cfg(test)]
@@ -616,5 +843,80 @@ mod tests {
             skills,
             vec![SlashCommand { name: "browser:control-in-app-browser".into(), description: "Control the browser".into(), kind: CommandKind::Skill }]
         );
+    }
+
+    // Devin CLI 3000.11.3, as `devin auth status` printed it (identifiers removed).
+    const DEVIN_AUTH: &str = "Logged in (via Devin).\n\nCredentials:\n  File:              /Users/me/.local/share/devin/credentials.toml\n  API server:        https://server.codeium.com\n\nUser:\n  Name:              Toby\n  Email:             toby@example.com\n  User ID:           user-0000\n\nAccount:\n  Tier:              Devin Pro\n  Plan:              Pro\n  Enterprise:        no\n";
+
+    // The screen after `/usage` (Devin CLI 3000.11.3), as the terminal emulator reads it.
+    const DEVIN_USAGE: &str = " ⠀⣴⣾⣶⡄⠀⠀⠀⠀\n ⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI\n Pro · 100% remaining (resets in 5h 10m)\n❭ /usage\n Daily   ■■■■■■■■■■■■■■■■■■■■  0% used  · resets in 5h 10m\n Weekly  ■■■■■■■■■■■■■■■■■■■■  0% used  · resets Oct 4, 4:00 AM (UTC-4)\n No quota consumed yet in this session.\n──────\n❭ Ask Devin to build features, fix bugs, or work on your code\nSWE-2 Max";
+
+    fn at(s: &str) -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap()
+    }
+
+    #[test]
+    fn devin_account_and_plan() {
+        let st = devin_account(DEVIN_AUTH);
+        assert!(st.logged_in);
+        assert_eq!((st.account.as_deref(), st.plan.as_deref()), (Some("toby@example.com"), Some("Devin Pro")));
+        assert_eq!(st.billing, Some(crate::Billing::Plan(Some("Devin Pro".into()))));
+        let out = devin_account("Not logged in. Run `devin auth login` to sign in.\n");
+        assert!(!out.logged_in && out.plan.is_none());
+    }
+
+    #[test]
+    fn devin_quota_from_the_usage_panel() {
+        let now = at("2026-10-03T22:50:00-04:00");
+        let l = devin_limits(DEVIN_USAGE, now);
+        assert_eq!(l.len(), 2);
+        assert_eq!((l[0].label.as_str(), l[0].percent, l[0].window.as_str()), ("Daily limit", 0.0, "24h"));
+        assert_eq!(l[0].resets_at, Some(now.timestamp_millis() + (5 * 3_600 + 10 * 60) * 1000));
+        assert_eq!((l[1].label.as_str(), l[1].window.as_str()), ("Weekly limit", "7d"));
+        assert_eq!(l[1].resets_at, Some(at("2026-10-04T04:00:00-04:00").timestamp_millis()));
+        let used = DEVIN_USAGE.replace("Daily   ■■■■■■■■■■■■■■■■■■■■  0% used", "Daily   ■■■■■■■■■■■■■■■■■■■■  37% used");
+        assert_eq!(devin_limits(&used, now)[0].percent, 37.0);
+        assert_eq!(devin_note(DEVIN_USAGE), None);
+        assert_eq!(devin_note(" Extra usage   $12.40 balance\n").as_deref(), Some("Extra usage $12.40 balance"));
+    }
+
+    #[test]
+    fn devin_quota_from_the_header_alone() {
+        let now = at("2026-10-03T22:50:00-04:00");
+        let l = devin_limits(" Pro · 88% remaining (resets in 2h 5m)\n❭ Ask Devin", now);
+        assert_eq!(l.len(), 1);
+        assert_eq!((l[0].percent, l[0].resets_at), (12.0, Some(now.timestamp_millis() + (2 * 3_600 + 5 * 60) * 1000)));
+        assert!(devin_limits("❭ Ask Devin", now).is_empty());
+    }
+
+    #[test]
+    fn devin_resets_read_every_way_it_writes_them() {
+        let now = at("2026-12-31T20:00:00+00:00");
+        assert_eq!(devin_reset("in 2d 3h", now), Some(now.timestamp_millis() + (2 * 86_400 + 3 * 3_600) * 1000));
+        assert_eq!(devin_reset("Jan 2, 9:30 AM (UTC+5:30)", now), Some(at("2027-01-02T09:30:00+05:30").timestamp_millis()), "next year");
+        assert_eq!(devin_reset("Dec 31, 11:00 PM (UTC)", now), Some(at("2026-12-31T23:00:00+00:00").timestamp_millis()));
+        assert_eq!(devin_reset("soon", now), None);
+    }
+
+    /// Against the installed Devin CLI (signed in): its plan and quota. Sends no prompt.
+    /// `cargo test -p trek-agents devin_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn devin_live() {
+        let st = trek_core::runtime().block_on(devin_status()).unwrap();
+        println!("plan {:?}, limits {:?}, note {:?}, error {:?}", st.plan, st.limits, st.note, st.error);
+        assert!(st.logged_in && !st.limits.is_empty());
+    }
+
+    /// Against the installed Claude Code and Codex (signed in): how each login is billed.
+    /// Sends no prompt. `cargo test -p trek-agents billing_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn billing_live() {
+        let dir = std::env::temp_dir();
+        let claude = trek_core::runtime().block_on(claude_status(&dir)).unwrap();
+        let codex = trek_core::runtime().block_on(codex_status(&dir)).unwrap();
+        println!("claude {:?} {:?}; codex {:?} {:?}", claude.plan, claude.billing, codex.plan, codex.billing);
+        assert!(claude.billing.is_some() && codex.billing.is_some());
     }
 }

@@ -77,7 +77,7 @@ fn a_day_of_work_is_recapped_and_reviewed() {
                 ];
                 store_items(&ws.store, &t.id, items);
                 let tokens = TokenUsage { input: 1_000, output: 400, cache_read: if model == "mock-deep" { 30_000 } else { 5_000 }, cache_write: 0 };
-                ws.store.record_usage(&t.id, now - 1_000, &mock(), Some(model), &tokens).unwrap();
+                ws.store.record_usage(&t.id, now - 1_000, &mock(), Some(model), &tokens, None).unwrap();
                 ids.push(t.id);
             }
             ws.store.update_thread(&ids[0], |t| {
@@ -95,6 +95,8 @@ fn a_day_of_work_is_recapped_and_reviewed() {
         assert_eq!((r.prompts, r.threads, r.turns, r.failed), (3, 3, 3, 1));
         assert_eq!(r.tokens.total(), 3 * 1_400 + 40_000);
         assert_eq!(r.best_model().and_then(|m| m.model.clone()).as_deref(), Some("mock-deep"));
+        // The mock's models have no price: the tokens tile says where they came from, no cost.
+        assert_eq!(crate::basecamp::tokens_note(&r, "today"), "40K read from cache");
         for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
             theme(cx, choice);
             trek.render(cx);

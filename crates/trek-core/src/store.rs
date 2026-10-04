@@ -439,7 +439,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
            PRIMARY KEY (thread_id, tool_id)
          );",
     )?;
-    conn.execute_batch(usage::SCHEMA)?;
+    usage::migrate(conn)?;
     migrate_items(conn)?;
     search::ensure_schema(conn)
 }

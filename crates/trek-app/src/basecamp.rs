@@ -408,13 +408,11 @@ impl Basecamp {
         }
         let total = recap.tokens.total();
         if total > 0 {
-            let note = if recap.tokens_partial() {
-                format!("From {} of {} threads", recap.threads_with_tokens, recap.threads)
-            } else if recap.tokens.cache_read > 0 {
-                format!("{} read from cache", fmt_tokens(recap.tokens.cache_read))
-            } else {
-                "As your agents reported them".to_string()
+            let when = match recap.window.range {
+                Range::Today => "today",
+                Range::Week => "this week",
             };
+            let note = tokens_note(recap, when);
             let spark = Sparkline::of(recap, p, cx);
             tiles.push(tile(
                 "You used",
@@ -986,6 +984,23 @@ impl Profile {
     }
 }
 
+/// What the tokens tile says under its figure: what they'd cost at API prices (as far as they
+/// have a price), then where they came from.
+pub(crate) fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
+    let source = if recap.tokens_partial() {
+        format!("From {} of {} threads", recap.threads_with_tokens, recap.threads)
+    } else if recap.tokens.cache_read > 0 {
+        format!("{} read from cache", fmt_tokens(recap.tokens.cache_read))
+    } else {
+        "As your agents reported them".to_string()
+    };
+    if !recap.spend.priced() {
+        return source;
+    }
+    let cost = format!("≈ {} at API prices {when}", crate::cost::usd(recap.spend.usd()));
+    if recap.tokens_partial() { format!("{cost} · {}", source.to_lowercase()) } else { cost }
+}
+
 /// The tokens tile's sparkline: tokens used so far, climbing through the window.
 struct Sparkline {
     points: Vec<f32>,
@@ -1029,7 +1044,33 @@ impl Sparkline {
 
 #[cfg(test)]
 mod tests {
-    use super::tween;
+    use super::{tokens_note, tween};
+    use trek_core::basecamp::{Range, Recap, ThreadActivity};
+    use trek_core::store::{Activity, Store, UsageRow};
+    use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
+
+    #[test]
+    fn the_tokens_tile_says_what_they_cost_at_api_prices() {
+        let window = Range::Today.window(&chrono::Local::now());
+        let at = window.start + 60_000;
+        let s = Store::in_memory().unwrap();
+        let thread = |agent: AgentId| {
+            let t = s.create_thread(None, agent, None, Effort::High, HandHolding::Auto).unwrap();
+            ThreadActivity { thread: t, project: None, activity: vec![Activity::Prompt { at }, Activity::TurnEnd { at: at + 1_000, took_secs: 1 }], usage: vec![] }
+        };
+        let row = |t: &ThreadActivity, model: &str, tokens: TokenUsage, cost: Option<UsageCost>| UsageRow { thread_id: t.thread.id.clone(), at, agent: t.thread.agent.clone(), model: Some(model.into()), tokens, cost };
+        let mut claude = thread(AgentId::ClaudeCode);
+        claude.usage = vec![row(&claude, "claude-opus-5-5", TokenUsage { input: 10, output: 400, cache_read: 30_000, cache_write: 2_000 }, Some(UsageCost::reported(1.25)))];
+        // Recorded before Trek kept costs: priced now, 100,000 × $0.20 + 10,000 × $1.20 per million.
+        let mut codex = thread(AgentId::Codex);
+        codex.usage = vec![row(&codex, "gpt-5.6-luna", TokenUsage { input: 100_000, output: 10_000, ..Default::default() }, None)];
+        let r = Recap::compute(window, at + 5_000, &[claude.clone(), codex]);
+        assert_eq!(tokens_note(&r, "today"), "≈ $1.28 at API prices today");
+        // Threads that didn't report their tokens are said to be missing from it.
+        let quiet = thread(AgentId::Acp("gemini".into()));
+        let r = Recap::compute(window, at + 5_000, &[claude, quiet]);
+        assert_eq!(tokens_note(&r, "this week"), "≈ $1.25 at API prices this week · from 1 of 2 threads");
+    }
 
     #[test]
     fn numbers_count_up_in_place() {

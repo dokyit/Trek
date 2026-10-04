@@ -139,10 +139,9 @@ pub struct LiveThread {
     /// Settings the agent reads only at launch changed mid-turn: the session restarts (and
     /// resumes) once the turn is over.
     relaunch: bool,
-    /// Estimated spend on this thread's agent so far; money only when `billing` is metered.
-    pub cost_usd: f64,
-    /// The agent's running session total at its last report (see `cost_added`).
-    cost_total: f64,
+    /// What the thread and its sub-agents spent, as the store has it (`None`: not read yet).
+    /// Updated as the agent reports usage, never per token.
+    pub spend: Option<crate::cost::ThreadSpend>,
     /// How the current session is billed, once the agent has said.
     pub billing: Option<Billing>,
     /// Tokens in the context window and the window size, as last reported by the agent.
@@ -670,6 +669,8 @@ pub struct Workspace {
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
+    /// When Devin last reported its plan and quota (`refresh_usage`).
+    devin_status_at: i64,
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
     /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
@@ -886,6 +887,7 @@ impl Workspace {
             agent_status: HashMap::new(),
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
+            devin_status_at: 0,
             acp_info: HashMap::new(),
             usage_loading: false,
             settings_project: None,
@@ -1637,6 +1639,10 @@ impl Workspace {
     }
 
     fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.live.get(id).is_none_or(|l| l.spend.is_none()) {
+            let spend = self.load_spend(id);
+            self.live.entry(id.to_string()).or_default().spend = Some(spend);
+        }
         let thread = self.thread(id).cloned();
         let live = self.live.entry(id.to_string()).or_default();
         if live.loaded || live.loading {
@@ -1758,14 +1764,12 @@ impl Workspace {
                 });
                 let live = self.live.entry(id.clone()).or_default();
                 let switched = before.as_ref().is_some_and(|b| b.agent != prefs.agent);
-                // Another agent means another login and a fresh session: what the old one cost
-                // and how it was billed say nothing about the new one, and the old agent's
-                // questions and plans go with it, as does a turn it was running.
+                // Another agent means another login and a fresh session: how the old one was
+                // billed says nothing about the new one, and the old agent's questions and plans
+                // go with it, as does a turn it was running. What it spent stays the thread's.
                 let mut cut = false;
                 if switched {
                     live.billing = None;
-                    live.cost_usd = 0.0;
-                    live.cost_total = 0.0;
                     live.permissions.clear();
                     live.picks.clear();
                     if live.turn_started.take().is_some() || live.background > 0 {
@@ -2375,8 +2379,9 @@ impl Workspace {
         // The agent stopped to ask the user something.
         let mut asked = false;
         let mut commands: Option<Vec<SlashCommand>> = None;
-        // Tokens the agent reported (by the model it named), kept once the batch is through.
-        let mut used: Vec<(Option<String>, trek_core::TokenUsage)> = vec![];
+        // Tokens the agent reported (by the model it named) and their cost, kept once the batch
+        // is through.
+        let mut used: Vec<(Option<String>, trek_core::TokenUsage, Option<trek_core::UsageCost>)> = vec![];
         // A turn that failed (true) or was stopped: transcripts keep no turn end for it, but the
         // time it ran counts in Basecamp.
         let mut stopped: Option<(u32, bool)> = None;
@@ -2566,18 +2571,15 @@ impl Workspace {
                     }
                     AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
-                    AgentEvent::Usage { model, tokens } => used.push((model, tokens)),
+                    AgentEvent::Usage { model, tokens, cost } => used.push((model, tokens, cost)),
                     AgentEvent::Billing(b) => live.billing = Some(b),
-                    AgentEvent::TurnComplete { cost_usd, error } => {
+                    AgentEvent::TurnComplete { error } => {
                         // Models that hide their reasoning leave empty "Thought" rows behind. Removing
                         // them shifts positions; the rows' ids keep saves and views lined up.
                         live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
                         live.streaming = None;
                         live.reasoning = None;
                         live.permissions.clear();
-                        if let Some(total) = cost_usd {
-                            live.cost_usd += cost_added(&mut live.cost_total, total);
-                        }
                         // Background sub-agents are still out: the agent will pick the turn back up
                         // when they report, so the thread keeps working.
                         if error.is_none() && live.background > 0 {
@@ -2664,18 +2666,7 @@ impl Workspace {
             tracing::warn!("record stopped turn: {e:#}");
         }
         if !used.is_empty() {
-            let at = now_ms();
-            if let Some(t) = self.thread(id) {
-                // Unnamed, it's the thread's model (picked since the session started, maybe), or
-                // the one the session said it runs when the thread leaves it to the agent.
-                let fallback = t.model.clone().or_else(|| self.live.get(id).and_then(|l| l.session_model.clone()));
-                let agent = t.agent.clone();
-                for (model, tokens) in used {
-                    if let Err(e) = self.store.record_usage(id, at, &agent, model.or_else(|| fallback.clone()).as_deref(), &tokens) {
-                        tracing::warn!("record token usage: {e:#}");
-                    }
-                }
-            }
+            self.record_usage(id, used);
         }
         if exited {
             self.retire_ipc_session(id);
@@ -2992,7 +2983,7 @@ impl Workspace {
         // the agent never gets it: the turn ends here.
         if live.held.iter().any(|c| matches!(c, Command::Prompt { .. })) {
             live.held.retain(|c| !matches!(c, Command::Prompt { .. }));
-            self.apply_events(id, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }], cx);
+            self.apply_events(id, vec![AgentEvent::TurnComplete { error: Some("Interrupted".into()) }], cx);
             return;
         }
         if let Some(tx) = &live.commands {
@@ -3963,7 +3954,9 @@ impl Workspace {
         }
         let ready = |id: AgentId| self.agents.iter().any(|a| a.agent == id && a.availability == Availability::Ready) && !self.settings.disabled_agents.contains(&id.key());
         let (claude, codex) = (ready(AgentId::ClaudeCode), ready(AgentId::Codex));
-        if !claude && !codex {
+        // Devin's quota is read off its terminal UI, a few seconds' work: every few minutes at most.
+        let devin = ready(devin_agent()) && now_ms() - self.devin_status_at >= DEVIN_STATUS_EVERY;
+        if !claude && !codex && !devin {
             return;
         }
         self.usage_loading = true;
@@ -3971,11 +3964,12 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         let folder = cwd.clone();
         trek_core::runtime().spawn(async move {
-            let (a, b) = tokio::join!(
+            let (a, b, c) = tokio::join!(
                 async { if claude { Some(trek_agents::claude_status(&cwd).await) } else { None } },
                 async { if codex { Some(trek_agents::codex_status(&cwd).await) } else { None } },
+                async { if devin { Some(trek_agents::devin_status().await) } else { None } },
             );
-            let _ = tx.send([(AgentId::ClaudeCode, a), (AgentId::Codex, b)]).await;
+            let _ = tx.send([(AgentId::ClaudeCode, a), (AgentId::Codex, b), (devin_agent(), c)]).await;
         });
         let task = cx.spawn(async move |this, cx| {
             let Ok(results) = rx.recv().await else { return };
@@ -3999,6 +3993,9 @@ impl Workspace {
                 }
                 this.usage_loading = false;
                 this.status_fetched_at = now_ms();
+                if devin {
+                    this.devin_status_at = now_ms();
+                }
                 this.fill_unknown_resets(cx);
                 cx.notify();
             });
@@ -4189,19 +4186,20 @@ impl Workspace {
                 for l in &st.limits {
                     lines.push(format!("- {}: {:.0}% used{}", l.label, l.percent, l.resets_at.map(|r| format!(", resets {}", crate::time::until(r))).unwrap_or_default()));
                 }
+                lines.extend(st.note.clone());
                 Some(lines.join("\n"))
             }
             "context" => match live.and_then(|l| l.context) {
                 Some((used, window)) => Some(format!("{} of {} tokens in context ({:.0}%).", fmt_tokens(used), fmt_tokens(window), used as f64 / window.max(1) as f64 * 100.)),
                 None => thread.is_none().then(|| "Nothing is in context yet: this thread hasn't started.".to_string()),
             },
-            "cost" if thread.is_none() => Some("Nothing is spent yet: this thread hasn't started.".into()),
-            "cost" => {
-                let cost = live.map(|l| l.cost_usd).unwrap_or(0.0);
-                // Claude Code reports cost on every turn; ACP agents (OpenCode) only for priced models.
-                let reports_cost = agent == AgentId::ClaudeCode || cost > 0.0;
-                Some(cost_reply(reports_cost, live.and_then(|l| l.billing.as_ref()), cost))
-            }
+            "cost" => match &thread {
+                None => Some("Nothing is spent yet: this thread hasn't started.".into()),
+                Some(t) => {
+                    let spend = self.spend_of(&t.id);
+                    Some(cost_reply(self.billing_of(t).as_ref(), &spend))
+                }
+            },
             "model" => Some(format!("{} · {}", agent.display_name(), model.unwrap_or_else(|| "default model".into()))),
             _ => None,
         }
@@ -4743,54 +4741,95 @@ fn viewing<W: PartialEq + Copy>(in_main: bool, window: Option<W>, main: Option<W
     }
 }
 
-/// What a turn added to a thread's spend, given the agent's running session `total` and the
-/// total it reported last. A zero total (a failed start) is ignored. A total below the last one
-/// means the agent started counting again (a new process without a saved total, or `/clear`),
-/// so all of it is new. A resumed session that carries on from its saved total adds only the
-/// difference, which is why `last` outlives the process.
-fn cost_added(last: &mut f64, total: f64) -> f64 {
-    if total <= 0.0 {
-        return 0.0;
+impl Workspace {
+    /// What `id` and the sub-agents under it spent, from the store.
+    fn load_spend(&self, id: &str) -> crate::cost::ThreadSpend {
+        let own = self.store.usage_of(&[id.to_string()]).unwrap_or_default();
+        let subs = self.store.descendants(id).unwrap_or_default();
+        let theirs = self.store.usage_of(&subs).unwrap_or_default();
+        let sub_threads = theirs.iter().map(|r| r.thread_id.as_str()).collect::<HashSet<_>>().len();
+        // Started to advise (the default), as far as this run knows.
+        let consults = subs.iter().all(|c| self.delegations.get(c).is_none_or(|d| d.mode == trek_core::orchestrate::Mode::Advise));
+        crate::cost::ThreadSpend { own: trek_core::store::UsageRow::spend(&own), subs: trek_core::store::UsageRow::spend(&theirs), sub_threads, consults }
     }
-    let added = if total >= *last { total - *last } else { total };
-    *last = total;
-    added
-}
 
-/// "your Claude Max plan", or "your subscription" when the plan has no name.
-fn plan_phrase(plan: &Option<String>) -> String {
-    plan.as_deref().map(|p| format!("your {p} plan")).unwrap_or_else(|| "your subscription".into())
-}
+    /// What `id` spent, as the status strip shows it.
+    pub fn spend_of(&self, id: &str) -> crate::cost::ThreadSpend {
+        self.live.get(id).and_then(|l| l.spend.clone()).unwrap_or_else(|| self.load_spend(id))
+    }
 
-/// What the composer says about a thread's spend: `(status strip text, agent tooltip)`. Only
-/// metered sessions show a cost in the strip. On a subscription the figure is what the same
-/// tokens would cost through the API, which the plan already covers, so it stays in the tooltip.
-pub fn cost_note(billing: Option<&Billing>, cost: f64) -> (Option<String>, Option<String>) {
-    let spent = cost >= 0.005;
-    match billing {
-        Some(Billing::Metered) => (spent.then(|| format!("${cost:.2} this thread")), Some("Billed per token by your API provider".into())),
-        Some(Billing::Plan(plan)) => {
-            let plan = plan_phrase(plan);
-            (None, Some(if spent { format!("≈${cost:.2} at API prices — included in {plan}") } else { format!("Included in {plan}") }))
+    /// How `t`'s tokens are paid for: as its session said, else as its agent's login is (a plan,
+    /// a key), or as its provider is.
+    pub fn billing_of(&self, t: &Thread) -> Option<Billing> {
+        if let Some(b) = self.live.get(&t.id).and_then(|l| l.billing.clone()) {
+            return Some(b);
         }
-        Some(Billing::Local) => (None, Some("Runs on this Mac, nothing is billed".into())),
-        None => (None, spent.then(|| format!("≈${cost:.2} at API prices"))),
+        match &t.agent {
+            AgentId::Direct(p) if catalog::is_mock(p) || catalog::direct_provider(p).is_some_and(|d| d.local) => Some(Billing::Local),
+            AgentId::Direct(_) => Some(Billing::Metered),
+            agent => self.agent_status.get(&agent.key()).and_then(|s| s.billing.clone()),
+        }
+    }
+
+    /// Keep what a turn of `id` used, priced: by the agent, else from the price table at
+    /// today's prices, so later price changes don't rewrite what it cost. The thread's spend,
+    /// and its share in the threads above it, follow.
+    fn record_usage(&mut self, id: &str, used: Vec<(Option<String>, trek_core::TokenUsage, Option<trek_core::UsageCost>)>) {
+        let at = now_ms();
+        let Some(t) = self.thread(id) else { return };
+        // Unnamed, it's the thread's model (picked since the session started, maybe), or the one
+        // the session said it runs when the thread leaves it to the agent.
+        let fallback = t.model.clone().or_else(|| self.live.get(id).and_then(|l| l.session_model.clone()));
+        let (agent, parent) = (t.agent.clone(), t.parent_id.clone());
+        let mut kept = vec![];
+        for (model, tokens, cost) in used {
+            let model = model.or_else(|| fallback.clone());
+            let cost = cost.or_else(|| model.as_deref().and_then(|m| trek_core::pricing::estimate(m, &agent, &tokens, at)).map(trek_core::UsageCost::priced));
+            if let Err(e) = self.store.record_usage(id, at, &agent, model.as_deref(), &tokens, cost) {
+                tracing::warn!("record token usage: {e:#}");
+            }
+            kept.push((model, tokens, cost));
+        }
+        match self.live.get_mut(id).and_then(|l| l.spend.as_mut()) {
+            Some(spend) => {
+                for (model, tokens, cost) in &kept {
+                    spend.own.add(&agent, model.as_deref(), tokens, *cost, at);
+                }
+            }
+            // Started here, it hasn't been read yet: the store has it all now.
+            None => {
+                let spend = self.load_spend(id);
+                self.live.entry(id.to_string()).or_default().spend = Some(spend);
+            }
+        }
+        let mut up = parent;
+        while let Some(p) = up {
+            if self.live.get(&p).is_some_and(|l| l.spend.is_some()) {
+                let spend = self.load_spend(&p);
+                if let Some(l) = self.live.get_mut(&p) {
+                    l.spend = Some(spend);
+                }
+            }
+            up = self.thread(&p).and_then(|t| t.parent_id.clone());
+        }
     }
 }
 
-/// The `/cost` answer. `reports_cost`: the agent reports what the session costs (Claude Code always,
-/// ACP agents for priced models).
-fn cost_reply(reports_cost: bool, billing: Option<&Billing>, cost: f64) -> String {
-    match (billing, reports_cost) {
+/// Devin, the ACP agent whose plan and quota Trek reads (`trek_agents::devin_status`).
+pub fn devin_agent() -> AgentId {
+    AgentId::Acp("devin".into())
+}
+
+/// How often Devin is asked for its quota, at most.
+const DEVIN_STATUS_EVERY: i64 = 10 * 60_000;
+
+/// The `/cost` answer: the breakdown the status strip's tooltip shows, as text.
+fn cost_reply(billing: Option<&Billing>, spend: &crate::cost::ThreadSpend) -> String {
+    match (billing, crate::cost::breakdown(billing, spend)) {
         (Some(Billing::Local), _) => "This session runs on a local model, so nothing is billed.".into(),
-        (Some(Billing::Plan(plan)), true) => {
-            format!("About ${cost:.2} at API prices so far. It's included in {}, so nothing is charged per token.", plan_phrase(plan))
-        }
-        (Some(Billing::Plan(plan)), false) => format!("This session is included in {}.", plan_phrase(plan)),
-        (Some(Billing::Metered), true) => format!("This session has cost ${cost:.2} so far."),
-        (Some(Billing::Metered), false) => "This session is billed per token by your API provider; the agent doesn't report what it has cost.".into(),
-        (None, true) => format!("About ${cost:.2} so far at API prices."),
-        (None, false) => "This agent doesn't report what a session costs.".into(),
+        (_, Some(b)) => crate::cost::reply(&b),
+        (Some(Billing::Plan(plan)), None) => format!("Nothing used yet. This thread is included in {}.", crate::cost::plan_phrase(plan)),
+        (_, None) => "Nothing used yet: the agent hasn't reported any tokens in this thread.".into(),
     }
 }
 
@@ -4919,27 +4958,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_running_totals_are_not_summed() {
-        // Three $1 turns report running totals 1, 2, 3: the thread has spent $3, not $6.
-        let (mut last, mut spent) = (0.0, 0.0);
-        for total in [1.0, 2.0, 3.0] {
-            spent += cost_added(&mut last, total);
-        }
-        assert_eq!(spent, 3.0);
-        // A failed start reports zero: ignored, and the next total still counts from 3.
-        spent += cost_added(&mut last, 0.0);
-        spent += cost_added(&mut last, 3.5);
-        assert_eq!(spent, 3.5);
-        // A relaunched process that resumes from its saved total carries on from it.
-        spent += cost_added(&mut last, 4.0);
-        assert_eq!(spent, 4.0);
-        // One that starts again from zero (no saved total, or /clear) adds all of its total.
-        spent += cost_added(&mut last, 0.25);
-        spent += cost_added(&mut last, 0.75);
-        assert_eq!(spent, 4.75);
-    }
-
-    #[test]
     fn scopes_resolve_against_the_main_route() {
         let on_a = Route::Thread("a".into());
         let draft = Route::Draft { project: None };
@@ -4983,25 +5001,16 @@ mod tests {
     }
 
     #[test]
-    fn subscription_cost_is_an_estimate_in_the_tooltip() {
-        let max = Billing::Plan(Some("Claude Max".into()));
-        assert_eq!(cost_note(Some(&max), 10.468), (None, Some("≈$10.47 at API prices — included in your Claude Max plan".into())));
-        assert_eq!(cost_note(Some(&max), 0.0), (None, Some("Included in your Claude Max plan".into())));
-        assert_eq!(cost_note(Some(&Billing::Plan(None)), 2.0).1.as_deref(), Some("≈$2.00 at API prices — included in your subscription"));
-        assert_eq!(cost_note(Some(&Billing::Metered), 0.42), (Some("$0.42 this thread".into()), Some("Billed per token by your API provider".into())));
-        assert_eq!(cost_note(Some(&Billing::Metered), 0.001).0, None);
-        assert_eq!(cost_note(Some(&Billing::Local), 0.0).0, None);
-        assert_eq!(cost_note(None, 1.0), (None, Some("≈$1.00 at API prices".into())));
-        assert_eq!(cost_note(None, 0.0), (None, None));
-    }
-
-    #[test]
     fn cost_command_answers_per_billing() {
         let plus = Billing::Plan(Some("ChatGPT Plus".into()));
-        assert_eq!(cost_reply(false, Some(&plus), 0.0), "This session is included in your ChatGPT Plus plan.");
-        assert!(cost_reply(true, Some(&Billing::Plan(Some("Claude Max".into()))), 3.5).starts_with("About $3.50 at API prices so far. It's included in your Claude Max plan"));
-        assert_eq!(cost_reply(true, Some(&Billing::Metered), 1.25), "This session has cost $1.25 so far.");
-        assert_eq!(cost_reply(true, Some(&Billing::Local), 0.0), "This session runs on a local model, so nothing is billed.");
+        let none = crate::cost::ThreadSpend::default();
+        assert_eq!(cost_reply(Some(&plus), &none), "Nothing used yet. This thread is included in your ChatGPT Plus plan.");
+        assert_eq!(cost_reply(Some(&Billing::Local), &none), "This session runs on a local model, so nothing is billed.");
+        let mut spend = crate::cost::ThreadSpend::default();
+        let tokens = trek_core::TokenUsage { input: 1_000, output: 100, ..Default::default() };
+        spend.own.add(&AgentId::ClaudeCode, Some("claude-opus-5-5"), &tokens, Some(trek_core::UsageCost::reported(3.5)), 0);
+        assert!(cost_reply(Some(&Billing::Plan(Some("Claude Max".into()))), &spend).starts_with("≈ $3.50 at API prices\nIncluded in your Claude Max plan."));
+        assert!(cost_reply(Some(&Billing::Metered), &spend).starts_with("$3.50 so far\nBilled per token by your API provider."));
     }
 
     #[test]

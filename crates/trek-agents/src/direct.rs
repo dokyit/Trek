@@ -8,7 +8,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use trek_core::catalog::{Wire, direct_provider};
 use trek_core::settings::secrets;
-use trek_core::{AgentId, Effort, TokenUsage};
+use trek_core::{AgentId, Effort, TokenUsage, UsageCost};
 
 /// The error for a failed request: a usage limit for a 429 (said with `AgentEvent::LimitReached`),
 /// else `message` as it is.
@@ -55,20 +55,20 @@ pub async fn run(
                     Wire::Anthropic => anthropic_turn(&client, key.as_deref().unwrap_or_default(), &model, effort, &history, &events, &commands).await,
                     _ => {
                         let usage = REPORTS_USAGE.contains(&provider.id);
-                        openai_turn(&client, provider.base_url, key.as_deref(), provider.local, usage, &model, effort, &history, &events, &commands).await
+                        openai_turn(&client, &config.agent, provider.base_url, key.as_deref(), provider.local, usage, &model, effort, &history, &events, &commands).await
                     }
                 };
                 match result {
                     Ok(assistant) => {
                         history.push(assistant);
-                        events.send(AgentEvent::TurnComplete { cost_usd: None, error: None }).await?;
+                        events.send(AgentEvent::TurnComplete { error: None }).await?;
                     }
                     Err(e) => {
                         history.pop();
                         if let Some(crate::limits::LimitError(limit)) = e.downcast_ref() {
                             events.send(limit.clone().event()).await?;
                         }
-                        events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some(format!("{e:#}")) }).await?;
+                        events.send(AgentEvent::TurnComplete { error: Some(format!("{e:#}")) }).await?;
                     }
                 }
             }
@@ -89,32 +89,40 @@ pub async fn run(
 const REPORTS_USAGE: &[&str] = &["openai", "openrouter", "deepseek", "xai", "groq"];
 
 /// Take in what an Anthropic stream event says about usage: `message_start` has the input
-/// side (and output so far), `message_delta` the running output count.
-fn anthropic_usage(v: &Value, usage: &mut TokenUsage) {
+/// side (and output so far), `message_delta` the running output count. `long_writes`: how many
+/// of the cache writes were 1-hour ones (`cache_creation`), priced apart.
+fn anthropic_usage(v: &Value, usage: &mut TokenUsage, long_writes: &mut u64) {
     let u = match v["type"].as_str() {
         Some("message_start") => &v["message"]["usage"],
         Some("message_delta") => &v["usage"],
         _ => return,
     };
-    let set = |k: &str, field: &mut u64| {
-        if let Some(n) = u[k].as_u64() {
+    let set = |n: &Value, field: &mut u64| {
+        if let Some(n) = n.as_u64() {
             *field = n;
         }
     };
-    set("input_tokens", &mut usage.input);
-    set("output_tokens", &mut usage.output);
-    set("cache_read_input_tokens", &mut usage.cache_read);
-    set("cache_creation_input_tokens", &mut usage.cache_write);
+    set(&u["input_tokens"], &mut usage.input);
+    set(&u["output_tokens"], &mut usage.output);
+    set(&u["cache_read_input_tokens"], &mut usage.cache_read);
+    set(&u["cache_creation_input_tokens"], &mut usage.cache_write);
+    set(&u["cache_creation"]["ephemeral_1h_input_tokens"], long_writes);
 }
 
-/// An OpenAI-style chunk's `usage` (the last chunk, when asked for): prompt tokens include
-/// cached ones, which are counted apart here.
-fn openai_usage(v: &Value) -> Option<TokenUsage> {
+/// An OpenAI-style chunk's `usage` (the last chunk, when asked for), and its cost when the
+/// provider says (OpenRouter's `cost`). Prompt tokens include cached ones and cache writes,
+/// which are counted apart here; output is all the model wrote, reasoning included (providers
+/// that leave reasoning out of `completion_tokens` still count it in `total_tokens`).
+fn openai_usage(v: &Value) -> Option<(TokenUsage, Option<f64>)> {
     let u = v.get("usage").filter(|u| u.is_object())?;
     let prompt = u["prompt_tokens"].as_u64().unwrap_or(0);
-    let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(prompt);
-    let t = TokenUsage { input: prompt - cached, output: u["completion_tokens"].as_u64().unwrap_or(0), cache_read: cached, cache_write: 0 };
-    (!t.is_empty()).then_some(t)
+    let details = &u["prompt_tokens_details"];
+    let cached = details["cached_tokens"].as_u64().unwrap_or(0).min(prompt);
+    let written = details["cache_write_tokens"].as_u64().unwrap_or(0).min(prompt - cached);
+    let completion = u["completion_tokens"].as_u64().unwrap_or(0);
+    let output = completion.max(u["total_tokens"].as_u64().unwrap_or(0).saturating_sub(prompt));
+    let t = TokenUsage { input: prompt - cached - written, output, cache_read: cached, cache_write: written };
+    (!t.is_empty()).then_some((t, u["cost"].as_f64()))
 }
 
 /// A user message for `wire`. Without images the content is a plain string; with images it's
@@ -228,6 +236,7 @@ async fn anthropic_turn(
     let mut text = String::new();
     let mut stop_reason = None;
     let mut usage = TokenUsage::default();
+    let mut long_writes = 0;
     loop {
         tokio::select! {
             chunk = stream.next() => {
@@ -235,7 +244,7 @@ async fn anthropic_turn(
                 buf.push_str(&String::from_utf8_lossy(&chunk?));
                 for data in sse_events(&mut buf) {
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
-                    anthropic_usage(&v, &mut usage);
+                    anthropic_usage(&v, &mut usage, &mut long_writes);
                     match v["type"].as_str() {
                         Some("content_block_start") => blocks.push(v["content_block"].clone()),
                         Some("content_block_delta") => {
@@ -271,7 +280,8 @@ async fn anthropic_turn(
         }
     }
     if !usage.is_empty() {
-        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens: usage }).await?;
+        let cost = trek_core::pricing::request(model, &AgentId::Direct("anthropic".into()), &usage, long_writes, false);
+        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens: usage, cost }).await?;
     }
     if stop_reason.as_deref() == Some("refusal") {
         bail!("The model declined this request.");
@@ -290,6 +300,7 @@ fn append(blocks: &mut [Value], index: usize, field: &str, s: &str) {
 #[allow(clippy::too_many_arguments)]
 async fn openai_turn(
     client: &reqwest::Client,
+    agent: &AgentId,
     base_url: &str,
     key: Option<&str>,
     local: bool,
@@ -352,8 +363,13 @@ async fn openai_turn(
             }
         }
     }
-    if let Some(tokens) = usage {
-        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens }).await?;
+    if let Some((tokens, reported)) = usage {
+        // One request: its prompt's size sets its tier (Gemini's and xAI's long context).
+        let cost = match reported {
+            Some(usd) => Some(UsageCost::reported(usd)),
+            None => trek_core::pricing::request(model, agent, &tokens, 0, false),
+        };
+        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens, cost }).await?;
     }
     events.send(AgentEvent::TextDone(text.clone())).await?;
     Ok(json!({ "role": "assistant", "content": text }))
@@ -404,14 +420,24 @@ mod tests {
     #[test]
     fn usage_from_both_wires() {
         // Anthropic's stream: the input side up front, the output count as it ends.
-        let mut u = TokenUsage::default();
-        anthropic_usage(&json!({"type":"message_start","message":{"id":"m","usage":{"input_tokens":12,"cache_creation_input_tokens":800,"cache_read_input_tokens":4000,"output_tokens":1}}}), &mut u);
-        anthropic_usage(&json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}), &mut u);
-        anthropic_usage(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":57}}), &mut u);
-        assert_eq!(u, TokenUsage { input: 12, output: 57, cache_read: 4000, cache_write: 800 });
+        let (mut u, mut long) = (TokenUsage::default(), 0);
+        anthropic_usage(&json!({"type":"message_start","message":{"id":"m","usage":{"input_tokens":12,"cache_creation_input_tokens":800,"cache_read_input_tokens":4000,"output_tokens":1,
+            "cache_creation":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":500}}}}), &mut u, &mut long);
+        anthropic_usage(&json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}), &mut u, &mut long);
+        anthropic_usage(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":57}}), &mut u, &mut long);
+        assert_eq!((u, long), (TokenUsage { input: 12, output: 57, cache_read: 4000, cache_write: 800 }, 500));
+        // On Opus 5.5: 12 × $4 + 57 × $20 + 4,000 × $0.20 + 300 × $5 + 500 × $8, per million.
+        let cost = trek_core::pricing::request("claude-opus-5-5", &AgentId::Direct("anthropic".into()), &u, long, false).unwrap();
+        assert!((cost.usd - (0.000048 + 0.00114 + 0.0008 + 0.0015 + 0.004)).abs() < 1e-12);
         // OpenAI's last chunk, asked for with include_usage: cached prompt tokens counted apart.
         let last = json!({"id":"c","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"total_tokens":1280,"prompt_tokens_details":{"cached_tokens":1024}}});
-        assert_eq!(openai_usage(&last), Some(TokenUsage { input: 176, output: 80, cache_read: 1024, cache_write: 0 }));
+        assert_eq!(openai_usage(&last), Some((TokenUsage { input: 176, output: 80, cache_read: 1024, cache_write: 0 }, None)));
+        // Cache writes (GPT-5.6 and later) are part of the prompt too; OpenRouter adds its cost.
+        let written = json!({"usage":{"prompt_tokens":5000,"completion_tokens":10,"total_tokens":5010,"prompt_tokens_details":{"cached_tokens":1000,"cache_write_tokens":3000},"cost":0.0042}});
+        assert_eq!(openai_usage(&written), Some((TokenUsage { input: 1000, output: 10, cache_read: 1000, cache_write: 3000 }, Some(0.0042))));
+        // Reasoning counted outside `completion_tokens` still counts, through the total.
+        let thoughts = json!({"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":180}});
+        assert_eq!(openai_usage(&thoughts).map(|(t, _)| t.output), Some(80));
         assert_eq!(openai_usage(&json!({"choices":[{"delta":{"content":"x"}}],"usage":null})), None);
     }
 

@@ -86,7 +86,7 @@ fn the_live_group_appears_grows_and_folds_into_its_summary() {
         assert!(!trek.visible(cx, "live-fold"));
 
         // The turn's end takes the bar away; the group stays a summary row you can open.
-        feed(&trek, cx, &id, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }]);
+        feed(&trek, cx, &id, vec![AgentEvent::TurnComplete { error: None }]);
         assert_eq!(trek.working_bar(cx), None);
         assert_eq!(trek.rows(cx), ["assistant", "group: Ran 1 command, edited 1 file, read 1 file, and ran 5 searches", "assistant", "end"]);
         trek.click(cx, ("tool-group", 1usize));

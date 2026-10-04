@@ -87,7 +87,8 @@ impl Sidebar {
             active: window.is_window_active(),
             open_projects: Default::default(),
             filter_open: false,
-            usage_open: false,
+            // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
+            usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
             updater_open: false,
             _clock: None,
             _subscriptions: subscriptions,
@@ -830,6 +831,7 @@ impl Sidebar {
                     )
                     .when(u.limits.is_empty() && u.error.is_none(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("No usage limits on this plan.")))
                     .when_some(u.error.clone(), |el, e| el.child(div().text_xs().text_color(palette::amber(cx)).child(e)))
+                    .when_some(u.note.clone(), |el, n| el.child(div().text_xs().text_color(theme.muted_foreground).child(n)))
                     .children(u.limits.iter().map(|l| {
                         let resets = l.resets_at.map(time::until).unwrap_or_default();
                         v_flex()
