@@ -23,7 +23,7 @@ fn answered(trek: &Trek, cx: &mut TestAppContext) -> String {
         AgentEvent::ReasoningDelta(THOUGHT.into()),
         AgentEvent::TextDelta(ANSWER.into()),
         AgentEvent::TextDone(ANSWER.into()),
-        AgentEvent::TurnComplete { cost_usd: None, error: None },
+        AgentEvent::TurnComplete { error: None },
     ];
     trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
     trek.render(cx);

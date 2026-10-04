@@ -16,11 +16,11 @@ mod status;
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
 pub use limits::{Limit, LimitScope};
-pub use status::{AgentStatus, CommandKind, SlashCommand, UsageLimit, claude_status, codex_status};
+pub use status::{AgentStatus, CommandKind, SlashCommand, UsageLimit, claude_status, codex_status, devin_status};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use trek_core::{AgentId, Effort, HandHolding, TokenUsage};
+use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -149,15 +149,16 @@ pub enum AgentEvent {
     PermissionResolved { request_id: String },
     /// A diff stat for the turn, when the agent reports one.
     DiffStat { additions: i64, deletions: i64 },
-    /// A turn ended. `cost_usd`: what the session has cost so far, as a running total (a resumed
-    /// session may carry on from its saved total; it starts again from zero after a `/clear`).
-    TurnComplete { cost_usd: Option<f64>, error: Option<String> },
+    /// A turn ended (`error`: why it failed, or "Interrupted"). What it cost came before it, in
+    /// its `Usage` reports.
+    TurnComplete { error: Option<String> },
     /// Tokens currently in the context window, and the window size.
     Context { used: u64, window: u64 },
     /// Tokens the running turn used on `model` (`None`: the session's own), sent as the agent
     /// reports them, before the turn's `TurnComplete`. A turn may send several: one per model
-    /// it used, or one per request.
-    Usage { model: Option<String>, tokens: TokenUsage },
+    /// it used, or one per request. `cost`: what they cost at API prices, as the agent said or
+    /// as priced per request (`trek_core::pricing`); `None` when no price is known here.
+    Usage { model: Option<String>, tokens: TokenUsage, cost: Option<UsageCost> },
     /// How the session is billed, once the agent has said which login it uses.
     Billing(Billing),
     /// A sub-agent (keyed by the tool call that launched it) started, moved on, or finished.
@@ -557,7 +558,7 @@ mod live_usage {
     }
 
     fn reported(events: &[AgentEvent]) -> Vec<(Option<String>, TokenUsage)> {
-        events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model.clone(), *tokens)) } else { None }).collect()
+        events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens, .. } = e { Some((model.clone(), *tokens)) } else { None }).collect()
     }
 
     #[test]
@@ -578,6 +579,11 @@ mod live_usage {
         let used = reported(&second);
         println!("first {before}, resumed {used:?}");
         assert!(matches!(&used[..], [(Some(m), t)] if m.starts_with("claude-haiku") && t.output > 0 && t.output < 200), "{used:?}");
+        // The first process left its totals in the ledger: the resumed turn is Claude Code's
+        // own figure, not one priced here.
+        let costs: Vec<UsageCost> = second.iter().filter_map(|e| if let AgentEvent::Usage { cost, .. } = e { *cost } else { None }).collect();
+        println!("resumed costs {costs:?}");
+        assert!(matches!(&costs[..], [c] if c.reported && c.usd > 0.0 && c.usd < 0.05), "{costs:?}");
     }
 
     #[test]

@@ -2068,7 +2068,16 @@ impl Render for Composer {
         let own_turn = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
         let children_working = thread.as_ref().is_some_and(|t| !ws.running_children(&t.id).is_empty());
         let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
-        let (cost_label, billing_tip) = crate::workspace::cost_note(live.and_then(|l| l.billing.as_ref()), live.map_or(0.0, |l| l.cost_usd));
+        // The API cost estimate: changes as usage is reported, not per token.
+        let billing = thread.as_ref().and_then(|t| ws.billing_of(t));
+        let spend = live.and_then(|l| l.spend.clone()).unwrap_or_default();
+        let cost_label = crate::cost::label(billing.as_ref(), &spend);
+        let billing_tip = match &billing {
+            Some(trek_agents::Billing::Plan(plan)) => Some(format!("Included in {}", crate::cost::plan_phrase(plan))),
+            Some(trek_agents::Billing::Metered) => Some("Billed per token by your API provider".to_string()),
+            Some(trek_agents::Billing::Local) => Some("Runs on this Mac, nothing is billed".to_string()),
+            None => None,
+        };
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let models = ws.models_for(&prefs.agent);
         let model_label = prefs
@@ -2286,10 +2295,10 @@ impl Render for Composer {
                         .gap(px(6.))
                         .child(ui::agent_glyph(&prefs.agent, cx))
                         .child(prefs.agent.display_name())
-                        // How the session is billed, and on a plan what its usage would cost at API prices.
+                        // How the session is billed (what it would cost is the estimate beside it).
                         .when_some(billing_tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))),
                 )
-                .when_some(cost_label, |el, c| el.child(c))
+                .when_some(cost_label, |el, label| el.child(cost_chip(label, billing.clone(), spend, cx)))
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
                 .when(crowded.is_some(), |el| {
                     let ws = self.workspace.clone();
@@ -2368,6 +2377,103 @@ impl Render for Composer {
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
             .child(v_flex().w_full().max_w(px(760.)).children(chips).children(limit_bar).child(card).children(status))
     }
+}
+
+/// The API cost estimate in the status strip, with its breakdown on hover (worked out only then).
+fn cost_chip(label: String, billing: Option<trek_agents::Billing>, spend: crate::cost::ThreadSpend, cx: &App) -> AnyElement {
+    let hover = cx.theme().foreground;
+    // TREK_HOVER_COST=<seconds> hovers the first estimate drawn, once, that long after it's
+    // drawn (once the agents have said how they're billed), so its breakdown can be reviewed in
+    // a window that isn't in front, without moving the real pointer.
+    static HOVERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static DELAY: std::sync::LazyLock<Option<std::time::Duration>> =
+        std::sync::LazyLock::new(|| std::env::var("TREK_HOVER_COST").ok().map(|s| std::time::Duration::from_secs(s.trim().parse().unwrap_or(0))));
+    let delay = *DELAY;
+    let review = delay.is_some() && !HOVERED.load(std::sync::atomic::Ordering::Relaxed);
+    div()
+        .id("cost-estimate")
+        .test_support()
+        .relative()
+        .flex_none()
+        .hover(move |s| s.text_color(hover.opacity(0.8)))
+        .child(label)
+        .when(review, |el| {
+            el.child(
+                canvas(
+                    move |bounds, window, cx| {
+                        if !HOVERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            let position = bounds.center();
+                            let after = delay.unwrap_or_default();
+                            window
+                                .spawn(cx, async move |cx| {
+                                    cx.background_executor().timer(after).await;
+                                    let _ = cx.update(|window, cx| {
+                                        window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), cx);
+                                    });
+                                })
+                                .detach();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+        })
+        .tooltip(move |window, cx| {
+            let tip = crate::cost::breakdown(billing.as_ref(), &spend);
+            gpui_kit::component::tooltip::Tooltip::element(move |_, cx| tip.as_ref().map_or_else(|| div().into_any_element(), |b| cost_breakdown(b, cx))).build(window, cx)
+        })
+        .into_any_element()
+}
+
+/// The tooltip: the estimate, how it's billed, each model's tokens by kind at their price, the
+/// sub-agents' share, and where the prices come from.
+fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    let rule = theme.foreground.opacity(0.07);
+    let models = b.models.iter().map(|m| {
+        v_flex()
+            .gap(px(2.))
+            .child(h_flex().gap(px(12.)).text_xs().font_medium().child(div().flex_1().child(m.name.clone())).child(m.amount.clone()))
+            .children(m.rows.iter().map(|r| {
+                h_flex()
+                    .gap(px(8.))
+                    .text_xs()
+                    .text_color(muted)
+                    .child(div().w(px(76.)).child(r.kind))
+                    .child(div().w(px(44.)).flex().justify_end().child(r.tokens.clone()))
+                    .child(div().pl(px(4.)).child(r.rate.clone().map(|r| format!("× {r}")).unwrap_or_else(|| "—".into())))
+            }))
+    });
+    v_flex()
+        .id("cost-breakdown")
+        .test_support()
+        .max_w(px(340.))
+        .gap(px(8.))
+        .child(
+            v_flex()
+                .gap(px(2.))
+                .child(div().text_sm().font_medium().child(b.headline.clone()))
+                .when_some(b.billing.clone(), |el, l| el.child(div().text_xs().text_color(muted).child(l))),
+        )
+        .when(!b.models.is_empty(), |el| el.child(v_flex().gap(px(8.)).pt(px(8.)).border_t_1().border_color(rule).children(models)))
+        .when(b.subs.is_some() || b.unpriced.is_some(), |el| {
+            el.child(
+                v_flex()
+                    .gap(px(2.))
+                    .text_xs()
+                    .when_some(b.subs.clone(), |el, s| el.child(s))
+                    .when_some(b.unpriced.clone(), |el, u| el.child(div().text_color(muted).child(u))),
+            )
+        })
+        .when(!b.sources.is_empty(), |el| {
+            el.child(v_flex().gap(px(2.)).pt(px(8.)).border_t_1().border_color(rule).text_xs().text_color(muted).children(b.sources.iter().cloned()))
+        })
+        .into_any_element()
 }
 
 #[cfg(test)]

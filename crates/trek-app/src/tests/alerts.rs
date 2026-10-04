@@ -47,7 +47,7 @@ fn titled(trek: &Trek, cx: &mut TestAppContext, title: &str) -> String {
 }
 
 fn finish(trek: &Trek, cx: &mut TestAppContext, id: &str, error: Option<&str>) {
-    let events = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TurnComplete { cost_usd: None, error: error.map(String::from) }];
+    let events = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TurnComplete { error: error.map(String::from) }];
     trek.update(cx, |ws, cx| ws.apply_events(id, events, cx));
 }
 
@@ -120,7 +120,7 @@ fn alerts_follow_focus_and_what_is_on_screen() {
         assert_eq!(said.borrow().last().map(String::as_str), Some("Failed: Write the docs"));
         assert_eq!(banners(cx).last(), Some(&(format!("trek-attention-{here}"), "Failed: Write the docs".to_string())));
         let before = said.borrow().len();
-        trek.update(cx, |ws, cx| ws.apply_events(&away, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&away, vec![AgentEvent::TurnComplete { error: Some("Interrupted".into()) }], cx));
         assert_eq!(said.borrow().len(), before, "no alert for a stop");
 
         // Clicking a banner brings Trek forward on its thread.

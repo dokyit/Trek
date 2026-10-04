@@ -551,7 +551,7 @@ fn without_a_reset_time_the_next_message_tries_again() {
         trek.update(cx, |ws, cx| {
             ws.live.get_mut(&id).unwrap().items.push(user);
             let limit = AgentEvent::LimitReached { message: "API Error: 429 rate_limit_error".into(), resets_at: None, scope: LimitScope::Other };
-            ws.apply_events(&id, vec![limit, AgentEvent::TurnComplete { cost_usd: None, error: Some("API Error: 429 rate_limit_error".into()) }], cx)
+            ws.apply_events(&id, vec![limit, AgentEvent::TurnComplete { error: Some("API Error: 429 rate_limit_error".into()) }], cx)
         });
         assert!(pause(&trek, cx, &id).is_some_and(|p| p.resets_at.is_none()));
         trek.render(cx);

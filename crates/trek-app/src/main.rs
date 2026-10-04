@@ -7,6 +7,7 @@ mod basecamp;
 mod brand;
 mod command_palette;
 mod composer;
+mod cost;
 mod file_icon;
 mod integrations;
 mod ipc;

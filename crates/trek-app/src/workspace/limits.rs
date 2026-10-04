@@ -62,13 +62,15 @@ pub(crate) struct Resuming {
 /// couldn't say). Claude Code and Codex report them; tests answer for any agent.
 pub type UsageProbe = Rc<dyn Fn(&AgentId, &Path) -> async_channel::Receiver<Option<AgentStatus>>>;
 
-/// Claude Code's and Codex's own usage report (`claude_status`, `codex_status`), off the main thread.
+/// Claude Code's, Codex's and Devin's own usage report (`claude_status`, `codex_status`,
+/// `devin_status`), off the main thread.
 fn ask_agent(agent: &AgentId, cwd: &Path) -> async_channel::Receiver<Option<AgentStatus>> {
     let (tx, rx) = async_channel::bounded(1);
     let (agent, cwd) = (agent.clone(), cwd.to_path_buf());
     trek_core::runtime().spawn(async move {
         let status = match agent {
             AgentId::ClaudeCode => trek_agents::claude_status(&cwd).await,
+            AgentId::Acp(_) => trek_agents::devin_status().await,
             _ => trek_agents::codex_status(&cwd).await,
         };
         let _ = tx.send(status.ok()).await;
@@ -143,6 +145,9 @@ impl Workspace {
         if unknown && matches!(thread.agent, AgentId::ClaudeCode | AgentId::Codex) {
             self.status_fetched_at = 0;
             self.refresh_usage(cx);
+        } else if unknown && thread.agent == super::devin_agent() {
+            self.devin_status_at = 0;
+            self.refresh_devin_usage(cx);
         }
         // A resume that met the limit again moves on without a word: the bar and the card say it,
         // and the alert for the limit went when it was first hit.
@@ -316,12 +321,13 @@ impl Workspace {
     }
 
     /// Resume `id`, after making sure the limit has really gone where the agent can say (Claude
-    /// Code and Codex report their usage windows): still used up, the pause moves to the new reset.
+    /// Code, Codex and Devin report their usage windows): still used up, the pause moves to the
+    /// new reset.
     fn resume_when_clear(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(t) = self.thread(id).cloned() else { return };
         let probe: Option<UsageProbe> = match &self.usage_probe {
             Some(p) => Some(p.clone()),
-            None if matches!(t.agent, AgentId::ClaudeCode | AgentId::Codex) && !trek_core::paths::isolated() => Some(Rc::new(ask_agent)),
+            None if (matches!(t.agent, AgentId::ClaudeCode | AgentId::Codex) || t.agent == super::devin_agent()) && !trek_core::paths::isolated() => Some(Rc::new(ask_agent)),
             None => None,
         };
         let Some(probe) = probe else {

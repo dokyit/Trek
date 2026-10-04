@@ -17,6 +17,9 @@ reqwest.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 base64 = "0.22"
+# Devin shows its quota only in its terminal UI (`status::devin_status`).
+portable-pty = "0.9"
+vt100 = "0.16"
 
 [dev-dependencies]
 # Isolates the test binary before any test runs (see `tests::isolate_process` in lib.rs).

@@ -169,7 +169,7 @@ fn imported(t: &Thread, source: ThreadSource, native: &str, window: &Window, unt
     let agent = source.agent().unwrap_or_else(|| t.agent.clone());
     let usage = import::load_usage(source, native, window.start, until)
         .into_iter()
-        .map(|(at, model, tokens)| UsageRow { thread_id: t.id.clone(), at, agent: agent.clone(), model: model.or_else(|| t.model.clone()), tokens })
+        .map(|(at, model, tokens)| UsageRow { thread_id: t.id.clone(), at, agent: agent.clone(), model: model.or_else(|| t.model.clone()), tokens, cost: None })
         .collect();
     let found = Arc::new((activity, usage));
     IMPORTED.lock().expect("basecamp cache").insert(key, (stamp, found.clone()));
@@ -220,6 +220,8 @@ pub struct Recap {
     pub tokens: TokenUsage,
     /// Of `threads`, the ones that reported tokens.
     pub threads_with_tokens: usize,
+    /// What the window's tokens cost at API prices, as far as they're priced (`Spend::usd`).
+    pub spend: crate::pricing::Spend,
     /// Most prompts first.
     pub projects: Vec<ProjectShare>,
     /// Most tokens first (most turns, where no tokens were reported).
@@ -251,6 +253,7 @@ impl Recap {
             agent_secs: 0,
             tokens: TokenUsage::default(),
             threads_with_tokens: 0,
+            spend: crate::pricing::Spend::default(),
             projects: vec![],
             models: vec![],
             failed: 0,
@@ -305,6 +308,7 @@ impl Recap {
             let mut tokens = 0;
             for u in &usage {
                 recap.tokens.add(&u.tokens);
+                recap.spend.add(&u.agent, u.model.as_deref(), &u.tokens, u.cost, u.at);
                 tokens += u.tokens.total();
                 buckets[window.bucket(u.at)].tokens += u.tokens.total();
                 let i = model_at(&mut models, &u.agent, u.model.as_deref());
@@ -597,7 +601,7 @@ mod tests {
     }
 
     fn used(t: &ThreadActivity, at: i64, model: Option<&str>, total: u64) -> UsageRow {
-        UsageRow { thread_id: t.thread.id.clone(), at, agent: t.thread.agent.clone(), model: model.map(String::from), tokens: TokenUsage { input: total / 10, output: total / 10, cache_read: total - 2 * (total / 10), cache_write: 0 } }
+        UsageRow { thread_id: t.thread.id.clone(), at, agent: t.thread.agent.clone(), model: model.map(String::from), tokens: TokenUsage { input: total / 10, output: total / 10, cache_read: total - 2 * (total / 10), cache_write: 0 }, cost: None }
     }
 
     /// A day across three agents, four models and two projects (plus a thread outside any).
@@ -946,13 +950,14 @@ mod tests {
             Item::TurnEnd { at: p + 60_000, took_secs: 60 },
         ];
         s.save_transcript(&t.id, &mut crate::transcript::Transcript::unsaved(items)).unwrap();
-        s.record_usage(&t.id, p + 60_000, &AgentId::ClaudeCode, Some("claude-opus-5-5"), &TokenUsage { input: 5, output: 50, cache_read: 1_000, cache_write: 0 }).unwrap();
+        s.record_usage(&t.id, p + 60_000, &AgentId::ClaudeCode, Some("claude-opus-5-5"), &TokenUsage { input: 5, output: 50, cache_read: 1_000, cache_write: 0 }, Some(crate::types::UsageCost::reported(0.0012))).unwrap();
         let got = gather(&s, &window).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].project.as_deref(), dir.file_name().and_then(|n| n.to_str()));
         assert_eq!(got[0].activity, vec![Activity::Prompt { at: p }, Activity::TurnEnd { at: p + 60_000, took_secs: 60 }]);
         let r = Recap::compute(window, p + 120_000, &got);
         assert_eq!((r.prompts, r.turns, r.tokens.total()), (1, 1, 1_055));
+        assert!((r.spend.usd() - 0.0012).abs() < 1e-12, "Claude Code's own figure, as recorded");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -988,12 +993,15 @@ mod tests {
         let mut child_items =
             crate::transcript::Transcript::unsaved(vec![user("Review the cache", p + 5_000), Item::Assistant { text: "Looks right.".into() }, Item::TurnEnd { at: p + 65_000, took_secs: 60 }]);
         s.save_transcript(&child.id, &mut child_items).unwrap();
-        s.record_usage(&child.id, p + 65_000, &AgentId::Codex, Some("gpt-6.1-sol"), &TokenUsage { input: 100, output: 900, cache_read: 0, cache_write: 0 }).unwrap();
+        s.record_usage(&child.id, p + 65_000, &AgentId::Codex, Some("gpt-6.1-sol"), &TokenUsage { input: 100, output: 900, cache_read: 0, cache_write: 0 }, None).unwrap();
         let got = gather(&s, &window).unwrap();
         let r = Recap::compute(window, p + 120_000, &got);
         assert_eq!((r.prompts, r.threads, r.turns), (1, 1, 3), "the user asked once, in one thread; three turns were worked");
         assert_eq!(r.agent_secs, 80);
         let sol = r.models.iter().find(|m| m.model.as_deref() == Some("gpt-6.1-sol")).expect("the sub-agent's model");
         assert_eq!((sol.tokens, sol.turns), (1_000, 1));
+        // Recorded without a cost, it's priced from the table: 100 × $2 + 900 × $10 per million.
+        let priced = r.spend.models.iter().find(|m| m.model.as_deref() == Some("gpt-6.1-sol")).unwrap();
+        assert!((priced.usd - 0.0092).abs() < 1e-12 && !priced.reported);
     }
 }

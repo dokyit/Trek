@@ -537,7 +537,7 @@ fn an_error_that_ends_nothing_leaves_the_turn_running() {
         assert!(trek.read(cx, |ws, _| ws.turn_running(&id) && ws.work_in_flight()));
         assert!(alerts.borrow().is_empty());
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "the follow-up still waits its turn");
-        let done = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }];
+        let done = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { error: None }];
         trek.update(cx, |ws, cx| ws.apply_events(&id, done, cx));
         assert_eq!(*alerts.borrow(), [format!("Finished: {}", trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()))]);
         assert!(matches!(trek.items(cx, &id).iter().find(|i| matches!(i, Item::Error { .. })), Some(Item::Error { text }) if text.contains("/x.png")));
@@ -573,7 +573,7 @@ fn switching_agent_leaves_nothing_waiting_on_the_old_one() {
         let planned = trek.quiet_thread(cx);
         let plan = AgentEvent::PermissionRequest { request_id: "plan-1".into(), title: "Plan".into(), detail: String::new(), prompt: Some(trek_agents::Prompt::Plan("1. Do it".into())) };
         trek.update(cx, |ws, cx| ws.apply_events(&planned, vec![AgentEvent::TextDelta("Here's the plan.".into())], cx));
-        trek.update(cx, |ws, cx| ws.apply_events(&planned, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }, plan], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&planned, vec![AgentEvent::TurnComplete { error: None }, plan], cx));
         assert_eq!(trek.run_state(cx, &planned), RunState::NeedsYou);
         trek.update(cx, |ws, cx| {
             let p = other(ws, &planned);
@@ -607,7 +607,7 @@ fn follow_ups_left_by_a_turn_that_failed_off_screen_come_back_with_the_thread() 
         // The turn fails while another thread is on screen: nowhere to hand them back yet.
         let project = trek.project.clone();
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
-        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("boom".into()) }], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { error: Some("boom".into()) }], cx));
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1);
         assert!(trek.read(cx, |ws, _| ws.work_in_flight()), "a restart would lose it");
         // Back on screen: in the composer, not sent after whatever comes next.
@@ -626,8 +626,8 @@ fn side_chats_raise_no_alerts_and_no_badge() {
         let parent = trek.quiet_thread(cx);
         let side = trek.update(cx, |ws, cx| ws.create_side_chat(cx)).expect("side chat");
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&side).and_then(|t| t.side_of.clone())), Some(parent));
-        trek.update(cx, |ws, cx| ws.apply_events(&side, vec![AgentEvent::TextDelta("An answer".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }], cx));
-        trek.update(cx, |ws, cx| ws.apply_events(&side, vec![AgentEvent::TextDelta("More".into()), AgentEvent::TurnComplete { cost_usd: None, error: Some("boom".into()) }], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&side, vec![AgentEvent::TextDelta("An answer".into()), AgentEvent::TurnComplete { error: None }], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&side, vec![AgentEvent::TextDelta("More".into()), AgentEvent::TurnComplete { error: Some("boom".into()) }], cx));
         assert_eq!(trek.run_state(cx, &side), RunState::Failed);
         assert!(alerts.borrow().is_empty(), "{:?}", alerts.borrow());
         assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 0);

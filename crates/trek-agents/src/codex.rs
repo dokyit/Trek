@@ -10,7 +10,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use trek_core::catalog::ModelInfo;
-use trek_core::{Effort, HandHolding, TokenUsage, detect};
+use trek_core::{Effort, HandHolding, TokenUsage, UsageCost, detect};
 
 pub(crate) struct Rpc {
     pub(crate) stdin: ChildStdin,
@@ -474,8 +474,9 @@ struct Session {
     limited: bool,
     /// Each Codex thread's token total as last reported (this one's and its sub-agents').
     token_totals: HashMap<String, TokenUsage>,
-    /// Tokens the running turn has used so far, by model, sent as `Usage` when it ends.
-    turn_tokens: Vec<(Option<String>, TokenUsage)>,
+    /// Tokens the running turn has used so far, by model, and what they cost (priced per
+    /// request), sent as `Usage` when it ends.
+    turn_tokens: Vec<(Option<String>, TokenUsage, Option<UsageCost>)>,
 }
 
 impl Session {
@@ -704,7 +705,7 @@ impl Session {
                 // Messages sent while the turn was starting were waiting for it: say which didn't go.
                 let unsent: Vec<String> = self.held.drain(..).map(|i| input_text(&i)).collect();
                 let e = if unsent.is_empty() { e } else { format!("{e}\nNot sent to Codex: {}", unsent.join(", ")) };
-                out.events.push(AgentEvent::TurnComplete { cost_usd: None, error: Some(e) });
+                out.events.push(AgentEvent::TurnComplete { error: Some(e) });
             }
             (Call::Steer { input, turn, retried }, Some(e)) => {
                 tracing::debug!("codex refused a steer: {e}");
@@ -894,13 +895,18 @@ impl Session {
         if used.is_empty() {
             return;
         }
+        // Each report is one request: its prompt's size sets its tier, and Fast costs more.
+        let cost = model.as_deref().and_then(|m| trek_core::pricing::request(m, &trek_core::AgentId::Codex, &used, 0, self.fast.is_some()));
         if self.busy() {
-            match self.turn_tokens.iter_mut().find(|(m, _)| *m == model) {
-                Some((_, t)) => t.add(&used),
-                None => self.turn_tokens.push((model, used)),
+            match self.turn_tokens.iter_mut().find(|(m, _, _)| *m == model) {
+                Some((_, t, c)) => {
+                    t.add(&used);
+                    *c = c.zip(cost).map(|(a, b)| UsageCost::priced(a.usd + b.usd));
+                }
+                None => self.turn_tokens.push((model, used, cost)),
             }
         } else {
-            out.events.push(AgentEvent::Usage { model, tokens: used });
+            out.events.push(AgentEvent::Usage { model, tokens: used, cost });
         }
     }
 
@@ -931,10 +937,10 @@ impl Session {
         if let Some(id) = turn["id"].as_str().filter(|id| !id.is_empty()) {
             out.events.push(AgentEvent::Mark(id.to_string()));
         }
-        for (model, tokens) in std::mem::take(&mut self.turn_tokens) {
-            out.events.push(AgentEvent::Usage { model, tokens });
+        for (model, tokens, cost) in std::mem::take(&mut self.turn_tokens) {
+            out.events.push(AgentEvent::Usage { model, tokens, cost });
         }
-        out.events.push(AgentEvent::TurnComplete { cost_usd: None, error });
+        out.events.push(AgentEvent::TurnComplete { error });
         // Messages that missed this turn start the next one, and answer its plan.
         let mut late = std::mem::take(&mut self.after_turn).into_iter();
         if let Some(first) = late.next() {
@@ -1315,7 +1321,7 @@ async fn cut_back(rpc: &mut Rpc, lines: &mut RpcLines, backlog: &mut Vec<Value>,
 
 /// How the login is billed, from an `account/read` result. Older Codex builds without the
 /// method answer with an error, which leaves billing unknown.
-fn account_billing(r: &Value) -> Option<Billing> {
+pub(crate) fn account_billing(r: &Value) -> Option<Billing> {
     let a = &r["account"];
     match a["type"].as_str()? {
         "chatgpt" => Some(Billing::Plan(a["planType"].as_str().map(crate::status::codex_plan_name))),
@@ -1597,7 +1603,7 @@ mod tests {
         assert_eq!(n, 5);
         assert!(matches!(&out.events[n - 4], AgentEvent::ToolFinished { id, output, ok: true } if id == row && output.starts_with("# Add `hello.txt`\n\n## Summary")));
         assert!(matches!(&out.events[n - 3], AgentEvent::Mark(_)), "the finished turn is a point to cut back to");
-        assert_eq!(out.events[n - 2], AgentEvent::TurnComplete { cost_usd: None, error: None });
+        assert_eq!(out.events[n - 2], AgentEvent::TurnComplete { error: None });
         let AgentEvent::PermissionRequest { request_id, prompt: Some(Prompt::Plan(plan)), .. } = &out.events[n - 1] else { panic!() };
         assert!(plan.contains("Hello, world!"));
 
@@ -1873,7 +1879,7 @@ mod tests {
         let out = s.incoming(&json!({"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}));
         assert_eq!(out.send, vec![json!({"id":4,"method":"turn/interrupt","params":{"threadId":"t","turnId":"turn-1"}})]);
         let done = s.incoming(&json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn-1","status":"interrupted","items":[]}}}));
-        assert_eq!(done.events, vec![AgentEvent::Mark("turn-1".into()), AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }]);
+        assert_eq!(done.events, vec![AgentEvent::Mark("turn-1".into()), AgentEvent::TurnComplete { error: Some("Interrupted".into()) }]);
     }
 
     #[test]
@@ -1892,7 +1898,7 @@ mod tests {
             vec![
                 AgentEvent::LimitReached { message: message.clone(), resets_at: Some(1_791_007_800_000), scope: crate::LimitScope::Session },
                 AgentEvent::Mark("01a0fe5c-0a11-7c2e-9d41-5b7f0e2d1a90".into()),
-                AgentEvent::TurnComplete { cost_usd: None, error: Some(message) },
+                AgentEvent::TurnComplete { error: Some(message) },
             ]
         );
         // The next turn starts clean: an ordinary failure is no limit.
@@ -1945,7 +1951,6 @@ mod tests {
         assert_eq!(
             out.events,
             vec![AgentEvent::Mark("01a0fe5b-cec1-72d0-a342-0bdf8326949a".into()), AgentEvent::TurnComplete {
-                cost_usd: None,
                 error: Some("The 'gpt-nope-9' model is not supported when using Codex with a ChatGPT account.".into())
             }]
         );
@@ -1956,7 +1961,7 @@ mod tests {
         let mut s = session("t", false);
         s.command(prompt("hi"));
         let out = s.incoming(&json!({"id":3,"error":{"code":-32600,"message":"thread not loaded"}}));
-        assert_eq!(out.events, vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("thread not loaded".into()) }]);
+        assert_eq!(out.events, vec![AgentEvent::TurnComplete { error: Some("thread not loaded".into()) }]);
         assert_eq!(s.command(prompt("again")).send[0]["method"], "turn/start");
         // Messages sent while it was starting waited for it: the error names them.
         s.command(prompt("and this"));
@@ -1964,7 +1969,7 @@ mod tests {
         let out = s.incoming(&json!({"id":4,"error":{"code":-32600,"message":"thread not loaded"}}));
         assert_eq!(
             out.events,
-            vec![AgentEvent::TurnComplete { cost_usd: None, error: Some("thread not loaded\nNot sent to Codex: “and this”, an image".into()) }]
+            vec![AgentEvent::TurnComplete { error: Some("thread not loaded\nNot sent to Codex: “and this”, an image".into()) }]
         );
         assert!(s.held.is_empty());
     }
@@ -2174,14 +2179,34 @@ mod tests {
         let out = feed(&mut s, &lines);
         let used: Vec<&AgentEvent> = out.events.iter().filter(|e| matches!(e, AgentEvent::Usage { .. })).collect();
         let tokens = TokenUsage { input: (51982 - 28928) + (23158 - 6912), output: 90 + 5, cache_read: 28928 + 6912, cache_write: 0 };
-        assert_eq!(used, vec![&AgentEvent::Usage { model: Some("gpt-5.6-luna".into()), tokens }]);
+        // Priced request by request; none was long, so it's the turn's tokens at standard rates.
+        let (luna, _) = trek_core::pricing::price("gpt-5.6-luna", &AgentId::Codex).unwrap();
+        let [AgentEvent::Usage { model, tokens: got, cost: Some(cost) }] = used[..] else { panic!("{used:?}") };
+        assert_eq!((model.as_deref(), *got), (Some("gpt-5.6-luna"), tokens));
+        assert!((cost.usd - luna.rates.cost(&tokens, 0)).abs() < 1e-12 && !cost.reported);
         // Reported as the turn ends, just before it.
         let at = out.events.iter().position(|e| matches!(e, AgentEvent::Usage { .. })).unwrap();
         assert!(matches!(out.events[at + 1], AgentEvent::TurnComplete { .. }));
         // A background sub-agent reporting between turns is counted at once.
         let late = json!({"method":"thread/tokenUsage/updated","params":{"threadId":"01a0fe4e-1f2d-7f20-a1e8-b5a58b5a5126","tokenUsage":{"total":{"inputTokens":24158,"cachedInputTokens":6912,"outputTokens":15},"last":{},"modelContextWindow":258400}}});
         let out = feed(&mut s, &[late]);
-        assert_eq!(out.events, vec![AgentEvent::Usage { model: Some("gpt-5.6-luna".into()), tokens: TokenUsage { input: 1000, output: 10, cache_read: 0, cache_write: 0 } }]);
+        // 1,000 × $0.20 + 10 × $1.20, per million.
+        assert_eq!(
+            out.events,
+            vec![AgentEvent::Usage { model: Some("gpt-5.6-luna".into()), tokens: TokenUsage { input: 1000, output: 10, cache_read: 0, cache_write: 0 }, cost: Some(UsageCost::priced(0.000212)) }]
+        );
+    }
+
+    #[test]
+    fn fast_requests_cost_what_fast_processing_does() {
+        let mut s = session("main", false);
+        s.model = Some("gpt-5.6-luna".into());
+        s.fast = Some("priority".into());
+        let report = json!({"method":"thread/tokenUsage/updated","params":{"threadId":"main","tokenUsage":{"total":{"inputTokens":1000,"cachedInputTokens":0,"outputTokens":10},"last":{"inputTokens":1000,"cachedInputTokens":0,"outputTokens":10}}}});
+        let out = feed(&mut s, &[report]);
+        // Between turns it's reported at once: twice (1,000 × $0.20 + 10 × $1.20) per million.
+        let [AgentEvent::Usage { cost: Some(c), .. }] = &out.events[..] else { panic!("{:?}", out.events) };
+        assert!((c.usd - 2.0 * 0.000212).abs() < 1e-12);
     }
 
     #[test]
@@ -2198,7 +2223,7 @@ mod tests {
             tokens("main", 1000),
             json!({"method":"turn/completed","params":{"threadId":"main","turn":{"id":"u","items":[],"status":"completed","error":null}}}),
         ]);
-        let used: Vec<(Option<String>, u64)> = out.events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model.clone(), tokens.input)) } else { None }).collect();
+        let used: Vec<(Option<String>, u64)> = out.events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens, .. } = e { Some((model.clone(), tokens.input)) } else { None }).collect();
         assert_eq!(used, vec![(Some("gpt-5.6-mini".into()), 300), (Some("gpt-5.6-luna".into()), 1000)]);
     }
 }

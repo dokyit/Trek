@@ -284,17 +284,14 @@ fn last_turn_in(path: &Path) -> Option<String> {
 
 /// A Codex token count: a rollout's `total_token_usage` / `last_token_usage`, or the app
 /// server's `tokenUsage.total` / `.last` (the same fields in camelCase). Codex counts cached
-/// input inside `input_tokens`; here it's apart, as `TokenUsage` keeps it.
+/// input and cache writes inside `input_tokens`, as OpenAI's usage does; here they're apart, as
+/// `TokenUsage` keeps them. Output includes reasoning (`total_tokens` is input plus output).
 pub fn tokens(v: &Value) -> TokenUsage {
     let n = |snake: &str, camel: &str| v[snake].as_u64().or(v[camel].as_u64()).unwrap_or(0);
     let input = n("input_tokens", "inputTokens");
-    let cached = n("cached_input_tokens", "cachedInputTokens");
-    TokenUsage {
-        input: input.saturating_sub(cached),
-        output: n("output_tokens", "outputTokens"),
-        cache_read: cached.min(input),
-        cache_write: n("cache_write_input_tokens", "cacheWriteInputTokens"),
-    }
+    let cached = n("cached_input_tokens", "cachedInputTokens").min(input);
+    let written = n("cache_write_input_tokens", "cacheWriteInputTokens").min(input - cached);
+    TokenUsage { input: input - cached - written, output: n("output_tokens", "outputTokens"), cache_read: cached, cache_write: written }
 }
 
 /// Tokens thread `id` used between `from` and `to` (unix ms), per model request, from its
@@ -867,5 +864,8 @@ mod tests {
         // The app server's camelCase shape reads the same.
         let camel = json!({ "inputTokens": 90000, "cachedInputTokens": 5000, "outputTokens": 900, "reasoningOutputTokens": 400, "totalTokens": 90900 });
         assert_eq!(tokens(&camel), TokenUsage { input: 85000, output: 900, cache_read: 5000, cache_write: 0 });
+        // Cache writes are part of the input too (GPT-5.6 and later price them apart).
+        let written = json!({ "input_tokens": 20000, "cached_input_tokens": 4000, "cache_write_input_tokens": 12000, "output_tokens": 50, "reasoning_output_tokens": 20, "total_tokens": 20050 });
+        assert_eq!(tokens(&written), TokenUsage { input: 4000, output: 50, cache_read: 4000, cache_write: 12000 });
     }
 }

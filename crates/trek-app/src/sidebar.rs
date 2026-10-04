@@ -87,7 +87,8 @@ impl Sidebar {
             active: window.is_window_active(),
             open_projects: Default::default(),
             filter_open: false,
-            usage_open: false,
+            // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
+            usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
             updater_open: false,
             _clock: None,
             _subscriptions: subscriptions,
@@ -722,7 +723,10 @@ impl Sidebar {
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
                 this.usage_open = *open;
                 if *open {
-                    this.workspace.update(cx, |ws, cx| ws.refresh_usage(cx));
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.refresh_usage(cx);
+                        ws.refresh_devin_usage(cx);
+                    });
                 }
                 cx.notify();
             }))
@@ -796,13 +800,13 @@ impl Sidebar {
     fn usage_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let loading = ws.usage_loading;
-        let mut rows: Vec<(trek_core::AgentId, trek_agents::AgentStatus)> = ws
+        let loading = ws.usage_loading || ws.devin_loading;
+        // In the agent picker's order: Claude Code and Codex first, then the ACP agents.
+        let rows: Vec<(trek_core::AgentId, trek_agents::AgentStatus)> = ws
             .ready_agents()
             .into_iter()
             .filter_map(|a| ws.agent_status.get(&a.key()).cloned().map(|u| (a, u)))
             .collect();
-        rows.sort_by_key(|(a, _)| a.key());
         let bar = |pct: f32, cx: &App| {
             let color = if pct >= 90. { palette::red(cx) } else if pct >= 70. { palette::amber(cx) } else { cx.theme().foreground.opacity(0.85) };
             div().h(px(5.)).w_full().rounded_full().bg(cx.theme().foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(color).w(relative((pct / 100.).clamp(0.0, 1.0))))
@@ -830,6 +834,7 @@ impl Sidebar {
                     )
                     .when(u.limits.is_empty() && u.error.is_none(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("No usage limits on this plan.")))
                     .when_some(u.error.clone(), |el, e| el.child(div().text_xs().text_color(palette::amber(cx)).child(e)))
+                    .when_some(u.note.clone(), |el, n| el.child(div().text_xs().text_color(theme.muted_foreground).child(n)))
                     .children(u.limits.iter().map(|l| {
                         let resets = l.resets_at.map(time::until).unwrap_or_default();
                         v_flex()

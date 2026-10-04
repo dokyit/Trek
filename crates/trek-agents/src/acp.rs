@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use trek_core::catalog::{ACP_AGENTS, ModelInfo};
-use trek_core::{AgentId, Effort, HandHolding, TokenUsage, detect};
+use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost, detect};
 
 /// What `acp_probe` learns about an installed ACP agent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -436,12 +436,17 @@ struct Turn {
     text: String,
     tools: HashMap<String, Tool>,
     plan_updates: u32,
-    /// The session's running cost as last reported. Turns report it as is (see
-    /// `AgentEvent::TurnComplete`); the app works out what each turn added.
+    /// The session's running cost (`usage_update`) as last reported.
     cost: Option<f64>,
-    /// Tokens the turn used, by model (`None`: the session's own): from the prompt responses'
-    /// `usage` (agents that report it), or the agent's own history where that says more.
-    tokens: Vec<(Option<String>, TokenUsage)>,
+    /// The running cost when the last turn ended: what the next one adds is the difference.
+    billed: Option<f64>,
+    /// The session was loaded, and its running cost may carry its earlier turns: until a report
+    /// before a turn says where it stands, a turn's share of it can't be told.
+    resumed: bool,
+    /// Tokens the turn used, by model (`None`: the session's own), and what they cost when the
+    /// agent said: from the prompt responses' `usage` (agents that report it), or the agent's
+    /// own history where that says more.
+    tokens: Vec<(Option<String>, TokenUsage, Option<UsageCost>)>,
 }
 
 impl Turn {
@@ -552,15 +557,49 @@ impl Turn {
         out
     }
 
+    /// A turn is starting: a running cost reported before it is where it starts from.
+    fn begin(&mut self) {
+        if self.billed.is_none() {
+            self.billed = self.cost;
+        }
+    }
+
+    /// What the turn added to the session's running cost, when that can be told.
+    fn turn_cost(&mut self) -> Option<f64> {
+        let now = self.cost?;
+        let added = match self.billed {
+            // Counted again from zero (a new session behind the same id): all of it is new.
+            Some(before) if now < before => now,
+            Some(before) => now - before,
+            None if self.resumed => {
+                self.billed = Some(now);
+                return None;
+            }
+            None => now,
+        };
+        self.billed = Some(now);
+        Some(added)
+    }
+
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
-        let cost_usd = self.cost.filter(|c| *c > 0.0);
         let failed = stop.is_err();
-        for (model, tokens) in std::mem::take(&mut self.tokens) {
-            if !tokens.is_empty() {
-                out.push(AgentEvent::Usage { model, tokens });
+        let added = self.turn_cost();
+        let mut tokens = std::mem::take(&mut self.tokens);
+        // The session's cost goes with the turn's tokens when they're one lot priced by nobody
+        // else; a cost with no tokens is reported on its own.
+        if let Some(usd) = added.filter(|c| *c > 0.0) {
+            match tokens.as_mut_slice() {
+                [] => tokens.push((None, TokenUsage::default(), Some(UsageCost::reported(usd)))),
+                [(_, _, cost @ None)] => *cost = Some(UsageCost::reported(usd)),
+                _ => {}
+            }
+        }
+        for (model, tokens, cost) in tokens {
+            if !tokens.is_empty() || cost.is_some() {
+                out.push(AgentEvent::Usage { model, tokens, cost });
             }
         }
         let error = match stop {
@@ -575,27 +614,38 @@ impl Turn {
         if let Some(limit) = error.as_deref().filter(|_| failed).and_then(|e| crate::Limit::from_text(e, trek_core::store::now_ms())) {
             out.push(limit.event());
         }
-        out.push(AgentEvent::TurnComplete { cost_usd, error });
+        out.push(AgentEvent::TurnComplete { error });
         out
     }
 }
 
-/// Count `used` toward `model`'s tokens in `tokens`.
-fn add_usage(tokens: &mut Vec<(Option<String>, TokenUsage)>, model: Option<String>, used: &TokenUsage) {
-    match tokens.iter_mut().find(|(m, _)| *m == model) {
-        Some((_, t)) => t.add(used),
-        None => tokens.push((model, *used)),
+/// Count `used` toward `model`'s tokens in `tokens`, with what it cost if the agent said.
+fn add_usage(tokens: &mut Vec<(Option<String>, TokenUsage, Option<UsageCost>)>, model: Option<String>, used: &TokenUsage, cost: Option<UsageCost>) {
+    match tokens.iter_mut().find(|(m, _, _)| *m == model) {
+        Some((_, t, c)) => {
+            t.add(used);
+            *c = match (*c, cost) {
+                (Some(a), Some(b)) => Some(UsageCost::reported(a.usd + b.usd)),
+                (a, b) => a.or(b),
+            };
+        }
+        None => tokens.push((model, *used, cost)),
     }
 }
 
-/// A prompt response's `usage` (ACP's session usage: totals for the turn). Input is fresh input;
-/// thought tokens are output, unless the agent already counted them there (then the parts add
-/// up to `totalTokens` without them).
+/// A prompt response's `usage` (ACP's session usage: totals for the turn). Input is fresh
+/// input: agents that count cache reads and writes inside it (Devin, as OpenAI does) have the
+/// parts add up to `totalTokens` without them, and they're taken out. Thought tokens are
+/// output, unless the agent already counted them there.
 fn prompt_usage(u: &Value) -> Option<TokenUsage> {
     let n = |k: &str| u[k].as_u64().unwrap_or(0);
-    let mut t = TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cachedReadTokens"), cache_write: n("cachedWriteTokens") };
-    if u["totalTokens"].as_u64() != Some(t.total()) {
-        t.output += n("thoughtTokens");
+    let (input, output, read, written, thoughts) = (n("inputTokens"), n("outputTokens"), n("cachedReadTokens"), n("cachedWriteTokens"), n("thoughtTokens"));
+    let total = u["totalTokens"].as_u64();
+    let cache_inside = read + written > 0 && read + written <= input && (total == Some(input + output) || total == Some(input + output + thoughts));
+    let mut t = TokenUsage { input: if cache_inside { input - read - written } else { input }, output, cache_read: read, cache_write: written };
+    let counted = if cache_inside { input + output } else { input + output + read + written };
+    if total != Some(counted) {
+        t.output += thoughts;
     }
     (!t.is_empty()).then_some(t)
 }
@@ -834,7 +884,8 @@ pub async fn run(
         events.send(crate::lost_session(&agent.name)).await?;
     }
 
-    let mut s = Live { session_id, turn: Turn::default(), perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), turn_began: None };
+    let turn = Turn { resumed: config.resume.is_some() && !lost, ..Default::default() };
+    let mut s = Live { session_id, turn, perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), turn_began: None };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -847,7 +898,7 @@ pub async fn run(
                 let Ok(cmd) = cmd else { break };
                 match cmd {
                     Command::Prompt { .. } if let Some(why) = &no_plan => {
-                        let _ = events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some(why.clone()) }).await;
+                        let _ = events.send(AgentEvent::TurnComplete { error: Some(why.clone()) }).await;
                     }
                     Command::Prompt { text, images } => {
                         let mut prompt = Vec::new();
@@ -860,6 +911,9 @@ pub async fn run(
                         prompt.push(json!({ "type": "text", "text": text }));
                         let params = json!({ "sessionId": s.session_id, "prompt": prompt });
                         // Sent mid-turn, it's another prompt open at once: the turn ends with the last.
+                        if s.turn_began.is_none() {
+                            s.turn.begin();
+                        }
                         s.turn_began.get_or_insert_with(trek_core::store::now_ms);
                         s.prompts.push(agent.rpc.request("session/prompt", params).await?);
                     }
@@ -967,7 +1021,7 @@ impl Live {
                     };
                     // Each prompt answered reports its own; messages that joined the turn add theirs.
                     if let Some(used) = prompt_usage(&v["result"]["usage"]) {
-                        add_usage(&mut self.turn.tokens, None, &used);
+                        add_usage(&mut self.turn.tokens, None, &used, None);
                     }
                     if self.prompts.is_empty() {
                         self.perms.clear();
@@ -975,13 +1029,14 @@ impl Live {
                             && self.agent == AgentId::OpenCode
                         {
                             // OpenCode's `usage` is the turn's last step (one model call) alone; its
-                            // own history has every step, sub-agents' included.
+                            // own history has every step, sub-agents' included, and what each cost
+                            // (nothing, for models it has no price for).
                             let id = self.session_id.clone();
-                            let steps = tokio::task::spawn_blocking(move || trek_core::import::opencode::usage(&id, began, i64::MAX)).await.unwrap_or_default();
+                            let steps = tokio::task::spawn_blocking(move || trek_core::import::opencode::usage_priced(&id, began, i64::MAX)).await.unwrap_or_default();
                             if !steps.is_empty() {
                                 self.turn.tokens.clear();
-                                for (_, model, tokens) in steps {
-                                    add_usage(&mut self.turn.tokens, model, &tokens);
+                                for (_, model, tokens, cost) in steps {
+                                    add_usage(&mut self.turn.tokens, model, &tokens, cost.filter(|c| *c > 0.0).map(UsageCost::reported));
                                 }
                             }
                         }
@@ -1299,7 +1354,7 @@ mod tests {
         });
         let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
         assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
-        assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { cost_usd: None, error: None }), "the turn ends with the first prompt, cleanly");
+        assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { error: None }), "the turn ends with the first prompt, cleanly");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1315,7 +1370,7 @@ mod tests {
         assert!(t.update(&json!({"sessionUpdate":"plan","entries":[]})).is_empty());
         assert_eq!(
             t.finish(Ok("end_turn")),
-            vec![AgentEvent::TextDone("pong".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }]
+            vec![AgentEvent::TextDone("pong".into()), AgentEvent::TurnComplete { error: None }]
         );
     }
 
@@ -1500,7 +1555,7 @@ mod tests {
         assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_a47ac35a1bd64360a32c5a34".into(), output: "→ Read notes\n○ Edit notes".into(), ok: true }));
         assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_339ea6bf075f4a0286098c91".into(), output: "Edit applied successfully.\nEdited /private/tmp/trek-agents-e2e/notes.txt".into(), ok: true }));
         assert_eq!(ev.last(), Some(&AgentEvent::Context { used: 12761, window: 200000 }));
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("done".into()), AgentEvent::TurnComplete { cost_usd: None, error: None }]);
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("done".into()), AgentEvent::TurnComplete { error: None }]);
 
         // The edit prompt reads like the row it belongs to.
         let ask = lines.iter().find(|v| v["method"] == "session/request_permission").unwrap();
@@ -1569,14 +1624,37 @@ mod tests {
                 AgentEvent::ToolFinished { id: "plan-1".into(), output: "✓ Read\n→ Write".into(), ok: true },
             ]
         );
-        // `cost` is the session's running total, and turns report it as such (as Claude Code's
-        // `total_cost_usd` is): the app charges each turn the difference.
+        // `cost` is the session's running total: each turn is charged the difference.
+        t.begin();
         t.update(&json!({"sessionUpdate":"usage_update","used":10,"size":100,"cost":{"amount":0.5,"currency":"USD"}}));
         assert!(t.update(&json!({"sessionUpdate":"usage_update","used":0,"size":100})).is_empty());
         t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":0.75,"currency":"USD"}}));
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.75), error: None }]);
-        // A turn without a new report repeats the total, which adds nothing.
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { cost_usd: Some(0.75), error: None }]);
+        t.tokens.push((None, TokenUsage { input: 10, ..Default::default() }, None));
+        assert_eq!(
+            t.finish(Ok("end_turn")),
+            vec![AgentEvent::Usage { model: None, tokens: TokenUsage { input: 10, ..Default::default() }, cost: Some(UsageCost::reported(0.75)) }, AgentEvent::TurnComplete { error: None }]
+        );
+        // A turn without a new report adds nothing; one with a report and no tokens, its cost.
+        t.begin();
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { error: None }]);
+        t.begin();
+        t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":1.0,"currency":"USD"}}));
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::Usage { model: None, tokens: TokenUsage::default(), cost: Some(UsageCost::reported(0.25)) }, AgentEvent::TurnComplete { error: None }]);
+        // A loaded session's first report carries its earlier turns: unless it came before the
+        // turn, the turn's share can't be told, and its tokens are priced from the table instead.
+        let mut loaded = Turn { resumed: true, ..Default::default() };
+        loaded.begin();
+        loaded.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.0,"currency":"USD"}}));
+        loaded.tokens.push((None, TokenUsage { input: 10, ..Default::default() }, None));
+        assert!(matches!(&loaded.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: None, .. }));
+        loaded.begin();
+        loaded.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.5,"currency":"USD"}}));
+        assert!(matches!(&loaded.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: Some(c), .. } if *c == UsageCost::reported(0.5)));
+        let mut told = Turn { resumed: true, ..Default::default() };
+        told.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.0,"currency":"USD"}}));
+        told.begin();
+        told.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.2,"currency":"USD"}}));
+        assert!(matches!(&told.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: Some(c), .. } if (c.usd - 0.2).abs() < 1e-12));
     }
 
     #[test]
@@ -1695,9 +1773,15 @@ mod tests {
         let inside = json!({"totalTokens":120,"inputTokens":100,"outputTokens":20,"thoughtTokens":5});
         assert_eq!(prompt_usage(&inside).map(|t| t.output), Some(20));
         assert_eq!(prompt_usage(&Value::Null), None);
-        let mut t = Turn { tokens: vec![(None, prompt_usage(&u).unwrap())], ..Default::default() };
+        let mut t = Turn { tokens: vec![(None, prompt_usage(&u).unwrap(), None)], ..Default::default() };
         let ev = t.finish(Ok("end_turn"));
-        assert!(matches!(&ev[..], [AgentEvent::Usage { model: None, tokens }, AgentEvent::TurnComplete { .. }] if tokens.total() == 12663));
+        assert!(matches!(&ev[..], [AgentEvent::Usage { model: None, tokens, cost: None }, AgentEvent::TurnComplete { .. }] if tokens.total() == 12663));
+        // Devin (CLI 3000.11.3) counts its cache writes inside the input, as OpenAI does: here
+        // on gpt-5-6-luna-medium, 10,837 of the 10,840 input tokens were written to the cache.
+        let devin = json!({"totalTokens":10845,"inputTokens":10840,"outputTokens":5,"cachedWriteTokens":10837});
+        assert_eq!(prompt_usage(&devin), Some(TokenUsage { input: 3, output: 5, cache_read: 0, cache_write: 10837 }));
+        let swe = json!({"totalTokens":11882,"inputTokens":11842,"outputTokens":40});
+        assert_eq!(prompt_usage(&swe), Some(TokenUsage { input: 11842, output: 40, ..Default::default() }));
     }
 }
 

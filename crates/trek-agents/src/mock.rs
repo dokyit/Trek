@@ -21,13 +21,16 @@
 //! | `recall`                     | the messages it remembers from this conversation             |
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
+//! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
+//! |                              | token (or, with `plan`, on a Claude Max plan)                 |
 //!
 //! A sub-agent's prompt is whatever follows the keyword, so `mock:consult mock:long 2s` starts
 //! one that works for two seconds (and `mock:consult mock:consult hi` one that consults in turn).
 //! A message Trek sends to wake it with a sub-agent's answer gets a short reply.
 //!
 //! Keywords may be written bare or as `mock:<keyword>`; durations look like `500ms`, `30s`, `2m`.
-//! Every turn also reports context and token usage. A prompt sent mid-turn steers it. Once a
+//! Every turn also reports context and token usage (on the mock's own models, which have no
+//! price). A prompt sent mid-turn steers it. Once a
 //! session has hit its limit, every prompt hits it again until it resets (or `lift_limit`).
 //!
 //! Like Claude Code and Codex, it keeps each session's history (in memory, for the process) and
@@ -126,6 +129,8 @@ enum Script {
     Limit(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate { wait: bool },
+    /// A turn on a real model with a real price: billed per token, or on a plan.
+    Cost { plan: bool },
     /// Trek woke it with what a sub-agent came back with.
     Wake,
 }
@@ -155,6 +160,7 @@ impl Script {
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
+                "cost" if w.starts_with("mock:") => Script::Cost { plan: words.get(i + 1).is_some_and(|w| w == "plan") },
                 "error" => Script::Error,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
@@ -192,6 +198,7 @@ pub fn title(request: &str) -> String {
         Script::Recall => "What was said",
         Script::Limit(_) => "Refactor the parser",
         Script::Delegate { .. } => "Get a second opinion",
+        Script::Cost { .. } => "Price the API calls",
         Script::Wake => "A sub-agent reported back",
     }
     .into()
@@ -238,8 +245,6 @@ struct Session {
     /// "Always allow" was chosen for commands this session.
     commands_allowed: bool,
     context: u64,
-    /// What the session has "cost" so far; turns report it as a running total, as real agents do.
-    cost: f64,
     next_id: u64,
     /// Prompts sent while a turn ran; the turn acknowledges them at its next step.
     steer: Vec<String>,
@@ -276,7 +281,6 @@ pub async fn run(
         plan: config.plan,
         commands_allowed: false,
         context: 9_400,
-        cost: 0.,
         next_id: 0,
         steer: vec![],
         background: vec![],
@@ -380,7 +384,7 @@ impl Session {
                     self.emit(AgentEvent::Task { id, description: None, activity: None, tool_uses: None, done: Some(false) }).await?;
                 }
                 self.emit(AgentEvent::Background(0)).await?;
-                self.emit(AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }).await?;
+                self.emit(AgentEvent::TurnComplete { error: Some("Interrupted".into()) }).await?;
             }
             Err(Stop::Closed) => return Err(Stop::Closed),
         }
@@ -420,15 +424,15 @@ impl Session {
                 self.say(&text).await?;
             }
             Script::Limit(after) => return self.limit(after).await,
+            Script::Cost { plan } => return self.priced_turn(plan).await,
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
                 self.tool_start(&id, "Run command", "cargo build").await?;
                 self.pause(paced(400)).await?;
                 self.emit(AgentEvent::ToolFinished { id, output: "error[E0425]: cannot find value `cfg` in this scope\n --> src/main.rs:14:9".into(), ok: false }).await?;
-                let cost_usd = Some(self.spend(0.01));
                 self.report_usage().await?;
-                return self.emit(AgentEvent::TurnComplete { cost_usd, error: Some("The mock agent hit an error: the build failed and the session ended (exit code 101).".into()) }).await;
+                return self.emit(AgentEvent::TurnComplete { error: Some("The mock agent hit an error: the build failed and the session ended (exit code 101).".into()) }).await;
             }
         }
         self.finish().await
@@ -436,9 +440,8 @@ impl Session {
 
     async fn finish(&mut self) -> Step {
         self.acknowledge_steer().await?;
-        let cost_usd = Some(self.spend(0.02));
         self.report_usage().await?;
-        self.emit(AgentEvent::TurnComplete { cost_usd, error: None }).await
+        self.emit(AgentEvent::TurnComplete { error: None }).await
     }
 
     /// A usage limit hit partway through, resetting `after` from now. Like Claude Code: the
@@ -453,21 +456,27 @@ impl Session {
         let at = chrono::DateTime::from_timestamp_millis(resets_at).map(|d| d.with_timezone(&chrono::Local).format("%-I:%M%P").to_string()).unwrap_or_default();
         let message = format!("You've hit your session limit · resets {at}");
         self.emit(AgentEvent::LimitReached { message: message.clone(), resets_at: Some(resets_at), scope: crate::LimitScope::Session }).await?;
-        let cost_usd = Some(self.spend(0.0));
-        self.emit(AgentEvent::TurnComplete { cost_usd, error: Some(message) }).await
+        self.emit(AgentEvent::TurnComplete { error: Some(message) }).await
     }
 
     /// The tokens a turn used, as agents report them as it ends: the conversation so far read
     /// from the cache, the new message fresh, and the answer.
     async fn report_usage(&self) -> Step {
         let tokens = trek_core::TokenUsage { input: 1_200, output: 420, cache_read: self.context, cache_write: 0 };
-        self.emit(AgentEvent::Usage { model: Some(self.model.clone()), tokens }).await
+        self.emit(AgentEvent::Usage { model: Some(self.model.clone()), tokens, cost: None }).await
     }
 
-    /// Add `usd` to the session's spend; returns the new total.
-    fn spend(&mut self, usd: f64) -> f64 {
-        self.cost += usd;
-        self.cost
+    /// `mock:cost`: a turn as Claude Code reports one on Claude Sonnet 5.5, priced at its API
+    /// price: billed per token, or covered by a Claude Max plan.
+    async fn priced_turn(&mut self, plan: bool) -> Step {
+        self.emit(AgentEvent::Billing(if plan { Billing::Plan(Some("Claude Max".into())) } else { Billing::Metered })).await?;
+        self.think("Reading what the calls cost.").await?;
+        self.say("Each call is priced at the model's API rates: fresh input, cache writes and reads, and output.").await?;
+        let model = "claude-sonnet-5-5";
+        let tokens = trek_core::TokenUsage { input: 2_400, output: 1_850, cache_read: 182_000, cache_write: 12_600 };
+        let cost = trek_core::pricing::request(model, &trek_core::AgentId::ClaudeCode, &tokens, tokens.cache_write, false);
+        self.emit(AgentEvent::Usage { model: Some(model.into()), tokens, cost }).await?;
+        self.emit(AgentEvent::TurnComplete { error: None }).await
     }
 
     /// Wait `d`, handling whatever the user sends meanwhile.
@@ -680,9 +689,8 @@ impl Session {
         }
         self.say("Both scouts are out. I'll pull their findings together when they report back.").await?;
         // The turn ends, but the thread keeps working until the background agents are back.
-        let cost_usd = Some(self.spend(0.01));
         self.report_usage().await?;
-        self.emit(AgentEvent::TurnComplete { cost_usd, error: None }).await?;
+        self.emit(AgentEvent::TurnComplete { error: None }).await?;
         let agents = self.background.clone();
         for (i, (id, _)) in agents.iter().enumerate() {
             self.pause(after / 3).await?;
@@ -1143,26 +1151,29 @@ mod tests {
             assert!(events.iter().any(|e| matches!(e, AgentEvent::ReasoningDelta(_))));
             // The turn's tokens, on the session's model, just before it ends.
             let n = events.len();
-            assert!(matches!(&events[n - 2], AgentEvent::Usage { model: Some(m), tokens } if m == "mock-swift" && tokens.output > 0), "{:?}", &events[n - 2]);
+            assert!(matches!(&events[n - 2], AgentEvent::Usage { model: Some(m), tokens, .. } if m == "mock-swift" && tokens.output > 0), "{:?}", &events[n - 2]);
             assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
         });
     }
 
     #[test]
-    fn cost_is_a_running_total_that_nobody_pays() {
+    fn its_own_models_cost_nothing_and_mock_cost_has_a_real_price() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = m.until(|e| matches!(e, AgentEvent::Context { .. })).await;
             assert!(start.contains(&AgentEvent::Billing(crate::Billing::Local)), "{start:?}");
-            let cost = |events: Vec<AgentEvent>| match events.last() {
-                Some(AgentEvent::TurnComplete { cost_usd: Some(c), .. }) => *c,
-                other => panic!("{other:?}"),
-            };
             m.prompt("explain").await;
-            let first = cost(m.turn().await);
-            m.prompt("and again").await;
-            let second = cost(m.turn().await);
-            assert!(second > first && first > 0., "{first} then {second}");
+            let events = m.turn().await;
+            assert!(events.iter().any(|e| matches!(e, AgentEvent::Usage { cost: None, .. })), "the mock's models have no price");
+            m.prompt("mock:cost").await;
+            let events = m.turn().await;
+            assert!(events.contains(&AgentEvent::Billing(crate::Billing::Metered)));
+            let Some(AgentEvent::Usage { model: Some(model), cost: Some(cost), .. }) = events.iter().find(|e| matches!(e, AgentEvent::Usage { .. })) else { panic!("{events:?}") };
+            // 2,400 × $2 + 1,850 × $10 + 182,000 × $0.20 + 12,600 × $4 (1-hour writes), per million.
+            assert_eq!(model, "claude-sonnet-5-5");
+            assert!((cost.usd - (0.0048 + 0.0185 + 0.0364 + 0.0504)).abs() < 1e-9, "{cost:?}");
+            m.prompt("mock:cost plan").await;
+            assert!(m.turn().await.contains(&AgentEvent::Billing(crate::Billing::Plan(Some("Claude Max".into())))));
         });
     }
 
@@ -1247,7 +1258,7 @@ mod tests {
             m.until(|e| matches!(e, AgentEvent::ToolStarted { .. })).await;
             m.send(Command::Interrupt).await;
             let events = m.turn().await;
-            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }));
+            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { error: Some("Interrupted".into()) }));
         });
     }
 
@@ -1369,7 +1380,7 @@ mod tests {
             assert!(*at >= before + 5_000 && *at < before + 7_000);
             assert_eq!(*scope, crate::LimitScope::Session);
             assert!(message.starts_with("You've hit your session limit · resets "));
-            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { cost_usd: Some(0.0), error: Some(message.clone()) }));
+            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { error: Some(message.clone()) }));
             // Anything else meets the same limit until it resets.
             m.prompt("explain the startup").await;
             let again = m.turn().await;

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use trek_core::{Effort, TokenUsage, detect};
+use trek_core::{Effort, TokenUsage, UsageCost, detect};
 
 fn tool_title(name: &str, input: &Value) -> (String, String) {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
@@ -278,19 +278,25 @@ struct Turns {
     /// Messages written that Claude hasn't echoed yet, and whether each was sent while a turn
     /// ran. Slash commands aren't echoed (some never reach the model), so they aren't counted.
     unread: Vec<(String, bool)>,
-    /// A result held back for unread messages: its cost, and when to stop waiting for Claude to
-    /// take them in (they may never come, and the turn mustn't hang).
-    waiting: Option<(Option<f64>, tokio::time::Instant)>,
+    /// A result held back for unread messages: when to stop waiting for Claude to take them in
+    /// (they may never come, and the turn mustn't hang).
+    waiting: Option<tokio::time::Instant>,
     /// The limit Claude's last `rate_limit_event` said was hit: when it resets, and which it is.
     rejected: Option<(Option<i64>, crate::LimitScope)>,
     /// This turn has reported its limit (`AgentEvent::LimitReached`).
     limited: bool,
-    /// Each model's tokens as the last `result` counted them: `modelUsage` runs for the whole
-    /// session, so a turn's share is how far it moved.
-    models: HashMap<String, TokenUsage>,
-    /// The session was resumed (or forked) into this process: its first `modelUsage` carries
-    /// the session's earlier turns, with nothing here to tell them apart from this one's.
+    /// Each model's tokens and `costUSD` as the last `result` counted them: `modelUsage` runs for
+    /// the whole session (across resumes too), so a turn's share is how far it moved.
+    models: HashMap<String, (TokenUsage, f64)>,
+    /// The session was resumed (or forked) into this process: its first `modelUsage` may carry
+    /// the session's earlier turns, which the ledger tells apart from this one's.
     resumed: bool,
+    /// The session resumed (`--resume`), whose totals the ledger may hold under its id when a
+    /// fork reports a new one.
+    resumed_from: Option<String>,
+    /// Where each session's `models` are kept between processes (`UsageLedger`); none in tests
+    /// that don't ask for one.
+    ledger: Option<PathBuf>,
     /// The model the session said it runs (`system init`).
     model: Option<String>,
 }
@@ -298,6 +304,61 @@ struct Turns {
 /// How long a held result waits for Claude to start on the messages after it. It starts within
 /// a fraction of a second.
 const STEER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Each Claude session's running per-model totals (`Turns::models`) as its last `result` left
+/// them, one small file per session under Trek's data folder. A resumed process starts from
+/// them, so its first turn is counted from Claude Code's own figures, sub-agents included.
+struct UsageLedger;
+
+impl UsageLedger {
+    /// Files of sessions untouched this long are dropped: they're unlikely to be resumed, and a
+    /// resume without one only prices its first turn itself.
+    const KEEP: std::time::Duration = std::time::Duration::from_secs(90 * 86_400);
+
+    fn dir() -> PathBuf {
+        trek_core::paths::data_dir().join("claude-usage")
+    }
+
+    fn path(dir: &std::path::Path, session: &str) -> PathBuf {
+        let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        dir.join(format!("{name}.json"))
+    }
+
+    fn load(dir: &std::path::Path, session: &str) -> Option<HashMap<String, (TokenUsage, f64)>> {
+        Self::prune(dir);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(Self::path(dir, session)).ok()?).ok()?;
+        let n = |m: &Value, k: &str| m[k].as_u64().unwrap_or(0);
+        Some(
+            v.as_object()?
+                .iter()
+                .map(|(model, m)| {
+                    let tokens = TokenUsage { input: n(m, "input"), output: n(m, "output"), cache_read: n(m, "cache_read"), cache_write: n(m, "cache_write") };
+                    (model.clone(), (tokens, m["cost"].as_f64().unwrap_or(0.0)))
+                })
+                .collect(),
+        )
+    }
+
+    fn save(dir: &std::path::Path, session: &str, models: &HashMap<String, (TokenUsage, f64)>) {
+        let v: serde_json::Map<String, Value> = models
+            .iter()
+            .map(|(model, (t, cost))| (model.clone(), json!({ "input": t.input, "output": t.output, "cache_read": t.cache_read, "cache_write": t.cache_write, "cost": cost })))
+            .collect();
+        if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(Self::path(dir, session), Value::Object(v).to_string())) {
+            tracing::warn!("claude: couldn't keep the session's usage totals: {e}");
+        }
+    }
+
+    fn prune(dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let stale = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Self::KEEP);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
 
 impl Turns {
     fn sent(&mut self, text: &str, mid_turn: bool) {
@@ -377,7 +438,7 @@ impl Turns {
                 self.unread.clear();
                 self.waiting = None;
             } else {
-                self.waiting = Some((v["total_cost_usd"].as_f64(), tokio::time::Instant::now() + STEER_WAIT));
+                self.waiting = Some(tokio::time::Instant::now() + STEER_WAIT);
                 out.retain(|e| !matches!(e, AgentEvent::TurnComplete { .. }));
             }
         }
@@ -385,50 +446,109 @@ impl Turns {
     }
 
     /// What a `result` says its turn used, per model (sub-agents and Claude Code's own helper
-    /// calls may run on another one). Without `modelUsage`, the turn's `usage` (its main model).
+    /// calls may run on another one), and what that cost by Claude Code's own pricing
+    /// (`costUSD`, which knows its cache tiers and fast mode). Without `modelUsage`, the turn's
+    /// `usage` (its main model), priced here.
     fn usage(&mut self, v: &Value) -> Vec<AgentEvent> {
         let u = &v["usage"];
         let n = |k: &str| u[k].as_u64().unwrap_or(0);
         let own = TokenUsage { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens") };
-        let Some(models) = v["modelUsage"].as_object() else {
-            return if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: None, tokens: own }] };
+        // Claude Code writes the prompt cache for an hour on subscriptions; `cache_creation` says.
+        let own_1h = u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+        let fast = u["speed"] == "fast" || v["fast_mode_state"] == "on";
+        let priced = |model: Option<&str>, tokens: &TokenUsage, long_writes: u64| {
+            model.and_then(|m| trek_core::pricing::request(m, &trek_core::AgentId::ClaudeCode, tokens, long_writes, fast))
         };
-        let totals: Vec<(&String, TokenUsage)> = models
+        let Some(models) = v["modelUsage"].as_object() else {
+            let cost = priced(self.model.as_deref(), &own, own_1h);
+            return if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: None, tokens: own, cost }] };
+        };
+        let totals: Vec<(&String, TokenUsage, Option<f64>)> = models
             .iter()
             .map(|(model, u)| {
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                (model, TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cacheReadInputTokens"), cache_write: n("cacheCreationInputTokens") })
+                (model, TokenUsage { input: n("inputTokens"), output: n("outputTokens"), cache_read: n("cacheReadInputTokens"), cache_write: n("cacheCreationInputTokens") }, u["costUSD"].as_f64())
             })
             .collect();
         if std::mem::take(&mut self.resumed) {
-            // The first result of a resumed session: its totals are the baseline from here on,
-            // and the turn's own `usage` (its main model's) is all that's known of this turn.
-            // Helper and sub-agent calls in this one turn go uncounted rather than overcounted.
-            let main = self.model.as_deref().filter(|m| models.contains_key(*m)).map(String::from).or_else(|| {
-                // Which entry the turn ran on: one that holds at least the turn, the busiest.
-                let holds = |t: &TokenUsage| t.input >= own.input && t.output >= own.output && t.cache_read >= own.cache_read && t.cache_write >= own.cache_write;
-                totals.iter().filter(|(_, t)| holds(t)).max_by_key(|(_, t)| t.output).map(|(m, _)| m.to_string())
-            });
-            self.models = totals.into_iter().map(|(m, t)| (m.clone(), t)).collect();
-            return if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: main, tokens: own }] };
-        }
-        let mut out = vec![];
-        for (model, total) in totals {
-            let tokens = total.since(&self.models.get(model).copied().unwrap_or_default());
-            self.models.insert(model.clone(), total);
-            if !tokens.is_empty() {
-                out.push(AgentEvent::Usage { model: Some(model.clone()), tokens });
+            let session = v["session_id"].as_str().filter(|s| !s.is_empty());
+            let ledger = self.ledger.as_deref();
+            let saved = ledger.and_then(|dir| session.and_then(|s| UsageLedger::load(dir, s)).or_else(|| self.resumed_from.as_deref().and_then(|s| UsageLedger::load(dir, s))));
+            match saved {
+                // Claude Code carries a session's totals over only when it resumes the folder's
+                // latest session; otherwise they start again with this turn. Carried over, the
+                // main model's total holds the saved one and this turn's `usage` on top of it.
+                Some(saved) => {
+                    let covers = |a: &TokenUsage, b: &TokenUsage| a.input >= b.input && a.output >= b.output && a.cache_read >= b.cache_read && a.cache_write >= b.cache_write;
+                    let main = self.model.as_deref().and_then(|m| totals.iter().find(|(name, _, _)| name.as_str() == m));
+                    let carried = match main.and_then(|(m, total, _)| saved.get(m.as_str()).map(|(before, _)| (total, before))) {
+                        Some((total, before)) => {
+                            let mut at_least = *before;
+                            at_least.add(&own);
+                            covers(total, &at_least)
+                        }
+                        None => totals.iter().all(|(m, total, _)| saved.get(m.as_str()).is_none_or(|(before, _)| covers(total, before))),
+                    };
+                    self.models = if carried { saved } else { HashMap::new() };
+                }
+                None => return self.first_resumed(v, &own, own_1h, totals, priced),
             }
         }
+        let mut out = vec![];
+        for (model, total, total_cost) in totals {
+            let (before, before_cost) = self.models.get(model).copied().unwrap_or_default();
+            let tokens = total.since(&before);
+            let restarted = tokens == total && before != TokenUsage::default();
+            let cost = match total_cost {
+                Some(c) => Some(UsageCost::reported(if restarted || c < before_cost { c } else { c - before_cost })),
+                // The turn's own `usage` says how its main model wrote the cache.
+                None => priced(Some(model), &tokens, if tokens == own { own_1h } else { 0 }),
+            };
+            self.models.insert(model.clone(), (total, total_cost.unwrap_or(0.0)));
+            if !tokens.is_empty() {
+                out.push(AgentEvent::Usage { model: Some(model.clone()), tokens, cost });
+            }
+        }
+        self.remember(v);
         out
+    }
+
+    /// The first result of a resumed session no ledger knows (resumed outside Trek, or before it
+    /// kept one): its totals are the baseline from here on, and the turn's own `usage` (its main
+    /// model's) is all that's known of this turn, so it's priced here. Helper and sub-agent calls
+    /// in this one turn go uncounted rather than overcounted.
+    fn first_resumed(
+        &mut self,
+        v: &Value,
+        own: &TokenUsage,
+        own_1h: u64,
+        totals: Vec<(&String, TokenUsage, Option<f64>)>,
+        priced: impl Fn(Option<&str>, &TokenUsage, u64) -> Option<UsageCost>,
+    ) -> Vec<AgentEvent> {
+        let main = self.model.as_deref().filter(|m| totals.iter().any(|(name, _, _)| name.as_str() == *m)).map(String::from).or_else(|| {
+            // Which entry the turn ran on: one that holds at least the turn, the busiest.
+            let holds = |t: &TokenUsage| t.input >= own.input && t.output >= own.output && t.cache_read >= own.cache_read && t.cache_write >= own.cache_write;
+            totals.iter().filter(|(_, t, _)| holds(t)).max_by_key(|(_, t, _)| t.output).map(|(m, _, _)| m.to_string())
+        });
+        self.models = totals.into_iter().map(|(m, t, c)| (m.clone(), (t, c.unwrap_or(0.0)))).collect();
+        self.remember(v);
+        let cost = priced(main.as_deref(), own, own_1h);
+        if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: main, tokens: *own, cost }] }
+    }
+
+    /// Keep the session's totals for the process that resumes it next.
+    fn remember(&self, v: &Value) {
+        if let (Some(dir), Some(session)) = (self.ledger.as_deref(), v["session_id"].as_str().filter(|s| !s.is_empty())) {
+            UsageLedger::save(dir, session, &self.models);
+        }
     }
 
     /// Claude never took in what it was sent after the held result: the turn ends with it.
     fn give_up(&mut self) -> Option<AgentEvent> {
-        let (cost_usd, _) = self.waiting.take()?;
+        self.waiting.take()?;
         tracing::warn!("claude: {} message(s) sent mid-turn were never taken in", self.unread.len());
         self.unread.clear();
-        Some(AgentEvent::TurnComplete { cost_usd, error: None })
+        Some(AgentEvent::TurnComplete { error: None })
     }
 }
 
@@ -463,7 +583,7 @@ pub async fn run(
     // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
     let mut planning = config.plan;
     let mut in_turn = false;
-    let mut turns = Turns { resumed: config.resume.is_some(), ..Default::default() };
+    let mut turns = Turns { resumed: config.resume.is_some(), resumed_from: config.resume.clone(), ledger: Some(UsageLedger::dir()), ..Default::default() };
     // Resumed partway: once the session has said which it is, that message is its latest point.
     let mut resumed_at = config.resume_at.clone();
     // The session has started (`system init`); until then, the messages sent so far, to send
@@ -500,7 +620,7 @@ pub async fn run(
                         if turns.waiting.take().is_some() {
                             turns.unread.clear();
                             in_turn = false;
-                            if events.send(AgentEvent::TurnComplete { cost_usd: None, error: Some("Interrupted".into()) }).await.is_err() {
+                            if events.send(AgentEvent::TurnComplete { error: Some("Interrupted".into()) }).await.is_err() {
                                 return Ok(());
                             }
                         }
@@ -530,7 +650,7 @@ pub async fn run(
                     Command::Shutdown => break,
                 }
             }
-            _ = tokio::time::sleep_until(turns.waiting.map_or_else(tokio::time::Instant::now, |(_, at)| at)), if turns.waiting.is_some() => {
+            _ = tokio::time::sleep_until(turns.waiting.unwrap_or_else(tokio::time::Instant::now)), if turns.waiting.is_some() => {
                 if let Some(ev) = turns.give_up() {
                     in_turn = false;
                     if events.send(ev).await.is_err() {
@@ -694,7 +814,7 @@ fn permission_mode(v: &Value) -> Option<&str> {
 /// How the login is billed, from the `account` in the `initialize` response; `None` when it
 /// doesn't say. Claude Code names the subscription only while its login is the one in use, so a
 /// subscription wins over a key that's merely present. Without one, a key is what pays.
-fn account_billing(account: &Value) -> Option<Billing> {
+pub(crate) fn account_billing(account: &Value) -> Option<Billing> {
     if let Some(plan) = account["subscriptionType"].as_str().filter(|s| !s.is_empty()) {
         let name = if plan.starts_with("Claude") { plan.to_string() } else { format!("Claude {}", crate::status::capitalize(plan)) };
         return Some(Billing::Plan(Some(name)));
@@ -847,10 +967,7 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
             }
             out.extend(mark(v));
         }
-        Some("result") => out.push(AgentEvent::TurnComplete {
-            cost_usd: v["total_cost_usd"].as_f64(),
-            error: (v["is_error"] == true).then(|| result_error(v)),
-        }),
+        Some("result") => out.push(AgentEvent::TurnComplete { error: (v["is_error"] == true).then(|| result_error(v)) }),
         Some("control_request") if v["request"]["subtype"] == "can_use_tool" => {
             let r = &v["request"];
             let request_id = v["request_id"].as_str().unwrap_or_default().to_string();
@@ -945,7 +1062,7 @@ mod tests {
         let result = json!({"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.12});
         assert_eq!(
             translate(&result, &mut pending, &mut streamed),
-            vec![AgentEvent::TurnComplete { cost_usd: Some(0.12), error: None }]
+            vec![AgentEvent::TurnComplete { error: None }]
         );
     }
 
@@ -1097,7 +1214,7 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"stop_reason":null,"session_id":"0b0b0b0b-0000-4000-8000-000000000000","total_cost_usd":0,"permission_denials":[],"errors":["No conversation found with session ID: 0b0b0b0b-0000-4000-8000-000000000000"]}"#).unwrap();
         assert_eq!(
             translate(&v, &mut HashMap::new(), &mut false),
-            vec![AgentEvent::TurnComplete { cost_usd: Some(0.0), error: Some("No conversation found with session ID: 0b0b0b0b-0000-4000-8000-000000000000".into()) }]
+            vec![AgentEvent::TurnComplete { error: Some("No conversation found with session ID: 0b0b0b0b-0000-4000-8000-000000000000".into()) }]
         );
         assert_eq!(result_error(&json!({"is_error":true,"result":"API Error: overloaded"})), "API Error: overloaded");
         assert_eq!(result_error(&json!({"is_error":true})), "The turn failed.");
@@ -1126,7 +1243,7 @@ mod tests {
         let first = "Write a 200 word story about a fox.";
         let (ev, turns) = steered(&lines, first, "Now reply with just the word BANANA.");
         assert_eq!(turn_ends(&ev), 1, "{ev:?}");
-        assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { cost_usd: Some(c), error: None }) if *c > 0.0));
+        assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { error: None })));
         assert!(ev.contains(&AgentEvent::TextDone("BANANA".into())));
         assert!(turns.unread.is_empty() && turns.waiting.is_none());
         // The echoes aren't points to resume at.
@@ -1160,7 +1277,7 @@ mod tests {
         turns.sent("first", false);
         turns.sent("steer", true);
         assert!(turns.step(&ok, &mut pending, &mut streamed).is_empty());
-        assert_eq!(turns.give_up(), Some(AgentEvent::TurnComplete { cost_usd: Some(0.5), error: None }));
+        assert_eq!(turns.give_up(), Some(AgentEvent::TurnComplete { error: None }));
         assert!(turns.unread.is_empty() && turns.give_up().is_none());
 
         // A stopped turn ends whatever is unread.
@@ -1203,7 +1320,7 @@ mod tests {
         let limit = ev.iter().position(|e| matches!(e, AgentEvent::LimitReached { .. })).unwrap();
         let end = ev.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
         assert!(limit < end);
-        assert_eq!(ev[end], AgentEvent::TurnComplete { cost_usd: Some(0.0), error: Some(message.into()) });
+        assert_eq!(ev[end], AgentEvent::TurnComplete { error: Some(message.into()) });
 
         // Without the rate-limit event, the result alone is enough; and an ordinary failure isn't one.
         let mut turns = Turns::default();
@@ -1363,7 +1480,7 @@ mod tests {
                 "claude-haiku-4-5":{"inputTokens":20,"outputTokens":81,"cacheReadInputTokens":35930,"cacheCreationInputTokens":9328,"costUSD":0.022674}}});
         let usage = |ev: Vec<AgentEvent>| -> Vec<(Option<String>, TokenUsage)> {
             assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { .. })), "{ev:?}");
-            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model, tokens)) } else { None }).collect()
+            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, tokens, .. } = e { Some((model, tokens)) } else { None }).collect()
         };
         let mut got = usage(turns.step(&first, &mut pending, &mut streamed));
         got.sort_by_key(|(m, _)| m.clone());
@@ -1383,11 +1500,78 @@ mod tests {
     }
 
     #[test]
+    fn turn_costs_add_up_to_claude_codes_total_across_a_resume() {
+        // Recorded (Claude Code 2.1.288, claude-haiku-4-5, low effort): a turn, then a second
+        // in a new process with `--resume`. `total_cost_usd` and `modelUsage` carry on across
+        // the resume (0.0206883, then 0.0233464), so summing them per process would count the
+        // first turn twice.
+        let lines = fixture(include_str!("../fixtures/claude-cost-resume.jsonl"));
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let costs = |ev: Vec<AgentEvent>| -> Vec<(Option<String>, UsageCost)> {
+            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, cost, .. } = e { Some((model, cost.expect("priced"))) } else { None }).collect()
+        };
+        let mut first = Turns::default();
+        let mut one: Vec<(Option<String>, UsageCost)> = lines[..2].iter().flat_map(|v| costs(first.step(v, &mut pending, &mut streamed))).collect();
+        one.sort_by(|a, b| a.0.cmp(&b.0));
+        // Claude Code's own figures, per model: the turn, and its title call on the dated id.
+        assert_eq!(one.iter().map(|(m, c)| (m.as_deref().unwrap(), c.reported)).collect::<Vec<_>>(), [("claude-haiku-4-5", true), ("claude-haiku-4-5-20251001", true)]);
+        assert!((one[0].1.usd - 0.0197463).abs() < 1e-12 && (one[1].1.usd - 0.000942).abs() < 1e-12, "{one:?}");
+        let mut resumed = Turns { resumed: true, ..Default::default() };
+        let two: Vec<(Option<String>, UsageCost)> = lines[2..].iter().flat_map(|v| costs(resumed.step(v, &mut pending, &mut streamed))).collect();
+        // Priced here from the turn's own usage, its cache writes 1-hour ones:
+        // 10 × $1 + 37 × $5 + 22,871 × $0.10 + 88 × $2, per million.
+        assert_eq!(two.len(), 1);
+        assert!(!two[0].1.reported);
+        let total: f64 = one.iter().chain(&two).map(|(_, c)| c.usd).sum();
+        assert!((total - lines[3]["total_cost_usd"].as_f64().unwrap()).abs() < 1e-9, "{total}");
+    }
+
+    #[test]
+    fn a_resume_counts_from_the_ledger_with_claude_codes_own_figures() {
+        // The same two real processes, each with the ledger: the resumed turn's cost is Claude
+        // Code's own (its `costUSD` moved), and the two add up to its total.
+        let dir = std::env::temp_dir().join(format!("trek-claude-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lines = fixture(include_str!("../fixtures/claude-cost-resume.jsonl"));
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let costs = |ev: Vec<AgentEvent>| -> Vec<UsageCost> { ev.into_iter().filter_map(|e| if let AgentEvent::Usage { cost, .. } = e { cost } else { None }).collect() };
+        let mut first = Turns { ledger: Some(dir.clone()), ..Default::default() };
+        let one: Vec<UsageCost> = lines[..2].iter().flat_map(|v| costs(first.step(v, &mut pending, &mut streamed))).collect();
+        let mut resumed = Turns { resumed: true, resumed_from: Some("eb3d266a-3587-4222-9ec1-fce8b7b3d23c".into()), ledger: Some(dir.clone()), ..Default::default() };
+        let two: Vec<UsageCost> = lines[2..].iter().flat_map(|v| costs(resumed.step(v, &mut pending, &mut streamed))).collect();
+        assert_eq!(two.len(), 1);
+        assert!(two[0].reported, "Claude Code's own figure");
+        assert!((two[0].usd - (0.0224044 - 0.0197463)).abs() < 1e-12, "{two:?}");
+        let total: f64 = one.iter().chain(&two).map(|c| c.usd).sum();
+        assert!((total - lines[3]["total_cost_usd"].as_f64().unwrap()).abs() < 1e-12, "{total}");
+
+        // A sub-agent on another model in the resumed turn is counted too.
+        let mut resumed = Turns { resumed: true, ledger: Some(dir.clone()), ..Default::default() };
+        let mut with_task = lines[3].clone();
+        with_task["modelUsage"]["claude-sonnet-5-5"] = json!({"inputTokens":40,"outputTokens":300,"cacheReadInputTokens":1000,"cacheCreationInputTokens":2000,"costUSD":0.0123});
+        let ev: Vec<(Option<String>, UsageCost)> = [&lines[2], &with_task]
+            .into_iter()
+            .flat_map(|v| resumed.step(v, &mut pending, &mut streamed))
+            .filter_map(|e| if let AgentEvent::Usage { model, cost, .. } = e { Some((model, cost.unwrap())) } else { None })
+            .collect();
+        assert!(ev.contains(&(Some("claude-sonnet-5-5".into()), UsageCost::reported(0.0123))), "{ev:?}");
+
+        // Claude Code started the totals over (another session in the folder ran since): all of
+        // the turn's figures are new.
+        let mut elsewhere = Turns { resumed: true, ledger: Some(dir.clone()), model: Some("claude-haiku-4-5".into()), ..Default::default() };
+        let mut fresh = lines[3].clone();
+        fresh["modelUsage"] = json!({"claude-haiku-4-5":{"inputTokens":10,"outputTokens":37,"cacheReadInputTokens":22871,"cacheCreationInputTokens":88,"costUSD":0.0026581}});
+        let ev = costs(elsewhere.step(&fresh, &mut pending, &mut streamed));
+        assert_eq!(ev, vec![UsageCost::reported(0.0026581)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_resumed_session_counts_only_its_own_turns() {
         let mut pending = HashMap::new();
         let mut streamed = false;
         let usage = |ev: Vec<AgentEvent>| -> Vec<(Option<String>, TokenUsage)> {
-            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, tokens } = e { Some((model, tokens)) } else { None }).collect()
+            ev.into_iter().filter_map(|e| if let AgentEvent::Usage { model, tokens, .. } = e { Some((model, tokens)) } else { None }).collect()
         };
         // A real second turn in a new process (`--resume`): `modelUsage` carries the first
         // turn's tokens, the helper call included, restored from the session; `usage` is the turn's.

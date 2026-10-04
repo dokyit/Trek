@@ -256,6 +256,24 @@ pub struct TokenUsage {
     pub cache_write: u64,
 }
 
+/// What some tokens cost at API prices, in dollars, and who priced them: the agent itself
+/// (Claude Code's `costUSD`, an ACP agent's reported cost) or Trek, from `pricing`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsageCost {
+    pub usd: f64,
+    pub reported: bool,
+}
+
+impl UsageCost {
+    pub fn reported(usd: f64) -> Self {
+        Self { usd, reported: true }
+    }
+
+    pub fn priced(usd: f64) -> Self {
+        Self { usd, reported: false }
+    }
+}
+
 impl TokenUsage {
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_write

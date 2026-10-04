@@ -266,7 +266,7 @@ fn streamed_answers_draw_their_full_text() {
                 assert_documents_match(&trek, cx, &id);
             }
         }
-        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDone(STREAMED.into()), AgentEvent::TurnComplete { cost_usd: None, error: None }], cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDone(STREAMED.into()), AgentEvent::TurnComplete { error: None }], cx));
         assert_eq!(trek.answers(cx, &id), STREAMED);
         assert_documents_match(&trek, cx, &id);
     });
@@ -284,7 +284,7 @@ fn documents_follow_answers_that_move() {
                 let events = vec![AgentEvent::ReasoningDelta(String::new()), AgentEvent::TextDelta(answer.into()), AgentEvent::TextDone(answer.into())];
                 trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
             }
-            trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }], cx));
+            trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { error: None }], cx));
             assert_documents_match(&trek, cx, &id);
         }
         assert_eq!(trek.answers(cx, &id), "First answer.\nSecond, longer answer here.\nAlpha\nOmega");
@@ -592,7 +592,7 @@ fn updates_wait_for_a_plan_offered_after_its_turn() {
         };
         trek.update(cx, |ws, cx| {
             ws.apply_events(&id, vec![AgentEvent::TextDelta("Here's the plan.".into())], cx);
-            ws.apply_events(&id, vec![AgentEvent::TurnComplete { cost_usd: None, error: None }, plan], cx);
+            ws.apply_events(&id, vec![AgentEvent::TurnComplete { error: None }, plan], cx);
         });
         assert_eq!(trek.run_state(cx, &id), RunState::NeedsYou);
         stage_fake_update(&trek, cx);
