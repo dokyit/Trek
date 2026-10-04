@@ -13,7 +13,7 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use trek_core::AgentId;
 use trek_core::agent_update::{AgentVersion, CHECK_EVERY_MS, Outcome};
 
@@ -75,6 +75,11 @@ pub struct AgentUpdates {
     pub mock: bool,
     /// The row whose update output is open under it.
     pub output_open: Option<String>,
+    /// Threads with messages held while their agent updated: those go once it's done. Others'
+    /// held follow-ups (of a turn that failed off screen) aren't the update's to send.
+    pub held: HashSet<String>,
+    /// Titles asked for while Claude Code (which writes them) updated, and whether to announce.
+    pub titles: Vec<(String, bool)>,
 }
 
 /// The ways `TREK_AGENT_UPDATES` sets the feature up for design review and end-to-end checks.
@@ -153,6 +158,16 @@ impl AgentUpdates {
         true
     }
 
+    /// Queued updates whose row a check no longer lists (the agent was uninstalled): there's
+    /// nothing left to update.
+    pub fn drop_orphans(&mut self) {
+        let gone: Vec<String> = self.jobs.iter().filter(|(id, j)| **j == Job::Queued && self.agent_of(id).is_none()).map(|(id, _)| id.clone()).collect();
+        for id in gone {
+            self.jobs.remove(&id);
+            self.order.retain(|a| *a != id);
+        }
+    }
+
     /// The next update to start, if one can start now: one at a time (package managers lock
     /// their folders), in the order asked, skipping agents with a turn running (`busy`, given
     /// an agent key).
@@ -201,16 +216,53 @@ impl AgentUpdates {
     /// finished updates are let go (the check now says where they stand), others carry on.
     pub fn checked(&mut self, mut fresh: Vec<AgentVersion>, now: i64) {
         trek_core::agent_update::carry_over(&mut fresh, &self.found);
-        // An update under way outlives the check: its row keeps the versions it started from.
+        // An update under way outlives the check: its row keeps the versions it started from,
+        // even when the check missed it (its binary is briefly gone while it's replaced).
+        for old in self.found.iter().filter(|o| matches!(self.jobs.get(&o.id), Some(Job::Running))) {
+            match fresh.iter_mut().find(|v| v.id == old.id) {
+                Some(v) => *v = old.clone(),
+                None => fresh.push(old.clone()),
+            }
+        }
         for v in fresh.iter_mut() {
-            if let (Some(Job::Queued | Job::Running), Some(old)) = (self.jobs.get(&v.id), self.found.iter().find(|o| o.id == v.id)) {
+            if let (Some(Job::Queued), Some(old)) = (self.jobs.get(&v.id), self.found.iter().find(|o| o.id == v.id)) {
                 *v = old.clone();
             }
         }
         self.jobs.retain(|_, j| matches!(j, Job::Queued | Job::Running));
         self.found = fresh;
+        self.drop_orphans();
         self.checked_at = now;
         self.checking = false;
+    }
+
+    /// What the last check couldn't compare, for Settings: "Couldn't check Codex and Grok:
+    /// offline, or the release feed didn't answer." `None` when every agent was compared.
+    pub fn unchecked_note(&self) -> Option<String> {
+        let missed: Vec<&AgentVersion> = self.found.iter().filter(|v| !v.compared() && !self.jobs.contains_key(&v.id)).collect();
+        let names: Vec<&str> = missed.iter().map(|v| v.name.as_str()).collect();
+        let names = match names.as_slice() {
+            [] => return None,
+            [one] => one.to_string(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        };
+        // One reason for all of them reads as one ("offline"); several are each the row's own.
+        let first = missed.iter().find_map(|v| v.error.as_deref());
+        let reason = match first {
+            Some(e) if missed.iter().all(|v| v.error.as_deref() == Some(e)) => format!(": {}.", lower_first(e.trim_end_matches('.'))),
+            _ if missed.iter().all(|v| v.installed.is_none()) => if missed.len() == 1 { ": it didn't say its version." } else { ": they didn't say their versions." }.into(),
+            _ => ".".into(),
+        };
+        Some(format!("Couldn't check {names}{reason}"))
+    }
+}
+
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        // "Offline, or …" reads on after a colon; a URL or a name ("Its vendor …") too.
+        Some(f) if c.clone().next().is_some_and(|n| n.is_lowercase()) => f.to_lowercase().chain(c).collect(),
+        _ => s.to_string(),
     }
 }
 
@@ -500,9 +552,42 @@ mod tests {
         u.checked(fresh, 1);
         assert_eq!(u.job("codex"), Some(&Job::Queued));
         assert_eq!(u.job("pi"), Some(&Job::Running));
-        assert_eq!(u.found[2].installed.as_deref(), Some("0.85.1"), "its row stays as it started");
+        assert_eq!(u.found[2].installed.as_deref(), Some("0.99.2"), "its row stays as it started");
         assert_eq!(u.job("opencode"), None);
         assert!(!u.found[1].update_available());
+    }
+
+    #[test]
+    fn a_check_missing_an_agent_keeps_its_running_update_and_drops_its_queued_one() {
+        let mut u = updates();
+        u.request("codex");
+        u.start("codex");
+        u.request("pi");
+        let fresh: Vec<_> = mock_versions().into_iter().filter(|v| v.id == "opencode").collect();
+        u.checked(fresh, 1);
+        assert_eq!(u.job("codex"), Some(&Job::Running));
+        assert!(u.found.iter().any(|v| v.id == "codex"), "its row is kept for it to finish on");
+        assert_eq!(u.job("pi"), None, "gone from this Mac: nothing to update");
+        assert!(!u.queued());
+        u.finish("codex", Outcome::Updated { version: "0.160.0".into(), output: String::new() });
+        assert!(!u.running());
+    }
+
+    #[test]
+    fn settings_says_what_a_check_couldnt_compare() {
+        let mut u = updates();
+        assert_eq!(u.unchecked_note(), None, "every agent compared");
+        let offline = "Offline, or the release feed didn't answer";
+        for v in u.found.iter_mut() {
+            v.latest = None;
+            v.error = Some(offline.into());
+        }
+        assert_eq!(u.unchecked_note().as_deref(), Some("Couldn't check Codex, OpenCode and Pi: offline, or the release feed didn't answer."));
+        u.found[1].error = Some("https://formulae.brew.sh/api/formula/opencode.json answered 500".into());
+        assert_eq!(u.unchecked_note().as_deref(), Some("Couldn't check Codex, OpenCode and Pi."));
+        let mut u = updates();
+        u.found[0].installed = None;
+        assert_eq!(u.unchecked_note().as_deref(), Some("Couldn't check Codex: it didn't say its version."));
     }
 
     #[test]

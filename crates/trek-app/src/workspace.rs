@@ -2138,6 +2138,10 @@ impl Workspace {
         // made or is missing: hold the message until that's sorted (`ensure_loaded`,
         // `worktree_ready` and `run_in_project_folder` send it).
         if self.holds_messages(&id) {
+            // Held for an agent update: sent when it's done (`agent_released`).
+            if self.thread(&id).is_some_and(|t| self.agent_updating(&t.agent.key())) {
+                self.agent_updates.held.insert(id.clone());
+            }
             let live = self.live.entry(id).or_default();
             live.queued.push((text, images));
             live.revision += 1;
@@ -3683,6 +3687,12 @@ impl Workspace {
 
     /// Ask a small model for a short title (through the user's Claude Code login).
     pub fn regenerate_title(&mut self, id: &str, announce: bool, cx: &mut Context<Self>) {
+        // Not while Claude Code's CLI is being replaced: written once it's back.
+        if self.agent_updating(&AgentId::ClaudeCode.key()) {
+            self.agent_updates.titles.retain(|(t, _)| t != id);
+            self.agent_updates.titles.push((id.to_string(), announce));
+            return;
+        }
         let Some((request, reply)) = self.title_inputs(id) else { return };
         // The mock agent names its own threads: it makes no model calls, titles included.
         if self.thread(id).is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if catalog::is_mock(p))) {
@@ -4017,7 +4027,9 @@ impl Workspace {
         if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 || trek_core::paths::isolated() {
             return;
         }
-        let (claude, codex) = (self.agent_ready(&AgentId::ClaudeCode), self.agent_ready(&AgentId::Codex));
+        // Not of a CLI being replaced: asked again once it's back (`agent_released`).
+        let ready = |a: AgentId| self.agent_ready(&a) && !self.agent_updating(&a.key());
+        let (claude, codex) = (ready(AgentId::ClaudeCode), ready(AgentId::Codex));
         if !claude && !codex {
             return;
         }
@@ -4067,7 +4079,12 @@ impl Workspace {
     /// something shows them (the Usage popover, Basecamp, Settings → Agents, a Devin thread
     /// paused at its limit), at most every ten minutes.
     pub fn refresh_devin_usage(&mut self, cx: &mut Context<Self>) {
-        if self.devin_loading || now_ms() - self.devin_status_at < DEVIN_STATUS_EVERY || trek_core::paths::isolated() || !self.agent_ready(&devin_agent()) {
+        if self.devin_loading
+            || now_ms() - self.devin_status_at < DEVIN_STATUS_EVERY
+            || trek_core::paths::isolated()
+            || !self.agent_ready(&devin_agent())
+            || self.agent_updating(&devin_agent().key())
+        {
             return;
         }
         self.devin_loading = true;

@@ -7,6 +7,7 @@
 use super::{Workspace, WorkspaceEvent};
 use gpui_kit::Context;
 use trek_agents::Command;
+use trek_core::AgentId;
 use trek_core::agent_update::{Outcome, Snapshot};
 use trek_core::store::now_ms;
 
@@ -84,6 +85,8 @@ impl Workspace {
     /// Start the next update that can start. Called as updates are asked for, as one finishes,
     /// as turns end, and from housekeeping.
     pub(super) fn pump_agent_updates(&mut self, cx: &mut Context<Self>) {
+        // A check may have found the agent gone since its update was asked for.
+        self.agent_updates.drop_orphans();
         if !self.agent_updates.queued() {
             return;
         }
@@ -106,8 +109,13 @@ impl Workspace {
     }
 
     fn agent_updated(&mut self, id: &str, outcome: Outcome, cx: &mut Context<Self>) {
-        let Some(v) = self.agent_updates.found.iter().find(|v| v.id == id).cloned() else { return };
-        let (agent, name) = (v.agent.clone(), v.name.clone());
+        // Its row is kept through checks while it runs; were it gone anyway, the job still ends,
+        // or it would hold up every update after it (and Trek's own).
+        let row = self.agent_updates.found.iter().find(|v| v.id == id).map(|v| (v.agent.clone(), v.name.clone()));
+        let (agent, name) = row.clone().unwrap_or_else(|| {
+            let h = trek_core::agent_update::harness(id);
+            (h.map(|h| h.agent.to_string()).unwrap_or_default(), h.map(|h| h.name()).unwrap_or_else(|| id.to_string()))
+        });
         let dry = matches!(self.agent_updates.runner, crate::agent_updates::Runner::DryRun);
         let message = match &outcome {
             Outcome::Updated { version, .. } if dry => format!("Dry run: {name} would be at {version} now. Nothing was changed."),
@@ -124,15 +132,33 @@ impl Workspace {
         };
         self.agent_updates.finish(id, outcome);
         cx.emit(WorkspaceEvent::Toast { message, undo: None });
-        // Messages that waited for it go now, to a session of the new version.
-        let waiting: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent).map(|t| t.id.clone()).collect();
-        for t in waiting {
-            self.send_queued(&t, cx);
+        if !self.agent_updating(&agent) {
+            self.agent_released(&agent, cx);
         }
         self.pump_agent_updates(cx);
         // A Trek update held back for this one may go now.
         self.maybe_restart_for_update(cx);
         cx.notify();
+    }
+
+    /// `agent`'s CLI is no longer being replaced: what waited for it goes now, to a session of
+    /// the new version. Only messages held for the update: follow-ups a failed turn left queued
+    /// are the user's to hand back or send.
+    fn agent_released(&mut self, agent: &str, cx: &mut Context<Self>) {
+        let held: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent && self.agent_updates.held.contains(&t.id)).map(|t| t.id.clone()).collect();
+        for t in held {
+            self.agent_updates.held.remove(&t);
+            self.send_queued(&t, cx);
+        }
+        // Claude Code writes the titles; Claude and Codex report usage.
+        if agent == AgentId::ClaudeCode.key() {
+            for (id, announce) in std::mem::take(&mut self.agent_updates.titles) {
+                self.regenerate_title(&id, announce, cx);
+            }
+        }
+        if agent == AgentId::ClaudeCode.key() || agent == AgentId::Codex.key() {
+            self.refresh_usage(cx);
+        }
     }
 
     /// Before `agent` is updated, its sessions go (the next message starts the new version,

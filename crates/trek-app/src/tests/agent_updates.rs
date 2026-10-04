@@ -3,7 +3,7 @@
 //! `trek_core::agent_update`'s (recorded feeds there); here the found versions are set up
 //! directly and updates run through a fake runner, so nothing is installed or fetched.
 
-use super::harness::{Trek, mock, open, run};
+use super::harness::{Trek, mock, open, open_with, run};
 use crate::agent_updates::{Job, Runner};
 use crate::workspace::{Route, SettingsPage};
 use gpui_kit::TestAppContext;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use trek_core::agent_update::{AgentVersion, Outcome, mock_versions};
 use trek_core::types::RunState;
-use trek_core::settings::ThemeChoice;
+use trek_core::settings::{FollowUp, ThemeChoice};
 
 /// MonoCode's three (Codex, OpenCode, Pi) and the mock agent itself, so a thread can be mid-turn
 /// in an agent with an update out. Pi's update fails; the rest reach their latest version.
@@ -29,7 +29,7 @@ fn found(trek: &Trek, cx: &mut TestAppContext) -> Arc<AtomicUsize> {
         u.runner = Runner::Fake(Arc::new(move |v: &AgentVersion| {
             counted.fetch_add(1, Ordering::SeqCst);
             match v.id.as_str() {
-                "pi" => Outcome::Failed { summary: "npm install -g @mariozechner/pi-coding-agent@latest stopped with code 243.".into(), output: "npm error code EACCES\nnpm error path /usr/local/lib/node_modules".into() },
+                "pi" => Outcome::Failed { summary: "npm install -g @earendil-works/pi-coding-agent@latest stopped with code 243.".into(), output: "npm error code EACCES\nnpm error path /usr/local/lib/node_modules".into() },
                 _ => Outcome::Updated { version: v.latest.clone().unwrap(), output: format!("updated {}", v.name) },
             }
         }));
@@ -171,5 +171,84 @@ fn while_an_agent_updates_no_session_of_it_starts_and_messages_wait() {
         assert!(trek.answers(cx, &id).lines().count() >= 2, "both turns answered: {}", trek.answers(cx, &id));
         trek.render(cx);
         assert!(!trek.visible(cx, "composer-agent-updating"));
+    });
+}
+
+#[test]
+fn follow_ups_a_failed_turn_left_queued_arent_sent_by_an_update() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
+        found(&trek, cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Working on it".into())], cx));
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().queued.push(("stale follow-up".into(), vec![])));
+        // Its turn fails off screen: the follow-up waits to be handed back, not sent.
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { error: Some("boom".into()) }], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1);
+        let before = trek.items(cx, &id).len();
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        trek.wait(cx, "the mock agent to update", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Updated { .. }))).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "still the user's to have back");
+        assert_eq!(trek.items(cx, &id).len(), before, "nothing went to the agent");
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        assert_eq!(trek.composer_text(cx), "stale follow-up");
+    });
+}
+
+#[test]
+fn a_check_that_lands_mid_update_doesnt_strand_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        let (release, gate) = async_channel::bounded::<()>(1);
+        trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
+        trek.update(cx, |ws, cx| ws.update_agent("codex", cx));
+        trek.update(cx, |ws, cx| ws.update_agent("opencode", cx));
+        assert_eq!(job(&trek, cx, "codex"), Some(Job::Running));
+        // A check comes back while Codex's binary is being swapped: no Codex in it, nor (now
+        // uninstalled) OpenCode.
+        trek.update(cx, |ws, _| {
+            let fresh = ws.agent_updates.found.iter().filter(|v| v.id != "codex" && v.id != "opencode").cloned().collect();
+            ws.agent_updates.checked(fresh, trek_core::store::now_ms());
+        });
+        assert!(trek.read(cx, |ws, _| ws.agent_updates.found.iter().any(|v| v.id == "codex")), "its row stays while it runs");
+        assert_eq!(job(&trek, cx, "opencode"), None, "nothing left to update");
+        release.send(()).await.unwrap();
+        trek.wait(cx, "Codex to update", |ws| matches!(ws.agent_updates.job("codex"), Some(Job::Updated { .. }))).await;
+        assert!(trek.read(cx, |ws, _| !ws.agent_updates.running() && !ws.work_in_flight()));
+        // Later updates still go.
+        release.send(()).await.unwrap();
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        trek.wait(cx, "the mock agent to update", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Updated { .. }))).await;
+    });
+}
+
+#[test]
+fn titles_wait_while_claude_code_updates() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        let (release, gate) = async_channel::bounded::<()>(1);
+        trek.update(cx, |ws, _| {
+            let mut claude = crate::agent_updates::mock_agent_row();
+            (claude.id, claude.agent, claude.name) = ("claude".into(), trek_core::AgentId::ClaudeCode.key(), "Claude Code".into());
+            ws.agent_updates.found.push(claude);
+            ws.agent_updates.runner = Runner::Gated(gate);
+        });
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.rename(&id, "placeholder".into(), cx));
+        trek.update(cx, |ws, cx| ws.update_agent("claude", cx));
+        // Claude Code writes titles: not while its CLI is being replaced.
+        trek.update(cx, |ws, cx| ws.regenerate_title(&id, true, cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.title.clone())).as_deref(), Some("placeholder"));
+        assert_eq!(trek.read(cx, |ws, _| ws.agent_updates.titles.clone()), [(id.clone(), true)]);
+        release.send(()).await.unwrap();
+        trek.wait(cx, "Claude Code to update", |ws| matches!(ws.agent_updates.job("claude"), Some(Job::Updated { .. }))).await;
+        assert!(trek.read(cx, |ws, _| ws.agent_updates.titles.is_empty()));
+        assert_ne!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.title.clone())).as_deref(), Some("placeholder"), "written once it's back");
     });
 }
