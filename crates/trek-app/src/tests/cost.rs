@@ -113,3 +113,31 @@ fn local_models_show_nothing_and_unpriced_models_show_tokens() {
         let _ = mock();
     });
 }
+
+#[test]
+fn devin_s_plan_leaves_its_commands_and_login_alone() {
+    run(async |cx| {
+        let trek = super::harness::open(cx);
+        let devin = AgentId::Acp("devin".into());
+        let t = trek.update(cx, |ws, cx| {
+            let t = ws.store.create_thread(Some(&trek.project), devin.clone(), Some("swe-2".into()), Effort::Medium, HandHolding::Auto).unwrap();
+            ws.reload(cx);
+            t.id
+        });
+        // A failed read before any other leaves no status behind: Settings keeps what Devin's
+        // ACP probe said of its login, rather than "Not signed in".
+        trek.update(cx, |ws, cx| ws.apply_devin_status(Err(anyhow::anyhow!("devin auth status timed out")), cx));
+        assert!(trek.read(cx, |ws, _| !ws.agent_status.contains_key(&devin.key())));
+        // Its session offered commands in the thread's folder; its plan says nothing of them.
+        let review = trek_agents::SlashCommand { name: "review".into(), description: "Review the diff".into(), kind: trek_agents::CommandKind::Command };
+        trek.update(cx, |ws, cx| ws.apply_events(&t, vec![AgentEvent::Commands(vec![review.clone()])], cx));
+        let plan = trek_agents::AgentStatus { logged_in: true, plan: Some("Devin Pro".into()), ..Default::default() };
+        trek.update(cx, |ws, cx| ws.apply_devin_status(Ok(plan), cx));
+        let scope = crate::workspace::Scope::Thread(t.clone());
+        assert!(trek.read(cx, |ws, _| ws.slash_commands(&scope, &devin).contains(&review)), "Devin's own commands stay");
+        // A later failure keeps what it knew, with the error.
+        trek.update(cx, |ws, cx| ws.apply_devin_status(Err(anyhow::anyhow!("Devin's terminal UI didn't start")), cx));
+        let st = trek.read(cx, |ws, _| ws.agent_status.get(&devin.key()).cloned()).unwrap();
+        assert!(st.logged_in && st.plan.as_deref() == Some("Devin Pro") && st.error.is_some());
+    });
+}

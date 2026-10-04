@@ -2293,7 +2293,7 @@ impl Render for Composer {
                         .gap(px(6.))
                         .child(ui::agent_glyph(&prefs.agent, cx))
                         .child(prefs.agent.display_name())
-                        // How the session is billed, and on a plan what its usage would cost at API prices.
+                        // How the session is billed (what it would cost is the estimate beside it).
                         .when_some(billing_tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))),
                 )
                 .when_some(cost_label, |el, label| el.child(cost_chip(label, billing.clone(), spend, cx)))
@@ -2384,7 +2384,9 @@ fn cost_chip(label: String, billing: Option<trek_agents::Billing>, spend: crate:
     // drawn (once the agents have said how they're billed), so its breakdown can be reviewed in
     // a window that isn't in front, without moving the real pointer.
     static HOVERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let delay = std::env::var("TREK_HOVER_COST").ok().map(|s| std::time::Duration::from_secs(s.trim().parse().unwrap_or(0)));
+    static DELAY: std::sync::LazyLock<Option<std::time::Duration>> =
+        std::sync::LazyLock::new(|| std::env::var("TREK_HOVER_COST").ok().map(|s| std::time::Duration::from_secs(s.trim().parse().unwrap_or(0))));
+    let delay = *DELAY;
     let review = delay.is_some() && !HOVERED.load(std::sync::atomic::Ordering::Relaxed);
     div()
         .id("cost-estimate")

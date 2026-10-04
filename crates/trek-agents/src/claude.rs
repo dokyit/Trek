@@ -288,9 +288,15 @@ struct Turns {
     /// Each model's tokens and `costUSD` as the last `result` counted them: `modelUsage` runs for
     /// the whole session (across resumes too), so a turn's share is how far it moved.
     models: HashMap<String, (TokenUsage, f64)>,
-    /// The session was resumed (or forked) into this process: its first `modelUsage` carries
-    /// the session's earlier turns, with nothing here to tell them apart from this one's.
+    /// The session was resumed (or forked) into this process: its first `modelUsage` may carry
+    /// the session's earlier turns, which the ledger tells apart from this one's.
     resumed: bool,
+    /// The session resumed (`--resume`), whose totals the ledger may hold under its id when a
+    /// fork reports a new one.
+    resumed_from: Option<String>,
+    /// Where each session's `models` are kept between processes (`UsageLedger`); none in tests
+    /// that don't ask for one.
+    ledger: Option<PathBuf>,
     /// The model the session said it runs (`system init`).
     model: Option<String>,
 }
@@ -298,6 +304,61 @@ struct Turns {
 /// How long a held result waits for Claude to start on the messages after it. It starts within
 /// a fraction of a second.
 const STEER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Each Claude session's running per-model totals (`Turns::models`) as its last `result` left
+/// them, one small file per session under Trek's data folder. A resumed process starts from
+/// them, so its first turn is counted from Claude Code's own figures, sub-agents included.
+struct UsageLedger;
+
+impl UsageLedger {
+    /// Files of sessions untouched this long are dropped: they're unlikely to be resumed, and a
+    /// resume without one only prices its first turn itself.
+    const KEEP: std::time::Duration = std::time::Duration::from_secs(90 * 86_400);
+
+    fn dir() -> PathBuf {
+        trek_core::paths::data_dir().join("claude-usage")
+    }
+
+    fn path(dir: &std::path::Path, session: &str) -> PathBuf {
+        let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        dir.join(format!("{name}.json"))
+    }
+
+    fn load(dir: &std::path::Path, session: &str) -> Option<HashMap<String, (TokenUsage, f64)>> {
+        Self::prune(dir);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(Self::path(dir, session)).ok()?).ok()?;
+        let n = |m: &Value, k: &str| m[k].as_u64().unwrap_or(0);
+        Some(
+            v.as_object()?
+                .iter()
+                .map(|(model, m)| {
+                    let tokens = TokenUsage { input: n(m, "input"), output: n(m, "output"), cache_read: n(m, "cache_read"), cache_write: n(m, "cache_write") };
+                    (model.clone(), (tokens, m["cost"].as_f64().unwrap_or(0.0)))
+                })
+                .collect(),
+        )
+    }
+
+    fn save(dir: &std::path::Path, session: &str, models: &HashMap<String, (TokenUsage, f64)>) {
+        let v: serde_json::Map<String, Value> = models
+            .iter()
+            .map(|(model, (t, cost))| (model.clone(), json!({ "input": t.input, "output": t.output, "cache_read": t.cache_read, "cache_write": t.cache_write, "cost": cost })))
+            .collect();
+        if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(Self::path(dir, session), Value::Object(v).to_string())) {
+            tracing::warn!("claude: couldn't keep the session's usage totals: {e}");
+        }
+    }
+
+    fn prune(dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let stale = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Self::KEEP);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
 
 impl Turns {
     fn sent(&mut self, text: &str, mid_turn: bool) {
@@ -410,18 +471,28 @@ impl Turns {
             })
             .collect();
         if std::mem::take(&mut self.resumed) {
-            // The first result of a resumed session: its totals are the baseline from here on,
-            // and the turn's own `usage` (its main model's) is all that's known of this turn, so
-            // it's priced here. Helper and sub-agent calls in this one turn go uncounted rather
-            // than overcounted.
-            let main = self.model.as_deref().filter(|m| models.contains_key(*m)).map(String::from).or_else(|| {
-                // Which entry the turn ran on: one that holds at least the turn, the busiest.
-                let holds = |t: &TokenUsage| t.input >= own.input && t.output >= own.output && t.cache_read >= own.cache_read && t.cache_write >= own.cache_write;
-                totals.iter().filter(|(_, t, _)| holds(t)).max_by_key(|(_, t, _)| t.output).map(|(m, _, _)| m.to_string())
-            });
-            self.models = totals.into_iter().map(|(m, t, c)| (m.clone(), (t, c.unwrap_or(0.0)))).collect();
-            let cost = priced(main.as_deref(), &own, own_1h);
-            return if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: main, tokens: own, cost }] };
+            let session = v["session_id"].as_str().filter(|s| !s.is_empty());
+            let ledger = self.ledger.as_deref();
+            let saved = ledger.and_then(|dir| session.and_then(|s| UsageLedger::load(dir, s)).or_else(|| self.resumed_from.as_deref().and_then(|s| UsageLedger::load(dir, s))));
+            match saved {
+                // Claude Code carries a session's totals over only when it resumes the folder's
+                // latest session; otherwise they start again with this turn. Carried over, the
+                // main model's total holds the saved one and this turn's `usage` on top of it.
+                Some(saved) => {
+                    let covers = |a: &TokenUsage, b: &TokenUsage| a.input >= b.input && a.output >= b.output && a.cache_read >= b.cache_read && a.cache_write >= b.cache_write;
+                    let main = self.model.as_deref().and_then(|m| totals.iter().find(|(name, _, _)| name.as_str() == m));
+                    let carried = match main.and_then(|(m, total, _)| saved.get(m.as_str()).map(|(before, _)| (total, before))) {
+                        Some((total, before)) => {
+                            let mut at_least = *before;
+                            at_least.add(&own);
+                            covers(total, &at_least)
+                        }
+                        None => totals.iter().all(|(m, total, _)| saved.get(m.as_str()).is_none_or(|(before, _)| covers(total, before))),
+                    };
+                    self.models = if carried { saved } else { HashMap::new() };
+                }
+                None => return self.first_resumed(v, &own, own_1h, totals, priced),
+            }
         }
         let mut out = vec![];
         for (model, total, total_cost) in totals {
@@ -438,7 +509,38 @@ impl Turns {
                 out.push(AgentEvent::Usage { model: Some(model.clone()), tokens, cost });
             }
         }
+        self.remember(v);
         out
+    }
+
+    /// The first result of a resumed session no ledger knows (resumed outside Trek, or before it
+    /// kept one): its totals are the baseline from here on, and the turn's own `usage` (its main
+    /// model's) is all that's known of this turn, so it's priced here. Helper and sub-agent calls
+    /// in this one turn go uncounted rather than overcounted.
+    fn first_resumed(
+        &mut self,
+        v: &Value,
+        own: &TokenUsage,
+        own_1h: u64,
+        totals: Vec<(&String, TokenUsage, Option<f64>)>,
+        priced: impl Fn(Option<&str>, &TokenUsage, u64) -> Option<UsageCost>,
+    ) -> Vec<AgentEvent> {
+        let main = self.model.as_deref().filter(|m| totals.iter().any(|(name, _, _)| name.as_str() == *m)).map(String::from).or_else(|| {
+            // Which entry the turn ran on: one that holds at least the turn, the busiest.
+            let holds = |t: &TokenUsage| t.input >= own.input && t.output >= own.output && t.cache_read >= own.cache_read && t.cache_write >= own.cache_write;
+            totals.iter().filter(|(_, t, _)| holds(t)).max_by_key(|(_, t, _)| t.output).map(|(m, _, _)| m.to_string())
+        });
+        self.models = totals.into_iter().map(|(m, t, c)| (m.clone(), (t, c.unwrap_or(0.0)))).collect();
+        self.remember(v);
+        let cost = priced(main.as_deref(), own, own_1h);
+        if own.is_empty() { vec![] } else { vec![AgentEvent::Usage { model: main, tokens: *own, cost }] }
+    }
+
+    /// Keep the session's totals for the process that resumes it next.
+    fn remember(&self, v: &Value) {
+        if let (Some(dir), Some(session)) = (self.ledger.as_deref(), v["session_id"].as_str().filter(|s| !s.is_empty())) {
+            UsageLedger::save(dir, session, &self.models);
+        }
     }
 
     /// Claude never took in what it was sent after the held result: the turn ends with it.
@@ -481,7 +583,7 @@ pub async fn run(
     // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
     let mut planning = config.plan;
     let mut in_turn = false;
-    let mut turns = Turns { resumed: config.resume.is_some(), ..Default::default() };
+    let mut turns = Turns { resumed: config.resume.is_some(), resumed_from: config.resume.clone(), ledger: Some(UsageLedger::dir()), ..Default::default() };
     // Resumed partway: once the session has said which it is, that message is its latest point.
     let mut resumed_at = config.resume_at.clone();
     // The session has started (`system init`); until then, the messages sent so far, to send
@@ -1422,6 +1524,46 @@ mod tests {
         assert!(!two[0].1.reported);
         let total: f64 = one.iter().chain(&two).map(|(_, c)| c.usd).sum();
         assert!((total - lines[3]["total_cost_usd"].as_f64().unwrap()).abs() < 1e-9, "{total}");
+    }
+
+    #[test]
+    fn a_resume_counts_from_the_ledger_with_claude_codes_own_figures() {
+        // The same two real processes, each with the ledger: the resumed turn's cost is Claude
+        // Code's own (its `costUSD` moved), and the two add up to its total.
+        let dir = std::env::temp_dir().join(format!("trek-claude-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lines = fixture(include_str!("../fixtures/claude-cost-resume.jsonl"));
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let costs = |ev: Vec<AgentEvent>| -> Vec<UsageCost> { ev.into_iter().filter_map(|e| if let AgentEvent::Usage { cost, .. } = e { cost } else { None }).collect() };
+        let mut first = Turns { ledger: Some(dir.clone()), ..Default::default() };
+        let one: Vec<UsageCost> = lines[..2].iter().flat_map(|v| costs(first.step(v, &mut pending, &mut streamed))).collect();
+        let mut resumed = Turns { resumed: true, resumed_from: Some("eb3d266a-3587-4222-9ec1-fce8b7b3d23c".into()), ledger: Some(dir.clone()), ..Default::default() };
+        let two: Vec<UsageCost> = lines[2..].iter().flat_map(|v| costs(resumed.step(v, &mut pending, &mut streamed))).collect();
+        assert_eq!(two.len(), 1);
+        assert!(two[0].reported, "Claude Code's own figure");
+        assert!((two[0].usd - (0.0224044 - 0.0197463)).abs() < 1e-12, "{two:?}");
+        let total: f64 = one.iter().chain(&two).map(|c| c.usd).sum();
+        assert!((total - lines[3]["total_cost_usd"].as_f64().unwrap()).abs() < 1e-12, "{total}");
+
+        // A sub-agent on another model in the resumed turn is counted too.
+        let mut resumed = Turns { resumed: true, ledger: Some(dir.clone()), ..Default::default() };
+        let mut with_task = lines[3].clone();
+        with_task["modelUsage"]["claude-sonnet-5-5"] = json!({"inputTokens":40,"outputTokens":300,"cacheReadInputTokens":1000,"cacheCreationInputTokens":2000,"costUSD":0.0123});
+        let ev: Vec<(Option<String>, UsageCost)> = [&lines[2], &with_task]
+            .into_iter()
+            .flat_map(|v| resumed.step(v, &mut pending, &mut streamed))
+            .filter_map(|e| if let AgentEvent::Usage { model, cost, .. } = e { Some((model, cost.unwrap())) } else { None })
+            .collect();
+        assert!(ev.contains(&(Some("claude-sonnet-5-5".into()), UsageCost::reported(0.0123))), "{ev:?}");
+
+        // Claude Code started the totals over (another session in the folder ran since): all of
+        // the turn's figures are new.
+        let mut elsewhere = Turns { resumed: true, ledger: Some(dir.clone()), model: Some("claude-haiku-4-5".into()), ..Default::default() };
+        let mut fresh = lines[3].clone();
+        fresh["modelUsage"] = json!({"claude-haiku-4-5":{"inputTokens":10,"outputTokens":37,"cacheReadInputTokens":22871,"cacheCreationInputTokens":88,"costUSD":0.0026581}});
+        let ev = costs(elsewhere.step(&fresh, &mut pending, &mut streamed));
+        assert_eq!(ev, vec![UsageCost::reported(0.0026581)]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

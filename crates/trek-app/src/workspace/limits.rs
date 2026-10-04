@@ -145,6 +145,9 @@ impl Workspace {
         if unknown && matches!(thread.agent, AgentId::ClaudeCode | AgentId::Codex) {
             self.status_fetched_at = 0;
             self.refresh_usage(cx);
+        } else if unknown && thread.agent == super::devin_agent() {
+            self.devin_status_at = 0;
+            self.refresh_devin_usage(cx);
         }
         // A resume that met the limit again moves on without a word: the bar and the card say it,
         // and the alert for the limit went when it was first hit.

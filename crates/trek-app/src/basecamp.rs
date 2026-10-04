@@ -140,7 +140,10 @@ impl Basecamp {
             // 30 seconds; nothing is asked when no agent reports limits).
             let ws = self.workspace.read(cx);
             if ws.agent_status.is_empty() && !ws.usage_loading && !ws.detecting {
-                self.workspace.update(cx, |ws, cx| ws.refresh_usage(cx));
+                self.workspace.update(cx, |ws, cx| {
+                    ws.refresh_usage(cx);
+                    ws.refresh_devin_usage(cx);
+                });
             }
             self.refresh(cx);
             // The review list and the tiles read the workspace as it is now.
@@ -985,7 +988,7 @@ impl Profile {
 }
 
 /// What the tokens tile says under its figure: what they'd cost at API prices (as far as they
-/// have a price), then where they came from.
+/// have a price, saying how many haven't), then where they came from.
 pub(crate) fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
     let source = if recap.tokens_partial() {
         format!("From {} of {} threads", recap.threads_with_tokens, recap.threads)
@@ -997,7 +1000,10 @@ pub(crate) fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
     if !recap.spend.priced() {
         return source;
     }
-    let cost = format!("≈ {} at API prices {when}", crate::cost::usd(recap.spend.usd()));
+    let mut cost = format!("≈ {} at API prices {when}", crate::cost::usd(recap.spend.usd()));
+    if recap.spend.unpriced() > 0 {
+        cost += &format!(" · {} tokens unpriced", fmt_tokens(recap.spend.unpriced()));
+    }
     if recap.tokens_partial() { format!("{cost} · {}", source.to_lowercase()) } else { cost }
 }
 
@@ -1068,8 +1074,13 @@ mod tests {
         assert_eq!(tokens_note(&r, "today"), "≈ $1.28 at API prices today");
         // Threads that didn't report their tokens are said to be missing from it.
         let quiet = thread(AgentId::Acp("gemini".into()));
-        let r = Recap::compute(window, at + 5_000, &[claude, quiet]);
+        let r = Recap::compute(window, at + 5_000, &[claude.clone(), quiet]);
         assert_eq!(tokens_note(&r, "this week"), "≈ $1.25 at API prices this week · from 1 of 2 threads");
+        // Tokens on a model without a known price are said to be left out.
+        let mut fusion = thread(AgentId::Acp("devin".into()));
+        fusion.usage = vec![row(&fusion, "fusion-x", TokenUsage { input: 2_000_000, output: 5_000, ..Default::default() }, None)];
+        let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion]);
+        assert_eq!(tokens_note(&r, "today"), "≈ $1.25 at API prices today · 2M tokens unpriced");
     }
 
     #[test]

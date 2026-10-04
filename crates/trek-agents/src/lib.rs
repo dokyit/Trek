@@ -579,6 +579,11 @@ mod live_usage {
         let used = reported(&second);
         println!("first {before}, resumed {used:?}");
         assert!(matches!(&used[..], [(Some(m), t)] if m.starts_with("claude-haiku") && t.output > 0 && t.output < 200), "{used:?}");
+        // The first process left its totals in the ledger: the resumed turn is Claude Code's
+        // own figure, not one priced here.
+        let costs: Vec<UsageCost> = second.iter().filter_map(|e| if let AgentEvent::Usage { cost, .. } = e { *cost } else { None }).collect();
+        println!("resumed costs {costs:?}");
+        assert!(matches!(&costs[..], [c] if c.reported && c.usd > 0.0 && c.usd < 0.05), "{costs:?}");
     }
 
     #[test]

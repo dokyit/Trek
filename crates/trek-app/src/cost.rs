@@ -74,7 +74,8 @@ pub fn plan_phrase(plan: &Option<String>) -> String {
 }
 
 /// The status strip's text: "≈ $1.24 at API prices" (a plan covers it, or how it's billed isn't
-/// known), "$1.24" (billed per token), "12.3K tokens · price unknown" (nothing has a price),
+/// known), "$1.24" (billed per token; "$1.00 + ≈ $0.30 from consults" when sub-agents, which
+/// may run on a plan, spent some of it), "12.3K tokens · price unknown" (nothing has a price),
 /// "202K tokens · free" (the models are free), or nothing (no tokens yet, or a model on this
 /// Mac).
 pub fn label(billing: Option<&Billing>, s: &ThreadSpend) -> Option<String> {
@@ -88,6 +89,8 @@ pub fn label(billing: Option<&Billing>, s: &ThreadSpend) -> Option<String> {
         return Some(format!("{} tokens · free", fmt_tokens(s.tokens())));
     }
     Some(match billing {
+        // Sub-agents may run on a plan: only the thread's own spend is what was billed.
+        Some(Billing::Metered) if s.subs.usd() > 0.0 => format!("{} + ≈ {} from {}", usd(s.own.usd()), usd(s.subs.usd()), if s.consults { "consults" } else { "sub-agents" }),
         Some(Billing::Metered) => usd(s.usd()),
         _ => format!("≈ {} at API prices", usd(s.usd())),
     })
@@ -165,7 +168,7 @@ pub fn breakdown(billing: Option<&Billing>, s: &ThreadSpend) -> Option<Breakdown
     } else if s.usd() == 0.0 {
         format!("{} tokens · free", fmt_tokens(s.tokens()))
     } else if matches!(billing, Some(Billing::Metered)) {
-        format!("{} so far", usd(s.usd()))
+        format!("{} so far", usd(s.own.usd()))
     } else {
         format!("≈ {} at API prices", usd(s.usd()))
     };
@@ -186,6 +189,8 @@ pub fn breakdown(billing: Option<&Billing>, s: &ThreadSpend) -> Option<Breakdown
             format!("+ {} tokens from {who}, price unknown", fmt_tokens(s.subs.tokens()))
         } else if s.subs.usd() == 0.0 {
             format!("+ {} tokens from {who}, free", fmt_tokens(s.subs.tokens()))
+        } else if matches!(billing, Some(Billing::Metered)) {
+            format!("+ ≈ {} from {who} at API prices", usd(s.subs.usd()))
         } else {
             format!("+ {} from {who}", usd(s.subs.usd()))
         }
@@ -283,6 +288,16 @@ mod tests {
         assert_eq!(label(Some(&Billing::Metered), &s).as_deref(), Some("$1.23"));
         assert_eq!(label(Some(&Billing::Local), &s), None);
         assert_eq!(label(Some(&max), &ThreadSpend::default()), None, "nothing used yet");
+        // Billed per token, with a consult that may have run on a plan: only the thread's own
+        // spend is a bill.
+        let mut consulted = claude_turn();
+        consulted.subs = spend(&[(AgentId::Codex, "gpt-5.6-luna", TokenUsage { input: 11_041, output: 5, ..Default::default() }, Some(UsageCost::priced(0.30)))]);
+        consulted.sub_threads = 1;
+        consulted.consults = true;
+        assert_eq!(label(Some(&Billing::Metered), &consulted).as_deref(), Some("$1.23 + ≈ $0.30 from consults"));
+        let b = breakdown(Some(&Billing::Metered), &consulted).unwrap();
+        assert_eq!((b.headline.as_str(), b.subs.as_deref()), ("$1.23 so far", Some("+ ≈ $0.30 from 1 consult at API prices")));
+        assert_eq!(label(Some(&max), &consulted).as_deref(), Some("≈ $1.53 at API prices"));
         // No price for any of it: tokens, honestly.
         let unknown = ThreadSpend { own: spend(&[(AgentId::Acp("devin".into()), "fusion-x", TokenUsage { input: 12_000, output: 300, ..Default::default() }, None)]), ..Default::default() };
         assert_eq!(label(None, &unknown).as_deref(), Some("12.3K tokens · price unknown"));

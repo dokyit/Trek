@@ -669,8 +669,10 @@ pub struct Workspace {
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
-    /// When Devin last reported its plan and quota (`refresh_usage`).
+    /// When Devin was last asked for its plan and quota (`refresh_devin_usage`).
     devin_status_at: i64,
+    /// Devin's plan and quota are being read.
+    pub devin_loading: bool,
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
     /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
@@ -888,6 +890,7 @@ impl Workspace {
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
             devin_status_at: 0,
+            devin_loading: false,
             acp_info: HashMap::new(),
             usage_loading: false,
             settings_project: None,
@@ -1350,6 +1353,11 @@ impl Workspace {
             self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
             // Plan limits for its "Left on" tiles (asked at most every 30 seconds).
             self.refresh_usage(cx);
+            self.refresh_devin_usage(cx);
+        }
+        if route == Route::Settings(SettingsPage::Agents) && self.route != route {
+            // Devin's plan for its account line, as Claude Code's and Codex's have theirs.
+            self.refresh_devin_usage(cx);
         }
         self.route = route;
         self.refresh_git(cx);
@@ -3930,6 +3938,10 @@ impl Workspace {
                     }
                     this.status_fetched_at = 0;
                     this.refresh_usage(cx);
+                    // Opened on something that shows Devin's plan before Devin was found.
+                    if matches!(this.route, Route::Basecamp | Route::Settings(SettingsPage::Agents)) || std::env::var_os("TREK_OPEN_USAGE").is_some() {
+                        this.refresh_devin_usage(cx);
+                    }
                     this.probe_acp_agents(cx);
                     // Default to an agent that's actually installed.
                     let ready = this.ready_agents();
@@ -3947,16 +3959,14 @@ impl Workspace {
     }
 
     /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
-    /// no prompt is sent. Throttled to once every 30 seconds.
+    /// no prompt is sent. Throttled to once every 30 seconds. Devin is asked on its own
+    /// (`refresh_devin_usage`).
     pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
         if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 || trek_core::paths::isolated() {
             return;
         }
-        let ready = |id: AgentId| self.agents.iter().any(|a| a.agent == id && a.availability == Availability::Ready) && !self.settings.disabled_agents.contains(&id.key());
-        let (claude, codex) = (ready(AgentId::ClaudeCode), ready(AgentId::Codex));
-        // Devin's quota is read off its terminal UI, a few seconds' work: every few minutes at most.
-        let devin = ready(devin_agent()) && now_ms() - self.devin_status_at >= DEVIN_STATUS_EVERY;
-        if !claude && !codex && !devin {
+        let (claude, codex) = (self.agent_ready(&AgentId::ClaudeCode), self.agent_ready(&AgentId::Codex));
+        if !claude && !codex {
             return;
         }
         self.usage_loading = true;
@@ -3964,12 +3974,11 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         let folder = cwd.clone();
         trek_core::runtime().spawn(async move {
-            let (a, b, c) = tokio::join!(
+            let (a, b) = tokio::join!(
                 async { if claude { Some(trek_agents::claude_status(&cwd).await) } else { None } },
                 async { if codex { Some(trek_agents::codex_status(&cwd).await) } else { None } },
-                async { if devin { Some(trek_agents::devin_status().await) } else { None } },
             );
-            let _ = tx.send([(AgentId::ClaudeCode, a), (AgentId::Codex, b), (devin_agent(), c)]).await;
+            let _ = tx.send([(AgentId::ClaudeCode, a), (AgentId::Codex, b)]).await;
         });
         let task = cx.spawn(async move |this, cx| {
             let Ok(results) = rx.recv().await else { return };
@@ -3993,15 +4002,59 @@ impl Workspace {
                 }
                 this.usage_loading = false;
                 this.status_fetched_at = now_ms();
-                if devin {
-                    this.devin_status_at = now_ms();
-                }
                 this.fill_unknown_resets(cx);
                 cx.notify();
             });
         });
         self.keep(task);
         cx.notify();
+    }
+
+    /// Re-read Devin's plan and quota. Devin shows them only in its terminal UI, which takes a
+    /// few seconds to run and leaves Devin a session lock each time, so it's asked only when
+    /// something shows them (the Usage popover, Basecamp, Settings → Agents, a Devin thread
+    /// paused at its limit), at most every ten minutes.
+    pub fn refresh_devin_usage(&mut self, cx: &mut Context<Self>) {
+        if self.devin_loading || now_ms() - self.devin_status_at < DEVIN_STATUS_EVERY || trek_core::paths::isolated() || !self.agent_ready(&devin_agent()) {
+            return;
+        }
+        self.devin_loading = true;
+        self.devin_status_at = now_ms();
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(trek_agents::devin_status().await).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(res) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| this.apply_devin_status(res, cx));
+        });
+        self.keep(task);
+        cx.notify();
+    }
+
+    /// Take in what Devin said of its plan and quota. It says nothing of its commands, which
+    /// its ACP sessions report per folder and stay as they were.
+    pub(crate) fn apply_devin_status(&mut self, res: anyhow::Result<AgentStatus>, cx: &mut Context<Self>) {
+        let key = devin_agent().key();
+        match res {
+            Ok(st) => {
+                self.agent_status.insert(key, st);
+            }
+            // Without a status of its own, Settings keeps what Devin's ACP probe said of its login.
+            Err(e) => {
+                if let Some(st) = self.agent_status.get_mut(&key) {
+                    st.error = Some(e.to_string());
+                }
+            }
+        }
+        self.devin_loading = false;
+        self.fill_unknown_resets(cx);
+        cx.notify();
+    }
+
+    /// Installed, signed in as far as Trek knows, and not turned off in Settings.
+    fn agent_ready(&self, id: &AgentId) -> bool {
+        self.agents.iter().any(|a| a.agent == *id && a.availability == Availability::Ready) && !self.settings.disabled_agents.contains(&id.key())
     }
 
     /// Ask each installed ACP agent for its models and login state. Answered from what the agent
@@ -4178,6 +4231,9 @@ impl Workspace {
             "usage" => {
                 self.status_fetched_at = 0;
                 self.refresh_usage(cx);
+                if agent == devin_agent() {
+                    self.refresh_devin_usage(cx);
+                }
                 let Some(st) = self.agent_status.get(&agent.key()) else {
                     // In a thread the agent may answer it itself; a draft has no agent to ask.
                     return thread.is_none().then(|| format!("{} hasn't reported its usage yet.", agent.display_name()));

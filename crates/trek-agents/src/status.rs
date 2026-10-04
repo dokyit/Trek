@@ -8,7 +8,7 @@ use crate::codex::{Rpc, RpcLines, await_response, fetch_models, start_app_server
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -457,7 +457,6 @@ pub(crate) fn capitalize(s: &str) -> String {
     }
 }
 
-
 // ---------------------------------------------------------------------------------------------
 // Devin
 
@@ -544,15 +543,19 @@ fn devin_usage_screen(bin: &Path, dir: &Path) -> Result<String> {
             if done(&screen) || std::time::Instant::now() >= end {
                 return screen;
             }
-            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
-                parser.process(&chunk);
-                if chunk.windows(4).any(|w| w == b"\x1b[6n") {
-                    let (r, c) = parser.screen().cursor_position();
-                    let _ = write!(writer, "\x1b[{};{}R", r + 1, c + 1);
-                }
-                if chunk.windows(3).any(|w| w == b"\x1b[c") || chunk.windows(4).any(|w| w == b"\x1b[0c") {
-                    let _ = writer.write_all(b"\x1b[?62;c");
-                }
+            let chunk = match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => chunk,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                // Devin exited: the screen is all there will be.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return screen,
+            };
+            parser.process(&chunk);
+            if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                let (r, c) = parser.screen().cursor_position();
+                let _ = write!(writer, "\x1b[{};{}R", r + 1, c + 1);
+            }
+            if chunk.windows(3).any(|w| w == b"\x1b[c") || chunk.windows(4).any(|w| w == b"\x1b[0c") {
+                let _ = writer.write_all(b"\x1b[?62;c");
             }
         }
     };
@@ -576,6 +579,8 @@ fn devin_usage_screen(bin: &Path, dir: &Path) -> Result<String> {
         // The panel draws in one go; a moment more for anything after the bars.
         Ok(if screen.contains("% used") { pump(Duration::from_millis(300), &|_| false, &mut writer) } else { screen })
     })();
+    // The processes Devin runs as (it starts its UI in a process of its own), for their locks.
+    let pids: Vec<u32> = child.process_id().map(descendants).unwrap_or_default();
     // Quit as a user would (twice Ctrl-C), so Devin lets go of the session it opened; kill it
     // if it lingers.
     for _ in 0..2 {
@@ -588,7 +593,39 @@ fn devin_usage_screen(bin: &Path, dir: &Path) -> Result<String> {
     }
     let _ = child.kill();
     let _ = child.wait();
+    drop_session_locks(&devin_session_locks(), &pids);
     result
+}
+
+/// `pid` and the processes under it, as they are now.
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut out = vec![pid];
+    let mut i = 0;
+    while i < out.len() && out.len() < 64 {
+        let kids = std::process::Command::new("/usr/bin/pgrep").args(["-P", &out[i].to_string()]).stderr(Stdio::null()).output();
+        out.extend(kids.map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()).collect::<Vec<_>>()).unwrap_or_default());
+        i += 1;
+    }
+    out
+}
+
+/// Devin leaves a lock behind for each terminal UI it ran (`session_locks/<name>.lock`, holding
+/// the process id), even quit as a user would. The ones of the processes Trek just ran go too.
+fn drop_session_locks(locks: &Path, pids: &[u32]) {
+    let Ok(entries) = std::fs::read_dir(locks) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = || std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u32>().ok()).is_some_and(|pid| pids.contains(&pid));
+        if path.extension().is_some_and(|e| e == "lock") && ours() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Where Devin keeps its session locks.
+fn devin_session_locks() -> PathBuf {
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| trek_core::paths::home().join(".local/share"));
+    data.join("devin/cli/session_locks")
 }
 
 /// The quota bars of Devin's `/usage` panel, as its screen shows them:
@@ -887,6 +924,21 @@ mod tests {
         assert_eq!(l.len(), 1);
         assert_eq!((l[0].percent, l[0].resets_at), (12.0, Some(now.timestamp_millis() + (2 * 3_600 + 5 * 60) * 1000)));
         assert!(devin_limits("❭ Ask Devin", now).is_empty());
+    }
+
+    #[test]
+    fn only_the_locks_of_trek_s_own_devin_go() {
+        let dir = std::env::temp_dir().join(format!("trek-devin-locks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("open-badge.lock"), "4242\n").unwrap();
+        std::fs::write(dir.join("ionized-growth.lock"), "424").unwrap();
+        std::fs::write(dir.join("notes.txt"), "4242").unwrap();
+        std::fs::write(dir.join("mutual-bakery.lock"), "4243\n").unwrap();
+        drop_session_locks(&dir, &[4242, 4243]);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["ionized-growth.lock", "notes.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

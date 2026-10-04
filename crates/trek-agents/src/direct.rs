@@ -85,8 +85,9 @@ pub async fn run(
 }
 
 /// OpenAI-style providers known to take `stream_options.include_usage` (a final chunk with the
-/// request's usage). Others aren't sent it; usage they send anyway is still counted.
-const REPORTS_USAGE: &[&str] = &["openai", "openrouter", "deepseek", "xai", "groq"];
+/// request's usage; Google's OpenAI-compatible endpoint documents it too). Others aren't sent it
+/// (Mistral turns down fields it doesn't know); usage they send anyway is still counted.
+const REPORTS_USAGE: &[&str] = &["openai", "openrouter", "deepseek", "xai", "groq", "google"];
 
 /// Take in what an Anthropic stream event says about usage: `message_start` has the input
 /// side (and output so far), `message_delta` the running output count. `long_writes`: how many
@@ -435,9 +436,11 @@ mod tests {
         // Cache writes (GPT-5.6 and later) are part of the prompt too; OpenRouter adds its cost.
         let written = json!({"usage":{"prompt_tokens":5000,"completion_tokens":10,"total_tokens":5010,"prompt_tokens_details":{"cached_tokens":1000,"cache_write_tokens":3000},"cost":0.0042}});
         assert_eq!(openai_usage(&written), Some((TokenUsage { input: 1000, output: 10, cache_read: 1000, cache_write: 3000 }, Some(0.0042))));
-        // Reasoning counted outside `completion_tokens` still counts, through the total.
+        // Reasoning counted outside `completion_tokens` (Gemini's thoughts) still counts, through
+        // the total.
         let thoughts = json!({"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":180}});
         assert_eq!(openai_usage(&thoughts).map(|(t, _)| t.output), Some(80));
+        assert!(REPORTS_USAGE.contains(&"google"), "Gemini is asked for its usage");
         assert_eq!(openai_usage(&json!({"choices":[{"delta":{"content":"x"}}],"usage":null})), None);
     }
 
