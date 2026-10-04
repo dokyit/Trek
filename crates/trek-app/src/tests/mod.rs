@@ -4,6 +4,7 @@
 
 mod activity;
 mod alerts;
+mod background;
 mod basecamp;
 mod cost;
 mod flows;

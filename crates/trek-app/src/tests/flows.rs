@@ -92,21 +92,26 @@ fn tool_calls_fold_into_summary_rows() {
 }
 
 #[test]
-fn sub_agents_report_progress_and_keep_the_turn_open() {
+fn sub_agents_out_after_the_answer_keep_the_thread_waiting_until_they_report() {
     run(async |cx| {
         let trek = open(cx);
         let id = trek.send(cx, "send subagents 3s");
         let tid = id.clone();
         trek.wait(cx, "the first turn to end with agents still out", |ws| {
             let l = &ws.live[&tid];
-            l.background == 2 && l.active_tasks() == 2 && l.items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("Both scouts are out")))
+            l.turn_started.is_none() && l.background.len() == 2 && l.active_tasks() == 2 && l.items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("Both scouts are out")))
         })
         .await;
-        // The agent's turn ended, but the thread works on until the agents are back.
-        assert_eq!(trek.run_state(cx, &id), RunState::Working);
-        assert_eq!(turn_ends(&trek.items(cx, &id)), 0);
-        assert!(trek.working_bar(cx).is_some_and(|l| l.ends_with("· 2 agents out")), "{:?}", trek.working_bar(cx));
-        assert!(trek.visible(cx, "working-bar"));
+        // The agent's answer is in (its turn has its footer), but it waits on the agents it sent:
+        // it's at work, in the Working group, with the header saying on what.
+        assert_eq!(trek.run_state(cx, &id), RunState::Idle);
+        assert_eq!(turn_ends(&trek.items(cx, &id)), 1);
+        assert!(trek.read(cx, |ws, _| ws.waiting(&id)));
+        assert!(trek.read(cx, |ws, _| ws.sections().iter().any(|(s, ts)| *s == trek_core::store::Section::Working && ts.iter().any(|t| t.id == id))));
+        assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Waiting on 2 sub-agents · ")), "{:?}", trek.working_bar(cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "working-bar") && trek.visible(cx, "waiting-on"));
+        assert!(trek.read(cx, |ws, _| ws.any_turn_running()), "the Mac stays awake while they work");
         // Their calls stay "running" (the tool call returned at once; the agent is still out).
         assert!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::Tool { title, status: ToolStatus::Running, .. } if title == "Subagent")).count() == 2);
         // Each is a row of its own, as sub-agents Trek runs are, with what it's doing now.
@@ -116,15 +121,24 @@ fn sub_agents_report_progress_and_keep_the_turn_open() {
         assert!(trek.visible(cx, ("subagent", first)));
         trek.wait(cx, "progress from a sub-agent", |ws| ws.live[&tid].tasks.iter().any(|t| t.activity == "Reading src/routes.rs")).await;
         assert!(trek.rows(cx).contains(&"subagent: Map the HTTP routes (Reading src/routes.rs · 2 steps)".to_string()), "{:?}", trek.rows(cx));
+        // Opened, the row shows the calls it made.
+        trek.click(cx, ("subagent", first));
+        assert!(trek.visible(cx, ("subagent-activity", first)));
+        let rows = trek.rows(cx);
+        let at = rows.iter().position(|r| r.starts_with("subagent: Map the HTTP routes")).unwrap();
+        assert_eq!(rows[at + 1..at + 3], ["  Read 1 file · Exploring the project".to_string(), "  Read src/routes.rs".to_string()], "{rows:?}");
 
+        // They report: the agent takes a turn of its own with what they found, and is done.
+        trek.wait(cx, "the agent's own turn after the report", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("Both scouts reported back")))).await;
         trek.wait_done(cx, &id, RunState::Idle).await;
         let items = trek.items(cx, &id);
         assert!(trek.read(cx, |ws, _| ws.live[&id].tasks.iter().all(|t| t.done == Some(true))));
         assert!(items.iter().filter(|i| matches!(i, Item::Tool { status: ToolStatus::Done, .. })).count() == 2);
-        assert!(trek.answers(cx, &id).contains("Both scouts reported back"));
-        assert_eq!(turn_ends(&items), 1);
+        assert_eq!(turn_ends(&items), 2);
         assert!(matches!(items.last(), Some(Item::TurnEnd { .. })));
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
         assert_eq!(trek.working_bar(cx), None);
+        trek.render(cx);
         assert!(!trek.visible(cx, "working-bar"));
     });
 }
@@ -437,22 +451,21 @@ fn steered_follow_ups_join_the_running_turn() {
 }
 
 #[test]
-fn steering_keeps_the_turn_clock_and_sub_agents() {
+fn a_message_while_sub_agents_are_out_is_a_turn_of_its_own_and_they_stay_tracked() {
     run(async |cx| {
         let trek = open(cx);
         let id = trek.send(cx, "send subagents 3s");
         let tid = id.clone();
-        trek.wait(cx, "agents out", |ws| ws.live[&tid].active_tasks() == 2).await;
-        let started = trek.read(cx, |ws, _| ws.live[&id].turn_started);
+        trek.wait(cx, "the answer with agents out", |ws| ws.live[&tid].turn_started.is_none() && ws.live[&tid].active_tasks() == 2).await;
         trek.send(cx, "check the auth routes too");
         trek.read(cx, |ws, _| {
             let live = &ws.live[&id];
-            assert_eq!(live.turn_started, started, "the turn goes on; its clock doesn't restart");
+            assert!(live.turn_started.is_some(), "the agent is free: the message starts a turn");
             assert_eq!(live.active_tasks(), 2, "the agents it sent are still tracked");
         });
-        trek.wait(cx, "progress after steering", |ws| ws.live[&tid].tasks.iter().any(|t| !t.activity.is_empty())).await;
+        trek.wait(cx, "progress after the message", |ws| ws.live[&tid].tasks.iter().any(|t| !t.activity.is_empty())).await;
+        trek.wait(cx, "the report", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("Both scouts reported back")))).await;
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert!(trek.answers(cx, &id).contains("Noted — check the auth routes too"));
         assert!(trek.read(cx, |ws, _| ws.live[&id].tasks.iter().all(|t| t.done == Some(true))));
     });
 }

@@ -150,6 +150,18 @@ pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
     div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full()).into_any_element()
 }
 
+/// How often the hiker, waiting, looks the other way.
+const LOOK_EVERY: f32 = 3.;
+
+/// The trail with the hiker standing at a fork, waiting for others to come back: it looks one way
+/// down the trail, then the other, every few seconds. Drawn at a second's pace (`clock` in
+/// seconds since the wait began); `still`, it faces ahead.
+pub fn waiting(clock: f32, still: bool, cx: &App) -> AnyElement {
+    let dots = cx.theme().foreground.opacity(0.16);
+    let right = still || (clock / LOOK_EVERY) as u64 % 2 == 0;
+    div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, 0.12, 1, right, dots, window)).size_full()).into_any_element()
+}
+
 fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
     let w = b.size.width.as_f32();
     let ground = (b.origin.y.as_f32() + HEIGHT - 2.).round();

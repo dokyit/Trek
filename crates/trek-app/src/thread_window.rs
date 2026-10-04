@@ -62,6 +62,7 @@ pub struct ThreadWindow {
     thread_view: Entity<ThreadView>,
     composer: Entity<Composer>,
     working_bar: Entity<WorkingBar>,
+    background_strip: Entity<crate::background_strip::BackgroundStrip>,
     /// The composer changed since the last frame (see `Composer::element`).
     composer_changed: bool,
     /// The window title as last set (the thread's title).
@@ -76,6 +77,7 @@ impl ThreadWindow {
         let scope = Scope::Thread(id.clone());
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), scope.clone(), window, cx));
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), scope.clone(), window, cx));
+        let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), scope.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), scope, window, cx));
         let title = workspace.read(cx).thread(&id).map(|t| t.title.clone()).unwrap_or_default();
         window.set_window_title(&title);
@@ -117,7 +119,7 @@ impl ThreadWindow {
         let c = composer.clone();
         window.defer(cx, move |window, cx| c.update(cx, |c, cx| c.focus(window, cx)));
         let _hidden_frames = crate::system::hidden_frames(window, cx);
-        Self { workspace, id, thread_view, composer, working_bar, composer_changed: true, title, _hidden_frames, _subscriptions: subscriptions }
+        Self { workspace, id, thread_view, composer, working_bar, background_strip, composer_changed: true, title, _hidden_frames, _subscriptions: subscriptions }
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -244,6 +246,7 @@ impl Render for ThreadWindow {
                         // Cached as in the main window: the working bar's frames redraw only the bar.
                         .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(StyleRefinement::default().size_full())))
                         .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
+                        .child(crate::background_strip::cached(&self.background_strip, cx))
                         .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
                 ),
             )

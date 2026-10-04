@@ -940,7 +940,8 @@ pub async fn run(
                             agent.rpc.reply(rpc_id, Ok(permission_outcome(pick_option(&options, decision)))).await?;
                         }
                     }
-                    Command::Answer { .. } => {}
+                    // ACP has no background work to read or stop.
+                    Command::Answer { .. } | Command::ReadTask { .. } | Command::StopTask { .. } => {}
                     Command::Shutdown => break,
                 }
             }

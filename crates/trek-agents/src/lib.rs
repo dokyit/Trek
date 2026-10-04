@@ -126,7 +126,42 @@ pub enum Command {
     Respond { request_id: String, decision: Decision },
     SetHandHolding(HandHolding),
     SetModel { model: String, effort: Effort },
+    /// Read the end of a background task's output (`BackgroundTask::readable`); the answer
+    /// comes back as `AgentEvent::TaskOutput`. Starts no turn.
+    ReadTask { id: String },
+    /// Stop a background task (`BackgroundTask::stoppable`).
+    StopTask { id: String },
     Shutdown,
+}
+
+/// Work an agent left running between turns: a shell command (a dev server, a test watcher, a
+/// browser session), a `Monitor` watching one, or a sub-agent of its own. It outlives the turn
+/// that started it, and when it reports, the agent may take a turn by itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundTask {
+    /// The agent's id for it (what `Command::ReadTask` and `Command::StopTask` take).
+    pub id: String,
+    pub kind: BackgroundKind,
+    /// What it is, in the agent's words: the command, or the task's description.
+    pub title: String,
+    /// The tool call that started it, when the agent says.
+    pub call: Option<String>,
+    /// Its output can be read while it runs (`Command::ReadTask`).
+    pub readable: bool,
+    /// The agent can stop it on request (`Command::StopTask`).
+    pub stoppable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundKind {
+    /// A shell command left running.
+    Shell,
+    /// A command whose output the agent watches, an event at a time (Claude's `Monitor`).
+    Monitor,
+    /// One of the agent's own sub-agents, working on while the agent waits for its report.
+    Agent,
+    /// Anything else (a workflow, a long MCP call).
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,8 +198,14 @@ pub enum AgentEvent {
     Billing(Billing),
     /// A sub-agent (keyed by the tool call that launched it) started, moved on, or finished.
     Task { id: String, description: Option<String>, activity: Option<String>, tool_uses: Option<u64>, done: Option<bool> },
-    /// How many background sub-agents are still running; the turn isn't really over until zero.
-    Background(usize),
+    /// A tool call a sub-agent made (keyed by the call that launched the sub-agent), for its
+    /// row's live activity.
+    TaskStep { task: String, title: String, detail: String },
+    /// The work the agent has running in the background now, all of it: it replaces the last
+    /// set. A turn can end with some still running.
+    Background(Vec<BackgroundTask>),
+    /// The end of background task `id`'s output, as it stands (the answer to `Command::ReadTask`).
+    TaskOutput { id: String, output: String },
     /// The slash commands the agent offers in this session (replaces any earlier list).
     Commands(Vec<SlashCommand>),
     /// Something the user should know that isn't an error (the transcript shows it as a note).
@@ -584,6 +625,55 @@ mod live_usage {
         let costs: Vec<UsageCost> = second.iter().filter_map(|e| if let AgentEvent::Usage { cost, .. } = e { *cost } else { None }).collect();
         println!("resumed costs {costs:?}");
         assert!(matches!(&costs[..], [c] if c.reported && c.usd > 0.0 && c.usd < 0.05), "{costs:?}");
+    }
+
+    #[test]
+    #[ignore = "talks to the real Claude Code"]
+    fn claude_live_background_shell_outlives_the_turn_and_wakes_it() {
+        let cwd = std::path::PathBuf::from("/tmp/trek-background-e2e");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = start(SessionConfig {
+            agent: AgentId::ClaudeCode,
+            cwd,
+            model: Some("claude-haiku-4-5".into()),
+            effort: Effort::Low,
+            hand_holding: HandHolding::FullAccess,
+            plan: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            read_only: false,
+        });
+        let prompt = "Use the Bash tool with run_in_background=true to run: echo started-bg; sleep 8; echo done-bg. Then immediately reply with just the word: started. When it completes, reply with just: finished.";
+        let seen = trek_core::runtime().block_on(async {
+            session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();
+            let mut seen = vec![];
+            let mut turns = 0;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+            while turns < 2 {
+                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                println!("{ev:?}");
+                if let AgentEvent::TurnComplete { .. } = ev {
+                    turns += 1;
+                    // Between turns, the shell's output can be read.
+                    if let Some(id) = seen.iter().rev().find_map(|e| if let AgentEvent::Background(b) = e { b.first().map(|t: &BackgroundTask| t.id.clone()) } else { None }) {
+                        session.commands.send(Command::ReadTask { id }).await.unwrap();
+                    }
+                }
+                seen.push(ev);
+            }
+            let _ = session.commands.send(Command::Shutdown).await;
+            seen
+        });
+        let first_end = seen.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
+        assert!(seen[..first_end].iter().any(|e| matches!(e, AgentEvent::Background(b) if b.iter().any(|t| t.kind == BackgroundKind::Shell && t.readable && t.stoppable))), "{seen:?}");
+        assert!(seen.iter().any(|e| matches!(e, AgentEvent::TaskOutput { output, .. } if output.contains("started-bg"))), "{seen:?}");
+        let rest = &seen[first_end + 1..];
+        let emptied = rest.iter().position(|e| *e == AgentEvent::Background(vec![])).expect("the shell ends");
+        assert!(rest[emptied..].iter().any(|e| matches!(e, AgentEvent::TextDelta(_))), "the agent takes a turn of its own: {rest:?}");
     }
 
     #[test]

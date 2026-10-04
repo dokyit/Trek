@@ -21,6 +21,11 @@
 //! | `recall`                     | the messages it remembers from this conversation             |
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
+//! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
+//! | `mock:server` [dur]          | leaves a dev server running in the background (for `dur`, or  |
+//! |                              | until stopped), printing a line now and then                  |
+//! | `mock:watch` [dur]           | leaves a test watcher running; `dur` later (default 3s) it    |
+//! |                              | reports a failure and the agent takes a turn of its own       |
 //! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
 //! |                              | token (or, with `plan`, on a Claude Max plan)                 |
 //!
@@ -40,11 +45,11 @@
 //! Selected by `AgentId::Direct("mock")`. Trek offers it only when `TREK_MOCK_AGENT=1` (and in
 //! its own tests).
 
-use crate::{AgentEvent, Billing, Command, Decision, Prompt, Question, SessionConfig};
+use crate::{AgentEvent, BackgroundKind, BackgroundTask, Billing, Command, Decision, Prompt, Question, SessionConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use trek_core::HandHolding;
 
@@ -129,6 +134,12 @@ enum Script {
     Limit(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate { wait: bool },
+    /// Start two sub-agents on the same task, and end the turn.
+    Pair,
+    /// Leave a dev server running in the background, for a while or until stopped.
+    Server(Option<Duration>),
+    /// Leave a test watcher running that reports a failure after a while.
+    Watch(Duration),
     /// A turn on a real model with a real price: billed per token, or on a plan.
     Cost { plan: bool },
     /// Trek woke it with what a sub-agent came back with.
@@ -160,6 +171,9 @@ impl Script {
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
+                "pair" if w.starts_with("mock:") => Script::Pair,
+                "server" if w.starts_with("mock:") => Script::Server(duration_after(i)),
+                "watch" if w.starts_with("mock:") => Script::Watch(duration_after(i).unwrap_or(Duration::from_secs(3))),
                 "cost" if w.starts_with("mock:") => Script::Cost { plan: words.get(i + 1).is_some_and(|w| w == "plan") },
                 "error" => Script::Error,
                 "permission" => Script::Permission,
@@ -198,6 +212,9 @@ pub fn title(request: &str) -> String {
         Script::Recall => "What was said",
         Script::Limit(_) => "Refactor the parser",
         Script::Delegate { .. } => "Get a second opinion",
+        Script::Pair => "Get two opinions",
+        Script::Server(_) => "Start the dev server",
+        Script::Watch(_) => "Watch the tests",
         Script::Cost { .. } => "Price the API calls",
         Script::Wake => "A sub-agent reported back",
     }
@@ -248,8 +265,12 @@ struct Session {
     next_id: u64,
     /// Prompts sent while a turn ran; the turn acknowledges them at its next step.
     steer: Vec<String>,
-    /// Background sub-agents still out: (tool call id, description).
-    background: Vec<(String, String)>,
+    /// Work left running between turns: background sub-agents and shells. Shared with the tasks
+    /// that play the shells, which run on while the session waits for its next message.
+    background: Jobs,
+    /// What background work reported that makes the agent take a turn of its own.
+    notes: async_channel::Receiver<Note>,
+    note: async_channel::Sender<Note>,
     /// The session's id, under which its history is kept.
     native_id: String,
     /// The mark of the turn under way: messages sent during it share it.
@@ -258,6 +279,58 @@ struct Session {
     model: String,
     /// The way to Trek's orchestration tools, when Trek gave the session them.
     orchestrate: Option<trek_ipc::Client>,
+}
+
+/// Background work's news, for a turn the agent takes on its own (as Claude Code does on a
+/// task's notification).
+enum Note {
+    /// The test watcher caught a failure.
+    Watcher(String),
+    /// The scouts (`agents`) are back.
+    Scouts,
+}
+
+/// Work running in the background of a session.
+#[derive(Clone, Default)]
+struct Jobs(Arc<Mutex<Vec<Job>>>);
+
+struct Job {
+    task: BackgroundTask,
+    /// What it has printed so far.
+    output: String,
+}
+
+impl Jobs {
+    fn add(&self, task: BackgroundTask) {
+        self.0.lock().unwrap().push(Job { task, output: String::new() });
+    }
+
+    /// Take it off the list; `false` when it wasn't on it (stopped already).
+    fn remove(&self, id: &str) -> bool {
+        let mut jobs = self.0.lock().unwrap();
+        let before = jobs.len();
+        jobs.retain(|j| j.task.id != id);
+        jobs.len() != before
+    }
+
+    fn running(&self, id: &str) -> bool {
+        self.0.lock().unwrap().iter().any(|j| j.task.id == id)
+    }
+
+    fn print(&self, id: &str, line: &str) {
+        if let Some(j) = self.0.lock().unwrap().iter_mut().find(|j| j.task.id == id) {
+            j.output.push_str(line);
+            j.output.push('\n');
+        }
+    }
+
+    fn output(&self, id: &str) -> Option<String> {
+        self.0.lock().unwrap().iter().find(|j| j.task.id == id && j.task.readable).map(|j| j.output.clone())
+    }
+
+    fn event(&self) -> AgentEvent {
+        AgentEvent::Background(self.0.lock().unwrap().iter().map(|j| j.task.clone()).collect())
+    }
 }
 
 /// The name Trek gives its orchestration MCP server in a session.
@@ -273,6 +346,7 @@ pub async fn run(
         Some(r) => crate::recap_first(commands, r),
         None => commands,
     };
+    let (note, notes) = async_channel::unbounded();
     let mut s = Session {
         cwd: config.cwd.clone(),
         commands,
@@ -283,7 +357,9 @@ pub async fn run(
         context: 9_400,
         next_id: 0,
         steer: vec![],
-        background: vec![],
+        background: Jobs::default(),
+        notes,
+        note,
         native_id: native_id.clone(),
         mark: String::new(),
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
@@ -298,7 +374,18 @@ pub async fn run(
     // Nothing leaves the Mac, so nothing is billed.
     let _ = s.emit(AgentEvent::Billing(Billing::Local)).await;
     let _ = s.emit(AgentEvent::Context { used: s.context, window: WINDOW }).await;
-    while let Ok(cmd) = s.commands.recv().await {
+    loop {
+        // Between turns: the user's next message, or a background shell that has something to say.
+        let cmd = tokio::select! {
+            cmd = s.commands.recv() => cmd,
+            Ok(note) = s.notes.recv() => {
+                if s.woken(&note).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        let Ok(cmd) = cmd else { break };
         match cmd {
             Command::Prompt { text, .. } => {
                 if s.turn(&text).await.is_err() {
@@ -307,8 +394,10 @@ pub async fn run(
             }
             Command::SetHandHolding(h) => s.hand_holding = h,
             Command::SetModel { model, .. } => s.model = model,
+            Command::ReadTask { id } => s.read_task(&id),
+            Command::StopTask { id } => s.stop_task(&id),
             Command::Shutdown => break,
-            // Nothing is running or pending between turns.
+            // No turn is running and nothing is pending between turns.
             Command::Interrupt | Command::Respond { .. } | Command::Answer { .. } => {}
         }
     }
@@ -380,10 +469,6 @@ impl Session {
             Ok(()) => {}
             Err(Stop::Interrupted) => {
                 self.steer.clear();
-                for (id, _) in std::mem::take(&mut self.background) {
-                    self.emit(AgentEvent::Task { id, description: None, activity: None, tool_uses: None, done: Some(false) }).await?;
-                }
-                self.emit(AgentEvent::Background(0)).await?;
                 self.emit(AgentEvent::TurnComplete { error: Some("Interrupted".into()) }).await?;
             }
             Err(Stop::Closed) => return Err(Stop::Closed),
@@ -394,6 +479,9 @@ impl Session {
     async fn play(&mut self, script: Script, text: &str) -> Step {
         match script {
             Script::Delegate { wait } => self.delegate(text, wait).await?,
+            Script::Pair => self.pair(text).await?,
+            Script::Server(until) => self.server(until).await?,
+            Script::Watch(after) => self.watch(after).await?,
             Script::Wake => {
                 let body = text.split_once(":\n\n").map_or(text, |(_, b)| b);
                 let gist = trek_core::orchestrate::preview(body.split("\n\n---\n\n").next().unwrap_or(body), 160);
@@ -511,10 +599,49 @@ impl Session {
             }
             Ok(Command::Interrupt) => return Err(Stop::Interrupted),
             Ok(Command::SetHandHolding(h)) => self.hand_holding = h,
+            Ok(Command::ReadTask { id }) => self.read_task(&id),
+            Ok(Command::StopTask { id }) => self.stop_task(&id),
             Ok(Command::Shutdown) | Err(_) => return Err(Stop::Closed),
             Ok(Command::SetModel { .. } | Command::Respond { .. } | Command::Answer { .. }) => {}
         }
         Ok(())
+    }
+
+    /// What a background task has printed so far, without a turn (as Claude Code's
+    /// `get_task_output` answers).
+    fn read_task(&self, id: &str) {
+        if let Some(output) = self.background.output(id) {
+            let _ = self.events.try_send(AgentEvent::TaskOutput { id: id.to_string(), output });
+        }
+    }
+
+    /// Stop a background task: it's off the list at once, and says nothing more.
+    fn stop_task(&self, id: &str) {
+        if self.background.remove(id) {
+            let _ = self.events.try_send(self.background.event());
+        }
+    }
+
+    /// Background work reported something: the agent takes a turn on its own, with no message
+    /// from the user (as Claude Code does on a task's notification).
+    async fn woken(&mut self, note: &Note) -> Step {
+        let run = async {
+            match note {
+                Note::Watcher(what) => {
+                    self.think("The watcher has something.").await?;
+                    self.tool("Read", "tests/parser.rs", "#[test]\nfn rejects_a_truncated_body() { … }", 120).await?;
+                    self.say(&format!("{what} The parser accepts a body that ends early; I'll make it return `ParseError::Truncated`.")).await?;
+                }
+                Note::Scouts => {
+                    self.say("Both scouts reported back:\n\n1. **Routes** — 12 handlers in `src/routes.rs`, two of them unauthenticated.\n2. **Errors** — 7 `unwrap()` calls on request input; I'd turn those into `400`s.").await?;
+                }
+            }
+            self.finish().await
+        };
+        match run.await {
+            Err(Stop::Interrupted) => self.emit(AgentEvent::TurnComplete { error: Some("Interrupted".into()) }).await,
+            other => other,
+        }
     }
 
     /// Block until `request_id` is answered.
@@ -676,35 +803,126 @@ impl Session {
     async fn agents(&mut self, after: Option<Duration>) -> Step {
         let after = after.unwrap_or_else(|| paced(6_000));
         self.say("I'll send two scouts ahead: one maps the HTTP routes, the other audits error handling.").await?;
-        let scouts = [("Map the HTTP routes", "Reading src/routes.rs"), ("Audit error handling", "Searching for unwrap()")];
-        for (description, _) in scouts {
+        let scouts = [
+            ("Map the HTTP routes", "Reading src/routes.rs", ("Read", "src/routes.rs")),
+            ("Audit error handling", "Searching for unwrap()", ("Search", "unwrap()")),
+        ];
+        let mut ids = vec![];
+        for (description, ..) in scouts {
             let id = self.id("agent");
             self.tool_start(&id, "Subagent", description).await?;
             self.emit(AgentEvent::Task { id: id.clone(), description: Some(description.into()), activity: None, tool_uses: None, done: None }).await?;
-            self.background.push((id, description.into()));
+            self.background.add(BackgroundTask { id: id.clone(), kind: BackgroundKind::Agent, title: description.into(), call: Some(id.clone()), readable: false, stoppable: true });
+            ids.push(id);
         }
-        self.emit(AgentEvent::Background(self.background.len())).await?;
-        for (id, _) in self.background.clone() {
-            self.emit(AgentEvent::ToolFinished { id, output: "Async agent launched successfully.".into(), ok: true }).await?;
+        self.emit(self.background.event()).await?;
+        for id in &ids {
+            self.emit(AgentEvent::ToolFinished { id: id.clone(), output: "Async agent launched successfully.".into(), ok: true }).await?;
         }
         self.say("Both scouts are out. I'll pull their findings together when they report back.").await?;
-        // The turn ends, but the thread keeps working until the background agents are back.
-        self.report_usage().await?;
-        self.emit(AgentEvent::TurnComplete { error: None }).await?;
-        let agents = self.background.clone();
-        for (i, (id, _)) in agents.iter().enumerate() {
-            self.pause(after / 3).await?;
-            let activity = scouts[i].1;
-            self.emit(AgentEvent::Task { id: id.clone(), description: None, activity: Some(activity.into()), tool_uses: Some(2 + i as u64 * 3), done: None }).await?;
+        self.finish().await?;
+        // The turn is over; the scouts work on, and the agent takes a turn of its own once they're
+        // back (none if they were all stopped). Meanwhile the session takes messages as usual.
+        let (jobs, events, note) = (self.background.clone(), self.events.clone(), self.note.clone());
+        tokio::spawn(async move {
+            let send = |ev: AgentEvent| events.try_send(ev).is_ok();
+            for (i, id) in ids.iter().enumerate() {
+                tokio::time::sleep(after / 3).await;
+                let (_, activity, (title, detail)) = scouts[i];
+                if jobs.running(id) {
+                    send(AgentEvent::TaskStep { task: id.clone(), title: title.into(), detail: detail.into() });
+                    send(AgentEvent::Task { id: id.clone(), description: None, activity: Some(activity.into()), tool_uses: Some(2 + i as u64 * 3), done: None });
+                }
+            }
+            let mut back = 0;
+            for id in ids {
+                tokio::time::sleep(after / 3).await;
+                // Stopped on request: it's off the list already, and says nothing more.
+                let done = jobs.remove(&id);
+                send(AgentEvent::Task { id: id.clone(), description: None, activity: None, tool_uses: None, done: Some(done) });
+                if done {
+                    back += 1;
+                    send(jobs.event());
+                    send(AgentEvent::ToolFinished { id, output: "Found what it was sent for.".into(), ok: true });
+                }
+            }
+            if back > 0 {
+                let _ = note.send(Note::Scouts).await;
+            }
+        });
+        Ok(())
+    }
+
+    /// `mock:pair`: two sub-agents on the same task, through Trek; the turn ends while they work.
+    async fn pair(&mut self, text: &str) -> Step {
+        let lower = text.to_lowercase();
+        let task = lower.find("mock:pair").map(|at| text[at + "mock:pair".len()..].trim()).filter(|t| !t.is_empty()).unwrap_or("Review how the app starts.").to_string();
+        self.say("I'll ask two models at once.").await?;
+        for title in ["First opinion", "Second opinion"] {
+            let id = self.id("tool");
+            self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), title).await?;
+            let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": "advise" });
+            let (output, ok) = match self.ipc("delegate_task", params).await? {
+                Ok(answer) => (serde_json::to_string_pretty(&answer).unwrap_or_default(), true),
+                Err(e) => (e, false),
+            };
+            self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         }
-        for (id, _) in agents {
-            self.pause(after / 3).await?;
-            self.background.retain(|(b, _)| *b != id);
-            self.emit(AgentEvent::Task { id, description: None, activity: None, tool_uses: None, done: Some(true) }).await?;
-            self.emit(AgentEvent::Background(self.background.len())).await?;
+        self.say("Both are on it. I'll compare what they say when they report back.").await
+    }
+
+    /// `mock:server`: a dev server left running in the background, printing as it goes. It runs
+    /// for `until` (or until stopped, or the session ends), and says nothing to the agent.
+    async fn server(&mut self, until: Option<Duration>) -> Step {
+        let id = self.id("shell");
+        self.tool_start(&id, "Run command", "npm run dev").await?;
+        self.background.add(BackgroundTask { id: id.clone(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: Some(id.clone()), readable: true, stoppable: true });
+        for line in ["> trail-app@0.4.0 dev", "> vite", "", "  VITE v5.4.2  ready in 312 ms", "", "  ➜  Local:   http://localhost:5173/"] {
+            self.background.print(&id, line);
         }
-        self.say("Both scouts reported back:\n\n1. **Routes** — 12 handlers in `src/routes.rs`, two of them unauthenticated.\n2. **Errors** — 7 `unwrap()` calls on request input; I'd turn those into `400`s.").await?;
-        self.finish().await
+        self.emit(self.background.event()).await?;
+        self.emit(AgentEvent::ToolFinished { id: id.clone(), output: format!("Command running in background with ID: {id}."), ok: true }).await?;
+        let (jobs, events) = (self.background.clone(), self.events.clone());
+        tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            let lines = ["[vite] page reload src/App.tsx", "[vite] hmr update /src/routes/Home.tsx", "GET / 200 in 14ms", "[vite] page reload src/styles.css"];
+            let mut n = 0;
+            while jobs.running(&id) && until.is_none_or(|u| started.elapsed() < u) {
+                // Real time, whatever the pace: a server prints when it prints.
+                tokio::time::sleep(Duration::from_millis(400).min(until.unwrap_or(Duration::MAX))).await;
+                if n % 3 == 2 {
+                    jobs.print(&id, lines[(n / 3) % lines.len()]);
+                }
+                n += 1;
+            }
+            // It exited on its own: off the list (one stopped is off it already).
+            if jobs.remove(&id) {
+                let _ = events.send(jobs.event()).await;
+            }
+        });
+        self.say("The dev server is running at http://localhost:5173 — it stays up in the background while you try it.").await
+    }
+
+    /// `mock:watch`: a test watcher left running; `after` later it catches a failure, ends, and
+    /// the agent takes a turn of its own about it.
+    async fn watch(&mut self, after: Duration) -> Step {
+        let id = self.id("watch");
+        self.tool_start(&id, "Monitor", "cargo watch -x test").await?;
+        self.background.add(BackgroundTask { id: id.clone(), kind: BackgroundKind::Monitor, title: "cargo watch -x test".into(), call: Some(id.clone()), readable: true, stoppable: true });
+        self.background.print(&id, "[Running 'cargo test']");
+        self.background.print(&id, "test result: ok. 14 passed; 0 failed");
+        self.emit(self.background.event()).await?;
+        self.emit(AgentEvent::ToolFinished { id: id.clone(), output: format!("Monitor started (task {id})."), ok: true }).await?;
+        let (jobs, events, note) = (self.background.clone(), self.events.clone(), self.note.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            jobs.print(&id, "test parser::rejects_a_truncated_body ... FAILED");
+            if jobs.remove(&id) {
+                let _ = events.send(jobs.event()).await;
+                let _ = note.send(Note::Watcher("The test watcher caught a failure: `parser::rejects_a_truncated_body`.".into())).await;
+            }
+        });
+        self.say("The test watcher is running in the background; I'll pick up anything it catches.").await
     }
 
     async fn permission(&mut self) -> Step {
@@ -1234,13 +1452,55 @@ mod tests {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("subagents 30ms").await;
             let first = m.turn().await;
-            assert!(first.contains(&AgentEvent::Background(2)));
+            let out = first.iter().find_map(|e| if let AgentEvent::Background(b) = e { Some(b.clone()) } else { None }).expect("a background set");
+            assert_eq!(out.iter().map(|t| (t.kind, t.title.as_str())).collect::<Vec<_>>(), [(BackgroundKind::Agent, "Map the HTTP routes"), (BackgroundKind::Agent, "Audit error handling")]);
             let tasks = first.iter().filter(|e| matches!(e, AgentEvent::Task { description: Some(_), .. })).count();
             assert_eq!(tasks, 2);
             let rest = m.turn().await;
-            assert!(rest.contains(&AgentEvent::Background(0)));
+            assert!(rest.iter().any(|e| matches!(e, AgentEvent::TaskStep { title, .. } if title == "Read")), "{rest:?}");
+            assert!(rest.contains(&AgentEvent::Background(vec![])));
             assert_eq!(rest.iter().filter(|e| matches!(e, AgentEvent::Task { done: Some(true), .. })).count(), 2);
             assert!(text(&rest).contains("reported back"));
+        });
+    }
+
+    #[test]
+    fn a_dev_server_runs_on_after_the_turn_and_stops_when_asked() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("mock:server").await;
+            let turn = m.turn().await;
+            let Some(AgentEvent::Background(b)) = turn.iter().find(|e| matches!(e, AgentEvent::Background(_))) else { panic!("{turn:?}") };
+            assert_eq!((b[0].kind, b[0].title.as_str(), b[0].readable, b[0].stoppable), (BackgroundKind::Shell, "npm run dev", true, true));
+            let id = b[0].id.clone();
+            assert!(text(&turn).contains("http://localhost:5173"));
+            // Read between turns, with no turn of its own.
+            m.send(Command::ReadTask { id: id.clone() }).await;
+            let read = m.until(|e| matches!(e, AgentEvent::TaskOutput { .. })).await;
+            assert!(matches!(read.last(), Some(AgentEvent::TaskOutput { id: i, output }) if *i == id && output.contains("ready in")), "{read:?}");
+            assert!(!read.iter().any(|e| matches!(e, AgentEvent::TurnComplete { .. })));
+            m.send(Command::StopTask { id: id.clone() }).await;
+            assert_eq!(m.until(|e| matches!(e, AgentEvent::Background(_))).await.last(), Some(&AgentEvent::Background(vec![])));
+            // Gone: nothing left to read.
+            m.send(Command::ReadTask { id }).await;
+            m.prompt("hello").await;
+            assert!(!m.turn().await.iter().any(|e| matches!(e, AgentEvent::TaskOutput { .. })));
+        });
+    }
+
+    #[test]
+    fn a_watcher_that_catches_something_starts_a_turn_of_its_own() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("mock:watch 50ms").await;
+            let turn = m.turn().await;
+            assert!(turn.iter().any(|e| matches!(e, AgentEvent::Background(b) if b.len() == 1 && b[0].kind == BackgroundKind::Monitor)));
+            // No message from anyone: the watcher's report starts the next turn.
+            let woken = m.turn().await;
+            let first = woken.iter().position(|e| matches!(e, AgentEvent::ReasoningDelta(_) | AgentEvent::TextDelta(_))).expect("output");
+            assert!(woken[..first].contains(&AgentEvent::Background(vec![])), "the watcher ended before the turn: {woken:?}");
+            assert!(text(&woken).contains("caught a failure"));
+            assert!(matches!(woken.last(), Some(AgentEvent::TurnComplete { error: None })));
         });
     }
 

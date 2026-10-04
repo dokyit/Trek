@@ -3,6 +3,7 @@
 mod activity;
 mod assets;
 mod attachments;
+mod background_strip;
 mod basecamp;
 mod brand;
 mod command_palette;

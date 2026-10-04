@@ -38,6 +38,8 @@ pub struct Sidebar {
     /// otherwise, so "5m" ages (this view is cached; nothing else would redraw it). The flag is
     /// whether it's the fast one.
     _clock: Option<(bool, Task<()>)>,
+    /// The breathing dots on cards of threads with work running in the background, by thread.
+    pulses: HashMap<String, Entity<ui::PulseDot>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -91,6 +93,7 @@ impl Sidebar {
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
             updater_open: false,
             _clock: None,
+            pulses: HashMap::new(),
             _subscriptions: subscriptions,
         };
         this.sync_clock(cx);
@@ -285,6 +288,22 @@ impl Sidebar {
                 .child(text)
                 .into_any_element();
         }
+        // Its turn is over but its sub-agents are still out: it's at work, waiting on them.
+        if t.run_state == RunState::Idle && ws.waiting(&t.id) {
+            let longest = ws.waiting_on(&t.id).iter().map(|w| w.elapsed).max();
+            return h_flex()
+                .id(SharedString::from(format!("card-waiting-{}", t.id)))
+                .test_support()
+                .gap_1()
+                .text_xs()
+                .text_color(palette::sky(cx))
+                .child(Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(palette::sky(cx)))
+                .child(match longest {
+                    Some(d) => format!("Waiting {}", time::elapsed(d)),
+                    None => "Waiting".to_string(),
+                })
+                .into_any_element();
+        }
         match t.run_state {
             RunState::Working => {
                 let elapsed = ws.live.get(&t.id).and_then(|l| l.turn_started).map(|s| time::elapsed(s.elapsed())).unwrap_or_default();
@@ -338,10 +357,13 @@ impl Sidebar {
     /// T3-style card: project · status on top, title below, agent glyph at the end.
     fn card(&self, t: &Thread, project: &str, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        // Its sub-agents at work, by logo.
-        let kids: Vec<(trek_core::AgentId, String)> = {
+        // Its sub-agents at work, by logo: Trek's, and its agent's own in the background.
+        let (kids, background): (Vec<(trek_core::AgentId, String)>, Vec<String>) = {
             let ws = self.workspace.read(cx);
-            ws.running_children(&t.id).into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect()
+            let mut kids: Vec<(trek_core::AgentId, String)> = ws.running_children(&t.id).into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect();
+            let live = ws.live.get(&t.id);
+            kids.extend(live.into_iter().flat_map(|l| l.background_agents()).map(|b| (t.agent.clone(), b.task.title.clone())));
+            (kids, live.map(|l| l.background_work().map(|b| b.task.title.clone()).collect()).unwrap_or_default())
         };
         let quiet = t.run_state == RunState::Idle && !t.is_unseen() && !selected && kids.is_empty();
         let id = t.id.clone();
@@ -400,9 +422,30 @@ impl Sidebar {
                     })
                     .child(ui::agent_glyph(&t.agent, cx)),
             )
+            .when(!background.is_empty(), |el| el.child(self.background_line(&t.id, &background, cx)))
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-2.))))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
+    }
+
+    /// A quiet line under a card's title while its agent runs things in the background (a dev
+    /// server, a browser, a watcher) after it has answered: a breathing dot and how many, each
+    /// named on hover.
+    fn background_line(&self, id: &str, titles: &[String], cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let n = titles.len();
+        let tip = SharedString::from(format!("Running in the background:\n{}", titles.join("\n")));
+        h_flex()
+            .id(SharedString::from(format!("card-background-{id}")))
+            .test_support()
+            .mt(px(-2.))
+            .gap(px(6.))
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+            .children(self.pulses.get(id).cloned())
+            .child(if n == 1 { "1 background task".to_string() } else { format!("{n} background tasks") })
+            .into_any_element()
     }
 
     /// Codex-style compact row for settled history.
@@ -924,6 +967,12 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Sidebar");
+        // Breathing dots for the cards of threads running things in the background.
+        let busy: Vec<String> = self.workspace.read(cx).live.iter().filter(|(_, l)| l.background_work().next().is_some()).map(|(id, _)| id.clone()).collect();
+        self.pulses.retain(|id, _| busy.contains(id));
+        for id in busy {
+            self.pulses.entry(id).or_insert_with(|| cx.new(|cx| ui::PulseDot::new(palette::sky, 6., window, cx)));
+        }
         let ws = self.workspace.read(cx);
         // A title animating in draws a frame at a time, for the moment it takes.
         if ws.retitled.keys().any(|id| ws.title_reveal(id).is_some()) {

@@ -55,9 +55,10 @@ pub(crate) async fn await_response(
     bail!("codex app-server exited")
 }
 
-/// Notifications a session never reads. Opting out keeps streamed command output off the pipe.
+/// Notifications a session never reads. Opting out keeps streamed output Trek doesn't show off
+/// the pipe. Commands' output it reads: a command can outlive its turn in a background terminal,
+/// and its latest lines show while it runs.
 const UNUSED_NOTIFICATIONS: &[&str] = &[
-    "item/commandExecution/outputDelta",
     "item/fileChange/outputDelta",
     "command/exec/outputDelta",
     "process/outputDelta",
@@ -269,6 +270,36 @@ fn agent_name(path: &str) -> String {
 }
 
 /// What a sub-agent is doing, from one of its own items.
+/// A tool item as its row is titled: (title, detail). `None` for items that aren't tool calls.
+fn tool_row(item: &Value) -> Option<(String, String)> {
+    Some(match item["type"].as_str()? {
+        "commandExecution" => ("Run command".to_string(), command_text(item)),
+        "fileChange" => ("Edit".to_string(), change_paths(item).join(", ")),
+        "mcpToolCall" | "dynamicToolCall" => (mcp_title(item), String::new()),
+        "webSearch" => ("Search the web".to_string(), item["query"].as_str().unwrap_or_default().to_string()),
+        "imageView" => ("Read".to_string(), item["path"].as_str().unwrap_or_default().to_string()),
+        _ => return None,
+    })
+}
+
+/// How much of a command's output Trek keeps while it runs: the end of it.
+const OUTPUT_TAIL: usize = 8 * 1024;
+
+/// `text` with `more` added, cut from the front to about `OUTPUT_TAIL` bytes (at a line break
+/// when there's one near the cut).
+fn keep_tail(text: &mut String, more: &str) {
+    text.push_str(more);
+    if text.len() <= OUTPUT_TAIL {
+        return;
+    }
+    let mut cut = text.len() - OUTPUT_TAIL;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let cut = text[cut..].find('\n').map(|n| cut + n + 1).filter(|c| *c - cut < 512).unwrap_or(cut);
+    text.drain(..cut);
+}
+
 fn activity(item: &Value) -> Option<String> {
     let s = match item["type"].as_str()? {
         "commandExecution" => format!("Running {}", command_text(item)),
@@ -477,6 +508,11 @@ struct Session {
     /// Tokens the running turn has used so far, by model, and what they cost (priced per
     /// request), sent as `Usage` when it ends.
     turn_tokens: Vec<(Option<String>, TokenUsage, Option<UsageCost>)>,
+    /// Commands running in this thread, by item id: the command and the end of its output so far.
+    commands: HashMap<String, (String, String)>,
+    /// Commands that outlived the turn that started them (Codex's background terminals), in the
+    /// order they were left running.
+    background: Vec<String>,
 }
 
 impl Session {
@@ -509,7 +545,23 @@ impl Session {
             limited: false,
             token_totals: HashMap::new(),
             turn_tokens: vec![],
+            commands: HashMap::new(),
+            background: vec![],
         }
+    }
+
+    /// The commands left running in the background, as `AgentEvent::Background` lists them.
+    /// Codex has no way for a client to stop one (the agent can, when asked).
+    fn background_event(&self) -> AgentEvent {
+        let tasks = self
+            .background
+            .iter()
+            .filter_map(|id| {
+                let (command, _) = self.commands.get(id)?;
+                Some(crate::BackgroundTask { id: id.clone(), kind: crate::BackgroundKind::Shell, title: command.clone(), call: Some(id.clone()), readable: true, stoppable: false })
+            })
+            .collect();
+        AgentEvent::Background(tasks)
     }
 
     fn busy(&self) -> bool {
@@ -632,6 +684,13 @@ impl Session {
                 }
                 None => {}
             },
+            Command::ReadTask { id } => {
+                if let Some((_, output)) = self.commands.get(&id) {
+                    out.events.push(AgentEvent::TaskOutput { id, output: output.clone() });
+                }
+            }
+            // Codex stops its background terminals itself; a client can't (see `background_event`).
+            Command::StopTask { .. } => {}
             Command::Shutdown => {}
         }
         out
@@ -814,6 +873,12 @@ impl Session {
                 None
             }
             "item/agentMessage/delta" => Some(AgentEvent::TextDelta(p["delta"].as_str().unwrap_or_default().into())),
+            "item/commandExecution/outputDelta" => {
+                if let Some((_, output)) = p["itemId"].as_str().and_then(|id| self.commands.get_mut(id)) {
+                    keep_tail(output, p["delta"].as_str().unwrap_or_default());
+                }
+                None
+            }
             "item/plan/delta" => {
                 self.plan_delta(p["itemId"].as_str().unwrap_or_default(), p["delta"].as_str().unwrap_or_default(), out);
                 None
@@ -941,6 +1006,12 @@ impl Session {
             out.events.push(AgentEvent::Usage { model, tokens, cost });
         }
         out.events.push(AgentEvent::TurnComplete { error });
+        // Commands still running when their turn ends carry on in the background.
+        let left: Vec<String> = self.commands.keys().filter(|id| !self.background.contains(id)).cloned().collect();
+        if !left.is_empty() {
+            self.background.extend(left);
+            out.events.push(self.background_event());
+        }
         // Messages that missed this turn start the next one, and answer its plan.
         let mut late = std::mem::take(&mut self.after_turn).into_iter();
         if let Some(first) = late.next() {
@@ -960,7 +1031,10 @@ impl Session {
     fn item_started(&mut self, item: &Value, out: &mut Out) {
         let id = item["id"].as_str().unwrap_or_default().to_string();
         let (title, detail) = match item["type"].as_str() {
-            Some("commandExecution") => ("Run command".to_string(), command_text(item)),
+            Some("commandExecution") => {
+                self.commands.insert(id.clone(), (command_text(item), String::new()));
+                ("Run command".to_string(), command_text(item))
+            }
             Some("fileChange") => {
                 let paths = change_paths(item);
                 let detail = paths.join(", ");
@@ -1018,6 +1092,11 @@ impl Session {
                 AgentEvent::ToolFinished { id, output: text, ok: true }
             }
             Some("commandExecution") => {
+                self.commands.remove(&id);
+                if let Some(ix) = self.background.iter().position(|b| *b == id) {
+                    self.background.remove(ix);
+                    out.events.push(self.background_event());
+                }
                 let output = item["aggregatedOutput"].as_str().map(|o| clip(o, 8000)).unwrap_or_else(declined);
                 AgentEvent::ToolFinished { id, output, ok: status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0 }
             }
@@ -1126,6 +1205,9 @@ impl Session {
                 if let Some(activity) = activity(&p["item"]) {
                     a.tool_uses += 1;
                     out.events.push(AgentEvent::Task { id: a.row.clone(), description: None, activity: Some(activity), tool_uses: Some(a.tool_uses), done: None });
+                }
+                if let Some((title, detail)) = tool_row(&p["item"]) {
+                    out.events.push(AgentEvent::TaskStep { task: a.row.clone(), title, detail });
                 }
             }
             "item/completed" if p["item"]["type"] == "agentMessage" => a.last = p["item"]["text"].as_str().unwrap_or_default().to_string(),
@@ -1815,8 +1897,11 @@ mod tests {
         let cmd = json!({"method":"item/started","params":{"threadId":"kid","turnId":"k","item":{"type":"commandExecution","id":"e1","command":"/bin/zsh -lc 'sleep 15'","cwd":"/tmp","status":"inProgress","commandActions":[]}}});
         let out = feed(&mut s, &[start, cmd]);
         assert_eq!(
-            out.events.last(),
-            Some(&AgentEvent::Task { id: "kid".into(), description: None, activity: Some("Running sleep 15".into()), tool_uses: Some(1), done: None })
+            out.events[out.events.len() - 2..],
+            [
+                AgentEvent::Task { id: "kid".into(), description: None, activity: Some("Running sleep 15".into()), tool_uses: Some(1), done: None },
+                AgentEvent::TaskStep { task: "kid".into(), title: "Run command".into(), detail: "sleep 15".into() },
+            ]
         );
         assert!(!out.events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { id, .. } if id == "e1")));
     }
@@ -2136,6 +2221,7 @@ mod tests {
                 AgentEvent::Task { id: "call1".into(), description: Some("Count the files".into()), activity: None, tool_uses: None, done: None },
                 AgentEvent::ToolFinished { id: "call1".into(), output: String::new(), ok: true },
                 AgentEvent::Task { id: "call1".into(), description: None, activity: Some("Running ls".into()), tool_uses: Some(1), done: None },
+                AgentEvent::TaskStep { task: "call1".into(), title: "Run command".into(), detail: "ls".into() },
             ]
         );
         // A later collab call (here `wait`) reports it finished, with its reply.
@@ -2225,6 +2311,54 @@ mod tests {
         ]);
         let used: Vec<(Option<String>, u64)> = out.events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens, .. } = e { Some((model.clone(), tokens.input)) } else { None }).collect();
         assert_eq!(used, vec![(Some("gpt-5.6-mini".into()), 300), (Some("gpt-5.6-luna".into()), 1000)]);
+    }
+
+    #[test]
+    fn commands_that_outlive_their_turn_run_in_the_background() {
+        // Recorded (Codex 0.160.0, gpt-5.6-luna): a command started in a background terminal; the
+        // turn ends while it runs, and it completes on its own later.
+        let mut s = session("t", false);
+        let command = "/bin/zsh -lc 'for i in 1 2 3; do sleep 5; echo tick $i; done'";
+        let item = |method: &str, status: &str, output: Value| {
+            let exit = if output.is_null() { Value::Null } else { json!(0) };
+            json!({"method":method,"params":{"threadId":"t","turnId":"u","item":{"type":"commandExecution","id":"exec-1","command":command,"cwd":"/tmp","processId":"46444","source":"unifiedExecStartup","status":status,"commandActions":[],"aggregatedOutput":output,"exitCode":exit}}})
+        };
+        let delta = |d: &str| json!({"method":"item/commandExecution/outputDelta","params":{"threadId":"t","turnId":"u","itemId":"exec-1","delta":d}});
+        feed(&mut s, &[json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"u"}}}), item("item/started", "inProgress", Value::Null), delta("tick 1\r\n")]);
+        let out = feed(&mut s, &[json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed","items":[]}}})]);
+        let Some(AgentEvent::Background(b)) = out.events.last() else { panic!("{:?}", out.events) };
+        let title = command_text(&json!({ "command": command }));
+        assert_eq!(b[..], [crate::BackgroundTask { id: "exec-1".into(), kind: crate::BackgroundKind::Shell, title, call: Some("exec-1".into()), readable: true, stoppable: false }]);
+        // Its output so far can be read while it runs, without a turn.
+        feed(&mut s, &[delta("tick 2\r\n")]);
+        let read = s.command(Command::ReadTask { id: "exec-1".into() });
+        assert_eq!(read.events, [AgentEvent::TaskOutput { id: "exec-1".into(), output: "tick 1\r\ntick 2\r\n".into() }]);
+        assert!(read.send.is_empty(), "nothing asked of Codex");
+        // It ends: off the list, and its row gets its output.
+        let out = feed(&mut s, &[item("item/completed", "completed", json!("tick 1\r\ntick 2\r\ntick 3\r\n"))]);
+        assert_eq!(out.events[0], AgentEvent::Background(vec![]));
+        assert!(matches!(&out.events[1], AgentEvent::ToolFinished { id, ok: true, .. } if id == "exec-1"));
+        assert!(s.commands.is_empty() && s.background.is_empty());
+    }
+
+    #[test]
+    fn a_command_s_output_keeps_its_end() {
+        let mut out = String::new();
+        keep_tail(&mut out, &"line\n".repeat(OUTPUT_TAIL));
+        assert!(out.len() <= OUTPUT_TAIL && out.starts_with("line\n") && out.ends_with("line\n"));
+        let mut wide = String::new();
+        keep_tail(&mut wide, &"é".repeat(OUTPUT_TAIL));
+        assert!(wide.len() <= OUTPUT_TAIL + 1 && wide.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_sub_agent_s_tool_calls_are_its_steps() {
+        let mut s = session("t", false);
+        s.agents.insert("kid".into(), SubAgent { row: "kid".into(), runs: 1, tool_uses: 0, last: String::new(), done: false, model: None });
+        let out = feed(&mut s, &[json!({"method":"item/started","params":{"threadId":"kid","turnId":"k","item":{"type":"commandExecution","id":"e1","command":"ls","cwd":"/tmp","status":"inProgress","commandActions":[]}}})]);
+        assert!(out.events.contains(&AgentEvent::TaskStep { task: "kid".into(), title: "Run command".into(), detail: "ls".into() }), "{:?}", out.events);
+        // The sub-agent's commands aren't the session's: they never run in its background.
+        assert!(s.commands.is_empty());
     }
 }
 

@@ -2066,7 +2066,8 @@ impl Render for Composer {
         let is_draft = ws.is_draft_in(&self.scope);
         let main = self.scope == Scope::Main;
         let own_turn = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
-        let children_working = thread.as_ref().is_some_and(|t| !ws.running_children(&t.id).is_empty());
+        // Its turn is over but it waits on sub-agents (Trek's, or its agent's own in the background).
+        let children_working = thread.as_ref().is_some_and(|t| !ws.running_children(&t.id).is_empty() || ws.waiting(&t.id));
         let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
         // The API cost estimate: changes as usage is reported, not per token.
         let billing = thread.as_ref().and_then(|t| ws.billing_of(t));

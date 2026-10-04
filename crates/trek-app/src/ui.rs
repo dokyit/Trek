@@ -659,3 +659,67 @@ mod tests {
         assert_eq!((out.as_str(), ranges), ("the stadium", vec![4..11]));
     }
 }
+
+/// A small dot that breathes while what it marks keeps running (a background task). A view of
+/// its own, redrawn a few times a second only while its window is in front and motion is on, so
+/// it never redraws what's around it; otherwise it holds still.
+pub struct PulseDot {
+    /// Its colour, from the theme in use.
+    color: fn(&App) -> Hsla,
+    size: f32,
+    born: std::time::Instant,
+    active: bool,
+    _ticker: Option<Task<()>>,
+    _activation: Subscription,
+}
+
+/// Frames a second for a breathing dot: enough for a slow breath, little enough to cost nothing.
+const PULSE_FPS: u64 = 5;
+
+impl PulseDot {
+    pub fn new(color: fn(&App) -> Hsla, size: f32, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            this.active = window.is_window_active() || crate::mascot::force_active();
+            this.sync(cx);
+        });
+        let mut this = Self { color, size, born: std::time::Instant::now(), active: window.is_window_active() || crate::mascot::force_active(), _ticker: None, _activation: activation };
+        this.sync(cx);
+        this
+    }
+
+    fn moving(&self, cx: &App) -> bool {
+        let motion = cx.try_global::<crate::workspace::GlobalWorkspace>().is_none_or(|g| g.0.read(cx).motion(cx));
+        self.active && motion
+    }
+
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        if !self.moving(cx) {
+            self._ticker = None;
+            cx.notify();
+            return;
+        }
+        if self._ticker.is_none() {
+            self._ticker = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(1000 / PULSE_FPS)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }));
+        }
+    }
+
+    /// How bright it is now: a slow breath, 2.4 s round.
+    fn breath(&self) -> f32 {
+        if self._ticker.is_none() {
+            return 1.;
+        }
+        let t = self.born.elapsed().as_secs_f32();
+        0.35 + 0.65 * (0.5 - 0.5 * (t * std::f32::consts::TAU / 2.4).cos())
+    }
+}
+
+impl Render for PulseDot {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex_none().size(px(self.size)).rounded_full().bg((self.color)(cx).opacity(self.breath()))
+    }
+}

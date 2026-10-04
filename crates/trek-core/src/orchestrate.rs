@@ -141,7 +141,7 @@ pub fn plain_preview(text: &str, max: usize) -> String {
 }
 
 /// How a sub-agent ended, for the agent that started it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub id: String,
     pub title: String,
@@ -150,7 +150,8 @@ pub struct Report {
     pub outcome: Outcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Done(String),
     Failed(String),

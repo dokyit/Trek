@@ -25,6 +25,7 @@ fn tool_title(name: &str, input: &Value) -> (String, String) {
         "TodoWrite" => ("Update plan".into(), todo_detail(input)),
         "ExitPlanMode" => ("Plan".into(), plan_title(input["plan"].as_str().unwrap_or_default())),
         "AskUserQuestion" => ("Question".into(), input["questions"][0]["question"].as_str().unwrap_or_default().to_string()),
+        "Monitor" => ("Monitor".into(), if input["description"].is_string() { s("description") } else { s("command") }),
         other => (other.to_string(), clip(&input.to_string(), 200)),
     }
 }
@@ -299,6 +300,70 @@ struct Turns {
     ledger: Option<PathBuf>,
     /// The model the session said it runs (`system init`).
     model: Option<String>,
+    /// What runs in the background, and what started it.
+    background: BackgroundTasks,
+}
+
+/// Claude's background tasks as Trek shows them: the set `background_tasks_changed` reports
+/// (all of it, each time), with what `task_started` said about each: the call that started it
+/// (a `Monitor` call starts a shell task as `Bash` does) and whether it was detached from the
+/// start (a sub-agent run in the background, whose answer comes in its notification).
+#[derive(Default)]
+struct BackgroundTasks {
+    /// The live set as last reported: (task id, task type, description), ambient ones left out.
+    live: Vec<(String, String, String)>,
+    /// What `task_started` said, by task id: the call, and whether it's a sub-agent that started
+    /// detached. Kept until the task's notification (which comes after it has left the live set).
+    started: HashMap<String, (String, bool)>,
+    /// `Monitor` calls, by id.
+    monitors: HashSet<String>,
+}
+
+impl BackgroundTasks {
+    /// The live set (`background_tasks_changed`).
+    fn set(&mut self, v: &Value) {
+        self.live = v["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            // Housekeeping (watchers Claude Code starts itself) isn't work the user would see.
+            .filter(|t| t["ambient"] != true)
+            .filter_map(|t| Some((t["task_id"].as_str()?.to_string(), t["task_type"].as_str().unwrap_or_default().to_string(), t["description"].as_str().unwrap_or_default().to_string())))
+            .collect();
+    }
+
+    /// A task started; `true` when it's in the live set (its kind may read differently now).
+    fn started(&mut self, v: &Value) -> bool {
+        let (Some(id), Some(call)) = (v["task_id"].as_str(), v["tool_use_id"].as_str()) else { return false };
+        // A sub-agent's own commands run inside it, not for the session.
+        if v["owned_by_subagent"] == true {
+            return false;
+        }
+        self.started.insert(id.to_string(), (call.to_string(), v["is_backgrounded"] == true && v["task_type"] == "local_agent"));
+        self.live.iter().any(|(t, ..)| t == id)
+    }
+
+    /// The call a sub-agent that ran detached was started by, once it has ended (`task_id`).
+    fn detached_agent(&self, task: &str) -> Option<&str> {
+        self.started.get(task).filter(|(_, detached)| *detached).map(|(call, _)| call.as_str())
+    }
+
+    fn list(&self) -> Vec<crate::BackgroundTask> {
+        self.live
+            .iter()
+            .map(|(id, kind, description)| {
+                let call = self.started.get(id).map(|(c, _)| c.clone());
+                let kind = match kind.as_str() {
+                    "local_bash" if call.as_ref().is_some_and(|c| self.monitors.contains(c)) => crate::BackgroundKind::Monitor,
+                    "local_bash" => crate::BackgroundKind::Shell,
+                    "local_agent" | "remote_agent" | "in_process_teammate" => crate::BackgroundKind::Agent,
+                    _ => crate::BackgroundKind::Other,
+                };
+                let readable = matches!(kind, crate::BackgroundKind::Shell | crate::BackgroundKind::Monitor);
+                crate::BackgroundTask { id: id.clone(), kind, title: description.clone(), call, readable, stoppable: true }
+            })
+            .collect()
+    }
 }
 
 /// How long a held result waits for Claude to start on the messages after it. It starts within
@@ -402,7 +467,44 @@ impl Turns {
             self.rejected = rejected.then(|| (info["resetsAt"].as_i64().map(|s| s * 1000), crate::limits::claude_scope(info["rateLimitType"].as_str().unwrap_or_default())));
             return vec![];
         }
+        if v["type"] == "system" && v["subtype"] == "background_tasks_changed" {
+            self.background.set(v);
+            return vec![AgentEvent::Background(self.background.list())];
+        }
+        // A sub-agent at work: the tools it calls are its row's activity.
+        if v["type"] == "assistant"
+            && let Some(task) = v["parent_tool_use_id"].as_str()
+        {
+            return v["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|b| b["type"] == "tool_use")
+                .map(|b| {
+                    let (title, detail) = tool_title(b["name"].as_str().unwrap_or("tool"), &b["input"]);
+                    AgentEvent::TaskStep { task: task.to_string(), title, detail }
+                })
+                .collect();
+        }
+        if v["type"] == "assistant" {
+            for b in v["message"]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_use" && b["name"] == "Monitor") {
+                self.background.monitors.insert(b["id"].as_str().unwrap_or_default().to_string());
+            }
+        }
         let mut out = translate(v, pending, streamed_text);
+        if v["type"] == "system" && v["subtype"] == "task_started" && self.background.started(v) {
+            out.push(AgentEvent::Background(self.background.list()));
+        }
+        // A sub-agent that ran detached answers in its notification: that's its row's output.
+        if v["type"] == "system" && v["subtype"] == "task_notification" {
+            let task = v["task_id"].as_str().unwrap_or_default();
+            if let Some(call) = self.background.detached_agent(task).map(str::to_string) {
+                out.push(AgentEvent::ToolFinished { id: call, output: clip(v["summary"].as_str().unwrap_or_default(), 8000), ok: v["status"] == "completed" });
+            }
+            if let Some((call, _)) = self.background.started.remove(task) {
+                self.background.monitors.remove(&call);
+            }
+        }
         // The limit message gets the reset and window Claude reported for it, if it did.
         for ev in out.iter_mut() {
             if let AgentEvent::LimitReached { resets_at, scope, .. } = ev {
@@ -575,6 +677,9 @@ pub async fn run(
     let mut init_id = cli.initialize(&mut ctl).await?;
     // Outstanding `get_context_usage` requests; their responses become `Context` events.
     let mut context_requests: HashSet<String> = HashSet::new();
+    // Outstanding reads of background tasks' output (request id → task id), and stops.
+    let mut output_requests: HashMap<String, String> = HashMap::new();
+    let mut stop_requests: HashSet<String> = HashSet::new();
 
     // Inputs of pending permission requests, echoed back as `updatedInput` on allow.
     let mut pending: HashMap<String, Value> = HashMap::new();
@@ -647,6 +752,16 @@ pub async fn run(
                         let request = pending.remove(&request_id).unwrap_or(json!({}));
                         write_line(&mut cli.stdin, &answer(&request_id, &request, answers)).await?;
                     }
+                    Command::ReadTask { id } => {
+                        let r = ctl.request("get_task_output", json!({ "task_id": id }));
+                        output_requests.insert(r["request_id"].as_str().unwrap_or_default().to_string(), id);
+                        write_line(&mut cli.stdin, &r).await?;
+                    }
+                    Command::StopTask { id } => {
+                        let r = ctl.request("stop_task", json!({ "task_id": id }));
+                        stop_requests.insert(r["request_id"].as_str().unwrap_or_default().to_string());
+                        write_line(&mut cli.stdin, &r).await?;
+                    }
                     Command::Shutdown => break,
                 }
             }
@@ -713,6 +828,21 @@ pub async fn run(
                     } else if context_requests.remove(id) {
                         if let Some(ev) = context_event(r) {
                             if events.send(ev).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    } else if let Some(task) = output_requests.remove(id) {
+                        // A task whose output can't be read (it ended long ago) just shows none.
+                        if r["subtype"] == "success" {
+                            let output = r["response"]["output"].as_str().unwrap_or_default().to_string();
+                            if events.send(AgentEvent::TaskOutput { id: task, output }).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    } else if stop_requests.remove(id) {
+                        if r["subtype"] == "error" {
+                            let msg = r["error"].as_str().unwrap_or("it didn't say why");
+                            if events.send(AgentEvent::Notice(format!("Claude Code couldn't stop the background task: {msg}"))).await.is_err() {
                                 return Ok(());
                             }
                         }
@@ -894,9 +1024,6 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
             tool_uses: None,
             done: Some(v["status"] == "completed"),
         }),
-        Some("system") if v["subtype"] == "background_tasks_changed" => out.push(AgentEvent::Background(
-            v["tasks"].as_array().map(|t| t.iter().filter(|t| t["task_type"] == "local_agent").count()).unwrap_or(0),
-        )),
         Some("stream_event") => {
             let e = &v["event"];
             if e["type"] == "content_block_delta" && v["parent_tool_use_id"].is_null() {
@@ -1596,5 +1723,58 @@ mod tests {
         // Without the session's model among the totals (an alias), the entry that holds the turn.
         let mut aliased = Turns { resumed: true, model: Some("haiku".into()), ..Default::default() };
         assert_eq!(usage(aliased.step(&resumed, &mut pending, &mut streamed)), vec![(Some("claude-haiku-4-5".into()), own)]);
+    }
+
+    #[test]
+    fn background_tasks_are_tracked_with_what_started_them() {
+        // Recorded (Claude Code 2.1.289, claude-haiku-4-5): a `Monitor`, a background `Bash` and a
+        // sub-agent run in the background, each outliving the turn that started it.
+        let mut turns = Turns::default();
+        let (mut pending, mut streamed) = (HashMap::new(), false);
+        let mut step = |v: Value| turns.step(&v, &mut pending, &mut streamed);
+        let monitor = json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_m","name":"Monitor","input":{"command":"for i in 1 2; do sleep 4; echo tick $i; done","description":"tick counter","timeout_ms":30000}}]}});
+        assert!(matches!(&step(monitor)[..], [AgentEvent::ToolStarted { title, detail, .. }] if title == "Monitor" && detail == "tick counter"));
+        let changed = |tasks: Value| json!({"type":"system","subtype":"background_tasks_changed","tasks":tasks});
+        // The set comes before `task_started` names the call: a shell until then.
+        let ev = step(changed(json!([{"task_id":"brc5","task_type":"local_bash","description":"tick counter"}])));
+        assert!(matches!(&ev[..], [AgentEvent::Background(b)] if b[0].kind == crate::BackgroundKind::Shell && b[0].call.is_none()));
+        let ev = step(json!({"type":"system","subtype":"task_started","task_id":"brc5","tool_use_id":"toolu_m","description":"tick counter","is_backgrounded":true,"task_type":"local_bash"}));
+        let Some(AgentEvent::Background(b)) = ev.last() else { panic!("{ev:?}") };
+        assert_eq!(
+            b[..],
+            [crate::BackgroundTask { id: "brc5".into(), kind: crate::BackgroundKind::Monitor, title: "tick counter".into(), call: Some("toolu_m".into()), readable: true, stoppable: true }]
+        );
+        // A sub-agent detached from the start, alongside; housekeeping tasks aren't shown.
+        step(json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"description":"Background sleep task","prompt":"…","run_in_background":true}}]}}));
+        let ev = step(changed(json!([
+            {"task_id":"brc5","task_type":"local_bash","description":"tick counter"},
+            {"task_id":"ae33","task_type":"local_agent","description":"Background sleep task"},
+            {"task_id":"w1","task_type":"local_bash","description":"watch settings","ambient":true}
+        ])));
+        let Some(AgentEvent::Background(b)) = ev.last() else { panic!("{ev:?}") };
+        assert_eq!(b.iter().map(|t| (t.id.as_str(), t.kind)).collect::<Vec<_>>(), [("brc5", crate::BackgroundKind::Monitor), ("ae33", crate::BackgroundKind::Agent)]);
+        let ev = step(json!({"type":"system","subtype":"task_started","task_id":"ae33","tool_use_id":"toolu_a","description":"Background sleep task","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}));
+        assert!(ev.iter().any(|e| matches!(e, AgentEvent::Task { id, description: Some(_), .. } if id == "toolu_a")));
+        assert!(!b[1].readable, "a sub-agent's output isn't a shell's");
+        // What the sub-agent does is its row's activity; its own commands aren't the session's tasks.
+        let ev = step(json!({"type":"assistant","parent_tool_use_id":"toolu_a","message":{"content":[{"type":"tool_use","id":"toolu_k","name":"Bash","input":{"command":"sleep 6","description":"Sleep for 6 seconds"}}]}}));
+        assert_eq!(ev, [AgentEvent::TaskStep { task: "toolu_a".into(), title: "Run command".into(), detail: "sleep 6".into() }]);
+        let ev = step(json!({"type":"system","subtype":"task_started","task_id":"bgvn","owned_by_subagent":true,"tool_use_id":"toolu_k","description":"Sleep for 6 seconds","is_backgrounded":false,"task_type":"local_bash"}));
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Background(_))), "{ev:?}");
+        // Done: the set empties first, then the notification brings the sub-agent's answer.
+        let ev = step(changed(json!([])));
+        assert_eq!(ev, [AgentEvent::Background(vec![])]);
+        let ev = step(json!({"type":"system","subtype":"task_notification","task_id":"ae33","tool_use_id":"toolu_a","status":"completed","output_file":"/tmp/x.output","summary":"kid done."}));
+        assert_eq!(
+            ev,
+            [
+                AgentEvent::Task { id: "toolu_a".into(), description: None, activity: None, tool_uses: None, done: Some(true) },
+                AgentEvent::ToolFinished { id: "toolu_a".into(), output: "kid done.".into(), ok: true }
+            ]
+        );
+        // A shell's notification has no answer to give.
+        let ev = step(json!({"type":"system","subtype":"task_notification","task_id":"brc5","tool_use_id":"toolu_m","status":"completed","summary":"Monitor \"tick counter\" stream ended"}));
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::ToolFinished { .. })), "{ev:?}");
+        assert!(turns.background.started.is_empty() && turns.background.monitors.is_empty(), "nothing kept once they're over");
     }
 }
