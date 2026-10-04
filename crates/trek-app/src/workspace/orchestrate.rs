@@ -23,7 +23,7 @@ pub struct Delegation {
     pub mode: Mode,
     /// The plan it offered, advising in plan mode: that's its advice.
     plan: Option<String>,
-    /// Calls waiting for its answer (`delegate_task` with `wait`).
+    /// Calls waiting for its answer (`delegate_task` or `task_result` with `wait`).
     waiters: Vec<async_channel::Sender<Reply>>,
     /// Stopped on its parent's behalf (Stop, `cancel_task`, archiving): its end isn't news.
     cancelled: bool,
@@ -189,7 +189,28 @@ impl Workspace {
                     Err(e) => Err(e),
                 },
                 "task_status" => self.task_status(&call.thread, &id()),
-                "task_result" => self.task_result(&call.thread, &id()),
+                "task_result" => {
+                    let child = id();
+                    let wait = call.params.get("wait").and_then(Value::as_bool) == Some(true);
+                    // Waiting on one still at work: its answer comes when it ends, as for a
+                    // `delegate_task` that waits. Several started without waiting run side by
+                    // side while the agent collects them one by one.
+                    let live = self.own_task(&call.thread, &child).is_ok() && self.task_state(&child).live();
+                    if let Some(d) = self.delegations.get_mut(&child).filter(|d| wait && live && d.outcome.is_none()) {
+                        d.waiters.push(call.reply.clone());
+                        let wait = crate::ipc::wait_for(&call.params).min(self.longest_wait(&call.thread));
+                        let _ = call.reply.try_send(Reply::Waiting(child, wait));
+                        return;
+                    }
+                    let result = self.task_result(&call.thread, &child);
+                    // Read now, its answer needn't wake the agent later.
+                    if result.as_ref().is_ok_and(|_| !self.task_state(&child).live()) {
+                        if let Some(w) = self.wakes.get_mut(&call.thread) {
+                            w.retain(|r| r.id != child);
+                        }
+                    }
+                    result
+                }
                 "cancel_task" => self.cancel_task(&call.thread, &id(), cx),
                 other => Err(format!("Trek has no tool called {other}.")),
             }
@@ -628,7 +649,7 @@ impl Workspace {
         self.own_task(caller, id)?;
         let mut v = self.task_json(id, true);
         if self.task_state(id).live() {
-            v["note"] = json!("Not finished yet. Trek sends you its answer when it is.");
+            v["note"] = json!("Not finished yet. Trek sends you its answer when it is, or call task_result with wait true to wait for it.");
         }
         Ok(v)
     }

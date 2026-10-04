@@ -197,9 +197,10 @@ pub fn setup_prompt(guide: &Path) -> String {
 }
 
 /// The message that brings the skill in `skill` up to date, following `guide`.
-pub fn maintain_prompt(guide: &Path, skill: &Path) -> String {
+pub fn maintain_prompt(guide: &Path, skill: &Path, has_cli: bool) -> String {
+    let missing = if has_cli { "" } else { " It names no CLI yet, so Trek can't tell when an agent checked its work with it: build one as the guide describes, and name it in the front matter's `metadata` as `cli:`." };
     format!(
-        "Maintain this project's verification skill in `{}`, following Trek's guide in `{}`: run it, fix what's broken, and bring the CLI, the dev-environment notes and the Feature Map up to date with the app.",
+        "Maintain this project's verification skill in `{}`, following Trek's guide in `{}`: run it, fix what's broken, and bring the CLI, the dev-environment notes and the Feature Map up to date with the app.{missing}",
         crate::paths::tildify(skill),
         guide.display()
     )
@@ -296,8 +297,14 @@ fn program(words: &[String]) -> &[String] {
 /// of its simple commands (`cd app && make verify`, `FOO=1 ./scripts/app check`), through a
 /// runner (`sh scripts/app`, `npx tsx tools/app.ts`, `bash -c "./scripts/app check"`), or from a
 /// folder on its path (`cd .agents/skills/x && ./scripts/app`). Naming it to another program
-/// (`cat`, `sed -n`, `chmod +x`, `git diff`, `echo`) isn't running it.
+/// (`cat`, `sed -n`, `chmod +x`, `git diff`, `echo`) or to a shell that only parses it
+/// (`bash -n`) isn't running it.
 pub fn runs(needle: &str, command: &str) -> bool {
+    !invocations(needle, command).is_empty()
+}
+
+/// The arguments of each run of the CLI `needle` stands for in `command` (see `runs`).
+fn invocations(needle: &str, command: &str) -> Vec<Vec<String>> {
     let target: Vec<&str> = needle.split_whitespace().collect();
     // `path` itself, wherever it's run from: `./scripts/app`, `/repo/scripts/app`.
     let is = |w: &str, path: &str| {
@@ -305,6 +312,7 @@ pub fn runs(needle: &str, command: &str) -> bool {
         let w = w.strip_prefix("./").unwrap_or(w);
         w == path || w.ends_with(&format!("/{path}"))
     };
+    let mut out = Vec::new();
     let mut cwd: Option<String> = None;
     for words in simple_commands(command) {
         let words = program(&words);
@@ -316,7 +324,7 @@ pub fn runs(needle: &str, command: &str) -> bool {
         if target.len() > 1 {
             // A program run through another (make, cargo, swift): that command line.
             if words.len() >= target.len() && words.iter().zip(&target).all(|(w, t)| w == t) {
-                return true;
+                out.push(words[target.len()..].to_vec());
             }
             continue;
         }
@@ -326,16 +334,24 @@ pub fn runs(needle: &str, command: &str) -> bool {
                 needle.match_indices('/').any(|(i, _)| is(d, &needle[..i]) && w.strip_prefix("./").unwrap_or(w) == &needle[i + 1..])
             });
             if is(w, needle) || from_cwd {
-                return true;
+                out.push(after.to_vec());
+                break;
             }
             let name = w.rsplit('/').next().unwrap_or(w);
             if !RUNNERS.contains(&name) {
                 break;
             }
-            // A shell given a command line (`bash -lc "…"`) runs that.
             if matches!(name, "sh" | "bash" | "zsh" | "dash") {
+                // `bash -n` parses the script without running it.
+                if noexec(after) {
+                    break;
+                }
+                // A shell given a command line (`bash -lc "…"`) runs that.
                 if let Some(at) = after.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')) {
-                    return after.get(at + 1).is_some_and(|line| runs(needle, line));
+                    if let Some(line) = after.get(at + 1) {
+                        out.extend(invocations(needle, line));
+                    }
+                    break;
                 }
             }
             rest = after;
@@ -344,7 +360,48 @@ pub fn runs(needle: &str, command: &str) -> bool {
             }
         }
     }
+    out
+}
+
+/// Whether a shell's options (the words after it) tell it to read commands without running
+/// them: `-n`, `-xn`, `--noexec`, `-o noexec`.
+fn noexec(options: &[String]) -> bool {
+    let mut words = options.iter();
+    while let Some(w) = words.next() {
+        match w.as_str() {
+            "-o" | "+o" => {
+                if words.next().is_some_and(|o| o == "noexec") {
+                    return w == "-o";
+                }
+            }
+            "--noexec" => return true,
+            w if w.starts_with("--") => {}
+            w if w.starts_with('-') && w.len() > 1 => {
+                if w.contains('n') {
+                    return true;
+                }
+                // `-c` takes the command line next: nothing past it is an option.
+                if w.contains('c') {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
     false
+}
+
+/// Whether a run of the CLI with `args` only asks it something (`--help`, `help`, `--version`)
+/// or shows what it would do (`--dry-run`): it checks nothing.
+fn inspects(args: &[String]) -> bool {
+    args.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V" | "--dry-run"))
+        || args.iter().find(|a| !a.starts_with('-')).is_some_and(|a| a == "help")
+}
+
+/// What a run of the CLI with `args` checks, for telling a failure from a later pass of the same
+/// thing: its subcommand (`check`, `ui`), or nothing for a bare run.
+fn subcommand(args: &[String]) -> &str {
+    args.iter().find(|a| !a.starts_with('-')).map_or("", |a| a.as_str())
 }
 
 /// Whether a command line goes into `dir` (or a folder in it) with `cd`.
@@ -364,8 +421,8 @@ pub struct Probe {
     pub main: Option<PathBuf>,
 }
 
-/// How a turn used the verification CLI: the commands that ran it, and whether the last one
-/// worked.
+/// How a turn used the verification CLI: the commands that ran it, and whether it passed: every
+/// subcommand that failed ran again and passed later in the turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verdict {
     pub commands: Vec<String>,
@@ -373,18 +430,25 @@ pub struct Verdict {
 }
 
 /// Whether the tool calls in `turn` (one turn's items) ran the CLI `probe` stands for. Reading
-/// the skill isn't verifying: only running its CLI counts, where the thread works.
+/// the skill isn't verifying: only running its CLI counts, where the thread works, and not to ask
+/// it for help or a dry run.
 pub fn verdict(turn: &[Item], probe: &Probe) -> Option<Verdict> {
     let here = |d: &str| probe.main.as_deref().is_none_or(|m| !goes_into(d, m));
-    let runs: Vec<(&String, ToolStatus)> = turn
-        .iter()
-        .filter_map(|i| match i {
-            Item::Tool { title, detail, status, .. } if is_command(title) && runs(&probe.needle, detail) && here(detail) && *status != ToolStatus::Running => Some((detail, *status)),
-            _ => None,
-        })
-        .collect();
-    let (_, last) = runs.last()?;
-    Some(Verdict { passed: *last == ToolStatus::Done, commands: runs.iter().map(|(d, _)| d.to_string()).collect() })
+    let mut commands = Vec::new();
+    // Each subcommand's last result: a failed `check` isn't made good by a `--help` or `logs`.
+    let mut last: Vec<(String, ToolStatus)> = Vec::new();
+    for item in turn {
+        let Item::Tool { title, detail, status, .. } = item else { continue };
+        if !is_command(title) || *status == ToolStatus::Running || !here(detail) {
+            continue;
+        }
+        let Some(args) = invocations(&probe.needle, detail).into_iter().find(|a| !inspects(a)) else { continue };
+        commands.push(detail.clone());
+        let what = subcommand(&args).to_string();
+        last.retain(|(w, _)| *w != what);
+        last.push((what, *status));
+    }
+    (!commands.is_empty()).then(|| Verdict { passed: last.iter().all(|(_, s)| *s == ToolStatus::Done), commands })
 }
 
 /// Whether a tool row is a shell command, as agents title them.
@@ -492,6 +556,8 @@ mod tests {
         assert!(runs("scripts/app", "APP_ENV=test ./scripts/app check 2>&1 | tail -5"));
         assert!(runs("scripts/app", "timeout 60 sh scripts/app check"));
         assert!(runs("scripts/app", "bash -lc 'cd /repo && ./scripts/app check'"));
+        assert!(runs("scripts/app", "bash -x scripts/app check"));
+        assert!(runs("scripts/app", "bash -o pipefail -c './scripts/app check | tail'"));
         assert!(runs("scripts/app", "out=$(./scripts/app check --json)"));
         assert!(runs("tools/app.ts", "npx tsx tools/app.ts check"));
         assert!(!runs("scripts/app", "cat scripts/apple.txt"));
@@ -507,6 +573,11 @@ mod tests {
             "ls -la .agents/skills/verify-app/scripts/app && wc -l .agents/skills/verify-app/scripts/app",
             "# ./.agents/skills/verify-app/scripts/app check",
             "bash -n .agents/skills/verify-app/scripts/app.bak",
+            "bash -n .agents/skills/verify-app/scripts/app",
+            "sh -xn ./.agents/skills/verify-app/scripts/app",
+            "zsh --noexec .agents/skills/verify-app/scripts/app",
+            "bash -o noexec .agents/skills/verify-app/scripts/app",
+            "bash -n -c './.agents/skills/verify-app/scripts/app check'",
         ] {
             assert!(!runs(cli, read), "{read}");
         }
@@ -545,6 +616,18 @@ mod tests {
         let v = verdict(&[failed, read, passed.clone()], &probe).unwrap();
         assert!(v.passed && v.commands.len() == 2, "the last run counts");
         assert_eq!(verdict(&[tool("Run command", "./scripts/app check", ToolStatus::Running)], &probe), None, "still running");
+        // A failed check stays failed through help, dry runs and other subcommands that work…
+        let failed = tool("Run command", "./scripts/app check", ToolStatus::Failed);
+        for after in ["./scripts/app --help", "./scripts/app help check", "./scripts/app check --help", "./scripts/app logs --since 1m", "./scripts/app reset --dry-run"] {
+            let v = verdict(&[failed.clone(), tool("Run command", after, ToolStatus::Done)], &probe).unwrap();
+            assert!(!v.passed, "{after}");
+        }
+        // …until the check itself passes.
+        let fixed = [failed.clone(), tool("Run command", "./scripts/app logs", ToolStatus::Done), tool("Run command", "./scripts/app check", ToolStatus::Done)];
+        assert!(verdict(&fixed, &probe).is_some_and(|v| v.passed && v.commands.len() == 3));
+        // Asking it for help alone checks nothing.
+        assert_eq!(verdict(&[tool("Run command", "./scripts/app --help", ToolStatus::Done)], &probe), None);
+        assert_eq!(verdict(&[tool("Run command", "./scripts/app --help && ./scripts/app check", ToolStatus::Done)], &probe).map(|v| v.passed), Some(true));
         // A thread in a worktree that checks the main checkout hasn't checked its own changes.
         let away = Probe { main: Some("/repo".into()), ..probe };
         assert_eq!(verdict(&[tool("Run command", "cd /repo && ./scripts/app check", ToolStatus::Done)], &away), None);
@@ -569,6 +652,10 @@ mod tests {
         let cli = p.join(".agents/skills/control-app/scripts/app");
         assert!(text.contains("has no copy of it yet") && text.contains(&format!("(`{}`, run from your working folder)", cli.display())), "{text}");
         assert!(setup_prompt(Path::new("/d/skills/create-verification-skill/SKILL.md")).contains("`/d/skills/create-verification-skill/SKILL.md`"));
+        // Maintaining one with no CLI named asks for one.
+        let guide = Path::new("/d/skills/maintain-verification-skill/SKILL.md");
+        assert!(!maintain_prompt(guide, &dir, true).contains("names no CLI"));
+        assert!(maintain_prompt(guide, &dir, false).contains("name it in the front matter's `metadata` as `cli:`"));
         for d in [p, wt, bare] {
             let _ = std::fs::remove_dir_all(d);
         }

@@ -511,7 +511,8 @@ impl SearchResults {
 }
 
 /// What a pre-warmed draft session was started with; it's used only if the draft still matches.
-type WarmKey = (AgentId, PathBuf, Option<String>, Effort, HandHolding, bool, bool);
+/// The last: the project notes it was given, so a skill set up or changed since starts afresh.
+type WarmKey = (AgentId, PathBuf, Option<String>, Effort, HandHolding, bool, bool, Option<String>);
 
 pub use crate::updater::{UpdateAction, UpdateStatus, UpdateView};
 
@@ -2102,8 +2103,8 @@ impl Workspace {
                         let key = self.draft_key(&cwd);
                         match self.warm.take() {
                             Some((k, handle, _)) if k == key => {
-                                // A new session: it was given the project notes there are.
-                                let notes = self.project_notes(Some(&cwd), &cwd).filter(|_| !self.thread(&id).is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent)));
+                                // A new session, given the project notes the key says.
+                                let notes = k.7.filter(|_| !self.thread(&id).is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent)));
                                 self.live.entry(id.clone()).or_default().notes_pending = notes;
                                 self.attach(&id, handle, cx);
                                 let ipc = self.warm_ipc.take();
@@ -2249,8 +2250,8 @@ impl Workspace {
     /// The agent restated the request and got it right: it goes ahead, with whatever else the
     /// request asked for (a consult, an arena) that waited for the restatement.
     pub fn go_ahead(&mut self, id: &str, cx: &mut Context<Self>) {
-        let asked = self.live.get(id).and_then(|l| l.items.iter().rev().find_map(|i| if let Item::User { text, .. } = i { Some(text.clone()) } else { None }));
-        let text = asked.map(|a| trek_core::restate::go_ahead(&a)).unwrap_or_else(|| trek_core::restate::GO_AHEAD.into());
+        let users = self.live.get(id).map(|l| l.items.iter().rev().filter_map(|i| if let Item::User { text, aside: false, .. } = i { Some(text.as_str()) } else { None }).collect::<Vec<_>>()).unwrap_or_default();
+        let text = trek_core::restate::go_ahead_after(users);
         self.send_to(id, text, vec![], cx);
     }
 
@@ -2366,7 +2367,7 @@ impl Workspace {
 
     fn draft_key(&self, cwd: &std::path::Path) -> WarmKey {
         let p = &self.draft_prefs;
-        (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast)
+        (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast, self.project_notes(Some(cwd), cwd))
     }
 
     /// Start the agent before the first message is sent (called when the user begins typing), so
@@ -2380,8 +2381,7 @@ impl Workspace {
                 if matches!(self.draft_prefs.agent, AgentId::Direct(_)) || self.draft_prefs.worktree {
                     return;
                 }
-                let key = self.draft_key(&cwd);
-                if self.warm.as_ref().is_some_and(|(k, _, _)| *k == key) {
+                if self.warm.as_ref().is_some_and(|(k, _, _)| *k == self.draft_key(&cwd)) {
                     return;
                 }
                 let p = self.draft_prefs.clone();
@@ -2390,7 +2390,8 @@ impl Workspace {
                     server.close_session(&old);
                 }
                 self.refresh_verification(&cwd, cx);
-                let instructions = self.project_notes(Some(&cwd), &cwd);
+                let key = self.draft_key(&cwd);
+                let instructions = key.7.clone();
                 let handle = start_session(SessionConfig {
                     agent: p.agent.clone(),
                     cwd,
@@ -4829,7 +4830,7 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("permissions full", "No prompts and no sandbox"),
     ("consult", "Ask other models first: /consult sol high, opus max: your message"),
     ("consult arena", "Have other models each design it, judged blind: /consult arena: your message"),
-    ("restate", "Have the agent say back what you asked before it starts: /restate your message"),
+    ("restate", "Have the agent say back what you asked before it starts: /restate your message, or /restate alone for the thread so far"),
 ];
 
 /// The thread `scope` shows: a thread window's own, or whatever thread the main window is on.

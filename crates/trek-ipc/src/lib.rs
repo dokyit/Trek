@@ -233,7 +233,19 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         ("task_status", "How a sub-agent you started is doing (running, needs approval, done, failed or cancelled), how long it has run, and a preview of its answer once done.", id.clone()),
-        ("task_result", "A finished sub-agent's final answer in full (very long answers are cut short).", id.clone()),
+        (
+            "task_result",
+            "A sub-agent's final answer in full (very long answers are cut short). wait=true blocks until it finishes (after timeout_seconds it returns its status \"running\" instead): start several with delegate_task wait=false, then collect each with task_result wait=true, and they run side by side meanwhile. An answer read here isn't sent to you again in a message.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The sub-agent's id, as delegate_task returned it." },
+                    "wait": { "type": "boolean", "description": "Wait for it to finish (true) or answer at once (false, the default)." },
+                    "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 1800, "description": "With wait=true, how long to wait before returning \"running\" (default 600). The sub-agent keeps going either way." }
+                },
+                "required": ["id"]
+            }),
+        ),
         ("cancel_task", "Stop a sub-agent you started. Its thread stays, for the user to read.", id),
     ]
 }

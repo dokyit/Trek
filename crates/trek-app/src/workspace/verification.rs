@@ -7,7 +7,7 @@ use gpui_kit::Context;
 use std::path::{Path, PathBuf};
 use trek_core::settings::Verification;
 use trek_core::store::{Item, Thread, ToolStatus, now_ms};
-use trek_core::{RunState, skills, verification};
+use trek_core::{AgentId, RunState, skills, verification};
 
 /// A thread setting up (or maintaining) a project's verification skill.
 pub struct VerifyRun {
@@ -116,7 +116,7 @@ impl Workspace {
     }
 
     /// Start a thread in `project` that sets up its verification skill (or, `maintain`, brings it
-    /// up to date) following the guide Trek ships, with the project's default agent. It works in
+    /// up to date) following the guide Trek ships, with the user's default agent. It works in
     /// the project folder itself: the skill is the project's, not a branch's.
     pub fn start_verification(&mut self, project: PathBuf, maintain: bool, cx: &mut Context<Self>) {
         if let Some((id, _)) = self.verification_run(&project) {
@@ -132,15 +132,37 @@ impl Workspace {
             }
         };
         let text = match self.verification(&project).filter(|_| maintain) {
-            Some(v) => verification::maintain_prompt(&guide, Path::new(&v.skill)),
+            Some(v) => verification::maintain_prompt(&guide, Path::new(&v.skill), v.cli.is_some()),
             None => verification::setup_prompt(&guide),
         };
         self.navigate(Route::Draft { project: Some(project.clone()) }, cx);
+        self.use_verification_agent();
         self.draft_prefs.worktree = false;
         self.draft_prefs.plan = false;
         self.send(text, vec![], cx);
         if let Route::Thread(id) = &self.route {
             self.verify_runs.insert(id.clone(), VerifyRun { project, maintain });
+        }
+    }
+
+    /// The draft takes the agent that builds a verification skill: the user's default agent, or
+    /// the project's if the default can't work on files (a direct model only chats), or else
+    /// the first agent on offer that can.
+    fn use_verification_agent(&mut self) {
+        let works = |a: &AgentId| !matches!(a, AgentId::Direct(p) if !trek_core::catalog::is_mock(p));
+        let ready = self.ready_agents();
+        let default = AgentId::from_key(&self.settings.general.default_agent);
+        let p = &mut self.draft_prefs;
+        if ready.contains(&default) && works(&default) {
+            if p.agent != default {
+                p.agent = default;
+                p.model = self.settings.general.default_model.clone();
+            }
+        } else if !works(&p.agent) {
+            if let Some(a) = ready.into_iter().find(works) {
+                p.agent = a;
+                p.model = None;
+            }
         }
     }
 
