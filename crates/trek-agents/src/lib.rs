@@ -126,6 +126,10 @@ pub enum Command {
     Respond { request_id: String, decision: Decision },
     SetHandHolding(HandHolding),
     SetModel { model: String, effort: Effort },
+    /// Settings a session is started with (`SessionConfig::plan`, `fast`, `effort`), for one that
+    /// can't be restarted to take them (it has work running in the background). Agents that read
+    /// them per turn, or can be told mid-session, take them now; the others with their next session.
+    SetModes { plan: bool, fast: Option<String>, effort: Effort },
     /// Read the end of a background task's output (`BackgroundTask::readable`); the answer
     /// comes back as `AgentEvent::TaskOutput`. Starts no turn.
     ReadTask { id: String },

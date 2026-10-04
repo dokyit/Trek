@@ -448,11 +448,20 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// Codex-style compact row for settled history.
+    /// Codex-style compact row for settled history. One whose sub-agents or background work are
+    /// still going (settled, it stays here, as a working thread would) has a quiet dot that names
+    /// them on hover, as a card does.
     fn line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let id = t.id.clone();
         let hit = self.content_hit(t, cx);
+        // Only a thread that ran in this process can have anything going.
+        let tip = if self.workspace.read(cx).live.contains_key(&t.id) {
+            let (kids, background) = self.at_work(t, cx);
+            card_tip(&kids, &background).map(SharedString::from)
+        } else {
+            None
+        };
         let title = h_flex()
             .h(px(30.))
             .gap_2()
@@ -463,6 +472,9 @@ impl Sidebar {
                 if selected { theme.foreground } else { theme.foreground.opacity(0.78) },
                 cx,
             )))
+            .when(tip.is_some(), |el| {
+                el.child(div().id(SharedString::from(format!("line-at-work-{}", t.id))).test_support().flex_none().size(px(6.)).rounded_full().bg(palette::sky(cx)))
+            })
             .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(time::relative(t.updated_at)));
         let row = v_flex()
             .id(SharedString::from(format!("line-{}", t.id)))
@@ -476,6 +488,7 @@ impl Sidebar {
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
             .child(title)
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.))))
+            .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }

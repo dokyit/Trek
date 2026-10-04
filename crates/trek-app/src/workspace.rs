@@ -137,7 +137,7 @@ pub struct LiveThread {
     pub plan: bool,
     pub fast: bool,
     /// Settings the agent reads only at launch changed mid-turn: the session restarts (and
-    /// resumes) once the turn is over.
+    /// resumes) once the turn is over, or is told them then if it has work in the background.
     relaunch: bool,
     /// What the thread and its sub-agents spent, as the store has it (`None`: not read yet).
     /// Updated as the agent reports usage, never per token.
@@ -159,6 +159,10 @@ pub struct LiveThread {
     pub opened: Option<crate::activity::Opened>,
     /// Follow-ups held while a turn runs (`FollowUp::Queue`), sent one per finished turn.
     pub queued: Vec<(String, Vec<PathBuf>)>,
+    /// The turn running is a wake-up Trek sent while `queued` was left over from a turn that
+    /// failed or stopped: those were written for that turn and don't follow this one out. They
+    /// go back to the composer once the thread is on screen (`hand_back_queued`).
+    hold_queue: bool,
     /// Sub-agents launched this turn (and those still out from earlier ones), keyed by the tool
     /// call that started them.
     pub tasks: Vec<SubTask>,
@@ -172,6 +176,10 @@ pub struct LiveThread {
     /// The turn running is the agent saying the sub-agents the user stopped were stopped: it
     /// raises no alert as it ends.
     quiet_turn: bool,
+    /// The turn running is one the agent took by itself, woken by work in the background.
+    self_started: bool,
+    /// When a turn its agent took by itself last raised an alert as it ended.
+    woke_alert: Option<Instant>,
     /// Last prompt or agent event (idle sessions are shut down; they resume on the next message).
     pub last_active: Option<Instant>,
     /// The latest point the agent's session can be taken back to (`AgentEvent::Mark`); saved to
@@ -330,6 +338,9 @@ pub enum ForkAt {
     End,
 }
 
+/// Said under calls an earlier run left going in the background when Trek quit.
+pub const ORPHANS_ENDED: &str = "Work left running in the background stopped when Trek closed";
+
 /// A task the agent left running in the background, as a thread keeps it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Background {
@@ -455,6 +466,30 @@ impl LiveThread {
             self.streaming = None;
             self.items.push(Item::Notice { text });
         }
+    }
+
+    /// Just loaded, with no turn and nothing in the background: calls its transcript has still
+    /// running are an earlier run's, which Trek quit under (the agent's own sub-agents, out in
+    /// the background while the thread was answered, aren't closed with turns). They failed, and
+    /// the transcript says so. Trek's own sub-agents' rows aside: they end with their threads.
+    /// `true` if anything changed.
+    fn end_orphaned_calls(&mut self) -> bool {
+        if self.turn_started.is_some() || !self.background.is_empty() {
+            return false;
+        }
+        let mut ended = false;
+        for ix in 0..self.items.len() {
+            let orphan = matches!(&self.items[ix], Item::Tool { id, status: ToolStatus::Running, .. } if trek_core::orchestrate::task_of_row(id).is_none());
+            if let (true, Some(Item::Tool { status, .. })) = (orphan, self.items.get_mut(ix)) {
+                *status = ToolStatus::Failed;
+                ended = true;
+            }
+        }
+        if ended {
+            self.items.push(Item::Notice { text: ORPHANS_ENDED.into() });
+            self.revision += 1;
+        }
+        ended
     }
 
     /// Append the rows of sub-agents started since, each after the agent's own call to
@@ -699,6 +734,10 @@ pub enum UndoAction {
 /// How long a restart the user asked for while agents worked waits once they're done: they may
 /// be typing the next message by then, and unsent text doesn't survive a restart.
 pub const RESTART_GRACE: Duration = Duration::from_secs(10);
+
+/// How long after one alert from a turn an agent took by itself (a watcher or a monitor woke it),
+/// the next such turn ends without another.
+const WOKE_ALERT_GAP: Duration = Duration::from_secs(10 * 60);
 
 /// How soon after the user stops its sub-agents an agent's turn of its own is taken to be it
 /// saying so (Claude Code takes one within seconds).
@@ -1878,6 +1917,9 @@ impl Workspace {
             }
             live.loaded = true;
             live.revision += 1;
+            if live.end_orphaned_calls() {
+                self.persist_items(id, cx);
+            }
             self.settle_cut_off_rows(id, cx);
             return;
         }
@@ -1980,6 +2022,7 @@ impl Workspace {
                         t.reopen = None;
                     }
                 });
+                let fast_tier = self.fast_tier(&prefs.agent, prefs.model.as_ref(), prefs.fast);
                 let live = self.live.entry(id.clone()).or_default();
                 let switched = before.as_ref().is_some_and(|b| b.agent != prefs.agent);
                 // Another agent means another login and a fresh session: how the old one was
@@ -2012,11 +2055,15 @@ impl Workspace {
                 if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
                     // Claude reads effort, fast mode and plan at launch: restart idle sessions (they
                     // resume), and running ones once their turn is over. One with work running in
-                    // the background restarts once that's over too: a restart would end it, and
-                    // its sub-agents would never report.
+                    // the background can't restart (it would end that work, and its sub-agents
+                    // would never report): it's told the new settings as it runs.
                     let at_launch = fast_changed || plan_changed || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort);
                     let relaunch = at_launch && live.free_to_relaunch();
-                    live.relaunch |= at_launch && !relaunch;
+                    let in_place = at_launch && !relaunch && live.turn_started.is_none();
+                    live.relaunch |= at_launch && !relaunch && !in_place;
+                    if in_place && before.agent == prefs.agent {
+                        let _ = tx.try_send(Command::SetModes { plan: prefs.plan, fast: fast_tier, effort: prefs.effort });
+                    }
                     if before.agent != prefs.agent || relaunch {
                         let _ = tx.try_send(Command::Shutdown);
                         live.commands = None;
@@ -2396,6 +2443,7 @@ impl Workspace {
             live.turn_error = false;
             live.stopped_out = None;
             live.quiet_turn = false;
+            live.self_started = false;
             // The agent's own sub-agents still out in the background carry on into this turn.
             live.tasks.retain(|t| t.done.is_none());
             // A new turn starts from a checkpoint of the files, taken before the agent has the
@@ -2661,6 +2709,7 @@ impl Workspace {
                 if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
                     turn_began = Some(now_ms());
                     live.quiet_turn = live.stopped_out.is_some_and(|at| at.elapsed() < STOPPED_ECHO);
+                    live.self_started = true;
                     live.turn_started = Some(Instant::now());
                     run_state = Some(RunState::Working);
                     transcript_only = false;
@@ -3026,11 +3075,18 @@ impl Workspace {
             }
         }
         // Settings read at launch changed while it was busy: now it isn't, it restarts (and
-        // resumes) before anything more goes to it.
-        if let Some(live) = self.live.get_mut(id).filter(|l| l.relaunch && l.free_to_relaunch()) {
+        // resumes) before anything more goes to it. Unless it has work running in the background:
+        // then it's told them instead.
+        if let Some(live) = self.live.get_mut(id).filter(|l| l.relaunch && l.turn_started.is_none()) {
             live.relaunch = false;
-            if let Some(tx) = live.commands.take() {
-                let _ = tx.try_send(Command::Shutdown);
+            let (free, plan, fast) = (live.free_to_relaunch(), live.plan, live.fast);
+            if free {
+                if let Some(tx) = live.commands.take() {
+                    let _ = tx.try_send(Command::Shutdown);
+                }
+            } else if let (Some(tx), Some(t)) = (live.commands.clone(), self.thread(id)) {
+                let fast = self.fast_tier(&t.agent, t.model.as_ref(), fast);
+                let _ = tx.try_send(Command::SetModes { plan, fast, effort: t.effort });
             }
         }
         if finished {
@@ -3042,6 +3098,9 @@ impl Workspace {
             self.persist_items(id, cx);
             self.search_index_changed(cx);
             self.note_branch(id, turn_began, cx);
+            if self.live.get_mut(id).is_some_and(|l| std::mem::take(&mut l.hold_queue)) {
+                continue_queue = false;
+            }
             let next = if continue_queue {
                 self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
             } else {
@@ -3062,11 +3121,18 @@ impl Workspace {
                 self.maybe_auto_title(id, cx);
                 // Waiting on its sub-agents, it isn't done: it says so when it is.
                 let waiting = self.waiting(id) || self.wakes.get(id).is_some_and(|w| !w.is_empty());
-                // The agent saying that what the user stopped has stopped isn't news either.
-                let echo = self.live.get_mut(id).is_some_and(|l| std::mem::take(&mut l.quiet_turn));
-                if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused && !waiting && !echo) {
-                    let verb = if t.run_state == RunState::Failed { "Failed" } else { "Finished" };
+                // The agent saying that what the user stopped has stopped isn't news either. Nor is
+                // every turn a watcher or a monitor wakes it for: one alert a while is enough,
+                // unless it failed.
+                let (echo, woke) = self.live.get_mut(id).map_or((false, false), |l| (std::mem::take(&mut l.quiet_turn), std::mem::take(&mut l.self_started)));
+                let woke_again = woke && self.live.get(id).and_then(|l| l.woke_alert).is_some_and(|at| at.elapsed() < WOKE_ALERT_GAP);
+                let failed = self.thread(id).is_some_and(|t| t.run_state == RunState::Failed);
+                if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused && !waiting && !echo && (failed || !woke_again)) {
+                    let verb = if failed { "Failed" } else { "Finished" };
                     notify_text.get_or_insert(format!("{verb}: {}", t.title));
+                    if let Some(l) = self.live.get_mut(id).filter(|_| woke) {
+                        l.woke_alert = Some(Instant::now());
+                    }
                 }
                 self.maybe_restart_for_update(cx);
             }
@@ -4947,7 +5013,6 @@ fn whole_session(thread: &Thread, mark: Option<String>, kept: &[Item], native: b
     }
 }
 
-/// Said in a transcript whose next session starts with a recap.
 /// The toast before an update restart, naming the background work it will end.
 fn restart_message(secs: u64, work: &[&str]) -> String {
     let name = |t: &str| t.lines().next().unwrap_or_default().trim().chars().take(60).collect::<String>();
@@ -4958,6 +5023,7 @@ fn restart_message(secs: u64, work: &[&str]) -> String {
     }
 }
 
+/// Said in a transcript whose next session starts with a recap.
 fn recap_notice(agent: &AgentId) -> String {
     format!("{} can't take its own session back to this point, so your next message starts a new session with a recap of the conversation so far.", agent.display_name())
 }

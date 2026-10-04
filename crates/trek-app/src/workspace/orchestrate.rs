@@ -990,6 +990,18 @@ impl Workspace {
             let line = if cut_off.contains(&parent) { &mut self.parked } else { &mut self.wakes };
             line.entry(parent).or_default().push(report);
         }
+        // The quit ended its turn and the user will pick it up: its transcript says what's kept
+        // for it, under the turn's "Interrupted".
+        let parked: Vec<(String, usize)> = self.parked.iter().map(|(p, r)| (p.clone(), r.len())).collect();
+        for (parent, n) in parked {
+            self.ensure_loaded(&parent, cx);
+            let agent = self.thread(&parent).map(|t| t.agent.display_name()).unwrap_or_default();
+            if let Some(live) = self.live.get_mut(&parent) {
+                live.items.push(Item::Notice { text: parked_notice(n, &agent) });
+                live.revision += 1;
+                self.persist_items(&parent, cx);
+            }
+        }
         if self.wakes.is_empty() {
             return;
         }
@@ -1048,6 +1060,10 @@ impl Workspace {
         let Some(reports) = self.wakes.remove(parent).filter(|r| !r.is_empty()) else { return };
         for r in &reports {
             let _ = self.store.drop_report(&r.id);
+        }
+        // Follow-ups still queued here were left by a turn that failed or stopped.
+        if let Some(l) = self.live.get_mut(parent).filter(|l| !l.queued.is_empty()) {
+            l.hold_queue = true;
         }
         self.send_to(parent, orch::wake_text(&reports), vec![], cx);
     }
@@ -1174,6 +1190,15 @@ impl Workspace {
     }
 }
 
+/// Said in a thread whose turn a quit cut off while it waited on `n` sub-agents' reports: its
+/// agent hears them after the user's next message there.
+fn parked_notice(n: usize, agent: &str) -> String {
+    match n {
+        1 => format!("A sub-agent's report is kept for this thread: {agent} hears it once your next message here is answered."),
+        _ => format!("{n} sub-agents' reports are kept for this thread: {agent} hears them once your next message here is answered."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Waited, waiting_label};
@@ -1195,3 +1220,4 @@ mod tests {
         assert_eq!(waiting_label(&[]), "");
     }
 }
+

@@ -399,6 +399,8 @@ enum Call {
     Steer { input: Value, turn: String, retried: bool },
     /// `account/read`, sent before the session starts: how the login is billed.
     Account,
+    /// `thread/backgroundTerminals/terminate` for the command run by item `0`.
+    Terminate(String),
     Other,
 }
 
@@ -495,6 +497,8 @@ struct Session {
     /// Commands that outlived the turn that started them (Codex's background terminals), in the
     /// order they were left running.
     background: Vec<String>,
+    /// Codex's own ids for the terminals commands run in, by item id: what stopping one takes.
+    processes: HashMap<String, String>,
 }
 
 impl Session {
@@ -529,21 +533,40 @@ impl Session {
             turn_tokens: vec![],
             commands: HashMap::new(),
             background: vec![],
+            processes: HashMap::new(),
         }
     }
 
     /// The commands left running in the background, as `AgentEvent::Background` lists them.
-    /// Codex has no way for a client to stop one (the agent can, when asked).
+    /// Those Codex said which terminal they run in can be stopped (`thread/backgroundTerminals/terminate`).
     fn background_event(&self) -> AgentEvent {
         let tasks = self
             .background
             .iter()
             .filter_map(|id| {
                 let (command, _) = self.commands.get(id)?;
-                Some(crate::BackgroundTask { id: id.clone(), kind: crate::BackgroundKind::Shell, title: command.clone(), call: Some(id.clone()), readable: true, stoppable: false })
+                let stoppable = self.processes.contains_key(id);
+                Some(crate::BackgroundTask { id: id.clone(), kind: crate::BackgroundKind::Shell, title: command.clone(), call: Some(id.clone()), readable: true, stoppable })
             })
             .collect();
         AgentEvent::Background(tasks)
+    }
+
+    /// Command `id` is no longer running: off the list of those in the background.
+    fn command_gone(&mut self, id: &str, out: &mut Out) {
+        self.commands.remove(id);
+        self.processes.remove(id);
+        if let Some(ix) = self.background.iter().position(|b| b == id) {
+            self.background.remove(ix);
+            out.events.push(self.background_event());
+        }
+    }
+
+    /// Command `id`, stopped on request, has ended: its row gets the output it had.
+    fn command_ended(&mut self, id: &str, out: &mut Out) {
+        let Some((_, output)) = self.commands.get(id).cloned() else { return };
+        self.command_gone(id, out);
+        out.events.push(AgentEvent::ToolFinished { id: id.to_string(), output, ok: false });
     }
 
     fn busy(&self) -> bool {
@@ -656,6 +679,12 @@ impl Session {
                 self.model = Some(model);
                 self.effort = effort;
             }
+            // Read per turn (`turn/start`), so the next one runs with them.
+            Command::SetModes { plan, fast, effort } => {
+                self.plan = plan;
+                self.fast = fast;
+                self.effort = effort;
+            }
             Command::Respond { request_id, decision } => self.respond(&request_id, decision, &mut out),
             Command::Answer { request_id, answers } => match self.pending.remove(&request_id) {
                 Some(Pending::Questions { rpc_id, ids }) => {
@@ -671,8 +700,12 @@ impl Session {
                     out.events.push(AgentEvent::TaskOutput { id, output: output.clone() });
                 }
             }
-            // Codex stops its background terminals itself; a client can't (see `background_event`).
-            Command::StopTask { .. } => {}
+            Command::StopTask { id } => {
+                if let Some(process) = self.processes.get(&id).cloned() {
+                    let m = self.request("thread/backgroundTerminals/terminate", json!({ "threadId": self.thread_id, "processId": process }), Call::Terminate(id));
+                    out.send.push(m);
+                }
+            }
             Command::Shutdown => {}
         }
         out
@@ -753,6 +786,10 @@ impl Session {
                 self.steer_failed(input, turn, retried, out);
             }
             (Call::Account, None) => out.events.extend(account_billing(&v["result"]).map(AgentEvent::Billing)),
+            // Stopped: it's over now, whether or not Codex says the command completed after.
+            (Call::Terminate(id), None) if v["result"]["terminated"] == true => self.command_ended(&id, out),
+            (Call::Terminate(_), None) => out.events.push(AgentEvent::Notice("Codex couldn't stop the background command: it had no terminal running it".into())),
+            (Call::Terminate(_), Some(e)) => out.events.push(AgentEvent::Notice(format!("Codex couldn't stop the background command: {e}"))),
             (_, Some(e)) => tracing::debug!("codex request failed: {e}"),
             _ => {}
         }
@@ -1015,6 +1052,9 @@ impl Session {
         let (title, detail) = match item["type"].as_str() {
             Some("commandExecution") => {
                 self.commands.insert(id.clone(), (command_text(item), String::new()));
+                if let Some(process) = item["processId"].as_str().filter(|p| !p.is_empty()) {
+                    self.processes.insert(id.clone(), process.to_string());
+                }
                 ("Run command".to_string(), command_text(item))
             }
             Some("fileChange") => {
@@ -1074,11 +1114,7 @@ impl Session {
                 AgentEvent::ToolFinished { id, output: text, ok: true }
             }
             Some("commandExecution") => {
-                self.commands.remove(&id);
-                if let Some(ix) = self.background.iter().position(|b| *b == id) {
-                    self.background.remove(ix);
-                    out.events.push(self.background_event());
-                }
+                self.command_gone(&id, out);
                 let output = item["aggregatedOutput"].as_str().map(|o| clip(o, 8000)).unwrap_or_else(declined);
                 AgentEvent::ToolFinished { id, output, ok: status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0 }
             }
@@ -2310,7 +2346,7 @@ mod tests {
         let out = feed(&mut s, &[json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed","items":[]}}})]);
         let Some(AgentEvent::Background(b)) = out.events.last() else { panic!("{:?}", out.events) };
         let title = command_text(&json!({ "command": command }));
-        assert_eq!(b[..], [crate::BackgroundTask { id: "exec-1".into(), kind: crate::BackgroundKind::Shell, title, call: Some("exec-1".into()), readable: true, stoppable: false }]);
+        assert_eq!(b[..], [crate::BackgroundTask { id: "exec-1".into(), kind: crate::BackgroundKind::Shell, title, call: Some("exec-1".into()), readable: true, stoppable: true }]);
         // Its output so far can be read while it runs, without a turn.
         feed(&mut s, &[delta("tick 2\r\n")]);
         let read = s.command(Command::ReadTask { id: "exec-1".into() });
@@ -2321,6 +2357,33 @@ mod tests {
         assert_eq!(out.events[0], AgentEvent::Background(vec![]));
         assert!(matches!(&out.events[1], AgentEvent::ToolFinished { id, ok: true, .. } if id == "exec-1"));
         assert!(s.commands.is_empty() && s.background.is_empty());
+    }
+
+    #[test]
+    fn a_background_command_is_stopped_through_its_terminal() {
+        let mut s = session("t", false);
+        let started = json!({"method":"item/started","params":{"threadId":"t","turnId":"u","item":{"type":"commandExecution","id":"exec-1","command":"npm run dev","cwd":"/tmp","processId":"46444","source":"unifiedExecStartup","status":"inProgress","commandActions":[]}}});
+        let delta = json!({"method":"item/commandExecution/outputDelta","params":{"threadId":"t","turnId":"u","itemId":"exec-1","delta":"ready on :5173\n"}});
+        feed(&mut s, &[json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"u"}}}), started, delta]);
+        feed(&mut s, &[json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed","items":[]}}})]);
+        let stop = s.command(Command::StopTask { id: "exec-1".into() });
+        let [req] = &stop.send[..] else { panic!("{:?}", stop.send) };
+        assert_eq!(req["method"], "thread/backgroundTerminals/terminate");
+        assert_eq!(req["params"], json!({ "threadId": "t", "processId": "46444" }));
+        // Codex says it's stopped: off the list, its row ends with the output it had.
+        let out = feed(&mut s, &[json!({ "id": req["id"], "result": { "terminated": true } })]);
+        assert_eq!(out.events[0], AgentEvent::Background(vec![]));
+        assert_eq!(out.events[1], AgentEvent::ToolFinished { id: "exec-1".into(), output: "ready on :5173\n".into(), ok: false });
+        assert!(s.commands.is_empty() && s.processes.is_empty());
+        // Its completion, if Codex reports one after, finds nothing left to take off.
+        let done = json!({"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"commandExecution","id":"exec-1","command":"npm run dev","cwd":"/tmp","processId":"46444","status":"failed","commandActions":[],"aggregatedOutput":"ready on :5173\n","exitCode":143}}});
+        assert!(!feed(&mut s, &[done]).events.iter().any(|e| matches!(e, AgentEvent::Background(_))));
+        // One that had ended by then: Codex says so, and Trek says it couldn't.
+        let mut s = session("t", false);
+        s.processes.insert("exec-2".into(), "7".into());
+        let stop = s.command(Command::StopTask { id: "exec-2".into() });
+        let out = feed(&mut s, &[json!({ "id": stop.send[0]["id"], "result": { "terminated": false } })]);
+        assert!(matches!(&out.events[..], [AgentEvent::Notice(n)] if n.contains("couldn't stop")), "{:?}", out.events);
     }
 
     #[test]

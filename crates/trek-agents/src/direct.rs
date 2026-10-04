@@ -79,7 +79,7 @@ pub async fn run(
             Command::Answer { .. } => {}
             Command::Shutdown => break,
             // Nothing runs between turns.
-            Command::Interrupt | Command::Respond { .. } | Command::SetHandHolding(_) | Command::ReadTask { .. } | Command::StopTask { .. } => {}
+            Command::Interrupt | Command::Respond { .. } | Command::SetHandHolding(_) | Command::SetModes { .. } | Command::ReadTask { .. } | Command::StopTask { .. } => {}
         }
     }
     Ok(())
