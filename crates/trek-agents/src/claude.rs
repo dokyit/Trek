@@ -148,6 +148,32 @@ fn trek_tool_allowed(v: &Value) -> Option<Value> {
     ours.then(|| control_response(v["request_id"].as_str().unwrap_or_default(), json!({ "behavior": "allow", "updatedInput": r["input"] })))
 }
 
+/// Claude's name for effort `e`; `None` leaves it to Claude.
+fn effort_level(e: Effort) -> Option<&'static str> {
+    (e != Effort::Off).then(|| e.clamp_to(&[Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]).as_str())
+}
+
+/// Requests putting a running session in plan mode, fast mode and effort `want`, from `had`
+/// (each as `(plan, fast, effort)`); `mode` is the access level to go back to out of plan mode.
+/// Plan mode is a permission mode, the others flag settings, all of which Claude takes mid-session.
+fn modes_requests(ctl: &mut Control, had: (bool, bool, Effort), want: (bool, bool, Effort), mode: &str) -> Vec<Value> {
+    let mut out = vec![];
+    if had.0 != want.0 {
+        out.push(ctl.request("set_permission_mode", json!({ "mode": if want.0 { "plan" } else { mode } })));
+    }
+    let mut flags = serde_json::Map::new();
+    if had.1 != want.1 {
+        flags.insert("fastMode".into(), if want.1 { Value::Bool(true) } else { Value::Null });
+    }
+    if had.2 != want.2 {
+        flags.insert("effortLevel".into(), effort_level(want.2).map_or(Value::Null, |e| Value::String(e.into())));
+    }
+    if !flags.is_empty() {
+        out.push(ctl.request("apply_flag_settings", json!({ "settings": flags })));
+    }
+    out
+}
+
 /// The CLI's arguments for a session (MCP servers aside).
 fn cli_args(config: &SessionConfig) -> Vec<String> {
     let mode = if config.plan { "plan" } else { config.hand_holding.claude_mode() };
@@ -174,8 +200,8 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
     if let Some(model) = &config.model {
         flag(&mut args, "--model", model);
     }
-    if config.effort != Effort::Off {
-        flag(&mut args, "--effort", config.effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]).as_str());
+    if let Some(effort) = effort_level(config.effort) {
+        flag(&mut args, "--effort", effort);
     }
     if let Some(id) = &config.resume {
         flag(&mut args, "--resume", id);
@@ -695,6 +721,8 @@ pub async fn run(
     let mut hand_holding = config.hand_holding;
     // In plan mode (as Claude last reported it): access changes wait until the plan is approved.
     let mut planning = config.plan;
+    // Fast mode and effort as the session last took them.
+    let (mut fast, mut effort) = (config.fast.is_some(), config.effort);
     let mut in_turn = false;
     let mut turns = Turns { resumed: config.resume.is_some(), resumed_from: config.resume.clone(), ledger: Some(UsageLedger::dir()), ..Default::default() };
     // Resumed partway: once the session has said which it is, that message is its latest point.
@@ -746,6 +774,12 @@ pub async fn run(
                     }
                     Command::SetModel { model, .. } => {
                         write_line(&mut cli.stdin, &ctl.request("set_model", json!({ "model": model }))).await?
+                    }
+                    Command::SetModes { plan, fast: f, effort: e } => {
+                        for msg in modes_requests(&mut ctl, (planning, fast, effort), (plan, f.is_some(), e), hand_holding.claude_mode()) {
+                            write_line(&mut cli.stdin, &msg).await?;
+                        }
+                        (planning, fast, effort) = (plan, f.is_some(), e);
                     }
                     Command::Respond { request_id, decision } => {
                         let request = pending.remove(&request_id).unwrap_or(json!({}));
@@ -1292,6 +1326,19 @@ mod tests {
         assert_eq!(msgs[0]["response"]["response"]["behavior"], "allow");
         assert_eq!(msgs[0]["response"]["response"]["updatedInput"]["plan"], request["input"]["plan"]);
         assert_eq!(msgs[1], json!({"type":"control_request","request_id":"trek-5","request":{"subtype":"set_permission_mode","mode":"bypassPermissions"}}));
+    }
+
+    #[test]
+    fn plan_fast_and_effort_change_mid_session() {
+        let mut ctl = Control { next_id: 0 };
+        assert!(modes_requests(&mut ctl, (false, false, Effort::High), (false, false, Effort::High), "acceptEdits").is_empty());
+        let on = modes_requests(&mut ctl, (false, false, Effort::High), (true, true, Effort::Max), "acceptEdits");
+        assert_eq!(on[0]["request"], json!({ "subtype": "set_permission_mode", "mode": "plan" }));
+        assert_eq!(on[1]["request"], json!({ "subtype": "apply_flag_settings", "settings": { "fastMode": true, "effortLevel": "max" } }));
+        // Out of plan mode, back to the thread's own access; fast mode off and effort left to Claude.
+        let off = modes_requests(&mut ctl, (true, true, Effort::Max), (false, false, Effort::Off), "acceptEdits");
+        assert_eq!(off[0]["request"], json!({ "subtype": "set_permission_mode", "mode": "acceptEdits" }));
+        assert_eq!(off[1]["request"], json!({ "subtype": "apply_flag_settings", "settings": { "fastMode": null, "effortLevel": null } }));
     }
 
     #[test]

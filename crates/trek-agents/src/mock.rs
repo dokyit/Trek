@@ -24,7 +24,8 @@
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
 //! | `mock:server` [dur]          | leaves a dev server running in the background (for `dur`, or  |
-//! |                              | until stopped), printing a line now and then                  |
+//! |                              | until stopped), printing a line now and then (to a file too,  |
+//! |                              | which its call names, as Claude Code's shells do)             |
 //! | `mock:watch` [dur]           | leaves a test watcher running; `dur` later (default 3s) it    |
 //! |                              | reports a failure and the agent takes a turn of its own       |
 //! | `mock:dev`                   | leaves a dev server and a quiet test watcher running          |
@@ -355,18 +356,37 @@ struct Job {
     task: BackgroundTask,
     /// What it has printed so far.
     output: String,
+    /// Where it writes all of that too, as Claude Code's shells do; gone once it is.
+    file: Option<std::path::PathBuf>,
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        if let Some(f) = &self.file {
+            let _ = std::fs::remove_file(f);
+        }
+    }
 }
 
 impl Jobs {
     fn add(&self, task: BackgroundTask) {
-        self.0.lock().unwrap().push(Job { task, output: String::new() });
+        self.0.lock().unwrap().push(Job { task, output: String::new(), file: None });
+    }
+
+    /// Add one that writes its whole output to a file, as well: where.
+    fn add_logged(&self, task: BackgroundTask) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("trek-mock-output");
+        let file = dir.join(format!("{}.output", task.id));
+        let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, ""));
+        self.0.lock().unwrap().push(Job { task, output: String::new(), file: Some(file.clone()) });
+        file
     }
 
     /// Take it off the list, with what it was (`None`: stopped already).
     fn take(&self, id: &str) -> Option<BackgroundTask> {
         let mut jobs = self.0.lock().unwrap();
         let ix = jobs.iter().position(|j| j.task.id == id)?;
-        Some(jobs.remove(ix).task)
+        Some(jobs.remove(ix).task.clone())
     }
 
     /// Take it off the list; `false` when it wasn't on it (stopped already).
@@ -385,6 +405,10 @@ impl Jobs {
         if let Some(j) = self.0.lock().unwrap().iter_mut().find(|j| j.task.id == id) {
             j.output.push_str(line);
             j.output.push('\n');
+            if let Some(f) = &j.file {
+                use std::io::Write as _;
+                let _ = std::fs::OpenOptions::new().append(true).open(f).and_then(|mut f| writeln!(f, "{line}"));
+            }
         }
     }
 
@@ -473,6 +497,7 @@ pub async fn run(
             }
             Command::SetHandHolding(h) => s.hand_holding = h,
             Command::SetModel { model, .. } => s.model = model,
+            Command::SetModes { plan, .. } => s.plan = plan,
             Command::ReadTask { id } => s.read_task(&id),
             Command::StopTask { id } => s.stop_task(&id),
             Command::Shutdown => break,
@@ -690,6 +715,7 @@ impl Session {
             }
             Ok(Command::Interrupt) => return Err(Stop::Interrupted),
             Ok(Command::SetHandHolding(h)) => self.hand_holding = h,
+            Ok(Command::SetModes { plan, .. }) => self.plan = plan,
             Ok(Command::ReadTask { id }) => self.read_task(&id),
             Ok(Command::StopTask { id }) => self.stop_task(&id),
             Ok(Command::Shutdown) | Err(_) => return Err(Stop::Closed),
@@ -726,6 +752,8 @@ impl Session {
             match note {
                 Note::Watcher(what) => {
                     self.think("The watcher has something.").await?;
+                    // Real time, whatever the pace: a turn of its own is seen at work, not just done.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                     self.tool("Read", "tests/parser.rs", "#[test]\nfn rejects_a_truncated_body() { … }", 120).await?;
                     self.say(&format!("{what} The parser accepts a body that ends early; I'll make it return `ParseError::Truncated`.")).await?;
                 }
@@ -1207,12 +1235,13 @@ impl Session {
     async fn server(&mut self, until: Option<Duration>) -> Step {
         let id = self.id("shell");
         self.tool_start(&id, "Run command", "npm run dev").await?;
-        self.background.add(BackgroundTask { id: id.clone(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: Some(id.clone()), readable: true, stoppable: true });
+        let log = self.background.add_logged(BackgroundTask { id: id.clone(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: Some(id.clone()), readable: true, stoppable: true });
         for line in ["> trail-app@0.4.0 dev", "> vite", "", "  VITE v5.4.2  ready in 312 ms", "", "  ➜  Local:   http://localhost:5173/"] {
             self.background.print(&id, line);
         }
         self.emit(self.background.event()).await?;
-        self.emit(AgentEvent::ToolFinished { id: id.clone(), output: format!("Command running in background with ID: {id}."), ok: true }).await?;
+        let output = format!("Command running in background with ID: {id}. Output is being written to: {}.", log.display());
+        self.emit(AgentEvent::ToolFinished { id: id.clone(), output, ok: true }).await?;
         let (jobs, events) = (self.background.clone(), self.events.clone());
         tokio::spawn(async move {
             let started = tokio::time::Instant::now();
@@ -1905,6 +1934,13 @@ mod tests {
             assert_eq!((b[0].kind, b[0].title.as_str(), b[0].readable, b[0].stoppable), (BackgroundKind::Shell, "npm run dev", true, true));
             let id = b[0].id.clone();
             assert!(text(&turn).contains("http://localhost:5173"));
+            // Its whole output goes to a file too, which its call says where, as Claude Code's do.
+            let file = turn.iter().find_map(|e| match e {
+                AgentEvent::ToolFinished { output, .. } => output.split("written to: ").nth(1).map(|p| std::path::PathBuf::from(p.trim_end_matches('.'))),
+                _ => None,
+            });
+            let file = file.expect("the call says where its output goes");
+            assert!(std::fs::read_to_string(&file).unwrap().contains("ready in 312 ms"));
             // Read between turns, with no turn of its own.
             m.send(Command::ReadTask { id: id.clone() }).await;
             let read = m.until(|e| matches!(e, AgentEvent::TaskOutput { .. })).await;
@@ -1912,6 +1948,7 @@ mod tests {
             assert!(!read.iter().any(|e| matches!(e, AgentEvent::TurnComplete { .. })));
             m.send(Command::StopTask { id: id.clone() }).await;
             assert_eq!(m.until(|e| matches!(e, AgentEvent::Background(_))).await.last(), Some(&AgentEvent::Background(vec![])));
+            assert!(!file.exists(), "it goes with the server");
             // Gone: nothing left to read.
             m.send(Command::ReadTask { id }).await;
             m.prompt("hello").await;

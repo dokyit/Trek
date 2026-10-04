@@ -169,6 +169,51 @@ fn rendering_cost() {
     });
 }
 
+/// Prints the cost of a sub-agent's row while it works: closed (its dot breathing, 5 fps) and
+/// open on its live activity (shimmering at the working bar's rate). Run with
+/// `cargo test -p trek-app -- --ignored --nocapture sub_agent_row_cost`.
+#[test]
+#[ignore = "benchmark; prints numbers"]
+fn sub_agent_row_cost() {
+    run(async |cx| {
+        let (trek, id) = busy_window(cx, 280).await;
+        use trek_agents::AgentEvent;
+        // The turn sends a scout out in the background and ends; the scout works on.
+        let scout = trek_agents::BackgroundTask { id: "task-1".into(), kind: trek_agents::BackgroundKind::Agent, title: "Map the HTTP routes".into(), call: Some("task-1".into()), readable: false, stoppable: true };
+        let mut events = vec![
+            AgentEvent::ToolFinished { id: "tool-1".into(), output: "ok".into(), ok: true },
+            AgentEvent::ToolStarted { id: "task-1".into(), title: "Subagent".into(), detail: "Map the HTTP routes".into() },
+            AgentEvent::Task { id: "task-1".into(), description: Some("Map the HTTP routes".into()), activity: Some("Reading src/routes.rs".into()), tool_uses: Some(4), done: None },
+            AgentEvent::Background(vec![scout]),
+            AgentEvent::ToolFinished { id: "task-1".into(), output: "Async agent launched successfully.".into(), ok: true },
+            AgentEvent::TextDelta("The scout is out.".into()),
+            AgentEvent::TurnComplete { error: None },
+        ];
+        for (title, detail) in [("Read", "src/routes.rs"), ("Search", "fn handler"), ("Read", "src/auth.rs"), ("Run command", "cargo check")] {
+            events.push(AgentEvent::TaskStep { task: "task-1".into(), title: title.into(), detail: detail.into() });
+        }
+        trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+        trek.render(cx);
+        trek.window(cx, |window, cx| {
+            window.activate_window();
+            window.blur(cx);
+        });
+        let row = trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "task-1"));
+        let measure = |cx: &mut TestAppContext, label: &str, fps: u32| {
+            let period = Duration::from_secs(1) / fps;
+            frames(cx, fps as usize + 1, period);
+            let f = frames(cx, 10 * fps as usize, period);
+            println!("sub-agent row {label} ({fps} fps): {:.2} ms CPU per frame in the process → {:.2}% CPU", ms(f.process), f.cpu(fps));
+            println!("  renders per frame: {:?}", f.renders);
+        };
+        measure(cx, "closed", crate::mascot::FPS as u32);
+        trek.click(cx, ("subagent", row));
+        trek.render(cx);
+        assert!(trek.visible(cx, ("subagent-activity", row)));
+        measure(cx, "open", crate::mascot::FPS as u32);
+    });
+}
+
 #[test]
 fn working_bar_frames_rerender_only_the_bar() {
     run(async |cx| {

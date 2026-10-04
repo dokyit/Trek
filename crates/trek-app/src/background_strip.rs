@@ -27,6 +27,11 @@ const PAD: f32 = 4.;
 const TICK: Duration = Duration::from_secs(2);
 /// The most of a task's output the popover shows: its last lines.
 const OUTPUT_LINES: usize = 400;
+/// A row's Stop slot, there or not, so the columns before it line up.
+const STOP_W: f32 = 20.;
+/// The first row's controls (open the rest, put the strip away); the rows under it keep the
+/// space empty, so their times and Stop buttons sit under the first's.
+const CONTROLS_W: f32 = 64.;
 
 pub struct BackgroundStrip {
     workspace: Entity<Workspace>,
@@ -69,6 +74,8 @@ struct TaskRow {
     readable: bool,
     stoppable: bool,
     stopping: bool,
+    /// Where the agent writes its whole output (the popover shows the end of it), if it says.
+    file: Option<std::path::PathBuf>,
 }
 
 impl BackgroundStrip {
@@ -121,6 +128,12 @@ impl BackgroundStrip {
                 readable: b.task.readable,
                 stoppable: b.task.stoppable,
                 stopping: b.stopping,
+                file: b.task.call.as_ref().and_then(|call| {
+                    live.items.iter().rev().find_map(|i| match i {
+                        trek_core::store::Item::Tool { id, output, .. } if id == call => output_file(output),
+                        _ => None,
+                    })
+                }),
             })
             .collect();
         (!rows.is_empty()).then(|| Shown {
@@ -353,9 +366,8 @@ impl BackgroundStrip {
                 .child(div().flex_none().max_w(relative(0.42)).truncate().font_family(theme.mono_font_family.clone()).text_color(theme.foreground.opacity(0.85)).child(r.title.clone()))
                 .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_xs().text_color(muted).child(line))
                 .child(div().flex_none().text_xs().text_color(muted).child(crate::time::elapsed(r.started.elapsed())))
-                .children(stop)
-                .children(toggle)
-                .children(hide)
+                .child(div().flex_none().w(px(STOP_W)).children(stop))
+                .child(h_flex().flex_none().w(px(CONTROLS_W)).justify_end().gap(px(4.)).children(toggle).children(hide))
                 .into_any_element(),
         };
         let entity = cx.entity();
@@ -393,6 +405,18 @@ impl BackgroundStrip {
                 .disabled(r.stopping)
                 .on_click(cx.listener(move |this, _, _, cx| this.stop(&id, cx)))
         });
+        // All of it, in a text editor: the popover only keeps the end.
+        let full = r.file.clone().map(|file| {
+            Button::new("bg-output-full")
+                .small()
+                .ghost()
+                .icon(Icon::new(IconName::ExternalLink))
+                .label("Full output")
+                .tooltip(file.display().to_string())
+                .on_click(move |_, _, _| {
+                    let _ = std::process::Command::new("/usr/bin/open").arg("-t").arg(&file).spawn();
+                })
+        });
         let note = if !r.readable {
             format!("{} doesn't share this task's output while it runs.", agent.display_name())
         } else if text.as_deref().is_some_and(|t| !t.trim().is_empty()) {
@@ -415,6 +439,7 @@ impl BackgroundStrip {
                     .child(kind_icon(r.kind).size(px(15.)).text_color(muted))
                     .child(div().min_w_0().flex_1().truncate().font_family(theme.mono_font_family.clone()).child(r.title.clone()))
                     .child(div().flex_none().text_xs().text_color(muted).child(format!("{} · {}", kind_label(r.kind), crate::time::elapsed(r.started.elapsed()))))
+                    .children(full)
                     .children(stop),
             )
             .when_some(text.filter(|t| !t.trim().is_empty()), |el, t| {
@@ -436,6 +461,15 @@ impl BackgroundStrip {
             .child(div().text_xs().text_color(muted).child(note))
             .into_any_element()
     }
+}
+
+/// Where an agent writes a background command's whole output, as the call's result says
+/// (Claude Code: "Command running in background with ID: b1x2. Output is being written to:
+/// /private/tmp/claude-501/…/tasks/b1x2.output").
+fn output_file(result: &str) -> Option<std::path::PathBuf> {
+    let rest = result.split("Output is being written to").nth(1)?;
+    let path = rest.trim_start_matches(':').trim_start().split(|c: char| c.is_whitespace() || c == ';').next()?.trim_end_matches('.');
+    path.starts_with('/').then(|| std::path::PathBuf::from(path))
 }
 
 /// The icon a task's kind wears.
@@ -507,6 +541,22 @@ impl Render for BackgroundStrip {
 pub fn cached(strip: &Entity<BackgroundStrip>, cx: &App) -> AnyElement {
     let h = strip.read(cx).height();
     strip.clone().cached(StyleRefinement::default().w_full().flex_none().h(px(h))).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_file;
+    use std::path::PathBuf;
+
+    #[test]
+    fn where_a_command_s_whole_output_goes() {
+        let claude = "Command running in background with ID: b1x2. Output is being written to: /private/tmp/claude-501/-Users-me-app/9f/tasks/b1x2.output.";
+        assert_eq!(output_file(claude), Some(PathBuf::from("/private/tmp/claude-501/-Users-me-app/9f/tasks/b1x2.output")));
+        let monitor = "Monitor started. Output is being written to /tmp/claude-501/x/tasks/m7.output; use Read on that path for interim output.";
+        assert_eq!(output_file(monitor), Some(PathBuf::from("/tmp/claude-501/x/tasks/m7.output")));
+        assert_eq!(output_file("Command running in background with ID: b1x2."), None);
+        assert_eq!(output_file("Output is being written to: somewhere"), None, "only a path");
+    }
 }
 
 #[cfg(test)]

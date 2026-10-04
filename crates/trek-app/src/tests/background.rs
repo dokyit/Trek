@@ -12,7 +12,7 @@ use serde_json::json;
 use std::cell::RefCell;
 use std::rc::Rc;
 use trek_core::orchestrate::{Outcome, Report};
-use trek_core::store::{Item, Section, Store};
+use trek_core::store::{Item, Section, Store, ToolStatus};
 use trek_core::{Effort, HandHolding, RunState};
 
 /// The section `id` is listed in.
@@ -81,11 +81,12 @@ fn an_answer_with_a_server_left_running_is_done_not_working() {
         trek.render(cx);
         assert!(trek.visible(cx, "background-strip"));
         assert_eq!(strip(&trek, cx), ["npm run dev — ➜  Local:   http://localhost:5173/ (stop)"]);
-        // Its output, in full, with Stop.
+        // The end of its output, with Stop, and the whole of it a click away (the agent says where).
         trek.click(cx, ("bg-task", 0usize));
         assert!(cx.read(|cx| trek.root.read(cx).background_strip.read(cx).output_open()).is_some());
         trek.render(cx);
         assert!(trek.visible(cx, "bg-output-card") && trek.visible(cx, "bg-output-text"));
+        assert!(trek.visible(cx, "bg-output-full"));
         trek.click(cx, "bg-output-stop");
         let t = id.clone();
         trek.wait(cx, "the server to stop", move |ws| ws.live[&t].background.is_empty()).await;
@@ -130,6 +131,54 @@ fn background_work_that_reports_makes_the_agent_work_again() {
         assert!(trek.read(cx, |ws, _| ws.live[&id].background.is_empty()));
         trek.render(cx);
         assert!(strip(&trek, cx).is_empty());
+    });
+}
+
+#[test]
+fn turns_a_watcher_wakes_the_agent_for_raise_one_alert_a_while() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let seen = alerts(&trek, cx);
+        // A watcher wakes the agent, again and again: one turn of its own after another.
+        let woken = |text: &str, error: Option<&str>| {
+            vec![trek_agents::AgentEvent::TextDelta(text.into()), trek_agents::AgentEvent::TurnComplete { error: error.map(str::to_string) }]
+        };
+        trek.update(cx, |ws, cx| ws.apply_events(&id, woken("The watcher caught a failure; fixed it.", None), cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, woken("Another one; fixed too.", None), cx));
+        assert_eq!(seen.borrow().len(), 1, "one alert for the two: {:?}", seen.borrow());
+        assert!(seen.borrow()[0].starts_with("Finished"));
+        // One that fails says so whatever.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, woken("Trying again.", Some("Claude Code crashed")), cx));
+        assert!(seen.borrow().last().is_some_and(|m| m.starts_with("Failed")), "{:?}", seen.borrow());
+        // The user's own turns raise theirs as ever.
+        trek.send(cx, "thanks");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(seen.borrow().len() == 3 && seen.borrow()[2].starts_with("Finished"), "{:?}", seen.borrow());
+    });
+}
+
+#[test]
+fn a_settled_thread_with_work_in_the_background_says_so_in_its_line() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        let quiet = trek.send(cx, "hello");
+        assert_ne!(quiet, id);
+        trek.wait_done(cx, &quiet, RunState::Idle).await;
+        trek.update(cx, |ws, cx| {
+            ws.settle(&id, cx);
+            ws.settle(&quiet, cx);
+            ws.settled_open = true;
+            ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx);
+        });
+        trek.render(cx);
+        assert_eq!(section(&trek, cx, &id), Some(Section::Settled), "settled, it stays settled");
+        assert!(trek.visible(cx, format!("line-at-work-{id}")), "its line has the dot");
+        assert!(!trek.visible(cx, format!("line-at-work-{quiet}")));
     });
 }
 
@@ -311,6 +360,18 @@ fn a_parent_whose_turn_failed_with_messages_left_queued_still_wakes() {
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1);
         // The report isn't held back by that.
         wait_woken(&trek, cx, &id).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Nor does the follow-up, written for the turn that failed, go out after the wake-up's.
+        cx.run_until_parked();
+        let sent = |trek: &Trek, cx: &TestAppContext| trek.items(cx, &id).iter().any(|i| matches!(i, Item::User { text, .. } if text == "and then this"));
+        assert!(!sent(&trek, cx), "not sent unattended");
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1);
+        // On screen again, it's back in the composer.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.render(cx);
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0);
+        assert!(trek.composer_text(cx).contains("and then this"), "{}", trek.composer_text(cx));
+        assert!(!sent(&trek, cx));
     });
 }
 
@@ -389,6 +450,9 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
         assert_eq!(section(&trek, cx, &busy), Some(Section::Inbox));
         assert!(wakes(&trek, cx, &nested).is_empty());
         assert_eq!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap().len()), 2, "the cut-off parent's are kept");
+        // And its transcript says so, under the turn the quit cut off.
+        let said = trek.read(cx, |ws, _| ws.store.items(&busy).unwrap());
+        assert!(matches!(&said[said.len() - 2..], [Item::Notice { text: cut }, Item::Notice { text: kept }] if cut == trek_core::store::INTERRUPTED_BY_QUIT && kept.starts_with("2 sub-agents' reports are kept")), "{said:?}");
         // The user picks it up: once that turn is over, it hears both.
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(busy.clone()), cx));
         trek.send(cx, "carry on");
@@ -402,6 +466,39 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
         let wake = items.iter().position(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))).unwrap();
         assert!(carry < wake, "after the user's own turn");
         assert!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap()).is_empty(), "nothing left to deliver");
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+#[test]
+fn sub_agents_out_in_the_background_when_trek_quit_end_with_it() {
+    run(async |cx| {
+        let dir = new_project("orphans");
+        let db = dir.join("trek.sqlite");
+        let project = new_project("project");
+        // Answered, with the agent's own scout still out: stored idle, its row still running.
+        let id = {
+            let store = Store::open(&db).expect("store");
+            let t = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            store_items(&store, &t.id, vec![
+                Item::User { text: "send a scout".into(), images: vec![], at: Some(1), resume: None, aside: false },
+                Item::Tool { id: "agent-1".into(), title: "Subagent".into(), detail: "Map the HTTP routes".into(), output: "Async agent launched successfully.".into(), status: ToolStatus::Running },
+                Item::Assistant { text: "The scout is out.".into() },
+            ]);
+            t.id
+        };
+        let mut s = settings();
+        s.user_projects.push(project.display().to_string());
+        let (ws, root, window) = launch(cx, Store::open(&db).expect("store"), s);
+        let trek = Trek { ws, root, window, project };
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.render(cx);
+        // No session of this run has it: it ended with the last one, and the transcript says so.
+        for items in [trek.items(cx, &id), trek.read(cx, |ws, _| ws.store.items(&id).unwrap())] {
+            assert!(items.iter().any(|i| matches!(i, Item::Tool { id, status: ToolStatus::Failed, .. } if id == "agent-1")), "{items:?}");
+            assert!(matches!(items.last(), Some(Item::Notice { text }) if text == crate::workspace::ORPHANS_ENDED), "{items:?}");
+        }
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
         let _ = std::fs::remove_dir_all(dir);
     });
 }
@@ -540,27 +637,49 @@ fn session_alive(trek: &Trek, cx: &TestAppContext, id: &str) -> bool {
 }
 
 #[test]
-fn a_setting_read_at_launch_waits_for_background_work_before_it_restarts_the_session() {
+fn a_setting_read_at_launch_reaches_a_session_with_background_work_without_restarting_it() {
     run(async |cx| {
         let trek = open(cx);
         let id = trek.send(cx, "mock:server");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        // The server would go with the session: the restart waits.
-        toggle_fast(&trek, cx, &Scope::Main);
+        // A restart would end the server: the session is told the new setting as it runs.
+        trek.update(cx, |ws, cx| {
+            let mut p = ws.prefs_in(&Scope::Main);
+            p.plan = true;
+            ws.set_prefs_in(&Scope::Main, p, cx);
+        });
         cx.run_until_parked();
         assert!(session_alive(&trek, cx, &id), "not restarted under the server");
         assert_eq!(trek.read(cx, |ws, _| ws.live[&id].background.len()), 1);
-        // Stopped, it's over: the session restarts (and resumes) now.
-        let task = trek.read(cx, |ws, _| ws.live[&id].background[0].task.id.clone());
-        trek.update(cx, |ws, cx| ws.stop_background(&id, &task, cx));
-        let t = id.clone();
-        trek.wait(cx, "the restart", move |ws| ws.live[&t].background.is_empty() && ws.live[&t].commands.is_none()).await;
-        trek.render(cx);
-        assert!(!trek.visible(cx, format!("card-background-{id}")) && !trek.visible(cx, "background-strip"));
-        // The next message gets a session with the new setting.
-        trek.send(cx, "hello");
+        // The next message runs in plan mode: a plan to approve, nothing changed.
+        trek.send(cx, "refactor the router");
+        trek.wait_needs_you(cx, &id).await;
+        assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.iter().any(|p| matches!(p.prompt, Some(trek_agents::Prompt::Plan(_))))), "a plan, in plan mode");
+        assert_eq!(trek.read(cx, |ws, _| ws.live[&id].background.len()), 1, "the server is still up");
+    });
+}
+
+#[test]
+fn a_setting_changed_mid_turn_with_background_work_reaches_the_session_after_the_turn() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert!(session_alive(&trek, cx, &id));
+        trek.send(cx, "mock:long 600s");
+        let t = id.clone();
+        trek.wait(cx, "the long turn", move |ws| ws.turn_running(&t)).await;
+        trek.update(cx, |ws, cx| {
+            let mut p = ws.prefs_in(&Scope::Main);
+            p.plan = true;
+            ws.set_prefs_in(&Scope::Main, p, cx);
+        });
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        cx.run_until_parked();
+        assert!(session_alive(&trek, cx, &id) && trek.read(cx, |ws, _| ws.live[&id].background.len()) == 1, "the server outlives the change");
+        trek.send(cx, "refactor the router");
+        trek.wait_needs_you(cx, &id).await;
+        assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.iter().any(|p| matches!(p.prompt, Some(trek_agents::Prompt::Plan(_))))));
     });
 }
 
@@ -575,12 +694,12 @@ fn a_setting_read_at_launch_doesn_t_strand_a_thread_waiting_on_its_agent_s_own_s
         cx.run_until_parked();
         assert!(session_alive(&trek, cx, &id), "its sub-agents would never report");
         assert!(trek.read(cx, |ws, _| ws.waiting(&id)));
-        // They report, the agent takes its turn, and only then does the session restart.
+        // It took the setting as it runs; they report, and the agent takes its turn in the same
+        // session.
         let p = id.clone();
         trek.wait(cx, "the scouts' report", move |ws| ws.live[&p].items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("reported back")))).await;
         trek.wait_done(cx, &id, RunState::Idle).await;
-        let p = id.clone();
-        trek.wait(cx, "the restart", move |ws| ws.live[&p].commands.is_none()).await;
+        assert!(session_alive(&trek, cx, &id), "no restart");
         assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
         assert_eq!(section(&trek, cx, &id), Some(Section::Inbox));
     });
@@ -785,6 +904,39 @@ fn a_turn_blocked_on_its_agent_s_own_sub_agent_says_it_waits_on_it() {
         assert_eq!(crate::sidebar::card_tip(&kids, &background).as_deref(), Some("Sub-agents at work:\nSurvey the test suite"));
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
+    });
+}
+
+#[test]
+fn a_codex_turn_in_its_wait_call_says_it_waits_on_its_sub_agent() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:long 600s");
+        let t = id.clone();
+        trek.wait(cx, "the turn", move |ws| ws.turn_running(&t)).await;
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // As Codex's driver reports a turn that spawns a sub-agent and then waits for it: the spawn
+        // call returns at once (its row runs on while its task does), and `wait` gets no row.
+        use trek_agents::AgentEvent;
+        let events = vec![
+            AgentEvent::TextDelta("Spawning a helper.".into()),
+            AgentEvent::ToolStarted { id: "call1".into(), title: "Subagent".into(), detail: "Count the files".into() },
+            AgentEvent::Task { id: "call1".into(), description: Some("Count the files".into()), activity: None, tool_uses: None, done: None },
+            AgentEvent::ToolFinished { id: "call1".into(), output: String::new(), ok: true },
+            AgentEvent::Task { id: "call1".into(), description: None, activity: Some("Running ls".into()), tool_uses: Some(1), done: None },
+        ];
+        trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+        trek.render(cx);
+        assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Waiting on a sub-agent")), "{:?}", trek.working_bar(cx));
+        // `wait` reports it done: the turn goes on with its own work.
+        let done = vec![
+            AgentEvent::Task { id: "call1".into(), description: None, activity: None, tool_uses: None, done: Some(true) },
+            AgentEvent::ToolFinished { id: "call1".into(), output: "3 files".into(), ok: true },
+        ];
+        trek.update(cx, |ws, cx| ws.apply_events(&id, done, cx));
+        trek.render(cx);
+        assert!(trek.working_bar(cx).is_some_and(|l| !l.starts_with("Waiting")), "{:?}", trek.working_bar(cx));
     });
 }
 
