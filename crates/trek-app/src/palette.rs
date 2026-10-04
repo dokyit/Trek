@@ -16,6 +16,8 @@ const INDIGO: (u32, u32) = (0x8B8CFF, 0x5B5BD6);
 const EMERALD: (u32, u32) = (0x3FCF8E, 0x177D4E);
 const RED: (u32, u32) = (0xFF5A5F, 0xCC343A);
 const SKY: (u32, u32) = (0x5AA9FF, 0x2B6CC4);
+/// Links in agent answers: ember, a shade darker on Paper so it reads as body-size text.
+pub(crate) const LINK: (u32, u32) = (0xFF7A3D, 0xC2410C);
 
 pub fn ember(cx: &App) -> Hsla {
     pick(cx, EMBER)
@@ -34,6 +36,9 @@ pub fn red(cx: &App) -> Hsla {
 }
 pub fn sky(cx: &App) -> Hsla {
     pick(cx, SKY)
+}
+pub fn link(cx: &App) -> Hsla {
+    pick(cx, LINK)
 }
 
 /// Sunrise gradient stops used by the logo and the effort meter.
@@ -80,7 +85,7 @@ mod tests {
     fn status_colours_are_readable_as_small_text_on_paper() {
         let surfaces = paper_surfaces();
         assert_eq!(surfaces.len(), 4);
-        for (name, (_, paper)) in [("amber", AMBER), ("indigo", INDIGO), ("emerald", EMERALD), ("red", RED), ("sky", SKY)] {
+        for (name, (_, paper)) in [("amber", AMBER), ("indigo", INDIGO), ("emerald", EMERALD), ("red", RED), ("sky", SKY), ("link", LINK)] {
             for bg in &surfaces {
                 let ratio = contrast(paper, *bg);
                 assert!(ratio >= 4.5, "{name} #{paper:06X} on #{bg:06X}: {ratio:.2}:1");

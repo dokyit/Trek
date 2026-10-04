@@ -206,7 +206,7 @@ impl Sidebar {
                     let gear_id = id.clone();
                     ui::menu_row(SharedString::from(format!("pf-{id}")), current.as_ref() == Some(&id), cx)
                         .group("pf-row")
-                        .child(ui::project_badge(&name, self.workspace.read(cx).project_icon(&path).as_deref(), cx))
+                        .child(ui::project_badge(&name, &self.workspace.read(cx).project_look(&path), cx))
                         .child(div().flex_1().min_w_0().truncate().child(label))
                         .child(
                             gpui_kit::component::button::Button::new(SharedString::from(format!("pf-gear-{id}")))
@@ -360,7 +360,7 @@ impl Sidebar {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(ui::project_badge(project, self.workspace.read(cx).thread_project_icon(t).as_deref(), cx))
+                    .child(ui::project_badge(project, &self.workspace.read(cx).thread_project_look(t), cx))
                     .child(div().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(project.to_string()))
                     .when_some(t.worktree.as_ref(), |el, wt| el.child(crate::worktree_ui::branch_chip(SharedString::from(format!("card-branch-{}", t.id)), wt, cx)))
                     .child(div().flex_1())
@@ -948,7 +948,7 @@ impl Render for Sidebar {
             .collect();
         let names: HashMap<String, String> = ws.projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
         let paths: HashMap<String, std::path::PathBuf> = ws.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
-        let icons: HashMap<String, Option<String>> = ws.projects.iter().map(|p| (p.id.clone(), ws.project_icon(&p.path))).collect();
+        let looks: HashMap<String, crate::ui::ProjectLook> = ws.projects.iter().map(|p| (p.id.clone(), ws.project_look(&p.path))).collect();
         let project_of = |t: &Thread| t.project_id.as_ref().and_then(|p| names.get(p).cloned()).unwrap_or_else(|| "No project".into());
         let theme = cx.theme().clone();
 
@@ -1047,7 +1047,7 @@ impl Render for Sidebar {
                         .rounded(px(8.))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(ui::project_badge(&name, icons.get(&pid).cloned().flatten().as_deref(), cx))
+                        .child(ui::project_badge(&name, &looks.get(&pid).cloned().unwrap_or_default(), cx))
                         .child(div().truncate().child(name.clone()));
                     history = match paths.get(&pid) {
                         Some(path) => history.child(self.with_project_menu(header, pid.clone(), name.clone(), path.clone())),

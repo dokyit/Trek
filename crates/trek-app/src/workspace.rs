@@ -1461,16 +1461,37 @@ impl Workspace {
         self.settings.projects.get(&path.display().to_string()).cloned().unwrap_or_default()
     }
 
-    /// `lucide:<name>` / `file:<path>` for a project folder, if the user chose one.
-    pub fn project_icon(&self, path: &std::path::Path) -> Option<String> {
-        self.settings.projects.get(&path.display().to_string()).and_then(|p| p.icon.clone())
+    /// The icon and colour chosen for a project folder, if any.
+    pub fn project_look(&self, path: &std::path::Path) -> crate::ui::ProjectLook {
+        self.settings.projects.get(&path.display().to_string()).map(crate::ui::ProjectLook::of).unwrap_or_default()
     }
 
-    /// Icon for the project a thread belongs to.
-    pub fn thread_project_icon(&self, t: &Thread) -> Option<String> {
+    /// The look of the project a thread belongs to.
+    pub fn thread_project_look(&self, t: &Thread) -> crate::ui::ProjectLook {
+        let project = t.project_id.as_ref().and_then(|pid| self.projects.iter().find(|p| &p.id == pid));
+        project.map(|p| self.project_look(&p.path)).unwrap_or_default()
+    }
+
+    /// The colour the folders of a thread's project are tinted with (`ui::project_tint`).
+    pub fn thread_project_tint(&self, t: &Thread, cx: &App) -> Option<gpui_kit::Hsla> {
         let pid = t.project_id.as_ref()?;
         let p = self.projects.iter().find(|p| &p.id == pid)?;
-        self.project_icon(&p.path)
+        Some(crate::ui::project_tint(&p.name, &self.project_look(&p.path), cx))
+    }
+
+    /// The folder tint of the project in the project folder `path`.
+    pub fn project_tint_at(&self, path: &std::path::Path, cx: &App) -> Option<gpui_kit::Hsla> {
+        let p = self.projects.iter().find(|p| p.path == path)?;
+        Some(crate::ui::project_tint(&p.name, &self.project_look(&p.path), cx))
+    }
+
+    /// The folder tint of the project on screen: the thread's, or the draft's.
+    pub fn current_project_tint(&self, cx: &App) -> Option<gpui_kit::Hsla> {
+        match &self.route {
+            Route::Thread(id) => self.thread(id).and_then(|t| self.thread_project_tint(t, cx)),
+            Route::Draft { project: Some(path) } => self.project_tint_at(path, cx),
+            _ => None,
+        }
     }
 
     pub fn update_project_prefs(&mut self, path: &std::path::Path, f: impl FnOnce(&mut trek_core::settings::ProjectPrefs), cx: &mut Context<Self>) {

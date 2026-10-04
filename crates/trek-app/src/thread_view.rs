@@ -11,7 +11,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
@@ -274,6 +274,8 @@ struct Shown {
     appearance: trek_core::settings::Appearance,
     /// Where its sub-agents stand: they move on without a new transcript revision.
     tasks: Vec<(String, TaskState)>,
+    /// Its project's colour (path chips' folders), which can change in another window.
+    folder: Option<Hsla>,
 }
 
 /// One side of a handoff divider: the model with its agent's name ("Claude Opus 5.5", "Codex
@@ -374,6 +376,7 @@ impl ThreadView {
             end: id.as_ref().and_then(|id| crate::activity::transcript_end(ws, id)),
             appearance: ws.settings.appearance.clone(),
             tasks: id.as_ref().map(|id| ws.children(id).into_iter().map(|t| (t.id.clone(), ws.task_state(&t.id))).collect()).unwrap_or_default(),
+            folder: id.as_ref().and_then(|id| ws.thread(id)).and_then(|t| ws.thread_project_tint(t, cx)),
         };
         let end = shown.end;
         let ticking = ws.any_task_live_in(&self.scope);
@@ -1003,7 +1006,7 @@ impl ThreadView {
                 .into_any_element()
             }
             (Row::Assistant { ix, .. }, _) => match md {
-                Some(md) => column(div().py_2().text_size(text_size).line_height(relative(1.62)).child(crate::md::view(&md, at.cwd.clone(), cx).stream_fade(true)))
+                Some(md) => column(div().py_2().child(crate::md::view(&md, at.cwd.clone(), at.folder, text_size, cx).motion(crate::md::streaming())))
                     .id(("answer", ix))
                     .test_support()
                     .into_any_element(),
@@ -1015,6 +1018,7 @@ impl ThreadView {
                     .child(
                         h_flex()
                             .id(("reasoning", ix))
+                            .test_support()
                             .gap_1()
                             .text_sm()
                             .text_color(theme.muted_foreground)
@@ -1025,14 +1029,7 @@ impl ThreadView {
                     )
                     .when_some(md.filter(|_| open), |el, md| {
                         el.child(
-                            div()
-                                .ml_2()
-                                .pl_3()
-                                .border_l_2()
-                                .border_color(theme.border)
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(TextView::new(&md).selectable(true)),
+                            div().ml_2().pl_3().py_1().border_l_2().border_color(theme.border).child(crate::md::thought(&md, at.cwd.clone(), at.folder, text_size * 0.93, cx)),
                         )
                     }),
             )
@@ -1211,9 +1208,7 @@ impl ThreadView {
                                     .pl(px(21.))
                                     .border_l_1()
                                     .border_color(theme.foreground.opacity(0.07))
-                                    .text_size(text_size * 0.93)
-                                    .line_height(relative(1.55))
-                                    .child(crate::md::view(&md, at.cwd.clone(), cx)),
+                                    .child(crate::md::view(&md, at.cwd.clone(), at.folder, text_size * 0.93, cx)),
                             )
                         }),
                 )
@@ -1682,6 +1677,7 @@ impl ThreadView {
         }
         let md = self.plan_md.as_ref().map(|(_, m, _)| m.clone());
         let cwd = self.workspace.read(cx).cwd_in(&self.scope);
+        let folder = self.workspace.read(cx).thread_in(&self.scope).and_then(|t| self.workspace.read(cx).thread_project_tint(t, cx));
         let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
         let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id, request_id);
         v_flex()
@@ -1695,7 +1691,7 @@ impl ThreadView {
             .border_color(palette::indigo(cx).opacity(0.45))
             .bg(theme.secondary)
             .child(h_flex().gap_2().text_sm().child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(palette::indigo(cx))).child(div().font_semibold().child(format!("{agent}'s plan"))))
-            .child(div().id("plan-scroll").flex_1().min_h_0().overflow_y_scroll().text_size(px(13.5)).line_height(relative(1.55)).children(md.map(|m| crate::md::view(&m, cwd, cx))))
+            .child(div().id("plan-scroll").flex_1().min_h_0().overflow_y_scroll().children(md.map(|m| crate::md::view(&m, cwd, folder, px(13.5), cx))))
             .child(
                 h_flex()
                     .gap_2()
@@ -1921,6 +1917,8 @@ struct RowContext {
     worktree_missing: bool,
     text_size: Pixels,
     cwd: Option<std::path::PathBuf>,
+    /// Folder icons' tint in path chips: the thread's project colour.
+    folder: Option<Hsla>,
     /// The search-result tint fades (the window is in front and motion isn't reduced).
     animate: bool,
     /// Working sub-agents' dots breathe, at `clock` (seconds).
@@ -1958,6 +1956,7 @@ impl Render for ThreadView {
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
             cwd: ws.cwd_in(&self.scope),
+            folder: t.and_then(|t| ws.thread_project_tint(t, cx)),
             animate: self.animate(window, cx),
             pulse: self.animate(window, cx) && self._ticker.is_some(),
             clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,

@@ -34,6 +34,7 @@ mod worktree_ui;
 #[cfg(test)]
 mod tests;
 
+use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::*;
 use trek_core::settings::ThemeChoice;
@@ -80,6 +81,11 @@ fn apply_theme(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
         ThemeChoice::Paper => Theme::change(ThemeMode::Light, window, cx),
         ThemeChoice::System => Theme::sync_system_appearance(window, cx),
     }
+    // Trek's theme files leave syntax colours out, so code blocks would keep the light palette on
+    // Night: give each mode its own (the markdown views' highlighter follows it).
+    Theme::update(cx, |theme| {
+        theme.highlight_theme = if theme.mode.is_dark() { HighlightTheme::default_dark() } else { HighlightTheme::default_light() };
+    });
     // Loading a theme resets the rem to the theme file's size; put the user's back.
     if let Some(ws) = cx.try_global::<workspace::GlobalWorkspace>().map(|g| g.0.clone()) {
         let size = ws.read(cx).settings.appearance.ui_font_size();

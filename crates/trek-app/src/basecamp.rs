@@ -394,14 +394,14 @@ impl Basecamp {
             ));
         }
         if let Some(top) = recap.projects.first() {
-            let icon = ws.project(&top.id).and_then(|p| ws.project_icon(&p.path));
+            let look = ws.project(&top.id).map(|p| ws.project_look(&p.path)).unwrap_or_default();
             let mut note = basecamp::count(top.prompts, "prompt", "prompts");
             if top.tokens > 0 {
                 note.push_str(&format!(" · {} tokens", fmt_tokens(top.tokens)));
             }
             tiles.push(tile(
                 "You worked most on",
-                h_flex().gap(px(8.)).min_w_0().child(ui::project_badge(&top.name, icon.as_deref(), cx)).child(figure(top.name.clone())),
+                h_flex().gap(px(8.)).min_w_0().child(ui::project_badge(&top.name, &look, cx)).child(figure(top.name.clone())),
                 note,
                 cx,
             ));
@@ -714,8 +714,8 @@ fn narrative(spans: &[Span], p: f32, workspace: &Entity<Workspace>, cx: &App) ->
                 space_before = false;
             }
             Span::Project(name) => {
-                let icon = ws.projects.iter().find(|pr| &pr.name == name).and_then(|pr| ws.project_icon(&pr.path));
-                let chip = h_flex().gap(px(6.)).child(ui::project_badge(name, icon.as_deref(), cx)).child(div().text_color(strong).font_medium().child(name.clone()));
+                let look = ws.projects.iter().find(|pr| &pr.name == name).map(|pr| ws.project_look(&pr.path)).unwrap_or_default();
+                let chip = h_flex().gap(px(6.)).child(ui::project_badge(name, &look, cx)).child(div().text_color(strong).font_medium().child(name.clone()));
                 push(&mut groups, chip.into_any_element(), space_before);
                 space_before = false;
             }

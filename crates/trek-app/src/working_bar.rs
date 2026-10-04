@@ -1,6 +1,7 @@
-//! The bar above the composer while an agent works. Its header names who's at it and for how
-//! long ("Opus 5.5 working for 17s") beside the hiker on its trail; above it, the turn's live group
-//! of tool calls: a summary line ("Ran 2 commands · Exploring the project") and a row per call,
+//! The bar above the composer while an agent works. Its header says who's at it (the agent's
+//! logo), a trail word that changes every few seconds and how long it's been ("Breaking trail…
+//! 17s"), beside the hiker on its trail; above it, the turn's live group of tool calls: a summary
+//! line ("Ran 2 commands · Exploring the project") and a row per call,
 //! the newest sliding in. When the group ends it folds into its summary, which the transcript
 //! then shows as a row of its own. Clicking the group opens it in the transcript instead, where
 //! each call's output can be read while the turn goes on. Under a transcript too short to reach
@@ -75,8 +76,6 @@ struct Shown {
 #[derive(Clone, PartialEq)]
 struct Header {
     agent: AgentId,
-    /// "Opus 5.5", or the agent's name when it doesn't say.
-    model: String,
     started: Option<Instant>,
     agents: usize,
 }
@@ -148,21 +147,6 @@ fn group(ws: &Workspace, id: &str, tools: &[usize], headline: Option<&str>) -> O
     })
 }
 
-/// The model `thread` runs, as people call it ("Opus 5.5"), or its agent's name.
-fn model_name(ws: &Workspace, thread: &trek_core::store::Thread) -> String {
-    let models = ws.models_for(&thread.agent);
-    let named = match thread.model.as_deref() {
-        Some(m) => Some(models.iter().find(|i| crate::composer::same_model(m, &i.id)).map(|i| i.name.clone()).unwrap_or_else(|| short_model(m))),
-        None => crate::composer::default_model(&models).map(|m| m.name.clone()),
-    };
-    named.filter(|n| !n.is_empty()).unwrap_or_else(|| thread.agent.display_name())
-}
-
-/// A model id without its provider path: `openrouter/qwen/qwen3-coder` → "qwen3-coder".
-fn short_model(id: &str) -> String {
-    id.rsplit('/').next().unwrap_or(id).to_string()
-}
-
 fn ease_out(t: f32) -> f32 {
     1. - (1. - t.clamp(0., 1.)).powi(3)
 }
@@ -213,7 +197,6 @@ impl WorkingBar {
         // this spot then).
         let header = (thread.run_state == RunState::Working && live.permissions.is_empty()).then(|| Header {
             agent: thread.agent.clone(),
-            model: model_name(ws, thread),
             started: live.turn_started,
             agents: live.active_tasks().max(live.background),
         });
@@ -685,9 +668,10 @@ impl Render for WorkingBar {
                                 .pb(px(4.))
                                 .gap(px(6.))
                                 .text_size(px(13.))
+                                // The logo says which agent; the composer's pill names the model.
                                 .child(crate::ui::agent_logo(&h.agent, px(14.), cx))
-                                .child(div().flex_none().text_color(theme.foreground.opacity(0.92)).child(h.model.clone()))
-                                .child(div().min_w_0().truncate().text_color(muted).child(working_for(elapsed)))
+                                .child(div().min_w_0().truncate().child(shimmer(trail_word(&shown.thread, elapsed).into(), clock, still, theme.foreground.opacity(0.88), theme.foreground)))
+                                .children(elapsed.map(|d| div().flex_none().text_color(muted).child(crate::time::elapsed(d))))
                                 .when(h.agents > 0, |el| el.child(div().flex_none().text_color(muted).child(agents_out(h.agents)))),
                         )
                         .child(div().flex_1().min_w_0().child(crate::mascot::trail(clock, still, cx))),
@@ -704,12 +688,10 @@ impl Render for WorkingBar {
     }
 }
 
-/// "working for 17s", or "working" before the clock starts.
-fn working_for(elapsed: Option<Duration>) -> String {
-    match elapsed {
-        Some(d) => format!("working for {}", crate::time::elapsed(d)),
-        None => "working".into(),
-    }
+/// "Breaking trail…": what the turn in `thread` is doing after `elapsed` (the first word before
+/// its clock starts).
+pub fn trail_word(thread: &str, elapsed: Option<Duration>) -> String {
+    format!("{}…", crate::mascot::word(thread, elapsed.map_or(0, |d| d.as_secs())))
 }
 
 /// The bar as a window lays it out: its three parts each cached at their current height (zero
@@ -784,10 +766,16 @@ pub fn agents_out(n: usize) -> String {
 
 #[cfg(test)]
 impl WorkingBar {
-    /// The header as shown: "Mock Swift working for 4s · 2 agents out", or `None` when hidden.
+    /// The header as shown: "Breaking trail… 4s · 2 agents out", or `None` when hidden.
     pub(crate) fn label(&self) -> Option<String> {
-        let h = self.shown.as_ref()?.header.as_ref()?;
-        let mut out = format!("{} {}", h.model, working_for(h.started.map(|t| t.elapsed())));
+        let s = self.shown.as_ref()?;
+        let h = s.header.as_ref()?;
+        let elapsed = h.started.map(|t| t.elapsed());
+        let mut out = trail_word(&s.thread, elapsed);
+        if let Some(d) = elapsed {
+            out.push(' ');
+            out.push_str(&crate::time::elapsed(d));
+        }
         if h.agents > 0 {
             out.push(' ');
             out.push_str(&agents_out(h.agents));
@@ -834,7 +822,7 @@ impl WorkingBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, short_model, working_for};
+    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, trail_word};
     use gpui_kit::{Hsla, px};
     use std::time::Duration;
 
@@ -884,11 +872,13 @@ mod tests {
     }
 
     #[test]
-    fn model_ids_lose_their_provider_path() {
-        assert_eq!(short_model("openrouter/qwen/qwen3-coder"), "qwen3-coder");
-        assert_eq!(short_model("gpt-5.6-luna"), "gpt-5.6-luna");
-        assert_eq!(working_for(Some(Duration::from_secs(17))), "working for 17s");
-        assert_eq!(working_for(None), "working");
+    fn the_header_says_a_trail_word_that_moves_on() {
+        let word = trail_word("t1", Some(Duration::from_secs(17)));
+        assert!(word.ends_with('…') && crate::mascot::WORDS.contains(&word.trim_end_matches('…')), "{word}");
+        // It holds within a step and the clock not having started reads as its first second.
+        assert_eq!(trail_word("t1", Some(Duration::from_millis(16_100))), word);
+        assert_eq!(trail_word("t1", None), trail_word("t1", Some(Duration::ZERO)));
+        assert!(!word.contains("working"), "no generic \"working\"");
     }
 
     #[test]

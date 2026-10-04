@@ -42,7 +42,8 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# Trek carries a small patch to gpui-base: semibold (not bold) emphasis and calmer heading sizes
-# in rendered markdown. See vendor/gpui-base/src/text/node.rs ("Trek:").
+# Trek carries a small patch to gpui-base: semibold (not bold) emphasis, calmer heading sizes,
+# and a few opt-in style knobs for rendered markdown (bold colour, a measure for running text,
+# list spacing and marker colour). See "Trek:" in vendor/gpui-base/src/text/{node,style}.rs.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }

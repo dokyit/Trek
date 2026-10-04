@@ -67,7 +67,7 @@ impl Group {
 #[derive(Clone)]
 enum Glyph {
     Agent(AgentId),
-    Project(String, Option<String>),
+    Project(String, ui::ProjectLook),
     Icon(Icon),
 }
 
@@ -431,7 +431,7 @@ impl CommandPalette {
         // Projects: a new thread in one, or its settings (those only when searching).
         let mut projects = vec![];
         for p in ws.workspace_projects() {
-            let glyph = Glyph::Project(p.name.clone(), ws.project_icon(&p.path));
+            let glyph = Glyph::Project(p.name.clone(), ws.project_look(&p.path));
             let folder = trek_core::paths::tildify(&p.path);
             let keywords = format!("{} {}", p.remote.clone().unwrap_or_default(), folder);
             let folder = path_tail(&folder, FOLDER_HINT);
@@ -567,7 +567,7 @@ impl CommandPalette {
         let selected = ix == self.selected;
         let glyph = match e.glyph {
             Glyph::Agent(a) => ui::agent_logo(&a, px(14.), cx),
-            Glyph::Project(name, icon) => ui::project_badge(&name, icon.as_deref(), cx),
+            Glyph::Project(name, look) => ui::project_badge(&name, &look, cx),
             Glyph::Icon(i) => i.size(px(14.)).text_color(theme.muted_foreground).into_any_element(),
         };
         // Matched words in full colour against a quieter rest, so they read at a glance.

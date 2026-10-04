@@ -28,16 +28,32 @@ fn children(dir: &Path) -> Vec<(PathBuf, bool)> {
 pub struct ExplorerPanel {
     workspace: Entity<Workspace>,
     root: Option<PathBuf>,
+    /// Folder icons' tint: the project's colour.
+    tint: Option<Hsla>,
     expanded: HashSet<PathBuf>,
     selected: Option<PathBuf>,
     preview: Option<Vec<String>>,
     _subscription: Subscription,
 }
 
+#[cfg(test)]
+impl ExplorerPanel {
+    /// The tint its folder icons are drawn in, when not the muted grey.
+    pub(crate) fn tint(&self) -> Option<Hsla> {
+        self.tint
+    }
+}
+
 impl ExplorerPanel {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let root = workspace.read(cx).current_cwd();
+        let tint = workspace.read(cx).current_project_tint(cx);
         let sub = cx.observe(&workspace, |this, ws, cx| {
+            let tint = ws.read(cx).current_project_tint(cx);
+            if tint != this.tint {
+                this.tint = tint;
+                cx.notify();
+            }
             let root = ws.read(cx).current_cwd();
             if root != this.root {
                 this.root = root;
@@ -47,7 +63,7 @@ impl ExplorerPanel {
                 cx.notify();
             }
         });
-        Self { workspace, root, expanded: HashSet::new(), selected: None, preview: None, _subscription: sub }
+        Self { workspace, root, tint, expanded: HashSet::new(), selected: None, preview: None, _subscription: sub }
     }
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -95,6 +111,7 @@ impl Render for ExplorerPanel {
         let mut rows = Vec::new();
         self.rows(&root, 0, &mut rows);
         let selected = self.selected.clone();
+        let folder = self.tint.unwrap_or(theme.muted_foreground);
         let tree = v_flex().id("explorer-tree").flex_1().min_h_0().overflow_y_scroll().py_1().children(rows.into_iter().map(|(path, is_dir, depth)| {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let open = self.expanded.contains(&path);
@@ -118,7 +135,7 @@ impl Render for ExplorerPanel {
                     div().w(px(12.)).into_any_element()
                 })
                 .child(if is_dir {
-                    Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).small().text_color(theme.muted_foreground).into_any_element()
+                    Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).small().text_color(folder).into_any_element()
                 } else {
                     crate::file_icon::badge(&name, px(14.), cx)
                 })

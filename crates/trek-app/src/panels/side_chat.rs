@@ -3,7 +3,6 @@
 use crate::attachments::{self, Attaching, Outbox};
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -104,11 +103,17 @@ impl Render for SideChatPanel {
         let ws = self.workspace.read(cx);
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
         let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
-        let working = live.is_some_and(|l| l.turn_started.is_some());
+        // While it answers, a trail word ("Breaking trail…") rather than a plain "Working…".
+        let working = live.and_then(|l| l.turn_started).map(|t| crate::working_bar::trail_word(self.thread_id.as_deref().unwrap_or_default(), Some(t.elapsed())));
         let now = ws.now();
         let amber = crate::palette::amber(cx);
         let prefs = ws.prefs();
         let id = self.thread_id.clone().unwrap_or_default();
+        // Answers read as they do in the transcript, a size down to suit the narrower panel.
+        let thread = ws.thread(&id);
+        let cwd = thread.and_then(|t| t.cwd.clone());
+        let folder = thread.and_then(|t| ws.thread_project_tint(t, cx));
+        let text_size = px(ws.settings.appearance.transcript_font_size()) * 0.93;
         v_flex()
             .size_full()
             .child(
@@ -163,9 +168,13 @@ impl Render for SideChatPanel {
                                         })
                                         .into_any_element(),
                                 ),
-                                Item::Assistant { text } if !text.is_empty() => {
-                                    Some(div().text_sm().child(TextView::markdown(SharedString::from(format!("side-{id}-{i}")), text).selectable(true)).into_any_element())
-                                }
+                                Item::Assistant { text } if !text.is_empty() => Some(
+                                    div()
+                                        .id(("side-answer", i))
+                                        .test_support()
+                                        .child(crate::md::keyed(SharedString::from(format!("side-{id}-{i}")), text, cwd.clone(), folder, text_size, cx))
+                                        .into_any_element(),
+                                ),
                                 Item::Tool { title, detail, .. } => Some(
                                     h_flex()
                                         .gap_2()
@@ -192,7 +201,7 @@ impl Render for SideChatPanel {
                                 ),
                                 _ => None,
                             }))
-                            .when(working, |el| el.child(div().text_color(theme.muted_foreground).child("Working…"))),
+                            .when_some(working, |el, word| el.child(div().id("side-working").test_support().text_color(theme.muted_foreground).child(word))),
                     ),
             )
             .child(
