@@ -49,6 +49,12 @@ pub struct SessionConfig {
     pub fast: Option<String>,
     /// Extra MCP servers (stdio) to attach to the session, on top of the agent's own config.
     pub mcp_servers: Vec<McpServer>,
+    /// What Trek tells the agent about the project (its verification skill): Claude Code gets it
+    /// as part of its system prompt, other agents with the first message of a new session.
+    pub instructions: Option<String>,
+    /// Folders outside `cwd` the agent may read without asking (the guides Trek ships): Claude
+    /// Code gets them with `--add-dir`; Codex reads anywhere already.
+    pub read_dirs: Vec<PathBuf>,
 }
 
 /// A stdio MCP server Trek adds to a session.
@@ -260,13 +266,23 @@ pub(crate) fn recap_prompt(recap: &str, text: &str) -> String {
 
 /// `commands`, with `recap` put in front of the first message.
 pub(crate) fn recap_first(commands: async_channel::Receiver<Command>, recap: String) -> async_channel::Receiver<Command> {
+    first_prompt(commands, move |text| recap_prompt(&recap, text))
+}
+
+/// The first message of a new session, with what Trek tells the agent about the project.
+pub(crate) fn instructions_prompt(instructions: &str, text: &str) -> String {
+    format!("<trek-project-notes>\n{}\n</trek-project-notes>\n\n{text}", instructions.trim())
+}
+
+/// `commands`, with the first message rewritten by `f`.
+fn first_prompt(commands: async_channel::Receiver<Command>, f: impl FnOnce(&str) -> String + Send + 'static) -> async_channel::Receiver<Command> {
     let (tx, rx) = async_channel::unbounded();
     trek_core::runtime().spawn(async move {
-        let mut recap = Some(recap);
+        let mut f = Some(f);
         while let Ok(mut cmd) = commands.recv().await {
             if let Command::Prompt { text, .. } = &mut cmd {
-                if let Some(r) = recap.take() {
-                    *text = recap_prompt(&r, text);
+                if let Some(f) = f.take() {
+                    *text = f(text);
                 }
             }
             if tx.send(cmd).await.is_err() {
@@ -285,6 +301,16 @@ pub fn start(config: SessionConfig) -> SessionHandle {
     // A new session gets the recap with its first message; one that resumes has it as a fallback.
     let cmd_rx = match (&config.recap, &config.resume) {
         (Some(recap), None) => recap_first(cmd_rx, recap.clone()),
+        _ => cmd_rx,
+    };
+    // A session that resumes was told already. Claude Code has it in its system prompt, and the
+    // mock reads it from the config.
+    let told_elsewhere = matches!(&config.agent, AgentId::ClaudeCode) || matches!(&config.agent, AgentId::Direct(p) if trek_core::catalog::is_mock(p));
+    let cmd_rx = match (&config.instructions, &config.resume) {
+        (Some(notes), None) if !told_elsewhere => {
+            let notes = notes.clone();
+            first_prompt(cmd_rx, move |text| instructions_prompt(&notes, text))
+        }
         _ => cmd_rx,
     };
     supervise(
@@ -529,6 +555,21 @@ mod tests {
     }
 
     #[test]
+    fn only_a_new_session_s_first_message_carries_the_project_notes() {
+        let (tx, rx) = async_channel::unbounded();
+        let out = first_prompt(rx, |text| instructions_prompt("Verify with ./app check.", text));
+        trek_core::runtime().block_on(async {
+            tx.send(Command::Prompt { text: "first".into(), images: vec![] }).await.unwrap();
+            tx.send(Command::Prompt { text: "second".into(), images: vec![] }).await.unwrap();
+            let texts: Vec<String> = [out.recv().await.unwrap(), out.recv().await.unwrap()]
+                .into_iter()
+                .map(|c| if let Command::Prompt { text, .. } = c { text } else { String::new() })
+                .collect();
+            assert_eq!(texts, ["<trek-project-notes>\nVerify with ./app check.\n</trek-project-notes>\n\nfirst", "second"]);
+        });
+    }
+
+    #[test]
     fn only_the_first_message_carries_the_recap() {
         let (tx, rx) = async_channel::unbounded();
         let out = recap_first(rx, "User: hi".into());
@@ -606,6 +647,8 @@ mod live_usage {
             recap: None,
             fast: None,
             mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
             read_only: false,
         });
         trek_core::runtime().block_on(async {
@@ -673,6 +716,8 @@ mod live_usage {
             recap: None,
             fast: None,
             mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
             read_only: false,
         });
         let prompt = "Use the Bash tool with run_in_background=true to run: echo started-bg; sleep 8; echo done-bg. Then immediately reply with just the word: started. When it completes, reply with just: finished.";
@@ -722,6 +767,8 @@ mod live_usage {
             recap: None,
             fast: None,
             mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
             read_only: false,
         });
         let prompt = "Use the Agent tool with run_in_background=true and subagent_type general-purpose, description \"Wait a while\", prompt: \"Run the Bash command `sleep 45` and then reply with just: waited.\" Then immediately reply with just the word: started.";

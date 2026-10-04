@@ -2,7 +2,8 @@
 //!
 //! Turning a skill off moves its folder into Trek's data folder (with a note of where it came
 //! from), so every agent stops loading it; turning it back on moves it home. Skills that another
-//! tool manages — Claude.ai sync, Codex's built-ins, plugins — are listed read-only.
+//! tool manages — Claude.ai sync, Codex's built-ins, plugins — are listed read-only, as are the
+//! ones Trek ships itself (`SHIPPED`), kept in its data folder for any agent to follow.
 
 use crate::paths;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,8 @@ pub enum SkillSource {
     CodexSystem,
     /// A Claude Code plugin's `skills/` folder.
     Plugin(String),
+    /// Shipped with Trek (`SHIPPED`), in its data folder.
+    Trek,
 }
 
 impl SkillSource {
@@ -35,6 +38,7 @@ impl SkillSource {
             SkillSource::Synced => "Synced from Claude".into(),
             SkillSource::CodexSystem => "Built into Codex".into(),
             SkillSource::Plugin(p) => format!("Plugin · {p}"),
+            SkillSource::Trek => "Built into Trek".into(),
         }
     }
 
@@ -77,6 +81,34 @@ impl SkillHome {
             SkillHome::Shared => home.join(".agents/skills"),
         }
     }
+}
+
+/// The guide that builds a project's verification skill (`crate::verification`).
+pub const CREATE_VERIFICATION: &str = "create-verification-skill";
+/// The guide that brings one up to date.
+pub const MAINTAIN_VERIFICATION: &str = "maintain-verification-skill";
+
+/// Skills Trek ships: (folder name, SKILL.md).
+pub const SHIPPED: [(&str, &str); 2] = [
+    (CREATE_VERIFICATION, include_str!("../skills/create-verification-skill/SKILL.md")),
+    (MAINTAIN_VERIFICATION, include_str!("../skills/maintain-verification-skill/SKILL.md")),
+];
+
+/// Where Trek keeps the skills it ships. Not one of the agents' own skill folders: Trek points an
+/// agent at one when it starts work that follows it, and the user's agents are left as they are.
+pub fn shipped_root() -> PathBuf {
+    paths::data_dir().join("skills")
+}
+
+/// The SKILL.md of shipped skill `name`, written (or brought up to this version) first.
+pub fn shipped(name: &str) -> anyhow::Result<PathBuf> {
+    let (_, text) = SHIPPED.iter().find(|(n, _)| *n == name).ok_or_else(|| anyhow::anyhow!("Trek ships no skill called {name}"))?;
+    let md = shipped_root().join(name).join("SKILL.md");
+    if std::fs::read_to_string(&md).ok().as_deref() != Some(*text) {
+        std::fs::create_dir_all(md.parent().unwrap_or(&md))?;
+        std::fs::write(&md, text)?;
+    }
+    Ok(md)
 }
 
 fn disabled_root() -> PathBuf {
@@ -147,6 +179,10 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
         }
     }
     scan(&home.join(".codex/skills/.system"), SkillSource::CodexSystem, &mut out);
+    for (name, _) in SHIPPED {
+        let _ = shipped(name);
+    }
+    scan(&shipped_root(), SkillSource::Trek, &mut out);
     for (plugin, dir) in plugin_dirs() {
         scan(&dir.join("skills"), SkillSource::Plugin(plugin), &mut out);
     }
@@ -310,6 +346,24 @@ mod tests {
         std::fs::write(s.join("SKILL.md"), "# Title\n\nDoes a thing.").unwrap();
         assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("my-skill".into(), "Does a thing.".into())));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shipped_skills_are_written_and_kept_current() {
+        crate::paths::isolate_thread(std::env::temp_dir().join(format!("trek-shipped-skills-{}", std::process::id())));
+        let md = shipped(CREATE_VERIFICATION).unwrap();
+        assert!(md.starts_with(shipped_root()));
+        let (name, desc) = read_front_matter(&md).unwrap();
+        assert_eq!(name, CREATE_VERIFICATION);
+        assert!(desc.contains("verification skill"), "{desc}");
+        // An old copy is brought up to this version.
+        std::fs::write(&md, "stale").unwrap();
+        shipped(CREATE_VERIFICATION).unwrap();
+        assert!(std::fs::read_to_string(&md).unwrap().contains("metadata:\n  trek: verification"));
+        let listed: Vec<Skill> = discover(None).into_iter().filter(|s| s.source == SkillSource::Trek).collect();
+        assert_eq!(listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), [CREATE_VERIFICATION, MAINTAIN_VERIFICATION]);
+        assert!(!SkillSource::Trek.editable(), "read-only");
+        assert!(shipped("nope").is_err());
     }
 
     #[test]

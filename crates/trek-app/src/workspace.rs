@@ -3,11 +3,13 @@
 mod agent_updates;
 mod limits;
 mod orchestrate;
+mod verification;
 mod worktrees;
 
 pub use agent_updates::Hold;
 pub use limits::Clock;
 pub use orchestrate::{TaskState, waiting_label};
+pub use verification::ago;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -679,6 +681,9 @@ pub enum WorkspaceEvent {
     /// ⌘K from a thread window: the palette opens in the main window (its commands act there),
     /// reopened if it was closed (`root::show_palette`).
     OpenPalette,
+    /// The user said a restatement isn't quite right: the composer of `scope` (on `thread`) takes
+    /// focus, asking for a restatement of the correction too.
+    CorrectRestatement { scope: Scope, thread: String },
     /// Only this thread's transcript changed (streamed text, tool calls). Sent instead of a
     /// notification, so views that don't draw transcripts aren't redrawn for every batch.
     /// `appended`: all that changed is text added to the messages already streaming.
@@ -696,6 +701,8 @@ pub enum UndoAction {
     /// Call off a restart to update that's counting down (`RESTART_GRACE`); it waits for a click
     /// or a quit again.
     CancelRestart,
+    /// Not an undo: the weekly reminder's way to maintain the project's verification skill.
+    MaintainVerification(PathBuf),
 }
 
 /// How long a restart the user asked for while agents worked waits once they're done: they may
@@ -861,6 +868,8 @@ pub struct Workspace {
     gathering: HashMap<String, Task<()>>,
     /// The orchestration key of the pre-warmed draft session (`warm`), until it has a thread.
     warm_ipc: Option<String>,
+    /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
+    verify_runs: HashMap<String, verification::VerifyRun>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -1068,6 +1077,7 @@ impl Workspace {
             parked: HashMap::new(),
             gathering: HashMap::new(),
             warm_ipc: None,
+            verify_runs: HashMap::new(),
         };
         this.reload(cx);
         this.start_ipc(cx);
@@ -1076,6 +1086,7 @@ impl Workspace {
         if alone {
             this.restore_wakes(&closed, cx);
         }
+        this.refresh_all_verification(cx);
         if this.route == (Route::Draft { project: None }) {
             let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
             // The first draft starts from its project's defaults, as drafts opened later do.
@@ -1553,7 +1564,13 @@ impl Workspace {
         if let Route::Draft { project: Some(p) } = &route {
             if self.route != route {
                 self.apply_project_defaults(&p.clone());
+                // Its first session is told about the project's verification skill as it is now.
+                self.refresh_verification(&p.clone(), cx);
             }
+        }
+        if route == Route::Settings(SettingsPage::Project) && self.route != route {
+            // Shown as last recorded until the look through every project is back.
+            self.refresh_all_verification(cx);
         }
         if route == Route::Basecamp && self.route != Route::Basecamp {
             self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
@@ -1767,7 +1784,10 @@ impl Workspace {
     }
 
     pub fn open_project_settings(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
-        let current = self.current_cwd().and_then(|c| self.projects.iter().find(|p| p.path == trek_core::store::project_root(&c)).map(|p| p.id.clone()));
+        let current = self
+            .current_thread()
+            .and_then(|t| t.project_id.clone())
+            .or_else(|| self.current_cwd().and_then(|c| self.projects.iter().find(|p| p.path == trek_core::store::project_root(&c)).map(|p| p.id.clone())));
         self.settings_project = project_id.or(current).or_else(|| self.workspace_projects().first().map(|p| p.id.clone()));
         self.navigate(Route::Settings(SettingsPage::Project), cx);
     }
@@ -2437,6 +2457,14 @@ impl Workspace {
         self.persist_items(&id, cx);
     }
 
+    /// The agent restated the request and got it right: it goes ahead, with whatever else the
+    /// request asked for (a consult, an arena) that waited for the restatement.
+    pub fn go_ahead(&mut self, id: &str, cx: &mut Context<Self>) {
+        let asked = self.live.get(id).and_then(|l| l.items.iter().rev().find_map(|i| if let Item::User { text, .. } = i { Some(text.clone()) } else { None }));
+        let text = asked.map(|a| trek_core::restate::go_ahead(&a)).unwrap_or_else(|| trek_core::restate::GO_AHEAD.into());
+        self.send_to(id, text, vec![], cx);
+    }
+
     /// Messages to `id` wait: its history is still being read, its worktree is being made,
     /// removed or has gone missing, or its agent's CLI is being updated.
     fn holds_messages(&self, id: &str) -> bool {
@@ -2483,9 +2511,16 @@ impl Workspace {
             None => (thread.native_id.clone(), None, false, None),
         };
         let (mcp_servers, ipc) = self.session_mcp(&thread.agent, Some(id));
+        // What the project's verification skill is now (made outside Trek, or since the last look).
+        let project = self.project_dir(&thread);
+        if let Some(p) = &project {
+            self.refresh_verification(p, cx);
+        }
+        let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
+        let instructions = self.project_notes(project.as_deref(), &cwd);
         let handle = start_session(SessionConfig {
             agent: thread.agent.clone(),
-            cwd: thread.cwd.clone().unwrap_or_else(trek_core::paths::home),
+            cwd,
             model: thread.model.clone(),
             effort: thread.effort,
             hand_holding: thread.hand_holding,
@@ -2498,6 +2533,8 @@ impl Workspace {
             recap,
             fast: self.fast_tier(&thread.agent, thread.model.as_ref(), fast_on),
             mcp_servers,
+            instructions,
+            read_dirs: vec![trek_core::skills::shipped_root()],
         });
         self.attach(id, handle, cx);
         self.adopt_ipc_session(id, ipc);
@@ -2563,6 +2600,8 @@ impl Workspace {
                 if let (Some(old), Some(server)) = (std::mem::replace(&mut self.warm_ipc, ipc), &self.ipc) {
                     server.close_session(&old);
                 }
+                self.refresh_verification(&cwd, cx);
+                let instructions = self.project_notes(Some(&cwd), &cwd);
                 let handle = start_session(SessionConfig {
                     agent: p.agent.clone(),
                     cwd,
@@ -2577,6 +2616,8 @@ impl Workspace {
                     recap: None,
                     fast: self.fast_tier(&p.agent, p.model.as_ref(), p.fast),
                     mcp_servers,
+                    instructions,
+                    read_dirs: vec![trek_core::skills::shipped_root()],
                 });
                 // Replacing the old one drops its command channel, which ends that process.
                 self.warm = Some((key, handle, cx.background_executor().now()));
@@ -3077,6 +3118,7 @@ impl Workspace {
             }
             // A sub-agent reports how its turn ended; a parent stopped by the user isn't woken.
             self.task_turn_ended(id, interrupted, cx);
+            self.verification_turn_ended(id, !interrupted && !paused, cx);
             if interrupted {
                 self.forget_wakes(id);
             }
@@ -3942,8 +3984,8 @@ impl Workspace {
             match item {
                 Item::User { text, images, .. } => {
                     out.push_str("\n## You\n");
-                    // As written: the instructions a consult adds aren't the user's words.
-                    let text = trek_core::orchestrate::split_consult(&text).0;
+                    // As written: what Trek adds for the agent (a consult, a restatement) isn't the user's words.
+                    let text = trek_core::restate::as_written(&text);
                     if !text.trim().is_empty() {
                         out.push_str(&format!("\n{}\n", text.trim()));
                     }
@@ -3968,7 +4010,7 @@ impl Workspace {
             None => self.store.items(id).unwrap_or_default(),
         };
         let request = items.iter().find_map(|i| match i {
-            Item::User { text, .. } if !text.trim().is_empty() => Some(trek_core::orchestrate::split_consult(text).0.to_string()),
+            Item::User { text, .. } if !text.trim().is_empty() => Some(trek_core::restate::as_written(text).to_string()),
             _ => None,
         })?;
         let reply = items.iter().find_map(|i| match i {
@@ -4049,6 +4091,7 @@ impl Workspace {
                 self.run_git(&thread, cx);
             }
             UndoAction::Unrestore { .. } => {}
+            UndoAction::MaintainVerification(project) => self.start_verification(project, true, cx),
             UndoAction::CancelRestart => {
                 self.restart_countdown = None;
                 if let UpdateStatus::RestartPending { version, staged } = self.updater.status.clone() {
@@ -4074,6 +4117,7 @@ impl Workspace {
                 this.maybe_check_for_updates(cx);
                 this.maybe_check_agent_updates(cx);
                 this.maybe_restart_for_update(cx);
+                this.remind_verification(now, cx);
                 // No redraw otherwise: the views that show times keep their own clocks.
             });
             if alive.is_err() {
@@ -5115,6 +5159,8 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("permissions auto", "Work on its own; check before risky actions"),
     ("permissions full", "No prompts and no sandbox"),
     ("consult", "Ask other models first: /consult sol high, opus max: your message"),
+    ("consult arena", "Have other models each design it, judged blind: /consult arena: your message"),
+    ("restate", "Have the agent say back what you asked before it starts: /restate your message"),
 ];
 
 /// The thread `scope` shows: a thread window's own, or whatever thread the main window is on.

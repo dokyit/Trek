@@ -17,7 +17,7 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
-    fn new(id: &str, name: &str, tier: u8, efforts: &[Effort]) -> Self {
+    pub(crate) fn new(id: &str, name: &str, tier: u8, efforts: &[Effort]) -> Self {
         Self { id: id.into(), name: name.into(), efforts: efforts.to_vec(), tier, fast: None }
     }
 }

@@ -14,6 +14,7 @@ mod inbox;
 mod lifecycle;
 mod limits;
 mod orchestrate;
+mod pstack;
 mod readability;
 mod render;
 mod rewind;

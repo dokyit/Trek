@@ -15,7 +15,7 @@ use trek_core::worktree::{self, git};
 
 /// Make the test's project a git repo on `main` with one commit, an ignored `.env`, and a draft
 /// in it again (so the project's defaults and git state are read anew).
-fn make_repo(trek: &Trek, cx: &mut TestAppContext) {
+pub(super) fn make_repo(trek: &Trek, cx: &mut TestAppContext) {
     let dir = &trek.project;
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
         git(dir, args).expect("git");
@@ -35,7 +35,7 @@ fn make_repo(trek: &Trek, cx: &mut TestAppContext) {
 }
 
 /// Pick "New worktree" for the draft, as its menu does.
-fn use_worktree(trek: &Trek, cx: &mut TestAppContext) {
+pub(super) fn use_worktree(trek: &Trek, cx: &mut TestAppContext) {
     trek.update(cx, |ws, cx| {
         let mut p = ws.prefs_in(&Scope::Main);
         p.worktree = true;

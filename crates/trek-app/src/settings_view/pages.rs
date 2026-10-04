@@ -1424,6 +1424,9 @@ impl SettingsView {
                 ],
                 cx,
             ),
+            Self::heading("Verification", cx),
+            Self::note("A skill that lets agents check their own work here: a small CLI to drive and debug the app, notes on setting up its dev environment, and a Feature Map of what it does and how to reach each part. Every agent working in this project is told to use it.", cx),
+            ui::group(self.verification_rows(&project, cx), cx),
             Self::heading("New threads", cx),
             Self::note("What a new thread in this project starts with. Anything left on “Trek default” follows Settings → General and Permissions.", cx),
             ui::group(new_thread_rows, cx),
@@ -1441,6 +1444,96 @@ impl SettingsView {
                 cx,
             ),
         ]
+    }
+
+    /// The project's verification skill: set it up, or how it stands, with Maintain and the
+    /// weekly reminder.
+    fn verification_rows(&mut self, project: &trek_core::store::Project, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let ws = self.workspace.read(cx);
+        let path = project.path.clone();
+        let now = trek_core::store::now_ms();
+        let run = ws.verification_run(&path).map(|(id, maintain)| (ws.thread(&id).map(|t| t.title.clone()).unwrap_or_default(), id, maintain));
+        let open_run = |id: String, w: Entity<crate::workspace::Workspace>| {
+            Button::new("verify-open-run").small().outline().label("Open thread").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx)))
+        };
+        let w = self.workspace.clone();
+        let Some(v) = ws.verification(&path) else {
+            let (desc, control) = match run {
+                Some((title, id, _)) => (format!("Being set up in “{title}”."), open_run(id, w).into_any_element()),
+                None => (
+                    "Not set up yet. Trek starts a thread with this project's agent that builds one, following Trek's guide.".to_string(),
+                    Button::new("verify-setup")
+                        .small()
+                        .outline()
+                        .icon(crate::assets::Lucide::BadgeCheck)
+                        .label("Set up verification")
+                        .on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.start_verification(path.clone(), false, cx)))
+                        .into_any_element(),
+                ),
+            };
+            return vec![Self::row("Verification skill", desc, control, cx)];
+        };
+        let due = trek_core::verification::due(&v, now);
+        let age = v.maintained_at.map(|at| format!("last maintained {}", crate::workspace::ago(at, now))).unwrap_or_else(|| "not maintained yet".into());
+        let status = h_flex()
+            .gap(px(7.))
+            .child(div().size(px(6.)).rounded_full().bg(palette::emerald(cx)))
+            .child("Ready")
+            .child(div().font_normal().text_color(if due { palette::amber(cx) } else { muted }).child(format!("· {age}")));
+        let skill_dir = std::path::PathBuf::from(&v.skill);
+        let shown = skill_dir.strip_prefix(&path).map(|p| p.display().to_string()).unwrap_or_else(|_| trek_core::paths::tildify(&skill_dir));
+        let maintain = match run {
+            Some((_, id, _)) => open_run(id, w.clone()).label("Maintaining…").into_any_element(),
+            None => {
+                let (w, p) = (w.clone(), path.clone());
+                Button::new("verify-maintain").small().outline().icon(IconName::Redo).label("Maintain").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.start_verification(p.clone(), true, cx))).into_any_element()
+            }
+        };
+        let reveal = Button::new("verify-reveal").small().ghost().label("Show").on_click(move |_, _, cx| cx.reveal_path(&skill_dir.join("SKILL.md")));
+        let mut rows = vec![Self::row(status, format!("“{}” in {shown}", v.name), h_flex().gap(px(6.)).child(reveal).child(maintain), cx)];
+        if let Some(cli) = v.cli.clone() {
+            // One in the skill's folder reads from there (`scripts/app`): the row above says where
+            // that is. The whole command is in the tooltip, and copied.
+            let short = cli.strip_prefix("./").and_then(|c| c.strip_prefix(&format!("{shown}/"))).unwrap_or(&cli).to_string();
+            let (tip, copied) = (SharedString::from(cli.clone()), cli.clone());
+            let chip = div()
+                .id("verify-cli")
+                .test_support()
+                .min_w_0()
+                .max_w(px(220.))
+                .truncate()
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .bg(theme.foreground.opacity(0.06))
+                .font_family(theme.mono_font_family.clone())
+                .text_size(px(12.))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .child(short);
+            let copy = Button::new("verify-cli-copy").ghost().xsmall().icon(Icon::new(IconName::Copy).text_color(muted)).tooltip("Copy the command").on_click(move |_, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                window.push_notification("Command copied", cx);
+            });
+            rows.push(Self::row(
+                "Its CLI",
+                "Agents run it from their working folder to drive and check the app. A turn that ran it is marked Verified.",
+                h_flex().min_w_0().gap(px(2.)).child(chip).child(copy),
+                cx,
+            ));
+        }
+        let (w, p) = (self.workspace.clone(), path.clone());
+        rows.push(Self::row(
+            "Remind me weekly",
+            "Once it's a week since it was last maintained, Trek reminds you, with a button that runs Maintain.",
+            Switch::new("verify-remind").checked(v.remind_weekly).on_click(move |on: &bool, _, cx| {
+                let on = *on;
+                w.update(cx, |ws, cx| ws.set_verification_reminder(&p, on, cx))
+            }),
+            cx,
+        ));
+        rows
     }
 
     /// The name field follows the selected project (needs the window, so it runs from `render`).

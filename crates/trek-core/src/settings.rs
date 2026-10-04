@@ -57,6 +57,26 @@ pub struct ProjectPrefs {
     /// Files and folders new worktrees get a copy of from the project folder (paths relative to
     /// it): ignored ones a fresh checkout lacks, such as `.env`.
     pub worktree_copy: Vec<String>,
+    /// The project's verification skill, once it has one (`crate::verification`).
+    pub verification: Option<Verification>,
+}
+
+/// Where a project's verification skill lives and how it's kept up.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Verification {
+    /// The skill's folder.
+    pub skill: String,
+    /// Its name, as agents know it.
+    pub name: String,
+    /// How to run its CLI from the project folder, as the skill says.
+    pub cli: Option<String>,
+    /// When it last changed or was last maintained (ms).
+    pub maintained_at: Option<i64>,
+    /// Remind the user once it's a week old.
+    pub remind_weekly: bool,
+    /// When the last reminder was given (ms).
+    pub reminded_at: Option<i64>,
 }
 
 impl Default for ProjectPrefs {
@@ -71,6 +91,7 @@ impl Default for ProjectPrefs {
             actions: vec![],
             run_in: RunIn::Local,
             worktree_copy: crate::worktree::default_copy(),
+            verification: None,
         }
     }
 }
