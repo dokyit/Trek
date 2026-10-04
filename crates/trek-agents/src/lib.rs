@@ -50,7 +50,8 @@ pub struct SessionConfig {
     /// Extra MCP servers (stdio) to attach to the session, on top of the agent's own config.
     pub mcp_servers: Vec<McpServer>,
     /// What Trek tells the agent about the project (its verification skill): Claude Code gets it
-    /// as part of its system prompt, other agents with the first message of a new session.
+    /// as part of its system prompt (`notes_in_system_prompt`), other agents with the session's
+    /// first message, so Trek gives a session that resumes only notes it hasn't told the thread.
     pub instructions: Option<String>,
     /// Folders outside `cwd` the agent may read without asking (the guides Trek ships): Claude
     /// Code gets them with `--add-dir`; Codex reads anywhere already.
@@ -228,7 +229,14 @@ pub(crate) fn recap_first(commands: async_channel::Receiver<Command>, recap: Str
     first_prompt(commands, move |text| recap_prompt(&recap, text))
 }
 
-/// The first message of a new session, with what Trek tells the agent about the project.
+/// Whether `agent` takes the project notes (`SessionConfig::instructions`) in its system prompt,
+/// every session (Claude Code; the mock reads them from the config). Others get them in a
+/// message.
+pub fn notes_in_system_prompt(agent: &AgentId) -> bool {
+    matches!(agent, AgentId::ClaudeCode) || matches!(agent, AgentId::Direct(p) if trek_core::catalog::is_mock(p))
+}
+
+/// A session's first message, with what Trek tells the agent about the project.
 pub(crate) fn instructions_prompt(instructions: &str, text: &str) -> String {
     format!("<trek-project-notes>\n{}\n</trek-project-notes>\n\n{text}", instructions.trim())
 }
@@ -262,11 +270,11 @@ pub fn start(config: SessionConfig) -> SessionHandle {
         (Some(recap), None) => recap_first(cmd_rx, recap.clone()),
         _ => cmd_rx,
     };
-    // A session that resumes was told already. Claude Code has it in its system prompt, and the
-    // mock reads it from the config.
-    let told_elsewhere = matches!(&config.agent, AgentId::ClaudeCode) || matches!(&config.agent, AgentId::Direct(p) if trek_core::catalog::is_mock(p));
-    let cmd_rx = match (&config.instructions, &config.resume) {
-        (Some(notes), None) if !told_elsewhere => {
+    // The project notes go with the first message, unless the agent has them in its system
+    // prompt. A session that resumes gets only notes its thread wasn't told (Trek leaves out
+    // the rest).
+    let cmd_rx = match &config.instructions {
+        Some(notes) if !notes_in_system_prompt(&config.agent) => {
             let notes = notes.clone();
             first_prompt(cmd_rx, move |text| instructions_prompt(&notes, text))
         }
@@ -486,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_new_session_s_first_message_carries_the_project_notes() {
+    fn only_a_session_s_first_message_carries_the_project_notes() {
         let (tx, rx) = async_channel::unbounded();
         let out = first_prompt(rx, |text| instructions_prompt("Verify with ./app check.", text));
         trek_core::runtime().block_on(async {

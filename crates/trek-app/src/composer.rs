@@ -343,12 +343,16 @@ impl Composer {
             }
         }
         let text = if restating { trek_core::restate::with_restate(&text) } else { text };
+        // An arena names its judge: the one picked, else Trek's pick.
+        let mut consult = self.consult.clone();
+        if consulting && consult.style == Style::Arena && consult.judge.is_none() {
+            consult.judge = self.arena_judge(cx);
+        }
+        if let Some(why) = trek_core::orchestrate::arena_problem(&consult).filter(|_| consulting) {
+            self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: format!("{why}."), undo: None }));
+            return;
+        }
         let text = if consulting {
-            // An arena names its judge: the one picked, else Trek's pick.
-            let mut consult = self.consult.clone();
-            if consult.style == Style::Arena && consult.judge.is_none() {
-                consult.judge = self.arena_judge(cx);
-            }
             let names = self.consultant_names(cx);
             trek_core::orchestrate::consult_prompt(&text, &consult, |c| names(c))
         } else {
@@ -1553,6 +1557,11 @@ impl Composer {
         if !picked.is_empty() {
             self.consult.consultants = picked;
         }
+        // Picks kept from an advice or a discussion: the first that can run at once, as the
+        // menu's switch to Arena keeps.
+        if self.consult.style == Style::Arena {
+            self.consult.consultants.truncate(most);
+        }
         // An arena with nobody named draws one design from each model family.
         if self.consult.style == Style::Arena && self.consult.consultants.is_empty() {
             self.consult.consultants = self.arena_defaults(cx);
@@ -1584,12 +1593,15 @@ impl Composer {
         defaults
     }
 
-    /// The model family of the thread's own agent and model.
-    fn main_family(&self, cx: &App) -> String {
+    /// The thread's own agent and model.
+    fn main_model(&self, cx: &App) -> (AgentId, String) {
         let ws = self.workspace.read(cx);
         let prefs = ws.prefs_in(&self.scope);
-        let model = prefs.model.clone().or_else(|| default_model(&ws.models_for(&prefs.agent)).map(|m| m.id.clone())).unwrap_or_default();
-        trek_core::orchestrate::family(&prefs.agent, &model)
+        let models = ws.models_for(&prefs.agent);
+        let model = prefs.model.clone().or_else(|| default_model(&models).map(|m| m.id.clone())).unwrap_or_default();
+        // As the model list names it, so it's told apart from the others there.
+        let model = models.iter().find(|m| same_model(&model, &m.id)).map(|m| m.id.clone()).unwrap_or(model);
+        (prefs.agent, model)
     }
 
     /// An arena's candidates when none are picked: one per model family.
@@ -1599,7 +1611,8 @@ impl Composer {
 
     /// Who judges the arena: the one picked, else a model of another family than the thread's.
     fn arena_judge(&self, cx: &App) -> Option<Consultant> {
-        self.consult.judge.clone().or_else(|| trek_core::orchestrate::pick_judge(&self.main_family(cx), &self.consult.consultants, &self.arena_options(cx)))
+        let (agent, model) = self.main_model(cx);
+        self.consult.judge.clone().or_else(|| trek_core::orchestrate::pick_judge((&agent, &model), &self.consult.consultants, &self.arena_options(cx)))
     }
 
     /// The consult menu: who's consulted, at what effort, how, and then what.
@@ -1658,7 +1671,15 @@ impl Composer {
         let note = match self.consult.style {
             Style::Advise => format!("They review and suggest; {main_agent} decides."),
             Style::Discuss => format!("{main_agent} and they go back and forth until they agree ({} rounds at most).", trek_core::orchestrate::DISCUSS_ROUNDS),
-            Style::Arena => format!("{main_agent} grounds the problem; each drafts a design on its own; a model of another family judges them blind; {main_agent} synthesises the best."),
+            Style::Arena => {
+                let (agent, model) = self.main_model(cx);
+                let own = trek_core::orchestrate::family(&agent, &model);
+                let judge = match self.arena_judge(cx) {
+                    Some(j) if trek_core::orchestrate::family(&j.agent, &j.model) == own => "another model",
+                    _ => "a model of another family",
+                };
+                format!("{main_agent} grounds the problem; each drafts a design on its own; {judge} judges them blind; {main_agent} synthesises the best.")
+            }
         };
         // An arena's designs all run at once: no more than can.
         let most = trek_core::orchestrate::MAX_RUNNING;
@@ -1711,7 +1732,7 @@ impl Composer {
         // An arena's judge, with a side panel to pick another.
         let judge = (self.consult.style == Style::Arena).then(|| {
             let j = self.arena_judge(cx);
-            let name = j.as_ref().map(|j| format!("{} · {}", model_name(&ws.models_for(&j.agent), &j.model), j.effort.label())).unwrap_or_else(|| "No model of another family".into());
+            let name = j.as_ref().map(|j| format!("{} · {}", model_name(&ws.models_for(&j.agent), &j.model), j.effort.label())).unwrap_or_else(|| "No other model on offer".into());
             v_flex().px(px(5.)).pt(px(2.)).child(
                 ui::menu_row("consult-judge", self.consult_judge, cx)
                     .test_support()
@@ -1830,16 +1851,16 @@ impl Composer {
                     )),
             );
         let judges = self.consult_judge.then(|| {
-            let main = self.main_family(cx);
+            let (agent, model) = self.main_model(cx);
             let current = self.arena_judge(cx);
-            let options: Vec<(AgentId, ModelInfo)> = self.arena_options(cx).into_iter().filter(|(a, m)| trek_core::orchestrate::designs(a, m) && trek_core::orchestrate::family(a, &m.id) != main).collect();
+            let options = trek_core::orchestrate::judges((&agent, &model), &self.arena_options(cx));
             ui::menu_surface(cx)
                 .id("consult-judges")
                 .test_support()
                 .w(px(230.))
                 .max_h(px(300.))
                 .overflow_y_scroll()
-                .when(options.is_empty(), |el| el.child(div().p(px(8.)).text_size(px(12.5)).text_color(muted).child("Every model on offer is of the same family as the thread's.")))
+                .when(options.is_empty(), |el| el.child(div().p(px(8.)).text_size(px(12.5)).text_color(muted).child("There's no other model on offer to judge.")))
                 .children(options.into_iter().map(|(agent, m)| {
                     let on = current.as_ref().is_some_and(|j| j.agent == agent && same_model(&j.model, &m.id));
                     ui::menu_row(SharedString::from(format!("consult-judge-{}-{}", agent.key(), m.id)), on, cx)

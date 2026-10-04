@@ -1007,7 +1007,7 @@ impl ThreadView {
                         v.commands.iter().rev().take(3).map(|c| format!("$ {}", orch::preview(c, 90))).collect::<Vec<_>>().join("\n")
                     );
                     h_flex()
-                        .id(("verified", ix))
+                        .id((if v.passed { "verified" } else { "verify-failed" }, ix))
                         .test_support()
                         .gap(px(4.))
                         .text_color(color)

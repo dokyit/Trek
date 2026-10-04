@@ -84,8 +84,25 @@ fn bundled_cli(dir: &Path, project: &Path) -> Option<String> {
     })
 }
 
-/// When anything in the skill's folder last changed (ms): when it was last worked on.
-pub fn last_change(dir: &Path) -> Option<i64> {
+/// When a skill's folder last changed, as far as Trek can tell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Changed {
+    /// The latest commit that touched it (its author date, which checkouts, pulls and rebases
+    /// leave alone): a change someone made.
+    Committed(i64),
+    /// Not committed: the newest file in it. A checkout rewrites these, so they only date a
+    /// skill Trek hasn't seen before.
+    Touched(i64),
+}
+
+/// When the skill in `dir` last changed (ms).
+pub fn last_change(dir: &Path) -> Option<Changed> {
+    let committed = crate::worktree::git(dir, &["log", "-1", "--format=%at", "--", "."]).ok().and_then(|s| s.trim().parse::<i64>().ok());
+    committed.map(|s| Changed::Committed(s * 1000)).or_else(|| newest_file(dir).map(Changed::Touched))
+}
+
+/// When the newest file in `dir` was modified (ms).
+fn newest_file(dir: &Path) -> Option<i64> {
     let mut newest: Option<std::time::SystemTime> = None;
     let mut stack = vec![(dir.to_path_buf(), 0)];
     let mut seen = 0;
@@ -107,10 +124,16 @@ pub fn last_change(dir: &Path) -> Option<i64> {
     newest.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64)
 }
 
-/// What Trek records about a skill it found, keeping the user's choices and the latest of when it
-/// was last maintained and when it last `changed` (`last_change`, when it was looked at).
-pub fn record(found: &Found, before: Option<&Verification>, changed: Option<i64>) -> Verification {
-    let maintained = before.and_then(|b| b.maintained_at).max(changed);
+/// What Trek records about a skill it found, keeping the user's choices. It was last maintained
+/// when Trek saw a Maintain run finish, or when a commit last changed it; a skill Trek knows
+/// nothing about yet dates from its newest file.
+pub fn record(found: &Found, before: Option<&Verification>, changed: Option<Changed>) -> Verification {
+    let known = before.and_then(|b| b.maintained_at);
+    let maintained = match changed {
+        Some(Changed::Committed(at)) => known.max(Some(at)),
+        Some(Changed::Touched(at)) => known.or(Some(at)),
+        None => known,
+    };
     Verification {
         skill: found.dir.display().to_string(),
         name: found.name.clone(),
@@ -197,37 +220,139 @@ pub fn needle(cli: &str) -> Option<String> {
     Some(words[..end].join(" "))
 }
 
-/// Whether a command line ran the CLI `needle` stands for.
-pub fn runs(needle: &str, command: &str) -> bool {
-    if needle.contains(' ') {
-        let line = command.split_whitespace().collect::<Vec<_>>().join(" ");
-        let edge = |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\''));
-        return line.match_indices(needle).any(|(at, _)| edge(line[..at].chars().next_back()) && edge(line[at + needle.len()..].chars().next()));
+/// The simple commands in a shell command line, each as its words (quotes taken off): split at
+/// `;`, `&&`, `||`, `|`, `&`, parentheses, backticks and new lines, outside quotes. Comments are
+/// left out.
+fn simple_commands(line: &str) -> Vec<Vec<String>> {
+    let (mut out, mut words, mut word) = (vec![], vec![], String::new());
+    let (mut quote, mut quoted, mut chars) = (None::<char>, false, line.chars().peekable());
+    let end_word = |words: &mut Vec<String>, word: &mut String, quoted: &mut bool| {
+        if !word.is_empty() || *quoted {
+            words.push(std::mem::take(word));
+        }
+        *quoted = false;
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => word.extend(chars.next()),
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                quoted = true;
+            }
+            (None, '\\') => word.extend(chars.next().filter(|&n| n != '\n')),
+            (None, '#') if word.is_empty() => {
+                while chars.next_if(|&n| n != '\n').is_some() {}
+            }
+            (None, c) if c.is_whitespace() && c != '\n' => end_word(&mut words, &mut word, &mut quoted),
+            (None, ';' | '&' | '|' | '(' | ')' | '`' | '\n') => {
+                end_word(&mut words, &mut word, &mut quoted);
+                if !words.is_empty() {
+                    out.push(std::mem::take(&mut words));
+                }
+            }
+            (None, c) => word.push(c),
+        }
     }
-    let words: Vec<&str> = command
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\''))
-        .filter(|w| !w.is_empty())
-        .collect();
+    end_word(&mut words, &mut word, &mut quoted);
+    if !words.is_empty() {
+        out.push(words);
+    }
+    out
+}
+
+/// Words that come before the program a simple command runs: shell keywords and commands that
+/// run the rest of the line as it is.
+const PREFIXES: [&str; 16] = ["!", "{", "if", "then", "else", "elif", "do", "while", "until", "time", "exec", "command", "builtin", "nohup", "sudo", "env"];
+
+/// Programs that run a script or package named after them (`sh x`, `npx tsx x.ts`, `uv run x`).
+const RUNNERS: [&str; 22] = [
+    "sh", "bash", "zsh", "dash", "fish", "node", "deno", "bun", "bunx", "npx", "pnpx", "tsx", "ts-node", "python", "python3", "uv", "ruby", "perl", "php", "swift", "run", "exec",
+];
+
+/// A simple command's words from its program on: past variables set for it (`FOO=1`), the
+/// prefixes above and their flags, and `timeout`'s duration.
+fn program(words: &[String]) -> &[String] {
+    let mut i = 0;
+    while let Some(w) = words.get(i) {
+        let assigns = w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()));
+        if assigns || PREFIXES.contains(&w.as_str()) || (i > 0 && w.starts_with('-') && PREFIXES.contains(&words[i - 1].as_str())) {
+            i += 1;
+        } else if w == "timeout" {
+            i += 1;
+            while words.get(i).is_some_and(|w| w.starts_with('-')) {
+                i += 1;
+            }
+            i += words.get(i).is_some_and(|w| w.starts_with(|c: char| c.is_ascii_digit())) as usize;
+        } else {
+            break;
+        }
+    }
+    &words[i.min(words.len())..]
+}
+
+/// Whether the command line `command` runs the CLI `needle` stands for: as the program of one
+/// of its simple commands (`cd app && make verify`, `FOO=1 ./scripts/app check`), through a
+/// runner (`sh scripts/app`, `npx tsx tools/app.ts`, `bash -c "./scripts/app check"`), or from a
+/// folder on its path (`cd .agents/skills/x && ./scripts/app`). Naming it to another program
+/// (`cat`, `sed -n`, `chmod +x`, `git diff`, `echo`) isn't running it.
+pub fn runs(needle: &str, command: &str) -> bool {
+    let target: Vec<&str> = needle.split_whitespace().collect();
     // `path` itself, wherever it's run from: `./scripts/app`, `/repo/scripts/app`.
     let is = |w: &str, path: &str| {
         let w = w.trim_end_matches('/');
         let w = w.strip_prefix("./").unwrap_or(w);
         w == path || w.ends_with(&format!("/{path}"))
     };
-    if words.iter().any(|w| is(w, needle)) {
-        return true;
+    let mut cwd: Option<String> = None;
+    for words in simple_commands(command) {
+        let words = program(&words);
+        let Some(first) = words.first() else { continue };
+        if first == "cd" {
+            cwd = words.get(1).cloned();
+            continue;
+        }
+        if target.len() > 1 {
+            // A program run through another (make, cargo, swift): that command line.
+            if words.len() >= target.len() && words.iter().zip(&target).all(|(w, t)| w == t) {
+                return true;
+            }
+            continue;
+        }
+        let mut rest = words;
+        while let Some((w, after)) = rest.split_first() {
+            let from_cwd = cwd.as_deref().is_some_and(|d| {
+                needle.match_indices('/').any(|(i, _)| is(d, &needle[..i]) && w.strip_prefix("./").unwrap_or(w) == &needle[i + 1..])
+            });
+            if is(w, needle) || from_cwd {
+                return true;
+            }
+            let name = w.rsplit('/').next().unwrap_or(w);
+            if !RUNNERS.contains(&name) {
+                break;
+            }
+            // A shell given a command line (`bash -lc "…"`) runs that.
+            if matches!(name, "sh" | "bash" | "zsh" | "dash") {
+                if let Some(at) = after.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')) {
+                    return after.get(at + 1).is_some_and(|line| runs(needle, line));
+                }
+            }
+            rest = after;
+            while rest.first().is_some_and(|w| w.starts_with('-')) {
+                rest = &rest[1..];
+            }
+        }
     }
-    // Or the rest of it, from a folder on its path: `cd .agents/skills/x && ./scripts/app check`.
-    needle.match_indices('/').any(|(i, _)| {
-        let (dir, rest) = (&needle[..i], &needle[i + 1..]);
-        words.windows(2).position(|p| p[0] == "cd" && is(p[1], dir)).is_some_and(|at| words[at + 2..].iter().any(|w| is(w, rest)))
-    })
+    false
 }
 
 /// Whether a command line goes into `dir` (or a folder in it) with `cd`.
 fn goes_into(command: &str, dir: &Path) -> bool {
-    let words: Vec<&str> = command.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '"' | '\'')).filter(|w| !w.is_empty()).collect();
-    words.windows(2).any(|p| p[0] == "cd" && Path::new(p[1].trim_end_matches('/')).starts_with(dir))
+    simple_commands(command).iter().any(|words| {
+        let words = program(words);
+        words.first().is_some_and(|w| w == "cd") && words.get(1).is_some_and(|d| Path::new(d.trim_end_matches('/')).starts_with(dir))
+    })
 }
 
 /// How Trek tells a turn ran the project's verification CLI: what a command running it contains
@@ -316,16 +441,25 @@ mod tests {
         let p = project("record");
         let dir = skill(&p, ".agents/skills", "control-app", "name: control-app\nmetadata:\n  trek: verification");
         let found = find(&p).unwrap();
-        let changed = last_change(&dir).unwrap();
-        assert!((crate::store::now_ms() - changed).abs() < 60_000);
-        let v = record(&found, None, Some(changed));
-        assert_eq!((v.maintained_at, v.remind_weekly, v.name.as_str()), (Some(changed), false, "control-app"));
-        // A later maintenance run counts; the user's choices stay.
-        let before = Verification { maintained_at: Some(changed + 10), remind_weekly: true, reminded_at: Some(5), ..v.clone() };
-        let again = record(&found, Some(&before), Some(changed));
-        assert_eq!((again.maintained_at, again.remind_weekly, again.reminded_at), (Some(changed + 10), true, Some(5)));
-        // Not looked at yet: what was known stays.
-        assert_eq!(record(&found, Some(&before), None).maintained_at, Some(changed + 10));
+        // Not committed: dated by its newest file, the first time Trek sees it.
+        let Some(Changed::Touched(touched)) = last_change(&dir) else { panic!("{:?}", last_change(&dir)) };
+        assert!((crate::store::now_ms() - touched).abs() < 60_000);
+        let v = record(&found, None, Some(Changed::Touched(touched)));
+        assert_eq!((v.maintained_at, v.remind_weekly, v.name.as_str()), (Some(touched), false, "control-app"));
+        // A later Maintain run counts; the user's choices stay.
+        let before = Verification { maintained_at: Some(touched - 10 * DAY_MS), remind_weekly: true, reminded_at: Some(5), ..v.clone() };
+        let again = record(&found, Some(&before), Some(Changed::Touched(touched)));
+        assert_eq!((again.maintained_at, again.remind_weekly, again.reminded_at), (Some(touched - 10 * DAY_MS), true, Some(5)), "files a checkout rewrote aren't maintenance");
+        assert_eq!(record(&found, Some(&before), None).maintained_at, Some(touched - 10 * DAY_MS), "not looked at yet");
+        // A commit that changed it is.
+        assert_eq!(record(&found, Some(&before), Some(Changed::Committed(touched))).maintained_at, Some(touched));
+        assert_eq!(record(&found, Some(&before), Some(Changed::Committed(5))).maintained_at, Some(touched - 10 * DAY_MS));
+        // Committed, it's dated by the commit, whatever the files say.
+        let git = |args: &[&str]| crate::worktree::git(&p, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "skill", "--date", "2020-01-02T00:00:00Z"]);
+        assert_eq!(last_change(&dir), Some(Changed::Committed(1_577_923_200_000)));
         let _ = std::fs::remove_dir_all(p);
     }
 
@@ -355,23 +489,45 @@ mod tests {
         assert_eq!(needle("  "), None);
         assert!(runs("scripts/app", "cd /repo && ./scripts/app check --json"));
         assert!(runs("scripts/app", "/repo/scripts/app status"));
+        assert!(runs("scripts/app", "APP_ENV=test ./scripts/app check 2>&1 | tail -5"));
+        assert!(runs("scripts/app", "timeout 60 sh scripts/app check"));
+        assert!(runs("scripts/app", "bash -lc 'cd /repo && ./scripts/app check'"));
+        assert!(runs("scripts/app", "out=$(./scripts/app check --json)"));
+        assert!(runs("tools/app.ts", "npx tsx tools/app.ts check"));
         assert!(!runs("scripts/app", "cat scripts/apple.txt"));
         assert!(!runs("scripts/app", "cat myscripts/app"));
+        // Naming it to another program isn't running it.
+        let cli = ".agents/skills/verify-app/scripts/app";
+        for read in [
+            "sed -n '1,200p' .agents/skills/verify-app/scripts/app",
+            "cat .agents/skills/verify-app/scripts/app",
+            "chmod +x .agents/skills/verify-app/scripts/app",
+            "git diff -- .agents/skills/verify-app/scripts/app",
+            "echo 'run ./.agents/skills/verify-app/scripts/app later'",
+            "ls -la .agents/skills/verify-app/scripts/app && wc -l .agents/skills/verify-app/scripts/app",
+            "# ./.agents/skills/verify-app/scripts/app check",
+            "bash -n .agents/skills/verify-app/scripts/app.bak",
+        ] {
+            assert!(!runs(cli, read), "{read}");
+        }
         assert!(runs("trekctl", "trekctl open settings"));
         assert!(runs("trekctl", "(cd x; /usr/local/bin/trekctl check)"));
         assert!(!runs("trekctl", "echo trekctl-old"));
+        assert!(!runs("trekctl", "which trekctl"));
         assert!(runs("cargo run -p xtask", "cargo  run -p xtask -- check"));
         // A program run through make (or swift, just, docker) is only that target.
         assert!(runs("make verify", "make verify"));
         assert!(runs("make verify", "cd app && make verify ARGS=check"));
         assert!(!runs("make verify", "make build"));
         assert!(!runs("make verify", "make verify-all"));
+        assert!(!runs("make verify", "echo 'run make verify later'"));
+        assert!(!runs("make verify", "grep -n verify Makefile # make verify"));
         assert!(!runs("swift run appctl", "swift build"));
         // From a folder on its path.
-        let cli = ".agents/skills/verify-app/scripts/app";
         assert!(runs(cli, "cd .agents/skills/verify-app && ./scripts/app check"));
         assert!(runs(cli, "cd /wt/.agents/skills/verify-app/scripts; ./app check"));
         assert!(!runs(cli, "cd .agents/skills/verify-app && cat SKILL.md"));
+        assert!(!runs(cli, "cd .agents/skills/verify-app && cat scripts/app"));
         assert!(!runs(cli, "./scripts/app check"), "another app's scripts/app");
     }
 
@@ -381,6 +537,8 @@ mod tests {
         let probe = Probe { needle: "scripts/app".into(), main: None };
         let read = tool("Read", "/repo/.agents/skills/control-app/scripts/app", ToolStatus::Done);
         assert_eq!(verdict(&[read.clone()], &probe), None);
+        // Codex reads through shell commands: still a read.
+        assert_eq!(verdict(&[tool("Run command", "sed -n '1,200p' scripts/app", ToolStatus::Done)], &probe), None);
         let failed = tool("Run command", "./scripts/app check", ToolStatus::Failed);
         let passed = tool("Run command", "./scripts/app check --json", ToolStatus::Done);
         assert_eq!(verdict(&[read.clone(), failed.clone()], &probe), Some(Verdict { commands: vec!["./scripts/app check".into()], passed: false }));

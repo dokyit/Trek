@@ -59,6 +59,10 @@ pub struct ProjectPrefs {
     pub worktree_copy: Vec<String>,
     /// The project's verification skill, once it has one (`crate::verification`).
     pub verification: Option<Verification>,
+    /// The skill Trek last recorded, while it's gone from the project folder (a branch without it
+    /// checked out): when it comes back, so do the user's choices for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_away: Option<Verification>,
 }
 
 /// Where a project's verification skill lives and how it's kept up.
@@ -71,7 +75,7 @@ pub struct Verification {
     pub name: String,
     /// How to run its CLI from the project folder, as the skill says.
     pub cli: Option<String>,
-    /// When it last changed or was last maintained (ms).
+    /// When it was last maintained (ms): a Maintain run Trek saw finish, or a commit that changed it.
     pub maintained_at: Option<i64>,
     /// Remind the user once it's a week old.
     pub remind_weekly: bool,
@@ -92,6 +96,7 @@ impl Default for ProjectPrefs {
             run_in: RunIn::Local,
             worktree_copy: crate::worktree::default_copy(),
             verification: None,
+            verification_away: None,
         }
     }
 }
