@@ -978,14 +978,16 @@ impl Workspace {
     /// Reports a parent hadn't heard when Trek last quit, back in line for it: those held for it,
     /// and for each sub-agent the quit cut off, that it was. A parent whose own turn was cut off
     /// too (`cut_off`: it was waiting for an answer mid-turn) isn't woken: the user picks it up,
-    /// and its reports go out once that turn is over (`parked`). Nor is a parent that's a
-    /// sub-agent itself: its own answer would have nobody to go to (its parent hears it was cut
-    /// off).
+    /// and its reports go out once that turn is over (`parked`). So with one an earlier launch
+    /// parked that the user hasn't picked up since: its transcript promised them for after their
+    /// next message. Nor is a parent that's a sub-agent itself: its own answer would have nobody
+    /// to go to (its parent hears it was cut off).
     pub(super) fn restore_wakes(&mut self, cut_off: &[String], cx: &mut Context<Self>) {
         let held = self.store.held_reports().unwrap_or_else(|e| {
             tracing::warn!("read held reports: {e:#}");
             vec![]
         });
+        let mut parked_before: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         for (parent, child, report) in held {
             let alive = self.thread(&parent).is_some_and(|t| t.archived_at.is_none() && t.parent_id.is_none());
             let report = match report {
@@ -1006,12 +1008,14 @@ impl Workspace {
                     continue;
                 }
             };
-            let line = if cut_off.contains(&parent) { &mut self.parked } else { &mut self.wakes };
+            let parked = cut_off.contains(&parent)
+                || *parked_before.entry(parent.clone()).or_insert_with(|| self.store.items(&parent).is_ok_and(|items| still_parked(&items)));
+            let line = if parked { &mut self.parked } else { &mut self.wakes };
             line.entry(parent).or_default().push(report);
         }
         // The quit ended its turn and the user will pick it up: its transcript says what's kept
-        // for it, under the turn's "Interrupted".
-        let parked: Vec<(String, usize)> = self.parked.iter().map(|(p, r)| (p.clone(), r.len())).collect();
+        // for it, under the turn's "Interrupted" (one parked before says so already).
+        let parked: Vec<(String, usize)> = self.parked.iter().filter(|(p, _)| cut_off.contains(p)).map(|(p, r)| (p.clone(), r.len())).collect();
         for (parent, n) in parked {
             self.ensure_loaded(&parent, cx);
             let agent = self.thread(&parent).map(|t| t.agent.display_name()).unwrap_or_default();
@@ -1228,13 +1232,23 @@ impl Workspace {
     }
 }
 
+/// How a parked notice ends.
+const PARKED_UNTIL: &str = "once your next message here is answered.";
+
 /// Said in a thread whose turn a quit cut off while it waited on `n` sub-agents' reports: its
 /// agent hears them after the user's next message there.
 fn parked_notice(n: usize, agent: &str) -> String {
     match n {
-        1 => format!("A sub-agent's report is kept for this thread: {agent} hears it once your next message here is answered."),
-        _ => format!("{n} sub-agents' reports are kept for this thread: {agent} hears them once your next message here is answered."),
+        1 => format!("A sub-agent's report is kept for this thread: {agent} hears it {PARKED_UNTIL}"),
+        _ => format!("{n} sub-agents' reports are kept for this thread: {agent} hears them {PARKED_UNTIL}"),
     }
+}
+
+/// Whether a transcript still has reports parked: it says so after the user's last message.
+fn still_parked(items: &[Item]) -> bool {
+    let notice = items.iter().rposition(|i| matches!(i, Item::Notice { text } if text.ends_with(PARKED_UNTIL)));
+    let user = items.iter().rposition(|i| matches!(i, Item::User { text, aside: false, .. } if !orch::is_wake(text)));
+    notice.is_some_and(|n| user.is_none_or(|u| u < n))
 }
 
 #[cfg(test)]
@@ -1247,7 +1261,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Waited, waiting_label};
+    use super::{Waited, parked_notice, still_parked, waiting_label};
     use std::time::Duration;
     use trek_core::AgentId;
 
@@ -1264,6 +1278,17 @@ mod tests {
         assert_eq!(waiting_label(&[on(None)]), "Waiting on a sub-agent");
         assert_eq!(waiting_label(&[on(None), on(None), on(Some("Sol"))]), "Waiting on 3 sub-agents");
         assert_eq!(waiting_label(&[]), "");
+    }
+
+    #[test]
+    fn reports_stay_parked_until_the_user_says_something() {
+        use trek_core::store::Item;
+        let user = |t: &str| Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false };
+        let notice = Item::Notice { text: parked_notice(2, "Codex") };
+        assert!(still_parked(&[user("go"), Item::Notice { text: trek_core::store::INTERRUPTED_BY_QUIT.into() }, notice.clone()]));
+        assert!(!still_parked(&[user("go"), notice.clone(), user("carry on")]), "picked up");
+        assert!(still_parked(&[user("go"), notice.clone(), Item::User { text: "and this?".into(), images: vec![], at: None, resume: None, aside: true }]), "a side question isn't a turn of the thread's");
+        assert!(!still_parked(&[user("go"), Item::Assistant { text: "Done.".into() }]), "nothing was parked");
     }
 }
 

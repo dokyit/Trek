@@ -478,6 +478,52 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
 }
 
 #[test]
+fn reports_parked_by_a_quit_stay_parked_through_another_relaunch() {
+    run(async |cx| {
+        let dir = new_project("parked-relaunch");
+        let db = dir.join("trek.sqlite");
+        let project = new_project("project");
+        let busy = {
+            let store = Store::open(&db).expect("store");
+            let mut t = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            t.title = "Mid-turn".into();
+            t.run_state = RunState::Working;
+            store.save_thread(&t).unwrap();
+            store_items(&store, &t.id, vec![Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None, aside: false }]);
+            let mut kid = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            kid.parent_id = Some(t.id.clone());
+            store.save_thread(&kid).unwrap();
+            store.await_report(&t.id, &kid.id).unwrap();
+            t.id
+        };
+        let mut s = settings();
+        s.user_projects.push(project.display().to_string());
+        // The launch after the quit parks the report; the one after that, with the user not back
+        // in the thread yet, mustn't start a turn for it.
+        for launch_no in 0..2 {
+            let (ws, root, window) = launch(cx, Store::open(&db).expect("store"), s.clone());
+            let trek = Trek { ws, root, window, project: project.clone() };
+            // (Launch wake-ups go out at once under test.)
+            cx.background_executor.timer(std::time::Duration::from_millis(200)).await;
+            cx.run_until_parked();
+            assert!(wakes(&trek, cx, &busy).is_empty(), "launch {launch_no}: no wake-up before the user's next message");
+            assert_eq!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap().len()), 1, "launch {launch_no}");
+            let kept = trek.read(cx, |ws, _| ws.store.items(&busy).unwrap()).iter().filter(|i| matches!(i, Item::Notice { text } if text.contains("kept for this thread"))).count();
+            assert_eq!(kept, 1, "launch {launch_no}: said once");
+            if launch_no == 1 {
+                trek.update(cx, |ws, cx| ws.navigate(Route::Thread(busy.clone()), cx));
+                trek.send(cx, "carry on");
+                wait_woken(&trek, cx, &busy).await;
+                trek.wait_done(cx, &busy, RunState::Idle).await;
+                assert!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap()).is_empty());
+            }
+            trek.window(cx, |window, _| window.remove_window());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+#[test]
 fn sub_agents_out_in_the_background_when_trek_quit_end_with_it() {
     run(async |cx| {
         let dir = new_project("orphans");
