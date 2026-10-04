@@ -48,6 +48,13 @@ pub struct Delegation {
     _stop: Option<Task<()>>,
 }
 
+impl Delegation {
+    /// Stopped on its parent's behalf.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+}
+
 /// Where a sub-agent stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -99,6 +106,9 @@ const ACP_WAIT: Duration = Duration::from_secs(50);
 const GATHER: Duration = Duration::from_millis(120);
 /// After a launch, reports held from before it wait this long: Trek finds its feet first.
 const LAUNCH_WAKE: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 3 });
+/// How long a sub-agent whose agent's own sub-agents have all ended gets to take the turn their
+/// reports start (Claude Code takes it within a second) before it's taken to be done without it.
+const SELF_TURN_GRACE: Duration = Duration::from_secs(15);
 
 /// Something a thread waits on: a sub-agent at work for it.
 #[derive(Debug, Clone, PartialEq)]
@@ -817,6 +827,42 @@ impl Workspace {
         self.finish_task(id, outcome, cx);
     }
 
+    /// Sub-agent `id`'s session ended between turns while its agent's own sub-agents were still
+    /// out: they went with it, and the turn their reports would have started never comes. Unless
+    /// Trek's sub-agents will wake it yet, it's done, and failed.
+    pub(super) fn background_agents_lost(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.delegations.get(id).is_none_or(|d| d.outcome.is_some()) || self.awaits_trek_reports(id) {
+            return;
+        }
+        let why = "Its session ended while its own sub-agents were still at work. Its thread keeps what it did.";
+        self.finish_task(id, Outcome::Failed(why.into()), cx);
+    }
+
+    /// Sub-agent `id`'s agent's own sub-agents have all ended with no turn of its own open. It
+    /// normally takes one for their reports, and reports itself as that ends; if it doesn't
+    /// within `SELF_TURN_GRACE` (they were stopped, say), it's done as it stands.
+    pub(super) fn background_agents_gone(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.delegations.get(id).is_none_or(|d| d.outcome.is_some()) {
+            return;
+        }
+        let id = id.to_string();
+        let check = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SELF_TURN_GRACE).await;
+            let _ = this.update(cx, |ws, cx| {
+                let idle = ws.live.get(&id).is_none_or(|l| l.turn_started.is_none() && l.background_agents().next().is_none());
+                if idle {
+                    ws.task_turn_ended(&id, false, cx);
+                }
+            });
+        });
+        self.keep(check);
+    }
+
+    /// Reports from Trek's sub-agents of `id` are still to come (or to be heard).
+    fn awaits_trek_reports(&self, id: &str) -> bool {
+        !self.running_children(id).is_empty() || self.wakes.get(id).is_some_and(|w| !w.is_empty())
+    }
+
     /// Sub-agent `id`, stopped by a usage limit, resumes at the reset (`send_resume`): it takes its
     /// task back up, its row runs again, and it reports to its parent when it's done.
     pub(super) fn task_resumed(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -912,9 +958,10 @@ impl Workspace {
 
     /// Reports a parent hadn't heard when Trek last quit, back in line for it: those held for it,
     /// and for each sub-agent the quit cut off, that it was. A parent whose own turn was cut off
-    /// too (`cut_off`: it was waiting for an answer mid-turn) isn't woken: the user picks it up.
-    /// Nor is a parent that's a sub-agent itself: its own answer would have nobody to go to (its
-    /// parent hears it was cut off).
+    /// too (`cut_off`: it was waiting for an answer mid-turn) isn't woken: the user picks it up,
+    /// and its reports go out once that turn is over (`parked`). Nor is a parent that's a
+    /// sub-agent itself: its own answer would have nobody to go to (its parent hears it was cut
+    /// off).
     pub(super) fn restore_wakes(&mut self, cut_off: &[String], cx: &mut Context<Self>) {
         let held = self.store.held_reports().unwrap_or_else(|e| {
             tracing::warn!("read held reports: {e:#}");
@@ -924,7 +971,7 @@ impl Workspace {
             let alive = self.thread(&parent).is_some_and(|t| t.archived_at.is_none() && t.parent_id.is_none());
             let report = match report {
                 Some(r) if alive => r,
-                None if alive && !cut_off.contains(&parent) => {
+                None if alive => {
                     let kid = self.thread(&child).cloned().or_else(|| self.store.thread(&child).ok().flatten());
                     let r = Report {
                         id: child.clone(),
@@ -940,7 +987,8 @@ impl Workspace {
                     continue;
                 }
             };
-            self.wakes.entry(parent).or_default().push(report);
+            let line = if cut_off.contains(&parent) { &mut self.parked } else { &mut self.wakes };
+            line.entry(parent).or_default().push(report);
         }
         if self.wakes.is_empty() {
             return;
@@ -955,6 +1003,14 @@ impl Workspace {
             });
         });
         self.keep(task);
+    }
+
+    /// `id` had its turn cut off by the last quit with reports kept for it: a turn of the user's
+    /// has ended there since, so they go out now.
+    pub(super) fn unpark_wakes(&mut self, id: &str) {
+        if let Some(reports) = self.parked.remove(id) {
+            self.wakes.entry(id.to_string()).or_default().extend(reports);
+        }
     }
 
     /// A sub-agent of `parent` ended without news for it: if `parent` is a sub-agent itself that
@@ -998,7 +1054,9 @@ impl Workspace {
 
     /// The sub-agents `id` waits on while its agent has no turn of its own running: Trek's still
     /// at work for it (their reports wake it), and its agent's own working in the background (it
-    /// takes a turn when they report). A turn blocked in a call that waits for one counts too.
+    /// takes a turn when they report). A turn blocked in a call that waits for one counts too,
+    /// as does one whose only calls still running are its agent's own sub-agents (Claude's
+    /// `Task`, run in the foreground).
     /// Empty when it waits on nothing, or on the user.
     pub fn waiting_on(&self, id: &str) -> Vec<Waited> {
         let Some(live) = self.live.get(id) else { return vec![] };
@@ -1019,6 +1077,9 @@ impl Workspace {
             .collect();
         if !turn {
             out.extend(live.background_agents().map(|b| Waited { agent: t.agent.clone(), name: b.task.title.clone(), model: None, elapsed: b.started.elapsed() }));
+        } else if out.is_empty() {
+            // Mid-turn, blocked on its agent's own: the calls still running are all sub-agents.
+            out.extend(live.blocked_on_tasks().map(|k| Waited { agent: t.agent.clone(), name: k.description.clone(), model: None, elapsed: k.started.elapsed() }));
         }
         out
     }

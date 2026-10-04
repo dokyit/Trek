@@ -356,11 +356,15 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
             let cut = thread("Check the changelog", Some(&parent));
             store.await_report(&parent, &cut).unwrap();
             store.update_thread(&cut, |t| t.run_state = RunState::Working).unwrap();
-            // A parent cut off mid-turn itself (it was waiting for an answer in a call) isn't woken.
+            // A parent cut off mid-turn itself (it was waiting for an answer in a call) isn't woken,
+            // though one of its sub-agents had finished: the user picks it up.
             let busy = thread("Mid-turn", None);
+            store_items(&store, &busy, vec![Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None, aside: false }]);
             store.update_thread(&busy, |t| t.run_state = RunState::Working).unwrap();
             let busy_kid = thread("Its helper", Some(&busy));
             store.await_report(&busy, &busy_kid).unwrap();
+            let busy_done = thread("Its scout", Some(&busy));
+            store.hold_report(&busy, &Report { id: busy_done.clone(), title: "Its scout".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Found it.".into()) }).unwrap();
             // Nor is a sub-agent: its answer would have nowhere to go.
             let nested = thread("Nested", Some(&parent));
             let grandkid = thread("Deep", Some(&nested));
@@ -381,7 +385,22 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
         let items = trek.items(cx, &parent);
         assert!(matches!(&items[..2], [Item::User { text, .. }, Item::Assistant { text: a }] if text == "go" && a == "Asked two models."), "{items:?}");
         assert!(wakes(&trek, cx, &busy).is_empty() && trek.read(cx, |ws, _| ws.live.get(&busy).is_none_or(|l| l.commands.is_none())));
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&busy)), "it waits on the user, not on its sub-agents");
+        assert_eq!(section(&trek, cx, &busy), Some(Section::Inbox));
         assert!(wakes(&trek, cx, &nested).is_empty());
+        assert_eq!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap().len()), 2, "the cut-off parent's are kept");
+        // The user picks it up: once that turn is over, it hears both.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(busy.clone()), cx));
+        trek.send(cx, "carry on");
+        wait_woken(&trek, cx, &busy).await;
+        trek.wait_done(cx, &busy, RunState::Idle).await;
+        let woke = wakes(&trek, cx, &busy);
+        assert_eq!(woke.len(), 1, "{woke:?}");
+        assert!(woke[0].contains("Found it.") && woke[0].contains(trek_core::orchestrate::CUT_OFF), "{}", woke[0]);
+        let items = trek.items(cx, &busy);
+        let carry = items.iter().position(|i| matches!(i, Item::User { text, .. } if text == "carry on")).unwrap();
+        let wake = items.iter().position(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))).unwrap();
+        assert!(carry < wake, "after the user's own turn");
         assert!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap()).is_empty(), "nothing left to deliver");
         let _ = std::fs::remove_dir_all(dir);
     });
@@ -446,16 +465,30 @@ fn sub_agents_never_get_inbox_cards() {
 fn stop_on_a_parent_waiting_on_its_agent_s_own_sub_agents_stops_them() {
     run(async |cx| {
         let trek = open(cx);
+        let seen = alerts(&trek, cx);
         let id = trek.send(cx, "send subagents 30s");
         let p = id.clone();
         trek.wait(cx, "the answer with agents out", move |ws| ws.live[&p].turn_started.is_none() && ws.live[&p].background.len() == 2).await;
         assert!(trek.read(cx, |ws, _| ws.waiting(&id)));
         trek.render(cx);
+        seen.borrow_mut().clear();
         trek.click(cx, "stop");
         let p = id.clone();
         trek.wait(cx, "the agents to stop", move |ws| ws.live[&p].background.is_empty()).await;
+        // Claude Code takes a turn of its own to say they were stopped (the mock does as it
+        // does): it shows, but it's no news.
+        let p = id.clone();
+        trek.wait(cx, "the agent saying so", move |ws| ws.live[&p].items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("was stopped")))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        cx.run_until_parked();
+        assert!(seen.borrow().is_empty(), "no alert for it: {:?}", seen.borrow());
         assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
         assert_eq!(section(&trek, cx, &id), Some(Section::Inbox));
+        // The next turn the user asks for is news again.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| ws.send_to(&id, "hello".into(), vec![], cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(seen.borrow().iter().any(|m| m.starts_with("Finished")), "{:?}", seen.borrow());
     });
 }
 
@@ -489,5 +522,295 @@ fn a_sub_agent_s_row_opens_on_what_it_is_doing() {
         assert!(!trek.visible(cx, ("subagent-activity", row)));
         assert_eq!(cx.read(|cx| trek.root.read(cx).thread_view.read(cx).ticker()), Some(false));
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+    });
+}
+
+/// Turn fast mode on or off for `scope`: settings the agent reads at launch, so its session
+/// restarts when nothing would be cut short.
+fn toggle_fast(trek: &Trek, cx: &mut TestAppContext, scope: &Scope) {
+    trek.update(cx, |ws, cx| {
+        let mut p = ws.prefs_in(scope);
+        p.fast = !p.fast;
+        ws.set_prefs_in(scope, p, cx);
+    });
+}
+
+fn session_alive(trek: &Trek, cx: &TestAppContext, id: &str) -> bool {
+    trek.read(cx, |ws, _| ws.live.get(id).is_some_and(|l| l.commands.is_some()))
+}
+
+#[test]
+fn a_setting_read_at_launch_waits_for_background_work_before_it_restarts_the_session() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // The server would go with the session: the restart waits.
+        toggle_fast(&trek, cx, &Scope::Main);
+        cx.run_until_parked();
+        assert!(session_alive(&trek, cx, &id), "not restarted under the server");
+        assert_eq!(trek.read(cx, |ws, _| ws.live[&id].background.len()), 1);
+        // Stopped, it's over: the session restarts (and resumes) now.
+        let task = trek.read(cx, |ws, _| ws.live[&id].background[0].task.id.clone());
+        trek.update(cx, |ws, cx| ws.stop_background(&id, &task, cx));
+        let t = id.clone();
+        trek.wait(cx, "the restart", move |ws| ws.live[&t].background.is_empty() && ws.live[&t].commands.is_none()).await;
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("card-background-{id}")) && !trek.visible(cx, "background-strip"));
+        // The next message gets a session with the new setting.
+        trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(session_alive(&trek, cx, &id));
+    });
+}
+
+#[test]
+fn a_setting_read_at_launch_doesn_t_strand_a_thread_waiting_on_its_agent_s_own_sub_agents() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "send subagents 600ms");
+        let p = id.clone();
+        trek.wait(cx, "the answer with agents out", move |ws| ws.live[&p].turn_started.is_none() && ws.live[&p].background.len() == 2).await;
+        toggle_fast(&trek, cx, &Scope::Main);
+        cx.run_until_parked();
+        assert!(session_alive(&trek, cx, &id), "its sub-agents would never report");
+        assert!(trek.read(cx, |ws, _| ws.waiting(&id)));
+        // They report, the agent takes its turn, and only then does the session restart.
+        let p = id.clone();
+        trek.wait(cx, "the scouts' report", move |ws| ws.live[&p].items.iter().any(|i| matches!(i, Item::Assistant { text } if text.contains("reported back")))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let p = id.clone();
+        trek.wait(cx, "the restart", move |ws| ws.live[&p].commands.is_none()).await;
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
+        assert_eq!(section(&trek, cx, &id), Some(Section::Inbox));
+    });
+}
+
+#[test]
+fn a_sub_agent_finishing_while_its_parent_s_session_restarts_still_wakes_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:delegate mock:long 1500ms");
+        let p = id.clone();
+        trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
+        // Idle with nothing in the background: the setting restarts its session at once.
+        toggle_fast(&trek, cx, &Scope::Main);
+        cx.run_until_parked();
+        assert!(!session_alive(&trek, cx, &id), "restarted");
+        assert!(trek.read(cx, |ws, _| ws.waiting(&id)), "still waiting, between sessions");
+        wait_woken(&trek, cx, &id).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(wakes(&trek, cx, &id).len(), 1);
+        assert!(trek.answers(cx, &id).contains("The sub-agent reported back"), "{}", trek.answers(cx, &id));
+    });
+}
+
+/// A sub-agent of Trek's, sent out by a parent, whose own turn has ended with its agent's own
+/// sub-agents still out: (parent, child).
+async fn delegate_with_agents_out(trek: &Trek, cx: &mut TestAppContext) -> (String, String) {
+    let id = trek.send(cx, "mock:delegate subagents 30s");
+    let p = id.clone();
+    trek.wait(cx, "the sub-agent with agents of its own out", move |ws| {
+        ws.children(&p).first().and_then(|c| ws.live.get(&c.id)).is_some_and(|l| l.turn_started.is_none() && l.background_agents().count() == 2)
+    })
+    .await;
+    let child = children(trek, cx, &id).pop().unwrap();
+    assert_eq!(trek.read(cx, |ws, _| ws.task_state(&child)), TaskState::Running, "it waits on them: not done yet");
+    (id, child)
+}
+
+#[test]
+fn a_sub_agent_whose_session_dies_with_its_own_sub_agents_out_reports_failing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, child) = delegate_with_agents_out(&trek, cx).await;
+        trek.update(cx, |ws, cx| ws.apply_events(&child, vec![trek_agents::AgentEvent::Exited], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.task_state(&child)), TaskState::Failed);
+        wait_woken(&trek, cx, &id).await;
+        let woke = wakes(&trek, cx, &id);
+        assert!(trek_core::orchestrate::wake_summary(&woke[0]).contains("failed on"), "{woke:?}");
+        assert!(woke[0].contains("own sub-agents were still at work"), "{}", woke[0]);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
+    });
+}
+
+#[test]
+fn a_sub_agent_the_user_stops_while_its_own_sub_agents_are_out_reports_stopped() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, child) = delegate_with_agents_out(&trek, cx).await;
+        // From its own window, say: Stop between its turns.
+        trek.update(cx, |ws, cx| ws.interrupt(&child, cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.task_state(&child)), TaskState::Cancelled);
+        wait_woken(&trek, cx, &id).await;
+        let woke = wakes(&trek, cx, &id);
+        assert!(woke[0].contains("was stopped before it finished"), "{woke:?}");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let c = child.clone();
+        trek.wait(cx, "its agents gone with its session", move |ws| ws.live[&c].background.is_empty()).await;
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
+    });
+}
+
+#[test]
+fn a_sub_agent_whose_own_sub_agents_end_with_no_turn_after_is_done_after_a_grace() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (id, child) = delegate_with_agents_out(&trek, cx).await;
+        // They end, and the agent takes no turn for them (it might, for a while).
+        trek.update(cx, |ws, cx| ws.apply_events(&child, vec![trek_agents::AgentEvent::Background(vec![])], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.task_state(&child)), TaskState::Running, "it may still take its turn");
+        cx.executor().advance_clock(std::time::Duration::from_secs(16));
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.task_state(&child)), TaskState::Done);
+        wait_woken(&trek, cx, &id).await;
+    });
+}
+
+#[test]
+fn an_imported_parent_hears_its_reports_after_its_history_has_loaded() {
+    run(async |cx| {
+        let dir = new_project("imported-parent");
+        let db = dir.join("trek.sqlite");
+        let project = new_project("project");
+        // A Claude Code session picked up in Trek: its history stays in Claude's files.
+        let native = "bg-imported-parent";
+        let folder = trek_core::paths::home().join(".claude/projects/-Users-me-code-trek-bg-imported");
+        std::fs::create_dir_all(&folder).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let lines = [
+            json!({"type":"user","message":{"role":"user","content":"Plan the trip"},"timestamp":now,"cwd":"/Users/me/code/trek-bg-imported","sessionId":native,"entrypoint":"cli"}),
+            json!({"type":"assistant","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"Asked a scout."}],"stop_reason":"end_turn"},"timestamp":now,"cwd":"/Users/me/code/trek-bg-imported","sessionId":native,"entrypoint":"cli"}),
+        ];
+        std::fs::write(folder.join(format!("{native}.jsonl")), lines.map(|l| l.to_string()).join("\n") + "\n").unwrap();
+        let parent = {
+            let store = Store::open(&db).expect("store");
+            let mut t = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            t.title = "Plan the trip".into();
+            t.source = trek_core::ThreadSource::ClaudeCode;
+            t.native_id = Some(native.into());
+            store.save_thread(&t).unwrap();
+            let kid = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("kid");
+            store.update_thread(&kid.id, |k| k.parent_id = Some(t.id.clone())).unwrap();
+            store.hold_report(&t.id, &Report { id: kid.id.clone(), title: "Scout".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Book the hut.".into()) }).unwrap();
+            t.id
+        };
+        let mut s = settings();
+        s.user_projects.push(project.display().to_string());
+        let (ws, root, window) = launch(cx, Store::open(&db).expect("store"), s);
+        let trek = Trek { ws, root, window, project };
+        wait_woken(&trek, cx, &parent).await;
+        let items = trek.items(cx, &parent);
+        let wake = items.iter().position(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))).unwrap();
+        assert!(matches!(&items[..wake], [Item::User { text, .. }, Item::Assistant { text: a }, ..] if text == "Plan the trip" && a == "Asked a scout."), "{items:?}");
+        assert!(items[wake].clone() != items[0] && wakes(&trek, cx, &parent)[0].contains("Book the hut."));
+        trek.wait_done(cx, &parent, RunState::Idle).await;
+        let _ = std::fs::remove_dir_all(folder);
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+#[test]
+fn a_background_server_doesn_t_redraw_the_sidebar() {
+    run(async |cx| {
+        let trek = open(cx);
+        // In front, with motion on: whatever animates, animates.
+        trek.window(cx, |window, _| window.activate_window());
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let t = id.clone();
+        trek.wait(cx, "the server's output", move |ws| ws.live[&t].background.iter().any(|b| b.output.is_some())).await;
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("card-background-{id}")));
+        cx.run_until_parked();
+        super::take_renders();
+        // The strip reads the server's output and moves its clock on (the test platform draws
+        // as soon as anything is dirty); the sidebar keeps its cache.
+        for _ in 0..3 {
+            cx.executor().advance_clock(std::time::Duration::from_secs(2));
+            cx.run_until_parked();
+        }
+        let renders = super::take_renders();
+        assert!(renders.get("BackgroundStrip").is_some_and(|n| *n > 0), "the strip ticks: {renders:?}");
+        assert_eq!(renders.get("Sidebar"), None, "{renders:?}");
+    });
+}
+
+#[test]
+fn a_task_that_won_t_stop_can_be_asked_again() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // A task the agent doesn't stop (it couldn't, and said so).
+        let mut set: Vec<trek_agents::BackgroundTask> = trek.read(cx, |ws, _| ws.live[&id].background.iter().map(|b| b.task.clone()).collect());
+        set.push(trek_agents::BackgroundTask { id: "stuck".into(), kind: trek_agents::BackgroundKind::Shell, title: "tail -f log".into(), call: None, readable: false, stoppable: true });
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::Background(set)], cx));
+        trek.update(cx, |ws, cx| ws.stop_background(&id, "stuck", cx));
+        let stopping = |trek: &Trek, cx: &TestAppContext| trek.read(cx, |ws, _| ws.live[&id].background.iter().find(|b| b.task.id == "stuck").map(|b| b.stopping));
+        assert_eq!(stopping(&trek, cx), Some(true));
+        cx.executor().advance_clock(std::time::Duration::from_secs(11));
+        cx.run_until_parked();
+        assert_eq!(stopping(&trek, cx), Some(false), "Stop is offered again");
+    });
+}
+
+#[test]
+fn a_session_that_ends_says_what_it_took_with_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::Exited], cx));
+        assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::Notice { text } if text == "npm run dev stopped with the session")), "{:?}", trek.items(cx, &id));
+        assert!(trek.read(cx, |ws, _| ws.live[&id].background.is_empty()));
+    });
+}
+
+#[test]
+fn a_turn_blocked_on_its_agent_s_own_sub_agent_says_it_waits_on_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:task 30s");
+        let p = id.clone();
+        trek.wait(cx, "the sub-agent at work", move |ws| ws.live[&p].active_tasks() == 1).await;
+        assert_eq!(trek.run_state(cx, &id), RunState::Working);
+        assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Waiting on a sub-agent")), "{:?}", trek.working_bar(cx));
+        // Its card names it on hover.
+        let (kids, background) = cx.read(|cx| {
+            let t = trek.ws.read(cx).thread(&id).cloned().unwrap();
+            trek.root.read(cx).sidebar.read(cx).at_work(&t, cx)
+        });
+        assert_eq!(crate::sidebar::card_tip(&kids, &background).as_deref(), Some("Sub-agents at work:\nSurvey the test suite"));
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+    });
+}
+
+#[test]
+fn the_card_tip_names_sub_agents_and_background_work() {
+    let mock = trek_core::AgentId::Direct("mock".into());
+    assert_eq!(crate::sidebar::card_tip(&[], &[]), None);
+    assert_eq!(
+        crate::sidebar::card_tip(&[(mock.clone(), "Sol: Review the cache".into())], &["npm run dev".into(), "cargo watch".into()]).as_deref(),
+        Some("Sub-agents at work:\nSol: Review the cache\n\nRunning in the background:\nnpm run dev\ncargo watch")
+    );
+}
+
+#[test]
+fn the_strip_can_be_put_away() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.render(cx);
+        trek.click(cx, "bg-hide");
+        trek.render(cx);
+        assert_eq!(strip(&trek, cx), ["Background · 1 running"]);
+        assert!(trek.visible(cx, "bg-show") && !trek.visible(cx, ("bg-task", 0usize)));
+        trek.click(cx, "bg-show");
+        trek.render(cx);
+        assert!(trek.visible(cx, ("bg-task", 0usize)));
     });
 }

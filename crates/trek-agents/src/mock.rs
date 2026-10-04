@@ -6,6 +6,7 @@
 //! | (none)                       | an answer streamed token by token: markdown, code, paths     |
 //! | `tools`                      | commands, reads, a search and an edit, with outputs          |
 //! | `agents` / `subagents` [dur] | two background sub-agents that report back `dur` later        |
+//! | `mock:task` [dur]            | a sub-agent the turn waits on (in the foreground) for `dur`   |
 //! | `permission`                 | a command that needs approval                                |
 //! | `question`                   | multiple-choice questions                                     |
 //! | `plan` (or plan mode)        | a plan to approve before any change                          |
@@ -26,6 +27,7 @@
 //! |                              | until stopped), printing a line now and then                  |
 //! | `mock:watch` [dur]           | leaves a test watcher running; `dur` later (default 3s) it    |
 //! |                              | reports a failure and the agent takes a turn of its own       |
+//! | `mock:dev`                   | leaves a dev server and a quiet test watcher running          |
 //! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
 //! |                              | token (or, with `plan`, on a Claude Max plan)                 |
 //!
@@ -120,6 +122,8 @@ enum Script {
     Answer,
     Tools,
     Agents(Option<Duration>),
+    /// A sub-agent of its own that the turn waits on, working for a while.
+    Task(Duration),
     Permission,
     Questions,
     Plan,
@@ -140,6 +144,8 @@ enum Script {
     Server(Option<Duration>),
     /// Leave a test watcher running that reports a failure after a while.
     Watch(Duration),
+    /// Leave a dev server and a test watcher running (one that catches nothing for a day).
+    Dev,
     /// A turn on a real model with a real price: billed per token, or on a plan.
     Cost { plan: bool },
     /// Trek woke it with what a sub-agent came back with.
@@ -172,8 +178,10 @@ impl Script {
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
+                "task" if w.starts_with("mock:") => Script::Task(duration_after(i).unwrap_or(Duration::from_secs(6))),
                 "server" if w.starts_with("mock:") => Script::Server(duration_after(i)),
                 "watch" if w.starts_with("mock:") => Script::Watch(duration_after(i).unwrap_or(Duration::from_secs(3))),
+                "dev" if w.starts_with("mock:") => Script::Dev,
                 "cost" if w.starts_with("mock:") => Script::Cost { plan: words.get(i + 1).is_some_and(|w| w == "plan") },
                 "error" => Script::Error,
                 "permission" => Script::Permission,
@@ -200,6 +208,7 @@ pub fn title(request: &str) -> String {
         Script::Answer => "How the app starts",
         Script::Tools => "Add a verbose flag",
         Script::Agents(_) => "Scout the routes and error handling",
+        Script::Task(_) => "Survey the test suite",
         Script::Permission => "Apply the schema migrations",
         Script::Questions => "Choose a database",
         Script::Plan => "Require a session on every route",
@@ -215,6 +224,7 @@ pub fn title(request: &str) -> String {
         Script::Pair => "Get two opinions",
         Script::Server(_) => "Start the dev server",
         Script::Watch(_) => "Watch the tests",
+        Script::Dev => "Run the app while we work",
         Script::Cost { .. } => "Price the API calls",
         Script::Wake => "A sub-agent reported back",
     }
@@ -288,6 +298,8 @@ enum Note {
     Watcher(String),
     /// The scouts (`agents`) are back.
     Scouts,
+    /// A sub-agent of its own was stopped on request (Claude Code takes a turn to say so).
+    Stopped(String),
 }
 
 /// Work running in the background of a session.
@@ -303,6 +315,13 @@ struct Job {
 impl Jobs {
     fn add(&self, task: BackgroundTask) {
         self.0.lock().unwrap().push(Job { task, output: String::new() });
+    }
+
+    /// Take it off the list, with what it was (`None`: stopped already).
+    fn take(&self, id: &str) -> Option<BackgroundTask> {
+        let mut jobs = self.0.lock().unwrap();
+        let ix = jobs.iter().position(|j| j.task.id == id)?;
+        Some(jobs.remove(ix).task)
     }
 
     /// Take it off the list; `false` when it wasn't on it (stopped already).
@@ -330,6 +349,17 @@ impl Jobs {
 
     fn event(&self) -> AgentEvent {
         AgentEvent::Background(self.0.lock().unwrap().iter().map(|j| j.task.clone()).collect())
+    }
+}
+
+/// Ends a session's background work when the session ends.
+struct EndJobs(Jobs);
+
+impl Drop for EndJobs {
+    fn drop(&mut self) {
+        if let Ok(mut jobs) = self.0.0.lock() {
+            jobs.clear();
+        }
     }
 }
 
@@ -365,6 +395,9 @@ pub async fn run(
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
         orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(&m.env)),
     };
+    // What it left running ends with it, however it ends: the loops printing for its shells
+    // stop once they're off the list.
+    let _jobs = EndJobs(s.background.clone());
     if s.emit(AgentEvent::Started { native_id, model: Some(s.model.clone()) }).await.is_err() {
         return Ok(());
     }
@@ -482,6 +515,10 @@ impl Session {
             Script::Pair => self.pair(text).await?,
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
+            Script::Dev => {
+                self.server(None).await?;
+                self.watch(MAX_DURATION).await?
+            }
             Script::Wake => {
                 let body = text.split_once(":\n\n").map_or(text, |(_, b)| b);
                 let gist = trek_core::orchestrate::preview(body.split("\n\n---\n\n").next().unwrap_or(body), 160);
@@ -493,6 +530,7 @@ impl Session {
             }
             Script::Tools => self.tools().await?,
             Script::Agents(after) => return self.agents(after).await,
+            Script::Task(total) => self.task(total).await?,
             Script::Permission => self.permission().await?,
             Script::Questions => self.questions().await?,
             Script::Plan => self.plan_turn().await?,
@@ -615,10 +653,16 @@ impl Session {
         }
     }
 
-    /// Stop a background task: it's off the list at once, and says nothing more.
+    /// Stop a background task: it's off the list at once. A sub-agent's call ends, failed, and
+    /// the agent takes a turn of its own to say it was stopped, as Claude Code does.
     fn stop_task(&self, id: &str) {
-        if self.background.remove(id) {
-            let _ = self.events.try_send(self.background.event());
+        let Some(task) = self.background.take(id) else { return };
+        let _ = self.events.try_send(self.background.event());
+        if task.kind == BackgroundKind::Agent {
+            let call = task.call.clone().unwrap_or_else(|| task.id.clone());
+            let _ = self.events.try_send(AgentEvent::Task { id: call.clone(), description: None, activity: None, tool_uses: None, done: Some(false) });
+            let _ = self.events.try_send(AgentEvent::ToolFinished { id: call, output: task.title.clone(), ok: false });
+            let _ = self.note.try_send(Note::Stopped(task.title));
         }
     }
 
@@ -631,6 +675,9 @@ impl Session {
                     self.think("The watcher has something.").await?;
                     self.tool("Read", "tests/parser.rs", "#[test]\nfn rejects_a_truncated_body() { … }", 120).await?;
                     self.say(&format!("{what} The parser accepts a body that ends early; I'll make it return `ParseError::Truncated`.")).await?;
+                }
+                Note::Stopped(what) => {
+                    self.say(&format!("The sub-agent \"{what}\" was stopped. Ready when you are.")).await?;
                 }
                 Note::Scouts => {
                     self.say("Both scouts reported back:\n\n1. **Routes** — 12 handlers in `src/routes.rs`, two of them unauthenticated.\n2. **Errors** — 7 `unwrap()` calls on request input; I'd turn those into `400`s.").await?;
@@ -853,6 +900,25 @@ impl Session {
         Ok(())
     }
 
+    /// `mock:task`: a sub-agent of its own (Claude's `Task`, in the foreground) that the turn
+    /// waits on while it works, reporting its steps as it goes.
+    async fn task(&mut self, total: Duration) -> Step {
+        self.say("I'll have a sub-agent survey the tests while I wait for it.").await?;
+        let id = self.id("agent");
+        let description = "Survey the test suite";
+        self.tool_start(&id, "Subagent", description).await?;
+        self.emit(AgentEvent::Task { id: id.clone(), description: Some(description.into()), activity: None, tool_uses: None, done: None }).await?;
+        let steps = [("Read", "tests/routes.rs", "Reading tests/routes.rs"), ("Search", "#[test]", "Searching for #[test]"), ("Run command", "cargo test --no-run", "Running cargo test --no-run")];
+        for (i, (title, detail, activity)) in steps.into_iter().enumerate() {
+            self.pause(total / steps.len() as u32).await?;
+            self.emit(AgentEvent::TaskStep { task: id.clone(), title: title.into(), detail: detail.into() }).await?;
+            self.emit(AgentEvent::Task { id: id.clone(), description: None, activity: Some(activity.into()), tool_uses: Some(i as u64 + 1), done: None }).await?;
+        }
+        self.emit(AgentEvent::Task { id: id.clone(), description: None, activity: None, tool_uses: None, done: Some(true) }).await?;
+        self.emit(AgentEvent::ToolFinished { id, output: "212 tests across 18 files; 3 are ignored.".into(), ok: true }).await?;
+        self.say("The sub-agent counted 212 tests across 18 files, 3 of them ignored.").await
+    }
+
     /// `mock:pair`: two sub-agents on the same task, through Trek; the turn ends while they work.
     async fn pair(&mut self, text: &str) -> Step {
         let lower = text.to_lowercase();
@@ -915,7 +981,11 @@ impl Session {
         self.emit(AgentEvent::ToolFinished { id: id.clone(), output: format!("Monitor started (task {id})."), ok: true }).await?;
         let (jobs, events, note) = (self.background.clone(), self.events.clone(), self.note.clone());
         tokio::spawn(async move {
-            tokio::time::sleep(after).await;
+            // A watcher stopped (or whose session ended) catches nothing more.
+            let started = tokio::time::Instant::now();
+            while jobs.running(&id) && started.elapsed() < after {
+                tokio::time::sleep((after - started.elapsed()).min(Duration::from_millis(200))).await;
+            }
             jobs.print(&id, "test parser::rejects_a_truncated_body ... FAILED");
             if jobs.remove(&id) {
                 let _ = events.send(jobs.event()).await;
@@ -1178,6 +1248,8 @@ mod tests {
         assert_eq!(Script::parse("mock:stream 2m", false), Script::Stream(Duration::from_secs(120)));
         assert_eq!(Script::parse("stream the logs", false), Script::Answer);
         assert_eq!(Script::parse("mock:explore 5s", false), Script::Explore(Duration::from_secs(5)));
+        assert_eq!(Script::parse("mock:task 2s", false), Script::Task(Duration::from_secs(2)));
+        assert_eq!(Script::parse("mock:dev", false), Script::Dev);
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("mock:prose", false), Script::Prose);
         assert_eq!(Script::parse("purple prose", false), Script::Answer, "bare `prose` is just a word");
@@ -1465,6 +1537,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_background_agent_gets_a_turn_saying_so() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("subagents 30s").await;
+            let first = m.turn().await;
+            let out = first.iter().find_map(|e| if let AgentEvent::Background(b) = e { Some(b.clone()) } else { None }).expect("a background set");
+            m.send(Command::StopTask { id: out[0].id.clone() }).await;
+            // As Claude Code does (recorded live): the call fails, and a turn of its own says so.
+            let echo = m.turn().await;
+            assert!(echo.contains(&AgentEvent::Task { id: out[0].id.clone(), description: None, activity: None, tool_uses: None, done: Some(false) }), "{echo:?}");
+            assert!(text(&echo).contains("was stopped"), "{echo:?}");
+        });
+    }
+
+    #[test]
     fn a_dev_server_runs_on_after_the_turn_and_stops_when_asked() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
@@ -1485,6 +1572,30 @@ mod tests {
             m.send(Command::ReadTask { id }).await;
             m.prompt("hello").await;
             assert!(!m.turn().await.iter().any(|e| matches!(e, AgentEvent::TaskOutput { .. })));
+        });
+    }
+
+    #[test]
+    fn a_session_s_background_work_ends_with_it() {
+        let jobs = Jobs::default();
+        jobs.add(BackgroundTask { id: "shell-1".into(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: None, readable: true, stoppable: true });
+        drop(EndJobs(jobs.clone()));
+        assert!(!jobs.running("shell-1"), "the loop printing for it stops");
+    }
+
+    #[test]
+    fn a_turn_waits_on_its_own_sub_agent_as_it_works() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("mock:task 30ms").await;
+            let turn = m.turn().await;
+            let started = turn.iter().position(|e| matches!(e, AgentEvent::ToolStarted { title, .. } if title == "Subagent")).expect("its row");
+            let steps = turn.iter().filter(|e| matches!(e, AgentEvent::TaskStep { .. })).count();
+            let done = turn.iter().position(|e| matches!(e, AgentEvent::Task { done: Some(true), .. })).expect("it finishes");
+            let finished = turn.iter().position(|e| matches!(e, AgentEvent::ToolFinished { .. })).expect("its call returns");
+            assert!(started < done && done < finished && steps == 3, "{turn:?}");
+            assert!(!turn.iter().any(|e| matches!(e, AgentEvent::Background(_))), "in the foreground: nothing left running");
+            assert!(text(&turn).contains("212 tests"));
         });
     }
 

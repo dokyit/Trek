@@ -166,6 +166,12 @@ pub struct LiveThread {
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
     /// them.
     pub background: Vec<Background>,
+    /// When the user last stopped its agent's own sub-agents between turns. Claude Code takes a
+    /// turn of its own to say they were stopped; that turn is no news (`quiet_turn`).
+    stopped_out: Option<Instant>,
+    /// The turn running is the agent saying the sub-agents the user stopped were stopped: it
+    /// raises no alert as it ends.
+    quiet_turn: bool,
     /// Last prompt or agent event (idle sessions are shut down; they resume on the next message).
     pub last_active: Option<Instant>,
     /// The latest point the agent's session can be taken back to (`AgentEvent::Mark`); saved to
@@ -332,6 +338,8 @@ pub struct Background {
     pub started: Instant,
     /// The end of its output as last read (`Workspace::read_background`), once it has been.
     pub output: Option<String>,
+    /// Bumped each time `output` changes, so views can tell without comparing it.
+    pub output_rev: u64,
     /// Asked to stop: it goes once the agent says it has.
     pub stopping: bool,
 }
@@ -374,6 +382,25 @@ impl LiveThread {
         self.tasks.iter().filter(|t| t.done.is_none()).count()
     }
 
+    /// Its agent's own sub-agents its turn is blocked on: tool calls are running, and every one
+    /// of them is a sub-agent at work (a foreground `Task`). Empty otherwise, mid-turn or not.
+    pub fn blocked_on_tasks(&self) -> impl Iterator<Item = &SubTask> {
+        let running: Vec<&str> = if self.turn_started.is_some() && self.permissions.is_empty() {
+            // The turn's own calls: back to the message that started it.
+            self.items
+                .iter()
+                .rev()
+                .take_while(|i| !matches!(i, Item::User { .. }))
+                .filter_map(|i| if let Item::Tool { id, status: ToolStatus::Running, .. } = i { Some(id.as_str()) } else { None })
+                .collect()
+        } else {
+            vec![]
+        };
+        let out = |id: &str| self.tasks.iter().any(|k| k.id == id && k.done.is_none());
+        let blocked = !running.is_empty() && running.iter().all(|id| out(id));
+        self.tasks.iter().filter(move |k| blocked && k.done.is_none() && running.contains(&k.id.as_str()))
+    }
+
     /// The agent's own sub-agents working in the background (it takes a turn when they report).
     pub fn background_agents(&self) -> impl Iterator<Item = &Background> {
         self.background.iter().filter(|b| b.is_agent())
@@ -391,14 +418,26 @@ impl LiveThread {
             .into_iter()
             .map(|task| match old.iter().position(|b| b.task.id == task.id) {
                 Some(ix) => Background { task, ..old.swap_remove(ix) },
-                None => Background { task, started: Instant::now(), output: None, stopping: false },
+                None => Background { task, started: Instant::now(), output: None, output_rev: 0, stopping: false },
             })
             .collect();
     }
 
+    /// Nothing would be cut short by restarting its session: no turn, nothing in the background.
+    fn free_to_relaunch(&self) -> bool {
+        self.turn_started.is_none() && self.background.is_empty()
+    }
+
     /// The session is gone, and what it had running in the background with it: its sub-agents
-    /// that were still out end, failed.
+    /// that were still out end, failed, and the transcript says what else stopped (the dev server
+    /// the user was told to try).
     fn lose_background(&mut self) {
+        let work: Vec<&str> = self.background_work().map(|b| b.task.title.as_str()).collect();
+        let notice = match work[..] {
+            [] => None,
+            [one] => Some(format!("{} stopped with the session", one.lines().next().unwrap_or_default().trim().chars().take(80).collect::<String>())),
+            _ => Some(format!("{} background tasks stopped with the session", work.len())),
+        };
         let out: Vec<String> = self.background_agents().filter_map(|b| b.task.call.clone()).collect();
         for t in self.tasks.iter_mut().filter(|t| t.done.is_none() && out.contains(&t.id)) {
             t.done = Some(false);
@@ -412,6 +451,10 @@ impl LiveThread {
             }
         }
         self.background.clear();
+        if let Some(text) = notice {
+            self.streaming = None;
+            self.items.push(Item::Notice { text });
+        }
     }
 
     /// Append the rows of sub-agents started since, each after the agent's own call to
@@ -657,6 +700,13 @@ pub enum UndoAction {
 /// be typing the next message by then, and unsent text doesn't survive a restart.
 pub const RESTART_GRACE: Duration = Duration::from_secs(10);
 
+/// How soon after the user stops its sub-agents an agent's turn of its own is taken to be it
+/// saying so (Claude Code takes one within seconds).
+const STOPPED_ECHO: Duration = Duration::from_secs(30);
+
+/// How long a background task asked to stop shows as stopping before Stop is offered again.
+const STOP_WAIT: Duration = Duration::from_secs(10);
+
 /// Git state of the folder on screen, for the composer's branch chip.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitInfo {
@@ -800,6 +850,9 @@ pub struct Workspace {
     pub delegations: HashMap<String, orchestrate::Delegation>,
     /// Sub-agents' reports for parents that haven't heard them yet (kept in the store too).
     wakes: HashMap<String, Vec<trek_core::orchestrate::Report>>,
+    /// Reports for parents whose own turn the last quit cut off: the user picks those threads
+    /// up, and the reports go out once a turn of theirs has ended (kept in the store too).
+    parked: HashMap<String, Vec<trek_core::orchestrate::Report>>,
     /// Parents about to be woken: reports that come in meanwhile go in the same message.
     gathering: HashMap<String, Task<()>>,
     /// The orchestration key of the pre-warmed draft session (`warm`), until it has a thread.
@@ -1000,6 +1053,7 @@ impl Workspace {
             _ipc_calls: None,
             delegations: HashMap::new(),
             wakes: HashMap::new(),
+            parked: HashMap::new(),
             gathering: HashMap::new(),
             warm_ipc: None,
         };
@@ -1375,14 +1429,28 @@ impl Workspace {
         }
     }
 
-    /// Stop background task `task` of `thread` (the agent says when it has).
+    /// Stop background task `task` of `thread` (the agent says when it has). Still running
+    /// `STOP_WAIT` later (the agent couldn't stop it, and said so in the transcript), it can be
+    /// asked again.
     pub fn stop_background(&mut self, thread: &str, task: &str, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(thread) else { return };
-        let Some(b) = live.background.iter_mut().find(|b| b.task.id == task && b.task.stoppable) else { return };
+        let Some(b) = live.background.iter_mut().find(|b| b.task.id == task && b.task.stoppable && !b.stopping) else { return };
         b.stopping = true;
         if let Some(tx) = &live.commands {
             let _ = tx.try_send(Command::StopTask { id: task.to_string() });
         }
+        let (id, task) = (thread.to_string(), task.to_string());
+        let again = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(STOP_WAIT).await;
+            let _ = this.update(cx, |ws, cx| {
+                if let Some(b) = ws.live.get_mut(&id).and_then(|l| l.background.iter_mut().find(|b| b.task.id == task && b.stopping)) {
+                    b.stopping = false;
+                    cx.emit(WorkspaceEvent::Background { id: id.clone() });
+                    cx.notify();
+                }
+            });
+        });
+        self.keep(again);
         cx.notify();
     }
 
@@ -1943,15 +2011,18 @@ impl Workspace {
                 live.fast = prefs.fast;
                 if let (Some(before), Some(tx)) = (before, live.commands.clone()) {
                     // Claude reads effort, fast mode and plan at launch: restart idle sessions (they
-                    // resume), and running ones once their turn is over.
+                    // resume), and running ones once their turn is over. One with work running in
+                    // the background restarts once that's over too: a restart would end it, and
+                    // its sub-agents would never report.
                     let at_launch = fast_changed || plan_changed || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort);
-                    let relaunch = at_launch && live.turn_started.is_none();
+                    let relaunch = at_launch && live.free_to_relaunch();
                     live.relaunch |= at_launch && !relaunch;
                     if before.agent != prefs.agent || relaunch {
                         let _ = tx.try_send(Command::Shutdown);
                         live.commands = None;
                         // What it says from here on (its exit above all) isn't the thread's news.
                         live._events = None;
+                        live.relaunch = false;
                     } else {
                         if before.hand_holding != prefs.hand_holding {
                             let _ = tx.try_send(Command::SetHandHolding(prefs.hand_holding));
@@ -2323,6 +2394,8 @@ impl Workspace {
         if !running {
             live.turn_started = Some(Instant::now());
             live.turn_error = false;
+            live.stopped_out = None;
+            live.quiet_turn = false;
             // The agent's own sub-agents still out in the background carry on into this turn.
             live.tasks.retain(|t| t.done.is_none());
             // A new turn starts from a checkpoint of the files, taken before the agent has the
@@ -2518,7 +2591,10 @@ impl Workspace {
                     if let AgentEvent::TaskOutput { id: task, output } = ev
                         && let Some(b) = live.background.iter_mut().find(|b| b.task.id == task)
                     {
-                        b.output = Some(output);
+                        if b.output.as_ref() != Some(&output) {
+                            b.output = Some(output);
+                            b.output_rev += 1;
+                        }
                     }
                 }
             }
@@ -2562,8 +2638,13 @@ impl Workspace {
         let mut transcript_only = true;
         let mut appended = true;
         let mut turn_began: Option<i64>;
+        // The agent's own sub-agents all ended with no turn of its own open: their reports went
+        // nowhere yet (the agent may still take a turn for them), or the session took them.
+        let agents_gone;
+        let mut agents_lost = false;
         {
             let live = self.live.entry(id.to_string()).or_default();
+            let had_agents = live.background_agents().next().is_some();
             live.last_active = Some(cx.background_executor().now());
             // When the turn ending here began, as wall time (`note_branch`).
             turn_began = live.turn_started.map(|t| now_ms() - t.elapsed().as_millis() as i64);
@@ -2579,6 +2660,7 @@ impl Workspace {
                 // Output with no turn open: the agent woke itself (a background sub-agent finished).
                 if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
                     turn_began = Some(now_ms());
+                    live.quiet_turn = live.stopped_out.is_some_and(|at| at.elapsed() < STOPPED_ECHO);
                     live.turn_started = Some(Instant::now());
                     run_state = Some(RunState::Working);
                     transcript_only = false;
@@ -2827,6 +2909,7 @@ impl Workspace {
                         continue_queue = false;
                         live.commands = None;
                         // What it ran in the background went with it.
+                        agents_lost |= live.turn_started.is_none() && live.background_agents().next().is_some();
                         live.lose_background();
                         // Nobody is left to answer what the agent was asking.
                         live.permissions.retain(|p| p.after_turn);
@@ -2855,6 +2938,12 @@ impl Workspace {
             }
             live.place_task_rows(false);
             live.revision += 1;
+            agents_gone = had_agents && !exited && live.turn_started.is_none() && live.background_agents().next().is_none();
+        }
+        if agents_lost {
+            self.background_agents_lost(id, cx);
+        } else if agents_gone {
+            self.background_agents_gone(id, cx);
         }
         if let Some((took, failed)) = stopped
             && let Err(e) = self.store.record_stop(id, now_ms(), took, failed)
@@ -2936,6 +3025,14 @@ impl Workspace {
                 self.persist_soon(id, cx);
             }
         }
+        // Settings read at launch changed while it was busy: now it isn't, it restarts (and
+        // resumes) before anything more goes to it.
+        if let Some(live) = self.live.get_mut(id).filter(|l| l.relaunch && l.free_to_relaunch()) {
+            live.relaunch = false;
+            if let Some(tx) = live.commands.take() {
+                let _ = tx.try_send(Command::Shutdown);
+            }
+        }
         if finished {
             self.turns_finished += 1;
             self.refresh_git(cx);
@@ -2945,12 +3042,6 @@ impl Workspace {
             self.persist_items(id, cx);
             self.search_index_changed(cx);
             self.note_branch(id, turn_began, cx);
-            if let Some(live) = self.live.get_mut(id).filter(|l| l.relaunch && l.turn_started.is_none()) {
-                live.relaunch = false;
-                if let Some(tx) = live.commands.take() {
-                    let _ = tx.try_send(Command::Shutdown);
-                }
-            }
             let next = if continue_queue {
                 self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
             } else {
@@ -2971,12 +3062,18 @@ impl Workspace {
                 self.maybe_auto_title(id, cx);
                 // Waiting on its sub-agents, it isn't done: it says so when it is.
                 let waiting = self.waiting(id) || self.wakes.get(id).is_some_and(|w| !w.is_empty());
-                if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused && !waiting) {
+                // The agent saying that what the user stopped has stopped isn't news either.
+                let echo = self.live.get_mut(id).is_some_and(|l| std::mem::take(&mut l.quiet_turn));
+                if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused && !waiting && !echo) {
                     let verb = if t.run_state == RunState::Failed { "Failed" } else { "Finished" };
                     notify_text.get_or_insert(format!("{verb}: {}", t.title));
                 }
                 self.maybe_restart_for_update(cx);
             }
+        }
+        // Picked up again after a quit cut its turn off, it hears what was kept for it then.
+        if finished && !interrupted && !paused {
+            self.unpark_wakes(id);
         }
         // Free now (its turn over, an answer settled, a request withdrawn), it hears from its
         // sub-agents that reported meanwhile.
@@ -3177,12 +3274,21 @@ impl Workspace {
     }
 
     pub fn interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
+        // A sub-agent the user stops between turns, while it waits on sub-agents of its own, has
+        // no turn whose end would report that: it reports now, stopped. (Stopped from above, it
+        // ends silently, `stop_task`.)
+        if self.live.get(id).is_some_and(|l| l.turn_started.is_none()) && self.delegations.get(id).is_some_and(|d| d.outcome.is_none() && !d.is_cancelled()) {
+            self.task_turn_ended(id, true, cx);
+        }
         // Its sub-agents stop with it.
         self.stop_children(id, cx);
         // Between turns, waiting on its agent's own sub-agents: they stop (there's no turn to
         // interrupt them with), and nothing that was due wakes it.
         if self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
             let agents: Vec<String> = self.live.get(id).map(|l| l.background_agents().filter(|b| b.task.stoppable).map(|b| b.task.id.clone()).collect()).unwrap_or_default();
+            if let Some(live) = self.live.get_mut(id).filter(|_| !agents.is_empty()) {
+                live.stopped_out = Some(Instant::now());
+            }
             for task in agents {
                 self.stop_background(id, &task, cx);
             }
@@ -4714,7 +4820,10 @@ impl Workspace {
         if !matches!(self.updater.status, UpdateStatus::RestartPending { .. }) || self.work_in_flight() || self.restart_countdown.is_some() {
             return;
         }
-        let message = format!("Trek restarts to update in {} seconds.", RESTART_GRACE.as_secs());
+        // Shells left running don't hold the update back (a dev server can run all day), but the
+        // restart ends them: the toast says so while it can still be cancelled.
+        let work: Vec<&str> = self.live.values().filter(|l| l.commands.is_some()).flat_map(|l| l.background_work().map(|b| b.task.title.as_str())).collect();
+        let message = restart_message(RESTART_GRACE.as_secs(), &work);
         cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::CancelRestart) });
         self.restart_countdown = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(RESTART_GRACE).await;
@@ -4839,6 +4948,16 @@ fn whole_session(thread: &Thread, mark: Option<String>, kept: &[Item], native: b
 }
 
 /// Said in a transcript whose next session starts with a recap.
+/// The toast before an update restart, naming the background work it will end.
+fn restart_message(secs: u64, work: &[&str]) -> String {
+    let name = |t: &str| t.lines().next().unwrap_or_default().trim().chars().take(60).collect::<String>();
+    match work {
+        [] => format!("Trek restarts to update in {secs} seconds."),
+        [one] => format!("Trek restarts to update in {secs} seconds, stopping {}.", name(one)),
+        _ => format!("Trek restarts to update in {secs} seconds, stopping {} background tasks.", work.len()),
+    }
+}
+
 fn recap_notice(agent: &AgentId) -> String {
     format!("{} can't take its own session back to this point, so your next message starts a new session with a recap of the conversation so far.", agent.display_name())
 }
@@ -5133,6 +5252,13 @@ mod tests {
 
     fn q(text: &str, secret: bool) -> Question {
         Question { question: text.into(), header: String::new(), options: vec![("Yes".into(), String::new())], multi: false, secret }
+    }
+
+    #[test]
+    fn the_update_toast_names_what_the_restart_stops() {
+        assert_eq!(restart_message(10, &[]), "Trek restarts to update in 10 seconds.");
+        assert_eq!(restart_message(10, &["npm run dev\n# more"]), "Trek restarts to update in 10 seconds, stopping npm run dev.");
+        assert_eq!(restart_message(10, &["npm run dev", "cargo watch"]), "Trek restarts to update in 10 seconds, stopping 2 background tasks.");
     }
 
     #[test]

@@ -263,8 +263,11 @@ impl WorkingBar {
             }
             (logos, crate::workspace::waiting_label(&waited))
         });
-        // The wait's clock is the longest-waited one's, to the second.
-        let since = waited.iter().map(|w| w.elapsed).max().map(|d| Instant::now() - Duration::from_secs(d.as_secs()));
+        // The wait's clock is the longest-waited one's, to the second. Worked out afresh, it'd
+        // land a hair off each time and redraw the bar on every workspace change: the one shown
+        // stands while it's within a second.
+        let shown = self.shown.as_ref().filter(|s| s.thread == id).and_then(|s| s.header.as_ref()).filter(|h| h.waiting.is_some()).and_then(|h| h.started);
+        let since = waited.iter().map(|w| w.elapsed).max().map(|d| steady(Instant::now() - Duration::from_secs(d.as_secs()), shown));
         let working = thread.run_state == RunState::Working || ws.waiting(id);
         let header = (working && live.permissions.is_empty()).then(|| Header {
             agent: thread.agent.clone(),
@@ -419,6 +422,14 @@ impl WorkingBar {
             });
             (every, task)
         });
+    }
+}
+
+/// `at`, or `shown` when that's within a second of it.
+fn steady(at: Instant, shown: Option<Instant>) -> Instant {
+    match shown {
+        Some(s) if (if at > s { at - s } else { s - at }) < Duration::from_secs(1) => s,
+        _ => at,
     }
 }
 
@@ -921,9 +932,18 @@ impl WorkingBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, trail_word};
+    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, steady, trail_word};
     use gpui_kit::{Hsla, px};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_wait_s_clock_holds_still_between_reads() {
+        let t = Instant::now();
+        assert_eq!(steady(t + Duration::from_millis(400), Some(t)), t, "a hair off: the one shown stands");
+        assert_eq!(steady(t, Some(t + Duration::from_millis(900))), t + Duration::from_millis(900));
+        assert_eq!(steady(t + Duration::from_secs(3), Some(t)), t + Duration::from_secs(3), "another wait");
+        assert_eq!(steady(t, None), t);
+    }
 
     #[test]
     fn the_shimmer_band_crosses_the_line_and_comes_round() {

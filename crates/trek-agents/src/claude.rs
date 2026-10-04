@@ -834,8 +834,7 @@ pub async fn run(
                     } else if let Some(task) = output_requests.remove(id) {
                         // A task whose output can't be read (it ended long ago) just shows none.
                         if r["subtype"] == "success" {
-                            let output = r["response"]["output"].as_str().unwrap_or_default().to_string();
-                            if events.send(AgentEvent::TaskOutput { id: task, output }).await.is_err() {
+                            if events.send(AgentEvent::TaskOutput { id: task, output: task_output(r) }).await.is_err() {
                                 return Ok(());
                             }
                         }
@@ -939,6 +938,14 @@ fn result_error(v: &Value) -> String {
 /// The permission mode Claude reports in its `init` and `status` messages.
 fn permission_mode(v: &Value) -> Option<&str> {
     (v["type"] == "system" && matches!(v["subtype"].as_str(), Some("init" | "status"))).then(|| v["permissionMode"].as_str()).flatten()
+}
+
+/// The end of a background task's output from Claude's answer to `get_task_output`: a dev
+/// server's log can run to megabytes, and only its end is shown.
+fn task_output(response: &Value) -> String {
+    let mut output = String::new();
+    crate::keep_tail(&mut output, response["response"]["output"].as_str().unwrap_or_default());
+    output
 }
 
 /// How the login is billed, from the `account` in the `initialize` response; `None` when it
@@ -1723,6 +1730,14 @@ mod tests {
         // Without the session's model among the totals (an alias), the entry that holds the turn.
         let mut aliased = Turns { resumed: true, model: Some("haiku".into()), ..Default::default() };
         assert_eq!(usage(aliased.step(&resumed, &mut pending, &mut streamed)), vec![(Some("claude-haiku-4-5".into()), own)]);
+    }
+
+    #[test]
+    fn a_background_task_s_output_keeps_its_end() {
+        let log = format!("{}ready on :5173\n", "GET /\n".repeat(10_000));
+        let out = task_output(&json!({ "subtype": "success", "response": { "output": log } }));
+        assert!(out.len() <= crate::OUTPUT_TAIL && out.ends_with("ready on :5173\n"), "{}", out.len());
+        assert_eq!(task_output(&json!({ "subtype": "success", "response": {} })), "");
     }
 
     #[test]

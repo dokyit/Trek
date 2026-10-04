@@ -38,8 +38,6 @@ pub struct Sidebar {
     /// otherwise, so "5m" ages (this view is cached; nothing else would redraw it). The flag is
     /// whether it's the fast one.
     _clock: Option<(bool, Task<()>)>,
-    /// The breathing dots on cards of threads with work running in the background, by thread.
-    pulses: HashMap<String, Entity<ui::PulseDot>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -93,7 +91,6 @@ impl Sidebar {
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
             updater_open: false,
             _clock: None,
-            pulses: HashMap::new(),
             _subscriptions: subscriptions,
         };
         this.sync_clock(cx);
@@ -354,17 +351,23 @@ impl Sidebar {
         div().min_w_0().truncate().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(ui::match_text(&text, &ranges, cx))
     }
 
+    /// What `t` has at work: its sub-agents (Trek's, and its agent's own, in its turn or working
+    /// in the background), by logo and name, and what else its agent runs in the background.
+    pub(crate) fn at_work(&self, t: &Thread, cx: &App) -> (Vec<(trek_core::AgentId, String)>, Vec<String>) {
+        let ws = self.workspace.read(cx);
+        let mut kids: Vec<(trek_core::AgentId, String)> = ws.running_children(&t.id).into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect();
+        let Some(l) = ws.live.get(&t.id) else { return (kids, vec![]) };
+        let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
+        kids.extend(l.tasks.iter().filter(|k| k.done.is_none()).map(|k| (t.agent.clone(), k.description.clone())));
+        kids.extend(l.background_agents().filter(|b| !b.task.call.as_deref().is_some_and(out)).map(|b| (t.agent.clone(), b.task.title.clone())));
+        (kids, l.background_work().map(|b| b.task.title.clone()).collect())
+    }
+
     /// T3-style card: project · status on top, title below, agent glyph at the end.
     fn card(&self, t: &Thread, project: &str, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        // Its sub-agents at work, by logo: Trek's, and its agent's own in the background.
-        let (kids, background): (Vec<(trek_core::AgentId, String)>, Vec<String>) = {
-            let ws = self.workspace.read(cx);
-            let mut kids: Vec<(trek_core::AgentId, String)> = ws.running_children(&t.id).into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect();
-            let live = ws.live.get(&t.id);
-            kids.extend(live.into_iter().flat_map(|l| l.background_agents()).map(|b| (t.agent.clone(), b.task.title.clone())));
-            (kids, live.map(|l| l.background_work().map(|b| b.task.title.clone()).collect()).unwrap_or_default())
-        };
+        let (kids, background) = self.at_work(t, cx);
+        let tip = card_tip(&kids, &background).map(SharedString::from);
         let quiet = t.run_state == RunState::Idle && !t.is_unseen() && !selected && kids.is_empty();
         let id = t.id.clone();
         let hit = self.content_hit(t, cx);
@@ -407,14 +410,12 @@ impl Sidebar {
                             )),
                     )
                     .when(!kids.is_empty(), |el| {
-                        let tip = SharedString::from(format!("Sub-agents at work:\n{}", kids.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n")));
                         let ring = if selected { theme.list_active } else { theme.sidebar };
                         el.child(
                             h_flex()
                                 .id(SharedString::from(format!("card-kids-{}", t.id)))
                                 .test_support()
                                 .flex_none()
-                                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
                                 .children(kids.iter().take(3).enumerate().map(|(i, (a, _))| {
                                     div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(4.)).bg(ring).child(ui::agent_logo(a, px(12.), cx))
                                 })),
@@ -422,19 +423,19 @@ impl Sidebar {
                     })
                     .child(ui::agent_glyph(&t.agent, cx)),
             )
-            .when(!background.is_empty(), |el| el.child(self.background_line(&t.id, &background, cx)))
+            .when(!background.is_empty(), |el| el.child(self.background_line(&t.id, background.len(), cx)))
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-2.))))
+            .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }
 
     /// A quiet line under a card's title while its agent runs things in the background (a dev
-    /// server, a browser, a watcher) after it has answered: a breathing dot and how many, each
-    /// named on hover.
-    fn background_line(&self, id: &str, titles: &[String], cx: &App) -> AnyElement {
+    /// server, a browser, a watcher) after it has answered: a dot and how many (the card's
+    /// tooltip names them). The dot holds still: the sidebar is one cached view, and a dot that breathed would
+    /// redraw all of it a few times a second for as long as a dev server runs.
+    fn background_line(&self, id: &str, n: usize, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let n = titles.len();
-        let tip = SharedString::from(format!("Running in the background:\n{}", titles.join("\n")));
         h_flex()
             .id(SharedString::from(format!("card-background-{id}")))
             .test_support()
@@ -442,8 +443,7 @@ impl Sidebar {
             .gap(px(6.))
             .text_size(px(12.))
             .text_color(theme.muted_foreground)
-            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-            .children(self.pulses.get(id).cloned())
+            .child(div().flex_none().size(px(6.)).rounded_full().bg(palette::sky(cx)))
             .child(if n == 1 { "1 background task".to_string() } else { format!("{n} background tasks") })
             .into_any_element()
     }
@@ -955,6 +955,17 @@ impl Sidebar {
     }
 }
 
+/// A card's tooltip while it has work out: its sub-agents, then what runs in the background.
+pub(crate) fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) -> Option<String> {
+    let kids: Vec<String> = kids.iter().map(|(_, name)| name.clone()).collect();
+    let parts: Vec<String> = [("Sub-agents at work", &kids[..]), ("Running in the background", background)]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(head, names)| format!("{head}:\n{}", names.join("\n")))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 /// The inbox's cards in order: what waits on the user (approvals, failures), then what's running
 /// now, then the rest of the inbox, newest first as `Thread::inbox_rank` has them. Running threads
 /// mustn't sink below a day's worth of finished ones and out of view.
@@ -967,12 +978,6 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Sidebar");
-        // Breathing dots for the cards of threads running things in the background.
-        let busy: Vec<String> = self.workspace.read(cx).live.iter().filter(|(_, l)| l.background_work().next().is_some()).map(|(id, _)| id.clone()).collect();
-        self.pulses.retain(|id, _| busy.contains(id));
-        for id in busy {
-            self.pulses.entry(id).or_insert_with(|| cx.new(|cx| ui::PulseDot::new(palette::sky, 6., window, cx)));
-        }
         let ws = self.workspace.read(cx);
         // A title animating in draws a frame at a time, for the moment it takes.
         if ws.retitled.keys().any(|id| ws.title_reveal(id).is_some()) {

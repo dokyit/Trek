@@ -282,24 +282,6 @@ fn tool_row(item: &Value) -> Option<(String, String)> {
     })
 }
 
-/// How much of a command's output Trek keeps while it runs: the end of it.
-const OUTPUT_TAIL: usize = 8 * 1024;
-
-/// `text` with `more` added, cut from the front to about `OUTPUT_TAIL` bytes (at a line break
-/// when there's one near the cut).
-fn keep_tail(text: &mut String, more: &str) {
-    text.push_str(more);
-    if text.len() <= OUTPUT_TAIL {
-        return;
-    }
-    let mut cut = text.len() - OUTPUT_TAIL;
-    while !text.is_char_boundary(cut) {
-        cut += 1;
-    }
-    let cut = text[cut..].find('\n').map(|n| cut + n + 1).filter(|c| *c - cut < 512).unwrap_or(cut);
-    text.drain(..cut);
-}
-
 fn activity(item: &Value) -> Option<String> {
     let s = match item["type"].as_str()? {
         "commandExecution" => format!("Running {}", command_text(item)),
@@ -875,7 +857,7 @@ impl Session {
             "item/agentMessage/delta" => Some(AgentEvent::TextDelta(p["delta"].as_str().unwrap_or_default().into())),
             "item/commandExecution/outputDelta" => {
                 if let Some((_, output)) = p["itemId"].as_str().and_then(|id| self.commands.get_mut(id)) {
-                    keep_tail(output, p["delta"].as_str().unwrap_or_default());
+                    crate::keep_tail(output, p["delta"].as_str().unwrap_or_default());
                 }
                 None
             }
@@ -2339,16 +2321,6 @@ mod tests {
         assert_eq!(out.events[0], AgentEvent::Background(vec![]));
         assert!(matches!(&out.events[1], AgentEvent::ToolFinished { id, ok: true, .. } if id == "exec-1"));
         assert!(s.commands.is_empty() && s.background.is_empty());
-    }
-
-    #[test]
-    fn a_command_s_output_keeps_its_end() {
-        let mut out = String::new();
-        keep_tail(&mut out, &"line\n".repeat(OUTPUT_TAIL));
-        assert!(out.len() <= OUTPUT_TAIL && out.starts_with("line\n") && out.ends_with("line\n"));
-        let mut wide = String::new();
-        keep_tail(&mut wide, &"é".repeat(OUTPUT_TAIL));
-        assert!(wide.len() <= OUTPUT_TAIL + 1 && wide.chars().all(|c| c == 'é'));
     }
 
     #[test]

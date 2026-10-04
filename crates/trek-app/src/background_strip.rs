@@ -4,6 +4,8 @@
 //! it. Clicking a row shows the end of its output in a popover. The agent's own sub-agents aren't
 //! here: they have rows in the transcript, and the thread waits on them.
 //!
+//! It can be put away to one slim "Background" line, per thread, for when the user knows.
+//!
 //! A view of its own, cached at its height: its once-every-two-seconds tick (the clocks, and
 //! reading the tasks' output from the agent) redraws only the strip.
 
@@ -18,6 +20,8 @@ use trek_agents::BackgroundKind;
 
 const COLUMN: f32 = 760.;
 const ROW: f32 = 28.;
+/// The slim line the strip folds to when put away.
+const SLIM: f32 = 24.;
 /// Space under the rows, above the composer.
 const PAD: f32 = 4.;
 /// How often the strip reads its tasks' output and moves its clocks on.
@@ -31,6 +35,8 @@ pub struct BackgroundStrip {
     shown: Option<Shown>,
     /// A row per task, rather than the first with a count.
     expanded: bool,
+    /// Threads whose strip is put away (one slim line), as the user left it.
+    hidden: std::collections::HashSet<String>,
     /// The task whose output is open in a popover.
     output: Option<String>,
     /// The window is in front: the strip reads output and ticks only then.
@@ -55,7 +61,9 @@ struct TaskRow {
     title: String,
     /// The last line it printed, as last read.
     line: Option<String>,
-    output: Option<String>,
+    /// Its output has been read (the popover reads it from the workspace, `Background::output`).
+    read: bool,
+    output_rev: u64,
     started: Instant,
     readable: bool,
     stoppable: bool,
@@ -84,6 +92,7 @@ impl BackgroundStrip {
             scope,
             shown: None,
             expanded: false,
+            hidden: std::collections::HashSet::new(),
             output: None,
             active: window.is_window_active() || crate::mascot::force_active(),
             review: std::env::var("TREK_OPEN_BACKGROUND").is_ok_and(|v| v == "1"),
@@ -105,7 +114,8 @@ impl BackgroundStrip {
                 kind: b.task.kind,
                 title: b.task.title.clone(),
                 line: b.last_line().map(str::to_string),
-                output: b.output.clone(),
+                read: b.output.is_some(),
+                output_rev: b.output_rev,
                 started: b.started,
                 readable: b.task.readable,
                 stoppable: b.task.stoppable,
@@ -155,9 +165,9 @@ impl BackgroundStrip {
         self.tick(cx);
     }
 
-    /// Tick while there's something on show and the window is in front.
+    /// Tick while there's something on show (not put away) and the window is in front.
     fn tick(&mut self, cx: &mut Context<Self>) {
-        if self.shown.is_none() || !self.active {
+        if self.shown.as_ref().is_none_or(|s| self.hidden.contains(&s.thread)) || !self.active {
             self._ticker = None;
             return;
         }
@@ -189,9 +199,51 @@ impl BackgroundStrip {
     /// Its height as laid out: a row (or a row per task, opened), and the space under it.
     pub fn height(&self) -> f32 {
         match &self.shown {
+            Some(s) if self.hidden.contains(&s.thread) => SLIM + PAD,
             Some(s) => (if self.expanded { s.rows.len() } else { 1 }) as f32 * ROW + PAD,
             None => 0.,
         }
+    }
+
+    /// Put the strip away to its slim line, or bring it back.
+    fn set_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        let Some(thread) = self.shown.as_ref().map(|s| s.thread.clone()) else { return };
+        if hidden {
+            self.hidden.insert(thread);
+            if self.output.is_some() {
+                self.set_output(None, cx);
+            }
+        } else {
+            self.hidden.remove(&thread);
+            self.poll(cx);
+        }
+        self.tick(cx);
+        cx.notify();
+    }
+
+    /// The strip put away: "Background · 2 running", which brings it back.
+    fn slim(&self, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        h_flex()
+            .id("bg-show")
+            .test_support()
+            .w_full()
+            .h(px(SLIM))
+            .px(px(8.))
+            .gap(px(8.))
+            .rounded(px(7.))
+            .text_size(px(12.5))
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.foreground.opacity(0.05)).text_color(theme.foreground))
+            .child(Icon::new(crate::assets::Lucide::Activity).size(px(14.)))
+            .child("Background")
+            .child(div().text_xs().child(format!("· {n} running")))
+            .child(div().flex_1())
+            .child(Icon::new(IconName::ChevronUp).xsmall())
+            .on_click(cx.listener(|this, _, _, cx| this.set_hidden(false, cx)))
+            .into_any_element()
     }
 
     fn set_output(&mut self, task: Option<String>, cx: &mut Context<Self>) {
@@ -264,6 +316,18 @@ impl BackgroundStrip {
                     cx.notify();
                 }))
         });
+        // The first row puts the strip away.
+        let hide = (ix == 0).then(|| {
+            Button::new("bg-hide")
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(crate::assets::Lucide::ChevronsDownUp).text_color(muted))
+                .tooltip("Put away")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.set_hidden(true, cx);
+                }))
+        });
         let line = r.line.clone().unwrap_or_else(|| if r.readable { String::new() } else { "running".into() });
         let trigger = Trigger {
             open,
@@ -285,6 +349,7 @@ impl BackgroundStrip {
                 .child(div().flex_none().text_xs().text_color(muted).child(crate::time::elapsed(r.started.elapsed())))
                 .children(stop)
                 .children(toggle)
+                .children(hide)
                 .into_any_element(),
         };
         let entity = cx.entity();
@@ -301,13 +366,15 @@ impl BackgroundStrip {
 
     /// The popover over a task: what it is, the end of what it printed, and Stop.
     fn output_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((r, agent)) = self.shown.as_ref().and_then(|s| Some((s.rows.iter().find(|r| Some(&r.id) == self.output.as_ref())?.clone(), s.agent.clone()))) else {
+        let Some((r, agent, thread)) = self.shown.as_ref().and_then(|s| Some((s.rows.iter().find(|r| Some(&r.id) == self.output.as_ref())?.clone(), s.agent.clone(), s.thread.clone()))) else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let text = r.output.as_deref().map(|o| {
-            let lines: Vec<&str> = o.lines().collect();
+        let text = r.read.then(|| {
+            let ws = self.workspace.read(cx);
+            let output = ws.live.get(&thread).and_then(|l| l.background.iter().find(|b| b.task.id == r.id)).and_then(|b| b.output.as_deref()).unwrap_or_default();
+            let lines: Vec<&str> = output.lines().collect();
             lines[lines.len().saturating_sub(OUTPUT_LINES)..].join("\n")
         });
         let id = r.id.clone();
@@ -413,7 +480,11 @@ impl Render for BackgroundStrip {
         crate::tests::rendered("BackgroundStrip");
         let Some(shown) = self.shown.clone() else { return div().into_any_element() };
         let more = shown.rows.len() - 1;
-        let rows: Vec<AnyElement> = shown.rows.iter().enumerate().take(if self.expanded { shown.rows.len() } else { 1 }).map(|(ix, r)| self.row(ix, r, more, cx)).collect();
+        let rows: Vec<AnyElement> = if self.hidden.contains(&shown.thread) {
+            vec![self.slim(shown.rows.len(), cx)]
+        } else {
+            shown.rows.iter().enumerate().take(if self.expanded { shown.rows.len() } else { 1 }).map(|(ix, r)| self.row(ix, r, more, cx)).collect()
+        };
         h_flex()
             .id("background-strip")
             .test_support()
@@ -443,6 +514,9 @@ impl BackgroundStrip {
     /// it can be stopped.
     pub(crate) fn rows(&self) -> Vec<String> {
         let Some(s) = &self.shown else { return vec![] };
+        if self.hidden.contains(&s.thread) {
+            return vec![format!("Background · {} running", s.rows.len())];
+        }
         s.rows
             .iter()
             .take(if self.expanded { s.rows.len() } else { 1 })

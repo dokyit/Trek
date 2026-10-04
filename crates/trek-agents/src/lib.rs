@@ -406,6 +406,24 @@ impl StderrTail {
     }
 }
 
+/// How much of a background task's or command's output Trek keeps while it runs: the end of it.
+pub(crate) const OUTPUT_TAIL: usize = 8 * 1024;
+
+/// `text` with `more` added, cut from the front to about `OUTPUT_TAIL` bytes (at a line break
+/// when there's one near the cut).
+pub(crate) fn keep_tail(text: &mut String, more: &str) {
+    text.push_str(more);
+    if text.len() <= OUTPUT_TAIL {
+        return;
+    }
+    let mut cut = text.len() - OUTPUT_TAIL;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let cut = text[cut..].find('\n').map(|n| cut + n + 1).filter(|c| *c - cut < 512).unwrap_or(cut);
+    text.drain(..cut);
+}
+
 pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -458,6 +476,16 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_s_output_keeps_its_end() {
+        let mut out = String::new();
+        keep_tail(&mut out, &"line\n".repeat(OUTPUT_TAIL));
+        assert!(out.len() <= OUTPUT_TAIL && out.starts_with("line\n") && out.ends_with("line\n"));
+        let mut wide = String::new();
+        keep_tail(&mut wide, &"é".repeat(OUTPUT_TAIL));
+        assert!(wide.len() <= OUTPUT_TAIL + 1 && wide.chars().all(|c| c == 'é'));
+    }
 
     /// Every test in this binary is isolated before any runs: none may reach the user's data
     /// folder or Keychain, whichever runs first.
@@ -674,6 +702,61 @@ mod live_usage {
         let rest = &seen[first_end + 1..];
         let emptied = rest.iter().position(|e| *e == AgentEvent::Background(vec![])).expect("the shell ends");
         assert!(rest[emptied..].iter().any(|e| matches!(e, AgentEvent::TextDelta(_))), "the agent takes a turn of its own: {rest:?}");
+    }
+
+    #[test]
+    #[ignore = "talks to the real Claude Code"]
+    fn claude_live_stopped_background_agent_and_what_follows() {
+        let cwd = std::path::PathBuf::from("/tmp/trek-background-e2e");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = start(SessionConfig {
+            agent: AgentId::ClaudeCode,
+            cwd,
+            model: Some("claude-haiku-4-5".into()),
+            effort: Effort::Low,
+            hand_holding: HandHolding::FullAccess,
+            plan: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            read_only: false,
+        });
+        let prompt = "Use the Agent tool with run_in_background=true and subagent_type general-purpose, description \"Wait a while\", prompt: \"Run the Bash command `sleep 45` and then reply with just: waited.\" Then immediately reply with just the word: started.";
+        let seen = trek_core::runtime().block_on(async {
+            session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();
+            let mut seen = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+            // The turn that sends it out.
+            loop {
+                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                println!("{ev:?}");
+                let done = matches!(ev, AgentEvent::TurnComplete { .. });
+                seen.push(ev);
+                if done {
+                    break;
+                }
+            }
+            let agent = seen.iter().rev().find_map(|e| if let AgentEvent::Background(b) = e { b.iter().find(|t| t.kind == BackgroundKind::Agent).map(|t| t.id.clone()) } else { None }).expect("an agent out");
+            println!("--- stopping {agent}");
+            session.commands.send(Command::StopTask { id: agent }).await.unwrap();
+            // Whatever follows within 30 s.
+            let quiet = tokio::time::Instant::now() + Duration::from_secs(30);
+            while let Ok(Ok(ev)) = tokio::time::timeout_at(quiet, session.events.recv()).await {
+                println!("{ev:?}");
+                seen.push(ev);
+            }
+            let _ = session.commands.send(Command::Shutdown).await;
+            seen
+        });
+        let first_end = seen.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
+        let rest = &seen[first_end + 1..];
+        assert!(rest.contains(&AgentEvent::Background(vec![])), "it stops: {rest:?}");
+        // Recorded (Claude Code 2.1.289): it takes a turn of its own to say so, which Trek keeps
+        // quiet (`Workspace::interrupt`, `quiet_turn`).
+        assert!(rest.iter().any(|e| matches!(e, AgentEvent::TextDelta(_))), "{rest:?}");
     }
 
     #[test]
