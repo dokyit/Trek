@@ -129,7 +129,27 @@ impl Render for SettingsNav {
                     .child(div().px(px(10.)).pb(px(6.)).text_size(px(11.5)).font_medium().text_color(theme.muted_foreground.opacity(0.8)).child(*group))
                     .children(pages.iter().map(|&p| {
                         let label: &'static str = p.label();
+                        // Agents: how many CLI updates are out (while Trek keeps checking: with checks
+                        // off, what the last check found isn't fresh enough to badge).
+                        let badge = (p == SettingsPage::Agents)
+                            .then(|| self.workspace.read(cx))
+                            .filter(|ws| ws.settings.updates.check_agents)
+                            .map(|ws| ws.agent_updates.pending())
+                            .filter(|n| *n > 0);
                         ui::nav_row(label, page_icon(p), label, None, p == current, cx)
+                            .when_some(badge, |el, n| {
+                                el.child(
+                                    div()
+                                        .id("agents-update-count")
+                                        .test_support()
+                                        .px(px(6.))
+                                        .rounded_full()
+                                        .bg(theme.foreground.opacity(0.08))
+                                        .text_size(px(11.))
+                                        .text_color(theme.muted_foreground)
+                                        .child(n.to_string()),
+                                )
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(p), cx))))
                     }))
             }))
@@ -362,7 +382,7 @@ impl SettingsView {
         let disabled = ws.settings.disabled_agents.clone();
         let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
         let (installed, missing): (Vec<_>, Vec<_>) = agents.into_iter().partition(|a| a.availability != Availability::NotInstalled);
-        let mut out = vec![];
+        let mut out: Vec<AnyElement> = vec![];
         let setup_key = |a: &AgentId| match a {
             AgentId::Acp(id) => id.clone(),
             other => other.key(),
@@ -449,7 +469,17 @@ impl SettingsView {
             let controls = h_flex().gap(px(6.)).children(sign_in).children(more).child(div().pl(px(4.)).child(toggle));
             rows.push(Self::row(title, "", controls, cx));
         }
-        out.push(ui::group(rows, cx));
+        // Updates to install come first; otherwise the setting waits under the agents.
+        let first = self.workspace.read(cx).agent_updates.pending() > 0 && self.workspace.read(cx).settings.updates.check_agents;
+        let updates = self.agent_updates_section(first, cx);
+        if first {
+            out.extend(updates);
+            out.push(Self::heading("Installed", cx));
+            out.push(ui::group(rows, cx));
+        } else {
+            out.push(ui::group(rows, cx));
+            out.extend(updates);
+        }
         if !missing.is_empty() {
             out.push(Self::heading("Not installed", cx));
             let rows = missing
@@ -484,6 +514,53 @@ impl SettingsView {
                 )
                 .into_any_element(),
         );
+        out
+    }
+
+    /// Agent CLI updates: the setting, when Trek last looked, and each update out.
+    /// `first`: it opens the page, right under the blurb's own space.
+    fn agent_updates_section(&mut self, first: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let (on, u) = (ws.settings.updates.check_agents, &ws.agent_updates);
+        let (checking, checked_at, listed) = (u.checking, u.checked_at, !u.listed().is_empty());
+        let last = match (checking, checked_at) {
+            (true, _) => "Checking now…".to_string(),
+            (false, 0) => "Not checked yet.".to_string(),
+            (false, at) if !listed => format!("Checked {}: every agent is up to date.", relative_ago(at)),
+            (false, at) => format!("Checked {}.", relative_ago(at)),
+        };
+        let description = format!(
+            "At launch and every 12 hours, Trek checks each agent CLI against where it came from: npm, Homebrew or its maker. Updates wait for running turns to end. {last}"
+        );
+        let controls = h_flex()
+            .gap(px(10.))
+            .child(
+                Button::new("check-agent-updates")
+                    .small()
+                    .outline()
+                    .loading(checking)
+                    .label("Check now")
+                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_agent_updates(true, cx)))),
+            )
+            .child(self.switch("agent-updates-auto", on, |s, v| s.updates.check_agents = v));
+        let mut rows = vec![Self::row("Check for agent updates", description, controls, cx)];
+        rows.extend(crate::agent_updates::rows(&self.workspace, cx));
+        let heading = if first {
+            div().pb(px(10.)).text_size(px(13.)).font_semibold().child("Updates").into_any_element()
+        } else {
+            Self::heading("Updates", cx)
+        };
+        let mut out = vec![heading, ui::group(rows, cx)];
+        if listed {
+            out.push(
+                h_flex()
+                    .pt_3()
+                    .gap(px(12.))
+                    .child(div().flex_1().text_size(px(12.5)).text_color(cx.theme().muted_foreground).child(crate::agent_updates::WHY))
+                    .children(crate::agent_updates::update_all(&self.workspace, cx))
+                    .into_any_element(),
+            );
+        }
         out
     }
 
@@ -743,6 +820,15 @@ impl SettingsView {
             SettingsPage::About => out.extend(self.about_page(&s, cx)),
         }
         out
+    }
+}
+
+/// When something happened, in a sentence: "just now", "3h ago", "on Sep 12".
+fn relative_ago(ms: i64) -> String {
+    match crate::time::relative(ms) {
+        r if r == "now" => "just now".into(),
+        r if r.ends_with(|c: char| c.is_ascii_alphabetic()) && r.starts_with(|c: char| c.is_ascii_digit()) => format!("{r} ago"),
+        r => format!("on {r}"),
     }
 }
 

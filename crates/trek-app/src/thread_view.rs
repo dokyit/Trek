@@ -24,7 +24,6 @@ use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
 use crate::workspace::TaskState;
 
-const COLUMN: f32 = 760.;
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
 
@@ -717,8 +716,9 @@ impl ThreadView {
         let text_size = at.text_size;
         let tint = theme.foreground.opacity(0.07);
         let animate = at.animate;
+        let width = at.column;
         let column = |el: Div| {
-            let el = el.w_full().max_w(px(COLUMN));
+            let el = el.w_full().max_w(width);
             let el = match flash {
                 // A soft band behind the message that holds briefly, then fades.
                 Some(seq) => {
@@ -728,7 +728,7 @@ impl ThreadView {
                     } else {
                         band.into_any_element()
                     };
-                    div().relative().w_full().max_w(px(COLUMN)).child(band).child(el)
+                    div().relative().w_full().max_w(width).child(band).child(el)
                 }
                 None => el,
             };
@@ -1006,7 +1006,7 @@ impl ThreadView {
                 .into_any_element()
             }
             (Row::Assistant { ix, .. }, _) => match md {
-                Some(md) => column(div().py_2().child(crate::md::view(&md, at.cwd.clone(), at.folder, text_size, cx).motion(crate::md::streaming())))
+                Some(md) => column(div().py_2().child(div().id(("answer-text", ix)).test_support().child(crate::md::view(&md, at.cwd.clone(), at.folder, text_size, cx).motion(crate::md::streaming()))))
                     .id(("answer", ix))
                     .test_support()
                     .into_any_element(),
@@ -1575,6 +1575,7 @@ impl ThreadView {
         let complete = self.card_answers(&request_id, &questions, cx).is_some();
         let picks = self.workspace.read(cx).live.get(&id).map(|l| l.picks.clone()).unwrap_or_default();
         let (id2, rid2) = (id.clone(), request_id.clone());
+        let width = self.workspace.read(cx).column();
         let hint = if questions.len() > 1 { "Or type below to answer the first open question in your own words." } else { "Or type your own answer below and send it." };
         let body = v_flex().gap(px(14.)).children(questions.iter().enumerate().map(|(qi, q)| {
             let picked = picks.get(&(request_id.clone(), qi)).cloned().unwrap_or_default();
@@ -1643,7 +1644,7 @@ impl ThreadView {
         }));
         v_flex()
             .w_full()
-            .max_w(px(COLUMN))
+            .max_w(width)
             .max_h(px(420.))
             .gap(px(12.))
             .p(px(14.))
@@ -1680,9 +1681,10 @@ impl ThreadView {
         let folder = self.workspace.read(cx).thread_in(&self.scope).and_then(|t| self.workspace.read(cx).thread_project_tint(t, cx));
         let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
         let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id, request_id);
+        let width = self.workspace.read(cx).column();
         v_flex()
             .w_full()
-            .max_w(px(COLUMN))
+            .max_w(width)
             .max_h(px(440.))
             .gap(px(10.))
             .p(px(14.))
@@ -1722,6 +1724,7 @@ impl ThreadView {
         let ws = self.workspace.read(cx);
         let live = ws.live.get(&id)?;
         let thread = ws.thread(&id)?;
+        let width = ws.column();
         let theme = cx.theme().clone();
         if let Some(p) = live.permissions.first().cloned() {
             let agent = thread.agent.display_name();
@@ -1745,7 +1748,7 @@ impl ThreadView {
                     .child(
                         v_flex()
                             .w_full()
-                            .max_w(px(COLUMN))
+                            .max_w(width)
                             .gap_2()
                             .p_3()
                             .rounded(theme.radius_lg)
@@ -1916,6 +1919,8 @@ struct RowContext {
     /// The thread's worktree is missing: no files can be restored until it's back.
     worktree_missing: bool,
     text_size: Pixels,
+    /// The column's widest (`Workspace::column`).
+    column: Pixels,
     cwd: Option<std::path::PathBuf>,
     /// Folder icons' tint in path chips: the thread's project colour.
     folder: Option<Hsla>,
@@ -1955,6 +1960,7 @@ impl Render for ThreadView {
             worktree_missing: t.is_some_and(crate::workspace::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
+            column: ws.column(),
             cwd: ws.cwd_in(&self.scope),
             folder: t.and_then(|t| ws.thread_project_tint(t, cx)),
             animate: self.animate(window, cx),
@@ -1962,11 +1968,12 @@ impl Render for ThreadView {
             clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,
         };
         let flash = self.flash;
+        let jump = self.jump_to_latest(window, cx);
         v_flex()
             .size_full()
             .child(forget)
             .child(
-                div().flex_1().min_h_0().child(
+                div().relative().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
                         Some(row) => {
                             let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
@@ -1982,17 +1989,75 @@ impl Render for ThreadView {
                         }
                         None => div().into_any_element(),
                     })
-                    .with_list_style(StyleRefinement::default().pt_4().pb_6())
+                    .with_list_style(StyleRefinement::default().pt_4().pb(px(TAIL_ROOM)))
                     .with_row_style(StyleRefinement::default().pb_0())
-                    .with_bottom_fade(cx.theme().background),
-                ),
+                    .jump_button(false),
+                )
+                .children(jump),
             )
             .children(footer)
     }
 }
 
+/// Room under the transcript's last line, so it ends clear of the working bar and composer.
+const TAIL_ROOM: f32 = 28.;
+/// The band "Jump to latest" sits in while the reader is scrolled up: the text above fades into
+/// it over `JUMP_FADE`, and the button has the solid rest to itself, never lying over a line.
+pub(crate) const JUMP_FADE: f32 = 20.;
+const JUMP_BAND: f32 = 40.;
+const JUMP_IN: std::time::Duration = std::time::Duration::from_millis(200);
+
+impl ThreadView {
+    /// While the reader is scrolled up, a band across the transcript's foot with the button that
+    /// brings them back down. It eases in and out (at once with reduced motion).
+    fn jump_to_latest(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let away = self.scroller.read(cx).is_scrolled_up();
+        let pace = if self.animate(window, cx) { JUMP_IN } else { std::time::Duration::ZERO };
+        let shown: f32 = gpui_kit::base::motion::transition("transcript-jump", if away { 1. } else { 0. }, gpui_kit::base::motion::Transition::new(pace), window, cx);
+        if shown <= 0. {
+            return None;
+        }
+        let theme = cx.theme();
+        let bg = theme.background;
+        let scroller = self.scroller.clone();
+        let button = Button::new("jump-to-latest")
+            .secondary()
+            .small()
+            .icon(IconName::ArrowDown)
+            .tooltip("Jump to latest")
+            .rounded(theme.radius_full())
+            .border_1()
+            .border_color(theme.border)
+            .bg(bg)
+            .disabled(!away)
+            .on_click(move |_, _, cx| scroller.update(cx, |s, cx| s.scroll_to_end(cx)));
+        Some(
+            v_flex()
+                .id("transcript-foot")
+                .test_support()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(JUMP_FADE + JUMP_BAND))
+                .opacity(shown)
+                // It covers the rows under it: clicks and hovers stop here (a hidden path chip
+                // mustn't open), the wheel still scrolls the transcript.
+                .block_mouse_except_scroll()
+                .child(div().w_full().h(px(JUMP_FADE)).bg(linear_gradient(180., linear_color_stop(bg.opacity(0.), 0.), linear_color_stop(bg, 1.))))
+                .child(h_flex().w_full().flex_1().justify_center().items_center().bg(bg).pb(px(4. * (1. - shown))).child(button))
+                .into_any_element(),
+        )
+    }
+}
+
 #[cfg(test)]
 impl ThreadView {
+    /// Scroll the transcript to its first row, as a reader going back up would.
+    pub(crate) fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        self.scroller.update(cx, |s, cx| _ = s.scroll_to_item(0, cx));
+    }
+
     /// The question card's masked field for its `n`th secret question.
     pub(crate) fn secret_field(&self, n: usize) -> Entity<InputState> {
         self.secrets.1[n].clone()

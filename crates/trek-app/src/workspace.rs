@@ -1,5 +1,6 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
+mod agent_updates;
 mod limits;
 mod orchestrate;
 mod worktrees;
@@ -643,6 +644,8 @@ pub struct Workspace {
     pub route: Route,
     pub draft_prefs: Prefs,
     pub updater: crate::updater::Updater,
+    /// The agent CLIs' versions and updates asked for.
+    pub agent_updates: crate::agent_updates::AgentUpdates,
     pub sidebar_collapsed: bool,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
@@ -807,6 +810,13 @@ impl Workspace {
         if this.settings.updates.auto_check {
             this.check_for_updates(false, cx);
         }
+        this.agent_updates = crate::agent_updates::AgentUpdates::at_launch();
+        if this.agent_updates.mock && this.agent_updates.start_at_launch() {
+            this.update_all_agents(cx);
+        }
+        // At every launch, whatever the last check found: a CLI may have been updated (or a
+        // new version come out) while Trek was closed. Its cached finds show meanwhile.
+        this.check_agent_updates(false, cx);
         this.start_housekeeping(cx);
         let keep = this.settings.snapshots.keep_days;
         cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
@@ -873,6 +883,7 @@ impl Workspace {
             route,
             draft_prefs,
             updater: Default::default(),
+            agent_updates: Default::default(),
             sidebar_collapsed: false,
             settled_open: false,
             search: String::new(),
@@ -1096,6 +1107,12 @@ impl Workspace {
         self.tasks.push(task);
     }
 
+    /// The transcript column's widest at the current text size (`md::column`): the transcript,
+    /// its cards, the working bar and the composer line up on it.
+    pub fn column(&self) -> gpui_kit::Pixels {
+        crate::md::column(gpui_kit::px(self.settings.appearance.transcript_font_size()))
+    }
+
     /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
     pub fn motion(&self, cx: &App) -> bool {
         !self.settings.appearance.reduce_motion && !cx.reduce_motion()
@@ -1271,9 +1288,10 @@ impl Workspace {
     /// on an approval, a question or a plan; sub-agents still out; a plan offered after its turn,
     /// waiting for an answer; or messages that haven't reached an agent yet (waiting for a
     /// worktree, for history to load or for git work, or queued behind a turn). All of those live
-    /// only in memory. Updates wait until there's none.
+    /// only in memory. An agent CLI update under way or about to start, too: a restart would cut
+    /// its package manager off mid-install. Updates wait until there's none.
     pub fn work_in_flight(&self) -> bool {
-        self.live.values().any(|l| {
+        self.agent_updates.running() || self.agent_updates.queued() || self.live.values().any(|l| {
             (l.commands.is_some() && (l.turn_started.is_some() || l.background > 0))
                 || l.permissions.iter().any(|p| p.after_turn)
                 || l.preparing
@@ -2217,10 +2235,11 @@ impl Workspace {
         self.persist_items(&id, cx);
     }
 
-    /// Messages to `id` wait: its history is still being read, or its worktree is being made,
-    /// removed or has gone missing.
+    /// Messages to `id` wait: its history is still being read, its worktree is being made,
+    /// removed or has gone missing, or its agent's CLI is being updated.
     fn holds_messages(&self, id: &str) -> bool {
-        self.live.get(id).is_some_and(|l| l.loading || l.preparing || l.removing) || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
+        self.live.get(id).is_some_and(|l| l.loading || l.preparing || l.removing)
+            || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()) || self.agent_updating(&t.agent.key()))
     }
 
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
@@ -2245,8 +2264,9 @@ impl Workspace {
         if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing || l.removing) {
             return;
         }
-        // No folder to run in until the worktree is back (or the thread moves to the project's).
-        if thread.worktree.as_ref().is_some_and(|w| w.is_missing()) {
+        // No folder to run in until the worktree is back (or the thread moves to the project's),
+        // and no CLI to run while it's being updated.
+        if thread.worktree.as_ref().is_some_and(|w| w.is_missing()) || self.agent_updating(&thread.agent.key()) {
             return;
         }
         let (plan, fast_on) = self.live.get(id).map(|l| (l.plan, l.fast)).unwrap_or_default();
@@ -2329,7 +2349,7 @@ impl Workspace {
             Route::Thread(id) => self.warm_thread(&id, cx),
             Route::Draft { project: Some(cwd) } => {
                 // A thread in a worktree starts its agent there, once the worktree is made.
-                if matches!(self.draft_prefs.agent, AgentId::Direct(_)) || self.draft_prefs.worktree {
+                if matches!(self.draft_prefs.agent, AgentId::Direct(_)) || self.draft_prefs.worktree || self.agent_updating(&self.draft_prefs.agent.key()) {
                     return;
                 }
                 let key = self.draft_key(&cwd);
@@ -2810,6 +2830,8 @@ impl Workspace {
                 // Sub-agents that reported while it worked wake it now.
                 self.deliver_wakes(id, cx);
             }
+            // An agent update held back for this turn may start now.
+            self.pump_agent_updates(cx);
         }
         // A side chat answers in the panel it was asked in, beside its thread; the inbox doesn't
         // list it, so an alert would lead nowhere. A sub-agent's end goes to its parent, not the
@@ -2989,6 +3011,14 @@ impl Workspace {
 
     /// Approve the agent's plan: it leaves plan mode and starts the work.
     pub fn approve_plan(&mut self, id: &str, request_id: &str, cx: &mut Context<Self>) {
+        // A plan offered after its turn needs a session to take its approval: none starts while
+        // the agent's CLI is being updated, so the plan stays offered until it's done.
+        let after_turn = self.live.get(id).is_some_and(|l| l.permissions.iter().any(|p| p.request_id == request_id && p.after_turn));
+        if let Some(agent) = self.thread(id).map(|t| t.agent.clone()).filter(|a| after_turn && self.agent_updating(&a.key())) {
+            let message = format!("{} is updating. Approve the plan once it's done.", agent.display_name());
+            cx.emit(WorkspaceEvent::Toast { message, undo: None });
+            return;
+        }
         let Some(live) = self.live.get_mut(id) else { return };
         live.plan = false;
         // Offered after its turn ended (Codex), the plan's approval starts a new turn. If the
@@ -3745,6 +3775,7 @@ impl Workspace {
                     this.refresh_usage(cx);
                 }
                 this.maybe_check_for_updates(cx);
+                this.maybe_check_agent_updates(cx);
                 this.maybe_restart_for_update(cx);
                 // No redraw otherwise: the views that show times keep their own clocks.
             });
