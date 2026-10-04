@@ -26,6 +26,9 @@ pub struct Harness {
     pub binary: &'static str,
     /// The npm package it's published as.
     pub npm: Option<&'static str>,
+    /// The package it was published as before it moved to `npm`: an install of that one is still
+    /// this agent, and updates by moving to the new package.
+    pub moved_from: Option<&'static str>,
     /// Its own update command, run with the installed binary: how a native install updates.
     pub self_update: Option<&'static [&'static str]>,
     /// The vendor's install script, for a native install with no update command of its own
@@ -55,11 +58,16 @@ impl Harness {
         }
     }
 
+    /// `package` is the one this agent's package moved from.
+    pub fn moved(&self, package: &str) -> bool {
+        self.moved_from == Some(package)
+    }
+
     /// `install` is this agent's: a global package by its own name, or one of its Homebrew
     /// formulae or casks. What else is on PATH under its name is another tool.
     pub fn owns(&self, install: &Install) -> bool {
         match install {
-            Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } => self.npm == Some(package.as_str()),
+            Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } => self.npm == Some(package.as_str()) || self.moved(package),
             Install::Brew { formula: name, .. } | Install::Cask { cask: name, .. } => self.brew.contains(&name.as_str()),
             Install::Volta | Install::Native => true,
         }
@@ -91,22 +99,22 @@ pub enum Feed {
 /// The agent CLIs Trek runs, as `detect` and `catalog` know them. Amp and Pi run through ACP
 /// adapters (separate packages): their CLIs and their adapters each have a row.
 pub const HARNESSES: &[Harness] = &[
-    Harness { agent: "claude-code", binary: "claude", npm: Some("@anthropic-ai/claude-code"), self_update: Some(&["update"]), installer: None, feed: Feed::ClaudeReleases, brew: &["claude-code"], adapter: false },
-    Harness { agent: "codex", binary: "codex", npm: Some("@openai/codex"), self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["codex"], adapter: false },
-    Harness { agent: "opencode", binary: "opencode", npm: Some("opencode-ai"), self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["opencode"], adapter: false },
-    Harness { agent: "droid", binary: "droid", npm: None, self_update: None, installer: Some("curl -fsSL https://app.factory.ai/cli | sh"), feed: Feed::DroidInstaller, brew: &["droid"], adapter: false },
-    Harness { agent: "acp:cursor", binary: "cursor-agent", npm: None, self_update: Some(&["update"]), installer: None, feed: Feed::CursorInstaller, brew: &["cursor-cli"], adapter: false },
-    Harness { agent: "acp:github-copilot", binary: "copilot", npm: Some("@github/copilot"), self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["copilot-cli"], adapter: false },
-    Harness { agent: "acp:gemini", binary: "gemini", npm: Some("@google/gemini-cli"), self_update: None, installer: None, feed: Feed::Npm, brew: &["gemini-cli"], adapter: false },
-    Harness { agent: "acp:kimi", binary: "kimi", npm: Some("@moonshot-ai/kimi-code"), self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["kimi-cli"], adapter: false },
-    Harness { agent: "acp:qwen-code", binary: "qwen", npm: Some("@qwen-code/qwen-code"), self_update: None, installer: None, feed: Feed::Npm, brew: &["qwen-code"], adapter: false },
-    Harness { agent: "acp:grok", binary: "grok", npm: None, self_update: Some(&["update"]), installer: None, feed: Feed::GrokStable, brew: &[], adapter: false },
-    Harness { agent: "acp:devin", binary: "devin", npm: None, self_update: Some(&["update"]), installer: None, feed: Feed::DevinManifest, brew: &[], adapter: false },
-    Harness { agent: "acp:goose", binary: "goose", npm: None, self_update: Some(&["update"]), installer: None, feed: Feed::GitHub("block/goose"), brew: &["block-goose-cli"], adapter: false },
-    Harness { agent: "acp:amp", binary: "amp", npm: Some("@sourcegraph/amp"), self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &[], adapter: false },
-    Harness { agent: "acp:amp", binary: "amp-acp", npm: Some("amp-acp"), self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: true },
-    Harness { agent: "acp:pi", binary: "pi", npm: Some("@mariozechner/pi-coding-agent"), self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: false },
-    Harness { agent: "acp:pi", binary: "pi-acp", npm: Some("pi-acp"), self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: true },
+    Harness { agent: "claude-code", binary: "claude", npm: Some("@anthropic-ai/claude-code"), moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::ClaudeReleases, brew: &["claude-code"], adapter: false },
+    Harness { agent: "codex", binary: "codex", npm: Some("@openai/codex"), moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["codex"], adapter: false },
+    Harness { agent: "opencode", binary: "opencode", npm: Some("opencode-ai"), moved_from: None, self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["opencode"], adapter: false },
+    Harness { agent: "droid", binary: "droid", npm: None, moved_from: None, self_update: None, installer: Some("curl -fsSL https://app.factory.ai/cli | sh"), feed: Feed::DroidInstaller, brew: &["droid"], adapter: false },
+    Harness { agent: "acp:cursor", binary: "cursor-agent", npm: None, moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::CursorInstaller, brew: &["cursor-cli"], adapter: false },
+    Harness { agent: "acp:github-copilot", binary: "copilot", npm: Some("@github/copilot"), moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["copilot-cli"], adapter: false },
+    Harness { agent: "acp:gemini", binary: "gemini", npm: Some("@google/gemini-cli"), moved_from: None, self_update: None, installer: None, feed: Feed::Npm, brew: &["gemini-cli"], adapter: false },
+    Harness { agent: "acp:kimi", binary: "kimi", npm: Some("@moonshot-ai/kimi-code"), moved_from: None, self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["kimi-cli"], adapter: false },
+    Harness { agent: "acp:qwen-code", binary: "qwen", npm: Some("@qwen-code/qwen-code"), moved_from: None, self_update: None, installer: None, feed: Feed::Npm, brew: &["qwen-code"], adapter: false },
+    Harness { agent: "acp:grok", binary: "grok", npm: None, moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::GrokStable, brew: &[], adapter: false },
+    Harness { agent: "acp:devin", binary: "devin", npm: None, moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::DevinManifest, brew: &[], adapter: false },
+    Harness { agent: "acp:goose", binary: "goose", npm: None, moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::GitHub("block/goose"), brew: &["block-goose-cli"], adapter: false },
+    Harness { agent: "acp:amp", binary: "amp", npm: Some("@sourcegraph/amp"), moved_from: None, self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &[], adapter: false },
+    Harness { agent: "acp:amp", binary: "amp-acp", npm: Some("amp-acp"), moved_from: None, self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: true },
+    Harness { agent: "acp:pi", binary: "pi", npm: Some("@earendil-works/pi-coding-agent"), moved_from: Some("@mariozechner/pi-coding-agent"), self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &[], adapter: false },
+    Harness { agent: "acp:pi", binary: "pi-acp", npm: Some("pi-acp"), moved_from: None, self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: true },
 ];
 
 /// The harness a row is for, by its id (the CLI's binary name: unique, unlike agents, which
@@ -170,6 +178,14 @@ pub fn install_of(resolved: &Path) -> Install {
     if parts.last().is_some_and(|n| n == "volta-shim") || resolved.to_string_lossy().contains("/.volta/tools/image/packages/") {
         return Install::Volta;
     }
+    // Before node_modules: a formula may be an npm package installed into its keg (gemini-cli,
+    // qwen-code), and only brew may change a keg.
+    if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
+        return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&parts[..i]), tap: None };
+    }
+    if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
+        return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&parts[..i]) };
+    }
     if let Some(i) = at("node_modules") {
         let Some(first) = parts.get(i + 1) else { return Install::Native };
         let package = match (first.starts_with('@'), parts.get(i + 2)) {
@@ -186,12 +202,6 @@ pub fn install_of(resolved: &Path) -> Install {
         }
         let end = if i > 0 && parts[i - 1] == "lib" { i - 1 } else { i };
         return Install::Npm { package, prefix: rooted(&parts[..end]) };
-    }
-    if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
-        return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&parts[..i]), tap: None };
-    }
-    if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
-        return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&parts[..i]) };
     }
     Install::Native
 }
@@ -225,26 +235,52 @@ pub fn shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
     Some(out)
 }
 
+/// The script a binary runs: what a package manager's shell-script shim points at, or itself.
+pub fn script_of(resolved: &Path) -> PathBuf {
+    let small = std::fs::metadata(resolved).is_ok_and(|m| m.len() < 8 * 1024);
+    small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t)).unwrap_or_else(|| resolved.to_path_buf())
+}
+
+/// A vendor installer's marker (Pi's `managed-install.json`): what's under its folder is the
+/// installer's, though it lays out an npm prefix, and updates with the CLI's own command.
+const VENDOR_MARKERS: &[&str] = &["managed-install.json"];
+
 /// `install_of`, reading through a script shim, with a formula's tap read from its keg.
 pub fn detect_install(resolved: &Path) -> Install {
-    let install = install_of(resolved);
-    let shim = || {
-        let small = std::fs::metadata(resolved).is_ok_and(|m| m.len() < 8 * 1024);
-        small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t))
-    };
-    let install = match install {
-        Install::Native => shim().map(|t| install_of(&t)).unwrap_or(Install::Native),
-        other => other,
-    };
+    let script = script_of(resolved);
+    let install = install_of(&script);
+    let vendors = || script.ancestors().skip(1).any(|dir| VENDOR_MARKERS.iter().any(|m| dir.join(m).is_file()));
     match install {
+        Install::Npm { .. } if vendors() => Install::Native,
         Install::Brew { formula, prefix, .. } => {
-            let parts = names(resolved);
+            let parts = names(&script);
             let keg = parts.iter().position(|p| p == "Cellar").and_then(|i| parts.get(i + 2)).map(|v| prefix.join("Cellar").join(&formula).join(v));
             let tap = keg.and_then(|k| std::fs::read_to_string(k.join("INSTALL_RECEIPT.json")).ok()).and_then(|j| tap_from_receipt(&j));
             Install::Brew { formula, prefix, tap }
         }
         other => other,
     }
+}
+
+/// The folder of the npm package `script` is part of (`…/node_modules/<package>`).
+pub fn package_dir(script: &Path) -> Option<PathBuf> {
+    let parts = names(script);
+    let i = parts.iter().rposition(|p| p == "node_modules")?;
+    let first = parts.get(i + 1)?;
+    let end = if first.starts_with('@') { i + 3 } else { i + 2 };
+    (parts.len() >= end).then(|| rooted(&parts[..end]))
+}
+
+/// The version in a package's `package.json`.
+pub fn version_in_package_json(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    parse_version(v["version"].as_str()?)
+}
+
+/// The version of the npm package the binary at `resolved` runs, from its `package.json`.
+fn package_version(resolved: &Path) -> Option<String> {
+    let dir = package_dir(&script_of(resolved))?;
+    version_in_package_json(&std::fs::read_to_string(dir.join("package.json")).ok()?)
 }
 
 /// The version in a CLI's `--version` output: "2.1.289 (Claude Code)", "codex-cli 0.160.0",
@@ -298,6 +334,9 @@ pub enum Source {
 /// publishes nowhere Trek can read.
 pub fn source(h: &Harness, install: &Install) -> Option<Source> {
     match install {
+        // An install of the package it moved from is compared with the new one: the old one's
+        // `latest` stays where it was left.
+        Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } if h.moved(package) => h.npm.map(|p| Source::Npm(p.into())),
         Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } => Some(Source::Npm(package.clone())),
         Install::Brew { formula, tap: None, .. } => Some(Source::Formula(formula.clone())),
         Install::Brew { formula, tap: Some(tap), .. } => Some(Source::TapFormula { tap: tap.clone(), formula: formula.clone() }),
@@ -415,7 +454,20 @@ impl UpdateCommand {
 /// `None` when there's no way Trek can run.
 pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_updates: bool) -> Option<UpdateCommand> {
     let own = || h.self_update.map(|args| UpdateCommand::new(binary, args));
+    // Installed as the package it moved from: that one goes, and the new one (with the same
+    // binary, which the old one's would block) comes in its place.
+    let moving = |remove: &str, add: &str, old: &str| {
+        let new = h.npm?;
+        Some(UpdateCommand::new("/bin/sh", &["-c", &format!("{remove} {old} && {add} {new}@latest")]))
+    };
     match install {
+        Install::Npm { package, prefix } if h.moved(package) => moving("npm uninstall -g", "npm install -g", package).map(|c| UpdateCommand {
+            path: vec![prefix.join("bin")],
+            env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
+            ..c
+        }),
+        Install::Bun { package } if h.moved(package) => moving("bun remove -g", "bun add -g", package),
+        Install::Pnpm { package } if h.moved(package) => moving("pnpm remove -g", "pnpm add -g", package),
         // The npm and node of the install's own prefix come first (an nvm version's, Homebrew's),
         // and the prefix is set outright: a prefix of the user's own (`~/.npm-global`) has
         // neither, so the npm on PATH installs there.
@@ -461,6 +513,11 @@ pub struct AgentVersion {
 }
 
 impl AgentVersion {
+    /// The check could compare: it knows both the installed version and the newest one.
+    pub fn compared(&self) -> bool {
+        self.installed.is_some() && self.latest.is_some()
+    }
+
     /// A newer version is out, and Trek knows how to install it.
     pub fn update_available(&self) -> bool {
         self.command.is_some() && matches!((&self.latest, &self.installed), (Some(l), Some(i)) if is_newer(l, i))
@@ -542,9 +599,16 @@ async fn fetch_latest(client: &reqwest::Client, source: &Source) -> Result<Lates
     Err(last)
 }
 
-/// What `<binary> --version` says, parsed.
-pub async fn installed_version(binary: &Path) -> Option<String> {
-    parse_version(&crate::detect::version_of(binary).await?)
+/// The version of `h` installed at `binary`: what `--version` says, or its npm package's
+/// `package.json` when it says nothing. ACP adapters aren't asked at all: they don't answer
+/// `--version`, they start serving ACP.
+pub async fn installed_version(h: &Harness, binary: &Path) -> Option<String> {
+    if !h.adapter
+        && let Some(v) = crate::detect::version_of(binary).await.and_then(|out| parse_version(&out))
+    {
+        return Some(v);
+    }
+    package_version(&std::fs::canonicalize(binary).unwrap_or_else(|_| binary.to_path_buf()))
 }
 
 /// Claude Code's settings put it on its stable channel (`autoUpdatesChannel`).
@@ -568,7 +632,7 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
     if !h.owns(&install) {
         return None;
     }
-    let installed = installed_version(&binary).await;
+    let installed = installed_version(h, &binary).await;
     let source = source(h, &install).map(|s| match s {
         Source::Feed(Feed::ClaudeReleases) if claude_channel_stable() => Source::Feed(Feed::ClaudeStable),
         s => s,
@@ -668,8 +732,9 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
         return Outcome::Failed { summary: format!("{} stopped with {code}.", cmd.shown()), output };
     }
     // The binary on PATH may have moved (a new keg): look it up again.
-    let binary = harness(&v.id).and_then(|h| which(h.binary)).unwrap_or_else(|| v.binary.clone());
-    verify(v, installed_version(&binary).await, output)
+    let Some(h) = harness(&v.id) else { return verify(v, None, output) };
+    let binary = which(h.binary).unwrap_or_else(|| v.binary.clone());
+    verify(v, installed_version(h, &binary).await, output)
 }
 
 /// What an update that ran without error came to, given the version installed afterwards.
@@ -711,7 +776,7 @@ pub fn mock_versions() -> Vec<AgentVersion> {
     vec![
         entry("codex", "0.159.2", "0.160.0", npm("@openai/codex"), "npm install -g @openai/codex@latest"),
         entry("opencode", "1.18.32", "1.18.34", Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) }, "brew upgrade anomalyco/tap/opencode"),
-        entry("acp:pi", "0.85.1", "1.0.0", npm("@mariozechner/pi-coding-agent"), "npm install -g @mariozechner/pi-coding-agent@latest"),
+        entry("acp:pi", "0.99.2", "1.0.2", npm("@earendil-works/pi-coding-agent"), "npm install -g @earendil-works/pi-coding-agent@latest"),
     ]
 }
 
@@ -734,6 +799,9 @@ mod tests {
             ("goose v1.9.3", "1.9.3"),
             ("qwen version: 0.24.7", "0.24.7"),
             ("Droid v0.233.0", "0.233.0"),
+            // Gemini (yargs' `.version()`) and Pi (`console.log(VERSION)`) print the bare number.
+            ("0.62.0\n", "0.62.0"),
+            ("1.0.2", "1.0.2"),
         ] {
             assert_eq!(parse_version(out).as_deref(), Some(want), "{out}");
         }
@@ -777,6 +845,18 @@ mod tests {
         assert_eq!(p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"), Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None });
         assert_eq!(p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"), Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None });
         assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
+        // Formulae that are npm packages installed into their keg: brew's, not npm's.
+        assert_eq!(
+            p("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"),
+            Install::Brew { formula: "gemini-cli".into(), prefix: "/opt/homebrew".into(), tap: None }
+        );
+        assert_eq!(
+            p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
+            Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
+        );
+        let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
+        assert!(h("acp:gemini").owns(&keg));
+        assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false).unwrap().shown(), "brew upgrade gemini-cli");
         // A global prefix of the user's own (npm's fix for EACCES).
         assert_eq!(
             p("/Users/me/.npm-global/lib/node_modules/@openai/codex/bin/codex.js"),
@@ -945,7 +1025,94 @@ mod tests {
         let droid = update_command(h("droid"), &Install::Native, bin, false).unwrap();
         assert_eq!(droid.program, Path::new("/bin/sh"));
         assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
-        assert_eq!(shown("acp:pi", Install::Native, false), None);
+        assert_eq!(shown("acp:pi", Install::Native, false).as_deref(), Some("x update"));
+        assert_eq!(shown("acp:gemini", Install::Native, false), None, "no update command, no installer");
+    }
+
+    #[test]
+    fn pi_moved_package_and_its_old_installs_move_with_it() {
+        let pi = h("acp:pi");
+        let new = Install::Npm { package: "@earendil-works/pi-coding-agent".into(), prefix: "/opt/homebrew".into() };
+        let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: "/opt/homebrew".into() };
+        assert!(pi.owns(&new) && pi.owns(&old));
+        assert!(!pi.owns(&Install::Npm { package: "pi".into(), prefix: "/opt/homebrew".into() }));
+        // Both are compared with the new package: the old one's `latest` stopped at 0.73.1.
+        assert_eq!(source(pi, &new), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
+        assert_eq!(source(pi, &old), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
+        assert_eq!(source(pi, &Install::Bun { package: "@mariozechner/pi-coding-agent".into() }), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
+        let bin = Path::new("/opt/homebrew/bin/pi");
+        assert_eq!(update_command(pi, &new, bin, false).unwrap().shown(), "npm install -g @earendil-works/pi-coding-agent@latest");
+        // The old package goes first: its `pi` would block the new one's.
+        let cmd = update_command(pi, &old, bin, false).unwrap();
+        assert_eq!(cmd.program, Path::new("/bin/sh"));
+        assert_eq!(cmd.shown(), "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest");
+        assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
+        assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
+        let pnpm = update_command(pi, &Install::Pnpm { package: "@mariozechner/pi-coding-agent".into() }, bin, false).unwrap();
+        assert_eq!(pnpm.shown(), "pnpm remove -g @mariozechner/pi-coding-agent && pnpm add -g @earendil-works/pi-coding-agent@latest");
+        // An old install a check found then (`latest` from the new package) has an update out.
+        let v = AgentVersion {
+            id: "pi".into(),
+            agent: "acp:pi".into(),
+            name: pi.name(),
+            binary: bin.into(),
+            installed: Some("0.73.1".into()),
+            latest: Some("1.0.2".into()),
+            install: old.clone(),
+            command: update_command(pi, &old, bin, false),
+            error: None,
+        };
+        assert!(v.update_available());
+    }
+
+    #[test]
+    fn pis_own_installer_updates_with_pi_update() {
+        // Pi's installer lays out an npm prefix of its own, marked as its: the installer's.
+        let root = std::env::temp_dir().join(format!("trek-pi-managed-{}", std::process::id()));
+        let script = root.join("releases/1.0.2/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        assert!(matches!(detect_install(&script), Install::Npm { .. }), "unmarked, it's an npm prefix");
+        std::fs::write(root.join("managed-install.json"), r#"{"kind":"pi-managed-install","schemaVersion":1}"#).unwrap();
+        assert_eq!(detect_install(&script), Install::Native);
+        assert_eq!(update_command(h("acp:pi"), &Install::Native, Path::new("/Users/me/.pi/agent/bin/pi"), false).unwrap().shown(), "pi update");
+        assert_eq!(source(h("acp:pi"), &Install::Native), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn adapters_versions_come_from_their_packages() {
+        // amp-acp and pi-acp start serving ACP whatever their arguments: no `--version`.
+        assert_eq!(package_dir(Path::new("/opt/homebrew/lib/node_modules/pi-acp/dist/index.js")).unwrap(), Path::new("/opt/homebrew/lib/node_modules/pi-acp"));
+        assert_eq!(
+            package_dir(Path::new("/Users/me/Library/pnpm/global/5/node_modules/@sourcegraph/amp/dist/main.js")).unwrap(),
+            Path::new("/Users/me/Library/pnpm/global/5/node_modules/@sourcegraph/amp")
+        );
+        assert_eq!(package_dir(Path::new("/Users/me/.local/bin/grok")), None);
+        assert_eq!(package_dir(Path::new("/x/node_modules/@scope")), None);
+        let pi_acp = r#"{
+  "name": "pi-acp",
+  "version": "0.0.34",
+  "description": "ACP adapter for pi coding agent",
+  "bin": { "pi-acp": "dist/index.js" }
+}"#;
+        assert_eq!(version_in_package_json(pi_acp).as_deref(), Some("0.0.34"));
+        let amp_acp = r#"{"name":"amp-acp","version":"0.9.0","type":"module","bin":{"amp-acp":"dist/index.js"}}"#;
+        assert_eq!(version_in_package_json(amp_acp).as_deref(), Some("0.9.0"));
+        assert_eq!(version_in_package_json("{}"), None);
+        // Read from disk, through the binary's link.
+        let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
+        let pkg = root.join("lib/node_modules/pi-acp");
+        std::fs::create_dir_all(pkg.join("dist")).unwrap();
+        std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
+        std::fs::write(pkg.join("dist/index.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let link = root.join("bin/pi-acp");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(pkg.join("dist/index.js"), &link).unwrap();
+        let adapter = harness("pi-acp").unwrap();
+        assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn version(agent: &str, installed: &str, latest: Option<&str>) -> AgentVersion {

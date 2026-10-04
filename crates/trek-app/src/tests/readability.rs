@@ -199,6 +199,21 @@ fn the_last_line_clears_the_composer_and_jump_to_latest_sits_below_the_text() {
         let composer = trek.bounds(cx, "send").expect("composer");
         assert!(text.bottom() < composer.top() - px(40.), "{text:?} vs {composer:?}");
         assert!(!trek.visible(cx, "jump-to-latest"));
+        // Scrolled up a little: the band shows in the room under the transcript's last row (the
+        // turn's footer), where it had ended, not over it.
+        let view = trek.thread_view(cx);
+        let end = cx.read(|cx| view.read(cx).tail.get()).expect("the transcript's end is on screen");
+        let row = trek.bounds(cx, ("answer", last)).expect("the row");
+        let wheel = gpui_kit::ScrollWheelEvent {
+            position: gpui_kit::point(row.center().x, row.top() + px(10.)),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(1.))),
+            ..Default::default()
+        };
+        trek.window(cx, |window, cx| _ = window.dispatch_event(gpui_kit::InputEvent::to_platform_input(wheel), cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "jump-to-latest"), "a little way up");
+        let band = trek.bounds(cx, "transcript-foot").expect("the band");
+        assert!(end <= band.top() + px(0.5), "the last row ended at {end:?}, over {band:?}");
         // Scrolled up: the button shows in the band at the transcript's foot, under every line
         // still drawn above it.
         let view = trek.thread_view(cx);

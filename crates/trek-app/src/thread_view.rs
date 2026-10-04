@@ -2128,12 +2128,14 @@ impl Render for ThreadView {
     }
 }
 
-/// Room under the transcript's last line, so it ends clear of the working bar and composer.
-const TAIL_ROOM: f32 = 28.;
+/// Room under the transcript's last line, so it ends clear of the working bar and composer. As
+/// tall as the "Jump to latest" band: scrolling up a little shows the band in that room, under
+/// the last line rather than over it.
+const TAIL_ROOM: f32 = JUMP_FADE + JUMP_BAND;
 /// The band "Jump to latest" sits in while the reader is scrolled up: the text above fades into
 /// it over `JUMP_FADE`, and the button has the solid rest to itself, never lying over a line.
-pub(crate) const JUMP_FADE: f32 = 20.;
-const JUMP_BAND: f32 = 40.;
+pub(crate) const JUMP_FADE: f32 = 16.;
+const JUMP_BAND: f32 = 36.;
 const JUMP_IN: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl ThreadView {

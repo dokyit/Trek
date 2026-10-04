@@ -179,7 +179,7 @@ pub const ACP_AGENTS: &[AcpAgent] = &[
     AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: "curl -fsSL https://cli.devin.ai/install.sh | bash" },
     AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: "brew install block-goose-cli" },
     AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: "npm i -g @sourcegraph/amp amp-acp" },
-    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: "npm i -g @mariozechner/pi-coding-agent pi-acp" },
+    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: "npm i -g @earendil-works/pi-coding-agent pi-acp" },
 ];
 
 /// How to install a CLI agent and sign in to it, keyed by `AgentId::key()`.
@@ -207,7 +207,7 @@ pub fn agent_setup(key: &str) -> Option<AgentSetup> {
         "devin" => ("curl -fsSL https://cli.devin.ai/install.sh | bash", "devin auth login", "https://app.devin.ai/settings"),
         "goose" => ("brew install block-goose-cli", "goose configure", "https://block.github.io/goose"),
         "amp" => ("npm i -g @sourcegraph/amp amp-acp", "amp login", "https://ampcode.com/settings"),
-        "pi" => ("npm i -g @mariozechner/pi-coding-agent pi-acp", "pi", "https://pi.dev"),
+        "pi" => ("npm i -g @earendil-works/pi-coding-agent pi-acp", "pi", "https://pi.dev"),
         _ => return None,
     };
     Some(AgentSetup { install, login, account_url })

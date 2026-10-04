@@ -522,12 +522,14 @@ impl SettingsView {
     fn agent_updates_section(&mut self, first: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
         let (on, u) = (ws.settings.updates.check_agents, &ws.agent_updates);
-        let (checking, checked_at, listed) = (u.checking, u.checked_at, !u.listed().is_empty());
-        let last = match (checking, checked_at) {
-            (true, _) => "Checking now…".to_string(),
-            (false, 0) => "Not checked yet.".to_string(),
-            (false, at) if !listed => format!("Checked {}: every agent is up to date.", relative_ago(at)),
-            (false, at) => format!("Checked {}.", relative_ago(at)),
+        let (checking, checked_at, listed, missed) = (u.checking, u.checked_at, !u.listed().is_empty(), u.unchecked_note());
+        // "Up to date" only when every agent was compared: an offline check proves nothing.
+        let last = match (checking, checked_at, missed) {
+            (true, ..) => "Checking now…".to_string(),
+            (false, 0, _) => "Not checked yet.".to_string(),
+            (false, at, Some(missed)) => format!("Checked {}. {missed}", relative_ago(at)),
+            (false, at, None) if !listed => format!("Checked {}: every agent is up to date.", relative_ago(at)),
+            (false, at, None) => format!("Checked {}.", relative_ago(at)),
         };
         let description = format!(
             "At launch and every 12 hours, Trek checks each agent CLI against where it came from: npm, Homebrew or its maker. Updates wait for running turns to end. {last}"
