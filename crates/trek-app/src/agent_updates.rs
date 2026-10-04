@@ -34,8 +34,11 @@ pub enum Runner {
     /// The agent's real update command.
     #[default]
     Real,
-    /// Pretends (`TREK_AGENT_UPDATES=dry-run` or `mock`): waits a moment and changes nothing.
+    /// Pretends (`TREK_AGENT_UPDATES=dry-run`): waits a moment and changes nothing.
     DryRun,
+    /// The made-up agents' (`TREK_AGENT_UPDATES=mock`): pretends too, and Pi's fails, so a
+    /// failure and its output can be looked at.
+    Mock,
     /// Tests decide the outcome.
     #[cfg(test)]
     Fake(std::sync::Arc<dyn Fn(&AgentVersion) -> Outcome + Send + Sync>),
@@ -49,6 +52,12 @@ impl Runner {
         match self {
             Runner::Real => trek_core::agent_update::run_update(&v).await,
             Runner::DryRun => trek_core::agent_update::dry_run(&v).await,
+            Runner::Mock if v.id == "pi" => {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let output = "npm error code EACCES\nnpm error syscall rename\nnpm error path /usr/local/lib/node_modules/@earendil-works/pi-coding-agent\nnpm error errno -13\nnpm error Your cache folder contains root-owned files.".to_string();
+                Outcome::Failed { summary: "npm install -g @earendil-works/pi-coding-agent@latest stopped with code 243.".into(), output }
+            }
+            Runner::Mock => trek_core::agent_update::dry_run(&v).await,
             #[cfg(test)]
             Runner::Fake(f) => f(&v),
             #[cfg(test)]
@@ -73,6 +82,10 @@ pub struct AgentUpdates {
     pub runner: Runner,
     /// Showing made-up agents (`TREK_AGENT_UPDATES=mock`): nothing is checked for real.
     pub mock: bool,
+    /// `found` is the cache of an earlier launch, not yet checked again: the agents may have
+    /// been updated or reinstalled some other way meanwhile, so no update starts on it (with
+    /// what may be another install's command) until a check of this launch is in.
+    pub stale: bool,
     /// The row whose update output is open under it.
     pub output_open: Option<String>,
     /// Threads with messages held while their agent updated: those go once it's done. Others'
@@ -98,18 +111,24 @@ impl AgentUpdates {
             if std::env::var_os("TREK_MOCK_AGENT").is_some() {
                 found.push(mock_agent_row());
             }
-            return Self { found, checked_at: trek_core::store::now_ms(), runner: Runner::DryRun, mock: true, ..Default::default() };
+            return Self { found, checked_at: trek_core::store::now_ms(), runner: Runner::Mock, mock: true, output_open: open_output(), ..Default::default() };
         }
         let snapshot = trek_core::agent_update::Snapshot::load();
         let runner = if mode.as_deref() == Some("dry-run") { Runner::DryRun } else { Runner::Real };
-        Self { found: snapshot.agents, checked_at: snapshot.checked_at, runner, ..Default::default() }
+        let stale = !snapshot.agents.is_empty();
+        Self { found: snapshot.agents, checked_at: snapshot.checked_at, runner, stale, output_open: open_output(), ..Default::default() }
+    }
+
+    /// A pretend run (dry run or the made-up agents): nothing it reports was installed.
+    pub fn pretend(&self) -> bool {
+        matches!(self.runner, Runner::DryRun | Runner::Mock)
     }
 
     /// `TREK_AGENT_UPDATES_START=1` with a dry run: "Update all" as soon as there's something to
     /// update, so a pretend update can be watched end to end without a click. Never with the
     /// real runner.
     pub fn start_at_launch(&self) -> bool {
-        matches!(self.runner, Runner::DryRun) && std::env::var_os("TREK_AGENT_UPDATES_START").is_some()
+        self.pretend() && std::env::var_os("TREK_AGENT_UPDATES_START").is_some()
     }
 
     /// A background check is due: on, none running, and the last one 12 hours ago or more.
@@ -172,7 +191,7 @@ impl AgentUpdates {
     /// their folders), in the order asked, skipping agents with a turn or background work
     /// running (`busy`, given an agent key).
     pub fn next(&self, busy: impl Fn(&str) -> bool) -> Option<String> {
-        if self.running() {
+        if self.running() || self.stale {
             return None;
         }
         self.order.iter().find(|id| self.jobs.get(*id) == Some(&Job::Queued) && !self.agent_of(id).is_some_and(&busy)).cloned()
@@ -224,16 +243,18 @@ impl AgentUpdates {
                 None => fresh.push(old.clone()),
             }
         }
-        for v in fresh.iter_mut() {
-            if let (Some(Job::Queued), Some(old)) = (self.jobs.get(&v.id), self.found.iter().find(|o| o.id == v.id)) {
-                *v = old.clone();
-            }
-        }
-        self.jobs.retain(|_, j| matches!(j, Job::Queued | Job::Running));
+        // Queued ones run on what this check found (how it's installed now, and so the command
+        // that updates it), or not at all if there's nothing to install anymore.
+        self.jobs.retain(|id, j| match j {
+            Job::Running => true,
+            Job::Queued => fresh.iter().any(|v| v.id == *id && v.update_available()),
+            _ => false,
+        });
+        self.order.retain(|id| self.jobs.contains_key(id));
         self.found = fresh;
-        self.drop_orphans();
         self.checked_at = now;
         self.checking = false;
+        self.stale = false;
     }
 
     /// What the last check couldn't compare, for Settings: "Couldn't check Codex and Grok:
@@ -255,6 +276,12 @@ impl AgentUpdates {
         };
         Some(format!("Couldn't check {names}{reason}"))
     }
+}
+
+/// `TREK_OPEN_AGENT_UPDATES=<row>` (rather than `1`) opens that row's output once it has one,
+/// for design review of a failure.
+fn open_output() -> Option<String> {
+    std::env::var("TREK_OPEN_AGENT_UPDATES").ok().filter(|v| !v.is_empty() && v != "1")
 }
 
 fn lower_first(s: &str) -> String {
@@ -290,10 +317,10 @@ pub const WHY: &str = "New models often need the latest version.";
 pub fn rows(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
     let w = ws.read(cx);
     let u = &w.agent_updates;
-    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.id), w.agent_hold(&v.agent), u.output_open.as_deref() == Some(v.id.as_str()), cx)).collect()
+    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.id), w.agent_hold(&v.agent), u.stale, u.output_open.as_deref() == Some(v.id.as_str()), cx)).collect()
 }
 
-fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, open: bool, cx: &App) -> AnyElement {
+fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, stale: bool, open: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let agent = AgentId::from_key(&v.agent);
@@ -310,6 +337,7 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
             trek_core::agent_update::Install::Native => ("Via its own installer".into(), muted),
             ref i => (format!("Via {}", i.label()), muted),
         },
+        Some(Job::Queued) if stale => ("Checks what's installed first".into(), muted),
         Some(Job::Queued) if hold == Some(Hold::Turn) => (format!("Waits for {}'s turn to end", agent.display_name()), muted),
         Some(Job::Queued) if hold == Some(Hold::Background) => (format!("Waits for {}'s background tasks to end", agent.display_name()), muted),
         Some(Job::Queued) => ("Next, after the update under way".into(), muted),
@@ -356,7 +384,7 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
             .text_size(px(12.5))
             .text_color(muted)
             .child(Icon::new(crate::assets::Lucide::Clock).xsmall())
-            .child(if hold.is_some() { "Waiting" } else { "Queued" })
+            .child(if hold.is_some() && !stale { "Waiting" } else { "Queued" })
             .into_any_element(),
         Some(Job::Updated { .. }) => h_flex()
             .id(SharedString::from(format!("agent-updated-{key}")))
@@ -418,15 +446,15 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
                 div()
                     .id(SharedString::from(format!("agent-update-log-{key}")))
                     .test_support()
+                    // Part of the row, under its name: a rule, not a box in the card.
                     .ml(px(32.))
                     .mt(px(4.))
                     .max_h(px(160.))
                     .overflow_y_scroll()
-                    .p(px(10.))
-                    .rounded(px(8.))
-                    .bg(theme.foreground.opacity(0.035))
-                    .border_1()
-                    .border_color(theme.foreground.opacity(0.07))
+                    .pl(px(12.))
+                    .py(px(2.))
+                    .border_l_1()
+                    .border_color(theme.border)
                     .font_family(theme.mono_font_family.clone())
                     .text_size(px(11.5))
                     .line_height(relative(1.5))
@@ -437,11 +465,12 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
         .into_any_element()
 }
 
-/// "Update all", when more than one agent has an update to install.
+/// "Update all", while there's an update to install (or retry): the card's one action, as
+/// MonoCode's has, even when it's a single agent's.
 pub fn update_all(ws: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
     let n = ws.read(cx).agent_updates.updatable().len();
     let ws = ws.clone();
-    (n > 1).then(|| {
+    (n > 0).then(|| {
         Button::new("agent-updates-all")
             .small()
             .primary()
@@ -496,7 +525,7 @@ pub fn badge(u: &AgentUpdates, enabled: bool) -> Option<(usize, bool)> {
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
     use super::{AgentUpdates, Job, badge};
-    use trek_core::agent_update::{CHECK_EVERY_MS, Outcome, mock_versions};
+    use trek_core::agent_update::{CHECK_EVERY_MS, Install, Outcome, UpdateCommand, mock_versions};
 
     fn updates() -> AgentUpdates {
         AgentUpdates { found: mock_versions(), ..Default::default() }
@@ -572,6 +601,24 @@ mod tests {
         assert!(!u.queued());
         u.finish("codex", Outcome::Updated { version: "0.160.0".into(), output: String::new() });
         assert!(!u.running());
+    }
+
+    #[test]
+    fn a_cached_find_waits_for_this_launchs_check_and_runs_on_what_it_finds() {
+        // An earlier launch's: Codex was an npm install then, OpenCode had an update out.
+        let mut u = AgentUpdates { stale: true, ..updates() };
+        assert!(u.request("codex") && u.request("opencode"));
+        assert_eq!(u.next(|_| false), None, "nothing starts on the cache");
+        // Meanwhile Codex moved to its own installer, and OpenCode was updated by hand.
+        let mut fresh = mock_versions();
+        fresh[0].install = Install::Native;
+        fresh[0].command = Some(UpdateCommand::new("/Users/me/.codex/bin/codex", &["update"]));
+        fresh[1].installed = Some("1.18.34".into());
+        u.checked(fresh, 1);
+        assert!(!u.stale);
+        assert_eq!(u.job("opencode"), None, "nothing left to install");
+        assert_eq!(u.next(|_| false).as_deref(), Some("codex"));
+        assert_eq!(u.start("codex").unwrap().command.unwrap().shown(), "codex update", "the command of the install that's there now");
     }
 
     #[test]

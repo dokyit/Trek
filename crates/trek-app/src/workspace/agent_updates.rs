@@ -36,21 +36,33 @@ impl Workspace {
             let Ok(fresh) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.agent_updates.checked(fresh, now_ms());
+                this.save_agent_versions(cx);
                 if this.agent_updates.start_at_launch() {
                     this.update_all_agents(cx);
                 }
-                let snapshot = Snapshot { checked_at: this.agent_updates.checked_at, agents: this.agent_updates.found.clone() };
-                cx.background_executor()
-                    .spawn(async move {
-                        if let Err(e) = snapshot.save() {
-                            tracing::warn!("save agent versions: {e:#}");
-                        }
-                    })
-                    .detach();
+                // Updates asked for before it came in go now, on what it found.
+                this.pump_agent_updates(cx);
                 cx.notify();
             });
         });
         self.keep(task);
+    }
+
+    /// Cache what's known for the next launch: the last check, with updates installed since.
+    /// Never the made-up agents.
+    fn save_agent_versions(&self, cx: &mut Context<Self>) {
+        let u = &self.agent_updates;
+        if u.mock {
+            return;
+        }
+        let snapshot = Snapshot { checked_at: u.checked_at, agents: u.found.clone() };
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = snapshot.save() {
+                    tracing::warn!("save agent versions: {e:#}");
+                }
+            })
+            .detach();
     }
 
     /// From housekeeping: check when the last check is 12 hours old, and start updates whose
@@ -111,6 +123,12 @@ impl Workspace {
         if !self.agent_updates.queued() {
             return;
         }
+        // The rows are an earlier launch's: check first (whatever the setting, the update was
+        // asked for), and start on what that finds.
+        if self.agent_updates.stale {
+            self.check_agent_updates(true, cx);
+            return;
+        }
         let Some(id) = self.agent_updates.next(|a| self.agent_busy(a)) else { return };
         let Some(version) = self.agent_updates.start(&id) else { return };
         // None of its turns is running: every session it has is idle, and goes now, before its
@@ -137,7 +155,7 @@ impl Workspace {
             let h = trek_core::agent_update::harness(id);
             (h.map(|h| h.agent.to_string()).unwrap_or_default(), h.map(|h| h.name()).unwrap_or_else(|| id.to_string()))
         });
-        let dry = matches!(self.agent_updates.runner, crate::agent_updates::Runner::DryRun);
+        let dry = self.agent_updates.pretend();
         let message = match &outcome {
             Outcome::Updated { version, .. } if dry => format!("Dry run: {name} would be at {version} now. Nothing was changed."),
             Outcome::Updated { version, .. } => {
@@ -151,7 +169,13 @@ impl Workspace {
             }
             Outcome::Failed { summary, .. } => format!("Couldn't update {name}: {summary}"),
         };
+        let installed = matches!(outcome, Outcome::Updated { .. });
         self.agent_updates.finish(id, outcome);
+        // Its new version is cached too: a later launch doesn't offer it again, with checks off
+        // (none runs to say so) or before its check is in.
+        if installed && !dry {
+            self.save_agent_versions(cx);
+        }
         cx.emit(WorkspaceEvent::Toast { message, undo: None });
         if !self.agent_updating(&agent) {
             self.agent_released(&agent, cx);

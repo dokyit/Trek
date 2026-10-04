@@ -62,6 +62,9 @@ fn the_sidebar_card_updates_an_agent_and_shows_a_failure_with_its_output() {
         assert!(trek.visible(cx, "agent-updated-codex"));
         assert_eq!(trek.read(cx, |ws, _| ws.agent_updates.pending()), 3);
         assert_eq!(job(&trek, cx, "codex"), Some(Job::Updated { from: Some("0.159.2".into()), to: "0.160.0".into(), output: "updated Codex".into() }));
+        // Cached at its new version: the next launch doesn't offer it again.
+        let cached = trek_core::agent_update::Snapshot::load();
+        assert_eq!(cached.agents.iter().find(|v| v.id == "codex").and_then(|v| v.installed.as_deref()), Some("0.160.0"));
 
         // A failure says why, keeps what the command printed one click away, and can be retried.
         trek.click(cx, "agent-update-pi");
@@ -134,6 +137,11 @@ fn settings_has_the_switch_the_updates_and_update_all() {
         trek.render(cx);
         assert_eq!(trek.read(cx, |ws, _| ws.agent_updates.pending()), 1, "Pi failed; the rest are in");
         assert!(trek.visible(cx, "agent-update-pi"), "Retry");
+        assert!(trek.visible(cx, "agent-updates-all"), "one left to retry: still there for it");
+        trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Fake(Arc::new(|v: &AgentVersion| Outcome::Updated { version: v.latest.clone().unwrap(), output: String::new() })));
+        trek.click(cx, "agent-updates-all");
+        trek.wait(cx, "Pi to update", |ws| matches!(ws.agent_updates.job("pi"), Some(Job::Updated { .. }))).await;
+        trek.render(cx);
         assert!(!trek.visible(cx, "agent-updates-all"), "nothing left to update all of");
     });
 }
@@ -171,6 +179,35 @@ fn while_an_agent_updates_no_session_of_it_starts_and_messages_wait() {
         assert!(trek.answers(cx, &id).lines().count() >= 2, "both turns answered: {}", trek.answers(cx, &id));
         trek.render(cx);
         assert!(!trek.visible(cx, "composer-agent-updating"));
+    });
+}
+
+#[test]
+fn a_first_message_waiting_for_its_worktree_goes_once_an_update_that_started_meanwhile_ends() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        super::worktrees::make_repo(&trek, cx);
+        super::worktrees::use_worktree(&trek, cx);
+        let (release, gate) = async_channel::bounded::<()>(1);
+        trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
+        // The message waits for its worktree; before that's made, the agent's update starts
+        // (no turn of it is running).
+        trek.ws.update(cx, |ws, cx| {
+            ws.send("hello".into(), vec![], cx);
+            ws.update_agent("mock", cx);
+        });
+        let id = trek.thread_id(cx);
+        assert_eq!(job(&trek, cx, "mock"), Some(Job::Running));
+        let tid = id.clone();
+        trek.wait(cx, "the worktree", move |ws| !ws.live[&tid].preparing).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "held for the update");
+        assert!(trek.read(cx, |ws, _| !ws.turn_running(&id)));
+        release.send(()).await.unwrap();
+        trek.wait(cx, "the update to finish", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Updated { .. }))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0);
+        assert!(!trek.answers(cx, &id).is_empty(), "the agent answered it");
     });
 }
 

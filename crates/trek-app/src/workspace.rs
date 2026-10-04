@@ -2540,6 +2540,11 @@ impl Workspace {
             let Some((text, images)) = self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0))) else { break };
             self.send_to(id, text, images, cx);
         }
+        // Ready to go but for an agent update that started meanwhile (its worktree or history
+        // came in while it ran): held for it, so they go once it's done (`agent_released`).
+        if self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none()) && self.thread(id).is_some_and(|t| self.agent_updating(&t.agent.key())) {
+            self.agent_updates.held.insert(id.to_string());
+        }
     }
 
     fn fast_tier(&self, agent: &AgentId, model: Option<&String>, fast_on: bool) -> Option<String> {

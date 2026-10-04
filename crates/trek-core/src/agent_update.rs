@@ -425,11 +425,15 @@ pub struct UpdateCommand {
     pub path: Vec<PathBuf>,
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// What particular exit codes mean, said instead of "stopped with code n" (a package move
+    /// that put the old package back).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_exit: Vec<(i32, String)>,
 }
 
 impl UpdateCommand {
     pub fn new(program: impl Into<PathBuf>, args: &[&str]) -> Self {
-        Self { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), path: vec![], env: vec![] }
+        Self { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), path: vec![], env: vec![], on_exit: vec![] }
     }
 
     /// The PATH it runs with.
@@ -440,34 +444,52 @@ impl UpdateCommand {
     /// As the user would type it: "npm install -g @openai/codex@latest", "claude update".
     pub fn shown(&self) -> String {
         let program = self.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.program.display().to_string());
-        // The installer runs through `sh -c`: show the script line itself.
+        // A script runs through `sh -c`: show the line itself, or what it's named after it (the
+        // script's `$0`) when it does more than it says.
         if program == "sh" && self.args.first().is_some_and(|a| a == "-c") {
-            return self.args[1..].join(" ");
+            return self.args.get(2).unwrap_or(&self.args[1]).clone();
         }
         std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
     }
 }
 
-/// The vendor's documented way to update `h`, installed as `install` with its binary at
-/// `binary`: the package manager that installed it, or for its own installer, the CLI's own
-/// update command (or the install script again). A self-updating cask updates itself too.
-/// `None` when there's no way Trek can run.
-pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_updates: bool) -> Option<UpdateCommand> {
+/// A package move's exit codes: the new package didn't install, and the old one is back
+/// (`PUT_BACK`) or couldn't be put back either (`LOST`).
+pub const PUT_BACK: i32 = 75;
+pub const LOST: i32 = 76;
+
+/// The vendor's documented way to update `h`, installed as `install` (at version `installed`)
+/// with its binary at `binary`: the package manager that installed it, or for its own
+/// installer, the CLI's own update command (or the install script again). A self-updating cask
+/// updates itself too. `None` when there's no way Trek can run.
+pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_updates: bool, installed: Option<&str>) -> Option<UpdateCommand> {
     let own = || h.self_update.map(|args| UpdateCommand::new(binary, args));
-    // Installed as the package it moved from: that one goes, and the new one (with the same
-    // binary, which the old one's would block) comes in its place.
-    let moving = |remove: &str, add: &str, old: &str| {
+    // Installed as the package it moved from: that one goes first (its binary blocks the new
+    // one's, and uninstalling it after a forced install takes the shared link with it), then the
+    // new one comes in its place. Should that fail (offline, a registry error), the old one is
+    // put back, from the package manager's cache if need be: never no agent at all.
+    let moving = |remove: &str, add: &str, offline: &str, old: &str| {
         let new = h.npm?;
-        Some(UpdateCommand::new("/bin/sh", &["-c", &format!("{remove} {old} && {add} {new}@latest")]))
+        let back = installed.map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
+        let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
+        let shown = format!("{remove} {old} && {add} {new}@latest");
+        let name = h.name();
+        Some(UpdateCommand {
+            on_exit: vec![
+                (PUT_BACK, format!("Couldn't install {new}, so {back} was put back.")),
+                (LOST, format!("Couldn't install {new}, nor put {back} back: {name} isn't installed now. Run {add} {new} to install it.")),
+            ],
+            ..UpdateCommand::new("/bin/sh", &["-c", &script, &shown])
+        })
     };
     match install {
-        Install::Npm { package, prefix } if h.moved(package) => moving("npm uninstall -g", "npm install -g", package).map(|c| UpdateCommand {
+        Install::Npm { package, prefix } if h.moved(package) => moving("npm uninstall -g", "npm install -g", "--prefer-offline ", package).map(|c| UpdateCommand {
             path: vec![prefix.join("bin")],
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..c
         }),
-        Install::Bun { package } if h.moved(package) => moving("bun remove -g", "bun add -g", package),
-        Install::Pnpm { package } if h.moved(package) => moving("pnpm remove -g", "pnpm add -g", package),
+        Install::Bun { package } if h.moved(package) => moving("bun remove -g", "bun add -g", "", package),
+        Install::Pnpm { package } if h.moved(package) => moving("pnpm remove -g", "pnpm add -g", "--prefer-offline ", package),
         // The npm and node of the install's own prefix come first (an nvm version's, Homebrew's),
         // and the prefix is set outright: a prefix of the user's own (`~/.npm-global`) has
         // neither, so the npm on PATH installs there.
@@ -530,7 +552,9 @@ pub fn carry_over(fresh: &mut [AgentVersion], before: &[AgentVersion]) {
     for v in fresh.iter_mut().filter(|v| v.latest.is_none()) {
         if let Some(old) = before.iter().find(|o| o.id == v.id && o.installed == v.installed && o.install == v.install) {
             v.latest = old.latest.clone();
-            if v.command.is_none() {
+            // With it, the command that check worked out for it: how an install updates may
+            // depend on what its feed said (a self-updating cask), unknown this time.
+            if old.command.is_some() {
                 v.command = old.command.clone();
             }
         }
@@ -646,7 +670,7 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
         id: h.binary.into(),
         agent: h.agent.into(),
         name: h.name(),
-        command: update_command(h, &install, &binary, auto_updates),
+        command: update_command(h, &install, &binary, auto_updates, installed.as_deref()),
         binary,
         installed,
         install,
@@ -728,6 +752,9 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
     };
     let output = strip_ansi(&format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))).trim().to_string();
     if !out.status.success() {
+        if let Some((_, said)) = out.status.code().and_then(|c| cmd.on_exit.iter().find(|(e, _)| *e == c)) {
+            return Outcome::Failed { summary: said.clone(), output };
+        }
         let code = out.status.code().map_or("a signal".to_string(), |c| format!("code {c}"));
         return Outcome::Failed { summary: format!("{} stopped with {code}.", cmd.shown()), output };
     }
@@ -856,7 +883,7 @@ mod tests {
         );
         let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
         assert!(h("acp:gemini").owns(&keg));
-        assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false).unwrap().shown(), "brew upgrade gemini-cli");
+        assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false, None).unwrap().shown(), "brew upgrade gemini-cli");
         // A global prefix of the user's own (npm's fix for EACCES).
         assert_eq!(
             p("/Users/me/.npm-global/lib/node_modules/@openai/codex/bin/codex.js"),
@@ -915,7 +942,7 @@ mod tests {
         let adapter = harness("amp-acp").unwrap();
         assert!(adapter.adapter);
         assert_eq!(adapter.name(), "Amp ACP adapter");
-        assert_eq!(update_command(adapter, &Install::Npm { package: "amp-acp".into(), prefix: "/opt/homebrew".into() }, Path::new("/opt/homebrew/bin/amp-acp"), false).unwrap().shown(), "npm install -g amp-acp@latest");
+        assert_eq!(update_command(adapter, &Install::Npm { package: "amp-acp".into(), prefix: "/opt/homebrew".into() }, Path::new("/opt/homebrew/bin/amp-acp"), false, None).unwrap().shown(), "npm install -g amp-acp@latest");
     }
 
     #[test]
@@ -992,29 +1019,29 @@ mod tests {
     #[test]
     fn updates_run_the_vendors_documented_command() {
         let bin = Path::new("/opt/homebrew/bin/x");
-        let shown = |agent: &str, install: Install, auto: bool| update_command(h(agent), &install, bin, auto).map(|c| c.shown());
+        let shown = |agent: &str, install: Install, auto: bool| update_command(h(agent), &install, bin, auto, None).map(|c| c.shown());
         let npm = |p: &str| Install::Npm { package: p.into(), prefix: "/opt/homebrew".into() };
         assert_eq!(shown("acp:kimi", npm("@moonshot-ai/kimi-code"), false).as_deref(), Some("npm install -g @moonshot-ai/kimi-code@latest"));
         // The npm (and node) of the prefix it's in first on PATH, and that prefix set outright.
-        let cmd = update_command(h("codex"), &npm("@openai/codex"), bin, false).unwrap();
+        let cmd = update_command(h("codex"), &npm("@openai/codex"), bin, false, None).unwrap();
         assert_eq!(cmd.program, Path::new("npm"));
         assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
         assert!(cmd.search_path().starts_with("/opt/homebrew/bin:"));
         // A prefix of the user's own has no npm in it: the one on PATH installs into it.
         let own = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.npm-global".into() };
-        let cmd = update_command(h("codex"), &own, bin, false).unwrap();
+        let cmd = update_command(h("codex"), &own, bin, false, None).unwrap();
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/Users/me/.npm-global".to_string())]);
         assert_eq!(cmd.shown(), "npm install -g @openai/codex@latest");
         let nvm = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.nvm/versions/node/v22.3.0".into() };
-        assert_eq!(update_command(h("codex"), &nvm, bin, false).unwrap().path, [Path::new("/Users/me/.nvm/versions/node/v22.3.0/bin")]);
+        assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [Path::new("/Users/me/.nvm/versions/node/v22.3.0/bin")]);
         assert_eq!(shown("codex", Install::Volta, false).as_deref(), Some("volta install @openai/codex@latest"));
         assert_eq!(shown("acp:grok", Install::Volta, false), None, "no package to install");
         assert_eq!(shown("acp:gemini", Install::Bun { package: "@google/gemini-cli".into() }, false).as_deref(), Some("bun add -g @google/gemini-cli@latest"));
         let tapped = Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) };
         assert_eq!(shown("opencode", tapped, false).as_deref(), Some("brew upgrade anomalyco/tap/opencode"));
         let core = Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None };
-        assert_eq!(update_command(h("acp:goose"), &core, bin, false).unwrap().program, Path::new("/usr/local/bin/brew"));
+        assert_eq!(update_command(h("acp:goose"), &core, bin, false, None).unwrap().program, Path::new("/usr/local/bin/brew"));
         // A cask that updates itself does so with its own command; another one through brew.
         let cask = Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() };
         assert_eq!(shown("acp:github-copilot", cask.clone(), true).as_deref(), Some("x update"));
@@ -1022,7 +1049,7 @@ mod tests {
         // Native installs: the CLI's own command, the install script, or nothing.
         assert_eq!(shown("claude-code", Install::Native, false).as_deref(), Some("x update"));
         assert_eq!(shown("opencode", Install::Native, false).as_deref(), Some("x upgrade"));
-        let droid = update_command(h("droid"), &Install::Native, bin, false).unwrap();
+        let droid = update_command(h("droid"), &Install::Native, bin, false, None).unwrap();
         assert_eq!(droid.program, Path::new("/bin/sh"));
         assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
         assert_eq!(shown("acp:pi", Install::Native, false).as_deref(), Some("x update"));
@@ -1041,14 +1068,14 @@ mod tests {
         assert_eq!(source(pi, &old), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
         assert_eq!(source(pi, &Install::Bun { package: "@mariozechner/pi-coding-agent".into() }), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
         let bin = Path::new("/opt/homebrew/bin/pi");
-        assert_eq!(update_command(pi, &new, bin, false).unwrap().shown(), "npm install -g @earendil-works/pi-coding-agent@latest");
+        assert_eq!(update_command(pi, &new, bin, false, None).unwrap().shown(), "npm install -g @earendil-works/pi-coding-agent@latest");
         // The old package goes first: its `pi` would block the new one's.
-        let cmd = update_command(pi, &old, bin, false).unwrap();
+        let cmd = update_command(pi, &old, bin, false, Some("0.73.1")).unwrap();
         assert_eq!(cmd.program, Path::new("/bin/sh"));
         assert_eq!(cmd.shown(), "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest");
         assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
-        let pnpm = update_command(pi, &Install::Pnpm { package: "@mariozechner/pi-coding-agent".into() }, bin, false).unwrap();
+        let pnpm = update_command(pi, &Install::Pnpm { package: "@mariozechner/pi-coding-agent".into() }, bin, false, None).unwrap();
         assert_eq!(pnpm.shown(), "pnpm remove -g @mariozechner/pi-coding-agent && pnpm add -g @earendil-works/pi-coding-agent@latest");
         // An old install a check found then (`latest` from the new package) has an update out.
         let v = AgentVersion {
@@ -1059,10 +1086,61 @@ mod tests {
             installed: Some("0.73.1".into()),
             latest: Some("1.0.2".into()),
             install: old.clone(),
-            command: update_command(pi, &old, bin, false),
+            command: update_command(pi, &old, bin, false, Some("0.73.1")),
             error: None,
         };
         assert!(v.update_available());
+    }
+
+    /// Pi's move to its new package, run against a fake `npm` that logs what it's asked and fails
+    /// at `fail` (each a line of arguments): the old package is never simply gone.
+    fn move_pi(fail: &[&str]) -> (Outcome, Vec<String>) {
+        let root = std::env::temp_dir().join(format!("trek-pi-move-{}-{}", std::process::id(), fail.len()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let log = root.join("npm.log");
+        let fails: String = fail.iter().map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n")).collect();
+        let npm = format!("#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n", log.display());
+        let fake = root.join("bin/npm");
+        std::fs::write(&fake, npm).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: root.clone() };
+        let v = AgentVersion {
+            id: "pi".into(),
+            agent: "acp:pi".into(),
+            name: "Pi".into(),
+            binary: root.join("bin/pi"),
+            installed: Some("0.73.1".into()),
+            latest: Some("1.0.2".into()),
+            command: update_command(h("acp:pi"), &old, &root.join("bin/pi"), false, Some("0.73.1")),
+            install: old,
+            error: None,
+        };
+        let outcome = crate::runtime().block_on(run_update(&v));
+        let ran = std::fs::read_to_string(&log).unwrap_or_default().lines().map(String::from).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        (outcome, ran)
+    }
+
+    #[test]
+    fn a_failed_package_move_puts_the_old_package_back() {
+        let (remove, add, back) = ("uninstall -g @mariozechner/pi-coding-agent", "install -g @earendil-works/pi-coding-agent@latest", "install -g --prefer-offline @mariozechner/pi-coding-agent@0.73.1");
+        // Offline mid-update: the new package doesn't come, the old one goes back from the cache.
+        let (outcome, ran) = move_pi(&[add]);
+        assert_eq!(ran, [remove, add, back]);
+        let Outcome::Failed { summary, output } = outcome else { panic!("{outcome:?}") };
+        assert_eq!(summary, "Couldn't install @earendil-works/pi-coding-agent, so @mariozechner/pi-coding-agent@0.73.1 was put back.");
+        assert!(output.contains("npm error install -g @earendil-works"), "{output}");
+        // Neither comes: the summary says Pi is gone and how to get it.
+        let (outcome, ran) = move_pi(&[add, back]);
+        assert_eq!(ran, [remove, add, back]);
+        let Outcome::Failed { summary, .. } = outcome else { panic!() };
+        assert!(summary.starts_with("Couldn't install @earendil-works/pi-coding-agent, nor put @mariozechner/pi-coding-agent@0.73.1 back: Pi isn't installed now."), "{summary}");
+        // The old one wouldn't go: nothing else is tried, nothing changed.
+        let (outcome, ran) = move_pi(&[remove]);
+        assert_eq!(ran, [remove]);
+        let Outcome::Failed { summary, .. } = outcome else { panic!() };
+        assert_eq!(summary, "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest stopped with code 1.");
     }
 
     #[test]
@@ -1075,7 +1153,7 @@ mod tests {
         assert!(matches!(detect_install(&script), Install::Npm { .. }), "unmarked, it's an npm prefix");
         std::fs::write(root.join("managed-install.json"), r#"{"kind":"pi-managed-install","schemaVersion":1}"#).unwrap();
         assert_eq!(detect_install(&script), Install::Native);
-        assert_eq!(update_command(h("acp:pi"), &Install::Native, Path::new("/Users/me/.pi/agent/bin/pi"), false).unwrap().shown(), "pi update");
+        assert_eq!(update_command(h("acp:pi"), &Install::Native, Path::new("/Users/me/.pi/agent/bin/pi"), false, None).unwrap().shown(), "pi update");
         assert_eq!(source(h("acp:pi"), &Install::Native), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1139,6 +1217,26 @@ mod tests {
         assert!(fresh[0].update_available());
         assert_eq!(fresh[1].latest, None);
         assert!(!fresh[1].update_available());
+    }
+
+    #[test]
+    fn an_offline_check_keeps_the_command_the_last_one_worked_out() {
+        // Copilot's cask updates itself: `copilot update`, as the cask's feed said. Offline, the
+        // feed can't say so, and brew's path would come up in its place.
+        let cask = Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() };
+        let bin = Path::new("/opt/homebrew/bin/copilot");
+        let copilot = h("acp:github-copilot");
+        let entry = |latest: Option<&str>, auto: bool| AgentVersion {
+            install: cask.clone(),
+            command: update_command(copilot, &cask, bin, auto, Some("1.0.91")),
+            ..version("copilot", "1.0.91", latest)
+        };
+        let before = [entry(Some("1.0.92"), true)];
+        let mut fresh = [entry(None, false)];
+        assert_eq!(fresh[0].command.as_ref().unwrap().shown(), "brew upgrade --cask copilot-cli");
+        carry_over(&mut fresh, &before);
+        assert_eq!(fresh[0].latest.as_deref(), Some("1.0.92"));
+        assert_eq!(fresh[0].command.as_ref().unwrap().shown(), "copilot update");
     }
 
     #[test]
