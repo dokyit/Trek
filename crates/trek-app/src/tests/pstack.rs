@@ -105,6 +105,13 @@ fn an_arena_drafts_designs_across_families_and_has_them_judged() {
         assert_eq!((said, consult.style, consult.implement), ("Rate-limit the webhooks", Style::Arena, false));
         assert_eq!(consult.judge.map(|j| j.key()).as_deref(), Some("direct:mock-relay/relay-swift/high"));
         trek.wait_done(cx, &id, RunState::Idle).await;
+        // As agents whose tool calls run one at a time do it: both designs start without waiting
+        // and are collected with `task_result`, which waits. Read in the turn, their answers don't
+        // wake the thread again after it.
+        let items = trek.items(cx, &id);
+        let calls: Vec<&str> = items.iter().filter_map(|i| if let Item::Tool { title, .. } = i { title.split_once("__").and_then(|(_, t)| t.split_once("__")).map(|(_, t)| t) } else { None }).collect();
+        assert_eq!(calls, ["delegate_task", "delegate_task", "task_result", "task_result", "delegate_task"]);
+        assert!(!items.iter().any(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))));
 
         // Two designs, then the judge: sub-agents of the thread, each on its own model.
         let mut kids: Vec<(String, String, String)> = trek.read(cx, |ws, _| ws.children(&id).into_iter().map(|t| (t.id.clone(), t.title.clone(), t.model.clone().unwrap_or_default())).collect());
@@ -125,6 +132,7 @@ fn an_arena_drafts_designs_across_families_and_has_them_judged() {
         // The agent waited for every answer in its turn: no report comes back to wake it again.
         cx.run_until_parked();
         assert!(trek.items(cx, &id).iter().all(|i| !matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))), "{:?}", trek.items(cx, &id));
+        assert!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap()).is_empty(), "nor after a restart");
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.run_state == RunState::Idle)));
         // The message shows who designs and who judges.
         let user = trek.item_ix(cx, &id, |i| matches!(i, Item::User { .. }));
@@ -170,6 +178,52 @@ fn restating_an_arena_holds_it_until_the_go_ahead() {
 }
 
 #[test]
+fn a_corrected_restatement_keeps_the_arena_for_the_go_ahead() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "consult-pill");
+        trek.click(cx, ("consult-style", 2usize));
+        trek.press(cx, "escape");
+        let id = trek.send(cx, "/restate Rate-limit the webhooks");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Not quite: the correction is restated, without the arena (its picks went with the
+        // first message)…
+        trek.render(cx);
+        trek.click(cx, ("restate-no", last_end(&trek, cx, &id)));
+        trek.send(cx, "Per customer, not per endpoint.");
+        let correction = last_message(&trek, cx, &id);
+        assert!(split_consult(&correction).1.is_none() && trek_core::restate::split_restate(&correction).1);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // …and the go-ahead brings it back.
+        trek.render(cx);
+        trek.click(cx, ("restate-yes", last_end(&trek, cx, &id)));
+        let ahead = last_message(&trek, cx, &id);
+        assert_eq!(split_consult(&ahead).1.map(|c| c.style), Some(Style::Arena), "{ahead}");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.read(cx, |ws, _| ws.children(&id).iter().any(|t| t.title == "Judge the designs")));
+    });
+}
+
+#[test]
+fn restate_alone_in_a_thread_under_way_restates_the_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "Fix the flaky upload test.");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.type_text(cx, "/restate");
+        trek.press(cx, "enter");
+        trek.press(cx, "enter");
+        let sent = last_message(&trek, cx, &id);
+        assert_eq!(trek_core::restate::split_restate(&sent), (trek_core::restate::THREAD, true));
+        assert!(!restating(&trek, cx) && trek.composer_text(cx).is_empty());
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.answers(cx, &id).contains("you'd like me to look at what we have so far"), "{}", trek.answers(cx, &id));
+        trek.render(cx);
+        assert!(trek.visible(cx, ("restate-yes", last_end(&trek, cx, &id))));
+    });
+}
+
+#[test]
 fn an_arena_drafts_no_more_designs_than_run_at_once() {
     run(async |cx| {
         let trek = open(cx);
@@ -207,6 +261,30 @@ fn an_arena_drafts_no_more_designs_than_run_at_once() {
         trek.press(cx, "enter");
         assert_eq!(trek.composer_text(cx), one);
         assert!(trek.read(cx, |ws, _| ws.threads.iter().all(|t| !t.title.contains("avatars"))), "not sent");
+    });
+}
+
+#[test]
+fn a_skill_without_a_cli_says_why_no_turn_is_verified() {
+    run(async |cx| {
+        let trek = open(cx);
+        let project = trek.project.clone();
+        // Found by its name and Feature Map, with no CLI named or bundled.
+        let skill = project.join(".claude/skills/verify-app");
+        std::fs::create_dir_all(skill.join("references/features")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: verify-app\ndescription: Check the app.\n---\n").unwrap();
+        std::fs::write(skill.join("references/features/README.md"), "# Features\n").unwrap();
+        trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
+        assert!(trek.read(cx, |ws, _| ws.verification(&project)).is_some_and(|v| v.cli.is_none()));
+        let pid = trek.read(cx, |ws, _| ws.projects.iter().find(|p| p.path == project).map(|p| p.id.clone()));
+        trek.update(cx, |ws, cx| ws.open_project_settings(pid, cx));
+        cx.simulate_window_resize(trek.window, gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(1800.)));
+        trek.render(cx);
+        assert!(trek.visible(cx, "verify-no-cli") && !trek.visible(cx, "verify-cli"));
+        // Maintain asks for one.
+        trek.click(cx, "verify-maintain");
+        let id = trek.thread_id(cx);
+        assert!(last_message(&trek, cx, &id).contains("names no CLI yet"));
     });
 }
 
@@ -264,9 +342,14 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         assert!(trek.visible(cx, "verify-setup"));
         assert!(!trek.visible(cx, "verify-maintain"));
 
-        // Set up: a thread in the project, following the guide Trek ships.
+        // Set up: a thread in the project, following the guide Trek ships, with the user's
+        // default agent (not one the project picked for its threads).
+        let relay = trek_core::AgentId::Direct(trek_core::catalog::MOCK_RELAY_PROVIDER.into());
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.agent = Some(relay.key()), cx));
         trek.click(cx, "verify-setup");
         let id = trek.thread_id(cx);
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.agent.clone())), Some(super::harness::mock()));
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.agent = None, cx));
         let asked = last_message(&trek, cx, &id);
         let guide = trek_core::skills::shipped_root().join(trek_core::skills::CREATE_VERIFICATION).join("SKILL.md");
         assert!(asked.contains(&guide.display().to_string()) && guide.exists(), "{asked}");
@@ -508,15 +591,19 @@ fn live_arena_with_real_agents() {
         trek.update(cx, |ws, cx| ws.send(consult_prompt(ask, &consult, |c| c.model.clone()), vec![], cx));
         let id = trek.thread_id(cx);
         let deadline = Instant::now() + Duration::from_secs(600);
+        // Whether the designs ever drafted at the same time: the agent's tool calls run one at a
+        // time, so they do only if it started them without waiting and collected them after.
+        let mut together = false;
         loop {
             cx.run_until_parked();
+            together |= trek.read(cx, |ws, _| ws.children(&id).iter().filter(|t| t.title.starts_with("Design") && ws.task_state(&t.id).live()).count() >= 2);
             // The orchestration tools, and anything else it asks for, are allowed: it reports only.
             for t in std::iter::once(id.clone()).chain(trek.read(cx, |ws, _| ws.children(&id).into_iter().map(|t| t.id.clone()).collect::<Vec<_>>())) {
                 if let Some(rid) = trek.read(cx, |ws, _| ws.pending_request(&t).map(|p| p.request_id.clone())) {
                     trek.update(cx, |ws, cx| ws.respond(&t, &rid, trek_agents::Decision::Allow, cx));
                 }
             }
-            let (state, running) = trek.read(cx, |ws, _| (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id)));
+            let (state, running) = trek.read(cx, |ws, _| (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id) || !ws.running_children(&id).is_empty()));
             match (state, running) {
                 (Some(RunState::Idle), false) => break,
                 (Some(RunState::Failed), _) => panic!("the turn failed: {:?}", trek.items(cx, &id)),
@@ -524,6 +611,14 @@ fn live_arena_with_real_agents() {
             }
             assert!(Instant::now() < deadline, "timed out: {:?}", trek.items(cx, &id));
             cx.background_executor.timer(Duration::from_millis(100)).await;
+        }
+        for i in trek.items(cx, &id) {
+            match i {
+                Item::Tool { title, detail, output, status, .. } => println!("tool {title} {:?}: {} -> {}", status, orch_preview(&detail), orch_preview(&output)),
+                Item::User { text, .. } => println!("user: {}", orch_preview(&text)),
+                Item::Assistant { text } => println!("said: {}", orch_preview(&text)),
+                _ => {}
+            }
         }
         let kids: Vec<(String, String, String, String)> =
             trek.read(cx, |ws, _| ws.children(&id).into_iter().map(|t| (t.id.clone(), t.title.clone(), t.agent.key(), t.model.clone().unwrap_or_default())).collect());
@@ -542,6 +637,7 @@ fn live_arena_with_real_agents() {
         let mut designers = vec![on("Design A"), on("Design B")];
         designers.sort();
         assert_eq!(designers, [("claude-code".to_string(), "claude-haiku-4-5".to_string()), ("codex".to_string(), "gpt-5.6-luna".to_string())]);
+        assert!(together, "the designs drafted one after the other");
         let answer = trek.answers(cx, &id);
         println!("synthesis: {answer}");
         assert!(answer.contains("Design"), "{answer}");

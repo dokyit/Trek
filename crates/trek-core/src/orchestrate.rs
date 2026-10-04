@@ -127,10 +127,10 @@ pub fn plain_preview(text: &str, max: usize) -> String {
     let lines: Vec<String> = text
         .lines()
         .filter(|l| !l.trim_start().starts_with("```"))
-        // A table's rule row says nothing; its cells read as a list.
+        // A table's rule row says nothing; its cells read as a list, a row to a clause.
         .filter(|l| !(l.contains("---") && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))))
         .map(|l| match l.trim().strip_prefix('|').and_then(|r| r.strip_suffix('|')) {
-            Some(cells) => cells.split('|').map(str::trim).filter(|c| !c.is_empty()).collect::<Vec<_>>().join(" · "),
+            Some(cells) => format!("{};", cells.split('|').map(str::trim).filter(|c| !c.is_empty()).collect::<Vec<_>>().join(" · ")),
             None => l.to_string(),
         })
         .map(|l| {
@@ -448,7 +448,7 @@ pub fn consult_prompt(text: &str, consult: &Consult, name: impl Fn(&Consultant) 
     let mut steps = vec![];
     match consult.style {
         Style::Advise | Style::Discuss => steps.push(format!(
-            "1. Call `delegate_task` once for each consultant below, all at once if you can, with mode \"advise\" and wait true:\n{}\n   They can't see this conversation: give each a self-contained brief (the request above, the files that matter, what you've found so far) and ask for their review and recommendations, not for edits.",
+            "1. Start every consultant below with `delegate_task`, mode \"advise\" and wait false, then collect each answer with `task_result` and wait true (they work side by side meanwhile):\n{}\n   They can't see this conversation: give each a self-contained brief (the request above, the files that matter, what you've found so far) and ask for their review and recommendations, not for edits.",
             list.join("\n")
         )),
         Style::Arena => {}
@@ -468,7 +468,7 @@ pub fn consult_prompt(text: &str, consult: &Consult, name: impl Fn(&Consultant) 
             let letters: Vec<String> = (0..consult.consultants.len()).map(|i| format!("\"Design {}\"", (b'A' + i as u8) as char)).collect();
             steps.push("1. Ground the problem before anyone designs: read the code it touches and write a short brief of what exists now, who owns what, the constraints, and how callers will use what's built. Don't design it yourself yet.".into());
             steps.push(format!(
-                "2. Run the arena: call `delegate_task` once for each candidate below, all at once, with mode \"advise\", wait true, and titles {}:\n{}\n   Give each the same self-contained brief and ask for a design package: a sketch of the call sites (how callers will use it), the core types, the public function signatures, and a short rationale, written as code with placeholder bodies. Each designs on its own: tell none of them about the others or your own ideas. Ask each to weigh how deep the interface is (a simple interface over real functionality), how it fails, and what a weaker model working with it would get wrong.",
+                "2. Run the arena: start every candidate below with `delegate_task`, mode \"advise\", wait false and titles {}, then collect each design with `task_result` and wait true (they draft side by side meanwhile; don't end your turn):\n{}\n   Give each the same self-contained brief and ask for a design package: a sketch of the call sites (how callers will use it), the core types, the public function signatures, and a short rationale, written as code with placeholder bodies. Each designs on its own: tell none of them about the others or your own ideas. Ask each to weigh how deep the interface is (a simple interface over real functionality), how it fails, and what a weaker model working with it would get wrong.",
                 letters.join(", "),
                 list.join("\n")
             ));
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(preview("a\n\n  b   c", 100), "a b c");
         assert_eq!(preview("abcdef", 3), "abc…");
         assert_eq!(plain_preview("## Findings\n\n- `sum2` is **vague**\n1. Rename it\n> ok\n```rust\n", 100), "Findings sum2 is vague Rename it ok");
-        assert_eq!(plain_preview("| Design | Score |\n| --- | :---: |\n| A | 4.6 |\n\nA wins.", 100), "Design · Score A · 4.6 A wins.");
+        assert_eq!(plain_preview("| Design | Score |\n| --- | :---: |\n| A | 4.6 |\n| B | 3.9 |\n\nA wins.", 100), "Design · Score; A · 4.6; B · 3.9; A wins.");
     }
 
     #[test]

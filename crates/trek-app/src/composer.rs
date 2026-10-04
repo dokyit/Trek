@@ -313,9 +313,15 @@ impl Composer {
             }
             None => text,
         };
-        // `/restate <message>` sends it asking for a restatement first; `/restate` alone turns that
-        // on (or off) for the next message.
+        // `/restate <message>` sends it asking for a restatement first. `/restate` alone, in a
+        // thread under way, asks the agent to restate the thread so far; in a new thread it turns
+        // that on (or off) for the first message.
+        let under_way = self.editing.is_none() && self.workspace.read(cx).thread_in(&self.scope).is_some();
         let text = match restate_command(&text) {
+            Some(None) if under_way => {
+                self.restate = true;
+                trek_core::restate::THREAD.to_string()
+            }
             Some(None) => {
                 state.update(cx, |s, cx| s.set_value("", window, cx));
                 self.trigger = None;

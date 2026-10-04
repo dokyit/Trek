@@ -382,7 +382,7 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
                 instructions: None,
                 read_dirs: vec![],
             };
-            let key = (mock(), trek.project.clone(), None, Effort::Medium, HandHolding::Auto, false, false);
+            let key = (mock(), trek.project.clone(), None, Effort::Medium, HandHolding::Auto, false, false, None);
             ws.warm = Some((key, trek_agents::start(config), cx.background_executor().now()));
         });
         cx.executor().advance_clock(Duration::from_secs(9 * 60));

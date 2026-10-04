@@ -216,7 +216,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "delegate_task",
-            "Start a sub-agent: a child thread in Trek that does one task with the agent, model and effort you choose (any that list_models offers, from any provider), in this thread's folder. It sees only the prompt you give it, not this conversation, so make the prompt self-contained: the goal, the files that matter, what you already know and what you want back. mode \"advise\" (the default) runs it read-only, to review, research or recommend; it can't change files. mode \"implement\" lets it change files, with this thread's access level. wait=true blocks until it finishes and returns its final answer (after timeout_seconds it returns its id with status \"running\" instead). wait=false returns its id at once; when it finishes Trek sends you its result in a message, so end your turn rather than polling. Each call starts a new sub-agent: for another round with the same model, call delegate_task again with the brief, the findings so far and any open objections. The user sees every sub-agent inline with its model and status, and can open it.",
+            "Start a sub-agent: a child thread in Trek that does one task with the agent, model and effort you choose (any that list_models offers, from any provider), in this thread's folder. It sees only the prompt you give it, not this conversation, so make the prompt self-contained: the goal, the files that matter, what you already know and what you want back. mode \"advise\" (the default) runs it read-only, to review, research or recommend; it can't change files. mode \"implement\" lets it change files, with this thread's access level. wait=true blocks until it finishes and returns its final answer (after timeout_seconds it returns its id with status \"running\" instead). wait=false returns its id at once; when it finishes Trek sends you its result in a message, so end your turn rather than polling, or collect it in this turn with task_result wait=true. Each call starts a new sub-agent: for another round with the same model, call delegate_task again with the brief, the findings so far and any open objections. The user sees every sub-agent inline with its model and status, and can open it.",
             json!({
                 "type": "object",
                 "properties": {
@@ -233,7 +233,19 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         ("task_status", "How a sub-agent you started is doing (running, needs approval, done, failed or cancelled), how long it has run, and a preview of its answer once done.", id.clone()),
-        ("task_result", "A finished sub-agent's final answer in full (very long answers are cut short).", id.clone()),
+        (
+            "task_result",
+            "A sub-agent's final answer in full (very long answers are cut short). wait=true blocks until it finishes (after timeout_seconds it returns its status \"running\" instead): start several with delegate_task wait=false, then collect each with task_result wait=true, and they run side by side meanwhile. An answer read here isn't sent to you again in a message.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The sub-agent's id, as delegate_task returned it." },
+                    "wait": { "type": "boolean", "description": "Wait for it to finish (true) or answer at once (false, the default)." },
+                    "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 1800, "description": "With wait=true, how long to wait before returning \"running\" (default 600). The sub-agent keeps going either way." }
+                },
+                "required": ["id"]
+            }),
+        ),
         ("cancel_task", "Stop a sub-agent you started. Its thread stays, for the user to read.", id),
     ]
 }

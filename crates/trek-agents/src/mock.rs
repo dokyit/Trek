@@ -908,43 +908,23 @@ impl Session {
         }
     }
 
-    /// Several calls to Trek's orchestration tools at once, answered in order. As with `ipc`, the
-    /// user can stop the turn while they wait: their connections are dropped.
-    async fn ipc_all(&mut self, method: &str, calls: Vec<serde_json::Value>) -> Step<Vec<std::result::Result<serde_json::Value, String>>> {
-        let Some(client) = self.orchestrate.clone() else { return Ok(calls.iter().map(|_| Err("Trek's sub-agent tools aren't in this session.".into())).collect()) };
-        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
-        let pending: Vec<_> = calls
-            .into_iter()
-            .map(|params| {
-                let (client, method, handle_tx) = (client.clone(), method.to_string(), handle_tx.clone());
-                tokio::task::spawn_blocking(move || {
-                    let mut conn = client.connect()?;
-                    if let Ok(h) = conn.handle() {
-                        let _ = handle_tx.send(h);
-                    }
-                    conn.call(&method, &params)
-                })
-            })
-            .collect();
-        let mut all = Box::pin(futures::future::join_all(pending));
-        loop {
-            tokio::select! {
-                done = &mut all => return Ok(done.into_iter().map(|r| r.unwrap_or_else(|e| Err(e.to_string()))).collect()),
-                cmd = self.commands.recv() => {
-                    if let Err(stop) = self.handle_midturn(cmd) {
-                        while let Ok(h) = handle_rx.try_recv() {
-                            let _ = h.shutdown(std::net::Shutdown::Both);
-                        }
-                        return Err(stop);
-                    }
-                }
-            }
-        }
+    /// One call to Trek's orchestration tool `method`, with its row in the transcript.
+    async fn orchestrate_call(&mut self, method: &str, detail: &str, params: serde_json::Value) -> Step<std::result::Result<serde_json::Value, String>> {
+        let id = self.id("tool");
+        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__{method}"), detail).await?;
+        let answer = self.ipc(method, params).await?;
+        let (output, ok) = match &answer {
+            Ok(v) => (serde_json::to_string_pretty(v).unwrap_or_default(), true),
+            Err(e) => (e.clone(), false),
+        };
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        Ok(answer)
     }
 
     /// Say back what it was asked, in its own words, and stop there.
     async fn restate(&mut self, text: &str) -> Step {
-        let said = trek_core::restate::as_written(text).trim().trim_end_matches(['.', '?', '!']);
+        let said = trek_core::restate::as_written(text).trim();
+        let said = if said == trek_core::restate::THREAD { "" } else { said.trim_end_matches(['.', '?', '!']) };
         let ask = match said.chars().next() {
             Some(c) => format!("{}{}", c.to_lowercase(), &said[c.len_utf8()..]),
             None => "look at what we have so far".into(),
@@ -970,44 +950,31 @@ impl Session {
         );
         let letters: Vec<char> = (0..consult.consultants.len()).map(|i| (b'A' + i as u8) as char).collect();
         self.say(&format!("Here's the ground: `deliver` in `src/webhooks.rs` has three callers, and one slow endpoint can hold up the rest. {} candidates will draft designs on their own.", consult.consultants.len())).await?;
-        // Every candidate at once, each with a row of its own.
-        let mut rows = vec![];
-        let mut calls = vec![];
+        // As agents whose tool calls run one at a time do it: every candidate starts without
+        // waiting, then each design is collected in turn while the rest draft.
+        let mut started = vec![];
         for (c, letter) in consult.consultants.iter().zip(&letters) {
-            let id = self.id("tool");
             let title = format!("Design {letter}");
-            self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), &title).await?;
-            rows.push(id);
-            calls.push(serde_json::json!({ "title": title, "prompt": format!("mock:design {brief}"), "agent": c.agent.key(), "model": c.model, "effort": c.effort.as_str(), "mode": "advise", "wait": true }));
+            let call = serde_json::json!({ "title": title, "prompt": format!("mock:design {brief}"), "agent": c.agent.key(), "model": c.model, "effort": c.effort.as_str(), "mode": "advise", "wait": false });
+            let v = self.orchestrate_call("delegate_task", &title, call).await?;
+            match v.as_ref().ok().and_then(|v| v["id"].as_str()) {
+                Some(child) => started.push((*letter, child.to_string())),
+                None => return self.say(&format!("The arena couldn't run: {}", v.err().unwrap_or_default())).await,
+            }
         }
-        let answers = self.ipc_all("delegate_task", calls).await?;
         let mut packages = vec![];
-        for ((id, letter), answer) in rows.into_iter().zip(&letters).zip(answers) {
-            match answer {
-                Ok(v) => {
-                    self.emit(AgentEvent::ToolFinished { id, output: serde_json::to_string_pretty(&v).unwrap_or_default(), ok: true }).await?;
-                    packages.push(format!("Design {letter}:\n{}", v["result"].as_str().unwrap_or("(no design)")));
-                }
-                Err(e) => {
-                    self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
-                    return self.say(&format!("The arena couldn't run: {e}")).await;
-                }
+        for (letter, child) in started {
+            match self.orchestrate_call("task_result", &format!("Design {letter}"), serde_json::json!({ "id": child, "wait": true })).await? {
+                Ok(v) => packages.push(format!("Design {letter}:\n{}", v["result"].as_str().unwrap_or("(no design)"))),
+                Err(e) => return self.say(&format!("The arena couldn't run: {e}")).await,
             }
         }
         // The judge sees the designs by letter only.
         let Some(judge) = consult.judge.clone().or_else(|| consult.consultants.first().cloned()) else { return self.say("The arena has no candidates.").await };
-        let id = self.id("tool");
-        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), "Judge the designs").await?;
         let call = serde_json::json!({ "title": "Judge the designs", "prompt": format!("mock:judge Score these designs.\n\n{brief}\n\n{}", packages.join("\n\n")), "agent": judge.agent.key(), "model": judge.model, "effort": judge.effort.as_str(), "mode": "advise", "wait": true });
-        let verdict = match self.ipc("delegate_task", call).await? {
-            Ok(v) => {
-                self.emit(AgentEvent::ToolFinished { id, output: serde_json::to_string_pretty(&v).unwrap_or_default(), ok: true }).await?;
-                v["result"].as_str().unwrap_or_default().to_string()
-            }
-            Err(e) => {
-                self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
-                return self.say(&format!("The judge couldn't run: {e}")).await;
-            }
+        let verdict = match self.orchestrate_call("delegate_task", "Judge the designs", call).await? {
+            Ok(v) => v["result"].as_str().unwrap_or_default().to_string(),
+            Err(e) => return self.say(&format!("The judge couldn't run: {e}")).await,
         };
         let winner = verdict.lines().find_map(|l| l.strip_prefix("Strongest: ")).unwrap_or("Design A").to_string();
         let then = if consult.implement { "Implementing against this sketch now." } else { "I haven't changed any files." };

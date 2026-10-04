@@ -32,7 +32,7 @@ pub struct Call {
 /// The workspace's answer to a `Call`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
-    /// A sub-agent was started and the caller waits for its answer, for as long as given:
+    /// The caller waits for a sub-agent's answer (one it started, or asked for), for as long as given:
     /// another reply follows when it ends, unless the wait runs out first.
     Waiting(String, Duration),
     Done(Result<Value, String>),
@@ -146,7 +146,7 @@ fn sweep(dir: &Path) {
 }
 
 /// How long a call may wait for a sub-agent: its `timeout_seconds` within bounds, for a
-/// `delegate_task` that waits.
+/// `delegate_task` or `task_result` that waits.
 pub fn wait_for(params: &Value) -> Duration {
     params.get("timeout_seconds").and_then(Value::as_u64).map_or(WAIT_DEFAULT, |s| Duration::from_secs(s.clamp(WAIT_MIN, WAIT_MAX)))
 }

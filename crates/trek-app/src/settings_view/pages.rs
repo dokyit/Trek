@@ -1463,7 +1463,7 @@ impl SettingsView {
             let (desc, control) = match run {
                 Some((title, id, _)) => (format!("Being set up in “{title}”."), open_run(id, w).into_any_element()),
                 None => (
-                    "Not set up yet. Trek starts a thread with this project's agent that builds one, following Trek's guide.".to_string(),
+                    "Not set up yet. Trek starts a thread with your default agent that builds one, following Trek's guide.".to_string(),
                     Button::new("verify-setup")
                         .small()
                         .outline()
@@ -1520,6 +1520,14 @@ impl SettingsView {
                 "Its CLI",
                 "Agents run it from their working folder to drive and check the app. A turn that ran it is marked Verified.",
                 h_flex().min_w_0().gap(px(2.)).child(chip).child(copy),
+                cx,
+            ));
+        } else {
+            // Without one, no turn can be marked Verified: say why, and what fixes it.
+            rows.push(Self::row(
+                "Its CLI",
+                "None named, so Trek can't tell when a turn checked its work. Maintain adds one, named as `cli:` in the skill's metadata.",
+                div().id("verify-no-cli").test_support().text_size(px(12.5)).text_color(muted).child("None"),
                 cx,
             ));
         }

@@ -1065,10 +1065,7 @@ impl ThreadView {
                         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
                 });
                 // The agent said back what it was asked: the user confirms or corrects it.
-                let restated = trek_core::rewind::turn_start(items, ix).and_then(|s| match items.get(s) {
-                    Some(Item::User { text, .. }) => Some(trek_core::restate::split_restate(orch::split_consult(text).0).1),
-                    _ => None,
-                }) == Some(true);
+                let restated = trek_core::restate::asked_in_turn(items, ix);
                 let confirm = (restated && at.last_end == Some(ix) && !at.busy).then(|| {
                     let (ws, ws2, thread, thread2, scope) = (at.workspace.clone(), at.workspace.clone(), at.thread.clone(), at.thread.clone(), at.scope.clone());
                     h_flex()
