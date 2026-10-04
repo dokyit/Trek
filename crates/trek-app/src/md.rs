@@ -15,10 +15,11 @@ use gpui_kit::*;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The longest a line of running text gets, in multiples of the text size, so a line holds about
-/// as many words at any size (until the transcript's column caps it): at the default size a
-/// little narrower than the column. Code blocks and tables keep the full column.
-pub const MEASURE: f32 = 46.;
+/// The longest a line of running text gets, in multiples of the text size: about 72 characters
+/// of prose in the system font (its average advance is about 0.44 of the size), the measure that
+/// reads most easily, at any text size until the transcript's column caps it. Code blocks and
+/// tables keep the full column.
+pub const MEASURE: f32 = 32.;
 
 /// Line height of running text.
 pub const LINE_HEIGHT: f32 = 1.65;
@@ -171,12 +172,18 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
 /// A markdown view of an agent's answer in `cwd`, set at `size`, with Trek's style and path
 /// chips. `folder`: the tint of folder icons in the chips (the project's colour).
 pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    build(state, cwd, folder, size, Tone::Prose, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, cx)
 }
 
 /// `view`, for the agent's reasoning: the same markdown, a step quieter.
 pub fn thought(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    build(state, cwd, folder, size, Tone::Muted, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Muted, cx)
+}
+
+/// `view` of `text` with its state kept by the window under `id`, for answers shown outside the
+/// transcript (the side chat).
+pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
+    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, cx)
 }
 
 /// Text streaming in fades in, as it arrives.
@@ -184,9 +191,8 @@ pub fn streaming() -> TextViewMotion {
     TextViewMotion::default().with_stream_fade(Duration::from_millis(280)).with_stream_fade_stagger(Duration::from_millis(10)).with_stream_fade_easing(Easing::EaseOut)
 }
 
-fn build(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, cx: &App) -> TextView {
-    TextView::new(state)
-        .selectable(true)
+fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, cx: &App) -> TextView {
+    view.selectable(true)
         .style(style(size, tone, cx))
         .text_size(size)
         .line_height(relative(LINE_HEIGHT))
@@ -261,6 +267,21 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// A path that stays in the thread's folder `cwd`: relative ones that don't climb out of it, and
+/// absolute ones under it. Only these folders wear the project's colour; `~/` or `/tmp/` aren't
+/// the project's.
+fn in_folder(raw: &str, cwd: Option<&Path>) -> bool {
+    let raw = path_part(raw);
+    let path = match raw.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => trek_core::paths::home().join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(raw),
+    };
+    if path.components().any(|c| c == std::path::Component::ParentDir) {
+        return false;
+    }
+    path.is_relative() || cwd.is_some_and(|cwd| path.starts_with(cwd))
+}
+
 struct PathChips {
     cwd: Option<PathBuf>,
     /// Folder icons' tint: the project's colour.
@@ -286,6 +307,7 @@ impl MarkdownPlugin for PathChips {
         let data = node.data::<PathRef>()?;
         let theme = cx.theme();
         let dir = data.raw.ends_with('/') || data.resolved.as_ref().is_some_and(|p| p.is_dir());
+        let folder = self.folder.filter(|_| in_folder(&data.raw, self.cwd.as_deref())).unwrap_or(theme.muted_foreground);
         let trimmed = data.raw.trim_end_matches('/');
         let label = trimmed.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(trimmed).to_string();
         let size = context.font_size() * 0.88;
@@ -306,7 +328,7 @@ impl MarkdownPlugin for PathChips {
             .text_size(size)
             .font_family(theme.mono_font_family.clone())
             .text_color(theme.foreground.opacity(0.9))
-            .child(if dir { Icon::new(IconName::Folder).size(size).text_color(self.folder.unwrap_or(theme.muted_foreground)).into_any_element() } else { crate::file_icon::badge(path_part(trimmed), size, cx) })
+            .child(if dir { Icon::new(IconName::Folder).size(size).text_color(folder).into_any_element() } else { crate::file_icon::badge(path_part(trimmed), size, cx) })
             .child(label)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
             .when_some(resolved, |el, path| {
@@ -328,7 +350,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 #[cfg(test)]
 mod tests {
-    use super::{Ink, LINE_HEIGHT, MEASURE, Metrics, Tone, looks_like_path, measure, path_part};
+    use super::{Ink, LINE_HEIGHT, MEASURE, Metrics, Tone, in_folder, looks_like_path, measure, path_part};
+    use std::path::Path;
     use gpui_kit::{Hsla, px, rgb};
 
     #[test]
@@ -367,8 +390,10 @@ mod tests {
     fn line_length_follows_the_text_size() {
         assert_eq!(measure(px(14.5)), px(14.5 * MEASURE));
         assert_eq!(measure(px(20.)), px(20. * MEASURE));
-        // At the default size running text is narrower than the 760 pt column code and tables use.
-        assert!(measure(px(14.5)) < px(760.) && measure(px(14.5)) > px(600.));
+        // Clearly narrower than the 760 pt column code and tables use, at every size the setting
+        // offers short of the largest (how many characters that holds: `tests::readability`).
+        assert!(measure(px(14.5)) < px(500.) && measure(px(14.5)) > px(420.));
+        assert!(measure(px(20.)) < px(760.));
     }
 
     // WCAG 2 contrast, with translucent colours composited over the surface they sit on.
@@ -445,6 +470,19 @@ mod tests {
             assert!(on(quiet.body, bg) < on(ink.body, bg));
             assert!(on(quiet.strong, bg) > on(quiet.body, bg), "{name}: reasoning's bold still stands out");
         }
+    }
+
+    #[test]
+    fn only_the_threads_own_folders_are_the_projects() {
+        let cwd = Some(Path::new("/Users/me/code/app"));
+        for inside in ["src/", "./src/", "src/ui/", "/Users/me/code/app/src/", "src/main.rs:12"] {
+            assert!(in_folder(inside, cwd), "{inside}");
+        }
+        for outside in ["~/", "~/Downloads/", "/tmp/", "/usr/local/", "../other-repo/", "src/../../x/", "/Users/me/code/application/"] {
+            assert!(!in_folder(outside, cwd), "{outside}");
+        }
+        // Without a folder only relative paths can be its.
+        assert!(in_folder("src/", None) && !in_folder("/Users/me/code/app/src/", None));
     }
 
     #[test]

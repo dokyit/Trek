@@ -93,11 +93,7 @@ pub fn project_tint(name: &str, look: &ProjectLook, cx: &App) -> Hsla {
     project_ink(project_hue(name, look.color), cx.theme().mode.is_dark())
 }
 
-/// Two-letter project badge with a stable tint (T3-style).
-pub fn monogram(name: &str, cx: &App) -> Div {
-    monogram_in(name, project_hue(name, None), cx.theme().mode.is_dark())
-}
-
+/// Two-letter project badge (T3-style).
 fn monogram_in(name: &str, hue: f32, dark: bool) -> Div {
     let letters: String = {
         let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();

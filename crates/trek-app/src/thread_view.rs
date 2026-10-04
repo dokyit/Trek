@@ -274,6 +274,8 @@ struct Shown {
     appearance: trek_core::settings::Appearance,
     /// Where its sub-agents stand: they move on without a new transcript revision.
     tasks: Vec<(String, TaskState)>,
+    /// Its project's colour (path chips' folders), which can change in another window.
+    folder: Option<Hsla>,
 }
 
 /// One side of a handoff divider: the model with its agent's name ("Claude Opus 5.5", "Codex
@@ -374,6 +376,7 @@ impl ThreadView {
             end: id.as_ref().and_then(|id| crate::activity::transcript_end(ws, id)),
             appearance: ws.settings.appearance.clone(),
             tasks: id.as_ref().map(|id| ws.children(id).into_iter().map(|t| (t.id.clone(), ws.task_state(&t.id))).collect()).unwrap_or_default(),
+            folder: id.as_ref().and_then(|id| ws.thread(id)).and_then(|t| ws.thread_project_tint(t, cx)),
         };
         let end = shown.end;
         let ticking = ws.any_task_live_in(&self.scope);

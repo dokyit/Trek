@@ -1204,7 +1204,7 @@ impl SettingsView {
             let dark = cx.theme().mode.is_dark();
             let ring = cx.theme().foreground.opacity(0.75);
             let options = std::iter::once((None, "Automatic: from the name".to_string())).chain(ui::PROJECT_COLORS.iter().map(|(name, hue)| (Some(*hue), name.to_string())));
-            h_flex().gap(px(2.)).children(options.map(|(hue, name)| {
+            h_flex().gap(px(4.)).children(options.map(|(hue, name)| {
                 let (w, p) = (self.workspace.clone(), path.clone());
                 let id = SharedString::from(format!("project-color-{}", hue.map_or("auto".to_string(), |h| h.to_string())));
                 let picked = prefs.color == hue;
@@ -1218,7 +1218,7 @@ impl SettingsView {
                     .border_color(if picked { ring } else { gpui_kit::transparent_black() })
                     .cursor_pointer()
                     .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx))
-                    .when(hue.is_none(), |el| el.mr(px(6.)))
+                    .when(hue.is_none(), |el| el.mr(px(4.)))
                     .child({
                         let ink = ui::project_ink(ui::project_hue(&project.name, hue), dark);
                         // Automatic is a ring in the name's colour, so it doesn't read as one of the picks.
@@ -1419,7 +1419,7 @@ impl SettingsView {
                         h_flex().gap(px(6.)).child(ui::project_badge(&project.name, &ui::ProjectLook::of(&prefs), cx)).child(div().w(px(4.))).children(icon_reset).child(icon_menu).child(icon_file),
                         cx,
                     ),
-                    Self::row("Colour", "Its badge, and its folders in answers, the Explorer and the composer.", colors, cx),
+                    Self::row("Color", "Its badge, and its folders in answers, the Explorer and the composer.", colors, cx),
                     Self::row("Folder", trek_core::paths::tildify(&path), reveal, cx),
                 ],
                 cx,

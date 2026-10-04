@@ -3,7 +3,7 @@
 
 use super::harness::{Trek, open, run};
 use crate::workspace::{PanelTool, Route};
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, px};
 use trek_agents::AgentEvent;
 use trek_core::settings::ThemeChoice;
 use trek_core::store::Item;
@@ -101,9 +101,19 @@ fn a_project_has_one_colour_wherever_its_folders_show() {
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
         trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx)));
         trek.render(cx);
-        // Automatic again: back to the name's.
+        let explorer = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.render(cx);
+            cx.read(|cx| panel.read(cx).explorer_tint(cx))
+        };
+        assert_eq!(explorer(&trek, cx), Some(Some(paper)));
+        // Automatic again: back to the name's, the Explorer too.
         trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = None, cx));
-        assert_eq!(tints(&trek, cx).0, Some(crate::ui::project_ink(crate::ui::project_hue(&name, None), false)));
+        let named = crate::ui::project_ink(crate::ui::project_hue(&name, None), false);
+        assert_eq!(tints(&trek, cx).0, Some(named));
+        assert_eq!(explorer(&trek, cx), Some(Some(named)));
+        // A draft in the project (its folder chip in the composer) shows it too.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
+        assert_eq!(tints(&trek, cx).1, Some(named));
         assert!(trek.read(cx, |ws, _| !ws.settings.projects.contains_key(&project.display().to_string())), "nothing left to keep");
     });
 }
@@ -125,5 +135,44 @@ fn a_side_chat_at_work_says_a_trail_word() {
         trek.wait(cx, "the side chat to finish", |ws| !ws.turn_running(&id)).await;
         trek.render(cx);
         assert!(!trek.visible(cx, "side-working"));
+        // Its answer reads as the transcript's do (Trek's markdown, path chips).
+        let answer = trek.read(cx, |ws, _| ws.live[&id].items.iter().position(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))).expect("an answer");
+        assert!(trek.visible(cx, ("side-answer", answer)));
+    });
+}
+
+#[test]
+fn a_line_of_prose_holds_about_seventy_characters() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.window(cx, |window, cx| {
+            let family = gpui_kit::component::ActiveTheme::theme(cx).font_family.clone();
+            let text = "Startup lives in main.rs. It does three things, in order: it parses the flags, it loads the settings, and then it opens the window. The settings file is read once and watched for changes, so editing it while Trek runs applies the new values without a restart.";
+            // Laid out in the transcript's font, as CoreText sets it: the same count at any size.
+            for size in [px(14.5), px(18.)] {
+                let run = gpui_kit::TextRun { len: text.len(), font: gpui_kit::font(family.clone()), color: gpui_kit::black(), background_color: None, underline: None, strikethrough: None };
+                let line = window.text_system().shape_line(text.into(), size, &[run], None);
+                let per_line = crate::md::measure(size) / (line.width / text.chars().count() as f32);
+                assert!((65. ..=78.).contains(&per_line), "{per_line} characters a line at {size:?}");
+            }
+        });
+    });
+}
+
+#[test]
+fn a_thread_window_redraws_its_folders_in_a_new_colour() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = answered(&trek, cx);
+        let own = trek.open_thread_window(cx, &id);
+        assert!(trek.visible_in(cx, own, "path-src/"));
+        // The main window moves on, so only the thread window shows the thread.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.render(cx);
+        super::take_renders();
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = Some(135), cx));
+        cx.run_until_parked();
+        assert!(super::take_renders().get("ThreadView").is_some_and(|n| *n > 0), "its transcript redrew for the colour");
     });
 }

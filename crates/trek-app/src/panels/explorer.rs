@@ -36,6 +36,14 @@ pub struct ExplorerPanel {
     _subscription: Subscription,
 }
 
+#[cfg(test)]
+impl ExplorerPanel {
+    /// The tint its folder icons are drawn in, when not the muted grey.
+    pub(crate) fn tint(&self) -> Option<Hsla> {
+        self.tint
+    }
+}
+
 impl ExplorerPanel {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let root = workspace.read(cx).current_cwd();

@@ -392,13 +392,13 @@ impl Trek {
     }
 }
 
-/// Store `items` as `thread`'s transcript, as if it had been saved there.
 /// The working bar's header split at its trail word: what follows it ("4s · 2 agents out"), or
 /// `None` when it doesn't start with one ("Breaking trail… 4s").
 pub fn trail_word(header: &str) -> Option<&str> {
     crate::mascot::WORDS.iter().find_map(|w| header.strip_prefix(*w)?.strip_prefix('…')).map(str::trim_start)
 }
 
+/// Store `items` as `thread`'s transcript, as if it had been saved there.
 pub fn store_items(store: &Store, thread: &str, items: Vec<Item>) {
     store.save_transcript(thread, &mut trek_core::transcript::Transcript::unsaved(items)).expect("items");
 }

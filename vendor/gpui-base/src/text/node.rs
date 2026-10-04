@@ -2509,8 +2509,6 @@ fn leaf_element_id(fade_key: Option<TextLeafKey>) -> ElementId {
     fade_key.map_or_else(|| ElementId::from("p"), ElementId::from)
 }
 
-/// `block` with `gap` below it. The box only exists to hold the padding,
-/// so a block with no gap below it is returned as is.
 /// Trek: `block` no wider than the style's measure, when it has one.
 fn measured(block: AnyElement, style: &TextViewStyle) -> AnyElement {
     match style.measure() {
@@ -2519,6 +2517,8 @@ fn measured(block: AnyElement, style: &TextViewStyle) -> AnyElement {
     }
 }
 
+/// `block` with `gap` below it. The box only exists to hold the padding,
+/// so a block with no gap below it is returned as is.
 fn gapped(block: AnyElement, gap: Rems) -> AnyElement {
     if gap.is_zero() {
         block
@@ -3366,7 +3366,7 @@ impl BlockNode {
                     .font_weight(font_weight)
                     .refine_style(&node_cx.style.heading(*level))
                     // Trek: the space a style puts above headings is between
-                    // sections; the text's first one needs none.
+                    // sections; one that opens the text (or a quote) needs none.
                     .when(options.ix == 0 && options.depth == 0, |this| this.pt_0())
                     .when_some(node_cx.style.measure(), |this, width| this.max_w(width))
                     .child(children.render(
@@ -3389,7 +3389,14 @@ impl BlockNode {
                         let children_len = children.len();
                         children.into_iter().enumerate().map(move |(index, c)| {
                             let is_last = index == children_len - 1;
-                            c.render_block(options.is_last(is_last), node_cx, window, cx)
+                            // Trek: each its own index, so only the quote's
+                            // first block counts as opening it.
+                            c.render_block(
+                                NodeRenderOptions { ix: index, ..options.is_last(is_last) },
+                                node_cx,
+                                window,
+                                cx,
+                            )
                         })
                     })
                     .into_any_element(),

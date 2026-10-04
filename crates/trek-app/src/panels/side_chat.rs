@@ -3,7 +3,6 @@
 use crate::attachments::{self, Attaching, Outbox};
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -110,6 +109,11 @@ impl Render for SideChatPanel {
         let amber = crate::palette::amber(cx);
         let prefs = ws.prefs();
         let id = self.thread_id.clone().unwrap_or_default();
+        // Answers read as they do in the transcript, a size down to suit the narrower panel.
+        let thread = ws.thread(&id);
+        let cwd = thread.and_then(|t| t.cwd.clone());
+        let folder = thread.and_then(|t| ws.thread_project_tint(t, cx));
+        let text_size = px(ws.settings.appearance.transcript_font_size()) * 0.93;
         v_flex()
             .size_full()
             .child(
@@ -164,9 +168,13 @@ impl Render for SideChatPanel {
                                         })
                                         .into_any_element(),
                                 ),
-                                Item::Assistant { text } if !text.is_empty() => {
-                                    Some(div().text_sm().child(TextView::markdown(SharedString::from(format!("side-{id}-{i}")), text).selectable(true)).into_any_element())
-                                }
+                                Item::Assistant { text } if !text.is_empty() => Some(
+                                    div()
+                                        .id(("side-answer", i))
+                                        .test_support()
+                                        .child(crate::md::keyed(SharedString::from(format!("side-{id}-{i}")), text, cwd.clone(), folder, text_size, cx))
+                                        .into_any_element(),
+                                ),
                                 Item::Tool { title, detail, .. } => Some(
                                     h_flex()
                                         .gap_2()

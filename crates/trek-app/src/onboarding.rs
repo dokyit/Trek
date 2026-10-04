@@ -280,7 +280,7 @@ impl Onboarding {
                 let is_sel = selected.as_ref() == Some(&p.path);
                 let detail = p.remote.clone().unwrap_or_else(|| trek_core::paths::tildify(&p.path));
                 let trail = if is_sel { Icon::new(IconName::Check).size(px(15.)).text_color(palette::ember(cx)).into_any_element() } else { div().into_any_element() };
-                Self::list_row(ui::monogram(&p.name, cx).into_any_element(), p.name.clone(), detail, trail, cx)
+                Self::list_row(ui::project_badge(&p.name, &ws.project_look(&p.path), cx), p.name.clone(), detail, trail, cx)
                     .id(SharedString::from(format!("ob-proj-{}", p.id)))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.foreground.opacity(0.03)))
