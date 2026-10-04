@@ -167,6 +167,10 @@ pub struct LiveThread {
     /// failed or stopped: those were written for that turn and don't follow this one out. They
     /// go back to the composer once the thread is on screen (`hand_back_queued`).
     hold_queue: bool,
+    /// Follow-ups a failed turn left queued, set aside when the messages held for an agent
+    /// update went without them: back to the composer once the thread is on screen
+    /// (`hand_back_queued`).
+    left_over: Vec<(String, Vec<PathBuf>)>,
     /// Sub-agents launched this turn (and those still out from earlier ones), keyed by the tool
     /// call that started them.
     pub tasks: Vec<SubTask>,
@@ -219,7 +223,7 @@ pub struct LiveThread {
     pending_rows: VecDeque<Item>,
     /// Project notes its session gives the agent with the next message: recorded as told once
     /// that message goes (`Store::told_notes`).
-    notes_pending: Option<String>,
+    pub notes_pending: Option<String>,
 }
 
 /// Held by a thread's git work while it runs. Once the thread is deleted (`gone`), work that
@@ -1547,6 +1551,7 @@ impl Workspace {
                 || l.removing
                 || l.git_busy
                 || !l.queued.is_empty()
+                || !l.left_over.is_empty()
                 || !l.held.is_empty()
         })
     }
@@ -2417,9 +2422,11 @@ impl Workspace {
         // made or is missing: hold the message until that's sorted (`ensure_loaded`,
         // `worktree_ready` and `run_in_project_folder` send it).
         if self.holds_messages(&id) {
-            // Held for an agent update: sent when it's done (`agent_released`).
-            if self.thread(&id).is_some_and(|t| self.agent_updating(&t.agent.key())) {
-                self.agent_updates.held.insert(id.clone());
+            // Held for an agent update: sent when it's done (`agent_released`). Follow-ups a
+            // failed turn left queued ahead of it aren't.
+            if self.thread(&id).is_some_and(|t| self.agent_updating(&t.agent.key())) && !self.agent_updates.held.contains_key(&id) {
+                let left = if self.stale_queue(&id) && !self.holds_queue(&id) { self.queued(&id) } else { 0 };
+                self.agent_updates.held.insert(id.clone(), left);
             }
             let live = self.live.entry(id).or_default();
             live.queued.push((text, images));
@@ -2511,9 +2518,6 @@ impl Workspace {
         live.last_active = Some(cx.background_executor().now());
         live.revision += 1;
         self.dispatch(&id, Command::Prompt { text, images });
-        if let Some(notes) = self.live.get_mut(&id).and_then(|l| l.notes_pending.take()) {
-            let _ = self.store.set_told_notes(&id, &notes);
-        }
         self.run_git(&id, cx);
         self.mutate_thread(&id, cx, |t| {
             t.run_state = RunState::Working;
@@ -2536,8 +2540,16 @@ impl Workspace {
     /// Messages to `id` wait: its history is still being read, its worktree is being made,
     /// removed or has gone missing, or its agent's CLI is being updated.
     fn holds_messages(&self, id: &str) -> bool {
+        self.holds_queue(id) || self.thread(id).is_some_and(|t| self.agent_updating(&t.agent.key()))
+    }
+
+    /// What's queued for `id` waits to go: its history is still being read, its worktree is
+    /// being made, removed or has gone missing, or it was sent while its agent's CLI updated.
+    /// Otherwise follow-ups queued while it has no turn were left by one that failed or stopped.
+    fn holds_queue(&self, id: &str) -> bool {
         self.live.get(id).is_some_and(|l| l.loading || l.preparing || l.removing)
-            || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()) || self.agent_updating(&t.agent.key()))
+            || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
+            || self.agent_updates.held.contains_key(id)
     }
 
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
@@ -2550,7 +2562,7 @@ impl Workspace {
         // Ready to go but for an agent update that started meanwhile (its worktree or history
         // came in while it ran): held for it, so they go once it's done (`agent_released`).
         if self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none()) && self.thread(id).is_some_and(|t| self.agent_updating(&t.agent.key())) {
-            self.agent_updates.held.insert(id.to_string());
+            self.agent_updates.held.entry(id.to_string()).or_insert(0);
         }
     }
 
@@ -3313,10 +3325,23 @@ impl Workspace {
     /// composer now that it's on screen. Left queued, they'd go out after some later turn, long
     /// after the turn they were written for.
     pub(crate) fn hand_back_queued(&mut self, id: &str, cx: &mut Context<Self>) {
-        let stale = self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none() && l.background_agents().next().is_none());
-        if stale && !self.holds_messages(id) && self.on_screen(id) {
+        if !self.on_screen(id) {
+            return;
+        }
+        if let Some(left) = self.live.get_mut(id).map(|l| std::mem::take(&mut l.left_over)).filter(|l| !l.is_empty()) {
+            let text = left.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+            let images = left.into_iter().flat_map(|(_, images)| images).collect();
+            cx.emit(WorkspaceEvent::RestoreQueued { thread: id.to_string(), text, images });
+        }
+        // While its agent updates too: only messages sent meanwhile are held for that.
+        if self.stale_queue(id) && !self.holds_queue(id) {
             self.restore_queued(id, cx);
         }
+    }
+
+    /// `id` has follow-ups queued with no turn of its own, nor its agent's sub-agents, to follow.
+    fn stale_queue(&self, id: &str) -> bool {
+        self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none() && l.background_agents().next().is_none())
     }
 
     /// Save `id`'s transcript a second from now, unless a save is on its way already.
@@ -3484,7 +3509,19 @@ impl Workspace {
         if live.git_busy || !live.git_jobs.is_empty() {
             live.held.push(cmd);
         } else if let Some(tx) = &live.commands {
+            let prompt = matches!(cmd, Command::Prompt { .. });
             let _ = tx.try_send(cmd);
+            if prompt {
+                self.notes_told(id);
+            }
+        }
+    }
+
+    /// A message reached `id`'s session: the project notes it had to give went with it. Not
+    /// before: one a stop kept from the agent (`interrupt`) took nothing with it.
+    fn notes_told(&mut self, id: &str) {
+        if let Some(notes) = self.live.get_mut(id).and_then(|l| l.notes_pending.take()) {
+            let _ = self.store.set_told_notes(id, &notes);
         }
     }
 
@@ -3494,10 +3531,13 @@ impl Workspace {
         let Some(live) = self.live.get_mut(id).filter(|l| !l.git_busy) else { return };
         let Some(job) = live.git_jobs.pop_front() else {
             let held = std::mem::take(&mut live.held);
-            if let Some(tx) = &live.commands {
-                for cmd in held {
-                    let _ = tx.try_send(cmd);
-                }
+            let Some(tx) = &live.commands else { return };
+            let prompt = held.iter().any(|c| matches!(c, Command::Prompt { .. }));
+            for cmd in held {
+                let _ = tx.try_send(cmd);
+            }
+            if prompt {
+                self.notes_told(id);
             }
             return;
         };

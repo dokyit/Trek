@@ -236,6 +236,69 @@ fn follow_ups_a_failed_turn_left_queued_arent_sent_by_an_update() {
 }
 
 #[test]
+fn a_message_sent_during_an_update_goes_without_the_follow_up_a_failed_turn_left() {
+    use trek_agents::AgentEvent;
+    use trek_core::store::Item;
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
+        found(&trek, cx);
+        let (release, gate) = async_channel::bounded::<()>(1);
+        trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Working on it".into())], cx));
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().queued.push(("stale follow-up".into(), vec![])));
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { error: Some("boom".into()) }], cx));
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        assert_eq!(job(&trek, cx, "mock"), Some(Job::Running));
+        // Opened while the agent updates: the left-over follow-up comes back to the composer.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.render(cx);
+        assert_eq!(trek.composer_text(cx), "stale follow-up");
+        // The user writes something new instead; it waits for the update, and only it goes.
+        trek.update(cx, |ws, cx| ws.send_to(&id, "something new instead".into(), vec![], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.live[&id].queued.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()), ["something new instead"]);
+        release.send(()).await.unwrap();
+        trek.wait(cx, "the update to finish", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Updated { .. }))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let users: Vec<String> = trek.items(cx, &id).into_iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).collect();
+        assert_eq!(users, ["something new instead"]);
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0);
+    });
+}
+
+#[test]
+fn a_message_sent_off_screen_during_an_update_goes_without_the_follow_up_a_failed_turn_left() {
+    use trek_agents::AgentEvent;
+    use trek_core::store::Item;
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
+        found(&trek, cx);
+        let (release, gate) = async_channel::bounded::<()>(1);
+        trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Working on it".into())], cx));
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().queued.push(("stale follow-up".into(), vec![])));
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TurnComplete { error: Some("boom".into()) }], cx));
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        // A message reaches it while it's off screen (not from its composer).
+        trek.update(cx, |ws, cx| ws.send_to(&id, "something new instead".into(), vec![], cx));
+        release.send(()).await.unwrap();
+        trek.wait(cx, "the update to finish", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Updated { .. }))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let users: Vec<String> = trek.items(cx, &id).into_iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).collect();
+        assert_eq!(users, ["something new instead"], "the left-over follow-up isn't sent");
+        // It's still the user's to have back.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.render(cx);
+        assert_eq!(trek.composer_text(cx), "stale follow-up");
+    });
+}
+
+#[test]
 fn a_check_that_lands_mid_update_doesnt_strand_it() {
     run(async |cx| {
         let trek = open(cx);

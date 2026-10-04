@@ -538,6 +538,29 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
 }
 
 #[test]
+fn notes_a_stop_kept_from_the_agent_with_its_message_arent_recorded_as_told() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_project(&trek.project);
+        let id = turn(&trek, cx, "apple").await;
+        // Its session has project notes to give with the next message, as an agent told them in
+        // a message (not in its system prompt, as the mock is) does.
+        let notes = "Verify with ./app check.";
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().notes_pending = Some(notes.into()));
+        // Stopped while the message waits for its checkpoint: neither reached the agent.
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&id, "banana".into(), vec![], cx);
+            ws.interrupt(&id, cx);
+        });
+        assert_eq!(trek.read(cx, |ws, _| ws.store.told_notes(&id).unwrap()), None, "a resumed session would leave them out");
+        // The next message that does reach it takes them.
+        trek.update(cx, |ws, cx| ws.send_to(&id, "cherry".into(), vec![], cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.store.told_notes(&id).unwrap()).as_deref(), Some(notes));
+    });
+}
+
+#[test]
 fn deleting_a_thread_drops_its_checkpoints() {
     run(async |cx| {
         let trek = open(cx);

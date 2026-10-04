@@ -188,12 +188,17 @@ impl Workspace {
 
     /// `agent`'s CLI is no longer being replaced: what waited for it goes now, to a session of
     /// the new version. Only messages held for the update: follow-ups a failed turn left queued
-    /// are the user's to hand back or send.
+    /// are the user's to hand back or send, those ahead of held messages too.
     fn agent_released(&mut self, agent: &str, cx: &mut Context<Self>) {
-        let held: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent && self.agent_updates.held.contains(&t.id)).map(|t| t.id.clone()).collect();
+        let held: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent && self.agent_updates.held.contains_key(&t.id)).map(|t| t.id.clone()).collect();
         for t in held {
-            self.agent_updates.held.remove(&t);
+            let left = self.agent_updates.held.remove(&t).unwrap_or(0);
+            if let Some(l) = self.live.get_mut(&t).filter(|_| left > 0) {
+                let left: Vec<_> = l.queued.drain(..left.min(l.queued.len())).collect();
+                l.left_over.extend(left);
+            }
             self.send_queued(&t, cx);
+            self.hand_back_queued(&t, cx);
         }
         // Parents whose sub-agents reported meanwhile hear from them (after those messages'
         // turns, if any).

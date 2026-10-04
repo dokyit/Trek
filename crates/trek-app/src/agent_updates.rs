@@ -13,7 +13,7 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use trek_core::AgentId;
 use trek_core::agent_update::{AgentVersion, CHECK_EVERY_MS, Outcome};
 
@@ -89,8 +89,9 @@ pub struct AgentUpdates {
     /// The row whose update output is open under it.
     pub output_open: Option<String>,
     /// Threads with messages held while their agent updated: those go once it's done. Others'
-    /// held follow-ups (of a turn that failed off screen) aren't the update's to send.
-    pub held: HashSet<String>,
+    /// held follow-ups (of a turn that failed off screen) aren't the update's to send, nor are
+    /// those queued ahead of the held messages: how many there were is kept with the thread.
+    pub held: HashMap<String, usize>,
     /// Titles asked for while Claude Code (which writes them) updated, and whether to announce.
     pub titles: Vec<(String, bool)>,
 }
