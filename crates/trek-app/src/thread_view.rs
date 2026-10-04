@@ -2041,6 +2041,9 @@ impl ThreadView {
                 .bottom_0()
                 .h(px(JUMP_FADE + JUMP_BAND))
                 .opacity(shown)
+                // It covers the rows under it: clicks and hovers stop here (a hidden path chip
+                // mustn't open), the wheel still scrolls the transcript.
+                .block_mouse_except_scroll()
                 .child(div().w_full().h(px(JUMP_FADE)).bg(linear_gradient(180., linear_color_stop(bg.opacity(0.), 0.), linear_color_stop(bg, 1.))))
                 .child(h_flex().w_full().flex_1().justify_center().items_center().bg(bg).pb(px(4. * (1. - shown))).child(button))
                 .into_any_element(),

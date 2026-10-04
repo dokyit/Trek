@@ -39,6 +39,9 @@ pub enum Runner {
     /// Tests decide the outcome.
     #[cfg(test)]
     Fake(std::sync::Arc<dyn Fn(&AgentVersion) -> Outcome + Send + Sync>),
+    /// Tests: runs until let go, then reaches the newest version.
+    #[cfg(test)]
+    Gated(async_channel::Receiver<()>),
 }
 
 impl Runner {
@@ -48,6 +51,11 @@ impl Runner {
             Runner::DryRun => trek_core::agent_update::dry_run(&v).await,
             #[cfg(test)]
             Runner::Fake(f) => f(&v),
+            #[cfg(test)]
+            Runner::Gated(gate) => {
+                let _ = gate.recv().await;
+                Outcome::Updated { version: v.latest.clone().unwrap_or_default(), output: String::new() }
+            }
         }
     }
 }
@@ -59,13 +67,13 @@ pub struct AgentUpdates {
     /// When that check finished (unix ms); 0 = never.
     pub checked_at: i64,
     pub checking: bool,
-    /// Updates asked for, by agent key, and the order they were asked in.
+    /// Updates asked for, by row (`AgentVersion::id`), and the order they were asked in.
     jobs: HashMap<String, Job>,
     order: Vec<String>,
     pub runner: Runner,
     /// Showing made-up agents (`TREK_AGENT_UPDATES=mock`): nothing is checked for real.
     pub mock: bool,
-    /// The agent whose update output is open under its row.
+    /// The row whose update output is open under it.
     pub output_open: Option<String>,
 }
 
@@ -79,7 +87,13 @@ impl AgentUpdates {
     pub fn at_launch() -> Self {
         let mode = mode();
         if mode.as_deref() == Some("mock") {
-            return Self { found: trek_core::agent_update::mock_versions(), checked_at: trek_core::store::now_ms(), runner: Runner::DryRun, mock: true, ..Default::default() };
+            let mut found = trek_core::agent_update::mock_versions();
+            // With the mock agent on, it has an update out too: a `mock:long` turn shows an update
+            // waiting for it.
+            if std::env::var_os("TREK_MOCK_AGENT").is_some() {
+                found.push(mock_agent_row());
+            }
+            return Self { found, checked_at: trek_core::store::now_ms(), runner: Runner::DryRun, mock: true, ..Default::default() };
         }
         let snapshot = trek_core::agent_update::Snapshot::load();
         let runner = if mode.as_deref() == Some("dry-run") { Runner::DryRun } else { Runner::Real };
@@ -98,69 +112,75 @@ impl AgentUpdates {
         enabled && !self.checking && !self.mock && (self.checked_at == 0 || now - self.checked_at >= CHECK_EVERY_MS)
     }
 
-    pub fn job(&self, agent: &str) -> Option<&Job> {
-        self.jobs.get(agent)
+    pub fn job(&self, id: &str) -> Option<&Job> {
+        self.jobs.get(id)
     }
 
-    /// The agents the updates card lists: those with an update out, and those whose update is
+    /// The agent (`AgentId::key()`) row `id` belongs to.
+    pub fn agent_of(&self, id: &str) -> Option<&str> {
+        self.found.iter().find(|v| v.id == id).map(|v| v.agent.as_str())
+    }
+
+    /// The rows the updates card lists: those with an update out, and those whose update is
     /// under way or just finished (so how it went stays readable).
     pub fn listed(&self) -> Vec<&AgentVersion> {
-        self.found.iter().filter(|v| v.update_available() || self.jobs.contains_key(&v.agent)).collect()
+        self.found.iter().filter(|v| v.update_available() || self.jobs.contains_key(&v.id)).collect()
     }
 
     /// Updates out that haven't been installed: the sidebar badge's count.
     pub fn pending(&self) -> usize {
-        self.found.iter().filter(|v| v.update_available() && !matches!(self.jobs.get(&v.agent), Some(Job::Updated { .. }))).count()
+        self.found.iter().filter(|v| v.update_available() && !matches!(self.jobs.get(&v.id), Some(Job::Updated { .. }))).count()
     }
 
-    /// The agents an "Update all" would update.
+    /// The rows an "Update all" would update.
     pub fn updatable(&self) -> Vec<String> {
         self.found
             .iter()
-            .filter(|v| v.update_available() && matches!(self.jobs.get(&v.agent), None | Some(Job::Failed { .. })))
-            .map(|v| v.agent.clone())
+            .filter(|v| v.update_available() && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. })))
+            .map(|v| v.id.clone())
             .collect()
     }
 
-    /// Ask for `agent`'s update; `false` when there's none to install or it's already asked for.
-    pub fn request(&mut self, agent: &str) -> bool {
-        let ready = self.found.iter().any(|v| v.agent == agent && v.update_available());
-        if !ready || matches!(self.jobs.get(agent), Some(Job::Queued | Job::Running | Job::Updated { .. })) {
+    /// Ask for row `id`'s update; `false` when there's none to install or it's already asked for.
+    pub fn request(&mut self, id: &str) -> bool {
+        let ready = self.found.iter().any(|v| v.id == id && v.update_available());
+        if !ready || matches!(self.jobs.get(id), Some(Job::Queued | Job::Running | Job::Updated { .. })) {
             return false;
         }
-        self.jobs.insert(agent.to_string(), Job::Queued);
-        self.order.retain(|a| a != agent);
-        self.order.push(agent.to_string());
+        self.jobs.insert(id.to_string(), Job::Queued);
+        self.order.retain(|a| a != id);
+        self.order.push(id.to_string());
         true
     }
 
     /// The next update to start, if one can start now: one at a time (package managers lock
-    /// their folders), in the order asked, skipping agents with a turn running (`busy`).
+    /// their folders), in the order asked, skipping agents with a turn running (`busy`, given
+    /// an agent key).
     pub fn next(&self, busy: impl Fn(&str) -> bool) -> Option<String> {
-        if self.jobs.values().any(|j| *j == Job::Running) {
+        if self.running() {
             return None;
         }
-        self.order.iter().find(|a| self.jobs.get(*a) == Some(&Job::Queued) && !busy(a)).cloned()
+        self.order.iter().find(|id| self.jobs.get(*id) == Some(&Job::Queued) && !self.agent_of(id).is_some_and(&busy)).cloned()
     }
 
-    pub fn start(&mut self, agent: &str) -> Option<AgentVersion> {
-        let v = self.found.iter().find(|v| v.agent == agent)?.clone();
-        self.jobs.insert(agent.to_string(), Job::Running);
+    pub fn start(&mut self, id: &str) -> Option<AgentVersion> {
+        let v = self.found.iter().find(|v| v.id == id)?.clone();
+        self.jobs.insert(id.to_string(), Job::Running);
         Some(v)
     }
 
-    /// Note how `agent`'s update went; once it's in, the agent counts as at its new version.
-    pub fn finish(&mut self, agent: &str, outcome: Outcome) {
-        self.order.retain(|a| a != agent);
+    /// Note how row `id`'s update went; once it's in, it counts as at its new version.
+    pub fn finish(&mut self, id: &str, outcome: Outcome) {
+        self.order.retain(|a| a != id);
         let job = match outcome {
             Outcome::Updated { version, output } => {
-                let v = self.found.iter_mut().find(|v| v.agent == agent);
+                let v = self.found.iter_mut().find(|v| v.id == id);
                 let from = v.and_then(|v| v.installed.replace(version.clone()));
                 Job::Updated { from, to: version, output }
             }
             Outcome::Failed { summary, output } => Job::Failed { summary, output },
         };
-        self.jobs.insert(agent.to_string(), job);
+        self.jobs.insert(id.to_string(), job);
     }
 
     pub fn queued(&self) -> bool {
@@ -171,13 +191,19 @@ impl AgentUpdates {
         self.jobs.values().any(|j| *j == Job::Running)
     }
 
+    /// One of `agent`'s CLIs (or its adapter) is being replaced right now: none of its sessions
+    /// may start, and no message goes to it, until that's done.
+    pub fn updating(&self, agent: &str) -> bool {
+        self.jobs.iter().any(|(id, j)| *j == Job::Running && self.agent_of(id) == Some(agent))
+    }
+
     /// A check came back with `fresh`. Feeds it couldn't reach keep what the last check found;
     /// finished updates are let go (the check now says where they stand), others carry on.
     pub fn checked(&mut self, mut fresh: Vec<AgentVersion>, now: i64) {
         trek_core::agent_update::carry_over(&mut fresh, &self.found);
         // An update under way outlives the check: its row keeps the versions it started from.
         for v in fresh.iter_mut() {
-            if let (Some(Job::Queued | Job::Running), Some(old)) = (self.jobs.get(&v.agent), self.found.iter().find(|o| o.agent == v.agent)) {
+            if let (Some(Job::Queued | Job::Running), Some(old)) = (self.jobs.get(&v.id), self.found.iter().find(|o| o.id == v.id)) {
                 *v = old.clone();
             }
         }
@@ -185,6 +211,22 @@ impl AgentUpdates {
         self.found = fresh;
         self.checked_at = now;
         self.checking = false;
+    }
+}
+
+/// The mock agent with an update out (`TREK_AGENT_UPDATES=mock` with `TREK_MOCK_AGENT`, and
+/// tests): its turns are what an update waits for.
+pub fn mock_agent_row() -> AgentVersion {
+    AgentVersion {
+        id: "mock".into(),
+        agent: AgentId::Direct("mock".into()).key(),
+        name: "Mock agent".into(),
+        binary: "/usr/local/bin/mock".into(),
+        installed: Some("1.0.0".into()),
+        latest: Some("1.1.0".into()),
+        install: trek_core::agent_update::Install::Native,
+        command: Some(trek_core::agent_update::UpdateCommand::new("/usr/local/bin/mock", &["update"])),
+        error: None,
     }
 }
 
@@ -196,14 +238,14 @@ pub const WHY: &str = "New models often need the latest version.";
 pub fn rows(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
     let w = ws.read(cx);
     let u = &w.agent_updates;
-    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.agent), w.agent_busy(&v.agent), u.output_open.as_deref() == Some(v.agent.as_str()), cx)).collect()
+    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.id), w.agent_busy(&v.agent), u.output_open.as_deref() == Some(v.id.as_str()), cx)).collect()
 }
 
 fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, busy: bool, open: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let agent = AgentId::from_key(&v.agent);
-    let key = v.agent.clone();
+    let key = v.id.clone();
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
     let versions = match job {
         Some(Job::Updated { from: Some(from), to, .. }) => format!("{from} → {to}"),
@@ -216,7 +258,7 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, busy: bool, 
             trek_core::agent_update::Install::Native => ("Via its own installer".into(), muted),
             ref i => (format!("Via {}", i.label()), muted),
         },
-        Some(Job::Queued) if busy => (format!("Waiting: {} is mid-turn. It updates when the turn ends.", agent.display_name()), muted),
+        Some(Job::Queued) if busy => (format!("Waits for {}'s turn to end", agent.display_name()), muted),
         Some(Job::Queued) => ("Next, after the update under way".into(), muted),
         Some(Job::Running) => (format!("Running {shown}"), muted),
         Some(Job::Updated { .. }) => ("New sessions use it".into(), muted),
@@ -313,7 +355,9 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, busy: bool, 
                 .pl(px(32.))
                 .gap(px(10.))
                 .text_size(px(12.))
-                .child(div().min_w_0().truncate().text_color(tone).child(detail))
+                // Wraps: a failure's reason and the command running are read in full.
+                .items_start()
+                .child(div().flex_1().min_w_0().text_color(tone).child(detail))
                 .children(toggle),
         )
         .when_some(output.filter(|_| open), |el, out| {
@@ -388,16 +432,17 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The footer pill's count: updates out, or one under way.
-pub fn badge(u: &AgentUpdates) -> Option<(usize, bool)> {
-    let running = u.running();
-    (u.pending() > 0 || running).then(|| (u.pending(), running))
+/// The footer pill's count: updates out, or one under way. With checks off, cached finds
+/// (which nothing refreshes) don't badge; updates asked for still show until they're done.
+pub fn badge(u: &AgentUpdates, enabled: bool) -> Option<(usize, bool)> {
+    let pending = if enabled { u.pending() } else { 0 };
+    (pending > 0 || u.running() || u.queued()).then_some((pending, u.running()))
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
-    use super::{AgentUpdates, Job};
+    use super::{AgentUpdates, Job, badge};
     use trek_core::agent_update::{CHECK_EVERY_MS, Outcome, mock_versions};
 
     fn updates() -> AgentUpdates {
@@ -408,31 +453,33 @@ mod tests {
     fn updates_wait_for_the_agents_turns_and_run_one_at_a_time() {
         let mut u = updates();
         assert_eq!(u.pending(), 3);
-        assert_eq!(u.updatable(), ["codex", "opencode", "acp:pi"]);
+        assert_eq!(u.updatable(), ["codex", "opencode", "pi"], "rows go by their CLI");
         for a in u.updatable() {
             assert!(u.request(&a));
         }
         assert!(!u.request("codex"), "asked once");
-        assert!(!u.request("claude-code"), "nothing to install");
+        assert!(!u.request("claude"), "nothing to install");
         // Codex is mid-turn: OpenCode goes first.
         let busy = |a: &str| a == "codex";
         assert_eq!(u.next(busy).as_deref(), Some("opencode"));
         u.start("opencode");
+        assert!(u.updating("opencode"));
+        assert!(!u.updating("codex"));
         assert_eq!(u.next(busy), None, "one at a time");
         u.finish("opencode", Outcome::Updated { version: "1.18.34".into(), output: String::new() });
         assert_eq!(u.job("opencode"), Some(&Job::Updated { from: Some("1.18.32".into()), to: "1.18.34".into(), output: String::new() }));
         assert_eq!(u.pending(), 2);
         assert_eq!(u.found.iter().find(|v| v.agent == "opencode").unwrap().installed.as_deref(), Some("1.18.34"));
-        assert_eq!(u.next(busy).as_deref(), Some("acp:pi"));
-        u.start("acp:pi");
-        u.finish("acp:pi", Outcome::Failed { summary: "npm stopped with code 1.".into(), output: "EACCES".into() });
+        assert_eq!(u.next(busy).as_deref(), Some("pi"));
+        u.start("pi");
+        u.finish("pi", Outcome::Failed { summary: "npm stopped with code 1.".into(), output: "EACCES".into() });
         // Codex still busy: it waits; once its turn ends, it's next.
         assert_eq!(u.next(busy), None);
         assert!(u.queued());
         assert_eq!(u.next(|_| false).as_deref(), Some("codex"));
         // A failed one can be asked again (Codex is still asked for); an updated one is done.
-        assert_eq!(u.updatable(), ["acp:pi"]);
-        assert!(u.request("acp:pi"));
+        assert_eq!(u.updatable(), ["pi"]);
+        assert!(u.request("pi"));
         assert!(!u.request("opencode"));
         // The card still lists the updated agent with how it went.
         assert_eq!(u.listed().len(), 3);
@@ -445,14 +492,14 @@ mod tests {
         u.request("opencode");
         u.start("opencode");
         u.finish("opencode", Outcome::Updated { version: "1.18.34".into(), output: String::new() });
-        u.request("acp:pi");
-        u.start("acp:pi");
+        u.request("pi");
+        u.start("pi");
         let mut fresh = mock_versions();
         fresh[1].installed = Some("1.18.34".into());
         fresh[2].installed = Some("9.9.9".into());
         u.checked(fresh, 1);
         assert_eq!(u.job("codex"), Some(&Job::Queued));
-        assert_eq!(u.job("acp:pi"), Some(&Job::Running));
+        assert_eq!(u.job("pi"), Some(&Job::Running));
         assert_eq!(u.found[2].installed.as_deref(), Some("0.85.1"), "its row stays as it started");
         assert_eq!(u.job("opencode"), None);
         assert!(!u.found[1].update_available());
@@ -467,5 +514,17 @@ mod tests {
         assert!(AgentUpdates::default().due(true, 5), "never checked");
         let checking = AgentUpdates { checking: true, ..Default::default() };
         assert!(!checking.due(true, i64::MAX));
+    }
+
+    #[test]
+    fn with_checks_off_only_updates_asked_for_badge() {
+        let mut u = updates();
+        assert_eq!(badge(&u, true), Some((3, false)));
+        assert_eq!(badge(&u, false), None, "the last check's finds aren't fresh");
+        u.request("codex");
+        assert_eq!(badge(&u, false), Some((0, false)), "asked for: it shows until it's done");
+        u.start("codex");
+        assert_eq!(badge(&u, false), Some((0, true)));
+        assert_eq!(badge(&u, true), Some((3, true)));
     }
 }

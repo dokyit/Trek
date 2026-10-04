@@ -129,8 +129,13 @@ impl Render for SettingsNav {
                     .child(div().px(px(10.)).pb(px(6.)).text_size(px(11.5)).font_medium().text_color(theme.muted_foreground.opacity(0.8)).child(*group))
                     .children(pages.iter().map(|&p| {
                         let label: &'static str = p.label();
-                        // Agents: how many CLI updates are out.
-                        let badge = (p == SettingsPage::Agents).then(|| self.workspace.read(cx).agent_updates.pending()).filter(|n| *n > 0);
+                        // Agents: how many CLI updates are out (while Trek keeps checking: with checks
+                        // off, what the last check found isn't fresh enough to badge).
+                        let badge = (p == SettingsPage::Agents)
+                            .then(|| self.workspace.read(cx))
+                            .filter(|ws| ws.settings.updates.check_agents)
+                            .map(|ws| ws.agent_updates.pending())
+                            .filter(|n| *n > 0);
                         ui::nav_row(label, page_icon(p), label, None, p == current, cx)
                             .when_some(badge, |el, n| {
                                 el.child(
@@ -465,7 +470,7 @@ impl SettingsView {
             rows.push(Self::row(title, "", controls, cx));
         }
         // Updates to install come first; otherwise the setting waits under the agents.
-        let first = self.workspace.read(cx).agent_updates.pending() > 0;
+        let first = self.workspace.read(cx).agent_updates.pending() > 0 && self.workspace.read(cx).settings.updates.check_agents;
         let updates = self.agent_updates_section(first, cx);
         if first {
             out.extend(updates);
@@ -818,7 +823,6 @@ impl SettingsView {
     }
 }
 
-/// How Settings names and explains each kind of session the import leaves out.
 /// When something happened, in a sentence: "just now", "3h ago", "on Sep 12".
 fn relative_ago(ms: i64) -> String {
     match crate::time::relative(ms) {
@@ -828,6 +832,7 @@ fn relative_ago(ms: i64) -> String {
     }
 }
 
+/// How Settings names and explains each kind of session the import leaves out.
 fn left_out_rule(rule: Skip) -> (&'static str, &'static str) {
     match rule {
         Skip::Trek => ("Started by Trek", "Already in the sidebar as Trek's own threads."),

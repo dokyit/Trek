@@ -786,7 +786,10 @@ impl Sidebar {
             .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
         // New agent CLI versions: a quiet pill with how many, only while there's one to install.
         // Kept while its card is open, so the last update finishing doesn't take the card away.
-        let agent_updates = crate::agent_updates::badge(&self.workspace.read(cx).agent_updates).or(self.agent_updates_open.then_some((0, false))).map(|(count, running)| {
+        let agent_updates = {
+            let ws = self.workspace.read(cx);
+            crate::agent_updates::badge(&ws.agent_updates, ws.settings.updates.check_agents)
+        }.or(self.agent_updates_open.then_some((0, false))).map(|(count, running)| {
             let ws = self.workspace.clone();
             Popover::new("agent-updates-popover")
                 .anchor(Anchor::BottomRight)

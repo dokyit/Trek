@@ -2096,6 +2096,8 @@ impl Render for Composer {
         let compact = self.width.get() < px(600.);
         let plan = prefs.plan;
         let preparing = live.is_some_and(|l| l.preparing);
+        // Its agent's CLI is being updated: messages wait for the new version.
+        let updating = thread.as_ref().filter(|t| ws.agent_updating(&t.agent.key())).map(|t| t.agent.display_name());
         let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && w.is_missing())?, t.id.clone())));
         // Another thread edits the same folder right now: offer a worktree for the next one.
         let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).map(|t| ws.project_dir(t));
@@ -2223,6 +2225,17 @@ impl Render for Composer {
                         .when(plan, |el| el.child(h_flex().gap(px(6.)).text_color(palette::indigo(cx)).child(Icon::new(crate::assets::Lucide::ListChecks).small()).child("Plan mode")))
                         .when(preparing, |el| {
                             el.child(h_flex().gap(px(6.)).child(gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground)).child("Creating the worktree…"))
+                        })
+                        .when_some(updating, |el, name| {
+                            el.child(
+                                h_flex()
+                                    .id("composer-agent-updating")
+                                    .test_support()
+                                    .min_w_0()
+                                    .gap(px(6.))
+                                    .child(gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground))
+                                    .child(div().min_w_0().truncate().child(format!("Updating {name}. Messages go when it's done."))),
+                            )
                         })
                         .child(div().flex_1())
 
