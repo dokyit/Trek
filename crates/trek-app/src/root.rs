@@ -231,7 +231,7 @@ impl Render for WindowTitle {
         let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
         let project_entry = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
         let project = project_entry.map(|p| p.name.clone()).or(project);
-        let icon = root.as_ref().and_then(|r| ws.project_icon(r));
+        let look = root.as_ref().map(|r| ws.project_look(r)).unwrap_or_default();
         let actions = root.as_ref().map(|r| ws.project_prefs(r).actions).unwrap_or_default();
         let project_id = project_entry.map(|p| p.id.clone());
         // A worktree thread's actions run on its own copy of the code, where its changes are.
@@ -268,7 +268,7 @@ impl Render for WindowTitle {
                         .gap_2()
                         .text_sm()
                         .when_some(project.clone(), |el, p| {
-                            el.child(crate::ui::project_badge(&p, icon.as_deref(), cx))
+                            el.child(crate::ui::project_badge(&p, &look, cx))
                                 .child(div().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })

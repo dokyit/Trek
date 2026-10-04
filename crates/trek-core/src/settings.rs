@@ -44,6 +44,9 @@ pub struct ProjectAction {
 pub struct ProjectPrefs {
     /// `lucide:<name>` or `file:<path>`; `None` shows the two-letter monogram.
     pub icon: Option<String>,
+    /// The project's colour, as a hue in degrees (0–359): its badge and folder icons. `None`
+    /// picks one from the name.
+    pub color: Option<u16>,
     pub agent: Option<String>,
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -60,6 +63,7 @@ impl Default for ProjectPrefs {
     fn default() -> Self {
         Self {
             icon: None,
+            color: None,
             agent: None,
             model: None,
             effort: None,
@@ -536,6 +540,16 @@ mod tests {
         back.run_in = RunIn::Worktree;
         let text = toml::to_string(&back).unwrap();
         assert_eq!(toml::from_str::<ProjectPrefs>(&text).unwrap(), back);
+    }
+
+    #[test]
+    fn a_project_colour_is_kept_and_alone_keeps_the_entry() {
+        let s: Settings = toml::from_str("[projects.\"/code/app\"]\ncolor = 210\n").unwrap();
+        let p = &s.projects["/code/app"];
+        assert_eq!(p.color, Some(210));
+        assert!(!p.is_empty(), "a chosen colour is worth keeping");
+        assert_eq!(toml::from_str::<ProjectPrefs>(&toml::to_string(p).unwrap()).unwrap(), *p);
+        assert_eq!(ProjectPrefs::default().color, None, "colours come from the name until chosen");
     }
 
     #[test]

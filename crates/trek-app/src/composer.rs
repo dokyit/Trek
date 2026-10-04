@@ -1776,6 +1776,8 @@ impl Composer {
             _ => None,
         };
         let label = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Choose project".into());
+        // The project's colour on its folder, as on its badge in the sidebar.
+        let tint = project.as_ref().and_then(|p| ws.project_tint_at(p, cx));
         let projects: Vec<(String, std::path::PathBuf)> = ws
             .workspace_projects()
             .into_iter()
@@ -1791,7 +1793,7 @@ impl Composer {
                 h_flex()
                     .gap(px(6.))
                     .text_color(theme.foreground.opacity(0.9))
-                    .child(Icon::new(IconName::Folder).small())
+                    .child(Icon::new(IconName::Folder).small().when_some(tint, |i, c| i.text_color(c)))
                     .child(label)
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )

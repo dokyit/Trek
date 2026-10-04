@@ -11,6 +11,8 @@
 //! | `plan` (or plan mode)        | a plan to approve before any change                          |
 //! | `mock:long` [dur]            | a long build that runs `dur` (default 30s)                   |
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
+//! | `mock:prose`                 | a long answer using all of markdown: headings, bold, lists,  |
+//! |                              | a table, code, paths and a link (for reviewing typography)   |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `error`                      | a turn that fails                                             |
@@ -115,6 +117,8 @@ enum Script {
     Plan,
     Long(Duration),
     Stream(Duration),
+    /// A long answer with every kind of block, for reviewing how answers read.
+    Prose,
     Explore(Duration),
     Error,
     Write,
@@ -144,6 +148,7 @@ impl Script {
                 // Bare "long" and "stream" are too common to start a 30-second turn.
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
+                "prose" if w.starts_with("mock:") => Script::Prose,
                 "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write,
@@ -180,6 +185,7 @@ pub fn title(request: &str) -> String {
         Script::Plan => "Require a session on every route",
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
+        Script::Prose => "Tour the startup code",
         Script::Explore(_) => "Animate the title as it appears",
         Script::Error => "Fix the failing build",
         Script::Write => "Add a note",
@@ -400,6 +406,11 @@ impl Session {
             Script::Plan => self.plan_turn().await?,
             Script::Long(total) => self.long(total).await?,
             Script::Stream(total) => self.stream(total).await?,
+            Script::Prose => {
+                self.think(PROSE_THOUGHT).await?;
+                // At reading pace, so the answer can be watched (and captured) as it grows.
+                self.say_at(PROSE, 45).await?;
+            }
             Script::Explore(total) => self.explore(total).await?,
             Script::Write => self.write().await?,
             Script::Recall => {
@@ -526,9 +537,14 @@ impl Session {
 
     /// Stream `text` a token at a time, then send it whole (as agents do at the end of a message).
     async fn say(&mut self, text: &str) -> Step {
+        self.say_at(text, 14).await
+    }
+
+    /// `say`, `ms` between tokens.
+    async fn say_at(&mut self, text: &str, ms: u64) -> Step {
         for chunk in tokens(text) {
             self.emit(AgentEvent::TextDelta(chunk.into())).await?;
-            self.pause(paced(14)).await?;
+            self.pause(paced(ms)).await?;
         }
         self.emit(AgentEvent::TextDone(text.into())).await
     }
@@ -909,6 +925,10 @@ fn tokens(text: &str) -> Vec<&str> {
 
 const ANSWER: &str = "## How the app starts\n\nStartup happens in `src/main.rs`: it parses the flags, loads the config and opens the window.\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults.\n- The **window** is created last, so a bad config fails fast.\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\nIf you want to change the startup order, `app::run` in `src/app.rs` is the place.";
 
+const PROSE_THOUGHT: &str = "**Mapping the startup path**\n\nThe flags are parsed in `src/cli.rs` before anything else, so a *bad flag* never opens a window. I'll walk through it in order and show the config table.";
+
+const PROSE: &str = "## How the app starts\n\nStartup lives in `src/main.rs`. It does three things, in order: it **parses the flags**, it **loads the settings**, and only then does it **open the window**, so a bad config fails before anything is drawn.\n\n### Flags and settings\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`. Unknown flags are an error, not a warning.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults in `src/settings.rs`.\n  - Paths in it may start with `~/`.\n  - A setting that fails to parse names its line.\n- The **window** is created last, from `src/app.rs`.\n\n### What each setting does\n\n| Setting | Default | What it does |\n| --- | --- | --- |\n| `theme` | `night` | Night or Paper |\n| `font_size` | `14.5` | Transcript text, in points |\n| `telemetry` | `false` | Never sent unless you turn it on |\n\n## The entry point\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\n> The order matters: a window opened before the settings load would flash the default theme.\n\n1. Read `src/cli.rs` first: it is short.\n2. Then `src/settings.rs`, which is where most changes land.\n3. Finally `src/app.rs`, for the window itself.\n\nThe folder `src/` holds all of it. For the config format itself, see [the TOML spec](https://toml.io).";
+
 const PLAN: &str = "## Require a session on every route\n\n1. Add `require_session` middleware in `src/auth.rs`.\n2. Wrap the router in `src/routes.rs` with it, keeping `/health` public.\n3. Return `401` with a JSON body when the session is missing or expired.\n4. Add tests for an authenticated and an anonymous request.\n\nNo database changes.";
 
 const LS_OUTPUT: &str = "total 48\ndrwxr-xr-x  8 me  staff   256 Oct  2 09:14 .\n-rw-r--r--  1 me  staff  1184 Oct  2 09:14 Cargo.toml\n-rw-r--r--  1 me  staff   912 Oct  2 09:14 README.md\ndrwxr-xr-x  5 me  staff   160 Oct  2 09:14 src\ndrwxr-xr-x  3 me  staff    96 Oct  2 09:14 tests";
@@ -933,6 +953,8 @@ mod tests {
         assert_eq!(Script::parse("stream the logs", false), Script::Answer);
         assert_eq!(Script::parse("mock:explore 5s", false), Script::Explore(Duration::from_secs(5)));
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
+        assert_eq!(Script::parse("mock:prose", false), Script::Prose);
+        assert_eq!(Script::parse("purple prose", false), Script::Answer, "bare `prose` is just a word");
         assert_eq!(Script::parse("send subagents 300ms", false), Script::Agents(Some(Duration::from_millis(300))));
         assert_eq!(Script::parse("ask a question", false), Script::Questions);
         assert_eq!(Script::parse("mock:permission", false), Script::Permission);
@@ -970,7 +992,7 @@ mod tests {
 
     #[test]
     fn tokens_rebuild_the_text() {
-        for text in [ANSWER, PLAN, "short", "ünïcödé words stream fine"] {
+        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, "short", "ünïcödé words stream fine"] {
             assert_eq!(tokens(text).concat(), text);
             assert!(tokens(text).iter().all(|t| !t.is_empty()));
         }

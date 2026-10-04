@@ -1,9 +1,66 @@
-//! While an agent works: a little hiker walking back and forth along a dotted trail above the
-//! composer, beside who's working and for how long (`working_bar`).
+//! While an agent works: a trail word that changes every few seconds ("Breaking trail…") and a
+//! little hiker walking back and forth along a dotted trail above the composer (`working_bar`).
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use std::time::Duration;
+
+/// What Trek says an agent is doing while it works, instead of a plain "Working…".
+pub const WORDS: &[&str] = &[
+    "Trailblazing",
+    "Switchbacking",
+    "Summiting",
+    "Scrambling",
+    "Bushwhacking",
+    "Route-finding",
+    "Stacking cairns",
+    "Reading the map",
+    "Checking the compass",
+    "Fording the creek",
+    "Gaining elevation",
+    "Traversing",
+    "Acclimatizing",
+    "Scouting ahead",
+    "Marking the trail",
+    "Crossing the ridge",
+    "Breaking trail",
+    "Boulder-hopping",
+    "Topping out",
+    "Following the cairns",
+    "Charting a course",
+    "Wayfinding",
+    "Lighting the beacon",
+    "Refilling canteens",
+    "Taking the scenic route",
+    "Contouring",
+    "Peak-bagging",
+    "Setting up base camp",
+    "Lacing boots",
+    "Checking the forecast",
+    "Glissading",
+    "Hiking it out",
+];
+
+/// How long each trail word stays before the next.
+pub const WORD_EVERY: u64 = 4;
+
+/// The trail word for a turn that has run `secs` seconds ("Breaking trail"): it changes every
+/// [`WORD_EVERY`] seconds, and `seed` (the thread) keeps threads from moving in lockstep.
+pub fn word(seed: &str, secs: u64) -> &'static str {
+    let n = WORDS.len() as u64;
+    let h = seed.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    // Each thread strides through the list from its own start, by a stride that shares no factor
+    // with its length: every word comes round once a lap, never twice in a row.
+    let gcd = |mut a: u64, mut b: u64| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let stride = (1..n).map(|k| (h >> 7).wrapping_add(k) % n).find(|&s| s > 1 && gcd(s, n) == 1).unwrap_or(1);
+    let i = (h % n + (secs / WORD_EVERY) % n * stride) % n;
+    WORDS[i as usize]
+}
 
 /// The hiker's walk: one lap there and back in `LAP`.
 const LAP: Duration = Duration::from_secs(16);
@@ -143,6 +200,27 @@ fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, windo
 
 #[cfg(test)]
 mod tests {
+    use super::{WORD_EVERY, WORDS, word};
+
+    #[test]
+    fn trail_words_hold_then_move_on() {
+        // The same word for the whole step, from its first second to its last.
+        assert_eq!(word("thread-a", 0), word("thread-a", WORD_EVERY - 1));
+        assert_eq!(word("thread-a", 8), word("thread-a", 8 + WORD_EVERY - 1));
+        // Over a few minutes it changes often, and never stays on one word for long.
+        let steps: Vec<&str> = (0..60).map(|i| word("thread-a", i * WORD_EVERY)).collect();
+        let changes = steps.windows(2).filter(|w| w[0] != w[1]).count();
+        assert_eq!(changes, 59, "a new word every step: {steps:?}");
+        // The whole list comes round in a lap, and threads don't move in lockstep.
+        let mut lap: Vec<&str> = steps[..WORDS.len()].to_vec();
+        lap.sort();
+        lap.dedup();
+        assert_eq!(lap.len(), WORDS.len());
+        let other: Vec<&str> = (0..60).map(|i| word("thread-b", i * WORD_EVERY)).collect();
+        assert_ne!(steps, other);
+        // Deterministic: a redraw shows the same word.
+        assert_eq!(word("thread-a", 123), word("thread-a", 123));
+    }
     #[test]
     fn sprite_rows_are_even() {
         for row in super::TOP.iter().chain(super::LEGS.iter().flatten()) {

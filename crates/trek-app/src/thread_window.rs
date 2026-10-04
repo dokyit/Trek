@@ -128,7 +128,7 @@ impl ThreadWindow {
         let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
         let project = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
         let name = project.map(|p| p.name.clone()).or_else(|| folder.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()));
-        let icon = root.as_ref().and_then(|r| ws.project_icon(r));
+        let look = root.as_ref().map(|r| ws.project_look(r)).unwrap_or_default();
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
         let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
         let title = thread.map(|t| t.title).unwrap_or_default();
@@ -149,7 +149,7 @@ impl ThreadWindow {
                         .gap_2()
                         .text_sm()
                         .when_some(name, |el, p| {
-                            el.child(crate::ui::project_badge(&p, icon.as_deref(), cx))
+                            el.child(crate::ui::project_badge(&p, &look, cx))
                                 .child(div().flex_none().text_color(theme.muted_foreground).child(p))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                         })

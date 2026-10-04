@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{HighlightStyle, Hsla, Rems, StyleRefinement, rems};
+use gpui::{HighlightStyle, Hsla, Pixels, Rems, StyleRefinement, rems};
 
 use crate::ColorTokens;
 
@@ -26,6 +26,12 @@ pub struct TextViewStyle {
     table_cell: StyleRefinement,
     inline_code: HighlightStyle,
     is_dark: bool,
+    // Trek: the knobs below are Trek's additions. Each defaults to the upstream look.
+    strong: Option<Hsla>,
+    measure: Option<Pixels>,
+    list_gap: Rems,
+    list_indent: Rems,
+    list_marker: Option<Hsla>,
 }
 
 impl PartialEq for TextViewStyle {
@@ -44,6 +50,11 @@ impl PartialEq for TextViewStyle {
             && self.table_cell == other.table_cell
             && self.inline_code == other.inline_code
             && self.is_dark == other.is_dark
+            && self.strong == other.strong
+            && self.measure == other.measure
+            && self.list_gap == other.list_gap
+            && self.list_indent == other.list_indent
+            && self.list_marker == other.list_marker
     }
 }
 
@@ -86,7 +97,72 @@ impl TextViewStyle {
                 ..Default::default()
             },
             is_dark,
+            strong: None,
+            measure: None,
+            list_gap: rems(0.),
+            list_indent: rems(1.),
+            list_marker: None,
         }
+    }
+
+    /// Trek: sets the color of bold text. By default bold keeps the color of
+    /// the text around it.
+    pub fn with_strong(mut self, color: Hsla) -> Self {
+        self.strong = Some(color);
+        self
+    }
+
+    /// Trek: caps the width of running text — paragraphs, headings, lists and
+    /// quotes — so lines stay a comfortable length. Code blocks and tables
+    /// keep the full width. Uncapped by default.
+    pub fn with_measure(mut self, width: Pixels) -> Self {
+        self.measure = Some(width);
+        self
+    }
+
+    /// Trek: sets the space between list items. None by default.
+    pub fn with_list_gap(mut self, gap: Rems) -> Self {
+        self.list_gap = gap;
+        self
+    }
+
+    /// Trek: sets how far nested lists and an item's later blocks are
+    /// indented. Defaults to 1 rem.
+    pub fn with_list_indent(mut self, indent: Rems) -> Self {
+        self.list_indent = indent;
+        self
+    }
+
+    /// Trek: sets the color of bullets and numbers. By default they keep the
+    /// color of the item's text.
+    pub fn with_list_marker(mut self, color: Hsla) -> Self {
+        self.list_marker = Some(color);
+        self
+    }
+
+    /// The color of bold text, when it has one of its own.
+    pub fn strong(&self) -> Option<Hsla> {
+        self.strong
+    }
+
+    /// The widest running text is set, when it's capped.
+    pub fn measure(&self) -> Option<Pixels> {
+        self.measure
+    }
+
+    /// The space between list items.
+    pub fn list_gap(&self) -> Rems {
+        self.list_gap
+    }
+
+    /// How far nested lists are indented.
+    pub fn list_indent(&self) -> Rems {
+        self.list_indent
+    }
+
+    /// The color of list bullets and numbers, when they have one of their own.
+    pub fn list_marker(&self) -> Option<Hsla> {
+        self.list_marker
     }
 
     /// Sets the default body-text color.

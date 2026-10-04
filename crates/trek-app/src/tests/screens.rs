@@ -390,7 +390,7 @@ fn image_icons_are_copied_in_and_fall_back_when_gone() {
         let picked = source.clone();
         cx.simulate_path_prompt_response(move |_| Some(vec![picked]));
         cx.run_until_parked();
-        let icon = trek.read(cx, |ws, _| ws.project_icon(&project)).expect("an icon");
+        let icon = trek.read(cx, |ws, _| ws.project_look(&project).icon).expect("an icon");
         let copy = PathBuf::from(icon.strip_prefix("file:").expect("an image icon"));
         assert!(copy.starts_with(trek_core::paths::data_dir().join("project-icons")), "{copy:?}");
         assert_eq!(std::fs::read(&copy).unwrap(), png(), "a copy, so the original can move");
@@ -408,12 +408,12 @@ fn image_icons_are_copied_in_and_fall_back_when_gone() {
         trek.render(cx);
         // Reset goes back to the monogram for good.
         trek.click(cx, "project-icon-reset");
-        assert_eq!(trek.read(cx, |ws, _| ws.project_icon(&project)), None);
+        assert_eq!(trek.read(cx, |ws, _| ws.project_look(&project).icon), None);
         // Cancelling the picker changes nothing.
         trek.click(cx, "project-icon-file");
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
-        assert_eq!(trek.read(cx, |ws, _| ws.project_icon(&project)), None);
+        assert_eq!(trek.read(cx, |ws, _| ws.project_look(&project).icon), None);
     });
 }
 

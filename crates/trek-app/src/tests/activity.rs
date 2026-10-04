@@ -39,7 +39,7 @@ fn the_live_group_appears_grows_and_folds_into_its_summary() {
         let id = trek.quiet_thread(cx);
         feed(&trek, cx, &id, vec![AgentEvent::TextDelta("Let me look around.".into())]);
         assert_eq!(trek.live_group(cx), None, "text alone isn't a group");
-        assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Mock Swift working")), "{:?}", trek.working_bar(cx));
+        assert!(trek.working_bar(cx).is_some_and(|l| super::harness::trail_word(&l).is_some()), "{:?}", trek.working_bar(cx));
 
         // The first call: the group appears in the bar, not the transcript.
         let project = trek.project.display().to_string();

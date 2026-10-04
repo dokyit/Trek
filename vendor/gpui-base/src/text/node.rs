@@ -2052,8 +2052,10 @@ impl PartialEq for NodeContext {
 fn mark_highlight(mark: &TextMark, node_cx: &NodeContext, cx: &App) -> InlineHighlight {
     let mut highlight = HighlightStyle::default();
     if mark.bold {
-        // Trek: semibold reads as emphasis without shouting in long answers.
+        // Trek: semibold reads as emphasis without shouting in long answers, and
+        // a color of its own (brighter than the body) makes it stand out.
         highlight.font_weight = Some(FontWeight::SEMIBOLD);
+        highlight.color = node_cx.style.strong();
     }
     if mark.italic {
         highlight.font_style = Some(FontStyle::Italic);
@@ -2509,6 +2511,14 @@ fn leaf_element_id(fade_key: Option<TextLeafKey>) -> ElementId {
 
 /// `block` with `gap` below it. The box only exists to hold the padding,
 /// so a block with no gap below it is returned as is.
+/// Trek: `block` no wider than the style's measure, when it has one.
+fn measured(block: AnyElement, style: &TextViewStyle) -> AnyElement {
+    match style.measure() {
+        Some(width) => div().w_full().max_w(width).child(block).into_any_element(),
+        None => block,
+    }
+}
+
 fn gapped(block: AnyElement, gap: Rems) -> AnyElement {
     if gap.is_zero() {
         block
@@ -2815,12 +2825,17 @@ impl BlockNode {
             .items_start()
             .content_start()
             .when(!options.todo && checked.is_none(), |this| {
-                this.child(list_item_prefix(
-                    ix,
-                    options.list_start,
-                    options.ordered,
-                    options.depth,
-                ))
+                this.child(
+                    div()
+                        .flex_none()
+                        .when_some(style.list_marker(), |this, color| this.text_color(color))
+                        .child(list_item_prefix(
+                            ix,
+                            options.list_start,
+                            options.ordered,
+                            options.depth,
+                        )),
+                )
             })
             .when_some(checked, |this, checked| {
                 // Todo list checkbox
@@ -2908,7 +2923,7 @@ impl BlockNode {
                                             div().child(preceding_row).child(
                                                 div()
                                                     .w_full()
-                                                    .pl(rems(1.))
+                                                    .pl(node_cx.style.list_indent())
                                                     .overflow_hidden()
                                                     .child(text),
                                             ),
@@ -2927,7 +2942,11 @@ impl BlockNode {
                                 ));
                             }
                             BlockNode::List { .. } => {
-                                items.push(div().ml(rems(1.)).child(child.render_block(
+                                items.push(
+                                    div()
+                                        .ml(node_cx.style.list_indent())
+                                        .pt(node_cx.style.list_gap())
+                                        .child(child.render_block(
                                     NodeRenderOptions {
                                         depth: options.depth + 1,
                                         todo: checked.is_some(),
@@ -2937,7 +2956,8 @@ impl BlockNode {
                                     node_cx,
                                     window,
                                     cx,
-                                )));
+                                )),
+                                );
                             }
                             BlockNode::Root { .. }
                             | BlockNode::Heading { .. }
@@ -2975,7 +2995,7 @@ impl BlockNode {
                                         div()
                                             .w_full()
                                             .min_w_0()
-                                            .pl(rems(1.))
+                                            .pl(node_cx.style.list_indent())
                                             .overflow_hidden()
                                             .child(block),
                                     );
@@ -3310,14 +3330,17 @@ impl BlockNode {
                     node.render_block(NodeRenderOptions { ix, ..options }, node_cx, window, cx)
                 }))
                 .into_any_element(),
-            BlockNode::Paragraph(paragraph) => gapped(
-                paragraph.render(
-                    paragraph.span.map(|span| TextLeafKey::block(span.start)),
-                    node_cx,
-                    window,
-                    cx,
+            BlockNode::Paragraph(paragraph) => measured(
+                gapped(
+                    paragraph.render(
+                        paragraph.span.map(|span| TextLeafKey::block(span.start)),
+                        node_cx,
+                        window,
+                        cx,
+                    ),
+                    mb,
                 ),
-                mb,
+                &node_cx.style,
             ),
             BlockNode::Heading {
                 level,
@@ -3342,6 +3365,10 @@ impl BlockNode {
                     .text_size(text_size)
                     .font_weight(font_weight)
                     .refine_style(&node_cx.style.heading(*level))
+                    // Trek: the space a style puts above headings is between
+                    // sections; the text's first one needs none.
+                    .when(options.ix == 0 && options.depth == 0, |this| this.pt_0())
+                    .when_some(node_cx.style.measure(), |this, width| this.max_w(width))
                     .child(children.render(
                         span.map(|span| TextLeafKey::block(span.start)),
                         node_cx,
@@ -3353,6 +3380,7 @@ impl BlockNode {
             BlockNode::Blockquote { children, .. } => gapped(
                 div()
                     .w_full()
+                    .when_some(node_cx.style.measure(), |this, width| this.max_w(width))
                     .text_color(node_cx.style.muted_foreground())
                     .border_l_3()
                     .border_color(node_cx.style.border())
@@ -3375,7 +3403,11 @@ impl BlockNode {
             } => div()
                 .w_full()
                 .min_w_0()
+                .when_some(node_cx.style.measure(), |this, width| this.max_w(width))
                 .pb(mb)
+                .flex()
+                .flex_col()
+                .gap(node_cx.style.list_gap())
                 .children({
                     let mut items = Vec::with_capacity(children.len());
                     let mut item_index = 0;

@@ -1156,7 +1156,7 @@ impl SettingsView {
             .child("Settings for")
             .child(picker(
                 "project-chooser",
-                Some(ui::project_badge(&project.name, prefs.icon.as_deref(), cx)),
+                Some(ui::project_badge(&project.name, &ui::ProjectLook::of(&prefs), cx)),
                 project.remote.clone().unwrap_or_else(|| project.name.clone()),
                 projects.iter().map(|p| (p.id.clone(), p.remote.clone().unwrap_or_else(|| p.name.clone()))).collect(),
                 Some(project.id.clone()),
@@ -1199,6 +1199,35 @@ impl SettingsView {
         let icon_reset = prefs.icon.is_some().then(|| {
             Button::new("project-icon-reset").small().ghost().label("Reset").on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p2, |pr| pr.icon = None, cx)))
         });
+        // Colour: from the name, or one of a few that stay apart.
+        let colors = {
+            let dark = cx.theme().mode.is_dark();
+            let ring = cx.theme().foreground.opacity(0.75);
+            let options = std::iter::once((None, "Automatic: from the name".to_string())).chain(ui::PROJECT_COLORS.iter().map(|(name, hue)| (Some(*hue), name.to_string())));
+            h_flex().gap(px(2.)).children(options.map(|(hue, name)| {
+                let (w, p) = (self.workspace.clone(), path.clone());
+                let id = SharedString::from(format!("project-color-{}", hue.map_or("auto".to_string(), |h| h.to_string())));
+                let picked = prefs.color == hue;
+                div()
+                    .id(id)
+                    .test_support()
+                    .size(px(22.))
+                    .p(px(2.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if picked { ring } else { gpui_kit::transparent_black() })
+                    .cursor_pointer()
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx))
+                    .when(hue.is_none(), |el| el.mr(px(6.)))
+                    .child({
+                        let ink = ui::project_ink(ui::project_hue(&project.name, hue), dark);
+                        // Automatic is a ring in the name's colour, so it doesn't read as one of the picks.
+                        let dot = div().size_full().rounded_full();
+                        if hue.is_none() { dot.border_2().border_color(ink) } else { dot.bg(ink) }
+                    })
+                    .on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.update_project_prefs(&p, |pr| pr.color = hue, cx)))
+            }))
+        };
         let reveal = {
             let p = path.clone();
             Button::new("project-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p))
@@ -1387,9 +1416,10 @@ impl SettingsView {
                             Some(s) if s.starts_with("file:") => "Your image is gone, so the two letters stand in. Choose another.",
                             Some(_) => "One of Trek's icons.",
                         },
-                        h_flex().gap(px(6.)).child(ui::project_badge(&project.name, prefs.icon.as_deref(), cx)).child(div().w(px(4.))).children(icon_reset).child(icon_menu).child(icon_file),
+                        h_flex().gap(px(6.)).child(ui::project_badge(&project.name, &ui::ProjectLook::of(&prefs), cx)).child(div().w(px(4.))).children(icon_reset).child(icon_menu).child(icon_file),
                         cx,
                     ),
+                    Self::row("Colour", "Its badge, and its folders in answers, the Explorer and the composer.", colors, cx),
                     Self::row("Folder", trek_core::paths::tildify(&path), reveal, cx),
                 ],
                 cx,

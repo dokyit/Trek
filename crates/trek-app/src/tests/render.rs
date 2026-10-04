@@ -195,7 +195,7 @@ fn working_bar_frames_rerender_only_the_bar() {
         assert!(renders("Sidebar", &f) * 10. <= 1., "{:?}", f.renders);
         let f = frames(cx, 3 * crate::mascot::FPS as usize, period);
         assert!((2. ..=4.).contains(&(renders("Sidebar", &f) * 3. * crate::mascot::FPS as f32)), "{:?}", f.renders);
-        assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Mock Swift working for ")), "{:?}", trek.working_bar(cx));
+        assert!(trek.working_bar(cx).is_some_and(|l| super::harness::trail_word(&l).is_some_and(|clock| clock.ends_with('s'))), "{:?}", trek.working_bar(cx));
         // The build shimmers in the bar's live group, on the bar's own frames.
         assert!(trek.visible(cx, "live-group"));
     });

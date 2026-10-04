@@ -40,12 +40,65 @@ pub fn status_text(text: &'static str, color: Hsla) -> AnyElement {
     div().text_xs().font_weight(FontWeight::MEDIUM).text_color(color).child(text).into_any_element()
 }
 
-/// Two-letter project badge with a stable tint (T3-style).
-pub fn monogram(name: &str, cx: &App) -> Div {
-    monogram_in(name, cx.theme().mode.is_dark())
+/// How a project shows: the icon and colour chosen for it, if any (its `ProjectPrefs`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectLook {
+    /// `lucide:<name>` or `file:<path>`; `None` shows the two-letter monogram.
+    pub icon: Option<String>,
+    /// A hue in degrees; `None` takes one from the name.
+    pub color: Option<u16>,
 }
 
-fn monogram_in(name: &str, dark: bool) -> Div {
+impl ProjectLook {
+    pub fn of(prefs: &trek_core::settings::ProjectPrefs) -> Self {
+        Self { icon: prefs.icon.clone(), color: prefs.color }
+    }
+}
+
+/// A project's hue (0 to 1): the one chosen for it, else a stable one from its name.
+pub fn project_hue(name: &str, color: Option<u16>) -> f32 {
+    match color {
+        Some(deg) => (deg % 360) as f32 / 360.,
+        None => (name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32) % 360) as f32 / 360.,
+    }
+}
+
+/// The ink of a project's badge in `hue`: its letters and icon, and the tint of the project's
+/// folder icons elsewhere (path chips, the Explorer, the composer's project chip).
+pub fn project_ink(hue: f32, dark: bool) -> Hsla {
+    hsla(hue, 0.55, if dark { 0.75 } else { 0.35 }, 1.)
+}
+
+/// The colours a project can be given in its settings, by hue: picked to stay apart from each
+/// other and readable in both themes.
+pub const PROJECT_COLORS: &[(&str, u16)] = &[
+    ("Red", 0),
+    ("Orange", 24),
+    ("Amber", 42),
+    ("Green", 135),
+    ("Teal", 172),
+    ("Blue", 212),
+    ("Indigo", 240),
+    ("Violet", 275),
+    ("Pink", 325),
+];
+
+/// The fill behind a project's monogram or icon in `hue`.
+fn project_fill(hue: f32, dark: bool) -> Hsla {
+    hsla(hue, 0.35, if dark { 0.22 } else { 0.88 }, 1.)
+}
+
+/// The colour a project's folder icons are tinted with: its badge's ink.
+pub fn project_tint(name: &str, look: &ProjectLook, cx: &App) -> Hsla {
+    project_ink(project_hue(name, look.color), cx.theme().mode.is_dark())
+}
+
+/// Two-letter project badge with a stable tint (T3-style).
+pub fn monogram(name: &str, cx: &App) -> Div {
+    monogram_in(name, project_hue(name, None), cx.theme().mode.is_dark())
+}
+
+fn monogram_in(name: &str, hue: f32, dark: bool) -> Div {
     let letters: String = {
         let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
         match words.as_slice() {
@@ -55,8 +108,6 @@ fn monogram_in(name: &str, dark: bool) -> Div {
         }
     }
     .to_uppercase();
-    let hash = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
-    let hue = (hash % 360) as f32 / 360.;
     div()
         .flex_none()
         .h(px(16.))
@@ -68,8 +119,8 @@ fn monogram_in(name: &str, dark: bool) -> Div {
         .justify_center()
         .text_size(px(9.5))
         .font_weight(FontWeight::BOLD)
-        .bg(hsla(hue, 0.35, if dark { 0.22 } else { 0.88 }, 1.))
-        .text_color(hsla(hue, 0.55, if dark { 0.75 } else { 0.35 }, 1.))
+        .bg(project_fill(hue, dark))
+        .text_color(project_ink(hue, dark))
         .child(letters)
 }
 
@@ -86,12 +137,11 @@ pub const PROJECT_ICONS: &[(&str, crate::assets::Lucide)] = {
     ]
 };
 
-/// A project's badge: its chosen icon or image, else the two-letter monogram.
-pub fn project_badge(name: &str, icon: Option<&str>, cx: &App) -> AnyElement {
-    let hash = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
-    let hue = (hash % 360) as f32 / 360.;
+/// A project's badge: its chosen icon or image, else the two-letter monogram, in its colour.
+pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
+    let hue = project_hue(name, look.color);
     let dark = cx.theme().mode.is_dark();
-    match icon {
+    match look.icon.as_deref() {
         Some(spec) if spec.starts_with("file:") => {
             let path = std::path::PathBuf::from(&spec[5..]);
             // An image that's gone or doesn't decode shows the monogram instead of a hole.
@@ -104,7 +154,7 @@ pub fn project_badge(name: &str, icon: Option<&str>, cx: &App) -> AnyElement {
                 .border_1()
                 .border_color(cx.theme().foreground.opacity(0.1))
                 .object_fit(ObjectFit::Cover)
-                .with_fallback(move || monogram_in(&name, dark).into_any_element())
+                .with_fallback(move || monogram_in(&name, hue, dark).into_any_element())
                 .into_any_element()
         }
         Some(spec) => match PROJECT_ICONS.iter().find(|(k, _)| spec.strip_prefix("lucide:") == Some(k)) {
@@ -116,12 +166,12 @@ pub fn project_badge(name: &str, icon: Option<&str>, cx: &App) -> AnyElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(hsla(hue, 0.35, if dark { 0.22 } else { 0.88 }, 1.))
-                .child(Icon::new(*icon).size(px(11.)).text_color(hsla(hue, 0.55, if dark { 0.75 } else { 0.35 }, 1.)))
+                .bg(project_fill(hue, dark))
+                .child(Icon::new(*icon).size(px(11.)).text_color(project_ink(hue, dark)))
                 .into_any_element(),
-            None => monogram(name, cx).into_any_element(),
+            None => monogram_in(name, hue, dark).into_any_element(),
         },
-        None => monogram(name, cx).into_any_element(),
+        None => monogram_in(name, hue, dark).into_any_element(),
     }
 }
 
@@ -557,7 +607,31 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{lead_to_match, reveal_alphas};
+    use super::{PROJECT_COLORS, lead_to_match, project_hue, project_ink, reveal_alphas};
+
+    #[test]
+    fn a_project_keeps_one_colour_and_a_chosen_one_wins() {
+        // From the name: the same every time, and different projects mostly differ.
+        assert_eq!(project_hue("Trek", None), project_hue("Trek", None));
+        assert_ne!(project_hue("Trek", None), project_hue("website", None));
+        assert!((0. ..1.).contains(&project_hue("Trek", None)));
+        // Chosen: that hue, whatever the name.
+        assert_eq!(project_hue("Trek", Some(212)), 212. / 360.);
+        assert_eq!(project_hue("website", Some(212)), project_hue("Trek", Some(212)));
+        assert_eq!(project_hue("Trek", Some(360 + 24)), 24. / 360., "wraps round");
+        // The same hue, in each theme's ink: light on Night, dark on Paper.
+        let hue = project_hue("Trek", None);
+        assert!(project_ink(hue, true).l > 0.6 && project_ink(hue, false).l < 0.4);
+        assert_eq!(project_ink(hue, true).h, project_ink(hue, false).h);
+    }
+
+    #[test]
+    fn project_colours_are_distinct() {
+        for w in PROJECT_COLORS.windows(2) {
+            assert!(w[1].1 > w[0].1 && w[1].1 - w[0].1 >= 18, "{w:?}");
+        }
+        assert!(PROJECT_COLORS.iter().all(|(_, h)| *h < 360));
+    }
 
     #[test]
     fn titles_reveal_left_to_right_over_the_old_one() {

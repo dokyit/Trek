@@ -104,7 +104,8 @@ impl Render for SideChatPanel {
         let ws = self.workspace.read(cx);
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
         let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
-        let working = live.is_some_and(|l| l.turn_started.is_some());
+        // While it answers, a trail word ("Breaking trail…") rather than a plain "Working…".
+        let working = live.and_then(|l| l.turn_started).map(|t| crate::working_bar::trail_word(self.thread_id.as_deref().unwrap_or_default(), Some(t.elapsed())));
         let now = ws.now();
         let amber = crate::palette::amber(cx);
         let prefs = ws.prefs();
@@ -192,7 +193,7 @@ impl Render for SideChatPanel {
                                 ),
                                 _ => None,
                             }))
-                            .when(working, |el| el.child(div().text_color(theme.muted_foreground).child("Working…"))),
+                            .when_some(working, |el, word| el.child(div().id("side-working").test_support().text_color(theme.muted_foreground).child(word))),
                     ),
             )
             .child(
