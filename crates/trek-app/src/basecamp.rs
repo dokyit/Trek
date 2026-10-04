@@ -465,8 +465,9 @@ impl Basecamp {
             .chunks_mut(per_row.max(1))
             .map(|row| {
                 let n = row.len();
+                // Stretched, so the hairline between tiles runs the row's full height.
                 h_flex()
-                    .items_start()
+                    .items_stretch()
                     .border_t_1()
                     .border_color(line)
                     .children(row.iter_mut().enumerate().map(|(i, t)| {
@@ -683,7 +684,8 @@ fn tile(label: impl Into<SharedString>, figure: impl IntoElement, note: impl Int
         .gap(px(8.))
         .child(div().text_size(px(12.)).text_color(muted).truncate().child(label.into()))
         .child(figure)
-        .child(div().text_size(px(12.)).text_color(muted).truncate().child(note.into()))
+        // Up to two lines: a narrow tile would otherwise cut a note's tail, often its caveat.
+        .child(div().text_size(px(12.)).text_color(muted).line_clamp(2).text_ellipsis().child(note.into()))
         .into_any_element()
 }
 
@@ -988,23 +990,22 @@ impl Profile {
 }
 
 /// What the tokens tile says under its figure: what they'd cost at API prices (as far as they
-/// have a price, saying how many haven't), then where they came from.
+/// have a price, saying how many haven't), then where they came from. Kept short, as the tile is
+/// narrow and a caveat saying the total is incomplete has to stay in view: with one, the span
+/// goes (the header's range already names it).
 pub(crate) fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
-    let source = if recap.tokens_partial() {
-        format!("From {} of {} threads", recap.threads_with_tokens, recap.threads)
-    } else if recap.tokens.cache_read > 0 {
-        format!("{} read from cache", fmt_tokens(recap.tokens.cache_read))
-    } else {
-        "As your agents reported them".to_string()
-    };
+    let partial = recap.tokens_partial().then(|| format!("{} of {} threads", recap.threads_with_tokens, recap.threads));
     if !recap.spend.priced() {
-        return source;
+        return match partial {
+            Some(p) => format!("From {p}"),
+            None if recap.tokens.cache_read > 0 => format!("{} read from cache", fmt_tokens(recap.tokens.cache_read)),
+            None => "As your agents reported them".to_string(),
+        };
     }
-    let mut cost = format!("≈ {} at API prices {when}", crate::cost::usd(recap.spend.usd()));
-    if recap.spend.unpriced() > 0 {
-        cost += &format!(" · {} tokens unpriced", fmt_tokens(recap.spend.unpriced()));
-    }
-    if recap.tokens_partial() { format!("{cost} · {}", source.to_lowercase()) } else { cost }
+    let cost = format!("≈ {} at API prices", crate::cost::usd(recap.spend.usd()));
+    let unpriced = (recap.spend.unpriced() > 0).then(|| format!("{} tokens unpriced", fmt_tokens(recap.spend.unpriced())));
+    let caveats: Vec<String> = [unpriced, partial].into_iter().flatten().collect();
+    if caveats.is_empty() { format!("{cost} {when}") } else { format!("{cost} · {}", caveats.join(" · ")) }
 }
 
 /// The tokens tile's sparkline: tokens used so far, climbing through the window.
@@ -1075,12 +1076,17 @@ mod tests {
         // Threads that didn't report their tokens are said to be missing from it.
         let quiet = thread(AgentId::Acp("gemini".into()));
         let r = Recap::compute(window, at + 5_000, &[claude.clone(), quiet]);
-        assert_eq!(tokens_note(&r, "this week"), "≈ $1.25 at API prices this week · from 1 of 2 threads");
+        assert_eq!(tokens_note(&r, "this week"), "≈ $1.25 at API prices · 1 of 2 threads");
         // Tokens on a model without a known price are said to be left out.
         let mut fusion = thread(AgentId::Acp("devin".into()));
         fusion.usage = vec![row(&fusion, "fusion-x", TokenUsage { input: 2_000_000, output: 5_000, ..Default::default() }, None)];
-        let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion]);
-        assert_eq!(tokens_note(&r, "today"), "≈ $1.25 at API prices today · 2M tokens unpriced");
+        let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion.clone()]);
+        assert_eq!(tokens_note(&r, "today"), "≈ $1.25 at API prices · 2M tokens unpriced");
+        let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion.clone(), thread(AgentId::Acp("gemini".into()))]);
+        assert_eq!(tokens_note(&r, "today"), "≈ $1.25 at API prices · 2M tokens unpriced · 2 of 3 threads");
+        // Nothing priced: just where the tokens came from.
+        let r = Recap::compute(window, at + 5_000, &[fusion, thread(AgentId::Acp("gemini".into()))]);
+        assert_eq!(tokens_note(&r, "today"), "From 1 of 2 threads");
     }
 
     #[test]
