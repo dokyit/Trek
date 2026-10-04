@@ -2375,7 +2375,7 @@ impl Render for Composer {
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.picker_action("tab", window, cx)))
             .capture_action(cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)))
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
-            .child(v_flex().w_full().max_w(px(760.)).children(chips).children(limit_bar).child(card).children(status))
+            .child(v_flex().w_full().max_w(self.workspace.read(cx).column()).children(chips).children(limit_bar).child(card).children(status))
     }
 }
 

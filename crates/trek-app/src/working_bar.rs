@@ -23,8 +23,6 @@ use std::time::{Duration, Instant};
 use trek_core::store::{Item, ToolStatus};
 use trek_core::{AgentId, RunState};
 
-const COLUMN: f32 = 760.;
-
 /// The header's height: the trail plus the gap above the composer.
 pub const HEIGHT: f32 = crate::mascot::HEIGHT + 6.;
 /// The live group: its summary line, a row per call, "+N earlier" over the rows when some
@@ -71,6 +69,8 @@ struct Shown {
     folding: Option<(Group, Instant)>,
     /// No motion: reduced motion, or the window isn't in front.
     still: bool,
+    /// The transcript column's widest (`Workspace::column`).
+    width: Pixels,
 }
 
 #[derive(Clone, PartialEq)]
@@ -178,7 +178,7 @@ impl WorkingBar {
             shown: None,
             active: window.is_window_active() || crate::mascot::force_active(),
             arrived: HashMap::new(),
-            settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0, open: None }),
+            settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0, width: px(0.), open: None }),
             settled_len: 0,
             _ticker: None,
             _subscriptions: subscriptions,
@@ -214,7 +214,7 @@ impl WorkingBar {
                 .collect();
             Some((group(ws, id, &tools, None)?, f.until))
         });
-        (header.is_some() || folding.is_some()).then(|| Shown { thread: id.to_string(), header, group: current, folding, still })
+        (header.is_some() || folding.is_some()).then(|| Shown { thread: id.to_string(), header, group: current, folding, still, width: ws.column() })
     }
 
     /// The height of the part above the settled rows: a folding group (shrinking frame by frame)
@@ -279,6 +279,7 @@ impl WorkingBar {
     /// Hand the live group's leading rows that are done and in to the cached view: up to the
     /// first that's still running or sliding in.
     fn settle(&mut self, cx: &mut Context<Self>) {
+        let width = self.shown.as_ref().map_or(px(0.), |s| s.width);
         let (rows, earlier) = match self.shown.as_ref().and_then(|s| s.group.as_ref()) {
             Some(g) => {
                 let n = g.rows.iter().position(|r| r.running || self.arrived.contains_key(&r.id)).unwrap_or(g.rows.len());
@@ -289,9 +290,10 @@ impl WorkingBar {
         self.settled_len = rows.len();
         let open = self.opener();
         self.settled.update(cx, |s, cx| {
-            if s.rows != rows || s.earlier != earlier || s.open.as_ref().map(|o| &o.thread) != open.as_ref().map(|o| &o.thread) {
+            if s.rows != rows || s.earlier != earlier || s.width != width || s.open.as_ref().map(|o| &o.thread) != open.as_ref().map(|o| &o.thread) {
                 s.rows = rows;
                 s.earlier = earlier;
+                s.width = width;
                 s.open = open;
                 cx.notify();
             }
@@ -579,6 +581,7 @@ fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, open: Option<&O
 pub struct SettledRows {
     rows: Vec<LiveRow>,
     earlier: usize,
+    width: Pixels,
     open: Option<Opener>,
 }
 
@@ -587,7 +590,7 @@ impl Render for SettledRows {
         #[cfg(test)]
         crate::tests::rendered("SettledRows");
         let open = self.open.as_ref();
-        column(rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, open, cx))).children(self.rows.iter().map(|r| row(r, None, 0., true, open, cx))))
+        column(self.width, rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, open, cx))).children(self.rows.iter().map(|r| row(r, None, 0., true, open, cx))))
     }
 }
 
@@ -607,6 +610,7 @@ impl Render for BarTop {
         let folding = shown.folding.as_ref().map(|(g, until)| {
             let t = fold_eased(*until, still);
             column(
+                shown.width,
                 v_flex()
                     .id("live-fold")
                     .test_support()
@@ -616,15 +620,15 @@ impl Render for BarTop {
             )
         });
         let group = shown.group.as_ref().map(|g| {
-            column(div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., cx)))
+            column(shown.width, div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., cx)))
         });
         v_flex().size_full().overflow_hidden().justify_end().children(folding).children(group).into_any_element()
     }
 }
 
-/// The transcript's column, as the bar's parts line up with it.
-fn column(el: impl IntoElement) -> Div {
-    h_flex().w_full().flex_none().justify_center().px_6().child(div().w_full().max_w(px(COLUMN)).child(el))
+/// The transcript's column, `width` at its widest, as the bar's parts line up with it.
+fn column(width: Pixels, el: impl IntoElement) -> Div {
+    h_flex().w_full().flex_none().justify_center().px_6().child(div().w_full().max_w(width).child(el))
 }
 
 impl Render for WorkingBar {
@@ -641,7 +645,7 @@ impl Render for WorkingBar {
         let rows = shown.group.as_ref().map(|g| {
             let settled = self.settled_len.min(g.rows.len());
             let open = self.opener();
-            column(rows_rail(cx).children(g.rows[settled..].iter().map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)))).pb(px(GROUP_PAD))
+            column(shown.width, rows_rail(cx).children(g.rows[settled..].iter().map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)))).pb(px(GROUP_PAD))
         });
         let header = shown.header.as_ref().map(|h| {
             h_flex()
@@ -656,7 +660,7 @@ impl Render for WorkingBar {
                 .child(
                     h_flex()
                         .w_full()
-                        .max_w(px(COLUMN))
+                        .max_w(shown.width)
                         .px(px(4.))
                         .gap(px(14.))
                         .items_end()

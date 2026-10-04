@@ -141,21 +141,79 @@ fn a_side_chat_at_work_says_a_trail_word() {
     });
 }
 
+/// A thread whose answer is a long paragraph, many turns deep (so the transcript scrolls).
+fn long_answers(trek: &Trek, cx: &mut TestAppContext) -> (String, usize) {
+    let id = trek.quiet_thread(cx);
+    let para = "Startup lives in main.rs. It does three things, in order: it parses the flags, it loads the settings, and then it opens the window. The settings file is read once and watched for changes, so editing it while Trek runs applies the new values without a restart. ".repeat(3);
+    for n in 0..6 {
+        let text = format!("Answer {n}. {para}");
+        let events = vec![AgentEvent::TextDelta(text.clone()), AgentEvent::TextDone(text), AgentEvent::TurnComplete { error: None }];
+        trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+    }
+    trek.render(cx);
+    let last = trek.read(cx, |ws, _| ws.live[&id].items.iter().rposition(|i| matches!(i, Item::Assistant { .. }))).unwrap();
+    (id, last)
+}
+
 #[test]
-fn a_line_of_prose_holds_about_seventy_characters() {
+fn prose_uses_the_whole_column_and_the_column_grows_with_the_window() {
     run(async |cx| {
         let trek = open(cx);
-        trek.window(cx, |window, cx| {
-            let family = gpui_kit::component::ActiveTheme::theme(cx).font_family.clone();
-            let text = "Startup lives in main.rs. It does three things, in order: it parses the flags, it loads the settings, and then it opens the window. The settings file is read once and watched for changes, so editing it while Trek runs applies the new values without a restart.";
-            // Laid out in the transcript's font, as CoreText sets it: the same count at any size.
-            for size in [px(14.5), px(18.)] {
-                let run = gpui_kit::TextRun { len: text.len(), font: gpui_kit::font(family.clone()), color: gpui_kit::black(), background_color: None, underline: None, strikethrough: None };
-                let line = window.text_system().shape_line(text.into(), size, &[run], None);
-                let per_line = crate::md::measure(size) / (line.width / text.chars().count() as f32);
-                assert!((65. ..=78.).contains(&per_line), "{per_line} characters a line at {size:?}");
-            }
+        // A big window: the column at its widest, the prose across all of it, the composer and
+        // the transcript on one edge.
+        cx.simulate_window_resize(trek.window, gpui_kit::size(px(1900.), px(1000.)));
+        let (_, last) = long_answers(&trek, cx);
+        let column = trek.read(cx, |ws, _| ws.column());
+        assert_eq!(column, px(870.));
+        let text = trek.bounds(cx, ("answer-text", last)).expect("the answer");
+        assert!((text.size.width - column).abs() < px(1.), "{text:?}");
+        let composer = trek.bounds(cx, "send").expect("composer");
+        assert!(composer.right() <= text.right() + px(16.) && composer.right() >= text.right() - px(16.), "{composer:?} vs {text:?}");
+        // A larger text size widens it in step.
+        trek.update(cx, |ws, cx| {
+            ws.settings.appearance.transcript_font_size = 17.5;
+            ws.save_settings(cx);
         });
+        trek.render(cx);
+        let wider = trek.bounds(cx, ("answer-text", last)).expect("the answer");
+        assert!((wider.size.width - px(17.5 * crate::md::COLUMN)).abs() < px(1.), "{wider:?}");
+        // A small window: the column takes what's left, with room at the sides.
+        cx.simulate_window_resize(trek.window, gpui_kit::size(px(900.), px(800.)));
+        trek.render(cx);
+        let narrow = trek.bounds(cx, ("answer-text", last)).expect("the answer");
+        assert!(narrow.size.width < px(870.));
+        let view = trek.bounds(cx, ("answer", last)).expect("the row");
+        // (The row itself sits in the scroller's own inset.)
+        let (left, right) = (narrow.left() - view.left(), view.right() - narrow.right());
+        assert!(left >= px(20.) && (left - right).abs() < px(1.), "{narrow:?} in {view:?}");
+    });
+}
+
+#[test]
+fn the_last_line_clears_the_composer_and_jump_to_latest_sits_below_the_text() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (_, last) = long_answers(&trek, cx);
+        // At the live edge: the last answer ends clear above the composer, and no jump button.
+        let text = trek.bounds(cx, ("answer-text", last)).expect("the answer");
+        let composer = trek.bounds(cx, "send").expect("composer");
+        assert!(text.bottom() < composer.top() - px(40.), "{text:?} vs {composer:?}");
+        assert!(!trek.visible(cx, "jump-to-latest"));
+        // Scrolled up: the button shows in the band at the transcript's foot, under every line
+        // still drawn above it.
+        let view = trek.thread_view(cx);
+        view.update(cx, |v, cx| v.scroll_to_top(cx));
+        trek.render(cx);
+        let jump = trek.bounds(cx, "jump-to-latest").expect("jump to latest");
+        // It sits in the band's solid part, under the fade the text above melts into: no line
+        // runs behind it.
+        let band = trek.bounds(cx, "transcript-foot").expect("the band");
+        assert!(jump.top() >= band.top() + px(crate::thread_view::JUMP_FADE) && jump.bottom() <= band.bottom(), "{jump:?} in {band:?}");
+        assert!(jump.bottom() <= composer.top() - px(16.), "in the transcript, above the working bar and composer");
+        // Back down.
+        trek.click(cx, "jump-to-latest");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "jump-to-latest"));
     });
 }
 

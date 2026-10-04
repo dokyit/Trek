@@ -1,6 +1,7 @@
 //! Trek — every agent, one trail.
 
 mod activity;
+mod agent_updates;
 mod assets;
 mod attachments;
 mod basecamp;

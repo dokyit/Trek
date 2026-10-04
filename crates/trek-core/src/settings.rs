@@ -394,11 +394,13 @@ pub struct Updates {
     /// The version whose "What's new" the user has seen. Behind the running version after an
     /// update, until they open it.
     pub seen_notes: String,
+    /// Look for new versions of the agent CLIs (`agent_update`) at launch and every 12 hours.
+    pub check_agents: bool,
 }
 
 impl Default for Updates {
     fn default() -> Self {
-        Self { channel: Channel::Stable, auto_check: true, auto_download: true, feed_url: crate::update::OFFICIAL_FEED.into(), seen_notes: String::new() }
+        Self { channel: Channel::Stable, auto_check: true, auto_download: true, feed_url: crate::update::OFFICIAL_FEED.into(), seen_notes: String::new(), check_agents: true }
     }
 }
 

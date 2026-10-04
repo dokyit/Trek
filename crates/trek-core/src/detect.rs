@@ -67,7 +67,7 @@ pub fn which(binary: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-async fn version_of(path: &Path) -> Option<String> {
+pub(crate) async fn version_of(path: &Path) -> Option<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new(path)

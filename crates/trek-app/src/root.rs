@@ -128,6 +128,25 @@ impl TrekWindow {
         if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
             workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
         }
+        // TREK_OPEN_THREAD=<thread id> opens that thread here at launch, the same way; with
+        // `@<n>`, scrolled to its nth item, as a search hit would (the transcript scrolled up).
+        if let Ok(spec) = std::env::var("TREK_OPEN_THREAD") {
+            let spec = spec.trim().to_string();
+            let (id, at) = match spec.split_once('@') {
+                Some((id, n)) => (id.to_string(), n.parse::<usize>().ok()),
+                None => (spec, None),
+            };
+            workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+            // Once the transcript has loaded and settled at its end.
+            if let Some(n) = at {
+                let ws = workspace.clone();
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                    let _ = ws.update(cx, |ws, cx| ws.open_thread_at(&id, crate::workspace::ItemRef::Position(n), cx));
+                })
+                .detach();
+            }
+        }
         // TREK_OPEN_BASECAMP=1 (or =week) opens Basecamp at launch, the same way.
         if let Ok(which) = std::env::var("TREK_OPEN_BASECAMP") {
             if which.trim() == "week" {
@@ -303,12 +322,20 @@ impl Render for WindowTitle {
     }
 }
 
+/// TREK_WINDOW_SIZE=<width>x<height> (points) sizes the main window at launch, for design review
+/// at sizes a screenshot can't be dragged to.
+fn launch_size() -> Option<Size<Pixels>> {
+    let v = std::env::var("TREK_WINDOW_SIZE").ok()?;
+    let (w, h) = v.trim().split_once('x')?;
+    Some(size(px(w.parse().ok()?), px(h.parse().ok()?)))
+}
+
 /// Open the main window: at launch, and again when something needs it after it was closed.
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        window_bounds: Some(WindowBounds::centered(launch_size().unwrap_or(size(px(1280.), px(820.))), cx)),
         window_min_size: Some(size(px(760.), px(520.))),
         app_id: Some("dev.trek.Trek".into()),
         focus,

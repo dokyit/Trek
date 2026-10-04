@@ -34,6 +34,8 @@ pub struct Sidebar {
     filter_open: bool,
     usage_open: bool,
     updater_open: bool,
+    /// The agent updates card is open.
+    agent_updates_open: bool,
     /// Re-renders once a second while a turn runs, so "Working 12s" counts up, and once a minute
     /// otherwise, so "5m" ages (this view is cached; nothing else would redraw it). The flag is
     /// whether it's the fast one.
@@ -90,6 +92,8 @@ impl Sidebar {
             // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
             updater_open: false,
+            // TREK_OPEN_AGENT_UPDATES=1 opens the agent updates card at launch, the same way.
+            agent_updates_open: std::env::var_os("TREK_OPEN_AGENT_UPDATES").is_some(),
             _clock: None,
             _subscriptions: subscriptions,
         };
@@ -780,6 +784,35 @@ impl Sidebar {
                     .when(whats_new, |el| el.child(div().text_xs().child("What's new"))),
             )
             .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
+        // New agent CLI versions: a quiet pill with how many, only while there's one to install.
+        // Kept while its card is open, so the last update finishing doesn't take the card away.
+        let agent_updates = crate::agent_updates::badge(&self.workspace.read(cx).agent_updates).or(self.agent_updates_open.then_some((0, false))).map(|(count, running)| {
+            let ws = self.workspace.clone();
+            Popover::new("agent-updates-popover")
+                .anchor(Anchor::BottomRight)
+                .appearance(false)
+                .open(self.agent_updates_open)
+                .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                    this.agent_updates_open = *open;
+                    cx.notify();
+                }))
+                .trigger(
+                    ui::Pill::new("agent-updates")
+                        .selected(self.agent_updates_open)
+                        .tooltip(match count {
+                            0 => "Agent updates".to_string(),
+                            1 => "1 agent update".to_string(),
+                            n => format!("{n} agent updates"),
+                        })
+                        .child(if running {
+                            Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
+                        } else {
+                            Icon::new(crate::assets::Lucide::CircleArrowUp).small().text_color(theme.muted_foreground).into_any_element()
+                        })
+                        .when(count > 0, |el| el.child(div().text_xs().child(count.to_string()))),
+                )
+                .content(move |_, _, cx| crate::agent_updates::card(&ws, cx))
+        });
         h_flex()
             .px_3()
             .py_2()
@@ -793,6 +826,7 @@ impl Sidebar {
             .child(usage)
             .child(div().flex_1())
             .when(importing, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground)))
+            .children(agent_updates)
             .child(updater)
     }
 

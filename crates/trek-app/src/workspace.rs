@@ -1,5 +1,6 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
+mod agent_updates;
 mod limits;
 mod orchestrate;
 mod worktrees;
@@ -643,6 +644,8 @@ pub struct Workspace {
     pub route: Route,
     pub draft_prefs: Prefs,
     pub updater: crate::updater::Updater,
+    /// The agent CLIs' versions and updates asked for.
+    pub agent_updates: crate::agent_updates::AgentUpdates,
     pub sidebar_collapsed: bool,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
@@ -807,6 +810,11 @@ impl Workspace {
         if this.settings.updates.auto_check {
             this.check_for_updates(false, cx);
         }
+        this.agent_updates = crate::agent_updates::AgentUpdates::at_launch();
+        if this.agent_updates.mock && this.agent_updates.start_at_launch() {
+            this.update_all_agents(cx);
+        }
+        this.maybe_check_agent_updates(cx);
         this.start_housekeeping(cx);
         let keep = this.settings.snapshots.keep_days;
         cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
@@ -873,6 +881,7 @@ impl Workspace {
             route,
             draft_prefs,
             updater: Default::default(),
+            agent_updates: Default::default(),
             sidebar_collapsed: false,
             settled_open: false,
             search: String::new(),
@@ -1094,6 +1103,12 @@ impl Workspace {
     fn keep(&mut self, task: Task<()>) {
         self.tasks.retain(|t| !t.is_ready());
         self.tasks.push(task);
+    }
+
+    /// The transcript column's widest at the current text size (`md::column`): the transcript,
+    /// its cards, the working bar and the composer line up on it.
+    pub fn column(&self) -> gpui_kit::Pixels {
+        crate::md::column(gpui_kit::px(self.settings.appearance.transcript_font_size()))
     }
 
     /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
@@ -2810,6 +2825,8 @@ impl Workspace {
                 // Sub-agents that reported while it worked wake it now.
                 self.deliver_wakes(id, cx);
             }
+            // An agent update held back for this turn may start now.
+            self.pump_agent_updates(cx);
         }
         // A side chat answers in the panel it was asked in, beside its thread; the inbox doesn't
         // list it, so an alert would lead nowhere. A sub-agent's end goes to its parent, not the
@@ -3745,6 +3762,7 @@ impl Workspace {
                     this.refresh_usage(cx);
                 }
                 this.maybe_check_for_updates(cx);
+                this.maybe_check_agent_updates(cx);
                 this.maybe_restart_for_update(cx);
                 // No redraw otherwise: the views that show times keep their own clocks.
             });

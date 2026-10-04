@@ -2,9 +2,9 @@
 //! small bordered chip with a file icon that opens the file, like T3 Code and Codex do.
 //!
 //! The style reads like T3 Code's: soft grey body text with bold in the theme's full foreground,
-//! running text held to a comfortable measure, and sizes, gaps and list spacing that all follow
-//! the transcript's text size (`Metrics`). Code blocks and tables keep the full column, inline
-//! code stays quiet, and folders in path chips take the project's colour.
+//! running text across the transcript's whole column (`column`), and sizes, gaps and list
+//! spacing that all follow the transcript's text size (`Metrics`). Inline code stays quiet, and
+//! folders in path chips take the project's colour.
 
 use gpui_kit::base::Easing;
 use gpui_kit::base::text::{TextView, TextViewMotion, TextViewStyle};
@@ -15,18 +15,18 @@ use gpui_kit::*;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The longest a line of running text gets, in multiples of the text size: about 72 characters
-/// of prose in the system font (its average advance is about 0.44 of the size), the measure that
-/// reads most easily, at any text size until the transcript's column caps it. Code blocks and
-/// tables keep the full column.
-pub const MEASURE: f32 = 32.;
+/// The transcript column's widest, in multiples of the text size: 870 pt at the default 14.5 pt,
+/// so answers use a big window instead of leaving half of it empty, and a larger text size
+/// widens it in step. Prose, code, tables, cards, the working bar and the composer all share it;
+/// a narrower window takes the column down with it.
+pub const COLUMN: f32 = 60.;
 
 /// Line height of running text.
 pub const LINE_HEIGHT: f32 = 1.65;
 
-/// The widest running text is set at `size`.
-pub fn measure(size: Pixels) -> Pixels {
-    size * MEASURE
+/// The transcript column's widest at text size `size`.
+pub fn column(size: Pixels) -> Pixels {
+    size * COLUMN
 }
 
 /// Sizes and spacing of markdown set at `size`, the transcript's text size: all of it scales with
@@ -34,7 +34,6 @@ pub fn measure(size: Pixels) -> Pixels {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     pub size: Pixels,
-    pub measure: Pixels,
     /// Between paragraphs, code blocks and tables.
     pub paragraph_gap: Pixels,
     /// Between list items.
@@ -54,7 +53,6 @@ impl Metrics {
     pub fn at(size: Pixels) -> Self {
         Self {
             size,
-            measure: measure(size),
             paragraph_gap: size * 0.8,
             list_gap: size * 0.3,
             list_indent: size * 1.25,
@@ -145,7 +143,6 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
         .with_code_background(theme.foreground.opacity(0.035))
         .with_border(line)
         .with_dark(theme.mode.is_dark())
-        .with_measure(m.measure)
         .with_paragraph_gap(rem(m.paragraph_gap))
         .with_list_gap(rem(m.list_gap))
         .with_list_indent(rem(m.list_indent))
@@ -350,7 +347,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 #[cfg(test)]
 mod tests {
-    use super::{Ink, LINE_HEIGHT, MEASURE, Metrics, Tone, in_folder, looks_like_path, measure, path_part};
+    use super::{COLUMN, Ink, LINE_HEIGHT, Metrics, Tone, column, in_folder, looks_like_path, path_part};
     use std::path::Path;
     use gpui_kit::{Hsla, px, rgb};
 
@@ -361,7 +358,7 @@ mod tests {
         let k = 18. / 14.5;
         let close = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| (a - b).abs() < px(0.01);
         for (a, b) in [
-            (base.measure, big.measure),
+            (column(base.size), column(big.size)),
             (base.paragraph_gap, big.paragraph_gap),
             (base.list_gap, big.list_gap),
             (base.list_indent, big.list_indent),
@@ -387,13 +384,14 @@ mod tests {
     }
 
     #[test]
-    fn line_length_follows_the_text_size() {
-        assert_eq!(measure(px(14.5)), px(14.5 * MEASURE));
-        assert_eq!(measure(px(20.)), px(20. * MEASURE));
-        // Clearly narrower than the 760 pt column code and tables use, at every size the setting
-        // offers short of the largest (how many characters that holds: `tests::readability`).
-        assert!(measure(px(14.5)) < px(500.) && measure(px(14.5)) > px(420.));
-        assert!(measure(px(20.)) < px(760.));
+    fn the_column_is_wide_and_follows_the_text_size() {
+        assert_eq!(column(px(14.5)), px(14.5 * COLUMN));
+        // Wide on a big window at the default size, the old 760 pt cap left well behind.
+        assert!(column(px(14.5)) >= px(860.) && column(px(14.5)) <= px(900.), "{:?}", column(px(14.5)));
+        // Every size the setting offers widens it in step.
+        let sizes = [13.5, 14.5, 16., 17.5].map(px);
+        assert!(sizes.windows(2).all(|w| column(w[0]) < column(w[1])));
+        assert!(column(px(13.5)) > px(760.));
     }
 
     // WCAG 2 contrast, with translucent colours composited over the surface they sit on.
