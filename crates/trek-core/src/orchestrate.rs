@@ -268,8 +268,8 @@ pub enum Style {
     /// The agent and its consultants go back and forth until they agree (a few rounds at most).
     Discuss,
     /// A design arena (pstack's "measure a hundred times, cut once"): the agent grounds the
-    /// problem, each consultant drafts a design of its own, a judge on another model family
-    /// scores them blind, and the agent synthesises one.
+    /// problem, each consultant drafts a design of its own, a judge on another model (of another
+    /// family when there's one) scores them blind, and the agent synthesises one.
     Arena,
 }
 
@@ -351,16 +351,26 @@ fn at_high(agent: &AgentId, model: &ModelInfo) -> Consultant {
     Consultant { agent: agent.clone(), model: model.id.clone(), effort }
 }
 
+/// Whether `model` is a small one, by its name: a few billion parameters ("llama-3.2-1b",
+/// "gpt-oss-20b") or a nano/tiny model. Fine for quick jobs; an arena only takes one when there's
+/// nothing else to draft a design or judge.
+pub fn small(model: &ModelInfo) -> bool {
+    let words = format!("{} {}", model.id, model.name).to_lowercase();
+    let billions = words.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.')).filter_map(|w| w.strip_suffix('b')?.parse::<f32>().ok()).reduce(f32::max);
+    billions.is_some_and(|b| b < 30.0) || words.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| matches!(w, "nano" | "tiny"))
+}
+
 /// An arena's candidates when none are picked: one per model family, from every model on offer
 /// (`options`: each agent's default first, then its others, smartest first), as many as can run
 /// at once. Families Trek knows come first (a model it can't place may well be one of them).
-/// Models called straight through an API (often small, local or general-purpose) only make up an
-/// arena that coding agents can't: two designs at least.
+/// Models called straight through an API (often local or general-purpose) only make up an arena
+/// that coding agents can't: two designs at least. With fewer than two families on offer, other
+/// models of one make up the two; small models only when there's nothing else.
 pub fn arena_defaults(options: &[(AgentId, ModelInfo)]) -> Vec<Consultant> {
     let mut seen: Vec<String> = vec![];
-    let mut out = vec![];
+    let mut out: Vec<Consultant> = vec![];
     for (known, direct) in [(true, false), (true, true), (false, false), (false, true)] {
-        let pass = |(a, m): &&(AgentId, ModelInfo)| designs(a, m) && known_family(a, &m.id).is_some() == known && matches!(a, AgentId::Direct(_)) == direct;
+        let pass = |(a, m): &&(AgentId, ModelInfo)| designs(a, m) && !small(m) && known_family(a, &m.id).is_some() == known && matches!(a, AgentId::Direct(_)) == direct;
         for (agent, model) in options.iter().filter(pass) {
             let f = family(agent, &model.id);
             let room = if direct { 2 } else { MAX_RUNNING };
@@ -370,18 +380,54 @@ pub fn arena_defaults(options: &[(AgentId, ModelInfo)]) -> Vec<Consultant> {
             }
         }
     }
+    let (large, tiny): (Vec<_>, Vec<_>) = options.iter().filter(|(a, m)| designs(a, m)).partition(|(_, m)| !small(m));
+    for (agent, model) in large.into_iter().chain(tiny) {
+        if out.len() >= 2 {
+            break;
+        }
+        if !out.iter().any(|c| c.agent == *agent && c.model == model.id) {
+            out.push(at_high(agent, model));
+        }
+    }
     out
 }
 
-/// The judge of an arena: a model of another family than the agent's own (`main`), from
-/// `options` (every model on offer, preferred first): one that isn't a candidate and whose family
-/// Trek knows if there's a choice.
-pub fn pick_judge(main: &str, candidates: &[Consultant], options: &[(AgentId, ModelInfo)]) -> Option<Consultant> {
-    let fit: Vec<&(AgentId, ModelInfo)> = options.iter().filter(|(a, m)| designs(a, m) && family(a, &m.id) != main).collect();
-    let fresh = |(a, m): &&(AgentId, ModelInfo)| !candidates.iter().any(|c| c.agent == *a && c.model == m.id);
-    let known = |(a, m): &&(AgentId, ModelInfo)| known_family(a, &m.id).is_some();
-    let pick = fit.iter().copied().find(|o| fresh(o) && known(o)).or_else(|| fit.iter().copied().find(fresh)).or_else(|| fit.first().copied());
-    pick.map(|(a, m)| at_high(a, m))
+/// Who can judge an arena run by an agent on `main` (agent, model): any model on offer that
+/// works on code but that one, those of another family first.
+pub fn judges(main: (&AgentId, &str), options: &[(AgentId, ModelInfo)]) -> Vec<(AgentId, ModelInfo)> {
+    let own = family(main.0, main.1);
+    let mut fit: Vec<(AgentId, ModelInfo)> = options.iter().filter(|(a, m)| designs(a, m) && !(a == main.0 && m.id == main.1)).cloned().collect();
+    fit.sort_by_key(|(a, m)| family(a, &m.id) == own);
+    fit
+}
+
+/// The judge of an arena run by an agent on `main` (agent, model), from `options` (every model on
+/// offer, preferred first): a model of another family if there's one, else another model of the
+/// same; one that isn't small, isn't a candidate and whose family Trek knows, as far as there's
+/// a choice. `None` when `main` is the only model on offer.
+pub fn pick_judge(main: (&AgentId, &str), candidates: &[Consultant], options: &[(AgentId, ModelInfo)]) -> Option<Consultant> {
+    let own = family(main.0, main.1);
+    let fresh = |a: &AgentId, m: &ModelInfo| !candidates.iter().any(|c| c.agent == *a && c.model == m.id);
+    let best = judges(main, options).into_iter().min_by_key(|(a, m)| (family(a, &m.id) == own, small(m), !fresh(a, m), known_family(a, &m.id).is_none()));
+    best.map(|(a, m)| at_high(&a, &m))
+}
+
+/// Whether an arena can run as picked: two designs at least, no more than run at once, and a
+/// judge. Else what's missing, to tell the user.
+pub fn arena_problem(consult: &Consult) -> Option<String> {
+    if consult.style != Style::Arena {
+        return None;
+    }
+    let n = consult.consultants.len();
+    if n < 2 {
+        Some("An arena needs two designs at least: pick another model to draft one".into())
+    } else if n > MAX_RUNNING {
+        Some(format!("An arena drafts {MAX_RUNNING} designs at most, all at once: drop {}", n - MAX_RUNNING))
+    } else if consult.judge.is_none() {
+        Some("An arena needs a judge on another model than the thread's, and there's none on offer".into())
+    } else {
+        None
+    }
 }
 
 /// Rounds a discussion may take.
@@ -428,7 +474,7 @@ pub fn consult_prompt(text: &str, consult: &Consult, name: impl Fn(&Consultant) 
             ));
             let judge = match &consult.judge {
                 Some(j) => format!("the judge below, with mode \"advise\", wait true and the title \"Judge the designs\":\n{}", line(j)),
-                None => "a judge on a model of another family than yours (`list_models` has them), with mode \"advise\", wait true and the title \"Judge the designs\"".into(),
+                None => "a judge on another model than yours, of another family if there's one (`list_models` has them), with mode \"advise\", wait true and the title \"Judge the designs\"".into(),
             };
             steps.push(format!(
                 "3. Cross-judge: call `delegate_task` for {judge}\n   Give it the brief and every design package, labelled by letter without saying which model wrote which, and ask it to score each from 1 to 5 on fit with the call sites, depth of the interface, simplicity, how it fails, and fit with the codebase as it is; then to name the strongest and what each of the others does better."
@@ -666,19 +712,51 @@ mod tests {
         // An API model of a family of its own only makes up an arena of fewer than two.
         let keys: Vec<String> = arena_defaults(&options[..6]).iter().map(Consultant::key).collect();
         assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "codex/gpt-6-astra/high"]);
+        // A small model is no designer: an API model of a family of its own makes up two.
         let keys: Vec<String> = arena_defaults(&options[1..6]).iter().map(Consultant::key).collect();
-        assert_eq!(keys, ["codex/gpt-6-astra/high", "direct:openrouter/meta-llama/llama-3.2-1b-instruct/high"]);
-        assert_eq!(pick_judge("anthropic", &[], &options[3..5]).map(|j| j.key()).as_deref(), Some("direct:local/house-coder/high"), "never the router");
+        assert_eq!(keys, ["codex/gpt-6-astra/high", "direct:local/house-coder/high"]);
+        let opencode_llama = (AgentId::OpenCode, ModelInfo::new("openrouter/meta-llama/llama-3.2-1b-instruct", "OpenRouter/Llama 3.2 1B Instruct", 0, &[]));
+        let mut with_llama = options.clone();
+        with_llama.insert(2, opencode_llama.clone());
+        let keys: Vec<String> = arena_defaults(&with_llama).iter().map(Consultant::key).collect();
+        assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "codex/gpt-6-astra/high", "acp:github-copilot/gemini-3-pro/high", "opencode/opencode/grok-4.6/high"], "not the 1B model");
+        assert!(small(&opencode_llama.1) && small(&model("gpt-oss-20b")) && small(&model("gpt-5-nano")));
+        assert!(!small(&model("qwen3-coder-480b-a35b")) && !small(&model("qwen3-30b-a3b")) && !small(&model("gpt-5.6-luna")) && !small(&model("claude-opus-5-5")));
+        let opus = (&AgentId::ClaudeCode, "claude-opus-5-5");
+        assert_eq!(pick_judge(opus, &[], &options[3..5]).map(|j| j.key()).as_deref(), Some("direct:local/house-coder/high"), "never the router");
         // The judge: another family than the main agent's, not a candidate when there's a choice.
         let options = vec![(AgentId::ClaudeCode, model("claude-opus-5-5")), (AgentId::Codex, model("gpt-5.6-sol")), (AgentId::Codex, model("gpt-5.6-luna"))];
-        let judge = pick_judge("anthropic", &picked, &options).unwrap();
+        let judge = pick_judge(opus, &picked, &options).unwrap();
         assert_eq!(judge.key(), "codex/gpt-5.6-luna/high");
-        let judge = pick_judge("anthropic", &picked, &options[..2]).unwrap();
+        let judge = pick_judge(opus, &picked, &options[..2]).unwrap();
         assert_eq!(judge.key(), "codex/gpt-5.6-sol/high", "a candidate, when nothing else is of another family");
-        assert_eq!(pick_judge("anthropic", &picked, &options[..1]), None);
+        assert_eq!(pick_judge(opus, &picked, &options[..1]), None, "the thread's own model is all there is");
+        // One family on offer: two of its models design, and a third (else the other) judges.
+        let claude = vec![(AgentId::ClaudeCode, model("claude-opus-5-5")), (AgentId::ClaudeCode, model("claude-sonnet-5-5")), (AgentId::ClaudeCode, model("claude-haiku-4-5"))];
+        let picked = arena_defaults(&claude);
+        let keys: Vec<String> = picked.iter().map(Consultant::key).collect();
+        assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "claude-code/claude-sonnet-5-5/high"]);
+        assert_eq!(pick_judge(opus, &picked, &claude).map(|j| j.key()).as_deref(), Some("claude-code/claude-haiku-4-5/high"));
+        assert_eq!(pick_judge(opus, &picked, &claude[..2]).map(|j| j.key()).as_deref(), Some("claude-code/claude-sonnet-5-5/high"));
+        let judges: Vec<String> = judges(opus, &[claude[1].clone(), (AgentId::Codex, model("gpt-5.6-sol")), claude[0].clone()]).into_iter().map(|(_, m)| m.id).collect();
+        assert_eq!(judges, ["gpt-5.6-sol", "claude-sonnet-5-5"], "another family first; never the thread's own model");
         // Efforts a model doesn't take are clamped.
         let low_only = ModelInfo::new("glm-5", "GLM 5", 0, &[Effort::Low]);
         assert_eq!(arena_defaults(&[(AgentId::OpenCode, low_only)])[0].effort, Effort::Low);
+    }
+
+    #[test]
+    fn an_arena_needs_two_designs_no_more_than_run_at_once_and_a_judge() {
+        let c = |m: &str| Consultant { agent: AgentId::Codex, model: m.into(), effort: Effort::High };
+        let mut arena = Consult { consultants: vec![c("a")], style: Style::Arena, implement: true, judge: Some(c("j")) };
+        assert!(arena_problem(&arena).is_some_and(|p| p.contains("two designs")));
+        assert_eq!(arena_problem(&Consult { style: Style::Advise, ..arena.clone() }), None, "only an arena");
+        arena.consultants = ["a", "b", "c", "d", "e"].map(c).to_vec();
+        assert!(arena_problem(&arena).is_some_and(|p| p.contains("drop 1")));
+        arena.consultants.truncate(2);
+        assert_eq!(arena_problem(&arena), None);
+        arena.judge = None;
+        assert!(arena_problem(&arena).is_some_and(|p| p.contains("judge")));
     }
 
     #[test]
@@ -700,7 +778,7 @@ mod tests {
         // No judge named: the agent picks one of another family; report only.
         let open = Consult { judge: None, implement: false, ..consult };
         let text = consult_prompt("x", &open, |c| c.model.clone());
-        assert!(text.contains("another family than yours") && text.contains("don't change any files"), "{text}");
+        assert!(text.contains("another model than yours, of another family if there's one") && text.contains("don't change any files"), "{text}");
         assert_eq!(split_consult(&text).1, Some(open));
     }
 

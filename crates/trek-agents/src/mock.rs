@@ -31,7 +31,9 @@
 //! | `mock:dev`                   | leaves a dev server and a quiet test watcher running          |
 //! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
 //! |                              | token (or, with `plan`, on a Claude Max plan)                 |
-//! | `mock:verify`                | runs the project's verification CLI, as Trek told it          |
+//! | `mock:verify` [`broken`]     | changes `src/notes.rs` (for real; `broken` leaves a `todo!()`  |
+//! |                              | in it) and runs the project's verification CLI, as Trek told |
+//! |                              | it (for real: the CLI the mock sets up fails on the `todo!()`) |
 //! | `mock:design` / `mock:judge` | an arena's design package, and a judge's scores               |
 //!
 //! Messages Trek dresses up are played as asked, whatever their words: a request to restate
@@ -171,8 +173,8 @@ enum Script {
     SetupVerification,
     /// Bring it up to date (`maintain-verification-skill`).
     MaintainVerification,
-    /// Run the verification CLI Trek named.
-    Verify,
+    /// Change a file, then run the verification CLI Trek named; `broken`: a change it fails on.
+    Verify { broken: bool },
 }
 
 impl Script {
@@ -219,7 +221,7 @@ impl Script {
                 "watch" if w.starts_with("mock:") => Script::Watch(duration_after(i).unwrap_or(Duration::from_secs(3))),
                 "dev" if w.starts_with("mock:") => Script::Dev,
                 "cost" if w.starts_with("mock:") => Script::Cost { plan: words.get(i + 1).is_some_and(|w| w == "plan") },
-                "verify" if w.starts_with("mock:") => Script::Verify,
+                "verify" if w.starts_with("mock:") => Script::Verify { broken: words.get(i + 1).is_some_and(|w| w == "broken") },
                 "design" if w.starts_with("mock:") => Script::Design,
                 "judge" if w.starts_with("mock:") => Script::Judge,
                 "error" => Script::Error,
@@ -270,7 +272,7 @@ pub fn title(request: &str) -> String {
         Script::Arena | Script::Design | Script::Judge => "Design the rate limiter",
         Script::SetupVerification => "Set up verification",
         Script::MaintainVerification => "Maintain verification",
-        Script::Verify => "Verify the change",
+        Script::Verify { .. } => "Verify the change",
     }
     .into()
 }
@@ -628,7 +630,7 @@ impl Session {
             Script::Judge => self.judge(text).await?,
             Script::SetupVerification => self.setup_verification().await?,
             Script::MaintainVerification => self.maintain_verification().await?,
-            Script::Verify => self.verify().await?,
+            Script::Verify { broken } => self.verify(broken).await?,
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -1065,7 +1067,7 @@ impl Session {
         self.tool("Read", "README.md", "# The app\n\nRun it with `cargo run`.", 120).await?;
         let files: [(&str, String, bool); 4] = [
             ("SKILL.md", format!("---\nname: verify-app\ndescription: Drive, debug and verify the app. Use it to check any change works before calling it done.\nmetadata:\n  trek: verification\n  cli: {cli}\n---\n\n# Verify the app\n\nRun `{cli} check` before calling a change done. `{cli} --help` lists every command.\n\nThe Feature Map is in references/features/README.md.\n"), false),
-            ("scripts/app", "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check) echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n".to_string(), true),
+            ("scripts/app", "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check)\n    if grep -qs 'todo!()' src/notes.rs; then echo '{\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}'; exit 1; fi\n    echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n".to_string(), true),
             ("references/features/README.md", "# Feature Map\n\n- [Notes](notes.md): write and find notes.\n".to_string(), false),
             ("references/features/notes.md", "# Notes\n\nWrite and find notes. Reach it from the sidebar's Notes item, or `app open notes`.\n".to_string(), false),
         ];
@@ -1086,16 +1088,20 @@ impl Session {
             self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
             self.pause(paced(60)).await?;
         }
-        self.tool("Run command", &format!("{cli} check --json"), "{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}", 200).await?;
-        self.say(&format!("The verification skill is in `{}`: a CLI (`{cli}`) with `check`, `open` and `screenshot`, and a Feature Map. `check` passes.", Self::VERIFY_SKILL)).await
+        let passed = self.run(&format!("{cli} check --json")).await?;
+        let check = if passed { "`check` passes." } else { "`check` fails for now: see its output above." };
+        self.say(&format!("The verification skill is in `{}`: a CLI (`{cli}`) with `check`, `open` and `screenshot`, and a Feature Map. {check}", Self::VERIFY_SKILL)).await
     }
 
     /// Touch the verification skill up: run it, and add what the Feature Map lacks.
     async fn maintain_verification(&mut self) -> Step {
-        let map = self.cwd.join(Self::VERIFY_SKILL).join("references/features/README.md");
-        let Ok(before) = std::fs::read_to_string(&map) else { return self.say("There's no verification skill here to maintain yet.").await };
+        let skill = self.cwd.join(Self::VERIFY_SKILL);
+        let map = skill.join("references/features/README.md");
+        let read = std::fs::read_to_string(skill.join("SKILL.md")).unwrap_or_else(|e| format!("Couldn't read it: {e}"));
+        self.tool("Read", &skill.join("SKILL.md").display().to_string(), &read, 100).await?;
+        let Ok(before) = std::fs::read_to_string(&map) else { return self.say("There's no verification skill here to maintain yet: it has no Feature Map.").await };
         let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
-        self.tool("Run command", &format!("{cli} check --json"), "{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}", 150).await?;
+        let passed = self.run(&format!("{cli} check --json")).await?;
         let line = "- [Settings](settings.md): the app's preferences.\n";
         if !before.contains(line) {
             let id = self.id("tool");
@@ -1105,17 +1111,46 @@ impl Session {
             self.emit(AgentEvent::ToolLines { id: id.clone(), added: 1, removed: 0 }).await?;
             self.emit(AgentEvent::ToolFinished { id, output: "Applied 1 edit".into(), ok: true }).await?;
         }
-        self.say("The verification skill is up to date: `check` passes, and the Feature Map has the Settings screen now.").await
+        let check = if passed { "`check` passes" } else { "`check` fails on the app as it is (see above)" };
+        self.say(&format!("The verification skill is up to date: {check}, and the Feature Map has the Settings screen now.")).await
     }
 
-    /// Run the verification CLI Trek named for the project (the mock doesn't run anything for
-    /// real here: the output is what a passing check prints).
-    async fn verify(&mut self) -> Step {
+    /// Change `src/notes.rs` in the session's folder (`broken`: leaving a `todo!()` in it), then
+    /// check the change with the verification CLI Trek named for the project. Both for real.
+    async fn verify(&mut self, broken: bool) -> Step {
         let cli = self.instructions.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
         let Some(cli) = cli else { return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await };
-        self.edit("src/notes.rs", "Applied 1 edit to src/notes.rs", 120, (6, 2)).await?;
-        self.tool("Run command", &format!("{cli} check --json"), "{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}", 200).await?;
-        self.say(&format!("Changed `src/notes.rs` and verified it with `{cli} check`: build, launch and the smoke run pass.")).await
+        let body = if broken { "pub fn load() -> Vec<String> {\n    todo!()\n}\n" } else { "pub fn load() -> Vec<String> {\n    Vec::new()\n}\n" };
+        let path = self.cwd.join("src/notes.rs");
+        let id = self.id("tool");
+        self.tool_start(&id, "Edit", "src/notes.rs").await?;
+        let wrote = std::fs::create_dir_all(self.cwd.join("src")).and_then(|_| std::fs::write(&path, body));
+        self.emit(AgentEvent::ToolLines { id: id.clone(), added: 3, removed: 0 }).await?;
+        let (output, ok) = match wrote {
+            Ok(()) => ("Applied 1 edit to src/notes.rs".to_string(), true),
+            Err(e) => (format!("Couldn't write src/notes.rs: {e}"), false),
+        };
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        if self.run(&format!("{cli} check --json")).await? {
+            self.say(&format!("Changed `src/notes.rs` and verified it with `{cli} check`: build, launch and the smoke run pass.")).await
+        } else {
+            self.say(&format!("Changed `src/notes.rs`, but `{cli} check` fails: it's not done until that passes.")).await
+        }
+    }
+
+    /// Run `command` in the session's folder, for real, as a command row with what it printed.
+    /// Whether it succeeded.
+    async fn run(&mut self, command: &str) -> Step<bool> {
+        let id = self.id("tool");
+        self.tool_start(&id, "Run command", command).await?;
+        let out = tokio::process::Command::new("/bin/sh").arg("-c").arg(command).current_dir(&self.cwd).stdin(std::process::Stdio::null()).output().await;
+        let (output, ok) = match out {
+            Ok(o) => (format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim_end().to_string(), o.status.success()),
+            Err(e) => (format!("Couldn't run it: {e}"), false),
+        };
+        self.pause(paced(100)).await?;
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        Ok(ok)
     }
 
     /// Add a line to `NOTES.md` in the session's folder: a real change, for worktree reviews.
@@ -1559,7 +1594,8 @@ mod tests {
         assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });
         assert_eq!(Script::parse("consult a friend", false), Script::Answer);
         assert_eq!(Script::parse("[Trek] Sub-agent “x” failed: error", false), Script::Wake);
-        assert_eq!(Script::parse("mock:verify the notes", false), Script::Verify);
+        assert_eq!(Script::parse("mock:verify the notes", false), Script::Verify { broken: false });
+        assert_eq!(Script::parse("mock:verify broken notes", false), Script::Verify { broken: true });
         assert_eq!(Script::parse("mock:design an error budget", false), Script::Design, "the first keyword decides");
         assert_eq!(Script::parse("mock:judge these: Design A has an error path", false), Script::Judge);
     }
@@ -1806,6 +1842,14 @@ mod tests {
                 events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { title, detail, .. } if title == "Run command" && detail == "./.agents/skills/verify-app/scripts/app check --json")),
                 "{events:?}"
             );
+            let ran = |events: &[AgentEvent]| events.iter().rev().find_map(|e| if let AgentEvent::ToolFinished { output, ok, .. } = e { Some((output.clone(), *ok)) } else { None }).unwrap();
+            assert_eq!(ran(&events), ("{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}".to_string(), true), "what the CLI printed");
+            // A change the CLI catches: the run fails, and the mock says so.
+            m.prompt("mock:verify broken").await;
+            let events = m.turn().await;
+            let (output, ok) = ran(&events);
+            assert!(!ok && output.contains("loading notes panics"), "{output}");
+            assert!(text(&events).contains("`./.agents/skills/verify-app/scripts/app check` fails"));
             // Without a skill, it says so.
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("mock:verify").await;

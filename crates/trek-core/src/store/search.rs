@@ -62,20 +62,6 @@ CREATE INDEX import_docs_thread ON import_docs(thread_id);
 -- Which imported transcripts are indexed, as of the thread's updated_at. complete = 0: skipped (too big).
 CREATE TABLE import_indexed (thread_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, complete INTEGER NOT NULL);
 
--- 'defer_items' is set only inside a transaction that leaves its rows to backfill_search.
-CREATE TRIGGER items_search_insert AFTER INSERT ON items
-WHEN json_extract(new.data, '$.kind') IN ('user', 'assistant') AND NOT EXISTS (SELECT 1 FROM search_state WHERE key = 'defer_items') BEGIN
-  INSERT INTO item_search (rowid, body) VALUES (new.pk, substr(json_extract(new.data, '$.text'), 1, {max}));
-END;
-CREATE TRIGGER items_search_update AFTER UPDATE OF data ON items BEGIN
-  DELETE FROM item_search WHERE rowid = old.pk;
-  INSERT INTO item_search (rowid, body)
-    SELECT new.pk, substr(json_extract(new.data, '$.text'), 1, {max}) WHERE json_extract(new.data, '$.kind') IN ('user', 'assistant');
-END;
-CREATE TRIGGER items_search_delete AFTER DELETE ON items BEGIN
-  DELETE FROM item_search WHERE rowid = old.pk;
-END;
-
 -- No conflict clauses in here: an outer INSERT OR REPLACE would override them.
 CREATE TRIGGER threads_search_insert AFTER INSERT ON threads BEGIN
   INSERT INTO title_docs (thread_id) SELECT new.id WHERE NOT EXISTS (SELECT 1 FROM title_docs WHERE thread_id = new.id);
@@ -96,14 +82,64 @@ CREATE TRIGGER threads_search_delete AFTER DELETE ON threads BEGIN
 END;
 "#;
 
+/// The triggers that index stored messages as they're written.
+const ITEM_TRIGGERS: &str = r#"
+DROP TRIGGER IF EXISTS items_search_insert;
+DROP TRIGGER IF EXISTS items_search_update;
+DROP TRIGGER IF EXISTS items_search_delete;
+-- 'defer_items' is set only inside a transaction that leaves its rows to backfill_search.
+CREATE TRIGGER items_search_insert AFTER INSERT ON items
+WHEN json_extract(new.data, '$.kind') IN ('user', 'assistant') AND NOT EXISTS (SELECT 1 FROM search_state WHERE key = 'defer_items') BEGIN
+  INSERT INTO item_search (rowid, body) VALUES (new.pk, {new_body});
+END;
+CREATE TRIGGER items_search_update AFTER UPDATE OF data ON items BEGIN
+  DELETE FROM item_search WHERE rowid = old.pk;
+  INSERT INTO item_search (rowid, body)
+    SELECT new.pk, {new_body} WHERE json_extract(new.data, '$.kind') IN ('user', 'assistant');
+END;
+CREATE TRIGGER items_search_delete AFTER DELETE ON items BEGIN
+  DELETE FROM item_search WHERE rowid = old.pk;
+END;
+"#;
+
+/// Bump when `ITEM_TRIGGERS` (or `body`) changes: the triggers are made again, and the rows
+/// it changes for indexed again.
+const ITEM_TRIGGERS_VERSION: i64 = 2;
+
+/// What's indexed of an `items` row whose data is `data` (`new.data` in a trigger): a message's
+/// text, a user's message as they wrote it (`restate::as_written`: not what Trek added for the
+/// agent, a consult or a request to restate it, which start "\n\n<trek-"), up to
+/// `MAX_INDEXED_CHARS`. SQL every Trek build's SQLite runs: older builds write through these
+/// triggers too.
+fn body(data: &str) -> String {
+    let text = format!("json_extract({data}, '$.text')");
+    let added = format!("instr({text}, char(10) || char(10) || '<trek-')");
+    format!("substr(CASE WHEN json_extract({data}, '$.kind') = 'user' AND {added} > 0 THEN substr({text}, 1, {added} - 1) ELSE {text} END, 1, {MAX_INDEXED_CHARS})")
+}
+
+/// Make the item triggers, and index again the stored messages they'd index differently: user
+/// messages with something Trek added (rare; a scan of the raw rows finds them).
+fn ensure_item_triggers(conn: &Connection) -> rusqlite::Result<()> {
+    if state(conn, "item_triggers")? >= ITEM_TRIGGERS_VERSION {
+        return Ok(());
+    }
+    conn.execute_batch(&ITEM_TRIGGERS.replace("{new_body}", &body("new.data")))?;
+    let added = "instr(data, '<trek-') > 0 AND json_extract(data, '$.kind') = 'user'";
+    conn.execute(&format!("DELETE FROM item_search WHERE rowid IN (SELECT pk FROM items WHERE {added})"), [])?;
+    conn.execute(&format!("INSERT INTO item_search (rowid, body) SELECT pk, {} FROM items WHERE {added}", body("data")), [])?;
+    set_state(conn, "item_triggers", ITEM_TRIGGERS_VERSION)
+}
+
 /// Create (or rebuild) the index. Cheap: rows that already exist are left to `backfill_search`.
 pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS search_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")?;
     let version: Option<i64> = conn.query_row("SELECT value FROM search_state WHERE key = 'version'", [], |r| r.get(0)).optional()?;
     if version == Some(VERSION) {
-        return Ok(());
+        return ensure_item_triggers(conn);
     }
-    conn.execute_batch(&SCHEMA.replace("{max}", &MAX_INDEXED_CHARS.to_string()))?;
+    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(&ITEM_TRIGGERS.replace("{new_body}", &body("new.data")))?;
+    set_state(conn, "item_triggers", ITEM_TRIGGERS_VERSION)?;
     // Keys for today's threads (cheap); their titles are indexed with the rest.
     conn.execute_batch("INSERT INTO title_docs (thread_id) SELECT id FROM threads ORDER BY rowid")?;
     // Everything up to today's last row is backfilled; the triggers cover what comes after.
@@ -263,6 +299,7 @@ pub struct ImportedToIndex {
 fn messages(items: &[Item]) -> impl Iterator<Item = (usize, &str)> {
     items.iter().enumerate().filter_map(|(pos, item)| match item {
         Item::User { text, .. } | Item::Assistant { text } if !text.trim().is_empty() => {
+            let text = if matches!(item, Item::User { .. }) { crate::restate::as_written(text) } else { text };
             let end = text.char_indices().nth(MAX_INDEXED_CHARS).map_or(text.len(), |(i, _)| i);
             Some((pos, &text[..end]))
         }
@@ -323,8 +360,9 @@ impl Store {
             &tx,
             "items",
             &format!(
-                "SELECT pk, substr(json_extract(data, '$.text'), 1, {MAX_INDEXED_CHARS}) FROM items
-                 WHERE pk > ?1 AND pk <= ?2 AND json_extract(data, '$.kind') IN ('user', 'assistant') ORDER BY pk LIMIT ?3"
+                "SELECT pk, {} FROM items
+                 WHERE pk > ?1 AND pk <= ?2 AND json_extract(data, '$.kind') IN ('user', 'assistant') ORDER BY pk LIMIT ?3",
+                body("data")
             ),
             "item_search",
             "body",
@@ -645,6 +683,39 @@ mod tests {
         assert_eq!((hit.thread_id.as_str(), hit.title.as_str()), (t.id.as_str(), "Fix __init__.py and **kwargs in `main`"));
         assert_eq!(hit.snippet, hit.title);
         assert_eq!(marked(hit), ["Fix"]);
+    }
+
+    #[test]
+    fn messages_are_found_as_written_not_by_what_trek_added() {
+        let s = Store::in_memory().unwrap();
+        let t = thread(&s, "Chat");
+        let consult = crate::orchestrate::Consult {
+            consultants: vec![crate::orchestrate::Consultant { agent: AgentId::Codex, model: "gpt-5.6-sol".into(), effort: Effort::High }],
+            ..Default::default()
+        };
+        let asked = crate::orchestrate::consult_prompt(&crate::restate::with_restate("Speed up the tarmac loader"), &consult, |_| "Sol".into());
+        let mut tr = Transcript::default();
+        tr.push(user(&asked));
+        tr.push(said("I'll restate it in plain English first."));
+        s.save_transcript(&t.id, &mut tr).unwrap();
+        assert_eq!(s.search("tarmac", 5).unwrap().len(), 1);
+        assert!(s.search("delegate_task", 5).unwrap().is_empty(), "the consult isn't searched");
+        let plain = s.search("plain english", 5).unwrap();
+        assert_eq!(plain.iter().map(|h| h.position).collect::<Vec<_>>(), [Some(1)], "only what the agent said");
+        // An index made before: the messages Trek added to are indexed again as written.
+        s.with(|c| {
+            c.execute("DELETE FROM item_search", [])?;
+            c.execute("INSERT INTO item_search (rowid, body) SELECT pk, json_extract(data, '$.text') FROM items", [])?;
+            set_state(c, "item_triggers", 1)?;
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM item_search WHERE item_search MATCH 'delegate_task'", [], |r| r.get::<_, i64>(0))?, 1);
+            ensure_schema(c)?;
+            assert_eq!(c.query_row("SELECT COUNT(*) FROM item_search WHERE item_search MATCH 'delegate_task'", [], |r| r.get::<_, i64>(0))?, 0);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(s.search("tarmac", 5).unwrap().len(), 1);
+        // Imported transcripts are read the same way.
+        assert_eq!(messages(&[user(&asked)]).next().map(|(_, t)| t), Some("Speed up the tarmac loader"));
     }
 
     #[test]

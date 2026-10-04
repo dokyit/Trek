@@ -185,6 +185,28 @@ fn an_arena_drafts_no_more_designs_than_run_at_once() {
         trek.press(cx, "enter");
         let picked = cx.read(|cx| trek.root.read(cx).composer.read(cx).consultants()).0;
         assert_eq!(picked.len(), trek_core::orchestrate::MAX_RUNNING, "{picked:?}");
+
+        // Five picked for advice, then an arena: the first four draft.
+        let clear = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| trek.root.read(cx).composer.clone().update(cx, |c, cx| c.set_text("", window, cx)));
+        trek.press(cx, "escape");
+        clear(&trek, cx);
+        trek.type_text(cx, "/consult advise swift low, swift high, deep low, deep high, relay");
+        trek.press(cx, "enter");
+        assert_eq!(cx.read(|cx| trek.root.read(cx).composer.read(cx).consultants()).0.len(), 5);
+        trek.press(cx, "escape");
+        clear(&trek, cx);
+        let id = trek.send(cx, "/consult arena: Rate-limit the webhooks");
+        let consult = split_consult(&last_message(&trek, cx, &id)).1.expect("an arena");
+        assert_eq!((consult.style, consult.consultants.len()), (Style::Arena, trek_core::orchestrate::MAX_RUNNING));
+
+        // One design isn't an arena: the message stays in the composer, unsent.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        clear(&trek, cx);
+        let one = "/consult arena relay: Cache the avatars";
+        trek.type_text(cx, one);
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), one);
+        assert!(trek.read(cx, |ws, _| ws.threads.iter().all(|t| !t.title.contains("avatars"))), "not sent");
     });
 }
 
@@ -201,6 +223,7 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
         std::fs::write(skill.join("SKILL.md"), "---\nname: verify-app\nmetadata:\n  trek: verification\n  cli: ./.agents/skills/verify-app/scripts/app\n---\n").unwrap();
         std::fs::write(skill.join("references/features/README.md"), "# Features\n").unwrap();
         std::fs::write(skill.join("scripts/app"), "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(skill.join("scripts/app"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
         assert!(trek.read(cx, |ws, _| ws.verification(&project)).is_some());
 
@@ -272,6 +295,18 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         trek.wait_done(cx, &id, RunState::Idle).await;
         trek.render(cx);
         assert!(!trek.visible(cx, ("verified", last_end(&trek, cx, &id))));
+        // A change the CLI catches: its run really fails, and the turn says so.
+        trek.send(cx, "mock:verify broken");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.render(cx);
+        let end = last_end(&trek, cx, &id);
+        assert!(trek.visible(cx, ("verify-failed", end)) && !trek.visible(cx, ("verified", end)));
+        assert!(trek.answers(cx, &id).contains("`./.agents/skills/verify-app/scripts/app check` fails"));
+        // Fixed, it passes again.
+        trek.send(cx, "mock:verify the fix");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.render(cx);
+        assert!(trek.visible(cx, ("verified", last_end(&trek, cx, &id))));
 
         // Maintain runs the maintain guide, and counts as maintenance.
         trek.update(cx, |ws, cx| ws.open_project_settings(Some(pid.clone()), cx));
@@ -284,8 +319,9 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         assert!(v.maintained_at.unwrap() >= first);
         assert!(std::fs::read_to_string(std::path::Path::new(&v.skill).join("references/features/README.md")).unwrap().contains("settings.md"));
 
-        // A Maintain run counts once it has run or changed the skill: one that didn't (here it
-        // found no Feature Map to work on) doesn't, nor does a later turn that leaves it alone.
+        // A Maintain run counts once it has changed the skill or run its CLI: one that only read
+        // it (here it found no Feature Map to work on) doesn't, nor does a later turn that leaves
+        // it alone.
         let old = trek_core::store::now_ms() - 3 * trek_core::verification::WEEK_MS;
         let aged = std::process::Command::new("find").arg(&v.skill).args(["-exec", "touch", "-t", "202001010000", "{}", "+"]).status().unwrap();
         assert!(aged.success());
@@ -327,11 +363,25 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         assert_eq!(*toasts.borrow(), [(format!("{name}'s verification skill was last maintained 7 days ago."), true)]);
         assert_eq!(trek.read(cx, |ws, _| ws.verification(&project).and_then(|v| v.reminded_at)), Some(now));
 
-        // A skill that's gone is forgotten.
-        std::fs::remove_dir_all(&v.skill).unwrap();
+        // A skill that's gone is forgotten; back (a branch with it checked out again), it has the
+        // user's choices again.
+        let kept = trek.read(cx, |ws, _| ws.verification(&project)).unwrap();
+        let aside = project.with_extension("skill-aside");
+        std::fs::rename(&v.skill, &aside).unwrap();
         trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
         assert_eq!(trek.read(cx, |ws, _| ws.verification(&project)), None);
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(SettingsPage::Project));
+        std::fs::rename(&aside, &v.skill).unwrap();
+        trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
+        cx.run_until_parked();
+        let back = trek.read(cx, |ws, _| ws.verification(&project)).expect("found again");
+        assert_eq!((back.remind_weekly, back.maintained_at, back.reminded_at), (true, kept.maintained_at, kept.reminded_at));
+        // A project folder that isn't there (a drive not mounted) says nothing about its skill.
+        let away = project.with_extension("unmounted");
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&away, |p| p.verification = Some(kept.clone()), cx));
+        trek.update(cx, |ws, cx| ws.refresh_verification(&away, cx));
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.verification(&away)), Some(kept));
     });
 }
 
@@ -413,4 +463,94 @@ fn live_restate_first_and_project_notes() {
         assert!(answer.contains("notesctl") && answer.contains("create-verification-skill"), "{answer}");
         assert!(!asked_any.get(), "reading the guide needed no permission");
     });
+}
+
+/// A design arena with real agents: Claude Code (claude-haiku-4-5, low effort) grounds a tiny
+/// problem and runs the arena through `delegate_task`, with designs from itself and Codex
+/// (gpt-5.6-luna, low) and Codex judging; then it reports. Not run by default (a handful of tiny
+/// turns), and needs `trek-mcp` next to the test binary:
+/// `cargo build -p trek-mcp && cp target/debug/trek-mcp target/debug/deps/ &&
+/// TREK_LIVE_AGENT=arena cargo test -p trek-app live_arena -- --ignored`. Works in
+/// /tmp/trek-pstack-e2e; remove ~/.claude/projects/-private-tmp-trek-pstack-e2e and the Codex
+/// sessions whose cwd is that folder afterwards.
+#[test]
+#[ignore = "live: runs real agents"]
+fn live_arena_with_real_agents() {
+    use std::time::{Duration, Instant};
+    use trek_core::orchestrate::{Consult, Consultant, consult_prompt};
+    use trek_core::{AgentId, Effort};
+    run(async |cx| {
+        let trek = super::harness::open_with(cx, |s| {
+            s.general.default_agent = AgentId::ClaudeCode.key();
+            s.general.default_model = Some("claude-haiku-4-5".into());
+            s.general.default_effort = Effort::Low;
+        });
+        let agents = trek_core::runtime().block_on(trek_core::detect::detect_all());
+        trek.update(cx, |ws, _| ws.agents = agents);
+        assert!(trek.read(cx, |ws, _| ws.consult_unavailable(&AgentId::ClaudeCode)).is_none(), "trek-mcp next to the test binary, Claude Code and Codex installed");
+        let project = std::path::PathBuf::from("/tmp/trek-pstack-e2e");
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "//! Timeouts for a tiny job runner.\n\npub struct Job {\n    pub name: String,\n}\n\npub fn run(job: &Job) {\n    println!(\"running {}\", job.name);\n}\n").unwrap();
+        trek.update(cx, |ws, cx| {
+            ws.store.ensure_project(&project).unwrap();
+            ws.reload(cx);
+            ws.navigate(Route::Draft { project: Some(project.clone()) }, cx);
+        });
+        let low = |agent: AgentId, model: &str| Consultant { agent, model: model.into(), effort: Effort::Low };
+        let consult = Consult {
+            consultants: vec![low(AgentId::ClaudeCode, "claude-haiku-4-5"), low(AgentId::Codex, "gpt-5.6-luna")],
+            style: Style::Arena,
+            implement: false,
+            judge: Some(low(AgentId::Codex, "gpt-5.6-luna")),
+        };
+        let ask = "Add a per-job timeout to src/lib.rs's runner. Keep every design package under 25 lines.";
+        trek.update(cx, |ws, cx| ws.send(consult_prompt(ask, &consult, |c| c.model.clone()), vec![], cx));
+        let id = trek.thread_id(cx);
+        let deadline = Instant::now() + Duration::from_secs(600);
+        loop {
+            cx.run_until_parked();
+            // The orchestration tools, and anything else it asks for, are allowed: it reports only.
+            for t in std::iter::once(id.clone()).chain(trek.read(cx, |ws, _| ws.children(&id).into_iter().map(|t| t.id.clone()).collect::<Vec<_>>())) {
+                if let Some(rid) = trek.read(cx, |ws, _| ws.pending_request(&t).map(|p| p.request_id.clone())) {
+                    trek.update(cx, |ws, cx| ws.respond(&t, &rid, trek_agents::Decision::Allow, cx));
+                }
+            }
+            let (state, running) = trek.read(cx, |ws, _| (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id)));
+            match (state, running) {
+                (Some(RunState::Idle), false) => break,
+                (Some(RunState::Failed), _) => panic!("the turn failed: {:?}", trek.items(cx, &id)),
+                _ => {}
+            }
+            assert!(Instant::now() < deadline, "timed out: {:?}", trek.items(cx, &id));
+            cx.background_executor.timer(Duration::from_millis(100)).await;
+        }
+        let kids: Vec<(String, String, String, String)> =
+            trek.read(cx, |ws, _| ws.children(&id).into_iter().map(|t| (t.id.clone(), t.title.clone(), t.agent.key(), t.model.clone().unwrap_or_default())).collect());
+        for (kid, title, agent, model) in &kids {
+            let brief = trek.items(cx, kid).into_iter().find_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).unwrap_or_default();
+            println!("sub-agent {title} on {agent}/{model} ({:?}): {}", trek.read(cx, |ws, _| ws.task_state(kid)), orch_preview(&brief));
+            println!("  said: {}", orch_preview(&trek.answers(cx, kid)));
+        }
+        // Titled as asked (an agent may add a few words: "Design A: Per-job timeout").
+        let titles: Vec<&str> = kids.iter().map(|k| k.1.as_str()).collect();
+        let on = |title: &str| kids.iter().find(|k| k.1.starts_with(title)).map(|k| (k.2.clone(), k.3.clone())).unwrap_or_else(|| panic!("no {title}: {titles:?}"));
+        assert_eq!(on("Judge the designs"), ("codex".to_string(), "gpt-5.6-luna".to_string()));
+        let judged = kids.iter().find(|k| k.1.starts_with("Judge")).map(|k| trek.items(cx, &k.0)).unwrap_or_default();
+        let brief = judged.iter().find_map(|i| if let Item::User { text, .. } = i { Some(text.to_lowercase()) } else { None }).unwrap_or_default();
+        assert!(!["haiku", "luna", "claude", "codex"].iter().any(|w| brief.contains(w)), "judged blind: {brief}");
+        let mut designers = vec![on("Design A"), on("Design B")];
+        designers.sort();
+        assert_eq!(designers, [("claude-code".to_string(), "claude-haiku-4-5".to_string()), ("codex".to_string(), "gpt-5.6-luna".to_string())]);
+        let answer = trek.answers(cx, &id);
+        println!("synthesis: {answer}");
+        assert!(answer.contains("Design"), "{answer}");
+        assert_eq!(std::fs::read_to_string(project.join("src/lib.rs")).unwrap().lines().count(), 9, "reported only: nothing changed");
+        trek.render(cx);
+        assert_eq!(trek.rows(cx).iter().filter(|r| r.starts_with("subagent:")).count(), kids.len());
+    });
+}
+
+fn orch_preview(text: &str) -> String {
+    trek_core::orchestrate::preview(text, 160)
 }

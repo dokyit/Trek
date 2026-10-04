@@ -217,6 +217,9 @@ pub struct LiveThread {
     /// Rows for sub-agents it started whose `delegate_task` call hasn't reached the transcript
     /// yet (`place_task_rows`).
     pending_rows: VecDeque<Item>,
+    /// Project notes its session gives the agent with the next message: recorded as told once
+    /// that message goes (`Store::told_notes`).
+    notes_pending: Option<String>,
 }
 
 /// Held by a thread's git work while it runs. Once the thread is deleted (`gone`), work that
@@ -2363,6 +2366,9 @@ impl Workspace {
                         let key = self.draft_key(&cwd);
                         match self.warm.take() {
                             Some((k, handle, _)) if k == key => {
+                                // A new session: it was given the project notes there are.
+                                let notes = self.project_notes(Some(&cwd), &cwd).filter(|_| !self.thread(&id).is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent)));
+                                self.live.entry(id.clone()).or_default().notes_pending = notes;
                                 self.attach(&id, handle, cx);
                                 let ipc = self.warm_ipc.take();
                                 self.adopt_ipc_session(&id, ipc);
@@ -2498,6 +2504,9 @@ impl Workspace {
         live.last_active = Some(cx.background_executor().now());
         live.revision += 1;
         self.dispatch(&id, Command::Prompt { text, images });
+        if let Some(notes) = self.live.get_mut(&id).and_then(|l| l.notes_pending.take()) {
+            let _ = self.store.set_told_notes(&id, &notes);
+        }
         self.run_git(&id, cx);
         self.mutate_thread(&id, cx, |t| {
             t.run_state = RunState::Working;
@@ -2569,7 +2578,9 @@ impl Workspace {
             self.refresh_verification(p, cx);
         }
         let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
-        let instructions = self.project_notes(project.as_deref(), &cwd);
+        let told = resume.is_some().then(|| self.store.told_notes(id).ok().flatten()).flatten();
+        let instructions = verification::notes_to_give(self.project_notes(project.as_deref(), &cwd), &thread.agent, resume.is_some(), told.as_deref());
+        self.live.entry(id.to_string()).or_default().notes_pending = instructions.clone().filter(|_| !trek_agents::notes_in_system_prompt(&thread.agent));
         let handle = start_session(SessionConfig {
             agent: thread.agent.clone(),
             cwd,

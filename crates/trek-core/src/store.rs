@@ -440,7 +440,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS tool_lines (
            thread_id TEXT NOT NULL, tool_id TEXT NOT NULL, added INTEGER NOT NULL, removed INTEGER NOT NULL,
            PRIMARY KEY (thread_id, tool_id)
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS told_notes (thread_id TEXT PRIMARY KEY, notes TEXT NOT NULL);",
     )?;
     usage::migrate(conn)?;
     migrate_items(conn)?;
@@ -1041,6 +1042,7 @@ impl Store {
             tx.execute("DELETE FROM items WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM checkpoints WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM tool_lines WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM told_notes WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM token_usage WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM turn_stops WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM wakes WHERE child_id = ?1 OR parent_id = ?1", [gone])?;
@@ -1161,6 +1163,20 @@ impl Store {
                 "INSERT OR REPLACE INTO checkpoints (thread_id, item_id, repo, sha, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![thread_id, item_id, repo.display().to_string(), sha, now_ms()],
             )?;
+            Ok(())
+        })
+    }
+
+    /// The project notes (`SessionConfig::instructions`) the agent of `thread_id` was last given
+    /// in a message: what a session that resumes has been told already.
+    pub fn told_notes(&self, thread_id: &str) -> Result<Option<String>> {
+        self.with(|c| c.query_row("SELECT notes FROM told_notes WHERE thread_id = ?1", [thread_id], |r| r.get(0)).optional())
+    }
+
+    /// Record that `thread_id`'s agent was given `notes`.
+    pub fn set_told_notes(&self, thread_id: &str, notes: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("INSERT OR REPLACE INTO told_notes (thread_id, notes) VALUES (?1, ?2)", params![thread_id, notes])?;
             Ok(())
         })
     }
@@ -1973,6 +1989,18 @@ mod tests {
         assert_eq!(by_native(&s, "a").model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
         // A model that isn't raw JSON is the thread's own (possibly picked in Trek): it stays.
         assert_eq!(by_native(&s, "b").model.as_deref(), Some("picked-in-trek"));
+    }
+
+    #[test]
+    fn the_notes_a_thread_was_told_are_kept_until_it_goes() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        assert_eq!(s.told_notes(&t.id).unwrap(), None);
+        s.set_told_notes(&t.id, "Verify with ./app check.").unwrap();
+        s.set_told_notes(&t.id, "Verify with ./app check --json.").unwrap();
+        assert_eq!(s.told_notes(&t.id).unwrap().as_deref(), Some("Verify with ./app check --json."));
+        s.delete_thread(&t.id).unwrap();
+        assert_eq!(s.told_notes(&t.id).unwrap(), None);
     }
 
     #[test]
