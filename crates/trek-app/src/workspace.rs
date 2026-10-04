@@ -393,10 +393,13 @@ impl LiveThread {
         self.tasks.iter().filter(|t| t.done.is_none()).count()
     }
 
-    /// Its agent's own sub-agents its turn is blocked on: tool calls are running, and every one
-    /// of them is a sub-agent at work (a foreground `Task`). Empty otherwise, mid-turn or not.
+    /// Its agent's own sub-agents its turn is blocked on: tool calls are running, every one of
+    /// them is a sub-agent at work (a foreground `Task`), and the agent hasn't gone on to say or
+    /// think anything since (Codex's spawn call returns at once; only its `wait`, which gets no
+    /// row, blocks). Empty otherwise, mid-turn or not.
     pub fn blocked_on_tasks(&self) -> impl Iterator<Item = &SubTask> {
-        let running: Vec<&str> = if self.turn_started.is_some() && self.permissions.is_empty() {
+        let calls_last = self.items.iter().rev().find(|i| matches!(i, Item::Assistant { .. } | Item::Reasoning { .. } | Item::Tool { .. } | Item::User { .. }));
+        let running: Vec<&str> = if self.turn_started.is_some() && self.permissions.is_empty() && matches!(calls_last, Some(Item::Tool { .. })) {
             // The turn's own calls: back to the message that started it.
             self.items
                 .iter()

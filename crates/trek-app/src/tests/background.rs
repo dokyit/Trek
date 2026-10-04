@@ -929,6 +929,10 @@ fn a_codex_turn_in_its_wait_call_says_it_waits_on_its_sub_agent() {
         trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
         trek.render(cx);
         assert!(trek.working_bar(cx).is_some_and(|l| l.starts_with("Waiting on a sub-agent")), "{:?}", trek.working_bar(cx));
+        // Going on with its own work instead (it didn't wait), it isn't blocked on it.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::ReasoningDelta("Meanwhile, the tests.".into())], cx));
+        trek.render(cx);
+        assert!(trek.working_bar(cx).is_some_and(|l| !l.starts_with("Waiting")), "{:?}", trek.working_bar(cx));
         // `wait` reports it done: the turn goes on with its own work.
         let done = vec![
             AgentEvent::Task { id: "call1".into(), description: None, activity: None, tool_uses: None, done: Some(true) },
