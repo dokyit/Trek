@@ -45,6 +45,9 @@ Design it for agents:
 - **Rich `--help`** at every level, with an example for each subcommand.
 - **JSON output** (`--json`, or by default) so results can be read without scraping text.
 - Safe defaults: never touch production, never use a person's real account or data.
+- **Works on the checkout it's run from.** Agents often work in a git worktree of the project:
+  find the project root from the current folder (`git rev-parse --show-toplevel`), not from where
+  the script lives, so a run from a worktree builds and checks that worktree's code.
 
 Run every subcommand you write and fix what fails. A CLI that errors on first use teaches agents to
 avoid it.
@@ -86,6 +89,10 @@ metadata:
   cli: <how to run the CLI from the project root, e.g. ./.agents/skills/control-app/scripts/app>
 ---
 ```
+
+Trek tells a turn verified its work when a shell command runs the CLI by that path, so the body
+should show every example that way (`./.agents/skills/control-app/scripts/app check`), run from
+the project root.
 
 The body says, briefly: when to use the skill (to verify any change before calling it done), the
 CLI's subcommands with one example each, the dev-environment notes, and a pointer to the Feature

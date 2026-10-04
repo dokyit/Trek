@@ -131,6 +131,94 @@ fn an_arena_drafts_designs_across_families_and_has_them_judged() {
 }
 
 #[test]
+fn restating_an_arena_holds_it_until_the_go_ahead() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "consult-pill");
+        trek.click(cx, ("consult-style", 2usize));
+        trek.press(cx, "escape");
+        let id = trek.send(cx, "/restate Rate-limit the webhooks");
+        let sent = last_message(&trek, cx, &id);
+        assert!(split_consult(&sent).1.is_some_and(|c| c.style == Style::Arena) && trek_core::restate::split_restate(split_consult(&sent).0).1);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.read(cx, |ws, _| ws.children(&id).is_empty()), "only restated: no designs yet");
+        assert!(cx.read(|cx| trek.root.read(cx).composer.read(cx).consultants()).0.is_empty(), "the picks went with the message");
+
+        // The go-ahead carries the arena that waited for it.
+        let end = last_end(&trek, cx, &id);
+        trek.render(cx);
+        trek.click(cx, ("restate-yes", end));
+        let ahead = last_message(&trek, cx, &id);
+        let (said, consult) = split_consult(&ahead);
+        assert_eq!((said, consult.map(|c| c.style)), (trek_core::restate::GO_AHEAD, Some(Style::Arena)));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let titles: Vec<String> = trek.read(cx, |ws, _| ws.children(&id).into_iter().map(|t| t.title.clone()).collect());
+        assert!(titles.iter().any(|t| t == "Judge the designs") && titles.iter().filter(|t| t.starts_with("Design ")).count() == 2, "{titles:?}");
+        assert!(trek.answers(cx, &id).contains("Design B won"), "{}", trek.answers(cx, &id));
+    });
+}
+
+#[test]
+fn an_arena_drafts_no_more_designs_than_run_at_once() {
+    run(async |cx| {
+        let trek = open(cx);
+        // Five designs can't all run at once: the command stays in the composer, unsent.
+        let five = "/consult arena swift low, swift high, deep low, deep high, relay: Rate-limit the webhooks";
+        trek.type_text(cx, five);
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), five);
+        assert!(trek.read(cx, |ws, _| ws.threads.iter().all(|t| !t.title.contains("Rate-limit"))), "not sent");
+        // Four can.
+        trek.window(cx, |window, cx| trek.root.read(cx).composer.clone().update(cx, |c, cx| c.set_text("", window, cx)));
+        trek.type_text(cx, "/consult arena swift low, swift high, deep low, relay");
+        trek.press(cx, "enter");
+        let picked = cx.read(|cx| trek.root.read(cx).composer.read(cx).consultants()).0;
+        assert_eq!(picked.len(), trek_core::orchestrate::MAX_RUNNING, "{picked:?}");
+    });
+}
+
+#[test]
+fn a_thread_in_a_worktree_verifies_its_own_folder() {
+    run(async |cx| {
+        let trek = open(cx);
+        super::worktrees::make_repo(&trek, cx);
+        let project = trek.project.clone();
+        // A skill made in the project folder and not committed yet.
+        let skill = project.join(".agents/skills/verify-app");
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::create_dir_all(skill.join("references/features")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: verify-app\nmetadata:\n  trek: verification\n  cli: ./.agents/skills/verify-app/scripts/app\n---\n").unwrap();
+        std::fs::write(skill.join("references/features/README.md"), "# Features\n").unwrap();
+        std::fs::write(skill.join("scripts/app"), "#!/bin/sh\necho ok\n").unwrap();
+        trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
+        assert!(trek.read(cx, |ws, _| ws.verification(&project)).is_some());
+
+        // The worktree has no copy: the agent reads the main checkout's, and runs its CLI by its
+        // full path from the worktree, where its changes are.
+        super::worktrees::use_worktree(&trek, cx);
+        let id = trek.send(cx, "mock:verify the notes change");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let wt = trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.worktree.clone())).expect("a worktree");
+        assert!(!wt.path.join(".agents").exists());
+        let full = skill.join("scripts/app");
+        assert!(trek.answers(cx, &id).contains(&format!("verified it with `{} check`", full.display())), "{}", trek.answers(cx, &id));
+        let end = last_end(&trek, cx, &id);
+        trek.render(cx);
+        assert!(trek.visible(cx, ("verified", end)));
+
+        // Committed, a new worktree has its own copy, and runs that.
+        trek_core::worktree::git(&project, &["add", "-A"]).unwrap();
+        trek_core::worktree::git(&project, &["commit", "-qm", "Add the verification skill"]).unwrap();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
+        super::worktrees::use_worktree(&trek, cx);
+        let id = trek.send(cx, "mock:verify the notes change");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.worktree.clone())).is_some_and(|w| w.path.join(".agents/skills/verify-app/SKILL.md").exists()));
+        assert!(trek.answers(cx, &id).contains("verified it with `./.agents/skills/verify-app/scripts/app check`"), "{}", trek.answers(cx, &id));
+    });
+}
+
+#[test]
 fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
     run(async |cx| {
         let trek = open(cx);
@@ -185,6 +273,27 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         assert!(v.maintained_at.unwrap() >= first);
         assert!(std::fs::read_to_string(std::path::Path::new(&v.skill).join("references/features/README.md")).unwrap().contains("settings.md"));
 
+        // A Maintain run counts once it has run or changed the skill: one that didn't (here it
+        // found no Feature Map to work on) doesn't, nor does a later turn that leaves it alone.
+        let old = trek_core::store::now_ms() - 3 * trek_core::verification::WEEK_MS;
+        let aged = std::process::Command::new("find").arg(&v.skill).args(["-exec", "touch", "-t", "202001010000", "{}", "+"]).status().unwrap();
+        assert!(aged.success());
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.verification.iter_mut().for_each(|v| v.maintained_at = Some(old)), cx));
+        let map = std::path::Path::new(&v.skill).join("references/features/README.md");
+        std::fs::rename(&map, map.with_extension("md.away")).unwrap();
+        trek.update(cx, |ws, cx| ws.open_project_settings(Some(pid.clone()), cx));
+        trek.render(cx);
+        trek.click(cx, "verify-maintain");
+        let id = trek.thread_id(cx);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let maintained = |trek: &super::harness::Trek, cx: &TestAppContext| trek.read(cx, |ws, _| ws.verification(&project).and_then(|v| v.maintained_at));
+        assert!(trek.answers(cx, &id).contains("no verification skill here"));
+        assert_eq!(maintained(&trek, cx), Some(old), "it didn't touch the skill");
+        std::fs::rename(map.with_extension("md.away"), &map).unwrap();
+        trek.send(cx, "thanks");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(maintained(&trek, cx), Some(old), "a turn that left it alone");
+
         // The weekly reminder: once it's a week old, once a week.
         trek.update(cx, |ws, cx| ws.open_project_settings(Some(pid.clone()), cx));
         trek.render(cx);
@@ -217,7 +326,8 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
 
 /// Restate first and the project notes with a real agent: Claude Code (claude-haiku-4-5, low
 /// effort) restates a request without touching anything, and a new thread in a project with a
-/// verification skill knows its CLI. Not run by default (two tiny turns):
+/// verification skill knows its CLI and reads Trek's guides without asking. Not run by default
+/// (two tiny turns):
 /// `TREK_LIVE_AGENT=claude cargo test -p trek-app live_restate -- --ignored`. Works in
 /// /tmp/trek-pstack-e2e; remove ~/.claude/projects/-private-tmp-trek-pstack-e2e afterwards.
 #[test]
@@ -245,6 +355,7 @@ fn live_restate_first_and_project_notes() {
             ws.navigate(Route::Draft { project: Some(project.clone()) }, cx);
         });
         assert!(trek.read(cx, |ws, _| ws.verification(&project)).is_some(), "found as the draft opened");
+        let asked_any = std::cell::Cell::new(false);
         let done = async |cx: &mut TestAppContext, id: &str| {
             let deadline = Instant::now() + Duration::from_secs(180);
             loop {
@@ -252,6 +363,7 @@ fn live_restate_first_and_project_notes() {
                 let (state, running, asked) = trek.read(cx, |ws, _| (ws.thread(id).map(|t| t.run_state), ws.turn_running(id), ws.pending_request(id).map(|p| p.request_id.clone())));
                 // Anything it asks to do is declined: restating needs nothing done.
                 if let Some(rid) = asked {
+                    asked_any.set(true);
                     trek.update(cx, |ws, cx| ws.respond(id, &rid, trek_agents::Decision::Deny, cx));
                 }
                 match (state, running) {
@@ -275,12 +387,19 @@ fn live_restate_first_and_project_notes() {
         trek.render(cx);
         assert!(trek.visible(cx, ("restate-yes", end)));
 
-        // A new thread: the project's verification skill reached Claude Code's system prompt.
+        // A new thread: the project's verification skill reached Claude Code's system prompt, and
+        // Trek's guides (outside the project) are read without asking.
+        let guide = trek_core::skills::shipped(trek_core::skills::CREATE_VERIFICATION).unwrap();
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
-        let id = trek.send(cx, "Without running or reading anything: what command runs this project's verification CLI, as you were told? Reply with just the command.");
+        asked_any.set(false);
+        let id = trek.send(
+            cx,
+            &format!("Without running anything: what command runs this project's verification CLI, as you were told? Then read {} and give its `name:` line. Reply with just those two lines.", guide.display()),
+        );
         done(cx, &id).await;
         let answer = trek.answers(cx, &id);
         println!("told: {answer}");
-        assert!(answer.contains("notesctl"), "{answer}");
+        assert!(answer.contains("notesctl") && answer.contains("create-verification-skill"), "{answer}");
+        assert!(!asked_any.get(), "reading the guide needed no permission");
     });
 }

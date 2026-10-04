@@ -12,6 +12,17 @@ const ASK: &str = "Before you do anything else, restate in your own words and in
 /// The message that confirms a restatement.
 pub const GO_AHEAD: &str = "That's right — go ahead.";
 
+/// The go-ahead for a restatement of `asked` (the message that asked for it). What else that
+/// message asked of the agent (a consult, an arena) was held back for the restatement, so it goes
+/// with the go-ahead.
+pub fn go_ahead(asked: &str) -> String {
+    let (rest, consult) = crate::orchestrate::split_consult(asked);
+    match consult {
+        Some(_) => format!("{GO_AHEAD}{}", &asked[rest.len()..]),
+        None => GO_AHEAD.into(),
+    }
+}
+
 /// `text`, asking the agent to restate it first.
 pub fn with_restate(text: &str) -> String {
     format!("{}\n\n{OPEN}\n{ASK}\n{CLOSE}", text.trim_end())
@@ -57,5 +68,10 @@ mod tests {
         assert!(back.is_some());
         assert_eq!(split_restate(rest), ("Fix it", true));
         assert_eq!(as_written(&text), "Fix it");
+        // The go-ahead brings the consult that waited for it; a plain one is just the go-ahead.
+        let ahead = go_ahead(&text);
+        assert!(ahead.starts_with(GO_AHEAD) && !ahead.contains("<trek-restate>"), "{ahead}");
+        assert_eq!(split_consult(&ahead), (GO_AHEAD, back));
+        assert_eq!(go_ahead(&with_restate("Fix it")), GO_AHEAD);
     }
 }

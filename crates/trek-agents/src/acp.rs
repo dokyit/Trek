@@ -1289,6 +1289,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         };
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
@@ -1335,6 +1336,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         };
         let h = crate::start(config);
         let seen = trek_core::runtime().block_on(async {

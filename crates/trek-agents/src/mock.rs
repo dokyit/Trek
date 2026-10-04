@@ -1312,6 +1312,7 @@ mod tests {
                 fast: None,
                 mcp_servers: vec![],
                 instructions: None,
+                read_dirs: vec![],
             };
             Live::of(config)
         }
@@ -1368,6 +1369,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         }
     }
 
@@ -1476,7 +1478,7 @@ mod tests {
         let out = std::process::Command::new(found.dir.join("scripts/app")).arg("check").output().unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("\"ok\":true"));
         // Told about it, a session checks its change with the CLI.
-        let notes = trek_core::verification::instructions(&trek_core::verification::record(&found, None));
+        let notes = trek_core::verification::instructions(&trek_core::verification::record(&found, None, None), &dir, &dir);
         trek_core::runtime().block_on(async {
             let m = Live::of(SessionConfig { cwd: dir.clone(), instructions: Some(notes), ..config(None, None, false, None) });
             m.prompt("mock:verify the notes change").await;

@@ -29,7 +29,10 @@ Follow SKILL.md from a clean state as a new agent would. Run `--help` and every 
 - Update the Feature Map: a file for each new feature, edits for changed ones, and remove
   features that are gone. Keep `references/features/README.md` in step.
 - Keep the front matter's `metadata` (`trek: verification` and `cli: …`) accurate, so Trek keeps
-  finding the skill and noticing when it runs.
+  finding the skill and noticing when it runs, and keep SKILL.md's examples running the CLI by
+  that path from the project root.
+- Make sure the CLI works on the checkout it's run from (a git worktree included): it finds the
+  project root from the current folder, not from where the script lives.
 
 Change only what's out of date: the skill is shared by everyone working here.
 

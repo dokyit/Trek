@@ -297,6 +297,11 @@ pub struct Consult {
 /// different ones and have them judged by another than the agent's own. Models Trek can't place
 /// count as their agent's own family.
 pub fn family(agent: &AgentId, model: &str) -> String {
+    known_family(agent, model).map(String::from).unwrap_or_else(|| agent.key())
+}
+
+/// The family Trek can tell `model` comes from: by its name, or as the only kind its agent runs.
+fn known_family(agent: &AgentId, model: &str) -> Option<&'static str> {
     let m = model.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| m.contains(w));
     let named = if has(&["claude", "opus", "sonnet", "haiku"]) {
@@ -322,12 +327,21 @@ pub fn family(agent: &AgentId, model: &str) -> String {
     } else {
         None
     };
-    match (named, agent) {
-        (Some(f), _) => f.to_string(),
-        (None, AgentId::ClaudeCode) => "anthropic".into(),
-        (None, AgentId::Codex) => "openai".into(),
-        (None, other) => other.key(),
-    }
+    named.or(match agent {
+        AgentId::ClaudeCode => Some("anthropic"),
+        AgentId::Codex => Some("openai"),
+        _ => None,
+    })
+}
+
+/// Whether `model` can design or judge in an arena: one that works on code itself, not a router
+/// that picks a model of any family as it goes ("Auto") or one made for something else (deep
+/// research, images, speech).
+pub fn designs(agent: &AgentId, model: &ModelInfo) -> bool {
+    let words = format!("{} {}", model.id, model.name).to_lowercase();
+    let router = known_family(agent, &model.id).is_none() && ["auto", "default", "router"].iter().any(|r| model.id.eq_ignore_ascii_case(r) || model.name.eq_ignore_ascii_case(r));
+    let other = ["research", "image", "embed", "audio", "realtime", "tts", "transcribe", "search"].iter().any(|w| words.contains(w));
+    !(router || other)
 }
 
 /// A consultant on `model` of `agent` at High, or as near as the model goes.
@@ -336,27 +350,37 @@ fn at_high(agent: &AgentId, model: &ModelInfo) -> Consultant {
     Consultant { agent: agent.clone(), model: model.id.clone(), effort }
 }
 
-/// An arena's candidates when none are picked: one per model family, from each agent's default
-/// model (`defaults`, in the order agents are offered), as many as can run at once.
-pub fn arena_defaults(defaults: &[(AgentId, ModelInfo)]) -> Vec<Consultant> {
+/// An arena's candidates when none are picked: one per model family, from every model on offer
+/// (`options`: each agent's default first, then its others, smartest first), as many as can run
+/// at once. Families Trek knows come first (a model it can't place may well be one of them).
+/// Models called straight through an API (often small, local or general-purpose) only make up an
+/// arena that coding agents can't: two designs at least.
+pub fn arena_defaults(options: &[(AgentId, ModelInfo)]) -> Vec<Consultant> {
     let mut seen: Vec<String> = vec![];
     let mut out = vec![];
-    for (agent, model) in defaults {
-        let f = family(agent, &model.id);
-        if !seen.contains(&f) && out.len() < MAX_RUNNING {
-            seen.push(f);
-            out.push(at_high(agent, model));
+    for (known, direct) in [(true, false), (true, true), (false, false), (false, true)] {
+        let pass = |(a, m): &&(AgentId, ModelInfo)| designs(a, m) && known_family(a, &m.id).is_some() == known && matches!(a, AgentId::Direct(_)) == direct;
+        for (agent, model) in options.iter().filter(pass) {
+            let f = family(agent, &model.id);
+            let room = if direct { 2 } else { MAX_RUNNING };
+            if !seen.contains(&f) && out.len() < room {
+                seen.push(f);
+                out.push(at_high(agent, model));
+            }
         }
     }
     out
 }
 
-/// The judge of an arena: a model of another family than the agent's own (`main`), not one of
-/// the candidates if there's a choice, from `options` (every model on offer, preferred first).
+/// The judge of an arena: a model of another family than the agent's own (`main`), from
+/// `options` (every model on offer, preferred first): one that isn't a candidate and whose family
+/// Trek knows if there's a choice.
 pub fn pick_judge(main: &str, candidates: &[Consultant], options: &[(AgentId, ModelInfo)]) -> Option<Consultant> {
-    let other = |(a, m): &&(AgentId, ModelInfo)| family(a, &m.id) != main;
+    let fit: Vec<&(AgentId, ModelInfo)> = options.iter().filter(|(a, m)| designs(a, m) && family(a, &m.id) != main).collect();
     let fresh = |(a, m): &&(AgentId, ModelInfo)| !candidates.iter().any(|c| c.agent == *a && c.model == m.id);
-    options.iter().filter(other).find(fresh).or_else(|| options.iter().find(other)).map(|(a, m)| at_high(a, m))
+    let known = |(a, m): &&(AgentId, ModelInfo)| known_family(a, &m.id).is_some();
+    let pick = fit.iter().copied().find(|o| fresh(o) && known(o)).or_else(|| fit.iter().copied().find(fresh)).or_else(|| fit.first().copied());
+    pick.map(|(a, m)| at_high(a, m))
 }
 
 /// Rounds a discussion may take.
@@ -622,6 +646,28 @@ mod tests {
         let picked = arena_defaults(&defaults);
         let keys: Vec<String> = picked.iter().map(Consultant::key).collect();
         assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "codex/gpt-5.6-sol/high", "opencode/grok-code-fast/high"], "Copilot's Claude is the same family");
+        // Every model on offer counts, not only defaults; a router (Copilot's Auto) and a model
+        // made for research don't design, and models Trek can't place come last.
+        let copilot = AgentId::Acp("github-copilot".into());
+        let options = vec![
+            (AgentId::ClaudeCode, model("claude-opus-5-5")),
+            (AgentId::Codex, model("gpt-6-astra")),
+            (AgentId::Acp("google".into()), ModelInfo::new("deep-research-max-preview", "Google/Deep Research Max Preview", 0, &[])),
+            (copilot.clone(), ModelInfo::new("auto", "Auto", 0, &[])),
+            (AgentId::Direct("local".into()), model("house-coder")),
+            (AgentId::Direct("openrouter".into()), model("meta-llama/llama-3.2-1b-instruct")),
+            (copilot.clone(), model("claude-sonnet-5")),
+            (copilot.clone(), model("gemini-3-pro")),
+            (AgentId::OpenCode, model("opencode/grok-4.6")),
+        ];
+        let keys: Vec<String> = arena_defaults(&options).iter().map(Consultant::key).collect();
+        assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "codex/gpt-6-astra/high", "acp:github-copilot/gemini-3-pro/high", "opencode/opencode/grok-4.6/high"]);
+        // An API model of a family of its own only makes up an arena of fewer than two.
+        let keys: Vec<String> = arena_defaults(&options[..6]).iter().map(Consultant::key).collect();
+        assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "codex/gpt-6-astra/high"]);
+        let keys: Vec<String> = arena_defaults(&options[1..6]).iter().map(Consultant::key).collect();
+        assert_eq!(keys, ["codex/gpt-6-astra/high", "direct:openrouter/meta-llama/llama-3.2-1b-instruct/high"]);
+        assert_eq!(pick_judge("anthropic", &[], &options[3..5]).map(|j| j.key()).as_deref(), Some("direct:local/house-coder/high"), "never the router");
         // The judge: another family than the main agent's, not a candidate when there's a choice.
         let options = vec![(AgentId::ClaudeCode, model("claude-opus-5-5")), (AgentId::Codex, model("gpt-5.6-sol")), (AgentId::Codex, model("gpt-5.6-luna"))];
         let judge = pick_judge("anthropic", &picked, &options).unwrap();

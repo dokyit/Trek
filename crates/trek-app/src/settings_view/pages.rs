@@ -1494,10 +1494,32 @@ impl SettingsView {
         let reveal = Button::new("verify-reveal").small().ghost().label("Show").on_click(move |_, _, cx| cx.reveal_path(&skill_dir.join("SKILL.md")));
         let mut rows = vec![Self::row(status, format!("“{}” in {shown}", v.name), h_flex().gap(px(6.)).child(reveal).child(maintain), cx)];
         if let Some(cli) = v.cli.clone() {
+            // One in the skill's folder reads from there (`scripts/app`): the row above says where
+            // that is. The whole command is in the tooltip, and copied.
+            let short = cli.strip_prefix("./").and_then(|c| c.strip_prefix(&format!("{shown}/"))).unwrap_or(&cli).to_string();
+            let (tip, copied) = (SharedString::from(cli.clone()), cli.clone());
+            let chip = div()
+                .id("verify-cli")
+                .test_support()
+                .min_w_0()
+                .max_w(px(220.))
+                .truncate()
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .bg(theme.foreground.opacity(0.06))
+                .font_family(theme.mono_font_family.clone())
+                .text_size(px(12.))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .child(short);
+            let copy = Button::new("verify-cli-copy").ghost().xsmall().icon(Icon::new(IconName::Copy).text_color(muted)).tooltip("Copy the command").on_click(move |_, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                window.push_notification("Command copied", cx);
+            });
             rows.push(Self::row(
                 "Its CLI",
-                "Agents run it from the project folder to drive and check the app. A turn that ran it is marked Verified.",
-                div().max_w(px(260.)).truncate().px(px(8.)).py(px(3.)).rounded(px(6.)).bg(theme.foreground.opacity(0.06)).font_family(theme.mono_font_family.clone()).text_size(px(12.)).child(cli),
+                "Agents run it from their working folder to drive and check the app. A turn that ran it is marked Verified.",
+                h_flex().min_w_0().gap(px(2.)).child(chip).child(copy),
                 cx,
             ));
         }

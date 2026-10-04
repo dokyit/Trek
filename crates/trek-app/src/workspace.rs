@@ -1362,11 +1362,9 @@ impl Workspace {
                 self.refresh_verification(&p.clone(), cx);
             }
         }
-        if route == Route::Settings(SettingsPage::Project) {
-            let projects: Vec<PathBuf> = self.workspace_projects().into_iter().map(|p| p.path.clone()).collect();
-            for p in projects {
-                self.refresh_verification(&p, cx);
-            }
+        if route == Route::Settings(SettingsPage::Project) && self.route != route {
+            // Shown as last recorded until the look through every project is back.
+            self.refresh_all_verification(cx);
         }
         if route == Route::Basecamp && self.route != Route::Basecamp {
             self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
@@ -2239,9 +2237,12 @@ impl Workspace {
         self.persist_items(&id, cx);
     }
 
-    /// The agent restated the request and got it right: it goes ahead.
+    /// The agent restated the request and got it right: it goes ahead, with whatever else the
+    /// request asked for (a consult, an arena) that waited for the restatement.
     pub fn go_ahead(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.send_to(id, trek_core::restate::GO_AHEAD.into(), vec![], cx);
+        let asked = self.live.get(id).and_then(|l| l.items.iter().rev().find_map(|i| if let Item::User { text, .. } = i { Some(text.clone()) } else { None }));
+        let text = asked.map(|a| trek_core::restate::go_ahead(&a)).unwrap_or_else(|| trek_core::restate::GO_AHEAD.into());
+        self.send_to(id, text, vec![], cx);
     }
 
     /// Messages to `id` wait: its history is still being read, or its worktree is being made,
@@ -2293,10 +2294,11 @@ impl Workspace {
         if let Some(p) = &project {
             self.refresh_verification(p, cx);
         }
-        let instructions = self.project_notes(project.as_deref());
+        let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
+        let instructions = self.project_notes(project.as_deref(), &cwd);
         let handle = start_session(SessionConfig {
             agent: thread.agent.clone(),
-            cwd: thread.cwd.clone().unwrap_or_else(trek_core::paths::home),
+            cwd,
             model: thread.model.clone(),
             effort: thread.effort,
             hand_holding: thread.hand_holding,
@@ -2310,6 +2312,7 @@ impl Workspace {
             fast: self.fast_tier(&thread.agent, thread.model.as_ref(), fast_on),
             mcp_servers,
             instructions,
+            read_dirs: vec![trek_core::skills::shipped_root()],
         });
         self.attach(id, handle, cx);
         self.adopt_ipc_session(id, ipc);
@@ -2376,7 +2379,7 @@ impl Workspace {
                     server.close_session(&old);
                 }
                 self.refresh_verification(&cwd, cx);
-                let instructions = self.project_notes(Some(&cwd));
+                let instructions = self.project_notes(Some(&cwd), &cwd);
                 let handle = start_session(SessionConfig {
                     agent: p.agent.clone(),
                     cwd,
@@ -2392,6 +2395,7 @@ impl Workspace {
                     fast: self.fast_tier(&p.agent, p.model.as_ref(), p.fast),
                     mcp_servers,
                     instructions,
+                    read_dirs: vec![trek_core::skills::shipped_root()],
                 });
                 // Replacing the old one drops its command channel, which ends that process.
                 self.warm = Some((key, handle, cx.background_executor().now()));
@@ -2831,7 +2835,7 @@ impl Workspace {
             }
             // A sub-agent reports how its turn ended; a parent stopped by the user isn't woken.
             self.task_turn_ended(id, interrupted, cx);
-            self.verification_turn_ended(id, cx);
+            self.verification_turn_ended(id, !interrupted && !paused, cx);
             if interrupted {
                 self.wakes.remove(id);
             }

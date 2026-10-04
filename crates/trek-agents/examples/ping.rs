@@ -11,7 +11,7 @@ fn main() {
     };
     let h = start(SessionConfig {
         agent, cwd: "/tmp/trek-e2e".into(), model: model.map(String::from), effort: Effort::Low,
-        hand_holding: HandHolding::Supervised, plan: false, read_only: false, resume: None, resume_at: None, fork: false, recap: None, fast: None, mcp_servers: vec![], instructions: None,
+        hand_holding: HandHolding::Supervised, plan: false, read_only: false, resume: None, resume_at: None, fork: false, recap: None, fast: None, mcp_servers: vec![], instructions: None, read_dirs: vec![],
     });
     trek_core::runtime().block_on(async {
         let images: Vec<std::path::PathBuf> = std::env::args().skip(2).map(Into::into).collect();

@@ -199,6 +199,9 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
     if let Some(notes) = config.instructions.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         flag(&mut args, "--append-system-prompt", notes);
     }
+    for dir in config.read_dirs.iter().filter(|d| d.is_dir()) {
+        flag(&mut args, "--add-dir", &dir.display().to_string());
+    }
     args
 }
 
@@ -1393,6 +1396,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         }
     }
 
@@ -1467,6 +1471,10 @@ mod tests {
         assert!(!cli_args(&config()).iter().any(|a| a == "--append-system-prompt"));
         let notes = cli_args(&SessionConfig { instructions: Some("Verify with ./app check.".into()), ..config() });
         assert!(has(&notes, &["--append-system-prompt", "Verify with ./app check."]), "{notes:?}");
+        // Trek's guides are read without asking; a folder that isn't there isn't passed.
+        let guides = std::env::temp_dir();
+        let dirs = cli_args(&SessionConfig { read_dirs: vec![guides.clone(), "/no/such/dir".into()], ..config() });
+        assert!(has(&dirs, &["--add-dir", &guides.display().to_string()]) && !dirs.iter().any(|a| a == "/no/such/dir"), "{dirs:?}");
     }
 
     #[test]

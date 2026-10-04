@@ -1405,6 +1405,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         };
         Session::new(thread.into(), &config, &json!({ "model": "gpt-5.6-luna" }), 2)
     }
@@ -1510,6 +1511,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         }
     }
 
@@ -1645,6 +1647,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         };
         let opened = json!({"model":"gpt-5.6-luna","collaborationMode":{"mode":"plan","settings":{"model":"gpt-5.6-luna"}}});
         let mut s = Session::new("t".into(), &config, &opened, 2);
@@ -2024,6 +2027,7 @@ mod tests {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         };
         let opened = json!({"model":"gpt-5.6-luna"});
         let mut s = Session::new("t".into(), &config, &opened, 2);
@@ -2261,6 +2265,7 @@ mod live {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
         });
         let events = trek_core::runtime().block_on(async {
             let prompt = |text: &str| Command::Prompt { text: text.into(), images: vec![] };

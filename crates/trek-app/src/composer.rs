@@ -1545,6 +1545,11 @@ impl Composer {
             let Some((agent, model)) = find_model(ws, &query) else { return Some(Err(format!("There's no model called “{query}” to consult."))) };
             picked.push(consultant(agent, &model, effort));
         }
+        // An arena's designs all run at once, so there are no more than can.
+        let most = trek_core::orchestrate::MAX_RUNNING;
+        if self.consult.style == Style::Arena && picked.len() > most {
+            return Some(Err(format!("An arena drafts {most} designs at most, all at once: name up to {most} models.")));
+        }
         if !picked.is_empty() {
             self.consult.consultants = picked;
         }
@@ -1559,8 +1564,8 @@ impl Composer {
     }
 
     /// Every model on offer for an arena, each agent's default first, then its others, smartest
-    /// first; and the defaults alone.
-    fn arena_options(&self, cx: &App) -> (Vec<(AgentId, ModelInfo)>, Vec<(AgentId, ModelInfo)>) {
+    /// first.
+    fn arena_options(&self, cx: &App) -> Vec<(AgentId, ModelInfo)> {
         let ws = self.workspace.read(cx);
         let (mut defaults, mut others) = (vec![], vec![]);
         for agent in ws.ready_agents() {
@@ -1575,8 +1580,8 @@ impl Composer {
                 }
             }
         }
-        let all = defaults.iter().cloned().chain(others).collect();
-        (all, defaults)
+        defaults.append(&mut others);
+        defaults
     }
 
     /// The model family of the thread's own agent and model.
@@ -1589,12 +1594,12 @@ impl Composer {
 
     /// An arena's candidates when none are picked: one per model family.
     fn arena_defaults(&self, cx: &App) -> Vec<Consultant> {
-        trek_core::orchestrate::arena_defaults(&self.arena_options(cx).1)
+        trek_core::orchestrate::arena_defaults(&self.arena_options(cx))
     }
 
     /// Who judges the arena: the one picked, else a model of another family than the thread's.
     fn arena_judge(&self, cx: &App) -> Option<Consultant> {
-        self.consult.judge.clone().or_else(|| trek_core::orchestrate::pick_judge(&self.main_family(cx), &self.consult.consultants, &self.arena_options(cx).0))
+        self.consult.judge.clone().or_else(|| trek_core::orchestrate::pick_judge(&self.main_family(cx), &self.consult.consultants, &self.arena_options(cx)))
     }
 
     /// The consult menu: who's consulted, at what effort, how, and then what.
@@ -1655,6 +1660,10 @@ impl Composer {
             Style::Discuss => format!("{main_agent} and they go back and forth until they agree ({} rounds at most).", trek_core::orchestrate::DISCUSS_ROUNDS),
             Style::Arena => format!("{main_agent} grounds the problem; each drafts a design on its own; a model of another family judges them blind; {main_agent} synthesises the best."),
         };
+        // An arena's designs all run at once: no more than can.
+        let most = trek_core::orchestrate::MAX_RUNNING;
+        let full = self.consult.style == Style::Arena && self.consult.consultants.len() >= most;
+        let note = if full { format!("{note} {most} designs at most.") } else { note };
         let picked = v_flex().px(px(5.)).children(self.consult.consultants.iter().enumerate().map(|(i, c)| {
             let name = picked_models.get(i).map(|m| model_name(m, &c.model)).unwrap_or_else(|| c.model.clone());
             let choosing = self.consult_effort == Some(i);
@@ -1748,12 +1757,15 @@ impl Composer {
                 ui::menu_row(SharedString::from(format!("consult-add-{}-{}", agent.key(), m.id)), false, cx)
                     .test_support()
                     .min_h(px(30.))
+                    .when(full && !on, |el| el.opacity(0.45).cursor_default())
                     .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
                     .when(on, |el| el.child(Icon::new(IconName::Check).small()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let at = this.consult.consultants.iter().position(|c| c.agent == agent && same_model(&c.model, &model.id));
+                        let full = this.consult.style == Style::Arena && this.consult.consultants.len() >= trek_core::orchestrate::MAX_RUNNING;
                         match at {
                             Some(i) => _ = this.consult.consultants.remove(i),
+                            None if full => return,
                             None => this.consult.consultants.push(consultant(agent.clone(), &model, None)),
                         }
                         this.consult_effort = None;
@@ -1793,6 +1805,9 @@ impl Composer {
                                 if v == Style::Arena && c.consult.consultants.is_empty() {
                                     c.consult.consultants = c.arena_defaults(cx);
                                 }
+                                if v == Style::Arena {
+                                    c.consult.consultants.truncate(trek_core::orchestrate::MAX_RUNNING);
+                                }
                                 if v != Style::Arena {
                                     c.consult_judge = false;
                                 }
@@ -1817,7 +1832,7 @@ impl Composer {
         let judges = self.consult_judge.then(|| {
             let main = self.main_family(cx);
             let current = self.arena_judge(cx);
-            let options: Vec<(AgentId, ModelInfo)> = self.arena_options(cx).0.into_iter().filter(|(a, m)| trek_core::orchestrate::family(a, &m.id) != main).collect();
+            let options: Vec<(AgentId, ModelInfo)> = self.arena_options(cx).into_iter().filter(|(a, m)| trek_core::orchestrate::designs(a, m) && trek_core::orchestrate::family(a, &m.id) != main).collect();
             ui::menu_surface(cx)
                 .id("consult-judges")
                 .test_support()

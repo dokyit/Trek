@@ -6,7 +6,7 @@ use super::{Route, UndoAction, Workspace, WorkspaceEvent};
 use gpui_kit::Context;
 use std::path::{Path, PathBuf};
 use trek_core::settings::Verification;
-use trek_core::store::{Thread, now_ms};
+use trek_core::store::{Item, Thread, now_ms};
 use trek_core::{RunState, skills, verification};
 
 /// A thread setting up (or maintaining) a project's verification skill.
@@ -22,28 +22,40 @@ impl Workspace {
     }
 
     /// Look for `project`'s verification skill again and record what's there: a new one, one
-    /// that changed, or none (one that's gone is forgotten).
+    /// that changed, or none (one that's gone is forgotten). Quick enough for the main thread (a
+    /// session about to start is told what's there now): when the skill last changed, a walk
+    /// through its folder, is worked out in the background.
     pub fn refresh_verification(&mut self, project: &Path, cx: &mut Context<Self>) {
-        // A thread with no project runs in the home folder, whose skills are the user's own.
-        if project == trek_core::paths::home() {
+        if !verifiable(project) {
             return;
         }
         let found = verification::find(project);
-        self.record_verification(project, found, cx);
+        let before = self.verification(project);
+        let same = match (&found, &before) {
+            (Some(f), Some(b)) => b.skill == f.dir.display().to_string() && b.name == f.name && b.cli == f.cli,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.record_verification(project, found.map(|f| (f, None)), cx);
+        }
+        if self.verification(project).is_some() {
+            self.scan_verification(vec![project.to_path_buf()], cx);
+        }
     }
 
-    fn record_verification(&mut self, project: &Path, found: Option<verification::Found>, cx: &mut Context<Self>) {
+    /// Record what Trek found in `project`: the skill, and when it last changed if that's known.
+    fn record_verification(&mut self, project: &Path, found: Option<(verification::Found, Option<i64>)>, cx: &mut Context<Self>) {
         let before = self.verification(project);
-        let after = found.map(|f| verification::record(&f, before.as_ref()));
+        let after = found.map(|(f, changed)| verification::record(&f, before.as_ref(), changed));
         if after != before {
             self.update_project_prefs(project, |p| p.verification = after, cx);
         }
     }
 
-    /// Look through every project for its skill, off the main thread (at launch: a skill made
-    /// outside Trek is told to agents too).
-    pub(super) fn refresh_all_verification(&mut self, cx: &mut Context<Self>) {
-        let projects: Vec<PathBuf> = self.workspace_projects().into_iter().map(|p| p.path.clone()).collect();
+    /// Look through `projects` for their skills, and when each last changed, off the main thread.
+    pub(super) fn scan_verification(&mut self, projects: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let projects: Vec<PathBuf> = projects.into_iter().filter(|p| verifiable(p)).collect();
         if projects.is_empty() {
             return;
         }
@@ -54,7 +66,10 @@ impl Workspace {
                     projects
                         .into_iter()
                         .map(|p| {
-                            let f = verification::find(&p);
+                            let f = verification::find(&p).map(|f| {
+                                let changed = verification::last_change(&f.dir);
+                                (f, changed)
+                            });
                             (p, f)
                         })
                         .collect::<Vec<_>>()
@@ -67,6 +82,13 @@ impl Workspace {
             });
         });
         self.keep(task);
+    }
+
+    /// Look through every project for its skill (at launch, and on Settings → Project: a skill
+    /// made outside Trek is told to agents too).
+    pub(super) fn refresh_all_verification(&mut self, cx: &mut Context<Self>) {
+        let projects: Vec<PathBuf> = self.workspace_projects().into_iter().map(|p| p.path.clone()).collect();
+        self.scan_verification(projects, cx);
     }
 
     /// Start a thread in `project` that sets up its verification skill (or, `maintain`, brings it
@@ -107,22 +129,41 @@ impl Workspace {
             .map(|(id, r)| (id.clone(), r.maintain))
     }
 
-    /// A turn in `id` is over: if it was setting up or maintaining a verification skill, see what
-    /// the project has now.
-    pub(super) fn verification_turn_ended(&mut self, id: &str, cx: &mut Context<Self>) {
+    /// A turn in `id` is over (`completed`: not stopped, nor paused at a usage limit): if it was
+    /// setting up or maintaining a verification skill, see what the project has now. A maintenance
+    /// run counts once it has run or changed the skill; a setup run, once there's a skill.
+    pub(super) fn verification_turn_ended(&mut self, id: &str, completed: bool, cx: &mut Context<Self>) {
         let Some(run) = self.verify_runs.get(id) else { return };
         let (project, maintain) = (run.project.clone(), run.maintain);
-        let ok = self.thread(id).is_some_and(|t| t.run_state != RunState::Failed);
+        let ok = completed && self.thread(id).is_some_and(|t| t.run_state != RunState::Failed);
         let had = self.verification(&project).is_some();
         self.refresh_verification(&project, cx);
-        if ok && maintain {
-            let now = now_ms();
-            self.update_project_prefs(&project, |p| p.verification.iter_mut().for_each(|v| v.maintained_at = Some(now)), cx);
+        let now = self.verification(&project);
+        let done = match &now {
+            Some(v) if maintain => ok && self.worked_on(id, &project, v),
+            Some(_) => ok,
+            None => false,
+        };
+        if done {
+            self.verify_runs.remove(id);
+            if maintain {
+                let at = now_ms();
+                self.update_project_prefs(&project, |p| p.verification.iter_mut().for_each(|v| v.maintained_at = Some(at)), cx);
+            }
         }
-        if let (false, Some(v)) = (had, self.verification(&project)) {
+        if let (false, Some(v)) = (had, now) {
             let name = self.projects.iter().find(|p| p.path == project).map(|p| p.name.clone()).unwrap_or_default();
             cx.emit(WorkspaceEvent::Toast { message: format!("{name} has a verification skill now: “{}”. Every agent working there will use it.", v.name), undo: None });
         }
+    }
+
+    /// Whether `id`'s last turn ran the skill `v` of `project`, or changed something in it.
+    fn worked_on(&self, id: &str, project: &Path, v: &Verification) -> bool {
+        let Some(live) = self.live.get(id) else { return false };
+        let from = live.items.iter().rposition(|i| matches!(i, Item::User { .. })).unwrap_or(0);
+        let folder = Path::new(&v.skill).strip_prefix(project).unwrap_or(Path::new(&v.skill)).display().to_string();
+        let needle = v.cli.as_deref().and_then(verification::needle);
+        live.items[from..].iter().any(|i| matches!(i, Item::Tool { detail, .. } if detail.contains(&folder) || needle.as_deref().is_some_and(|n| verification::runs(n, detail))))
     }
 
     /// Turn the weekly reminder for `project`'s skill on or off.
@@ -144,17 +185,29 @@ impl Workspace {
         }
     }
 
-    /// What agents working in `project` are told about it: where its verification skill is.
-    pub(super) fn project_notes(&self, project: Option<&Path>) -> Option<String> {
-        let v = self.verification(project?)?;
-        Path::new(&v.skill).join("SKILL.md").exists().then(|| verification::instructions(&v))
+    /// What agents working in `project` are told about it, for one working in `cwd` (the project
+    /// folder or a worktree of it): where its verification skill is.
+    pub(super) fn project_notes(&self, project: Option<&Path>, cwd: &Path) -> Option<String> {
+        let project = project?;
+        let v = self.verification(project)?;
+        Path::new(&v.skill).join("SKILL.md").exists().then(|| verification::instructions(&v, project, cwd))
     }
 
-    /// What a command that runs `t`'s project's verification CLI contains (`verification::needle`).
-    pub fn verify_needle(&self, t: &Thread) -> Option<String> {
-        let v = self.verification(&self.project_dir(t)?)?;
-        verification::needle(v.cli.as_deref()?)
+    /// How to tell a turn in `t` ran its project's verification CLI (`verification::verdict`).
+    pub fn verify_probe(&self, t: &Thread) -> Option<verification::Probe> {
+        let project = self.project_dir(t)?;
+        let v = self.verification(&project)?;
+        let needle = verification::needle(v.cli.as_deref()?)?;
+        // A thread working outside the main checkout checks its own folder, not the checkout.
+        let main = t.cwd.as_ref().filter(|c| !c.starts_with(&project)).map(|_| project.clone());
+        Some(verification::Probe { needle, main })
     }
+}
+
+/// Whether Trek looks for a verification skill in `project`: not in the home folder, where a
+/// thread with no project runs, and whose skills are the user's own.
+fn verifiable(project: &Path) -> bool {
+    project != trek_core::paths::home()
 }
 
 /// "3 days ago", "today": how long since `at`, for the reminder and Settings.

@@ -52,6 +52,9 @@ pub struct SessionConfig {
     /// What Trek tells the agent about the project (its verification skill): Claude Code gets it
     /// as part of its system prompt, other agents with the first message of a new session.
     pub instructions: Option<String>,
+    /// Folders outside `cwd` the agent may read without asking (the guides Trek ships): Claude
+    /// Code gets them with `--add-dir`; Codex reads anywhere already.
+    pub read_dirs: Vec<PathBuf>,
 }
 
 /// A stdio MCP server Trek adds to a session.
@@ -576,6 +579,7 @@ mod live_usage {
             fast: None,
             mcp_servers: vec![],
             instructions: None,
+            read_dirs: vec![],
             read_only: false,
         });
         trek_core::runtime().block_on(async {

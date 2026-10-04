@@ -996,7 +996,7 @@ impl ThreadView {
                 let from = items[..ix.min(items.len())].iter().rposition(trek_core::rewind::ends_turn).map_or(0, |b| b + 1);
                 let turn = &items[from.min(ix)..ix.min(items.len())];
                 // Did the turn run the project's verification CLI, and did its last run pass?
-                let verdict = at.verify_needle.as_deref().and_then(|n| trek_core::verification::verdict(turn, n));
+                let verdict = at.verify_probe.as_ref().and_then(|p| trek_core::verification::verdict(turn, p));
                 let verified = verdict.map(|v| {
                     let color = if v.passed { palette::emerald(cx) } else { palette::amber(cx) };
                     let n = v.commands.len();
@@ -1986,8 +1986,8 @@ struct RowContext {
     /// Working sub-agents' dots breathe, at `clock` (seconds).
     pulse: bool,
     clock: f32,
-    /// What a command running the project's verification CLI contains, when it has one.
-    verify_needle: Option<String>,
+    /// How to tell a turn ran the project's verification CLI, when it has one.
+    verify_probe: Option<trek_core::verification::Probe>,
 }
 
 impl Render for ThreadView {
@@ -2024,7 +2024,7 @@ impl Render for ThreadView {
             animate: self.animate(window, cx),
             pulse: self.animate(window, cx) && self._ticker.is_some(),
             clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,
-            verify_needle: t.and_then(|t| ws.verify_needle(t)),
+            verify_probe: t.and_then(|t| ws.verify_probe(t)),
         };
         let flash = self.flash;
         v_flex()

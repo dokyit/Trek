@@ -41,7 +41,9 @@ fn front_matter(text: &str) -> Vec<(String, String)> {
 }
 
 /// The project's verification skill: one marked as such in its front matter (`metadata: trek:
-/// verification`), else one named like one ("verify-app", "control-app").
+/// verification`), else one named like one ("verify-app", "control-app") that has a Feature Map.
+/// A name alone isn't enough: "verification-before-completion" or "verify-pr" are checklists,
+/// not a way to drive the app.
 pub fn find(project: &Path) -> Option<Found> {
     let mut found: Vec<(bool, Found)> = vec![];
     for root in SKILL_DIRS {
@@ -55,7 +57,7 @@ pub fn find(project: &Path) -> Option<Found> {
             let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let name = field("name").unwrap_or(folder);
             let marked = field(MARK.0).as_deref() == Some(MARK.1);
-            let named = name.contains("verif") || name == "control-app";
+            let named = (name.contains("verif") || name == "control-app") && dir.join("references/features/README.md").is_file();
             if marked || named {
                 let cli = field("cli").or_else(|| bundled_cli(&dir, project));
                 found.push((marked, Found { dir, name, cli }));
@@ -106,9 +108,8 @@ pub fn last_change(dir: &Path) -> Option<i64> {
 }
 
 /// What Trek records about a skill it found, keeping the user's choices and the latest of when it
-/// was last maintained and when it last changed.
-pub fn record(found: &Found, before: Option<&Verification>) -> Verification {
-    let changed = last_change(&found.dir);
+/// was last maintained and when it last `changed` (`last_change`, when it was looked at).
+pub fn record(found: &Found, before: Option<&Verification>, changed: Option<i64>) -> Verification {
     let maintained = before.and_then(|b| b.maintained_at).max(changed);
     Verification {
         skill: found.dir.display().to_string(),
@@ -131,14 +132,37 @@ pub fn remind_now(v: &Verification, now: i64) -> bool {
     v.remind_weekly && due(v, now) && v.reminded_at.is_none_or(|at| now - at >= WEEK_MS)
 }
 
-/// What every agent working in the project is told about the skill.
-pub fn instructions(v: &Verification) -> String {
-    let cli = v.cli.as_deref().map(|c| format!(" and drive and check the app with its CLI (`{c}`, run from the project folder) rather than throwaway scripts")).unwrap_or_default();
+/// What every agent working in `project` is told about the skill, for one working in `cwd`: the
+/// project folder or a worktree of it. A worktree is told to use its own copy of the skill; one
+/// without a copy (a skill not committed yet) reads the main checkout's but runs its CLI from its
+/// own folder, so it checks its own changes.
+pub fn instructions(v: &Verification, project: &Path, cwd: &Path) -> String {
+    let skill = Path::new(&v.skill);
+    let rel = skill.strip_prefix(project).ok().filter(|r| cwd.join(r).join("SKILL.md").is_file());
+    let (place, cli) = match rel {
+        Some(rel) => (format!("in `{}` in your working folder", rel.display()), v.cli.clone()),
+        None => {
+            let away = if cwd == project { String::new() } else { " (this working folder has no copy of it yet)".into() };
+            (format!("in {}{away}", crate::paths::tildify(skill)), v.cli.as_deref().map(|c| absolute(c, project, cwd)))
+        }
+    };
+    let cli = cli.map(|c| format!(" and drive and check the app with its CLI (`{c}`, run from your working folder) rather than throwaway scripts")).unwrap_or_default();
     format!(
-        "This project has a verification skill, “{}”, in {}. Before you call a change done, verify it with the skill: read its SKILL.md{cli}. Its Feature Map, references/features/README.md, says what each feature does and how to reach it.",
-        v.name,
-        crate::paths::tildify(Path::new(&v.skill))
+        "This project has a verification skill, “{}”, {place}. Before you call a change done, verify it with the skill: read its SKILL.md{cli}. Its Feature Map, references/features/README.md, says what each feature does and how to reach it.",
+        v.name
     )
+}
+
+/// The CLI `cli` (run from `project`) with a program that `cwd` lacks named by its full path.
+fn absolute(cli: &str, project: &Path, cwd: &Path) -> String {
+    let mut words: Vec<String> = cli.split_whitespace().map(String::from).collect();
+    if let Some(w) = words.iter_mut().find(|w| w.starts_with("./")) {
+        let rel = &w[2..];
+        if !cwd.join(rel).exists() {
+            *w = project.join(rel).display().to_string();
+        }
+    }
+    words.join(" ")
 }
 
 /// The message that starts building a project's verification skill, following `guide`.
@@ -159,27 +183,60 @@ pub fn maintain_prompt(guide: &Path, skill: &Path) -> String {
 }
 
 /// What a command line running the CLI `cli` contains: the program it starts with
-/// (`./scripts/app check` → `scripts/app`), or the whole line for one run through another
-/// program (`cargo run -p xtask --` → itself).
+/// (`./scripts/app check` → `scripts/app`, `npx tsx tools/app.ts` → `tools/app.ts`), else the
+/// whole line but its trailing flags (`make verify` → itself, `appctl --json` → `appctl`): a
+/// program run through another (make, cargo, swift) is only that program with its arguments.
 pub fn needle(cli: &str) -> Option<String> {
-    const RUNNERS: [&str; 18] = ["npx", "npm", "pnpm", "yarn", "bun", "bunx", "node", "deno", "python", "python3", "uv", "uvx", "cargo", "go", "sh", "bash", "zsh", "ruby"];
     let words: Vec<&str> = cli.split_whitespace().collect();
-    if let Some(path) = words.iter().find(|w| w.contains('/')) {
-        return Some(path.trim_start_matches("./").to_string());
+    // A path is the program when no flag comes before it (`make -C tools/x check` isn't).
+    let path = words.iter().position(|w| w.contains('/')).filter(|&i| !words[..i].iter().any(|w| w.starts_with('-')));
+    if let Some(i) = path {
+        return Some(words[i].trim_start_matches("./").to_string());
     }
-    let first = *words.first()?;
-    Some(if RUNNERS.contains(&first) { words.join(" ") } else { first.to_string() })
+    let end = words.iter().rposition(|w| !w.starts_with('-'))? + 1;
+    Some(words[..end].join(" "))
 }
 
 /// Whether a command line ran the CLI `needle` stands for.
 pub fn runs(needle: &str, command: &str) -> bool {
     if needle.contains(' ') {
-        return command.split_whitespace().collect::<Vec<_>>().join(" ").contains(needle);
+        let line = command.split_whitespace().collect::<Vec<_>>().join(" ");
+        let edge = |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\''));
+        return line.match_indices(needle).any(|(at, _)| edge(line[..at].chars().next_back()) && edge(line[at + needle.len()..].chars().next()));
     }
-    // The program itself, wherever it's run from: `./scripts/app`, `/repo/scripts/app`.
-    command
+    let words: Vec<&str> = command
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\''))
-        .any(|w| w == needle || w.ends_with(&format!("/{needle}")))
+        .filter(|w| !w.is_empty())
+        .collect();
+    // `path` itself, wherever it's run from: `./scripts/app`, `/repo/scripts/app`.
+    let is = |w: &str, path: &str| {
+        let w = w.trim_end_matches('/');
+        let w = w.strip_prefix("./").unwrap_or(w);
+        w == path || w.ends_with(&format!("/{path}"))
+    };
+    if words.iter().any(|w| is(w, needle)) {
+        return true;
+    }
+    // Or the rest of it, from a folder on its path: `cd .agents/skills/x && ./scripts/app check`.
+    needle.match_indices('/').any(|(i, _)| {
+        let (dir, rest) = (&needle[..i], &needle[i + 1..]);
+        words.windows(2).position(|p| p[0] == "cd" && is(p[1], dir)).is_some_and(|at| words[at + 2..].iter().any(|w| is(w, rest)))
+    })
+}
+
+/// Whether a command line goes into `dir` (or a folder in it) with `cd`.
+fn goes_into(command: &str, dir: &Path) -> bool {
+    let words: Vec<&str> = command.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '"' | '\'')).filter(|w| !w.is_empty()).collect();
+    words.windows(2).any(|p| p[0] == "cd" && Path::new(p[1].trim_end_matches('/')).starts_with(dir))
+}
+
+/// How Trek tells a turn ran the project's verification CLI: what a command running it contains
+/// (`needle`), and, for a thread working outside the main checkout (a worktree), that checkout:
+/// a run there checks the main checkout's code, not the thread's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Probe {
+    pub needle: String,
+    pub main: Option<PathBuf>,
 }
 
 /// How a turn used the verification CLI: the commands that ran it, and whether the last one
@@ -190,13 +247,14 @@ pub struct Verdict {
     pub passed: bool,
 }
 
-/// Whether the tool calls in `turn` (one turn's items) ran the CLI `needle` stands for. Reading
-/// the skill isn't verifying: only running its CLI counts.
-pub fn verdict(turn: &[Item], needle: &str) -> Option<Verdict> {
+/// Whether the tool calls in `turn` (one turn's items) ran the CLI `probe` stands for. Reading
+/// the skill isn't verifying: only running its CLI counts, where the thread works.
+pub fn verdict(turn: &[Item], probe: &Probe) -> Option<Verdict> {
+    let here = |d: &str| probe.main.as_deref().is_none_or(|m| !goes_into(d, m));
     let runs: Vec<(&String, ToolStatus)> = turn
         .iter()
         .filter_map(|i| match i {
-            Item::Tool { title, detail, status, .. } if is_command(title) && runs(needle, detail) && *status != ToolStatus::Running => Some((detail, *status)),
+            Item::Tool { title, detail, status, .. } if is_command(title) && runs(&probe.needle, detail) && here(detail) && *status != ToolStatus::Running => Some((detail, *status)),
             _ => None,
         })
         .collect();
@@ -233,13 +291,17 @@ mod tests {
         assert_eq!(find(&p), None);
         skill(&p, ".claude/skills", "review", "name: review\ndescription: Review code.");
         assert_eq!(find(&p), None, "not a verification skill");
-        // Named like one, with a script of its own.
+        // Named like one, with a script of its own: only a checklist until it has a Feature Map.
         let named = skill(&p, ".claude/skills", "verify-app", "name: verify-app\ndescription: Check the app.");
         std::fs::create_dir_all(named.join("scripts")).unwrap();
         std::fs::write(named.join("scripts/notes.txt"), "not a program").unwrap();
         let app = named.join("scripts/app");
         std::fs::write(&app, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&app, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        skill(&p, ".claude/skills", "verification-before-completion", "name: verification-before-completion\ndescription: Check before you say done.");
+        assert_eq!(find(&p), None, "a name alone isn't a verification skill");
+        std::fs::create_dir_all(named.join("references/features")).unwrap();
+        std::fs::write(named.join("references/features/README.md"), "# Features\n").unwrap();
         let found = find(&p).unwrap();
         assert_eq!((found.name.as_str(), found.cli.as_deref()), ("verify-app", Some("./.claude/skills/verify-app/scripts/app")));
         // One marked in its front matter wins, with the CLI it names.
@@ -252,16 +314,18 @@ mod tests {
     #[test]
     fn records_when_it_was_last_maintained() {
         let p = project("record");
-        let dir = skill(&p, ".agents/skills", "control-app", "name: control-app");
+        let dir = skill(&p, ".agents/skills", "control-app", "name: control-app\nmetadata:\n  trek: verification");
         let found = find(&p).unwrap();
         let changed = last_change(&dir).unwrap();
         assert!((crate::store::now_ms() - changed).abs() < 60_000);
-        let v = record(&found, None);
+        let v = record(&found, None, Some(changed));
         assert_eq!((v.maintained_at, v.remind_weekly, v.name.as_str()), (Some(changed), false, "control-app"));
         // A later maintenance run counts; the user's choices stay.
         let before = Verification { maintained_at: Some(changed + 10), remind_weekly: true, reminded_at: Some(5), ..v.clone() };
-        let again = record(&found, Some(&before));
+        let again = record(&found, Some(&before), Some(changed));
         assert_eq!((again.maintained_at, again.remind_weekly, again.reminded_at), (Some(changed + 10), true, Some(5)));
+        // Not looked at yet: what was known stays.
+        assert_eq!(record(&found, Some(&before), None).maintained_at, Some(changed + 10));
         let _ = std::fs::remove_dir_all(p);
     }
 
@@ -284,8 +348,10 @@ mod tests {
     fn commands_that_run_the_cli_are_recognised() {
         assert_eq!(needle("./scripts/app check").as_deref(), Some("scripts/app"));
         assert_eq!(needle("npx tsx tools/app.ts").as_deref(), Some("tools/app.ts"));
-        assert_eq!(needle("cargo run -p xtask --").as_deref(), Some("cargo run -p xtask --"));
-        assert_eq!(needle("trekctl").as_deref(), Some("trekctl"));
+        assert_eq!(needle("cargo run -p xtask --").as_deref(), Some("cargo run -p xtask"));
+        assert_eq!(needle("make verify").as_deref(), Some("make verify"));
+        assert_eq!(needle("make -C tools/verify check").as_deref(), Some("make -C tools/verify check"), "the path isn't the program");
+        assert_eq!(needle("trekctl --json").as_deref(), Some("trekctl"));
         assert_eq!(needle("  "), None);
         assert!(runs("scripts/app", "cd /repo && ./scripts/app check --json"));
         assert!(runs("scripts/app", "/repo/scripts/app status"));
@@ -294,28 +360,59 @@ mod tests {
         assert!(runs("trekctl", "trekctl open settings"));
         assert!(runs("trekctl", "(cd x; /usr/local/bin/trekctl check)"));
         assert!(!runs("trekctl", "echo trekctl-old"));
-        assert!(runs("cargo run -p xtask --", "cargo  run -p xtask -- check"));
+        assert!(runs("cargo run -p xtask", "cargo  run -p xtask -- check"));
+        // A program run through make (or swift, just, docker) is only that target.
+        assert!(runs("make verify", "make verify"));
+        assert!(runs("make verify", "cd app && make verify ARGS=check"));
+        assert!(!runs("make verify", "make build"));
+        assert!(!runs("make verify", "make verify-all"));
+        assert!(!runs("swift run appctl", "swift build"));
+        // From a folder on its path.
+        let cli = ".agents/skills/verify-app/scripts/app";
+        assert!(runs(cli, "cd .agents/skills/verify-app && ./scripts/app check"));
+        assert!(runs(cli, "cd /wt/.agents/skills/verify-app/scripts; ./app check"));
+        assert!(!runs(cli, "cd .agents/skills/verify-app && cat SKILL.md"));
+        assert!(!runs(cli, "./scripts/app check"), "another app's scripts/app");
     }
 
     #[test]
     fn a_turn_is_verified_by_running_the_cli_not_reading_the_skill() {
         let tool = |title: &str, detail: &str, status: ToolStatus| Item::Tool { id: "t".into(), title: title.into(), detail: detail.into(), output: String::new(), status };
+        let probe = Probe { needle: "scripts/app".into(), main: None };
         let read = tool("Read", "/repo/.agents/skills/control-app/scripts/app", ToolStatus::Done);
-        assert_eq!(verdict(&[read.clone()], "scripts/app"), None);
+        assert_eq!(verdict(&[read.clone()], &probe), None);
         let failed = tool("Run command", "./scripts/app check", ToolStatus::Failed);
         let passed = tool("Run command", "./scripts/app check --json", ToolStatus::Done);
-        assert_eq!(verdict(&[read.clone(), failed.clone()], "scripts/app"), Some(Verdict { commands: vec!["./scripts/app check".into()], passed: false }));
-        let v = verdict(&[failed, read, passed], "scripts/app").unwrap();
+        assert_eq!(verdict(&[read.clone(), failed.clone()], &probe), Some(Verdict { commands: vec!["./scripts/app check".into()], passed: false }));
+        let v = verdict(&[failed, read, passed.clone()], &probe).unwrap();
         assert!(v.passed && v.commands.len() == 2, "the last run counts");
-        assert_eq!(verdict(&[tool("Run command", "./scripts/app check", ToolStatus::Running)], "scripts/app"), None, "still running");
+        assert_eq!(verdict(&[tool("Run command", "./scripts/app check", ToolStatus::Running)], &probe), None, "still running");
+        // A thread in a worktree that checks the main checkout hasn't checked its own changes.
+        let away = Probe { main: Some("/repo".into()), ..probe };
+        assert_eq!(verdict(&[tool("Run command", "cd /repo && ./scripts/app check", ToolStatus::Done)], &away), None);
+        assert!(verdict(&[passed], &away).is_some_and(|v| v.passed));
     }
 
     #[test]
     fn agents_are_told_where_it_is() {
-        let v = Verification { skill: "/repo/.agents/skills/control-app".into(), name: "control-app".into(), cli: Some("./scripts/app".into()), ..Default::default() };
-        let text = instructions(&v);
-        assert!(text.contains("“control-app”") && text.contains("(`./scripts/app`") && text.contains("references/features/README.md"), "{text}");
-        assert!(!instructions(&Verification { cli: None, ..v }).contains("CLI"));
+        let p = project("tell");
+        let dir = skill(&p, ".agents/skills", "control-app", "name: control-app");
+        let v = Verification { skill: dir.display().to_string(), name: "control-app".into(), cli: Some("./.agents/skills/control-app/scripts/app".into()), ..Default::default() };
+        let text = instructions(&v, &p, &p);
+        assert!(text.contains("“control-app”, in `.agents/skills/control-app` in your working folder") && text.contains("(`./.agents/skills/control-app/scripts/app`, run from your working folder)") && text.contains("references/features/README.md"), "{text}");
+        assert!(!instructions(&Verification { cli: None, ..v.clone() }, &p, &p).contains("CLI"));
+        // A worktree with the skill committed uses its own copy.
+        let wt = project("tell-wt");
+        skill(&wt, ".agents/skills", "control-app", "name: control-app");
+        assert_eq!(instructions(&v, &p, &wt), text);
+        // One without a copy reads the main checkout's, and runs its CLI by full path from its own folder.
+        let bare = project("tell-bare");
+        let text = instructions(&v, &p, &bare);
+        let cli = p.join(".agents/skills/control-app/scripts/app");
+        assert!(text.contains("has no copy of it yet") && text.contains(&format!("(`{}`, run from your working folder)", cli.display())), "{text}");
         assert!(setup_prompt(Path::new("/d/skills/create-verification-skill/SKILL.md")).contains("`/d/skills/create-verification-skill/SKILL.md`"));
+        for d in [p, wt, bare] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 }
