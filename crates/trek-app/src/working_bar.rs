@@ -76,12 +76,16 @@ struct Shown {
 #[derive(Clone, PartialEq)]
 struct Header {
     agent: AgentId,
+    /// Its clock: when the turn started, or the wait began.
     started: Option<Instant>,
     agents: usize,
+    /// It waits on sub-agents rather than working itself (its turn is over, or blocked in a call
+    /// for their answers): their logos, and "Waiting on Sol".
+    waiting: Option<(Vec<AgentId>, String)>,
 }
 
 #[derive(Clone, PartialEq)]
-struct Group {
+pub(crate) struct Group {
     summary: String,
     kind: ToolKind,
     phrase: String,
@@ -106,6 +110,60 @@ struct LiveRow {
 impl Group {
     fn rows_height(&self) -> f32 {
         self.rows.len() as f32 * ROW + if self.earlier > 0 { EARLIER } else { 0. }
+    }
+}
+
+/// What a sub-agent is doing, as the bar shows its own agent's live group: the calls of the
+/// sub-agent `child`'s latest turn (one Trek runs), its newest ones as rows.
+pub(crate) fn child_group(ws: &Workspace, child: &str) -> Option<Group> {
+    let live = ws.live.get(child)?;
+    let start = live.items.iter().rposition(|i| matches!(i, Item::User { aside: false, .. })).map_or(0, |u| u + 1);
+    let tools: Vec<usize> = (start..live.items.len()).filter(|ix| matches!(live.items.get(*ix), Some(i @ Item::Tool { .. }) if activity::placement(i) == activity::Place::Group)).collect();
+    group(ws, child, &tools, None)
+}
+
+/// The same for one of the agent's own sub-agents, from the calls it reported
+/// (`SubTask::steps`, the newest last; `earlier` more before them). The last is under way while
+/// it runs.
+pub(crate) fn steps_group(steps: &[(String, String)], earlier: usize, running: bool, cwd: Option<&std::path::Path>) -> Option<Group> {
+    let (title, detail) = steps.last()?;
+    let kinds: Vec<ToolKind> = steps.iter().map(|(t, _)| activity::tool_kind(t)).collect();
+    let rows = steps
+        .iter()
+        .enumerate()
+        .skip(steps.len().saturating_sub(ROWS))
+        .map(|(n, (t, d))| LiveRow { id: format!("step-{}", earlier + n), op: activity::op(t, d, cwd), lines: None, running: running && n + 1 == steps.len(), failed: false, activity: None })
+        .collect();
+    Some(Group {
+        summary: activity::summarize(&kinds),
+        kind: kinds.last().copied().unwrap_or(ToolKind::Other),
+        phrase: activity::phrase(title, detail, None),
+        earlier: earlier + steps.len().saturating_sub(ROWS),
+        rows,
+    })
+}
+
+impl Group {
+    /// Rows shown (the "+N earlier" line counts as one).
+    pub(crate) fn lines(&self) -> usize {
+        self.rows.len() + usize::from(self.earlier > 0)
+    }
+
+    /// The group drawn as a sub-agent's row shows it: its summary line and its rows, the call
+    /// under way shimmering (`clock` in seconds; `still`, it doesn't).
+    pub(crate) fn element(&self, clock: f32, still: bool, cx: &App) -> AnyElement {
+        let live = self.rows.iter().any(|r| r.running);
+        v_flex()
+            .child(WorkingBar::summary_line(self, clock, None, still || !live, 1., false, cx))
+            .child(rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, None, cx))).children(self.rows.iter().map(|r| row(r, None, clock, still, None, cx))))
+            .into_any_element()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn describe(&self) -> Vec<String> {
+        let mut out = vec![format!("{} · {}", self.summary, self.phrase)];
+        out.extend(self.rows.iter().map(|r| [r.op.verb.as_str(), r.op.text.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ")));
+        out
     }
 }
 
@@ -194,11 +252,28 @@ impl WorkingBar {
         let thread = ws.thread(id)?;
         let still = !ws.motion(cx) || !self.active;
         // The header shows while the thread works and isn't waiting on the user (its cards take
-        // this spot then).
-        let header = (thread.run_state == RunState::Working && live.permissions.is_empty()).then(|| Header {
+        // this spot then), and while it waits on its sub-agents.
+        let waited = ws.waiting_on(id);
+        let waiting = (!waited.is_empty()).then(|| {
+            let mut logos: Vec<AgentId> = vec![];
+            for w in &waited {
+                if !logos.contains(&w.agent) && logos.len() < 3 {
+                    logos.push(w.agent.clone());
+                }
+            }
+            (logos, crate::workspace::waiting_label(&waited))
+        });
+        // The wait's clock is the longest-waited one's, to the second. Worked out afresh, it'd
+        // land a hair off each time and redraw the bar on every workspace change: the one shown
+        // stands while it's within a second.
+        let shown = self.shown.as_ref().filter(|s| s.thread == id).and_then(|s| s.header.as_ref()).filter(|h| h.waiting.is_some()).and_then(|h| h.started);
+        let since = waited.iter().map(|w| w.elapsed).max().map(|d| steady(Instant::now() - Duration::from_secs(d.as_secs()), shown));
+        let working = thread.run_state == RunState::Working || ws.waiting(id);
+        let header = (working && live.permissions.is_empty()).then(|| Header {
             agent: thread.agent.clone(),
-            started: live.turn_started,
-            agents: live.active_tasks().max(live.background),
+            started: if waiting.is_some() { since } else { live.turn_started },
+            agents: live.active_tasks().max(live.background_agents().count()),
+            waiting,
         });
         let current = activity::live(ws, id).and_then(|t| group(ws, id, &t.tools, t.headline.as_deref()));
         // The transcript holds a folding group back wherever it's shown, so every bar on it shows
@@ -307,7 +382,9 @@ impl WorkingBar {
         if s.header.as_ref().is_none_or(|h| h.started.is_none()) && s.folding.is_none() {
             return None;
         }
-        Some(if s.still {
+        // Waiting is calm: the clock ticks and the hiker looks about, once a second.
+        let waiting = s.header.as_ref().is_some_and(|h| h.waiting.is_some());
+        Some(if s.still || (waiting && s.folding.is_none()) {
             Duration::from_secs(1)
         } else if s.folding.is_some() {
             // 30 a second: smooth enough for a quarter second of motion, and each one redraws the
@@ -347,6 +424,14 @@ impl WorkingBar {
             });
             (every, task)
         });
+    }
+}
+
+/// `at`, or `shown` when that's within a second of it.
+fn steady(at: Instant, shown: Option<Instant>) -> Instant {
+    match shown {
+        Some(s) if (if at > s { at - s } else { s - at }) < Duration::from_secs(1) => s,
+        _ => at,
     }
 }
 
@@ -483,7 +568,8 @@ impl Opener {
 impl WorkingBar {
     /// The group's summary line: kind icon, counts, and what it's about (shimmering while live).
     /// `open`: it opens the group in the transcript (the live one does; a folding one is going).
-    fn summary_line(g: &Group, clock: f32, open: Option<&Opener>, still: bool, phrase_opacity: f32, cx: &App) -> AnyElement {
+    /// `chevron`: it reads as one that opens (not in a sub-agent's row, which opens itself).
+    fn summary_line(g: &Group, clock: f32, open: Option<&Opener>, still: bool, phrase_opacity: f32, chevron: bool, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let live = open.is_some();
@@ -505,8 +591,8 @@ impl WorkingBar {
                     .child(div().child("·"))
                     .child(div().min_w_0().truncate().child(shimmer(g.phrase.clone().into(), clock, still || !live, muted, theme.foreground))),
             )
-            // As the transcript's summary rows do: it opens.
-            .child(Icon::new(IconName::ChevronRight).xsmall().opacity(0.6 * phrase_opacity))
+            // As the transcript's summary rows do: it opens (a sub-agent's, shown in its row, doesn't).
+            .when(chevron, |el| el.child(Icon::new(IconName::ChevronRight).xsmall().opacity(0.6 * phrase_opacity)))
             .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.text_color(theme.foreground)).on_click(o.on_click(None)))
             .into_any_element()
     }
@@ -615,12 +701,12 @@ impl Render for BarTop {
                     .id("live-fold")
                     .test_support()
                     .pt(px(GROUP_PAD))
-                    .child(WorkingBar::summary_line(g, clock, None, still, 1. - t, cx))
+                    .child(WorkingBar::summary_line(g, clock, None, still, 1. - t, true, cx))
                     .child(div().h(px((g.rows_height() + GROUP_PAD) * (1. - t))).overflow_hidden().opacity(1. - t).child(all_rows(g, cx))),
             )
         });
         let group = shown.group.as_ref().map(|g| {
-            column(shown.width, div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., cx)))
+            column(shown.width, div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., true, cx)))
         });
         v_flex().size_full().overflow_hidden().justify_end().children(folding).children(group).into_any_element()
     }
@@ -648,6 +734,28 @@ impl Render for WorkingBar {
             column(shown.width, rows_rail(cx).children(g.rows[settled..].iter().map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)))).pb(px(GROUP_PAD))
         });
         let header = shown.header.as_ref().map(|h| {
+            let who = match &h.waiting {
+                // Their logos, stacked, and who they are; no shimmer: nothing to see here but time.
+                Some((logos, label)) => h_flex()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .child(h_flex().flex_none().children(logos.iter().enumerate().map(|(i, a)| {
+                        div().when(i > 0, |el| el.ml(px(-4.))).p(px(1.)).rounded(px(4.)).bg(theme.background).child(crate::ui::agent_logo(a, px(13.), cx))
+                    })))
+                    .child(div().id("waiting-on").test_support().min_w_0().truncate().text_color(theme.foreground.opacity(0.88)).child(label.clone()))
+                    .children(elapsed.map(|d| div().flex_none().text_color(muted).child(format!("· {}", crate::time::elapsed(d)))))
+                    .into_any_element(),
+                None => h_flex()
+                    .min_w_0()
+                    .gap(px(6.))
+                    // The logo says which agent; the composer's pill names the model.
+                    .child(crate::ui::agent_logo(&h.agent, px(14.), cx))
+                    .child(div().min_w_0().truncate().child(shimmer(trail_word(&shown.thread, elapsed).into(), clock, still, theme.foreground.opacity(0.88), theme.foreground)))
+                    .children(elapsed.map(|d| div().flex_none().text_color(muted).child(crate::time::elapsed(d))))
+                    .when(h.agents > 0, |el| el.child(div().flex_none().text_color(muted).child(agents_out(h.agents))))
+                    .into_any_element(),
+            };
+            let trail = if h.waiting.is_some() { crate::mascot::waiting(clock, still, cx) } else { crate::mascot::trail(clock, still, cx) };
             h_flex()
                 .id("working-bar")
                 .test_support()
@@ -670,15 +778,10 @@ impl Render for WorkingBar {
                                 // Fixed width so the trail doesn't jump as the clock grows.
                                 .w(px(300.))
                                 .pb(px(4.))
-                                .gap(px(6.))
                                 .text_size(px(13.))
-                                // The logo says which agent; the composer's pill names the model.
-                                .child(crate::ui::agent_logo(&h.agent, px(14.), cx))
-                                .child(div().min_w_0().truncate().child(shimmer(trail_word(&shown.thread, elapsed).into(), clock, still, theme.foreground.opacity(0.88), theme.foreground)))
-                                .children(elapsed.map(|d| div().flex_none().text_color(muted).child(crate::time::elapsed(d))))
-                                .when(h.agents > 0, |el| el.child(div().flex_none().text_color(muted).child(agents_out(h.agents)))),
+                                .child(who),
                         )
-                        .child(div().flex_1().min_w_0().child(crate::mascot::trail(clock, still, cx))),
+                        .child(div().flex_1().min_w_0().child(trail)),
                 )
         });
         v_flex()
@@ -770,11 +873,18 @@ pub fn agents_out(n: usize) -> String {
 
 #[cfg(test)]
 impl WorkingBar {
-    /// The header as shown: "Breaking trail… 4s · 2 agents out", or `None` when hidden.
+    /// The header as shown: "Breaking trail… 4s · 2 agents out", "Waiting on Sol · 2s", or
+    /// `None` when hidden.
     pub(crate) fn label(&self) -> Option<String> {
         let s = self.shown.as_ref()?;
         let h = s.header.as_ref()?;
         let elapsed = h.started.map(|t| t.elapsed());
+        if let Some((_, label)) = &h.waiting {
+            return Some(match elapsed {
+                Some(d) => format!("{label} · {}", crate::time::elapsed(d)),
+                None => label.clone(),
+            });
+        }
         let mut out = trail_word(&s.thread, elapsed);
         if let Some(d) = elapsed {
             out.push(' ');
@@ -826,9 +936,18 @@ impl WorkingBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, trail_word};
+    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, steady, trail_word};
     use gpui_kit::{Hsla, px};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_wait_s_clock_holds_still_between_reads() {
+        let t = Instant::now();
+        assert_eq!(steady(t + Duration::from_millis(400), Some(t)), t, "a hair off: the one shown stands");
+        assert_eq!(steady(t, Some(t + Duration::from_millis(900))), t + Duration::from_millis(900));
+        assert_eq!(steady(t + Duration::from_secs(3), Some(t)), t + Duration::from_secs(3), "another wait");
+        assert_eq!(steady(t, None), t);
+    }
 
     #[test]
     fn the_shimmer_band_crosses_the_line_and_comes_round() {

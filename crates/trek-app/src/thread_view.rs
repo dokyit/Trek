@@ -205,8 +205,12 @@ pub struct ThreadView {
     shown: Option<Shown>,
     /// The confirmation open over a message or a turn's footer (rewind, undo, retry).
     confirm: Option<Confirm>,
-    /// Redraws while a sub-agent in this thread works: its time ticks and its dot breathes.
-    _ticker: Option<Task<()>>,
+    /// Redraws while a sub-agent in this thread works: its time ticks and its dot breathes. The
+    /// flag: at the working bar's rate, for an opened sub-agent's live activity (its shimmer).
+    _ticker: Option<(bool, Task<()>)>,
+    /// Lines each opened sub-agent's live activity showed when last measured, by its row's key:
+    /// its row is measured again when that changes.
+    activity_lines: HashMap<String, usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -344,6 +348,7 @@ impl ThreadView {
             shown: None,
             confirm: None,
             _ticker: None,
+            activity_lines: HashMap::new(),
             _subscriptions: subscriptions,
         };
         this.sync(false, cx);
@@ -498,25 +503,65 @@ impl ThreadView {
     }
 
     /// Redraw on a ticker while a sub-agent works: fast enough for its dot to breathe while the
-    /// window is in front, once a second (for its time) otherwise.
+    /// window is in front (at the working bar's rate while one is open, its activity shimmering),
+    /// once a second (for its time) otherwise.
     fn sync_ticker(&mut self, live: bool, cx: &mut Context<Self>) {
         if !live {
             self._ticker = None;
+            self.activity_lines.clear();
             return;
         }
-        if self._ticker.is_some() {
+        let shimmer = !self.open_activity(cx).is_empty();
+        if self._ticker.as_ref().is_some_and(|(s, _)| *s == shimmer) {
             return;
         }
-        self._ticker = Some(cx.spawn(async move |this, cx| loop {
-            let Ok(fast) = this.update(cx, |this, cx| {
+        let task = cx.spawn(async move |this, cx| loop {
+            let Ok(moving) = this.update(cx, |this, cx| {
                 cx.notify();
+                this.remeasure_activity(cx);
                 this.active && !this.workspace.read(cx).settings.appearance.reduce_motion
             }) else {
                 break;
             };
-            let wait = if fast { std::time::Duration::from_millis(1000 / PULSE_FPS) } else { std::time::Duration::from_secs(1) };
+            let fps = if shimmer { crate::mascot::FPS } else { PULSE_FPS };
+            let wait = if moving { std::time::Duration::from_millis(1000 / fps) } else { std::time::Duration::from_secs(1) };
             cx.background_executor().timer(wait).await;
-        }));
+        });
+        self._ticker = Some((shimmer, task));
+    }
+
+    /// Opened sub-agent rows showing what their sub-agent is doing: (row, key, lines shown).
+    fn open_activity(&self, cx: &App) -> Vec<(usize, String, usize)> {
+        let ws = self.workspace.read(cx);
+        let Some((thread, live)) = self.current.as_ref().and_then(|t| Some((t, ws.live.get(t)?))) else { return vec![] };
+        let agent = ws.thread(thread).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode);
+        self.rows(cx)
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(r, row)| match (row, row.item()) {
+                (Row::SubAgent { key, open: true, .. }, ix) => match live.items.get(ix)? {
+                    Item::Tool { id, detail, output, status, .. } => SubAgentRow::read(ws, thread, &agent, id, detail, output, *status).activity.map(|g| (r, key.to_string(), g.lines())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Measure again the opened sub-agent rows whose activity grew or shrank since last time.
+    fn remeasure_activity(&mut self, cx: &mut Context<Self>) {
+        let open = self.open_activity(cx);
+        let changed: Vec<usize> = open.iter().filter(|(_, key, n)| self.activity_lines.get(key) != Some(n)).map(|(r, ..)| *r).collect();
+        self.activity_lines = open.into_iter().map(|(_, key, n)| (key, n)).collect();
+        if changed.is_empty() {
+            return;
+        }
+        self.scroller.update(cx, |s, cx| {
+            for r in changed {
+                let _ = s.remeasure_items(r..r + 1, cx);
+            }
+        });
     }
 
     /// Measure the sub-agent rows again (their answers' previews come and go).
@@ -669,7 +714,8 @@ impl ThreadView {
                     match &live.items[ix] {
                         Item::User { text, .. } if orch::is_wake(text) => Row::Wake { ix, key: key.clone().into(), open: self.expanded.contains(key) },
                         Item::User { .. } => Row::User { ix, key: key.clone().into(), open: self.expanded.contains(key) },
-                        Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) },
+                        // `TREK_OPEN_BACKGROUND=1` (design review) opens them all.
+                        Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) || review_open() },
                         Item::TurnEnd { .. } => Row::TurnEnd { ix },
                         Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into() },
                         Item::Notice { .. } => Row::Notice { ix },
@@ -743,6 +789,9 @@ impl ThreadView {
                     }
                     this.expanded_gen += 1;
                     this.scroller.update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
+                    // An opened sub-agent's activity shimmers at the working bar's rate.
+                    let live = this.workspace.read(cx).any_task_live_in(&this.scope);
+                    this.sync_ticker(live, cx);
                     cx.notify();
                 });
             }
@@ -1137,6 +1186,8 @@ impl ThreadView {
                 let sub = SubAgentRow::read(ws, &at.thread, &at.agent, &row_id, &detail, &output, status);
                 let finished = !sub.state.live();
                 let has_result = finished && !output.trim().is_empty() && sub.state != TaskState::Failed;
+                // Open, it shows what it's doing while it works, and its answer once it's done.
+                let expandable = has_result || sub.activity.is_some();
                 let dot = match sub.state {
                     TaskState::Running => palette::sky(cx),
                     TaskState::NeedsYou => palette::amber(cx),
@@ -1155,23 +1206,20 @@ impl ThreadView {
                         None => Icon::new(crate::assets::Lucide::Users).size(px(18.)).text_color(muted).into_any_element(),
                     })
                     .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(9.)).rounded_full().border_2().border_color(theme.background).bg(dot.opacity(breath)));
-                let opener = match sub.child.clone() {
-                    Some(child) => {
-                        let ws = at.workspace.clone();
-                        Button::new(("subagent-open", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(IconName::ChevronRight).text_color(muted))
-                            .tooltip("Open the sub-agent's thread")
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                crate::thread_window::open(ws.clone(), &child, cx);
-                            })
-                            .into_any_element()
-                    }
-                    None if has_result => Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted).into_any_element(),
-                    None => div().into_any_element(),
-                };
+                let opener = sub.child.clone().map(|child| {
+                    let ws = at.workspace.clone();
+                    Button::new(("subagent-open", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight).text_color(muted))
+                        .tooltip("Open the sub-agent's thread in a window")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            crate::thread_window::open(ws.clone(), &child, cx);
+                        })
+                });
+                let chevron = expandable.then(|| Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted));
+                let activity = sub.activity.clone().filter(|_| open).map(|g| g.element(at.clock, !at.pulse, cx));
                 let preview = (has_result && !open).then(|| orch::plain_preview(&output, 240));
                 column(
                     v_flex()
@@ -1185,7 +1233,7 @@ impl ThreadView {
                                 .py(px(6.))
                                 .mx(px(-8.))
                                 .rounded(px(8.))
-                                .when(has_result, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
+                                .when(expandable, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
                                 .child(logo)
                                 .child(
                                     v_flex()
@@ -1195,8 +1243,10 @@ impl ThreadView {
                                         .child(div().text_size(px(12.5)).text_color(muted).truncate().child(sub.detail)),
                                 )
                                 .when_some(sub.elapsed, |el, d| el.child(div().flex_none().text_xs().text_color(muted).child(crate::time::elapsed(d))))
-                                .child(opener),
+                                .children(opener)
+                                .children(chevron),
                         )
+                        .when_some(activity, |el, a| el.child(div().id(("subagent-activity", ix)).test_support().pl(px(32.)).pr(px(28.)).pb(px(2.)).child(a)))
                         .when_some(preview, |el, p| {
                             el.child(div().pl(px(32.)).pr(px(28.)).pb(px(2.)).text_size(px(12.5)).line_height(relative(1.45)).text_color(muted).line_clamp(2).child(p))
                         })
@@ -1826,6 +1876,8 @@ struct SubAgentRow {
     elapsed: Option<std::time::Duration>,
     /// The thread it runs in, for one Trek runs.
     child: Option<String>,
+    /// What it's doing, while it works: its latest calls, as the working bar shows its parent's.
+    activity: Option<crate::working_bar::Group>,
 }
 
 impl SubAgentRow {
@@ -1845,7 +1897,7 @@ impl SubAgentRow {
             let Some(t) = ws.thread(child) else {
                 // Its thread is gone (deleted, or archived on its own): what the row kept.
                 let state = if by_status == TaskState::Running { TaskState::Cancelled } else { by_status };
-                return SubAgentRow { agent: None, label: detail.to_string(), detail: with_error(state), state, elapsed: None, child: None };
+                return SubAgentRow { agent: None, label: detail.to_string(), detail: with_error(state), state, elapsed: None, child: None, activity: None };
             };
             let state = ws.task_state(child);
             let detail = match state {
@@ -1872,6 +1924,7 @@ impl SubAgentRow {
                 state,
                 elapsed: Some(ws.task_elapsed(child)),
                 child: Some(child.to_string()),
+                activity: state.live().then(|| crate::working_bar::child_group(ws, child)).flatten(),
             };
         }
         // One of the agent's own.
@@ -1888,6 +1941,7 @@ impl SubAgentRow {
             Some(t) if t.tool_uses > 0 => format!("{} · {}", state.label(), steps(t.tool_uses)),
             _ => with_error(state),
         };
+        let cwd = ws.thread(thread).and_then(|t| t.cwd.clone());
         SubAgentRow {
             agent: Some(agent.clone()),
             label: if detail.trim().is_empty() { "Sub-agent".into() } else { detail.to_string() },
@@ -1895,6 +1949,9 @@ impl SubAgentRow {
             state,
             elapsed: task.map(|t| t.ended.unwrap_or_else(std::time::Instant::now).saturating_duration_since(t.started)),
             child: None,
+            activity: task
+                .filter(|_| state.live())
+                .and_then(|t| crate::working_bar::steps_group(&t.steps, t.stepped.saturating_sub(t.steps.len()), true, cwd.as_deref())),
         }
     }
 }
@@ -1902,6 +1959,13 @@ impl SubAgentRow {
 /// Frames a second for a working sub-agent's breathing dot (once a second when the window is in
 /// the background or motion is reduced).
 const PULSE_FPS: u64 = 5;
+
+/// `TREK_OPEN_BACKGROUND=1`: sub-agents' rows (and the background strip) open at launch, for
+/// design review.
+fn review_open() -> bool {
+    static OPEN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("TREK_OPEN_BACKGROUND").is_ok_and(|v| v == "1"));
+    *OPEN
+}
 
 /// What every row of one render shares.
 struct RowContext {
@@ -2058,6 +2122,11 @@ impl ThreadView {
         self.scroller.update(cx, |s, cx| _ = s.scroll_to_item(0, cx));
     }
 
+    /// Whether the transcript redraws on a ticker, and at the working bar's rate if so.
+    pub(crate) fn ticker(&self) -> Option<bool> {
+        self._ticker.as_ref().map(|(fast, _)| *fast)
+    }
+
     /// The question card's masked field for its `n`th secret question.
     pub(crate) fn secret_field(&self, n: usize) -> Entity<InputState> {
         self.secrets.1[n].clone()
@@ -2089,7 +2158,8 @@ impl ThreadView {
     }
 
     /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines
-    /// under an open group), "subagent: Sol: Review (Running)", "wake", "end", "notice", "error".
+    /// under an open group), "subagent: Sol: Review (Running)" (with "  Read src/main.rs" lines
+    /// of its activity, opened), "wake", "end", "notice", "error".
     pub(crate) fn describe(&self, cx: &App) -> Vec<String> {
         let ws = self.workspace.read(cx);
         let thread = self.current.clone().unwrap_or_default();
@@ -2124,6 +2194,10 @@ impl ThreadView {
                 for t in tools {
                     line(t, &mut out, "  ");
                 }
+            }
+            if let (Row::SubAgent { open: true, .. }, Some(Item::Tool { id, detail, output, status, .. })) = (row, items.get(row.item())) {
+                let sub = SubAgentRow::read(ws, &thread, &agent, id, detail, output, *status);
+                out.extend(sub.activity.iter().flat_map(|g| g.describe()).map(|l| format!("  {l}")));
             }
         }
         out

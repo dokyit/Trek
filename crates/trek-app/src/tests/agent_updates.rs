@@ -173,3 +173,55 @@ fn while_an_agent_updates_no_session_of_it_starts_and_messages_wait() {
         assert!(!trek.visible(cx, "composer-agent-updating"));
     });
 }
+
+#[test]
+fn an_update_waits_for_its_agents_background_work() {
+    run(async |cx| {
+        let trek = open(cx);
+        let runs = found(&trek, cx);
+        // Answered, with a dev server left running: replacing the CLI would end it.
+        let id = trek.send(cx, "mock:server 800ms");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty() && !ws.turn_running(&id)));
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        assert_eq!(job(&trek, cx, "mock"), Some(Job::Queued));
+        trek.click(cx, "agent-updates");
+        trek.render(cx);
+        assert!(trek.visible(cx, "agent-update-waiting-mock"));
+        // The server exits between turns: the update goes then, not before.
+        let t = id.clone();
+        trek.wait(cx, "the mock agent to update", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Updated { .. }))).await;
+        assert!(trek.read(cx, |ws, _| ws.live[&t].background.is_empty()));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_none()), "its idle session went before the files changed");
+    });
+}
+
+#[test]
+fn a_parent_whose_agent_updated_while_its_sub_agent_reported_still_wakes() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        let (release, gate) = async_channel::bounded::<()>(1);
+        trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
+        let id = trek.send(cx, "mock:delegate mock:long 600ms");
+        let p = id.clone();
+        trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none() && !ws.children(&p).is_empty()).await;
+        // Asked for while the sub-agent (the same agent) works: it starts as that turn ends, so
+        // the report arrives while the agent's CLI is being replaced and has to wait.
+        trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
+        assert_eq!(job(&trek, cx, "mock"), Some(Job::Queued));
+        trek.wait(cx, "the update to start", |ws| matches!(ws.agent_updates.job("mock"), Some(Job::Running))).await;
+        let p = id.clone();
+        trek.wait(cx, "the report to be held", move |ws| ws.wakes_held(&p)).await;
+        assert!(trek.read(cx, |ws, _| ws.waiting(&id) && matches!(ws.agent_updates.job("mock"), Some(Job::Running))), "still waiting, its report held");
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, trek_core::store::Item::User { text, .. } if trek_core::orchestrate::is_wake(text))));
+        // Done: the report goes to a session of the new version.
+        release.send(()).await.unwrap();
+        let p = id.clone();
+        trek.wait(cx, "the wake-up", move |ws| ws.live[&p].items.iter().any(|i| matches!(i, trek_core::store::Item::User { text, .. } if trek_core::orchestrate::is_wake(text)))).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
+        assert!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap()).is_empty());
+    });
+}

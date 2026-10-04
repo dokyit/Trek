@@ -5,6 +5,7 @@
 mod activity;
 mod agent_updates;
 mod alerts;
+mod background;
 mod basecamp;
 mod cost;
 mod flows;

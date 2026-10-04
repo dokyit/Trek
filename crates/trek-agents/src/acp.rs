@@ -377,6 +377,7 @@ fn step(status: Option<&str>) -> Step {
 fn row_title(tool: &Tool) -> String {
     match tool.kind.as_str() {
         _ if tool.todos.is_some() => "Update plan".to_string(),
+        _ if tool.agent => "Subagent".to_string(),
         k @ ("read" | "edit" | "delete" | "move" | "search" | "execute" | "fetch") => kind_title(k).to_string(),
         k if tool.title.is_empty() => kind_title(k).to_string(),
         _ => tool.title.clone(),
@@ -427,7 +428,16 @@ struct Tool {
     detail: String,
     /// A to-do tool's list, shown as a checklist once it's done.
     todos: Option<Vec<(String, Step)>>,
+    /// A sub-agent of the agent's own (OpenCode's `task`): it gets a sub-agent row, and its
+    /// call's end is the sub-agent's.
+    agent: bool,
     started: bool,
+}
+
+/// A call that starts a sub-agent of the agent's own: OpenCode's `task` names the kind of agent
+/// it sends (`subagent_type`) along with what to do.
+fn is_sub_agent(input: &Value) -> bool {
+    input["subagent_type"].is_string() && input["prompt"].is_string()
 }
 
 /// Turns `session/update` notifications into [`AgentEvent`]s for one session.
@@ -485,6 +495,7 @@ impl Turn {
                 if let Some(steps) = todo_steps(&u["rawInput"]) {
                     tool.todos = Some(steps);
                 }
+                tool.agent |= is_sub_agent(&u["rawInput"]);
                 let detail = tool_detail(u, &tool.kind);
                 if !detail.is_empty() {
                     tool.detail = detail;
@@ -495,11 +506,19 @@ impl Turn {
                 let start = !tool.started && (done || status == "in_progress" || !tool.detail.is_empty());
                 if start {
                     tool.started = true;
-                    let (title, detail) = (row_title(tool), tool.detail.clone());
+                    let (title, detail, agent) = (row_title(tool), tool.detail.clone(), tool.agent);
                     self.flush_text(&mut out);
-                    out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail });
+                    out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail: detail.clone() });
+                    if agent {
+                        // ACP carries nothing of what it does meanwhile: what kind of agent it is.
+                        let activity = u["rawInput"]["subagent_type"].as_str().map(|k| format!("The {k} agent is at work"));
+                        out.push(AgentEvent::Task { id: id.clone(), description: Some(detail), activity, tool_uses: None, done: None });
+                    }
                 }
                 if done {
+                    if self.tools.get(&id).is_some_and(|t| t.agent) {
+                        out.push(AgentEvent::Task { id: id.clone(), description: None, activity: None, tool_uses: None, done: Some(status == "completed") });
+                    }
                     if let Some((added, removed)) = diff_lines(u).filter(|_| status == "completed") {
                         out.push(AgentEvent::ToolLines { id: id.clone(), added, removed });
                     }
@@ -940,7 +959,8 @@ pub async fn run(
                             agent.rpc.reply(rpc_id, Ok(permission_outcome(pick_option(&options, decision)))).await?;
                         }
                     }
-                    Command::Answer { .. } => {}
+                    // ACP has no background work to read or stop.
+                    Command::Answer { .. } | Command::ReadTask { .. } | Command::StopTask { .. } => {}
                     Command::Shutdown => break,
                 }
             }
@@ -1384,6 +1404,34 @@ mod tests {
         }));
         assert_eq!(ev[0], AgentEvent::ToolLines { id: "e1".into(), added: 3, removed: 1 });
         assert!(matches!(&ev[1], AgentEvent::ToolFinished { ok: true, .. }));
+    }
+
+    #[test]
+    fn an_opencode_task_is_a_sub_agent_of_its_own() {
+        // Shapes from OpenCode's ACP adapter (`acp/tool.ts`): its `task` tool is of kind "think",
+        // titled with the description, and its input names the kind of agent it sends.
+        let mut t = Turn::default();
+        let input = json!({"description":"Map the routes","prompt":"List every HTTP route.","subagent_type":"explore"});
+        assert!(t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k1","title":"task","kind":"think","status":"pending","rawInput":{}})).is_empty());
+        let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"k1","status":"in_progress","kind":"think","title":"Map the routes","rawInput":input}));
+        assert_eq!(
+            ev,
+            vec![
+                AgentEvent::ToolStarted { id: "k1".into(), title: "Subagent".into(), detail: "Map the routes".into() },
+                AgentEvent::Task { id: "k1".into(), description: Some("Map the routes".into()), activity: Some("The explore agent is at work".into()), tool_uses: None, done: None },
+            ]
+        );
+        let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"k1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Three routes."}}]}));
+        assert_eq!(
+            ev,
+            vec![
+                AgentEvent::Task { id: "k1".into(), description: None, activity: None, tool_uses: None, done: Some(true) },
+                AgentEvent::ToolFinished { id: "k1".into(), output: "Three routes.".into(), ok: true },
+            ]
+        );
+        // Another "think" call is just that.
+        let ev = t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k2","title":"sequential","kind":"think","status":"in_progress","rawInput":{"thought":"hm"}}));
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Task { .. })), "{ev:?}");
     }
 
     #[test]

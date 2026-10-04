@@ -434,6 +434,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
            PRIMARY KEY (thread_id, item_id)
          );
          CREATE TABLE IF NOT EXISTS retired_sessions (native_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS wakes (
+           child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, report TEXT, created_at INTEGER NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS tool_lines (
            thread_id TEXT NOT NULL, tool_id TEXT NOT NULL, added INTEGER NOT NULL, removed INTEGER NOT NULL,
            PRIMARY KEY (thread_id, tool_id)
@@ -787,6 +790,46 @@ impl Store {
         })
     }
 
+    /// Sub-agent `child` of `parent` is at work, and its report goes to its parent in a message
+    /// unless a call waiting for it takes it: kept so that a relaunch still tells the parent.
+    pub fn await_report(&self, parent: &str, child: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("INSERT OR IGNORE INTO wakes (child_id, parent_id, report, created_at) VALUES (?1, ?2, NULL, ?3)", params![child, parent, now_ms()])?;
+            Ok(())
+        })
+    }
+
+    /// The report sub-agent `report.id` came back with, for `parent` to hear in a message.
+    pub fn hold_report(&self, parent: &str, report: &crate::orchestrate::Report) -> Result<()> {
+        let json = serde_json::to_string(report)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO wakes (child_id, parent_id, report, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(child_id) DO UPDATE SET parent_id = excluded.parent_id, report = excluded.report",
+                params![report.id, parent, json, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// `child`'s report reached its parent (or never will: it was stopped from above).
+    pub fn drop_report(&self, child: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM wakes WHERE child_id = ?1", [child])?;
+            Ok(())
+        })
+    }
+
+    /// Every report a parent hasn't heard yet, oldest first: `(parent, child, report)`, the
+    /// report `None` for a sub-agent that hadn't finished (when Trek quit, it was cut off).
+    pub fn held_reports(&self) -> Result<Vec<(String, String, Option<crate::orchestrate::Report>)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT parent_id, child_id, report FROM wakes ORDER BY created_at, rowid")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|(p, c, r)| (p, c, r.and_then(|j| serde_json::from_str(&j).ok()))).collect())
+        })
+    }
+
     /// `thread` moved on from the agent session `native_id` (a rewind continues in a copy of it,
     /// say). The session stays in the agent's history; imports leave it out, as they do the
     /// sessions threads use.
@@ -1000,6 +1043,7 @@ impl Store {
             tx.execute("DELETE FROM tool_lines WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM token_usage WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM turn_stops WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM wakes WHERE child_id = ?1 OR parent_id = ?1", [gone])?;
             tx.execute("DELETE FROM threads WHERE id = ?1", [gone])?;
         }
         tx.commit()?;
@@ -1274,6 +1318,28 @@ mod tests {
         assert_eq!(t.section(now), Some(Section::Inbox));
         t.pinned_at = Some(now);
         assert_eq!(t.section(now), Some(Section::Pinned));
+    }
+
+    #[test]
+    fn reports_wait_for_their_parent_until_heard() {
+        use crate::orchestrate::{Outcome, Report};
+        let s = Store::in_memory().unwrap();
+        let parent = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let mut kid = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        kid.parent_id = Some(parent.id.clone());
+        s.save_thread(&kid).unwrap();
+        s.await_report(&parent.id, &kid.id).unwrap();
+        s.await_report(&parent.id, &kid.id).unwrap();
+        assert_eq!(s.held_reports().unwrap(), [(parent.id.clone(), kid.id.clone(), None)], "at work: nothing to say yet");
+        let report = Report { id: kid.id.clone(), title: "Review".into(), model: "Sol".into(), outcome: Outcome::Done("Looks fine.".into()) };
+        s.hold_report(&parent.id, &report).unwrap();
+        assert_eq!(s.held_reports().unwrap(), [(parent.id.clone(), kid.id.clone(), Some(report.clone()))]);
+        s.drop_report(&kid.id).unwrap();
+        assert!(s.held_reports().unwrap().is_empty());
+        // Deleting the parent takes what waits for it.
+        s.hold_report(&parent.id, &Report { outcome: Outcome::Failed("boom".into()), ..report }).unwrap();
+        s.delete_thread(&parent.id).unwrap();
+        assert!(s.held_reports().unwrap().is_empty());
     }
 
     #[test]

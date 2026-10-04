@@ -10,6 +10,13 @@ use trek_agents::Command;
 use trek_core::agent_update::{Outcome, Snapshot};
 use trek_core::store::now_ms;
 
+/// Why an agent's update hasn't started yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    Turn,
+    Background,
+}
+
 impl Workspace {
     /// Look for new versions of the agent CLIs. A background check (`user: false`) runs only
     /// with the setting on. Not in a test process: that would run the user's own CLIs.
@@ -54,9 +61,23 @@ impl Workspace {
         self.pump_agent_updates(cx);
     }
 
-    /// A turn is under way in one of `agent`'s threads (sub-agents and side chats included).
+    /// A turn is under way in one of `agent`'s threads (sub-agents and side chats included), or
+    /// one of its sessions has work running in the background (a dev server, a browser, its own
+    /// sub-agents): replacing the CLI would end its session and that work with it.
     pub fn agent_busy(&self, agent: &str) -> bool {
-        self.threads.iter().any(|t| t.agent.key() == agent && self.turn_running(&t.id))
+        self.agent_hold(agent).is_some()
+    }
+
+    /// What `agent`'s update waits for, if anything: a turn, or background work.
+    pub fn agent_hold(&self, agent: &str) -> Option<Hold> {
+        let lives = || self.threads.iter().filter(|t| t.agent.key() == agent).filter_map(|t| self.live.get(&t.id));
+        if lives().any(|l| l.turn_started.is_some()) {
+            Some(Hold::Turn)
+        } else if lives().any(|l| l.commands.is_some() && !l.background.is_empty()) {
+            Some(Hold::Background)
+        } else {
+            None
+        }
     }
 
     /// `agent`'s CLI is being replaced: its sessions and messages wait.
@@ -124,10 +145,14 @@ impl Workspace {
         };
         self.agent_updates.finish(id, outcome);
         cx.emit(WorkspaceEvent::Toast { message, undo: None });
-        // Messages that waited for it go now, to a session of the new version.
+        // Messages that waited for it go now, to a session of the new version, and parents whose
+        // sub-agents reported meanwhile hear from them (after those messages' turns, if any).
         let waiting: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent).map(|t| t.id.clone()).collect();
         for t in waiting {
             self.send_queued(&t, cx);
+            if self.wakes.contains_key(&t) {
+                self.deliver_wakes(&t, cx);
+            }
         }
         self.pump_agent_updates(cx);
         // A Trek update held back for this one may go now.
@@ -141,7 +166,7 @@ impl Workspace {
     fn stop_sessions_of(&mut self, agent: &str) {
         for t in self.threads.iter().filter(|t| t.agent.key() == agent) {
             let Some(live) = self.live.get_mut(&t.id) else { continue };
-            if live.turn_started.is_some() || live.background > 0 {
+            if !live.free_to_relaunch() {
                 live.relaunch = true;
             } else if let Some(tx) = live.commands.take() {
                 let _ = tx.try_send(Command::Shutdown);

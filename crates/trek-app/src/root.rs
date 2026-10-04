@@ -28,6 +28,8 @@ pub struct TrekWindow {
     pub(crate) basecamp: Entity<Basecamp>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,
+    /// What the thread's agent runs in the background, above the composer.
+    pub(crate) background_strip: Entity<crate::background_strip::BackgroundStrip>,
     title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
     pub(crate) palette: Entity<CommandPalette>,
@@ -53,6 +55,7 @@ impl TrekWindow {
         let composer = cx.new(|cx| Composer::new(workspace.clone(), Scope::Main, window, cx));
         let thread_view = cx.new(|cx| ThreadView::new(workspace.clone(), Scope::Main, window, cx));
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
+        let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), Scope::Main, window, cx));
         let handle = window.window_handle();
         workspace.update(cx, |ws, _| ws.main_window = Some(handle));
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
@@ -104,8 +107,8 @@ impl TrekWindow {
                     }
                 }
                 WorkspaceEvent::ComposeIn { .. } => {}
-                // The transcript views redraw themselves.
-                WorkspaceEvent::Transcript { .. } => {}
+                // The transcript views and the background strip redraw themselves.
+                WorkspaceEvent::Transcript { .. } | WorkspaceEvent::Background { .. } => {}
             }),
             cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
@@ -184,6 +187,7 @@ impl TrekWindow {
             basecamp,
             right_panel,
             working_bar,
+            background_strip,
             title,
             onboarding,
             palette,
@@ -638,6 +642,7 @@ impl Render for TrekWindow {
                 .min_w_0()
                 .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(fill())))
                 .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
+                .child(crate::background_strip::cached(&self.background_strip, cx))
                 .child(Composer::element(&self.composer, &mut self.composer_changed, cx))
                 .into_any_element(),
         };

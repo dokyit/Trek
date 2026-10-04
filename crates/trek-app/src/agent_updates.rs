@@ -7,7 +7,7 @@
 //! something to install) and on Settings > Agents: one row per agent with installed → latest and
 //! an Update button, MonoCode's harness updates in Trek's design.
 
-use crate::workspace::Workspace;
+use crate::workspace::{Hold, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -154,8 +154,8 @@ impl AgentUpdates {
     }
 
     /// The next update to start, if one can start now: one at a time (package managers lock
-    /// their folders), in the order asked, skipping agents with a turn running (`busy`, given
-    /// an agent key).
+    /// their folders), in the order asked, skipping agents with a turn or background work
+    /// running (`busy`, given an agent key).
     pub fn next(&self, busy: impl Fn(&str) -> bool) -> Option<String> {
         if self.running() {
             return None;
@@ -238,10 +238,10 @@ pub const WHY: &str = "New models often need the latest version.";
 pub fn rows(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
     let w = ws.read(cx);
     let u = &w.agent_updates;
-    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.id), w.agent_busy(&v.agent), u.output_open.as_deref() == Some(v.id.as_str()), cx)).collect()
+    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.id), w.agent_hold(&v.agent), u.output_open.as_deref() == Some(v.id.as_str()), cx)).collect()
 }
 
-fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, busy: bool, open: bool, cx: &App) -> AnyElement {
+fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, open: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let agent = AgentId::from_key(&v.agent);
@@ -258,7 +258,8 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, busy: bool, 
             trek_core::agent_update::Install::Native => ("Via its own installer".into(), muted),
             ref i => (format!("Via {}", i.label()), muted),
         },
-        Some(Job::Queued) if busy => (format!("Waits for {}'s turn to end", agent.display_name()), muted),
+        Some(Job::Queued) if hold == Some(Hold::Turn) => (format!("Waits for {}'s turn to end", agent.display_name()), muted),
+        Some(Job::Queued) if hold == Some(Hold::Background) => (format!("Waits for {}'s background tasks to end", agent.display_name()), muted),
         Some(Job::Queued) => ("Next, after the update under way".into(), muted),
         Some(Job::Running) => (format!("Running {shown}"), muted),
         Some(Job::Updated { .. }) => ("New sessions use it".into(), muted),
@@ -303,7 +304,7 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, busy: bool, 
             .text_size(px(12.5))
             .text_color(muted)
             .child(Icon::new(crate::assets::Lucide::Clock).xsmall())
-            .child(if busy { "Waiting" } else { "Queued" })
+            .child(if hold.is_some() { "Waiting" } else { "Queued" })
             .into_any_element(),
         Some(Job::Updated { .. }) => h_flex()
             .id(SharedString::from(format!("agent-updated-{key}")))
