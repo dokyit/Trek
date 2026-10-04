@@ -12,6 +12,7 @@ pub mod limit;
 pub mod orchestrate;
 pub mod paths;
 pub mod pricing;
+pub mod restate;
 pub mod rewind;
 pub mod settings;
 pub mod skills;
@@ -19,6 +20,7 @@ pub mod store;
 pub mod transcript;
 pub mod types;
 pub mod update;
+pub mod verification;
 pub mod worktree;
 
 pub use types::*;

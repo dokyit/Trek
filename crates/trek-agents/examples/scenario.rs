@@ -45,6 +45,7 @@ impl Session {
             recap: None,
             fast: None,
             mcp_servers: vec![],
+            instructions: None,
         });
         Session { h, seen: vec![] }
     }

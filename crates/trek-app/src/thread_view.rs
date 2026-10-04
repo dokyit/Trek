@@ -848,24 +848,25 @@ impl ThreadView {
             (Row::User { ix, key, open }, Item::User { text: full, images, at: sent, aside, .. }) => {
                 // A message sent with consultants shows as written, with who it consults under it.
                 let (said, consult) = orch::split_consult(&full);
+                let (said, restated) = trek_core::restate::split_restate(said);
                 let consulting = consult.map(|c| {
                     let ws = at.workspace.read(cx);
-                    let who: Vec<String> = c
-                        .consultants
-                        .iter()
-                        .map(|k| {
-                            let models = ws.models_for(&k.agent);
-                            let name = models.iter().find(|m| crate::composer::same_model(&k.model, &m.id)).map(|m| m.name.clone()).unwrap_or_else(|| k.model.clone());
-                            format!("{name} · {}", k.effort.label())
-                        })
-                        .collect();
-                    let how = match (c.style, c.implement) {
-                        (orch::Style::Advise, true) => "advice, then implement",
-                        (orch::Style::Advise, false) => "advice only",
-                        (orch::Style::Discuss, true) => "discuss, then implement",
-                        (orch::Style::Discuss, false) => "discuss, then report",
+                    let name = |k: &orch::Consultant| {
+                        let models = ws.models_for(&k.agent);
+                        let name = models.iter().find(|m| crate::composer::same_model(&k.model, &m.id)).map(|m| m.name.clone()).unwrap_or_else(|| k.model.clone());
+                        format!("{name} · {}", k.effort.label())
                     };
-                    (c.consultants.iter().map(|k| k.agent.clone()).collect::<Vec<_>>(), format!("Consulting {} · {how}", who.join(", ")))
+                    let who: Vec<String> = c.consultants.iter().map(name).collect();
+                    let then = if c.implement { "then implement" } else { "then report" };
+                    let line = match c.style {
+                        orch::Style::Advise => format!("Consulting {} · {}", who.join(", "), if c.implement { "advice, then implement" } else { "advice only" }),
+                        orch::Style::Discuss => format!("Consulting {} · discuss, {then}", who.join(", ")),
+                        orch::Style::Arena => match &c.judge {
+                            Some(j) => format!("Design arena: {} · judged by {} · {then}", who.join(", "), name(j)),
+                            None => format!("Design arena: {} · {then}", who.join(", ")),
+                        },
+                    };
+                    (c.consultants.iter().chain(c.judge.iter()).map(|k| k.agent.clone()).collect::<Vec<_>>(), line)
                 });
                 let text = SharedString::from(said.to_string());
                 let long = text.len() > 700 || text.lines().count() > 10;
@@ -973,35 +974,96 @@ impl ThreadView {
                                 .child(div().min_w_0().truncate().child(line)),
                         )
                     })
+                    .when(restated, |el| {
+                        el.child(
+                            h_flex()
+                                .id(("restating", ix))
+                                .test_support()
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(Icon::new(crate::assets::Lucide::MessageSquareQuote).xsmall())
+                                .child("Asked to restate it first"),
+                        )
+                    })
                     .child(meta),
                 ))
                 .into_any_element()
             }
             (Row::TurnEnd { ix }, Item::TurnEnd { at: finished, took_secs }) => {
                 let (workspace, thread) = (at.workspace.clone(), at.thread.clone());
-                column(
+                let items = live.map(|l| &l.items[..]).unwrap_or_default();
+                let from = items[..ix.min(items.len())].iter().rposition(trek_core::rewind::ends_turn).map_or(0, |b| b + 1);
+                let turn = &items[from.min(ix)..ix.min(items.len())];
+                // Did the turn run the project's verification CLI, and did its last run pass?
+                let verdict = at.verify_needle.as_deref().and_then(|n| trek_core::verification::verdict(turn, n));
+                let verified = verdict.map(|v| {
+                    let color = if v.passed { palette::emerald(cx) } else { palette::amber(cx) };
+                    let n = v.commands.len();
+                    let tip = format!(
+                        "{} the project's verification skill {}:\n{}",
+                        if v.passed { "Checked with" } else { "The last check with" },
+                        if v.passed { format!("({} run{})", n, if n == 1 { "" } else { "s" }) } else { "failed".into() },
+                        v.commands.iter().rev().take(3).map(|c| format!("$ {}", orch::preview(c, 90))).collect::<Vec<_>>().join("\n")
+                    );
                     h_flex()
-                        .group("turn-end")
-                        .pt(px(2.))
-                        .pb(px(10.))
-                        .gap(px(6.))
-                        .text_xs()
-                        .text_color(muted)
-                        .child(
-                            Button::new(("copy-turn", ix))
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(IconName::Copy).text_color(muted))
-                                .tooltip("Copy response")
-                                .on_click(move |_, window, cx| {
-                                    let text = workspace.read(cx).live.get(&thread).map(|l| Self::response_text(&l.items, ix)).unwrap_or_default();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                    window.push_notification("Copied", cx);
-                                }),
-                        )
-                        .child(crate::time::clock(finished))
-                        .when(took_secs >= 1, |el| el.child(div().text_color(muted.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs)))))
-                        .child(turn_actions(ix)),
+                        .id(("verified", ix))
+                        .test_support()
+                        .gap(px(4.))
+                        .text_color(color)
+                        .child(Icon::new(if v.passed { crate::assets::Lucide::BadgeCheck } else { crate::assets::Lucide::TriangleAlert }).xsmall())
+                        .child(if v.passed { "Verified" } else { "Verification failed" })
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                });
+                // The agent said back what it was asked: the user confirms or corrects it.
+                let restated = trek_core::rewind::turn_start(items, ix).and_then(|s| match items.get(s) {
+                    Some(Item::User { text, .. }) => Some(trek_core::restate::split_restate(orch::split_consult(text).0).1),
+                    _ => None,
+                }) == Some(true);
+                let confirm = (restated && at.last_end == Some(ix) && !at.busy).then(|| {
+                    let (ws, ws2, thread, thread2, scope) = (at.workspace.clone(), at.workspace.clone(), at.thread.clone(), at.thread.clone(), at.scope.clone());
+                    h_flex()
+                        .id(("restate-check", ix))
+                        .test_support()
+                        .pt(px(6.))
+                        .pb(px(4.))
+                        .gap(px(8.))
+                        .child(div().min_w_0().pr(px(4.)).text_size(px(12.5)).text_color(muted).child("Is that what you meant?"))
+                        .child(Button::new(("restate-yes", ix)).small().primary().label("That's right — go ahead").on_click(move |_, _, cx| {
+                            let thread = thread2.clone();
+                            ws2.update(cx, |ws, cx| ws.go_ahead(&thread, cx));
+                        }))
+                        .child(Button::new(("restate-no", ix)).small().ghost().label("Not quite…").on_click(move |_, _, cx| {
+                            let (scope, thread) = (scope.clone(), thread.clone());
+                            ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::CorrectRestatement { scope, thread }));
+                        }))
+                });
+                column(
+                    v_flex().children(confirm).child(
+                        h_flex()
+                            .group("turn-end")
+                            .pt(px(2.))
+                            .pb(px(10.))
+                            .gap(px(6.))
+                            .text_xs()
+                            .text_color(muted)
+                            .child(
+                                Button::new(("copy-turn", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Copy).text_color(muted))
+                                    .tooltip("Copy response")
+                                    .on_click(move |_, window, cx| {
+                                        let text = workspace.read(cx).live.get(&thread).map(|l| Self::response_text(&l.items, ix)).unwrap_or_default();
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        window.push_notification("Copied", cx);
+                                    }),
+                            )
+                            .child(crate::time::clock(finished))
+                            .when(took_secs >= 1, |el| el.child(div().text_color(muted.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs)))))
+                            .children(verified)
+                            .child(turn_actions(ix)),
+                    ),
                 )
                 .into_any_element()
             }
@@ -1924,6 +1986,8 @@ struct RowContext {
     /// Working sub-agents' dots breathe, at `clock` (seconds).
     pulse: bool,
     clock: f32,
+    /// What a command running the project's verification CLI contains, when it has one.
+    verify_needle: Option<String>,
 }
 
 impl Render for ThreadView {
@@ -1960,6 +2024,7 @@ impl Render for ThreadView {
             animate: self.animate(window, cx),
             pulse: self.animate(window, cx) && self._ticker.is_some(),
             clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,
+            verify_needle: t.and_then(|t| ws.verify_needle(t)),
         };
         let flash = self.flash;
         v_flex()

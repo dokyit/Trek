@@ -23,6 +23,14 @@
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
 //! |                              | token (or, with `plan`, on a Claude Max plan)                 |
+//! | `mock:verify`                | runs the project's verification CLI, as Trek told it          |
+//! | `mock:design` / `mock:judge` | an arena's design package, and a judge's scores               |
+//!
+//! Messages Trek dresses up are played as asked, whatever their words: a request to restate
+//! (`trek_core::restate`) gets a restatement, an arena (`Style::Arena`) is run with the
+//! candidates and judge it names, and Trek's verification guides (`create-` and
+//! `maintain-verification-skill`) set up, or touch up, a small verification skill in the
+//! session's folder (for real).
 //!
 //! A sub-agent's prompt is whatever follows the keyword, so `mock:consult mock:long 2s` starts
 //! one that works for two seconds (and `mock:consult mock:consult hi` one that consults in turn).
@@ -133,6 +141,20 @@ enum Script {
     Cost { plan: bool },
     /// Trek woke it with what a sub-agent came back with.
     Wake,
+    /// Asked to restate the request in its own words, and stop.
+    Restate,
+    /// A design arena: candidates, then a judge, through Trek's orchestration tools.
+    Arena,
+    /// A design package for an arena.
+    Design,
+    /// Scores for an arena's designs.
+    Judge,
+    /// Build the project's verification skill (Trek's `create-verification-skill` guide).
+    SetupVerification,
+    /// Bring it up to date (`maintain-verification-skill`).
+    MaintainVerification,
+    /// Run the verification CLI Trek named.
+    Verify,
 }
 
 impl Script {
@@ -141,6 +163,19 @@ impl Script {
         // Before any keyword: a sub-agent's answer may mention "error" or "plan".
         if trek_core::orchestrate::is_wake(text) {
             return Script::Wake;
+        }
+        // What Trek added to a message decides, before the words in it.
+        if trek_core::restate::split_restate(trek_core::orchestrate::split_consult(text).0).1 {
+            return Script::Restate;
+        }
+        if trek_core::orchestrate::split_consult(text).1.is_some_and(|c| c.style == trek_core::orchestrate::Style::Arena) {
+            return Script::Arena;
+        }
+        if text.contains(trek_core::skills::CREATE_VERIFICATION) {
+            return Script::SetupVerification;
+        }
+        if text.contains(trek_core::skills::MAINTAIN_VERIFICATION) {
+            return Script::MaintainVerification;
         }
         let words: Vec<String> = text
             .split_whitespace()
@@ -161,6 +196,9 @@ impl Script {
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "cost" if w.starts_with("mock:") => Script::Cost { plan: words.get(i + 1).is_some_and(|w| w == "plan") },
+                "verify" if w.starts_with("mock:") => Script::Verify,
+                "design" if w.starts_with("mock:") => Script::Design,
+                "judge" if w.starts_with("mock:") => Script::Judge,
                 "error" => Script::Error,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
@@ -200,6 +238,11 @@ pub fn title(request: &str) -> String {
         Script::Delegate { .. } => "Get a second opinion",
         Script::Cost { .. } => "Price the API calls",
         Script::Wake => "A sub-agent reported back",
+        Script::Restate => "Say it back first",
+        Script::Arena | Script::Design | Script::Judge => "Design the rate limiter",
+        Script::SetupVerification => "Set up verification",
+        Script::MaintainVerification => "Maintain verification",
+        Script::Verify => "Verify the change",
     }
     .into()
 }
@@ -258,6 +301,8 @@ struct Session {
     model: String,
     /// The way to Trek's orchestration tools, when Trek gave the session them.
     orchestrate: Option<trek_ipc::Client>,
+    /// What Trek told it about the project (`SessionConfig::instructions`).
+    instructions: Option<String>,
 }
 
 /// The name Trek gives its orchestration MCP server in a session.
@@ -288,6 +333,7 @@ pub async fn run(
         mark: String::new(),
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
         orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(&m.env)),
+        instructions: config.instructions.clone(),
     };
     if s.emit(AgentEvent::Started { native_id, model: Some(s.model.clone()) }).await.is_err() {
         return Ok(());
@@ -425,6 +471,13 @@ impl Session {
             }
             Script::Limit(after) => return self.limit(after).await,
             Script::Cost { plan } => return self.priced_turn(plan).await,
+            Script::Restate => self.restate(text).await?,
+            Script::Arena => self.arena(text).await?,
+            Script::Design => self.design().await?,
+            Script::Judge => self.judge(text).await?,
+            Script::SetupVerification => self.setup_verification().await?,
+            Script::MaintainVerification => self.maintain_verification().await?,
+            Script::Verify => self.verify().await?,
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -649,6 +702,218 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Several calls to Trek's orchestration tools at once, answered in order. As with `ipc`, the
+    /// user can stop the turn while they wait: their connections are dropped.
+    async fn ipc_all(&mut self, method: &str, calls: Vec<serde_json::Value>) -> Step<Vec<std::result::Result<serde_json::Value, String>>> {
+        let Some(client) = self.orchestrate.clone() else { return Ok(calls.iter().map(|_| Err("Trek's sub-agent tools aren't in this session.".into())).collect()) };
+        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+        let pending: Vec<_> = calls
+            .into_iter()
+            .map(|params| {
+                let (client, method, handle_tx) = (client.clone(), method.to_string(), handle_tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    let mut conn = client.connect()?;
+                    if let Ok(h) = conn.handle() {
+                        let _ = handle_tx.send(h);
+                    }
+                    conn.call(&method, &params)
+                })
+            })
+            .collect();
+        let mut all = Box::pin(futures::future::join_all(pending));
+        loop {
+            tokio::select! {
+                done = &mut all => return Ok(done.into_iter().map(|r| r.unwrap_or_else(|e| Err(e.to_string()))).collect()),
+                cmd = self.commands.recv() => {
+                    if let Err(stop) = self.handle_midturn(cmd) {
+                        while let Ok(h) = handle_rx.try_recv() {
+                            let _ = h.shutdown(std::net::Shutdown::Both);
+                        }
+                        return Err(stop);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Say back what it was asked, in its own words, and stop there.
+    async fn restate(&mut self, text: &str) -> Step {
+        let said = trek_core::restate::as_written(text).trim().trim_end_matches(['.', '?', '!']);
+        let ask = match said.chars().next() {
+            Some(c) => format!("{}{}", c.to_lowercase(), &said[c.len_utf8()..]),
+            None => "look at what we have so far".into(),
+        };
+        self.think("Before anything else: say back what I've been asked, and nothing more.").await?;
+        self.say(&format!(
+            "Here's how I understand it, in my own words:\n\n- **What you want:** you'd like me to {ask}.\n- **Why it matters:** the current behaviour gets in your way, and you want it fixed at the cause rather than patched over.\n- **What I'd leave alone:** anything that isn't part of that.\n\nI haven't changed anything. Tell me if that's right and I'll go ahead."
+        ))
+        .await
+    }
+
+    /// An arena as Trek's instructions lay it out: ground the problem, have each candidate draft
+    /// a design at once, have the judge score them blind, and synthesise.
+    async fn arena(&mut self, text: &str) -> Step {
+        let (said, consult) = trek_core::orchestrate::split_consult(text);
+        let Some(consult) = consult else { return self.say("There's no arena in that message.").await };
+        let said = trek_core::restate::as_written(said).trim().to_string();
+        self.think("Ground the problem before anyone designs: what's there now, and how callers will use it.").await?;
+        self.tool("Read", "src/webhooks.rs", "pub fn deliver(endpoint: &Endpoint, event: Event) -> Result<()> { … }", 120).await?;
+        self.tool("Search", "deliver(", "src/webhooks.rs:41\nsrc/jobs/retry.rs:18\nsrc/api/events.rs:77", 100).await?;
+        let brief = format!(
+            "{said}\n\nGround: webhooks go out one event at a time through `deliver` in src/webhooks.rs, called from the API, the retry job and the event fan-out. Endpoints belong to customers; a slow one mustn't hold up the rest. Callers want to know whether an event went, waits, or was dropped."
+        );
+        let letters: Vec<char> = (0..consult.consultants.len()).map(|i| (b'A' + i as u8) as char).collect();
+        self.say(&format!("Here's the ground: `deliver` in `src/webhooks.rs` has three callers, and one slow endpoint can hold up the rest. {} candidates will draft designs on their own.", consult.consultants.len())).await?;
+        // Every candidate at once, each with a row of its own.
+        let mut rows = vec![];
+        let mut calls = vec![];
+        for (c, letter) in consult.consultants.iter().zip(&letters) {
+            let id = self.id("tool");
+            let title = format!("Design {letter}");
+            self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), &title).await?;
+            rows.push(id);
+            calls.push(serde_json::json!({ "title": title, "prompt": format!("mock:design {brief}"), "agent": c.agent.key(), "model": c.model, "effort": c.effort.as_str(), "mode": "advise", "wait": true }));
+        }
+        let answers = self.ipc_all("delegate_task", calls).await?;
+        let mut packages = vec![];
+        for ((id, letter), answer) in rows.into_iter().zip(&letters).zip(answers) {
+            match answer {
+                Ok(v) => {
+                    self.emit(AgentEvent::ToolFinished { id, output: serde_json::to_string_pretty(&v).unwrap_or_default(), ok: true }).await?;
+                    packages.push(format!("Design {letter}:\n{}", v["result"].as_str().unwrap_or("(no design)")));
+                }
+                Err(e) => {
+                    self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
+                    return self.say(&format!("The arena couldn't run: {e}")).await;
+                }
+            }
+        }
+        // The judge sees the designs by letter only.
+        let Some(judge) = consult.judge.clone().or_else(|| consult.consultants.first().cloned()) else { return self.say("The arena has no candidates.").await };
+        let id = self.id("tool");
+        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), "Judge the designs").await?;
+        let call = serde_json::json!({ "title": "Judge the designs", "prompt": format!("mock:judge Score these designs.\n\n{brief}\n\n{}", packages.join("\n\n")), "agent": judge.agent.key(), "model": judge.model, "effort": judge.effort.as_str(), "mode": "advise", "wait": true });
+        let verdict = match self.ipc("delegate_task", call).await? {
+            Ok(v) => {
+                self.emit(AgentEvent::ToolFinished { id, output: serde_json::to_string_pretty(&v).unwrap_or_default(), ok: true }).await?;
+                v["result"].as_str().unwrap_or_default().to_string()
+            }
+            Err(e) => {
+                self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
+                return self.say(&format!("The judge couldn't run: {e}")).await;
+            }
+        };
+        let winner = verdict.lines().find_map(|l| l.strip_prefix("Strongest: ")).unwrap_or("Design A").to_string();
+        let then = if consult.implement { "Implementing against this sketch now." } else { "I haven't changed any files." };
+        self.say(&format!(
+            "The judge scored the designs blind; **{winner} won**, and I've folded in the others' retry queue.\n\n```rust\n// Call site\nmatch limiter.admit(&endpoint) {{\n    Admit::Now => deliver(&endpoint, event)?,\n    Admit::After(wait) => queue.retry_in(wait, event),\n}}\n\npub struct Limiter {{ /* per-endpoint buckets */ }}\npub enum Admit {{ Now, After(Duration) }}\nimpl Limiter {{\n    pub fn per_endpoint(rate: u32, per: Duration) -> Self;\n    pub fn admit(&self, endpoint: &Endpoint) -> Admit;\n}}\n```\n\n{then}"
+        ))
+        .await?;
+        if consult.implement {
+            self.edit("src/webhooks/limiter.rs", "Created src/webhooks/limiter.rs", 160, (64, 0)).await?;
+            self.edit("src/webhooks.rs", "Applied 2 edits to src/webhooks.rs", 140, (9, 3)).await?;
+        }
+        Ok(())
+    }
+
+    /// A design package, its approach after the model playing it.
+    async fn design(&mut self) -> Step {
+        let (name, shape) = match self.model.as_str() {
+            "mock-deep" => ("Leaky bucket with a retry queue", "Queue::push(endpoint, event) -> Ticket"),
+            m if m.starts_with("relay") => ("Sliding window per endpoint", "Window::check(endpoint) -> Result<(), RetryAt>"),
+            _ => ("Token bucket per endpoint", "Limiter::admit(endpoint) -> Admit"),
+        };
+        self.think("Sketch the call sites first; the types follow from them.").await?;
+        self.say(&format!(
+            "## {name}\n\n**Call sites**\n\n```rust\nlet admit = limiter.admit(&endpoint);\n```\n\n**Core types and signatures**\n\n```rust\n{shape}\n```\n\n**Rationale:** one decision per event, made where `deliver` is called, so no caller needs to know how the limit is kept. It fails closed: an endpoint it can't place waits rather than floods."
+        ))
+        .await
+    }
+
+    /// Scores for the designs in `text`, by letter.
+    async fn judge(&mut self, text: &str) -> Step {
+        let letters: Vec<char> = text.lines().filter_map(|l| l.strip_prefix("Design ").and_then(|r| r.strip_suffix(':')).and_then(|r| r.chars().next())).collect();
+        let strongest = if letters.len() > 1 { letters[1] } else { letters.first().copied().unwrap_or('A') };
+        let rows: Vec<String> = letters
+            .iter()
+            .map(|l| {
+                let total = if *l == strongest { "4.6" } else { "3.8" };
+                format!("| {l} | {} | {} | 4 | {} | 4 | {total} |", if *l == strongest { 5 } else { 4 }, if *l == strongest { 5 } else { 3 }, if *l == strongest { 5 } else { 4 })
+            })
+            .collect();
+        self.think("Score each against the rubric, without knowing who wrote it.").await?;
+        self.say(&format!(
+            "Strongest: Design {strongest}\n\nIts interface is one call deep and fails closed. The others' retry queue is worth keeping.\n\n| Design | Call sites | Depth | Simplicity | Failure | Fit | Score |\n| --- | --- | --- | --- | --- | --- | --- |\n{}",
+            rows.join("\n")
+        ))
+        .await
+    }
+
+    /// Where the mock keeps the verification skill it sets up, in the session's folder.
+    const VERIFY_SKILL: &'static str = ".agents/skills/verify-app";
+
+    /// Build a small verification skill in the session's folder (for real): SKILL.md marked for
+    /// Trek, a CLI, and a Feature Map. Then run its check.
+    async fn setup_verification(&mut self) -> Step {
+        let dir = self.cwd.join(Self::VERIFY_SKILL);
+        let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
+        self.think("Learn how the app runs, then build the lever: a CLI first, the notes after.").await?;
+        self.tool("Read", "README.md", "# The app\n\nRun it with `cargo run`.", 120).await?;
+        let files: [(&str, String, bool); 4] = [
+            ("SKILL.md", format!("---\nname: verify-app\ndescription: Drive, debug and verify the app. Use it to check any change works before calling it done.\nmetadata:\n  trek: verification\n  cli: {cli}\n---\n\n# Verify the app\n\nRun `{cli} check` before calling a change done. `{cli} --help` lists every command.\n\nThe Feature Map is in references/features/README.md.\n"), false),
+            ("scripts/app", "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check) echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n".to_string(), true),
+            ("references/features/README.md", "# Feature Map\n\n- [Notes](notes.md): write and find notes.\n".to_string(), false),
+            ("references/features/notes.md", "# Notes\n\nWrite and find notes. Reach it from the sidebar's Notes item, or `app open notes`.\n".to_string(), false),
+        ];
+        for (path, body, exec) in files {
+            let id = self.id("tool");
+            let full = dir.join(path);
+            self.tool_start(&id, "Write", &full.display().to_string()).await?;
+            let wrote = full.parent().map(|p| std::fs::create_dir_all(p)).transpose().and_then(|_| std::fs::write(&full, &body));
+            if exec && wrote.is_ok() {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o755));
+            }
+            self.emit(AgentEvent::ToolLines { id: id.clone(), added: body.lines().count() as u32, removed: 0 }).await?;
+            let (output, ok) = match wrote {
+                Ok(()) => (format!("Wrote {path}"), true),
+                Err(e) => (format!("Couldn't write {path}: {e}"), false),
+            };
+            self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+            self.pause(paced(60)).await?;
+        }
+        self.tool("Run command", &format!("{cli} check --json"), "{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}", 200).await?;
+        self.say(&format!("The verification skill is in `{}`: a CLI (`{cli}`) with `check`, `open` and `screenshot`, and a Feature Map. `check` passes.", Self::VERIFY_SKILL)).await
+    }
+
+    /// Touch the verification skill up: run it, and add what the Feature Map lacks.
+    async fn maintain_verification(&mut self) -> Step {
+        let map = self.cwd.join(Self::VERIFY_SKILL).join("references/features/README.md");
+        let Ok(before) = std::fs::read_to_string(&map) else { return self.say("There's no verification skill here to maintain yet.").await };
+        let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
+        self.tool("Run command", &format!("{cli} check --json"), "{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}", 150).await?;
+        let line = "- [Settings](settings.md): the app's preferences.\n";
+        if !before.contains(line) {
+            let id = self.id("tool");
+            self.tool_start(&id, "Edit", &map.display().to_string()).await?;
+            let _ = std::fs::write(&map, format!("{before}{line}"));
+            let _ = std::fs::write(map.with_file_name("settings.md"), "# Settings\n\nThe app's preferences. Reach them with ⌘, or `app open settings`.\n");
+            self.emit(AgentEvent::ToolLines { id: id.clone(), added: 1, removed: 0 }).await?;
+            self.emit(AgentEvent::ToolFinished { id, output: "Applied 1 edit".into(), ok: true }).await?;
+        }
+        self.say("The verification skill is up to date: `check` passes, and the Feature Map has the Settings screen now.").await
+    }
+
+    /// Run the verification CLI Trek named for the project (the mock doesn't run anything for
+    /// real here: the output is what a passing check prints).
+    async fn verify(&mut self) -> Step {
+        let cli = self.instructions.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
+        let Some(cli) = cli else { return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await };
+        self.edit("src/notes.rs", "Applied 1 edit to src/notes.rs", 120, (6, 2)).await?;
+        self.tool("Run command", &format!("{cli} check --json"), "{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}", 200).await?;
+        self.say(&format!("Changed `src/notes.rs` and verified it with `{cli} check`: build, launch and the smoke run pass.")).await
     }
 
     /// Add a line to `NOTES.md` in the session's folder: a real change, for worktree reviews.
@@ -975,6 +1240,24 @@ mod tests {
         assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });
         assert_eq!(Script::parse("consult a friend", false), Script::Answer);
         assert_eq!(Script::parse("[Trek] Sub-agent “x” failed: error", false), Script::Wake);
+        assert_eq!(Script::parse("mock:verify the notes", false), Script::Verify);
+        assert_eq!(Script::parse("mock:design an error budget", false), Script::Design, "the first keyword decides");
+        assert_eq!(Script::parse("mock:judge these: Design A has an error path", false), Script::Judge);
+    }
+
+    #[test]
+    fn what_trek_adds_to_a_message_decides_the_script() {
+        use trek_core::orchestrate::{Consult, Consultant, Style, consult_prompt};
+        // Whatever the words say ("plan", "error"), a request to restate is played as one.
+        let restate = trek_core::restate::with_restate("plan the error pages");
+        assert_eq!(Script::parse(&restate, false), Script::Restate);
+        assert_eq!(Script::parse(&restate, true), Script::Restate, "in plan mode too");
+        let c = Consult { consultants: vec![Consultant { agent: trek_core::AgentId::Direct(PROVIDER.into()), model: "mock-deep".into(), effort: trek_core::Effort::High }], style: Style::Arena, implement: false, judge: None };
+        assert_eq!(Script::parse(&consult_prompt("rate-limit the webhooks", &c, |_| "Deep".into()), false), Script::Arena);
+        let advise = Consult { style: Style::Advise, ..c };
+        assert_eq!(Script::parse(&consult_prompt("explain it", &advise, |_| "Deep".into()), false), Script::Answer, "an ordinary consult is the words' to decide");
+        assert_eq!(Script::parse("Set up verification following `/x/skills/create-verification-skill/SKILL.md`", false), Script::SetupVerification);
+        assert_eq!(Script::parse("Maintain it following `/x/maintain-verification-skill/SKILL.md`", false), Script::MaintainVerification);
     }
 
     #[test]
@@ -1028,7 +1311,13 @@ mod tests {
                 recap: None,
                 fast: None,
                 mcp_servers: vec![],
+                instructions: None,
             };
+            Live::of(config)
+        }
+
+        fn of(config: SessionConfig) -> Live {
+            set_pace(0.);
             let h = crate::start(config);
             Live { commands: h.commands, events: h.events }
         }
@@ -1078,6 +1367,7 @@ mod tests {
             recap: recap.map(String::from),
             fast: None,
             mcp_servers: vec![],
+            instructions: None,
         }
     }
 
@@ -1154,6 +1444,58 @@ mod tests {
             assert!(matches!(&events[n - 2], AgentEvent::Usage { model: Some(m), tokens, .. } if m == "mock-swift" && tokens.output > 0), "{:?}", &events[n - 2]);
             assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
         });
+    }
+
+    #[test]
+    fn restating_says_it_back_and_does_nothing_else() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::FullAccess, false);
+            m.prompt(&trek_core::restate::with_restate("Fix the flaky upload test.")).await;
+            let events = m.turn().await;
+            let said = text(&events);
+            assert!(said.contains("in my own words") && said.contains("you'd like me to fix the flaky upload test.") && said.contains("I haven't changed anything"), "{said}");
+            assert!(!events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { .. })), "nothing done yet");
+        });
+    }
+
+    #[test]
+    fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
+        let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trek_core::runtime().block_on(async {
+            let m = Live::of(SessionConfig { cwd: dir.clone(), ..config(None, None, false, None) });
+            m.prompt("Set up a verification skill, following Trek's guide in `/x/skills/create-verification-skill/SKILL.md`.").await;
+            let events = m.turn().await;
+            assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: None })), "{events:?}");
+        });
+        // Trek finds what it made, and its CLI really runs.
+        let found = trek_core::verification::find(&dir).expect("a verification skill");
+        assert_eq!((found.name.as_str(), found.cli.as_deref()), ("verify-app", Some("./.agents/skills/verify-app/scripts/app")));
+        assert!(found.dir.join("references/features/README.md").exists());
+        let out = std::process::Command::new(found.dir.join("scripts/app")).arg("check").output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("\"ok\":true"));
+        // Told about it, a session checks its change with the CLI.
+        let notes = trek_core::verification::instructions(&trek_core::verification::record(&found, None));
+        trek_core::runtime().block_on(async {
+            let m = Live::of(SessionConfig { cwd: dir.clone(), instructions: Some(notes), ..config(None, None, false, None) });
+            m.prompt("mock:verify the notes change").await;
+            let events = m.turn().await;
+            assert!(
+                events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { title, detail, .. } if title == "Run command" && detail == "./.agents/skills/verify-app/scripts/app check --json")),
+                "{events:?}"
+            );
+            // Without a skill, it says so.
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("mock:verify").await;
+            assert!(text(&m.turn().await).contains("no verification skill yet"));
+            // Maintaining it adds what the Feature Map lacked.
+            let m = Live::of(SessionConfig { cwd: dir.clone(), ..config(None, None, false, None) });
+            m.prompt("Maintain it, following `/x/maintain-verification-skill/SKILL.md`.").await;
+            m.turn().await;
+        });
+        assert!(std::fs::read_to_string(found.dir.join("references/features/README.md")).unwrap().contains("settings.md"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

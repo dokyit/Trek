@@ -77,6 +77,11 @@ pub struct Composer {
     consult_rail: Option<AgentId>,
     /// The consultant whose effort the consult menu's side panel is picking.
     consult_effort: Option<usize>,
+    /// The consult menu's side panel is picking an arena's judge.
+    consult_judge: bool,
+    /// Ask the agent to restate the next message in its own words before it does anything
+    /// (`trek_core::restate`). Clears once that message is sent.
+    restate: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -128,6 +133,18 @@ pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
 fn consult_split(rest: &str) -> Option<(&str, &str)> {
     let at = rest.char_indices().find(|&(i, c)| c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))?.0;
     Some((&rest[..at], &rest[at + 1..]))
+}
+
+/// `/restate` alone (`Some(None)`), or with the message to send (`Some(Some(message))`); `None`
+/// when `text` isn't the command.
+fn restate_command(text: &str) -> Option<Option<String>> {
+    let rest = text.trim_start().strip_prefix("/restate")?;
+    let rest = rest.strip_prefix(':').unwrap_or(rest);
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let rest = rest.trim();
+    Some((!rest.is_empty()).then(|| rest.to_string()))
 }
 
 /// A consultant on `model` of `agent`, at `effort` (High, unless asked) within what the model takes.
@@ -216,7 +233,7 @@ impl Composer {
             // The cursor blinks and moves without an input event; this view is cached, so redraw.
             cx.observe(&input, |_, _, cx| cx.notify()),
         ];
-        Self {
+        let mut this = Self {
             workspace,
             scope,
             input,
@@ -244,8 +261,29 @@ impl Composer {
             consult_open: false,
             consult_rail: None,
             consult_effort: None,
+            consult_judge: false,
+            restate: false,
             _subscriptions: subscriptions,
+        };
+        // TREK_REVIEW_COMPOSER=restate (Restate first on) or arena (the Consult menu open on an
+        // arena): states a click reaches, for design review of a window that isn't in front.
+        match std::env::var("TREK_REVIEW_COMPOSER").as_deref() {
+            Ok("restate") if this.scope == Scope::Main => this.restate = true,
+            // Once the agents on this Mac have been found, so every family can take part.
+            Ok("arena") if this.scope == Scope::Main => cx
+                .spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.consult.style = Style::Arena;
+                        this.consult.consultants = this.arena_defaults(cx);
+                        this.consult_open = true;
+                        cx.notify();
+                    });
+                })
+                .detach(),
+            _ => {}
         }
+        this
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
@@ -275,9 +313,27 @@ impl Composer {
             }
             None => text,
         };
+        // `/restate <message>` sends it asking for a restatement first; `/restate` alone turns that
+        // on (or off) for the next message.
+        let text = match restate_command(&text) {
+            Some(None) => {
+                state.update(cx, |s, cx| s.set_value("", window, cx));
+                self.trigger = None;
+                self.restate = !self.restate;
+                self.sync_overlay(cx);
+                cx.notify();
+                return;
+            }
+            Some(Some(message)) => {
+                self.restate = true;
+                message
+            }
+            None => text,
+        };
         // With consultants picked, the agent is told to ask them first. Picks clear once it's
         // sent (unless pinned); a message that isn't sent keeps them, and comes back as written.
         let plain = text.clone();
+        let restating = self.restate && !text.trim().is_empty() && !text.trim_start().starts_with('/');
         let consulting = !(self.consult.consultants.is_empty() || text.trim().is_empty() || text.trim_start().starts_with('/'));
         if consulting {
             let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
@@ -286,9 +342,15 @@ impl Composer {
                 return;
             }
         }
+        let text = if restating { trek_core::restate::with_restate(&text) } else { text };
         let text = if consulting {
+            // An arena names its judge: the one picked, else Trek's pick.
+            let mut consult = self.consult.clone();
+            if consult.style == Style::Arena && consult.judge.is_none() {
+                consult.judge = self.arena_judge(cx);
+            }
             let names = self.consultant_names(cx);
-            trek_core::orchestrate::consult_prompt(&text, &self.consult, |c| names(c))
+            trek_core::orchestrate::consult_prompt(&text, &consult, |c| names(c))
         } else {
             text
         };
@@ -332,18 +394,32 @@ impl Composer {
         };
         if consulting && sent && !self.consult_pinned {
             self.consult.consultants.clear();
+            self.consult.judge = None;
             self.consult_effort = None;
         }
+        if restating && sent {
+            self.restate = false;
+        }
+    }
+
+    /// "Not quite…" on a restatement: the composer takes focus, and the correction is restated too.
+    pub fn correct(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restate = true;
+        self.focus(window, cx);
+        cx.notify();
     }
 
     /// A message comes back into the composer: put back by a rewind, or (`edit`: its item id) to
     /// edit and send again in its place.
     pub fn compose(&mut self, thread: &str, text: &str, images: &[PathBuf], edit: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        // A message sent with consultants comes back as it was written, its consultants picked.
+        // A message sent with consultants comes back as it was written, its consultants picked
+        // (and asking for a restatement again, if it did).
         let (text, consult) = trek_core::orchestrate::split_consult(text);
         if let Some(c) = consult {
             self.consult = c;
         }
+        let (text, restate) = trek_core::restate::split_restate(text);
+        self.restate |= restate;
         let Some(item) = edit else {
             self.restore(text, images, window, cx);
             return;
@@ -638,6 +714,18 @@ impl Composer {
         (self.consult.consultants.iter().map(Consultant::key).collect(), self.consult_pinned)
     }
 
+    /// Whether the next message asks for a restatement first.
+    #[cfg(test)]
+    pub(crate) fn restating(&self) -> bool {
+        self.restate
+    }
+
+    /// The judge an arena sent now would name.
+    #[cfg(test)]
+    pub(crate) fn judge(&self, cx: &App) -> Option<String> {
+        self.arena_judge(cx).map(|j| j.key())
+    }
+
     /// Images attached to the next message, and how many are still being saved.
     #[cfg(test)]
     pub(crate) fn attached(&self) -> (Vec<PathBuf>, usize) {
@@ -695,6 +783,8 @@ impl Composer {
         if let Some(c) = consult {
             self.consult = c;
         }
+        let (text, restate) = trek_core::restate::split_restate(text);
+        self.restate |= restate;
         if !text.is_empty() {
             self.insert_text(text, window, cx);
         }
@@ -1070,10 +1160,11 @@ impl Composer {
         Some(div().px(px(14.)).pt(px(12.)).child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx)).into_any_element())
     }
 
-    /// "+" menu: files and photos, snapshots, and the three pickers.
+    /// "+" menu: files and photos, snapshots, the three pickers, and restating first.
     fn plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let me = cx.entity();
         let theme = cx.theme().clone();
+        let restate = self.restate;
         gpui_kit::component::button::Button::new("attach")
             .ghost()
             .with_size(px(30.))
@@ -1081,8 +1172,9 @@ impl Composer {
             .bg(theme.foreground.opacity(0.065))
             .icon(Icon::new(IconName::Plus).text_color(theme.muted_foreground))
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let (a, b, c, d, e, f, g) = (me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone());
+                let (a, b, c, d, e, f, g, h) = (me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone());
                 menu.min_w(px(230.))
+                    .check_side(gpui_kit::component::Side::Right)
                     .item(PopupMenuItem::new("Add photos & files").icon(crate::assets::Lucide::Image).on_click(move |_, window, cx| a.update(cx, |c, cx| c.attach(window, cx))))
                     .separator()
                     .item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
@@ -1092,6 +1184,14 @@ impl Composer {
                     .item(PopupMenuItem::new("Mention a file  @").icon(IconName::File).on_click(move |_, window, cx| e.update(cx, |c, cx| c.insert_trigger("@", window, cx))))
                     .item(PopupMenuItem::new("Use a skill  $").icon(crate::assets::Lucide::Sparkle).on_click(move |_, window, cx| f.update(cx, |c, cx| c.insert_trigger("$", window, cx))))
                     .item(PopupMenuItem::new("Run a command  /").icon(IconName::SquareTerminal).on_click(move |_, window, cx| g.update(cx, |c, cx| c.insert_trigger("/", window, cx))))
+                    .separator()
+                    .item(PopupMenuItem::new("Restate first").icon(crate::assets::Lucide::MessageSquareQuote).checked(restate).on_click(move |_, window, cx| {
+                        h.update(cx, |c, cx| {
+                            c.restate = !c.restate;
+                            c.focus(window, cx);
+                            cx.notify();
+                        })
+                    }))
             })
     }
 
@@ -1420,6 +1520,10 @@ impl Composer {
                     self.consult.style = Style::Advise;
                     false
                 }
+                "arena" => {
+                    self.consult.style = Style::Arena;
+                    false
+                }
                 "report" => {
                     self.consult.implement = false;
                     false
@@ -1444,10 +1548,53 @@ impl Composer {
         if !picked.is_empty() {
             self.consult.consultants = picked;
         }
+        // An arena with nobody named draws one design from each model family.
+        if self.consult.style == Style::Arena && self.consult.consultants.is_empty() {
+            self.consult.consultants = self.arena_defaults(cx);
+        }
         match message {
             Some(_) if self.consult.consultants.is_empty() => Some(Err("Name a model to consult: /consult sol high: your question".into())),
             message => Some(Ok(message)),
         }
+    }
+
+    /// Every model on offer for an arena, each agent's default first, then its others, smartest
+    /// first; and the defaults alone.
+    fn arena_options(&self, cx: &App) -> (Vec<(AgentId, ModelInfo)>, Vec<(AgentId, ModelInfo)>) {
+        let ws = self.workspace.read(cx);
+        let (mut defaults, mut others) = (vec![], vec![]);
+        for agent in ws.ready_agents() {
+            let mut models = ws.models_for(&agent);
+            let default = default_model(&models).map(|m| m.id.clone());
+            models.sort_by_key(|m| std::cmp::Reverse(m.tier));
+            for m in models {
+                if Some(&m.id) == default.as_ref() {
+                    defaults.push((agent.clone(), m));
+                } else {
+                    others.push((agent.clone(), m));
+                }
+            }
+        }
+        let all = defaults.iter().cloned().chain(others).collect();
+        (all, defaults)
+    }
+
+    /// The model family of the thread's own agent and model.
+    fn main_family(&self, cx: &App) -> String {
+        let ws = self.workspace.read(cx);
+        let prefs = ws.prefs_in(&self.scope);
+        let model = prefs.model.clone().or_else(|| default_model(&ws.models_for(&prefs.agent)).map(|m| m.id.clone())).unwrap_or_default();
+        trek_core::orchestrate::family(&prefs.agent, &model)
+    }
+
+    /// An arena's candidates when none are picked: one per model family.
+    fn arena_defaults(&self, cx: &App) -> Vec<Consultant> {
+        trek_core::orchestrate::arena_defaults(&self.arena_options(cx).1)
+    }
+
+    /// Who judges the arena: the one picked, else a model of another family than the thread's.
+    fn arena_judge(&self, cx: &App) -> Option<Consultant> {
+        self.consult.judge.clone().or_else(|| trek_core::orchestrate::pick_judge(&self.main_family(cx), &self.consult.consultants, &self.arena_options(cx).0))
     }
 
     /// The consult menu: who's consulted, at what effort, how, and then what.
@@ -1484,7 +1631,9 @@ impl Composer {
                         .child("Clear")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.consult.consultants.clear();
+                            this.consult.judge = None;
                             this.consult_effort = None;
+                            this.consult_judge = false;
                             cx.notify();
                         })),
                 )
@@ -1504,6 +1653,7 @@ impl Composer {
         let note = match self.consult.style {
             Style::Advise => format!("They review and suggest; {main_agent} decides."),
             Style::Discuss => format!("{main_agent} and they go back and forth until they agree ({} rounds at most).", trek_core::orchestrate::DISCUSS_ROUNDS),
+            Style::Arena => format!("{main_agent} grounds the problem; each drafts a design on its own; a model of another family judges them blind; {main_agent} synthesises the best."),
         };
         let picked = v_flex().px(px(5.)).children(self.consult.consultants.iter().enumerate().map(|(i, c)| {
             let name = picked_models.get(i).map(|m| model_name(m, &c.model)).unwrap_or_else(|| c.model.clone());
@@ -1525,6 +1675,7 @@ impl Composer {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.consult_effort = if this.consult_effort == Some(i) { None } else { Some(i) };
+                            this.consult_judge = false;
                             cx.notify();
                         })),
                 )
@@ -1544,9 +1695,30 @@ impl Composer {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.consult_effort = if this.consult_effort == Some(i) { None } else { Some(i) };
+                    this.consult_judge = false;
                     cx.notify();
                 }))
         }));
+        // An arena's judge, with a side panel to pick another.
+        let judge = (self.consult.style == Style::Arena).then(|| {
+            let j = self.arena_judge(cx);
+            let name = j.as_ref().map(|j| format!("{} · {}", model_name(&ws.models_for(&j.agent), &j.model), j.effort.label())).unwrap_or_else(|| "No model of another family".into());
+            v_flex().px(px(5.)).pt(px(2.)).child(
+                ui::menu_row("consult-judge", self.consult_judge, cx)
+                    .test_support()
+                    .min_h(px(32.))
+                    .child(Icon::new(crate::assets::Lucide::Scale).small().text_color(muted))
+                    .child(div().flex_none().text_color(muted).child("Judged by"))
+                    .children(j.as_ref().map(|j| ui::agent_glyph(&j.agent, cx)))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.consult_judge = !this.consult_judge;
+                        this.consult_effort = None;
+                        cx.notify();
+                    })),
+            )
+        });
         // Which agent's models to list: a row of tabs, so no logo sits beside a model it isn't.
         let rail_row = h_flex().flex_wrap().gap(px(2.)).px(px(6.)).pt(px(6.)).children(agents.iter().map(|a| {
             let active = rail.as_ref() == Some(a);
@@ -1599,6 +1771,7 @@ impl Composer {
             .child(header)
             .child(div().px(px(10.)).pb(px(6.)).text_size(px(12.5)).line_height(relative(1.4)).text_color(muted).child(note))
             .when(!empty, |el| el.child(picked))
+            .children(judge)
             .child(v_flex().mt(px(6.)).border_t_1().border_color(hairline).child(rail_row).child(list))
             .child(
                 v_flex()
@@ -1611,11 +1784,18 @@ impl Composer {
                     .border_color(hairline)
                     .child(ui::segmented(
                         "consult-style",
-                        vec![(Style::Advise, "Advise"), (Style::Discuss, "Discuss")],
+                        vec![(Style::Advise, "Advise"), (Style::Discuss, "Discuss"), (Style::Arena, "Arena")],
                         self.consult.style,
                         move |v, _, cx| {
                             m1.update(cx, |c, cx| {
                                 c.consult.style = v;
+                                // An arena starts from one design per model family.
+                                if v == Style::Arena && c.consult.consultants.is_empty() {
+                                    c.consult.consultants = c.arena_defaults(cx);
+                                }
+                                if v != Style::Arena {
+                                    c.consult_judge = false;
+                                }
                                 cx.notify();
                             })
                         },
@@ -1634,6 +1814,32 @@ impl Composer {
                         cx,
                     )),
             );
+        let judges = self.consult_judge.then(|| {
+            let main = self.main_family(cx);
+            let current = self.arena_judge(cx);
+            let options: Vec<(AgentId, ModelInfo)> = self.arena_options(cx).0.into_iter().filter(|(a, m)| trek_core::orchestrate::family(a, &m.id) != main).collect();
+            ui::menu_surface(cx)
+                .id("consult-judges")
+                .test_support()
+                .w(px(230.))
+                .max_h(px(300.))
+                .overflow_y_scroll()
+                .when(options.is_empty(), |el| el.child(div().p(px(8.)).text_size(px(12.5)).text_color(muted).child("Every model on offer is of the same family as the thread's.")))
+                .children(options.into_iter().map(|(agent, m)| {
+                    let on = current.as_ref().is_some_and(|j| j.agent == agent && same_model(&j.model, &m.id));
+                    ui::menu_row(SharedString::from(format!("consult-judge-{}-{}", agent.key(), m.id)), on, cx)
+                        .test_support()
+                        .child(ui::agent_glyph(&agent, cx))
+                        .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
+                        .when(on, |el| el.child(Icon::new(IconName::Check).small()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.consult.judge = Some(consultant(agent.clone(), &m, None));
+                            this.consult_judge = false;
+                            cx.notify();
+                        }))
+                }))
+                .into_any_element()
+        });
         let side = self.consult_effort.and_then(|i| {
             let c = self.consult.consultants.get(i)?;
             let efforts = picked_models.get(i).and_then(|ms| ms.iter().find(|m| same_model(&c.model, &m.id))).map(|m| m.efforts.clone()).filter(|e| !e.is_empty());
@@ -1658,7 +1864,7 @@ impl Composer {
                     .into_any_element(),
             )
         });
-        h_flex().items_end().gap(px(6.)).child(main).children(side).into_any_element()
+        h_flex().items_end().gap(px(6.)).child(main).children(side.or(judges)).into_any_element()
     }
 
     /// The Consult pill: quiet until models are picked, then their logos and how they'll be asked.
@@ -1677,6 +1883,7 @@ impl Composer {
         let style = match self.consult.style {
             Style::Advise => "Advise",
             Style::Discuss => "Discuss",
+            Style::Arena => "Arena",
         };
         let logos = h_flex().children(self.consult.consultants.iter().take(4).enumerate().map(|(i, c)| {
             div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(5.)).bg(theme.secondary).child(ui::agent_logo(&c.agent, px(14.), cx))
@@ -1701,6 +1908,7 @@ impl Composer {
                 this.consult_open = *open;
                 if !*open {
                     this.consult_effort = None;
+                    this.consult_judge = false;
                 }
                 this.sync_overlay(cx);
                 cx.notify();
@@ -2252,6 +2460,19 @@ impl Render for Composer {
                     .child(self.plus_button(cx))
                     .child(model_pill)
                     .child(self.consult_pill(compact, cx))
+                    .when(self.restate, |el| {
+                        el.child(
+                            Pill::new("restate-pill")
+                                .selected(true)
+                                .tooltip("The agent says back what you asked, in its own words, before it does anything. Click to turn off.")
+                                .child(Icon::new(crate::assets::Lucide::MessageSquareQuote).small().text_color(theme.foreground.opacity(0.85)))
+                                .when(!compact, |p| p.child("Restate first"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.restate = false;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(access_pill)
                     .when(is_draft, |el| {
                         el.child(
@@ -2478,7 +2699,17 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::consult_split;
+    use super::{consult_split, restate_command};
+
+    #[test]
+    fn restate_takes_a_message_or_none() {
+        assert_eq!(restate_command("/restate"), Some(None));
+        assert_eq!(restate_command("  /restate  "), Some(None));
+        assert_eq!(restate_command("/restate why does it flicker?"), Some(Some("why does it flicker?".into())));
+        assert_eq!(restate_command("/restate: why?"), Some(Some("why?".into())));
+        assert_eq!(restate_command("/restated"), None);
+        assert_eq!(restate_command("please /restate"), None);
+    }
 
     #[test]
     fn consult_splits_at_a_colon_and_space() {

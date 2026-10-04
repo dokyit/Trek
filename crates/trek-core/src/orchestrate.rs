@@ -2,6 +2,7 @@
 //! takes back as the answer, how it wakes the agent that asked, and the "consult" instructions
 //! the composer adds to a message. The live part (threads, sessions, the socket) is the app's.
 
+use crate::catalog::ModelInfo;
 use crate::store::Item;
 use crate::types::{AgentId, Effort};
 
@@ -126,6 +127,12 @@ pub fn plain_preview(text: &str, max: usize) -> String {
     let lines: Vec<String> = text
         .lines()
         .filter(|l| !l.trim_start().starts_with("```"))
+        // A table's rule row says nothing; its cells read as a list.
+        .filter(|l| !(l.contains("---") && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))))
+        .map(|l| match l.trim().strip_prefix('|').and_then(|r| r.strip_suffix('|')) {
+            Some(cells) => cells.split('|').map(str::trim).filter(|c| !c.is_empty()).collect::<Vec<_>>().join(" · "),
+            None => l.to_string(),
+        })
         .map(|l| {
             let l = l.trim_start().trim_start_matches('#').trim_start_matches('>').trim_start();
             let l = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).unwrap_or(l);
@@ -259,6 +266,20 @@ pub enum Style {
     Advise,
     /// The agent and its consultants go back and forth until they agree (a few rounds at most).
     Discuss,
+    /// A design arena (pstack's "measure a hundred times, cut once"): the agent grounds the
+    /// problem, each consultant drafts a design of its own, a judge on another model family
+    /// scores them blind, and the agent synthesises one.
+    Arena,
+}
+
+impl Style {
+    fn key(self) -> &'static str {
+        match self {
+            Style::Advise => "advise",
+            Style::Discuss => "discuss",
+            Style::Arena => "arena",
+        }
+    }
 }
 
 /// Consultants picked in the composer, and what happens once they've had their say.
@@ -268,6 +289,74 @@ pub struct Consult {
     pub style: Style,
     /// Then implement (else just report).
     pub implement: bool,
+    /// Who judges an arena's designs (`None`: Trek picks, see `pick_judge`).
+    pub judge: Option<Consultant>,
+}
+
+/// The family a model comes from ("anthropic", "openai", …), so an arena can draw designs from
+/// different ones and have them judged by another than the agent's own. Models Trek can't place
+/// count as their agent's own family.
+pub fn family(agent: &AgentId, model: &str) -> String {
+    let m = model.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| m.contains(w));
+    let named = if has(&["claude", "opus", "sonnet", "haiku"]) {
+        Some("anthropic")
+    } else if has(&["gpt", "codex", "openai/"]) || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
+        Some("openai")
+    } else if has(&["gemini", "gemma"]) {
+        Some("google")
+    } else if has(&["grok"]) {
+        Some("xai")
+    } else if has(&["qwen"]) {
+        Some("qwen")
+    } else if has(&["kimi", "moonshot"]) {
+        Some("moonshot")
+    } else if has(&["deepseek"]) {
+        Some("deepseek")
+    } else if has(&["glm", "zhipu", "z-ai"]) {
+        Some("zhipu")
+    } else if has(&["llama"]) {
+        Some("meta")
+    } else if has(&["mistral", "devstral", "codestral"]) {
+        Some("mistral")
+    } else {
+        None
+    };
+    match (named, agent) {
+        (Some(f), _) => f.to_string(),
+        (None, AgentId::ClaudeCode) => "anthropic".into(),
+        (None, AgentId::Codex) => "openai".into(),
+        (None, other) => other.key(),
+    }
+}
+
+/// A consultant on `model` of `agent` at High, or as near as the model goes.
+fn at_high(agent: &AgentId, model: &ModelInfo) -> Consultant {
+    let effort = if model.efforts.is_empty() { Effort::High } else { Effort::High.clamp_to(&model.efforts) };
+    Consultant { agent: agent.clone(), model: model.id.clone(), effort }
+}
+
+/// An arena's candidates when none are picked: one per model family, from each agent's default
+/// model (`defaults`, in the order agents are offered), as many as can run at once.
+pub fn arena_defaults(defaults: &[(AgentId, ModelInfo)]) -> Vec<Consultant> {
+    let mut seen: Vec<String> = vec![];
+    let mut out = vec![];
+    for (agent, model) in defaults {
+        let f = family(agent, &model.id);
+        if !seen.contains(&f) && out.len() < MAX_RUNNING {
+            seen.push(f);
+            out.push(at_high(agent, model));
+        }
+    }
+    out
+}
+
+/// The judge of an arena: a model of another family than the agent's own (`main`), not one of
+/// the candidates if there's a choice, from `options` (every model on offer, preferred first).
+pub fn pick_judge(main: &str, candidates: &[Consultant], options: &[(AgentId, ModelInfo)]) -> Option<Consultant> {
+    let other = |(a, m): &&(AgentId, ModelInfo)| family(a, &m.id) != main;
+    let fresh = |(a, m): &&(AgentId, ModelInfo)| !candidates.iter().any(|c| c.agent == *a && c.model == m.id);
+    options.iter().filter(other).find(fresh).or_else(|| options.iter().find(other)).map(|(a, m)| at_high(a, m))
 }
 
 /// Rounds a discussion may take.
@@ -277,44 +366,67 @@ const CONSULT_OPEN: &str = "<trek-consult";
 const CONSULT_CLOSE: &str = "</trek-consult>";
 
 /// `text` with the instructions for consulting: which models to ask (named for the agent with
-/// `name`, e.g. "Sol · High"), how, and what to do after.
+/// `name`, e.g. "Sol · High"), how, and what to do after. An arena without a judge has none
+/// named: the agent is told to pick one of another family.
 pub fn consult_prompt(text: &str, consult: &Consult, name: impl Fn(&Consultant) -> String) -> String {
     let with: Vec<String> = consult.consultants.iter().map(Consultant::key).collect();
-    let style = match consult.style {
-        Style::Advise => "advise",
-        Style::Discuss => "discuss",
-    };
     let then = if consult.implement { "implement" } else { "report" };
-    let list: Vec<String> = consult
-        .consultants
-        .iter()
-        .map(|c| format!("   - {}: agent \"{}\", model \"{}\", effort \"{}\"", name(c), c.agent.key(), c.model, c.effort.as_str()))
-        .collect();
-    let mut steps = vec![format!(
-        "1. Call `delegate_task` once for each consultant below, all at once if you can, with mode \"advise\" and wait true:\n{}\n   They can't see this conversation: give each a self-contained brief (the request above, the files that matter, what you've found so far) and ask for their review and recommendations, not for edits.",
-        list.join("\n")
-    )];
+    let line = |c: &Consultant| format!("   - {}: agent \"{}\", model \"{}\", effort \"{}\"", name(c), c.agent.key(), c.model, c.effort.as_str());
+    let list: Vec<String> = consult.consultants.iter().map(line).collect();
+    let finish = if consult.implement { "then implement it." } else { "then stop there: don't change any files." };
+    let mut steps = vec![];
+    match consult.style {
+        Style::Advise | Style::Discuss => steps.push(format!(
+            "1. Call `delegate_task` once for each consultant below, all at once if you can, with mode \"advise\" and wait true:\n{}\n   They can't see this conversation: give each a self-contained brief (the request above, the files that matter, what you've found so far) and ask for their review and recommendations, not for edits.",
+            list.join("\n")
+        )),
+        Style::Arena => {}
+    }
     match consult.style {
         Style::Advise => {
             steps.push("2. Weigh their advice against your own judgment: the decision is yours.".into());
-            steps.push(format!(
-                "3. Tell me in a few lines what each consultant recommended and what you decided, {}",
-                if consult.implement { "then implement it." } else { "then stop there: don't change any files." }
-            ));
+            steps.push(format!("3. Tell me in a few lines what each consultant recommended and what you decided, {finish}"));
         }
         Style::Discuss => {
             steps.push(format!(
                 "2. Where you disagree with a consultant, or they disagree with each other, run another round: call `delegate_task` for them again with the brief, every position so far and the open objections. Stop once you agree, or after {DISCUSS_ROUNDS} rounds in all."
             ));
+            steps.push(format!("3. Tell me in a few lines where you landed: what you agreed on (or what's still disputed, and your call), {finish}"));
+        }
+        Style::Arena => {
+            let letters: Vec<String> = (0..consult.consultants.len()).map(|i| format!("\"Design {}\"", (b'A' + i as u8) as char)).collect();
+            steps.push("1. Ground the problem before anyone designs: read the code it touches and write a short brief of what exists now, who owns what, the constraints, and how callers will use what's built. Don't design it yourself yet.".into());
             steps.push(format!(
-                "3. Tell me in a few lines where you landed: what you agreed on (or what's still disputed, and your call), {}",
-                if consult.implement { "then implement it." } else { "then stop there: don't change any files." }
+                "2. Run the arena: call `delegate_task` once for each candidate below, all at once, with mode \"advise\", wait true, and titles {}:\n{}\n   Give each the same self-contained brief and ask for a design package: a sketch of the call sites (how callers will use it), the core types, the public function signatures, and a short rationale, written as code with placeholder bodies. Each designs on its own: tell none of them about the others or your own ideas. Ask each to weigh how deep the interface is (a simple interface over real functionality), how it fails, and what a weaker model working with it would get wrong.",
+                letters.join(", "),
+                list.join("\n")
+            ));
+            let judge = match &consult.judge {
+                Some(j) => format!("the judge below, with mode \"advise\", wait true and the title \"Judge the designs\":\n{}", line(j)),
+                None => "a judge on a model of another family than yours (`list_models` has them), with mode \"advise\", wait true and the title \"Judge the designs\"".into(),
+            };
+            steps.push(format!(
+                "3. Cross-judge: call `delegate_task` for {judge}\n   Give it the brief and every design package, labelled by letter without saying which model wrote which, and ask it to score each from 1 to 5 on fit with the call sites, depth of the interface, simplicity, how it fails, and fit with the codebase as it is; then to name the strongest and what each of the others does better."
+            ));
+            let then = if consult.implement {
+                "then implement against the sketch. If the code shows the sketch is wrong (the same workaround at unrelated call sites, or types that need escape hatches), stop and tell me rather than forcing it."
+            } else {
+                "then stop there: don't change any files."
+            };
+            steps.push(format!(
+                "4. Synthesise: start from the strongest design and fold in what the others do better. Tell me in a few lines how the designs scored, which won and why, and show the final sketch (call sites, types, signatures), {then}"
             ));
         }
     }
+    let judge = consult.judge.as_ref().filter(|_| consult.style == Style::Arena).map(|j| format!(" judge=\"{}\"", j.key())).unwrap_or_default();
+    let lead = match consult.style {
+        Style::Arena => "Before you build this, run a design arena through Trek's `delegate_task` tool:",
+        _ => "Before you act on this, consult other models through Trek's `delegate_task` tool:",
+    };
     format!(
-        "{}\n\n{CONSULT_OPEN} style=\"{style}\" then=\"{then}\" with=\"{}\">\nBefore you act on this, consult other models through Trek's `delegate_task` tool:\n\n{}\n\nIf `delegate_task` isn't available to you, say so and stop.\n{CONSULT_CLOSE}",
+        "{}\n\n{CONSULT_OPEN} style=\"{}\" then=\"{then}\" with=\"{}\"{judge}>\n{lead}\n\n{}\n\nIf `delegate_task` isn't available to you, say so and stop.\n{CONSULT_CLOSE}",
         text.trim_end(),
+        consult.style.key(),
         with.join(", "),
         steps.join("\n")
     )
@@ -333,11 +445,12 @@ pub fn split_consult(text: &str) -> (&str, Option<Consult>) {
     if consultants.is_empty() {
         return (text, None);
     }
-    let consult = Consult {
-        consultants,
-        style: if attr("style") == Some("discuss") { Style::Discuss } else { Style::Advise },
-        implement: attr("then") != Some("report"),
+    let style = match attr("style") {
+        Some("discuss") => Style::Discuss,
+        Some("arena") => Style::Arena,
+        _ => Style::Advise,
     };
+    let consult = Consult { consultants, style, implement: attr("then") != Some("report"), judge: attr("judge").and_then(Consultant::from_key).filter(|_| style == Style::Arena) };
     (text[..at].trim_end(), Some(consult))
 }
 
@@ -391,6 +504,7 @@ mod tests {
         assert_eq!(preview("a\n\n  b   c", 100), "a b c");
         assert_eq!(preview("abcdef", 3), "abc…");
         assert_eq!(plain_preview("## Findings\n\n- `sum2` is **vague**\n1. Rename it\n> ok\n```rust\n", 100), "Findings sum2 is vague Rename it ok");
+        assert_eq!(plain_preview("| Design | Score |\n| --- | :---: |\n| A | 4.6 |\n\nA wins.", 100), "Design · Score A · 4.6 A wins.");
     }
 
     #[test]
@@ -464,6 +578,7 @@ mod tests {
             ],
             style: Style::Discuss,
             implement: false,
+            judge: None,
         };
         let text = consult_prompt("Should the diff panel default to unified?\n", &consult, |c| format!("{} model", c.model));
         assert!(text.starts_with("Should the diff panel default to unified?\n\n<trek-consult"));
@@ -479,6 +594,67 @@ mod tests {
         assert_eq!(split_consult(&text).1, Some(advise));
         assert_eq!(split_consult("plain text"), ("plain text", None));
         assert_eq!(split_consult("a\n\n<trek-consult with=\"\">\n</trek-consult>").1, None);
+    }
+
+    fn model(id: &str) -> ModelInfo {
+        ModelInfo::new(id, id, 0, &[Effort::Low, Effort::Medium, Effort::High])
+    }
+
+    #[test]
+    fn models_fall_into_families() {
+        assert_eq!(family(&AgentId::ClaudeCode, "claude-opus-5-5"), "anthropic");
+        assert_eq!(family(&AgentId::ClaudeCode, "default"), "anthropic", "an agent's own models");
+        assert_eq!(family(&AgentId::Codex, "gpt-5.6-sol"), "openai");
+        assert_eq!(family(&AgentId::OpenCode, "opencode/grok-code-fast"), "xai");
+        assert_eq!(family(&AgentId::Acp("github-copilot".into()), "anthropic/claude-sonnet-5"), "anthropic");
+        assert_eq!(family(&AgentId::Acp("github-copilot".into()), "gemini-3-pro"), "google");
+        assert_eq!(family(&AgentId::Direct("mock".into()), "mock-swift"), "direct:mock", "unknown: the agent's");
+    }
+
+    #[test]
+    fn an_arena_draws_one_design_per_family_and_a_judge_from_another() {
+        let defaults = vec![
+            (AgentId::ClaudeCode, model("claude-opus-5-5")),
+            (AgentId::Codex, model("gpt-5.6-sol")),
+            (AgentId::Acp("github-copilot".into()), model("claude-sonnet-5")),
+            (AgentId::OpenCode, model("grok-code-fast")),
+        ];
+        let picked = arena_defaults(&defaults);
+        let keys: Vec<String> = picked.iter().map(Consultant::key).collect();
+        assert_eq!(keys, ["claude-code/claude-opus-5-5/high", "codex/gpt-5.6-sol/high", "opencode/grok-code-fast/high"], "Copilot's Claude is the same family");
+        // The judge: another family than the main agent's, not a candidate when there's a choice.
+        let options = vec![(AgentId::ClaudeCode, model("claude-opus-5-5")), (AgentId::Codex, model("gpt-5.6-sol")), (AgentId::Codex, model("gpt-5.6-luna"))];
+        let judge = pick_judge("anthropic", &picked, &options).unwrap();
+        assert_eq!(judge.key(), "codex/gpt-5.6-luna/high");
+        let judge = pick_judge("anthropic", &picked, &options[..2]).unwrap();
+        assert_eq!(judge.key(), "codex/gpt-5.6-sol/high", "a candidate, when nothing else is of another family");
+        assert_eq!(pick_judge("anthropic", &picked, &options[..1]), None);
+        // Efforts a model doesn't take are clamped.
+        let low_only = ModelInfo::new("glm-5", "GLM 5", 0, &[Effort::Low]);
+        assert_eq!(arena_defaults(&[(AgentId::OpenCode, low_only)])[0].effort, Effort::Low);
+    }
+
+    #[test]
+    fn arena_instructions_ground_sketch_judge_and_synthesise() {
+        let candidates = vec![
+            Consultant { agent: AgentId::Codex, model: "gpt-5.6-sol".into(), effort: Effort::High },
+            Consultant { agent: AgentId::ClaudeCode, model: "claude-opus-5-5".into(), effort: Effort::High },
+        ];
+        let judge = Consultant { agent: AgentId::OpenCode, model: "grok-code-fast".into(), effort: Effort::High };
+        let consult = Consult { consultants: candidates, style: Style::Arena, implement: true, judge: Some(judge.clone()) };
+        let text = consult_prompt("Add rate limiting to webhooks", &consult, |c| c.model.clone());
+        for step in ["1. Ground the problem", "2. Run the arena", "titles \"Design A\", \"Design B\"", "3. Cross-judge", "\"Judge the designs\"", "4. Synthesise", "implement against the sketch"] {
+            assert!(text.contains(step), "{step}: {text}");
+        }
+        assert!(text.contains("grok-code-fast: agent \"opencode\", model \"grok-code-fast\""), "the judge is named");
+        let (said, back) = split_consult(&text);
+        assert_eq!(said, "Add rate limiting to webhooks");
+        assert_eq!(back, Some(consult.clone()));
+        // No judge named: the agent picks one of another family; report only.
+        let open = Consult { judge: None, implement: false, ..consult };
+        let text = consult_prompt("x", &open, |c| c.model.clone());
+        assert!(text.contains("another family than yours") && text.contains("don't change any files"), "{text}");
+        assert_eq!(split_consult(&text).1, Some(open));
     }
 
     #[test]

@@ -104,6 +104,12 @@ impl TrekWindow {
                     }
                 }
                 WorkspaceEvent::ComposeIn { .. } => {}
+                WorkspaceEvent::CorrectRestatement { scope: Scope::Main, thread } => {
+                    if this.workspace.read(cx).thread_id_in(&Scope::Main) == Some(thread.as_str()) {
+                        this.composer.update(cx, |c, cx| c.correct(window, cx));
+                    }
+                }
+                WorkspaceEvent::CorrectRestatement { .. } => {}
                 // The transcript views redraw themselves.
                 WorkspaceEvent::Transcript { .. } => {}
             }),
@@ -126,7 +132,8 @@ impl TrekWindow {
         // TREK_OPEN_SETTINGS=updates (or any page label, dashes for spaces) opens that settings
         // page at launch, for design review of states that are hard to reach by hand.
         if let Some(page) = std::env::var("TREK_OPEN_SETTINGS").ok().and_then(|n| crate::settings_view::page_named(&n)) {
-            workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx));
+            // The project page opens on the project on screen.
+            workspace.update(cx, |ws, cx| if page == SettingsPage::Project { ws.open_project_settings(None, cx) } else { ws.navigate(Route::Settings(page), cx) });
         }
         // TREK_OPEN_BASECAMP=1 (or =week) opens Basecamp at launch, the same way.
         if let Ok(which) = std::env::var("TREK_OPEN_BASECAMP") {
@@ -472,7 +479,11 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     let mut note = Notification::new().message(message);
     if let Some(action) = undo {
         let ws = workspace.downgrade();
-        let label = if matches!(action, UndoAction::CancelRestart) { "Not now" } else { "Undo" };
+        let label = match action {
+            UndoAction::CancelRestart => "Not now",
+            UndoAction::MaintainVerification(_) => "Maintain",
+            _ => "Undo",
+        };
         note = note
             .action(move |_, _, _| {
                 let ws = ws.clone();

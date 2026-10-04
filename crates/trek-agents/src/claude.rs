@@ -194,6 +194,11 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
     if config.read_only {
         flag(&mut args, "--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit");
     }
+    // Added to Claude Code's own system prompt, not in place of it, at every launch: a resumed
+    // session hears it again without it piling up in the conversation.
+    if let Some(notes) = config.instructions.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        flag(&mut args, "--append-system-prompt", notes);
+    }
     args
 }
 
@@ -1387,6 +1392,7 @@ mod tests {
             recap: None,
             fast: None,
             mcp_servers: vec![],
+            instructions: None,
         }
     }
 
@@ -1454,6 +1460,13 @@ mod tests {
         let out = claude_mcp_servers(&[trek, servers[0].clone()]);
         assert_eq!(out["trek-orchestrate"]["timeout"], 1_900_000, "Trek's tools may wait long on a sub-agent");
         assert!(out["fs"].get("timeout").is_none(), "others keep Claude Code's default");
+    }
+
+    #[test]
+    fn project_notes_join_the_system_prompt() {
+        assert!(!cli_args(&config()).iter().any(|a| a == "--append-system-prompt"));
+        let notes = cli_args(&SessionConfig { instructions: Some("Verify with ./app check.".into()), ..config() });
+        assert!(has(&notes, &["--append-system-prompt", "Verify with ./app check."]), "{notes:?}");
     }
 
     #[test]

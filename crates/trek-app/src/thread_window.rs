@@ -100,6 +100,9 @@ impl ThreadWindow {
                     WorkspaceEvent::ComposeIn { scope: Scope::Thread(t), thread, text, images, edit } if *t == this.id => {
                         this.composer.update(cx, |c, cx| c.compose(thread, text, images, edit.clone(), window, cx));
                     }
+                    WorkspaceEvent::CorrectRestatement { scope: Scope::Thread(t), .. } if *t == this.id => {
+                        this.composer.update(cx, |c, cx| c.correct(window, cx));
+                    }
                     _ => {}
                 }
             }),
