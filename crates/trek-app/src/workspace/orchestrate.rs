@@ -519,11 +519,6 @@ impl Workspace {
         out
     }
 
-    /// Whether a sub-agent under `id` waits on the user's approval (`waiting_on_sub_agents`).
-    pub fn sub_agent_needs_you(&self, id: &str) -> bool {
-        self.waiting_on_sub_agents().contains(id)
-    }
-
     /// Every sub-agent under `id`, theirs too, archived ones included.
     fn descendants(&self, id: &str) -> Vec<Thread> {
         let mut out = vec![];
