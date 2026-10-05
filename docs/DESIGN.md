@@ -232,3 +232,32 @@ Keyboard Shortcuts · Updates · Advanced · About.
 - **Tools & MCP.** Computer use and Simulator toggles (served by the bundled `trek-mcp`), live
   Accessibility / Screen Recording status with deep links, AXe install, user MCP servers, and a read-only
   list of the MCP servers, skills and plugins each agent already loads.
+
+## v5 (request 4)
+- **Liquid glass** (Settings › Appearance › Material, ⌘K "Turn on liquid glass"): the window blurs the desktop
+  behind it (`WindowBackgroundAppearance::Blurred`, a colourless `NSVisualEffectView`) and the chrome lets it
+  through: the sidebar and title bar keep the theme's colour at the chosen tint (Clear 0.4 · Balanced 0.6 ·
+  Frosted 0.8), inset panels more of it (never under 82%, so text stays readable), with a faint rim of light; the composer is a firmer frosted
+  pane. The window root's opaque fill is cleared while glass is on. Off while background art fills the window
+  and while macOS reduces transparency.
+- **Files in colour.** A file anywhere in the transcript (path chips in answers, tool rows, the live rows of
+  the working bar) sits in a chip of its type's colour: a wash of it behind the name, a rim, and the name in a
+  shade of it that keeps 4.5:1 on both themes (`file_icon::tint`, tested). Plain files and lockfiles stay
+  neutral; folders take the project's colour.
+- **No project.** A thread can start in no project (composer project picker › No project, the sidebar's add
+  menu, ⌘K, or the pencil on the "No project" header in Settled). It runs in a folder of its own, `~/Trek/Chats/<time>`
+  (no space in the path; a git repository, so its turns rewind like a project's; moved to the Trash when the
+  thread is deleted), belongs to no project, shows a chat-bubble badge, and ⌘N from it stays project-less.
+  The project filter has a "No project" entry.
+- **Tabs** (after MonoCode): the threads open in the main window, one strip per project along the top of the
+  chat. Opening a thread adds its tab beside the one in front; a draft shows as "New thread" and becomes the
+  thread's tab when sent; + starts another in the project; × or ⌘W closes a tab (never the thread);
+  ⌃Tab / ⌃⇧Tab step through; drag to reorder. Status dots: working ember, needs-you amber, failed red,
+  unseen emerald. A strip keeps at most 8 tabs: past that, the one looked at longest ago closes. Kept in
+  `tabs.json` across launches. The sidebar stays the map of every project.
+- **Notes** (sidebar › Notes, ⌘⇧J): notes as markdown files in the data folder's `notes/`, titled by their
+  first line. Write · Split · Preview; a toolbar and shortcuts for bold (⌘B), italic (⌘I), underline (⌘U),
+  strikethrough (⌘⇧X), headings (⌘⌥1/2), bullet (⌘⇧8), numbered (⌘⇧7) and check lists (⌘⇧9, tick with
+  ⌘↩), quotes, code, text colour and highlights (`<span style="color: …">`, `<mark>`, rendered by Trek's
+  gpui-base patch). Return carries a list on; Return on an empty item ends it. Saved as you type (and on quit); a deleted
+  note moves to `notes/Deleted/`.

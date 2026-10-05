@@ -67,6 +67,8 @@ pub struct ThreadWindow {
     composer_changed: bool,
     /// The window title as last set (the thread's title).
     title: String,
+    /// Whether the window was last told to blur what's behind it (liquid glass).
+    glass_applied: Option<bool>,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `system::hidden_frames`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -122,7 +124,7 @@ impl ThreadWindow {
         let c = composer.clone();
         window.defer(cx, move |window, cx| c.update(cx, |c, cx| c.focus(window, cx)));
         let _hidden_frames = crate::system::hidden_frames(window, cx);
-        Self { workspace, id, thread_view, composer, working_bar, background_strip, composer_changed: true, title, _hidden_frames, _subscriptions: subscriptions }
+        Self { workspace, id, thread_view, composer, working_bar, background_strip, composer_changed: true, title, glass_applied: None, _hidden_frames, _subscriptions: subscriptions }
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -130,15 +132,18 @@ impl ThreadWindow {
         let theme = cx.theme().clone();
         let thread = ws.thread(&self.id).cloned();
         let folder = thread.as_ref().and_then(|t| t.cwd.clone());
-        let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
+        let chat = folder.as_deref().is_some_and(trek_core::paths::is_chat_dir);
+        let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().filter(|_| !chat).map(trek_core::store::project_root));
         let project = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
-        let name = project.map(|p| p.name.clone()).or_else(|| folder.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()));
+        let name = project
+            .map(|p| p.name.clone())
+            .or_else(|| folder.as_ref().filter(|_| !chat).and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()));
         let look = root.as_ref().map(|r| ws.project_look(r)).unwrap_or_default();
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
         let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
         let title = thread.map(|t| t.title).unwrap_or_default();
         let reveal = ws.title_reveal(&self.id).map(|(p, old)| (p, old.to_string()));
-        let transparent = ws.backdrop().is_some();
+        let transparent = ws.see_through();
         TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
             h_flex()
                 .w_full()
@@ -186,6 +191,8 @@ impl ThreadWindow {
 impl Render for ThreadWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let backdrop = self.workspace.read(cx).backdrop();
+        let glass = self.workspace.read(cx).glass();
+        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
         if self.workspace.read(cx).title_reveal(&self.id).is_some() {
             window.request_animation_frame();
         }
@@ -194,7 +201,7 @@ impl Render for ThreadWindow {
             .id("thread-window")
             .key_context("ThreadWindow")
             .size_full()
-            .bg(theme.sidebar)
+            .bg(crate::ui::chrome_bg(glass, cx))
             .text_color(theme.foreground)
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
@@ -243,8 +250,8 @@ impl Render for ThreadWindow {
                         .size_full()
                         .rounded(px(12.))
                         .border_1()
-                        .border_color(theme.sidebar_border)
-                        .bg(theme.background)
+                        .border_color(crate::ui::panel_border(glass, cx))
+                        .bg(crate::ui::panel_bg(glass, cx))
                         .overflow_hidden()
                         // Cached as in the main window: the working bar's frames redraw only the bar.
                         .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(StyleRefinement::default().size_full())))

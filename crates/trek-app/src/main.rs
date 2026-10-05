@@ -16,13 +16,17 @@ mod ipc;
 mod mascot;
 mod md;
 mod mentions;
+mod notes;
 mod onboarding;
 mod panels;
 mod palette;
 mod root;
 mod settings_view;
+#[cfg(feature = "shots")]
+mod shots;
 mod sidebar;
 mod system;
+mod tabs;
 mod thread_view;
 mod thread_window;
 mod time;
@@ -63,7 +67,11 @@ actions!(
         OpenPalette,
         OpenInNewWindow,
         OpenBasecamp,
-        CloseWindow
+        CloseWindow,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        OpenNotes
     ]
 );
 
@@ -173,8 +181,13 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
         KeyBinding::new("cmd-shift-h", OpenBasecamp, None),
         KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
+        KeyBinding::new("cmd-shift-j", OpenNotes, None),
         // Only thread windows close with ⌘W; the main window stays put.
         KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
+        // In the main window ⌘W closes the tab in front; the window stays put.
+        KeyBinding::new("cmd-w", CloseTab, Some("TrekWindow")),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
     ]
 }
 
@@ -195,6 +208,7 @@ fn main() {
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
         cx.bind_keys(key_bindings());
+        cx.bind_keys(notes::key_bindings());
         app_actions(cx);
         cx.set_menus(menus());
 
@@ -211,6 +225,8 @@ fn main() {
         let background = std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1");
         root::init(ws.clone(), cx);
         root::open_main(ws.clone(), !background, cx).expect("open window");
+        #[cfg(feature = "shots")]
+        shots::init(ws.clone(), cx);
         // TREK_OPEN_THREAD_WINDOW=<thread id> also opens that thread in a window of its own, for
         // design review of thread windows; `mock`, the thread TREK_MOCK_PROMPT just started.
         if let Ok(id) = std::env::var("TREK_OPEN_THREAD_WINDOW") {
@@ -240,6 +256,7 @@ fn app_actions(cx: &mut App) {
     cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
     cx.on_action(|_: &OpenPalette, cx| root::show_palette(workspace::workspace_global(cx), cx));
     cx.on_action(|_: &OpenBasecamp, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Basecamp, cx)));
+    cx.on_action(|_: &OpenNotes, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Notes, cx)));
     cx.on_action(|_: &CheckForUpdates, cx| {
         in_main(cx, |ws, cx| {
             ws.check_for_updates(true, cx);

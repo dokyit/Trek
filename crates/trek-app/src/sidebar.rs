@@ -137,11 +137,17 @@ impl Sidebar {
             let ws = self.workspace.clone();
             let sidebar = cx.entity();
             move |menu, _, _| {
+                let ws2 = ws.clone();
                 let ws = ws.clone();
                 let sb = sidebar.clone();
                 menu.min_w(px(200.))
                     .item(PopupMenuItem::new("Open folder…").icon(IconName::FolderOpen).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))))
                     .item(PopupMenuItem::new("Clone from GitHub…").icon(IconName::Github).on_click(move |_, window, cx| sb.update(cx, |s, cx| s.open_clone_dialog(window, cx))))
+                    .separator()
+                    .item(PopupMenuItem::new("New thread without a project").icon(crate::assets::Lucide::MessageSquarePlus).on_click({
+                        let ws = ws2.clone();
+                        move |_, _, cx| ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx))
+                    }))
             }
         });
         let ws = self.workspace.read(cx);
@@ -152,6 +158,11 @@ impl Sidebar {
             .when(waiting > 0, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(waiting.to_string())))
             .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Your day on the trail (⌘⇧H)").build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))));
+        let at_notes = self.workspace.read(cx).route == Route::Notes;
+        let notes = ui::nav_row("open-notes", Icon::new(crate::assets::Lucide::NotebookPen), "Notes", None, at_notes, cx)
+            .test_support()
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Things to jot down (⌘⇧J)").build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))));
         v_flex()
             .child(
                 h_flex()
@@ -170,7 +181,7 @@ impl Sidebar {
                         this.workspace.update(cx, |ws, cx| ws.new_thread(cx))
                     }))),
             )
-            .child(div().px_2().pb_1().child(basecamp))
+            .child(div().px_2().pb_1().child(basecamp).child(notes))
     }
 
     fn project_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -203,6 +214,12 @@ impl Sidebar {
                     .child(Icon::new(IconName::Folder).small().text_color(theme.muted_foreground))
                     .child("All projects")
                     .on_click(pick(None, cx)),
+            )
+            .child(
+                ui::menu_row("pf-none", current.as_deref() == Some(crate::workspace::NO_PROJECT), cx)
+                    .child(Icon::new(crate::assets::Lucide::MessageSquare).small().text_color(theme.muted_foreground))
+                    .child("No project")
+                    .on_click(pick(Some(crate::workspace::NO_PROJECT.to_string()), cx)),
             )
             .child(
                 v_flex().id("pf-list").max_h(px(320.)).overflow_y_scroll().children(projects.into_iter().map(|(id, name, remote, path)| {
@@ -390,7 +407,7 @@ impl Sidebar {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(ui::project_badge(project, &self.workspace.read(cx).thread_project_look(t), cx))
+                    .child(if t.project_id.is_none() { no_project_badge(cx) } else { ui::project_badge(project, &self.workspace.read(cx).thread_project_look(t), cx) })
                     .child(div().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(project.to_string()))
                     .when_some(t.worktree.as_ref(), |el, wt| el.child(crate::worktree_ui::branch_chip(SharedString::from(format!("card-branch-{}", t.id)), wt, cx)))
                     .child(div().flex_1())
@@ -1006,6 +1023,21 @@ impl Sidebar {
 }
 
 /// A card's tooltip while it has work out: its sub-agents, then what runs in the background.
+/// Where a project's badge goes, for threads in no project: a chat bubble, not a monogram.
+fn no_project_badge(cx: &App) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(16.))
+        .w(px(20.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(cx.theme().foreground.opacity(0.07))
+        .child(Icon::new(crate::assets::Lucide::MessageSquare).size(px(11.)).text_color(cx.theme().muted_foreground))
+        .into_any_element()
+}
+
 pub(crate) fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) -> Option<String> {
     let kids: Vec<String> = kids.iter().map(|(_, name)| name.clone()).collect();
     let parts: Vec<String> = [("Sub-agents at work", &kids[..]), ("Running in the background", background)]
@@ -1146,18 +1178,41 @@ impl Render for Sidebar {
                     let open = self.open_projects.contains(&pid);
                     let shown = if open || searching { items.len() } else { items.len().min(5) };
                     let pid2 = pid.clone();
+                    // A new thread in this project (or in none, for "No project"), from its header.
+                    let here = if pid.is_empty() { Some(None) } else { paths.get(&pid).cloned().map(Some) };
                     let header = h_flex()
                         .id(SharedString::from(format!("proj-head-{pid}")))
+                        .group("proj-head")
                         .mx_2()
-                        .px_3()
+                        .pl_3()
+                        .pr_1()
                         .h(px(30.))
                         .mt_1()
                         .gap_2()
                         .rounded(px(8.))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(ui::project_badge(&name, &looks.get(&pid).cloned().unwrap_or_default(), cx))
-                        .child(div().truncate().child(name.clone()));
+                        .map(|el| {
+                            if pid.is_empty() {
+                                el.child(no_project_badge(cx))
+                            } else {
+                                el.child(ui::project_badge(&name, &looks.get(&pid).cloned().unwrap_or_default(), cx))
+                            }
+                        })
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .when_some(here, |el, project| {
+                            let tip = if project.is_none() { "New thread without a project" } else { "New thread here" };
+                            el.child(
+                                div().invisible().group_hover("proj-head", |s| s.visible()).child(
+                                    ui::icon_button(SharedString::from(format!("proj-new-{pid}")), crate::assets::Lucide::SquarePen, tip).on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            let project = project.clone();
+                                            this.workspace.update(cx, |ws, cx| ws.navigate(Route::Draft { project }, cx))
+                                        },
+                                    )),
+                                ),
+                            )
+                        });
                     history = match paths.get(&pid) {
                         Some(path) => history.child(self.with_project_menu(header, pid.clone(), name.clone(), path.clone())),
                         None => history.child(header),
@@ -1195,7 +1250,7 @@ impl Render for Sidebar {
             .w(px(crate::root::SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
-            .when(self.workspace.read(cx).backdrop().is_none(), |el| el.bg(theme.sidebar))
+            .when(!self.workspace.read(cx).see_through(), |el| el.bg(theme.sidebar))
             .child(self.top(cx))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().child(list).child(history))
             .child(self.footer(cx))

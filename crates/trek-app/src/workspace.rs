@@ -3,6 +3,8 @@
 mod agent_updates;
 mod limits;
 mod orchestrate;
+mod tabs;
+pub use tabs::MAX_TABS;
 mod verification;
 mod worktrees;
 
@@ -25,6 +27,9 @@ use trek_core::store::{Item, Project, ResumePoint, SearchHit, Section, Store, Th
 use trek_core::transcript::Transcript;
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
+/// The project filter that keeps the threads without a project.
+pub const NO_PROJECT: &str = "";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Route {
     /// Composing a new thread in a project.
@@ -33,6 +38,8 @@ pub enum Route {
     Settings(SettingsPage),
     /// The recap of the day's (or week's) work, with what's ready for review.
     Basecamp,
+    /// Notes: things jotted down, in markdown.
+    Notes,
     Onboarding,
 }
 
@@ -830,6 +837,8 @@ pub struct Workspace {
     /// The agent CLIs' versions and updates asked for.
     pub agent_updates: crate::agent_updates::AgentUpdates,
     pub sidebar_collapsed: bool,
+    /// The threads open as tabs in the main window, by id, in order (see `tabs`).
+    pub tabs: Vec<String>,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
@@ -1082,6 +1091,7 @@ impl Workspace {
             updater: Default::default(),
             agent_updates: Default::default(),
             sidebar_collapsed: false,
+            tabs: if cfg!(test) { vec![] } else { tabs::load_tabs() },
             settled_open: false,
             search: String::new(),
             search_results: SearchResults::default(),
@@ -1443,7 +1453,8 @@ impl Workspace {
                 continue;
             }
             if let Some(p) = &self.project_filter {
-                if t.project_id.as_ref() != Some(p) {
+                // `NO_PROJECT` keeps the threads that belong to none.
+                if t.project_id.as_ref() != Some(p) && !(p == NO_PROJECT && t.project_id.is_none()) {
                     continue;
                 }
             }
@@ -1612,6 +1623,7 @@ impl Workspace {
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
         if let Route::Thread(id) = &route {
             let id = id.clone();
+            self.open_tab(&id);
             self.mutate_thread(&id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
             self.ensure_loaded(&id, cx);
         }
@@ -1895,11 +1907,13 @@ impl Workspace {
 
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         let project = match &self.route {
-            Route::Thread(id) => self.thread(id).and_then(|t| self.draft_folder(t)),
+            // From a thread without a project, or a draft without one, the next has none either.
+            Route::Thread(id) if self.thread(id).is_some_and(|t| t.project_id.is_none() && t.cwd.as_deref().is_some_and(trek_core::paths::is_chat_dir)) => None,
+            Route::Draft { project: None } => None,
+            Route::Thread(id) => self.thread(id).and_then(|t| self.draft_folder(t)).or_else(|| self.workspace_projects().first().map(|p| p.path.clone())),
             Route::Draft { project } => project.clone(),
-            _ => None,
-        }
-        .or_else(|| self.workspace_projects().first().map(|p| p.path.clone()));
+            _ => self.workspace_projects().first().map(|p| p.path.clone()),
+        };
         self.navigate(Route::Draft { project }, cx);
     }
 
@@ -2222,6 +2236,20 @@ impl Workspace {
         (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere).then(|| a.background.clone().map(|b| (b, a.background_dim))).flatten()
     }
 
+    /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and macOS
+    /// isn't set to reduce transparency).
+    pub fn glass(&self) -> Option<f32> {
+        if self.backdrop().is_some() || (!cfg!(test) && crate::system::reduce_transparency()) {
+            return None;
+        }
+        self.settings.appearance.glass_tint()
+    }
+
+    /// The window's chrome is see-through: over the backdrop image, or the desktop through glass.
+    pub fn see_through(&self) -> bool {
+        self.backdrop().is_some() || self.glass().is_some()
+    }
+
     /// Working directory for whatever is on screen: the thread's folder or the draft's project.
     pub fn current_cwd(&self) -> Option<PathBuf> {
         match &self.route {
@@ -2330,16 +2358,24 @@ impl Workspace {
         let id = match self.route.clone() {
             Route::Thread(id) => id,
             Route::Draft { project } => {
-                let Some(cwd) = project else {
-                    cx.emit(WorkspaceEvent::Toast { message: "Pick a project folder first.".into(), undo: None });
-                    return;
+                // No project: the thread gets a folder of its own to work in, and belongs to none.
+                let chat = project.is_none();
+                let cwd = match project {
+                    Some(cwd) => cwd,
+                    None => match trek_core::paths::new_chat_dir() {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't make a folder for the thread: {e}"), undo: None });
+                            return;
+                        }
+                    },
                 };
                 let p = self.draft_prefs.clone();
                 // A worktree of its own: its branch and folder are picked now, and it's made in
                 // the background while the message waits. Other threads' worktrees are taken,
                 // made yet or not.
                 let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
-                let planned = match p.worktree.then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, &text, &taken)) {
+                let planned = match (p.worktree && !chat).then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, &text, &taken)) {
                     Some(Err(e)) => {
                         cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start a worktree: {e}"), undo: None });
                         cx.emit(WorkspaceEvent::InsertIntoComposer(text));
@@ -2351,7 +2387,7 @@ impl Workspace {
                     Some(Ok(wt)) => Some(wt),
                     None => None,
                 };
-                let mut thread = match self.store.create_thread(Some(&cwd), p.agent, p.model, p.effort, p.hand_holding) {
+                let mut thread = match self.store.create_thread((!chat).then_some(cwd.as_path()), p.agent, p.model, p.effort, p.hand_holding) {
                     Ok(t) => t,
                     Err(e) => {
                         cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't create thread: {e}"), undo: None });
@@ -2359,6 +2395,9 @@ impl Workspace {
                     }
                 };
                 thread.title = trek_core::import_title(&text);
+                if chat {
+                    thread.cwd = Some(cwd.clone());
+                }
                 if let Some(wt) = &planned {
                     thread.cwd = Some(wt.path.clone());
                     thread.worktree = Some(wt.clone());
@@ -2370,6 +2409,8 @@ impl Workspace {
                 live.loaded = true;
                 live.plan = p.plan;
                 live.fast = p.fast;
+                // The draft's tab becomes the thread's.
+                self.open_tab(&id);
                 self.route = Route::Thread(id.clone());
                 match planned {
                     Some(wt) => self.make_worktree(&id, cwd, wt, cx),
@@ -4051,6 +4092,19 @@ impl Workspace {
         let children = self.drop_children(id, cx);
         let direct: Vec<String> = children.iter().filter(|c| c.parent_id.as_deref() == Some(id)).map(|c| c.id.clone()).collect();
         threads.extend(children);
+        // A thread in no project takes its folder to the Trash (it's the thread's own), unless a
+        // thread that stays (a fork) still works in it.
+        let gone: HashSet<&str> = threads.iter().map(|t| t.id.as_str()).collect();
+        let chat_dirs: Vec<PathBuf> = threads
+            .iter()
+            .filter_map(|t| t.cwd.clone().filter(|c| trek_core::paths::is_chat_dir(c) && c != &trek_core::paths::chats_dir()))
+            .filter(|c| !self.threads.iter().any(|o| !gone.contains(o.id.as_str()) && o.cwd.as_ref() == Some(c)))
+            .collect();
+        for dir in chat_dirs.into_iter().filter(|d| d.exists()) {
+            if let Err(e) = crate::system::trash(&dir) {
+                tracing::warn!("trash {}: {e:#}", dir.display());
+            }
+        }
         let checkpoints = self.store.checkpoints(id).unwrap_or_default();
         let mut refs: HashSet<(String, PathBuf)> = HashSet::new();
         let mut guards = vec![];

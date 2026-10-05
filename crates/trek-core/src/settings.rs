@@ -305,6 +305,10 @@ pub struct Appearance {
     pub background_placement: BackgroundPlacement,
     /// How strongly the image is darkened/lightened under content, 0.0–0.9.
     pub background_dim: f32,
+    /// Liquid glass: the window lets the desktop show through, blurred, under translucent chrome.
+    pub glass: bool,
+    /// How much of the theme's colour the glass keeps, 0.3 (clear) to 0.9 (frosted).
+    pub glass_tint: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +340,11 @@ impl Appearance {
     pub fn transcript_font_size(&self) -> f32 {
         font_size_or(self.transcript_font_size, DEFAULT_TRANSCRIPT_FONT_SIZE)
     }
+
+    /// The glass's tint to draw with, when glass is on: the stored one, kept in its range.
+    pub fn glass_tint(&self) -> Option<f32> {
+        self.glass.then(|| if self.glass_tint.is_finite() { self.glass_tint.clamp(0.3, 0.9) } else { 0.6 })
+    }
 }
 
 impl Default for Appearance {
@@ -350,6 +359,8 @@ impl Default for Appearance {
             background: Some("builtin:dawn".into()),
             background_placement: BackgroundPlacement::NewThread,
             background_dim: 0.35,
+            glass: false,
+            glass_tint: 0.6,
         }
     }
 }

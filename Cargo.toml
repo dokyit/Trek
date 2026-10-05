@@ -44,6 +44,7 @@ strip = true
 
 # Trek carries a small patch to gpui-base: semibold (not bold) emphasis, calmer heading sizes,
 # and a few opt-in style knobs for rendered markdown (bold colour, a measure for running text,
-# list spacing and marker colour). See "Trek:" in vendor/gpui-base/src/text/{node,style}.rs.
+# list spacing and marker colour), and coloured text and highlights from inline `<span style="color: …">`
+# and `<mark>` (for notes). See "Trek:" in vendor/gpui-base/src/text/{node,style}.rs and format/markdown.rs.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }

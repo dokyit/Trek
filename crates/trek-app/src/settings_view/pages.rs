@@ -315,8 +315,43 @@ impl SettingsView {
             v if v < 16.75 => 2,
             _ => 3,
         };
+        let glass = s.appearance.glass;
+        let covered = s.appearance.background_placement == trek_core::settings::BackgroundPlacement::Everywhere && s.appearance.background.is_some();
         vec![
             self.theme_tiles(s.appearance.theme, cx),
+            Self::heading("Material", cx),
+            ui::group(
+                vec![
+                    Self::row(
+                        "Liquid glass",
+                        if covered {
+                            "Your desktop shows through the window, blurred. Hidden while the background art fills the window."
+                        } else {
+                            "Your desktop shows through the window, blurred, under translucent panels. Off while macOS reduces transparency."
+                        },
+                        self.switch("glass", glass, |s, v| s.appearance.glass = v),
+                        cx,
+                    ),
+                    Self::row(
+                        "Glass",
+                        "How much of the theme's colour the glass keeps.",
+                        div().when(!glass, |el| el.opacity(0.45)).child(ui::segmented(
+                            "glass-tint",
+                            vec![(0u8, "Clear"), (1, "Balanced"), (2, "Frosted")],
+                            match s.appearance.glass_tint {
+                                t if t < 0.5 => 0u8,
+                                t if t < 0.7 => 1,
+                                _ => 2,
+                            },
+                            self.setter(|s, v: u8| s.appearance.glass_tint = [0.4, 0.6, 0.8][v as usize]),
+                            cx,
+                        ))
+                        .into_any_element(),
+                        cx,
+                    ),
+                ],
+                cx,
+            ),
             Self::heading("Text size", cx),
             ui::group(
                 vec![

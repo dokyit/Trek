@@ -106,7 +106,7 @@ impl Render for SettingsNav {
             .px(px(10.))
             .pt(px(4.))
             .gap(px(1.))
-            .when(self.workspace.read(cx).backdrop().is_none(), |el| el.bg(theme.sidebar))
+            .when(!self.workspace.read(cx).see_through(), |el| el.bg(theme.sidebar))
             .child(
                 h_flex()
                     .id("settings-back")

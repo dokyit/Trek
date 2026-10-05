@@ -126,7 +126,7 @@ fn mark_color(attrs: &RefCell<Vec<html5ever::Attribute>>) -> Option<Hsla> {
         .and_then(|v| parse_mark_color(v.trim()))
 }
 
-fn parse_mark_color(value: &str) -> Option<Hsla> {
+pub(crate) fn parse_mark_color(value: &str) -> Option<Hsla> {
     if value.starts_with('#') {
         return gpui::Rgba::try_from(value).ok().map(Into::into);
     }
@@ -135,6 +135,13 @@ fn parse_mark_color(value: &str) -> Option<Hsla> {
         "white" => Some(gpui::rgb(0xffffff).into()),
         "blue" => Some(gpui::rgb(0x3b82f6).into()),
         "yellow" => Some(gpui::rgb(0xfacc15).into()),
+        // Trek: the colours notes offer by name.
+        "red" => Some(gpui::rgb(0xef4444).into()),
+        "orange" => Some(gpui::rgb(0xf97316).into()),
+        "green" => Some(gpui::rgb(0x22c55e).into()),
+        "purple" => Some(gpui::rgb(0xa855f7).into()),
+        "pink" => Some(gpui::rgb(0xec4899).into()),
+        "gray" | "grey" => Some(gpui::rgb(0x9ca3af).into()),
         _ => None,
     }
 }

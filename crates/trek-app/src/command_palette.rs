@@ -35,6 +35,9 @@ enum Action {
     NewThread,
     OpenFolder,
     Basecamp,
+    Notes,
+    NewChat,
+    Glass(bool),
     Settings(SettingsPage),
     ToggleSidebar,
     ToggleTools,
@@ -462,6 +465,13 @@ impl CommandPalette {
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint("⌘N"), "create start chat compose");
         add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint("⌘O"), "project add repository");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week summary inbox review usage tokens stats");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint("⌘⇧J"), "jot write todo checklist scratch pad memo");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New thread without a project", Action::NewChat), "chat scratch no project question");
+        let glass = ws.settings.appearance.glass;
+        add(
+            Entry::new(c, icon(Icon::new(crate::assets::Lucide::Sparkles)), if glass { "Turn off liquid glass" } else { "Turn on liquid glass" }, Action::Glass(!glass)),
+            "appearance translucent blur transparent vibrancy theme",
+        );
         let thread = ws.current_thread().cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
             add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint("⌘E"), "done finish inbox archive");
@@ -528,6 +538,12 @@ impl CommandPalette {
             Action::ProjectSettings(id) => ws.update(cx, |ws, cx| ws.open_project_settings(Some(id), cx)),
             Action::NewThread => ws.update(cx, |ws, cx| ws.new_thread(cx)),
             Action::Basecamp => ws.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx)),
+            Action::Notes => ws.update(cx, |ws, cx| ws.navigate(Route::Notes, cx)),
+            Action::NewChat => ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx)),
+            Action::Glass(on) => ws.update(cx, |ws, cx| {
+                ws.settings.appearance.glass = on;
+                ws.save_settings(cx);
+            }),
             Action::OpenFolder => ws.update(cx, |ws, cx| ws.open_folder(cx)),
             Action::Settings(SettingsPage::Project) => ws.update(cx, |ws, cx| ws.open_project_settings(None, cx)),
             Action::Settings(page) => ws.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx)),

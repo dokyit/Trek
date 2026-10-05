@@ -67,6 +67,71 @@ pub fn file_type(path: &str) -> FileType {
     }
 }
 
+/// A file chip's colours, from its type: a wash of the type's colour behind the name, a rim of
+/// it, and the name in a shade of it that reads on either theme. Plain files and lockfiles
+/// stay neutral.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tint {
+    pub fill: Hsla,
+    pub edge: Hsla,
+    pub ink: Hsla,
+}
+
+/// The chip colours for `path`'s type.
+pub fn tint(path: &str, cx: &App) -> Tint {
+    match file_type(path).fill {
+        Some(c) => tint_of(rgb(c).into(), cx),
+        None => {
+            let theme = cx.theme();
+            Tint { fill: theme.foreground.opacity(0.06), edge: theme.foreground.opacity(0.14), ink: theme.foreground.opacity(0.9) }
+        }
+    }
+}
+
+/// Chip colours in `color`'s hue (a type's colour, or a project's for its folders).
+pub fn tint_of(color: Hsla, cx: &App) -> Tint {
+    tint_in(color, cx.theme().mode.is_dark())
+}
+
+/// `tint_of` in the dark theme or the light one.
+pub fn tint_in(color: Hsla, dark: bool) -> Tint {
+    // Yellows through cyans are bright for their shade: on paper their ink comes down further.
+    let bright = (0.09..0.55).contains(&color.h);
+    let ink = Hsla { s: color.s.min(0.75), l: if dark { 0.78 } else if bright { 0.26 } else { 0.34 - (color.l - 0.5).max(0.) * 0.3 }, a: 1., ..color };
+    Tint {
+        fill: Hsla { a: if dark { 0.16 } else { 0.11 }, ..color },
+        edge: Hsla { a: if dark { 0.38 } else { 0.3 }, ..color },
+        ink,
+    }
+}
+
+/// A file's name in a chip of its type's colour, with its badge: what tool rows, live rows and
+/// path chips show for a file. `label` is what's written (a name, or a path); `path` picks the
+/// type.
+pub fn chip(id: impl Into<ElementId>, path: &str, label: impl Into<SharedString>, size: Pixels, cx: &App) -> Stateful<Div> {
+    let t = tint(path, cx);
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .min_w_0()
+        .max_w_full()
+        .h(size * 1.62)
+        .px(size * 0.42)
+        .gap(size * 0.34)
+        .rounded(size * 0.42)
+        .border_1()
+        .border_color(t.edge)
+        .bg(t.fill)
+        .text_color(t.ink)
+        .text_size(size)
+        .font_family(cx.theme().mono_font_family.clone())
+        .child(badge(path, size * 1.02, cx))
+        .child(div().min_w_0().truncate().child(label.into()))
+}
+
 /// The badge for `path`, `size` points square.
 pub fn badge(path: &str, size: Pixels, cx: &App) -> AnyElement {
     let t = file_type(path);

@@ -10,6 +10,7 @@ pub mod detect;
 pub mod git;
 pub mod import;
 pub mod limit;
+pub mod notes;
 pub mod orchestrate;
 pub mod paths;
 pub mod pricing;

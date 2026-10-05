@@ -26,6 +26,7 @@ pub struct TrekWindow {
     settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
     pub(crate) basecamp: Entity<Basecamp>,
+    notes: Entity<crate::notes::NotesView>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
@@ -41,6 +42,8 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
+    /// Whether the window was last told to blur what's behind it (liquid glass).
+    glass_applied: Option<bool>,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `mascot::force_active`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -62,6 +65,7 @@ impl TrekWindow {
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
         let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
+        let notes = cx.new(|cx| crate::notes::NotesView::new(workspace.clone(), window, cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
             let mut p = RightPanel::new(workspace.clone());
@@ -81,6 +85,8 @@ impl TrekWindow {
                 WorkspaceEvent::Toast { .. } | WorkspaceEvent::Attention { .. } | WorkspaceEvent::ActivateMain | WorkspaceEvent::OpenPalette => {}
                 // Basecamp has no composer: it takes the keys itself (Esc goes back).
                 WorkspaceEvent::FocusComposer if this.workspace.read(cx).route == Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
+                // Nor have notes: the note's text takes them.
+                WorkspaceEvent::FocusComposer if this.workspace.read(cx).route == Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
                 WorkspaceEvent::FocusComposer => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 WorkspaceEvent::OpenTool(tool) => {
                     let tool = *tool;
@@ -173,6 +179,7 @@ impl TrekWindow {
             match ws.read(cx).route.clone() {
                 Route::Thread(_) | Route::Draft { .. } => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
+                Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
                 Route::Settings(_) | Route::Onboarding => this.focus.focus(window, cx),
             }
             let pending = ws.update(cx, |ws, _| ws.pending_compose.take());
@@ -192,6 +199,7 @@ impl TrekWindow {
             settings,
             settings_nav,
             basecamp,
+            notes,
             right_panel,
             working_bar,
             background_strip,
@@ -201,6 +209,7 @@ impl TrekWindow {
             focus: cx.focus_handle(),
             composer_changed: true,
             panel_drag: None,
+            glass_applied: None,
             _hidden_frames: hidden_frames,
             _subscriptions: subscriptions,
         }
@@ -239,12 +248,14 @@ impl Render for WindowTitle {
         let project_name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let (project, title, folder): (Option<String>, String, Option<std::path::PathBuf>) = match &ws.route {
             Route::Thread(_) => match &thread {
-                Some(t) => (t.cwd.as_deref().map(project_name), t.title.clone(), t.cwd.clone()),
+                // A thread without a project has a folder of its own, but no project to name.
+                Some(t) => (t.cwd.as_deref().filter(|c| !trek_core::paths::is_chat_dir(c)).map(project_name), t.title.clone(), t.cwd.clone()),
                 None => (None, "Trek".into(), None),
             },
             Route::Draft { project } => (project.as_deref().map(project_name), "New thread".into(), project.clone()),
             Route::Settings(_) => (None, "Settings".into(), None),
             Route::Basecamp => (None, "Basecamp".into(), None),
+            Route::Notes => (None, "Notes".into(), None),
             Route::Onboarding => (None, String::new(), None),
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
@@ -258,7 +269,10 @@ impl Render for WindowTitle {
         }
         // The project's icon and its actions (Settings → Project).
         // A thread knows its project (a worktree's folder isn't the project's).
-        let root = thread.as_ref().and_then(|t| ws.project_dir(t)).or_else(|| folder.as_deref().map(trek_core::store::project_root));
+        let root = thread
+            .as_ref()
+            .and_then(|t| ws.project_dir(t))
+            .or_else(|| folder.as_deref().filter(|f| !trek_core::paths::is_chat_dir(f)).map(trek_core::store::project_root));
         let project_entry = root.as_ref().and_then(|r| ws.projects.iter().find(|p| &p.path == r));
         let project = project_entry.map(|p| p.name.clone()).or(project);
         let look = root.as_ref().map(|r| ws.project_look(r)).unwrap_or_default();
@@ -266,7 +280,7 @@ impl Render for WindowTitle {
         let project_id = project_entry.map(|p| p.id.clone());
         // A worktree thread's actions run on its own copy of the code, where its changes are.
         let run_dir = worktree.as_ref().filter(|w| !w.is_missing()).map(|w| w.path.clone()).or_else(|| root.clone());
-        let transparent = self.workspace.read(cx).backdrop().is_some();
+        let transparent = self.workspace.read(cx).see_through();
         TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
             h_flex()
                 .w_full()
@@ -618,6 +632,8 @@ impl Render for TrekWindow {
         }
         let in_settings = matches!(route, Route::Settings(_));
         let backdrop = self.workspace.read(cx).backdrop();
+        let glass = self.workspace.read(cx).glass();
+        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
         let (right_open, wanted_width) = {
             let p = self.right_panel.read(cx);
             (p.open, p.width)
@@ -630,27 +646,37 @@ impl Render for TrekWindow {
         // The heavy views are cached: a frame that only moves the working bar reuses them as
         // drawn. Each re-renders when it's notified.
         let fill = || StyleRefinement::default().size_full();
+        let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
         let content = match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
             Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
-            Route::Draft { .. } => div()
-                .relative()
+            Route::Notes => self.notes.clone().into_any_element(),
+            Route::Draft { .. } => v_flex()
                 .size_full()
-                .child(div().absolute().top_0().left_0().size_full().child(self.thread_view.clone().cached(fill())))
+                .min_w_0()
+                .children(tabs)
                 .child(
-                    v_flex()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .justify_center()
-                        .pb(px(40.))
-                        .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(div().absolute().top_0().left_0().size_full().child(self.thread_view.clone().cached(fill())))
+                        .child(
+                            v_flex()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .justify_center()
+                                .pb(px(40.))
+                                .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
+                        ),
                 )
                 .into_any_element(),
             _ => v_flex()
                 .size_full()
                 .min_w_0()
+                .children(tabs)
                 .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(fill())))
                 .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
                 .child(crate::background_strip::cached(&self.background_strip, cx))
@@ -659,6 +685,7 @@ impl Render for TrekWindow {
         };
         v_flex()
             .id("trek-window")
+            .key_context("TrekWindow")
             // Panel resizing: follow the pointer anywhere in the window until the button is released.
             .when(dragging, |el| {
                 el.cursor(CursorStyle::ResizeLeftRight)
@@ -722,7 +749,17 @@ impl Render for TrekWindow {
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
             .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
-            .bg(cx.theme().sidebar)
+            .on_action(cx.listener(|this, _: &crate::OpenNotes, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))))
+            .on_action(cx.listener(|this, _: &crate::CloseTab, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    if let Route::Thread(id) = ws.route.clone() {
+                        ws.close_tab(&id, cx);
+                    }
+                })
+            }))
+            .on_action(cx.listener(|this, _: &crate::NextTab, _, cx| this.workspace.update(cx, |ws, cx| ws.cycle_tab(1, cx))))
+            .on_action(cx.listener(|this, _: &crate::PreviousTab, _, cx| this.workspace.update(cx, |ws, cx| ws.cycle_tab(-1, cx))))
+            .bg(crate::ui::chrome_bg(glass, cx))
             .when_some(backdrop.clone(), |el, (spec, dim)| {
                 let side = cx.theme().sidebar;
                 el.relative()
@@ -752,8 +789,8 @@ impl Render for TrekWindow {
                                     .size_full()
                                     .rounded(px(12.))
                                     .border_1()
-                                    .border_color(cx.theme().sidebar_border)
-                                    .bg(cx.theme().background)
+                                    .border_color(crate::ui::panel_border(glass, cx))
+                                    .bg(crate::ui::panel_bg(glass, cx))
                                     .overflow_hidden()
                                     .child(content),
                             ),
@@ -803,8 +840,8 @@ impl Render for TrekWindow {
                                     .size_full()
                                     .rounded(px(12.))
                                     .border_1()
-                                    .border_color(cx.theme().sidebar_border)
-                                    .bg(cx.theme().background)
+                                    .border_color(crate::ui::panel_border(glass, cx))
+                                    .bg(crate::ui::panel_bg(glass, cx))
                                     .overflow_hidden()
                                     .child(self.right_panel.clone().cached(fill())),
                             ),

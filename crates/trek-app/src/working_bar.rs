@@ -646,15 +646,33 @@ fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, open: Option<&O
         .text_size(px(12.5))
         .when_some(slide, |el, t| el.relative().top(px(5. * (1. - t))).opacity(t))
         .when(!r.op.verb.is_empty(), |el| el.child(div().flex_none().text_color(muted).child(r.op.verb.clone())))
-        .when_some(r.op.file.as_deref(), |el, f| el.child(crate::file_icon::badge(f, px(13.), cx)))
-        .child(
-            div()
+        .map(|el| {
+            let label = div()
                 .min_w_0()
                 .truncate()
                 .font_family(theme.mono_font_family.clone())
-                .when(r.failed, |el| el.line_through())
-                .child(shimmer(r.op.text.clone().into(), clock, still || !r.running, if r.running { muted } else { text }, theme.foreground)),
-        )
+                .when(r.failed, |el| el.line_through());
+            match r.op.file.as_deref() {
+                // A file sits in a chip of its type's colour, its name in that colour's ink.
+                Some(f) => {
+                    let t = crate::file_icon::tint(f, cx);
+                    el.child(
+                        h_flex()
+                            .min_w_0()
+                            .h(px(ROW - 4.))
+                            .px(px(5.))
+                            .gap(px(5.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(t.edge)
+                            .bg(t.fill)
+                            .child(crate::file_icon::badge(f, px(13.), cx))
+                            .child(label.child(shimmer(r.op.text.clone().into(), clock, still || !r.running, if r.running { t.ink.opacity(0.7) } else { t.ink }, theme.foreground))),
+                    )
+                }
+                None => el.child(label.child(shimmer(r.op.text.clone().into(), clock, still || !r.running, if r.running { muted } else { text }, theme.foreground))),
+            }
+        })
         .when_some(r.activity.clone(), |el, a| el.child(div().flex_none().max_w(relative(0.4)).truncate().text_xs().text_color(muted).child(a)))
         .when_some(r.lines, |el, (a, d)| el.child(lines_chip(a, d, cx)))
         .when(r.failed, |el| el.child(Icon::new(IconName::CircleX).xsmall().text_color(crate::palette::red(cx))))
