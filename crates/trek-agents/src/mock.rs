@@ -20,6 +20,8 @@
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
 //! | `recall`                     | the messages it remembers from this conversation             |
+//! | `mock:told`                  | what Trek told the session besides its messages (its          |
+//! |                              | `SessionConfig::instructions`)                                |
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
@@ -146,6 +148,8 @@ enum Script {
     Error,
     Write,
     Recall,
+    /// Say what Trek told the session (`SessionConfig::instructions`).
+    Told,
     Limit(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate { wait: bool },
@@ -231,6 +235,7 @@ impl Script {
                 "agents" | "subagents" | "sub-agents" => Script::Agents(duration_after(i)),
                 "tools" => Script::Tools,
                 "recall" => Script::Recall,
+                "told" if w.starts_with("mock:") => Script::Told,
                 _ => return None,
             })
         });
@@ -260,6 +265,7 @@ pub fn title(request: &str) -> String {
         Script::Error => "Fix the failing build",
         Script::Write => "Add a note",
         Script::Recall => "What was said",
+        Script::Told => "What Trek said",
         Script::Limit(_) => "Refactor the parser",
         Script::Delegate { .. } => "Get a second opinion",
         Script::Pair => "Get two opinions",
@@ -620,6 +626,13 @@ impl Session {
                 let mut said = remembered(&self.native_id);
                 said.pop();
                 let text = if said.is_empty() { "I don't remember anything from before this message.".to_string() } else { format!("I remember: {}", said.join(" | ")) };
+                self.say(&text).await?;
+            }
+            Script::Told => {
+                let text = match self.instructions.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+                    Some(i) => format!("Trek told me:\n\n{i}"),
+                    None => "Trek told me nothing.".to_string(),
+                };
                 self.say(&text).await?;
             }
             Script::Limit(after) => return self.limit(after).await,
@@ -1565,6 +1578,8 @@ mod tests {
         assert_eq!(Script::parse("mock:verify broken notes", false), Script::Verify { broken: true });
         assert_eq!(Script::parse("mock:design an error budget", false), Script::Design, "the first keyword decides");
         assert_eq!(Script::parse("mock:judge these: Design A has an error path", false), Script::Judge);
+        assert_eq!(Script::parse("mock:told", false), Script::Told);
+        assert_eq!(Script::parse("what were you told", false), Script::Answer, "bare `told` is just a word");
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub mod agent_update;
 pub mod basecamp;
 pub mod catalog;
 pub mod changelog;
+pub mod changes;
 pub mod checkpoint;
 pub mod detect;
 pub mod git;
