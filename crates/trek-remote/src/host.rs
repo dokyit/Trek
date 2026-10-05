@@ -166,6 +166,7 @@ fn unsupported<T>(what: &str) -> std::future::Ready<HostResult<T>> {
 
 /// A change the app pushes to connected phones through [`crate::RemoteHandle::push`].
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // short-lived: one per change, straight to the phones
 pub enum HostEvent {
     /// Replace everything (to every authenticated phone).
     Snapshot(Snapshot),

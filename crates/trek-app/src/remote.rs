@@ -884,7 +884,7 @@ impl Workspace {
         let rows: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
         let watched: Vec<String> = remote.watched.keys().cloned().collect();
         // What turns changed may be worked out after they end: looked at every tick.
-        let turn_files: Vec<(String, HashMap<usize, tr::ItemBody>, Vec<Option<i64>>)> =
+        let turn_files: Vec<_> =
             watched.iter().filter_map(|id| Some((id.clone(), self.remote_changes(id), item_times(&self.live.get(id)?.items)))).collect();
         let changes: Vec<(String, u64, Vec<tr::ItemBody>, Vec<(String, tr::ItemBody)>, Vec<Option<i64>>)> = watched
             .into_iter()
