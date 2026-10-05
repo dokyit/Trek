@@ -1791,6 +1791,7 @@ impl Workspace {
     }
 
     /// The folder tint of the project on screen: the thread's, or the draft's.
+    #[cfg(test)]
     pub fn current_project_tint(&self, cx: &App) -> Option<gpui_kit::Hsla> {
         match &self.route {
             Route::Thread(id) => self.thread(id).and_then(|t| self.thread_project_tint(t, cx)),

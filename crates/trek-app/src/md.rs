@@ -304,7 +304,6 @@ impl MarkdownPlugin for PathChips {
         let data = node.data::<PathRef>()?;
         let theme = cx.theme();
         let dir = data.raw.ends_with('/') || data.resolved.as_ref().is_some_and(|p| p.is_dir());
-        let folder = self.folder.filter(|_| in_folder(&data.raw, self.cwd.as_deref())).unwrap_or(theme.muted_foreground);
         let trimmed = data.raw.trim_end_matches('/');
         let label = trimmed.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(trimmed).to_string();
         let size = context.font_size() * 0.88;
@@ -335,7 +334,7 @@ impl MarkdownPlugin for PathChips {
             .text_size(size)
             .font_family(theme.mono_font_family.clone())
             .text_color(tint.ink)
-            .child(if dir { Icon::new(IconName::Folder).size(size).text_color(folder).into_any_element() } else { crate::file_icon::badge(path_part(trimmed), size, cx) })
+            .child(if dir { crate::file_icon::folder(path_part(trimmed), false, size, cx) } else { crate::file_icon::badge(path_part(trimmed), size, cx) })
             .child(label)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
             .when_some(resolved, |el, path| {
@@ -447,7 +446,7 @@ mod tests {
             let t = theme(name);
             let bg = over(t.background, [0.; 3]);
             for path in ["a.rs", "a.ts", "a.js", "a.py", "a.go", "a.swift", "a.kt", "a.java", "a.rb", "a.md", "a.json", "a.toml", "a.yml", "a.html", "a.css", "a.sh", "a.sql", "a.png"] {
-                let Some(fill) = crate::file_icon::file_type(path).fill else { continue };
+                let Some(fill) = crate::file_icon::type_colour(path) else { continue };
                 let tint = crate::file_icon::tint_in(rgb(fill).into(), t.dark);
                 let chip = over(tint.fill, bg);
                 let ratio = contrast(over(tint.ink, chip), chip);
@@ -524,6 +523,6 @@ mod tests {
         assert_eq!(path_part("/Users/me/app/src/main.rs:42"), "/Users/me/app/src/main.rs");
         assert_eq!(path_part("src/lib.rs:7:3"), "src/lib.rs");
         assert_eq!(path_part(" README.md "), "README.md");
-        assert_eq!(crate::file_icon::file_type(path_part("src/main.rs:42")), crate::file_icon::file_type("main.rs"));
+        assert_eq!(crate::file_icon::icon_name(path_part("src/main.rs:42")), crate::file_icon::icon_name("main.rs"));
     }
 }

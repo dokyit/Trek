@@ -60,17 +60,6 @@ pub struct RightPanel {
     launcher_open: bool,
 }
 
-#[cfg(test)]
-impl RightPanel {
-    /// The open Explorer's folder tint: `None` without an Explorer tab.
-    pub(crate) fn explorer_tint(&self, cx: &App) -> Option<Option<Hsla>> {
-        self.tabs.iter().find_map(|t| match &t.view {
-            View::Explorer(e) => Some(e.read(cx).tint()),
-            _ => None,
-        })
-    }
-}
-
 impl RightPanel {
     pub fn new(workspace: Entity<Workspace>) -> Self {
         Self { workspace, open: false, width: trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH, tabs: vec![], active: None, next_id: 1, launcher_open: false }

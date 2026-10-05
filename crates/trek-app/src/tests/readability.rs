@@ -97,20 +97,10 @@ fn a_project_has_one_colour_wherever_its_folders_show() {
         let paper = crate::ui::project_ink(212. / 360., false);
         assert_eq!(tints(&trek, cx).0, Some(paper));
         assert!(trek.visible(cx, "path-src/"));
-        // The Explorer draws the project's folders in it.
-        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx)));
-        trek.render(cx);
-        let explorer = |trek: &Trek, cx: &mut TestAppContext| {
-            trek.render(cx);
-            cx.read(|cx| panel.read(cx).explorer_tint(cx))
-        };
-        assert_eq!(explorer(&trek, cx), Some(Some(paper)));
-        // Automatic again: back to the name's, the Explorer too.
+        // Automatic again: back to the name's.
         trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = None, cx));
         let named = crate::ui::project_ink(crate::ui::project_hue(&name, None), false);
         assert_eq!(tints(&trek, cx).0, Some(named));
-        assert_eq!(explorer(&trek, cx), Some(Some(named)));
         // A draft in the project (its folder chip in the composer) shows it too.
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
         assert_eq!(tints(&trek, cx).1, Some(named));

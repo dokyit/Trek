@@ -102,7 +102,7 @@ pub fn card(ix: usize, changes: &TurnChanges, folded: &HashSet<String>, actions:
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.foreground.opacity(0.04)))
                 .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted.opacity(0.8)))
-                .child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).xsmall().text_color(muted))
+                .child(crate::file_icon::folder(if dir.is_empty() { &root } else { dir }, open, px(14.), cx))
                 .child(div().min_w_0().truncate().child(if dir.is_empty() { root.clone() } else { trek_core::paths::tildify(std::path::Path::new(dir)) }))
                 .when(!open, |el| el.child(div().flex_none().text_color(muted.opacity(0.7)).child(format!("{}", files.len()))))
                 .on_click(move |_, _, cx| toggle(&key, cx))
