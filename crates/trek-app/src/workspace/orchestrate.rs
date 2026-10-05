@@ -394,6 +394,7 @@ impl Workspace {
         self.store.save_thread(&child).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
         let id = child.id.clone();
         self.threads.push(child);
+        self.threads_gen += 1;
         self.live.entry(id.clone()).or_default().loaded = true;
         let since = self.now();
         self.delegations.insert(
@@ -1188,6 +1189,7 @@ impl Workspace {
             }
             let _ = self.store.update_thread(&child.id, |t| t.archived_at = Some(now_ms()));
             self.threads.retain(|t| t.id != child.id);
+            self.threads_gen += 1;
         }
     }
 

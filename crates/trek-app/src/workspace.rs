@@ -891,6 +891,9 @@ pub struct Workspace {
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
+    /// Counts the changes to `threads` (one added, gone, or changed through `mutate_thread`):
+    /// what's built from all of them is built again only when this has moved.
+    pub(crate) threads_gen: u64,
     /// When Devin was last asked for its plan and quota (`refresh_devin_usage`).
     devin_status_at: i64,
     /// Devin's plan and quota are being read.
@@ -1141,6 +1144,7 @@ impl Workspace {
             agent_status: HashMap::new(),
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
+            threads_gen: 0,
             devin_status_at: 0,
             devin_loading: false,
             acp_info: HashMap::new(),
@@ -1208,6 +1212,7 @@ impl Workspace {
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.threads = self.store.threads().unwrap_or_default();
+        self.threads_gen += 1;
         self.projects = self.store.projects().unwrap_or_default();
         cx.notify();
     }
@@ -1379,6 +1384,7 @@ impl Workspace {
     fn mutate_thread(&mut self, id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut Thread)) {
         let motion = self.motion(cx);
         if let Some(t) = self.threads.iter_mut().find(|t| t.id == id) {
+            self.threads_gen += 1;
             let before = t.title.clone();
             f(t);
             if t.title != before && motion {
@@ -2323,6 +2329,7 @@ impl Workspace {
         let _ = self.store.save_thread(&t);
         let id = t.id.clone();
         self.threads.push(t);
+        self.threads_gen += 1;
         self.live.entry(id.clone()).or_default().loaded = true;
         cx.notify();
         Some(id)
@@ -4173,6 +4180,7 @@ impl Workspace {
             self.new_thread(cx);
         }
         self.threads.retain(|t| t.archived_at.is_none());
+        self.threads_gen += 1;
         cx.emit(WorkspaceEvent::Toast { message: "Archived".into(), undo: Some(UndoAction::Unarchive(id.into())) });
     }
 

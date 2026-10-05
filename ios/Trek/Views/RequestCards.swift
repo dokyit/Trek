@@ -116,16 +116,19 @@ struct ApprovalCard: View {
                     .controlSize(.large)
                 }
 
-                Menu {
-                    Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 22, height: 22)
+                // Only where the Mac takes it (its Settings › Phone): it refuses otherwise.
+                if model.macSettings?.sessionApprovals != false {
+                    Menu {
+                        Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.large)
+                    .fixedSize()
+                    .disabled(confirming)
+                    .accessibilityLabel("More options")
                 }
-                .buttonStyle(.glass)
-                .controlSize(.large)
-                .fixedSize()
-                .disabled(confirming)
-                .accessibilityLabel("More options")
             }
         }
     }

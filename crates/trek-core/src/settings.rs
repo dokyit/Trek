@@ -50,11 +50,18 @@ pub struct Mobile {
     /// Made when push is first turned on.
     pub push_topic: String,
     pub push_when: PushWhen,
+    /// Notifications name the thread and its project. Off, they say only that a thread needs
+    /// you, finished or failed: the ntfy server (someone else's, unless it's your own) reads
+    /// whatever is sent through it.
+    pub push_names: bool,
+    /// The phone may allow a kind of request for the rest of a session, not just the one asked.
+    /// Off, only this Mac can: Trek can't check from here who is holding the phone.
+    pub session_approvals: bool,
 }
 
 impl Default for Mobile {
     fn default() -> Self {
-        Self { enabled: false, port: 7420, reach: Reach::Wifi, push: false, push_server: "https://ntfy.sh".into(), push_topic: String::new(), push_when: PushWhen::Away }
+        Self { enabled: false, port: 7420, reach: Reach::Wifi, push: false, push_server: "https://ntfy.sh".into(), push_topic: String::new(), push_when: PushWhen::Away, push_names: false, session_approvals: false }
     }
 }
 

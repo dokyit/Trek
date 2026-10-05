@@ -48,6 +48,7 @@ fn settings() -> MacSettings {
         auto_settle_days: 3,
         theme: Theme::System,
         full_access: false,
+        session_approvals: false,
     }
 }
 

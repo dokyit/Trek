@@ -885,3 +885,99 @@ fn timing_of_a_long_thread() {
         });
     });
 }
+
+#[test]
+fn the_phone_allows_for_a_whole_session_only_where_the_mac_lets_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "ask permission first");
+        trek.wait_needs_you(cx, &id).await;
+        let request_id = trek.read(cx, |ws, _| ws.live[&id].permissions[0].request_id.clone());
+        let for_session = |reply| tr::HostRequest::Answer {
+            req: tr::AnswerRequest { thread_id: id.clone(), request_id: request_id.clone(), response: tr::AnswerResponse::Approval { decision: tr::Decision::AllowForSession } },
+            reply,
+        };
+        // Off (as it starts): refused, whatever the phone's own check was. The card stays, and
+        // nothing is remembered as answered.
+        let settings = ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap();
+        assert!(!settings.session_approvals);
+        let refused = ask(&trek, cx, for_session).unwrap_err();
+        assert!(refused.message.contains("off on this Mac"), "{refused:?}");
+        assert_eq!(trek.run_state(cx, &id), RunState::NeedsYou);
+        assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.len() == 1 && ws.remote.as_ref().is_none_or(|r| r.answered.is_empty())));
+        // Turned on at the Mac, the same answer goes through.
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.session_approvals = true;
+            ws.save_settings(cx);
+        });
+        assert!(ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap().session_approvals);
+        ask(&trek, cx, for_session).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+    });
+}
+
+#[test]
+fn a_long_answer_still_streaming_goes_less_often_and_whole_when_it_ends() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = long_thread(&trek, cx, 3).await;
+        ask(&trek, cx, transcript_req(&id, None, Some(10))).unwrap();
+        let seq = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().watched[&id].seq);
+        // An answer streams in: `more` is added to it and the tick run.
+        let grow = |trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, more: &str| {
+            trek.update(cx, |ws, cx| {
+                let l = ws.live.get_mut(&id).unwrap();
+                match l.streaming {
+                    Some(ix) => {
+                        if let Some(trek_core::store::Item::Assistant { text }) = l.items.get_mut(ix) {
+                            text.push_str(more)
+                        }
+                    }
+                    None => l.streaming = Some(l.items.push(trek_core::store::Item::Assistant { text: more.into() })),
+                }
+                l.revision += 1;
+                ws.push_remote_changes(cx);
+            })
+        };
+        // Short, it goes with every tick it grew in.
+        let start = seq(&trek, cx);
+        grow(&trek, cx, "The parser");
+        grow(&trek, cx, " reads flags");
+        assert_eq!(seq(&trek, cx), start + 2);
+        // Long (a megabyte), it's held back between sends: the ticks right after one send nothing.
+        grow(&trek, cx, &"x".repeat(1 << 20));
+        let long = seq(&trek, cx);
+        grow(&trek, cx, " and more");
+        grow(&trek, cx, " and more");
+        assert_eq!(seq(&trek, cx), long, "held back");
+        // It ends: the phone gets it as it ended, at once, though nothing more was added.
+        trek.update(cx, |ws, cx| {
+            let l = ws.live.get_mut(&id).unwrap();
+            l.streaming = None;
+            l.revision += 1;
+            ws.push_remote_changes(cx);
+        });
+        assert_eq!(seq(&trek, cx), long + 1);
+        let back = ask(&trek, cx, transcript_req(&id, Some(long), Some(10))).unwrap();
+        assert!(back.items.iter().any(|i| matches!(&i.body, tr::ItemBody::Assistant { text, streaming: false } if text.ends_with(" and more and more"))), "whole, as it ended");
+    });
+}
+
+#[test]
+fn thread_rows_are_built_only_when_something_of_the_threads_changed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let row = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent.get(&id).map(|r| r.title.clone()));
+        trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        assert_eq!(row(&trek, cx).as_deref(), Some(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()).as_str()));
+        // A change made the usual way is in the rows at the next tick.
+        trek.update(cx, |ws, cx| {
+            ws.rename(&id, "Renamed on the Mac".into(), cx);
+            ws.push_remote_changes(cx);
+        });
+        assert_eq!(row(&trek, cx).as_deref(), Some("Renamed on the Mac"));
+    });
+}

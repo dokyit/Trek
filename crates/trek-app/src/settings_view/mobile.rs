@@ -54,13 +54,22 @@ impl SettingsView {
         let topic = m.push_topic.clone();
         let url = format!("{}/{}", m.push_server.trim_end_matches('/'), topic);
         out.push(div().h(px(12.)).into_any_element());
+        let names = self.switch("push-names", m.push_names, |s, v| s.mobile.push_names = v);
         out.push(ui::group(
-            vec![Self::row(
-                "Send them",
-                "Away means no keyboard or mouse on this Mac for two minutes, or the screen locked.",
-                ui::segmented("push-when", vec![(trek_core::settings::PushWhen::Away, "When I'm away"), (trek_core::settings::PushWhen::Always, "Always")], m.push_when, self.setter(|s, v| s.mobile.push_when = v), cx),
-                cx,
-            )],
+            vec![
+                Self::row(
+                    "Send them",
+                    "Away means no keyboard or mouse on this Mac for two minutes, or the screen locked.",
+                    ui::segmented("push-when", vec![(trek_core::settings::PushWhen::Away, "When I'm away"), (trek_core::settings::PushWhen::Always, "Always")], m.push_when, self.setter(|s, v| s.mobile.push_when = v), cx),
+                    cx,
+                ),
+                Self::row(
+                    "Name the thread and its project",
+                    "Off, a notification says only that a thread needs you, finished or failed. On, it says which and what for, as this Mac's own alerts do; the ntfy server it goes through can read that.",
+                    names,
+                    cx,
+                ),
+            ],
             cx,
         ));
         let (copy_topic, test, fresh) = (topic.clone(), self.workspace.clone(), self.workspace.clone());
@@ -124,15 +133,22 @@ impl SettingsView {
         let enabled = s.mobile.enabled;
         let running = ws.remote.as_ref().map(|r| (r.offer.clone(), r.addresses.clone(), r.advertise.clone(), r.devices.clone(), r.connected.clone()));
         let starting = enabled && running.is_none();
-        let mut out = vec![ui::group(
-            vec![Self::row(
-                "Let your iPhone connect",
-                "Trek listens for phones you've paired, on your network or tailnet. Off, nothing listens.",
-                self.switch("mobile-on", enabled, |s, v| s.mobile.enabled = v),
-                cx,
-            )],
+        let session_approvals = self.switch("mobile-session-approvals", s.mobile.session_approvals, |s, v| s.mobile.session_approvals = v);
+        let mut rows = vec![Self::row(
+            "Let your iPhone connect",
+            "Trek listens for phones you've paired, on your network or tailnet. Off, nothing listens.",
+            self.switch("mobile-on", enabled, |s, v| s.mobile.enabled = v),
             cx,
         )];
+        if enabled {
+            rows.push(Self::row(
+                "Let it allow for a whole session",
+                "Off, the phone can allow or deny what an agent asks, one request at a time. On, it can also allow that kind of request for the rest of the session. Only this Mac changes this: Trek can't check from here who is holding the phone.",
+                session_approvals,
+                cx,
+            ));
+        }
+        let mut out = vec![ui::group(rows, cx)];
         if starting {
             out.push(Self::note("Starting…", cx));
         }

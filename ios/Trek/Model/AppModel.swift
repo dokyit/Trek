@@ -201,6 +201,8 @@ final class AppModel {
             if state == .connected {
                 // Resubscribe after a reconnect, from where we were.
                 for s in self.stores.values where s.subscribed { self.resubscribe(s) }
+                // What the Mac lets this phone do (allowing for a whole session, Full access).
+                self.loadSettings()
             }
             if self.pairing, let why = Self.pairingFailure(state) {
                 self.pairing = false

@@ -339,6 +339,9 @@ nonisolated struct MacSettings: Codable, Hashable {
     var theme: MacTheme
     /// Full access is unlocked on the Mac (only the Mac changes that).
     var fullAccess: Bool? = nil
+    /// The Mac lets this phone allow a request for the rest of a session (only the Mac changes
+    /// that). Nil from a Mac that doesn't say: it takes them.
+    var sessionApprovals: Bool? = nil
 }
 
 /// Notifications on the phone through ntfy.

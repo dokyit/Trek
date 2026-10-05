@@ -67,6 +67,8 @@ pub struct Remote {
     /// each tick, and a phone opening one again carries on where they left off (seq, and what
     /// changed since).
     pub(crate) dormant: HashMap<String, Watched>,
+    /// What the thread rows were last built from (`push_remote_changes`).
+    rows_key: Option<(u64, u64, i64)>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -92,7 +94,22 @@ pub(crate) struct Watched {
     cwd: Option<PathBuf>,
     /// Turns' changed files are looked at again on the next tick (one was counted, or waits).
     recount: bool,
+    /// When the item streaming was last sent, and whether it has changed since but was held
+    /// back (`STREAM_STEP`): it goes on a later tick, whether or not more of it comes.
+    stream_sent: Option<std::time::Instant>,
+    held: bool,
 }
+
+/// An answer still streaming is sent whole each time it grows: every tick while it's shorter
+/// than this, and that much less often for each time it's longer (a megabyte: every four
+/// seconds). Sent every tick whatever its length, a long answer cost its length squared, in
+/// bytes to the phone and in work on this Mac's main thread.
+const STREAM_STEP: usize = 64 << 10;
+
+/// Thread rows are built and compared at least this often (the times they show move on), and
+/// otherwise only when something of the threads has changed (`Workspace::threads_gen`, a
+/// transcript's revision): with hundreds of threads and nothing happening, a tick does nothing.
+const ROWS_AT_LEAST_MS: i64 = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Sent {
@@ -117,6 +134,8 @@ impl Watched {
             streaming: None,
             cwd: None,
             recount: false,
+            stream_sent: None,
+            held: false,
         }
     }
 
@@ -301,7 +320,7 @@ impl Workspace {
                     Ok((handle, requests, addresses, advertise)) if ws.settings.mobile.enabled => {
                         let tasks = vec![serve_requests(cx.weak_entity(), requests, cx), push_changes(cx.weak_entity(), cx), hear_notices(cx.weak_entity(), handle.notices(), cx)];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
@@ -327,7 +346,7 @@ impl Workspace {
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
         let connected = HashSet::from(["phone".to_string()]);
         let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), _tasks: vec![] });
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: vec![] });
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -408,6 +427,7 @@ impl Workspace {
                 if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                     t.last_seen_at = now_ms().max(t.updated_at);
                     let _ = self.store.save_thread(t);
+                    self.threads_gen += 1;
                     cx.notify();
                 }
                 let _ = reply.send(Ok(()));
@@ -587,6 +607,14 @@ impl Workspace {
             (tr::AnswerResponse::Approval { decision }, None) => {
                 let decision = match decision {
                     tr::Decision::Allow => trek_agents::Decision::Allow,
+                    // Anything that holds the phone's token can say this, whatever the phone's
+                    // own check (Face ID) was: only the Mac's setting lets it through.
+                    tr::Decision::AllowForSession if !self.settings.mobile.session_approvals => {
+                        if let Some(remote) = self.remote.as_mut() {
+                            remote.answered.remove(&(id.clone(), req.request_id.clone()));
+                        }
+                        return Err(tr::HostError::bad_request("Allowing for a whole session from the phone is off on this Mac (Settings › Phone). Allow just this once, or turn it on there."));
+                    }
                     tr::Decision::AllowForSession => trek_agents::Decision::AllowForSession,
                     tr::Decision::Deny => trek_agents::Decision::Deny,
                 };
@@ -951,9 +979,10 @@ impl Workspace {
         let moved = revision != w.revision;
         // Requests come and go with a revision bump, mostly: looked at whenever they differ too.
         let asks = moved || live.permissions.len() != w.requests.len() || live.permissions.iter().zip(&w.requests).any(|(p, (r, ..))| p.request_id != *r);
-        if edited.is_none() && !asks && streaming == w.streaming && cwd == w.cwd && !w.recount {
+        if edited.is_none() && !asks && streaming == w.streaming && cwd == w.cwd && !w.recount && !w.held {
             return vec![];
         }
+        w.held = false;
         let mut out = vec![];
         // Shorter than sent (a rewind, a rewrite): the phone reads it again.
         if len < w.items.len() {
@@ -975,10 +1004,25 @@ impl Workspace {
         w.items.resize(len, unsent);
         let live = &self.live[id];
         for ix in floor.max(w.from)..len {
+            // A long answer still streaming waits its turn (`STREAM_STEP`); once it stops
+            // streaming it's no longer `streaming`, and goes as it ended.
+            if Some(ix) == streaming {
+                let size = match &live.items[ix] {
+                    Item::Assistant { text } | Item::Reasoning { text } => text.len(),
+                    _ => 0,
+                };
+                if w.stream_sent.is_some_and(|at| at.elapsed() < TICK * (size / STREAM_STEP) as u32) {
+                    w.held = true;
+                    continue;
+                }
+            }
             let body = item_body(live, cwd.as_deref(), ix);
             let h = hash(&body);
             if w.items[ix].hash == Some(h) {
                 continue;
+            }
+            if Some(ix) == streaming {
+                w.stream_sent = Some(std::time::Instant::now());
             }
             w.seq += 1;
             w.items[ix] = Sent { seq: w.seq, hash: Some(h) };
@@ -1186,21 +1230,25 @@ impl Workspace {
             return;
         }
         let now = now_ms();
-        let rows: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+        // Thread rows, when something of them can have changed (or it's been a while).
+        let key = (self.threads_gen, self.live.values().fold(0u64, |sum, l| sum.wrapping_add(l.revision)), now / ROWS_AT_LEAST_MS);
+        let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect());
         let Some(remote) = self.remote.as_mut() else { return };
-        // Thread rows.
-        let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        let gone: Vec<String> = remote.sent.keys().filter(|id| !ids.contains(id.as_str())).cloned().collect();
-        for id in gone {
-            remote.sent.remove(&id);
-            remote.watched.remove(&id);
-            remote.dormant.remove(&id);
-            remote.handle.push(tr::HostEvent::ThreadRemoved(id));
-        }
-        for row in rows {
-            if remote.sent.get(&row.id) != Some(&row) {
-                remote.sent.insert(row.id.clone(), row.clone());
-                remote.handle.push(tr::HostEvent::Thread(row));
+        if let Some(rows) = rows {
+            remote.rows_key = Some(key);
+            let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+            let gone: Vec<String> = remote.sent.keys().filter(|id| !ids.contains(id.as_str())).cloned().collect();
+            for id in gone {
+                remote.sent.remove(&id);
+                remote.watched.remove(&id);
+                remote.dormant.remove(&id);
+                remote.handle.push(tr::HostEvent::ThreadRemoved(id));
+            }
+            for row in rows {
+                if remote.sent.get(&row.id) != Some(&row) {
+                    remote.sent.insert(row.id.clone(), row.clone());
+                    remote.handle.push(tr::HostEvent::Thread(row));
+                }
             }
         }
         // Open transcripts.

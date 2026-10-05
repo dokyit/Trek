@@ -1642,6 +1642,10 @@ pub struct MacSettings {
     /// Full access is unlocked on the Mac (only the Mac can change that).
     #[serde(default)]
     pub full_access: bool,
+    /// The phone may allow a request for the rest of a session (only the Mac can change that;
+    /// off, `allow_for_session` is refused).
+    #[serde(default)]
+    pub session_approvals: bool,
 }
 
 /// Notifications on the phone through ntfy.

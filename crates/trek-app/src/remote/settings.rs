@@ -53,6 +53,7 @@ impl Workspace {
                 ThemeChoice::Paper => tr::Theme::Paper,
             },
             full_access: s.permissions.full_access_unlocked,
+            session_approvals: m.session_approvals,
         }
     }
 
