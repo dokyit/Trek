@@ -136,3 +136,40 @@ fn notes_open_from_the_sidebar() {
         assert!(trek.visible(cx, "note-delete-zone"), "a note now");
     });
 }
+
+#[test]
+fn notes_undo_and_redo_typing_and_formatting() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        // What the note holds on disk, once what's typed has been saved.
+        let saved = |cx: &mut gpui_kit::TestAppContext| {
+            cx.executor().advance_clock(std::time::Duration::from_millis(600));
+            cx.run_until_parked();
+            trek_core::notes::list_in(&trek_core::notes::notes_dir()).first().map(|n| n.body.clone()).unwrap_or_default()
+        };
+        trek.type_text(cx, "milk");
+        assert_eq!(saved(cx), "milk");
+        assert!(trek.visible(cx, "note-undo") && trek.visible(cx, "note-redo"));
+        // A formatting command, from the toolbar: one step.
+        trek.render(cx);
+        trek.press(cx, "cmd-a");
+        trek.click(cx, "note-bold");
+        assert_eq!(saved(cx), "**milk**");
+        // ⌘Z takes it back, then the typing; ⇧⌘Z puts them back.
+        trek.press(cx, "cmd-z");
+        assert_eq!(saved(cx), "milk");
+        trek.press(cx, "cmd-z");
+        assert_eq!(saved(cx), "");
+        trek.press(cx, "cmd-shift-z");
+        assert_eq!(saved(cx), "milk");
+        trek.press(cx, "cmd-shift-z");
+        assert_eq!(saved(cx), "**milk**");
+        // The toolbar's buttons do the same.
+        trek.click(cx, "note-undo");
+        assert_eq!(saved(cx), "milk");
+        trek.click(cx, "note-redo");
+        assert_eq!(saved(cx), "**milk**");
+    });
+}

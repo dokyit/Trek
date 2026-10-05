@@ -5,13 +5,13 @@
 //! Preview. Saved as you type, as markdown files (see `trek_core::notes`).
 
 use crate::workspace::Workspace;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use trek_core::notes::{self, Block, Edit, Note};
 
 actions!(notes, [Bold, Italic, Underline, Strike, Bullets, Numbers, Checklist, Heading1, Heading2, Quote, Code, ToggleCheck, NewNote]);
@@ -48,6 +48,75 @@ const COLORS: &[(&str, &str, &str)] = &[
     ("Pink", "#ec4899", "#ec489940"),
 ];
 
+/// Typing with pauses shorter than this is one step to undo.
+const TYPING_BURST: Duration = Duration::from_millis(900);
+
+/// The most steps kept to undo in one note.
+const UNDO_STEPS: usize = 300;
+
+/// A note's text and what was selected in it, at one moment.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Snapshot {
+    text: String,
+    selection: Range<usize>,
+}
+
+/// What can be undone and redone in the note on screen (`NotesView::undo`). The note's own:
+/// opening another starts afresh. Typing is taken a burst at a time; a formatting command, a
+/// list carried on by Return, or a paste is a step each.
+#[derive(Default)]
+struct History {
+    /// The note as it stands (as of the last change taken in).
+    now: Snapshot,
+    /// What it was before each step, oldest first.
+    past: Vec<Snapshot>,
+    /// What undoing took back, the next to redo last.
+    future: Vec<Snapshot>,
+    /// When the last change came from typing, while one more would join its step.
+    typed: Option<Instant>,
+}
+
+impl History {
+    fn starting_at(now: Snapshot) -> Self {
+        History { now, ..Default::default() }
+    }
+
+    /// The note changed to `now`: by `typing` (joined to the burst under way), or in one go.
+    fn record(&mut self, now: Snapshot, typing: bool) {
+        if now.text == self.now.text {
+            // Only the caret moved: an undo from here comes back to it.
+            self.now.selection = now.selection;
+            return;
+        }
+        let joins = typing && self.typed.is_some_and(|at| at.elapsed() < TYPING_BURST);
+        if !joins {
+            self.past.push(self.now.clone());
+            if self.past.len() > UNDO_STEPS {
+                self.past.remove(0);
+            }
+        }
+        self.future.clear();
+        self.typed = typing.then(Instant::now);
+        self.now = now;
+    }
+
+    /// Step back: what the note goes back to.
+    fn undo(&mut self) -> Option<Snapshot> {
+        let back = self.past.pop()?;
+        self.future.push(std::mem::replace(&mut self.now, back.clone()));
+        self.typed = None;
+        Some(back)
+    }
+
+    /// Step forward again: what an undo took back.
+    fn redo(&mut self) -> Option<Snapshot> {
+        let on = self.future.pop()?;
+        self.past.push(std::mem::replace(&mut self.now, on.clone()));
+        self.typed = None;
+        Some(on)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     Write,
@@ -64,6 +133,8 @@ pub struct NotesView {
     colors_open: bool,
     /// The note's text changed and isn't saved yet.
     dirty: bool,
+    /// Undo and redo for the note on screen.
+    history: History,
     /// The workspace's `notes_epoch` the list was read at.
     epoch: u64,
     _save: Option<Task<()>>,
@@ -86,7 +157,8 @@ impl NotesView {
         .detach();
         let mut subscriptions = vec![cx.subscribe_in(&editor, window, |this, state, event: &InputEvent, window, cx| match event {
             InputEvent::Change => {
-                let body = state.read(cx).value().to_string();
+                let (body, selection) = Self::read(state, cx);
+                this.history.record(Snapshot { text: body.clone(), selection }, true);
                 this.changed(body, cx);
             }
             InputEvent::PressEnter { shift: false, .. } => {
@@ -112,6 +184,7 @@ impl NotesView {
             mode: Mode::Split,
             colors_open: false,
             dirty: false,
+            history: History::default(),
             epoch,
             _save: None,
             _subscriptions: subscriptions,
@@ -144,6 +217,8 @@ impl NotesView {
             s.set_value(body.clone(), window, cx);
             s.set_selected_range(body.len()..body.len(), cx);
         });
+        // Another note (or this one as the phone left it): nothing of the last is undone into it.
+        self.history = History::starting_at(Snapshot { selection: body.len()..body.len(), text: body });
         self.dirty = false;
         cx.notify();
     }
@@ -265,14 +340,34 @@ impl NotesView {
         (s.value().to_string(), s.selected_range())
     }
 
-    /// Put an edit's text in the editor and select what it says.
+    /// Put an edit's text in the editor and select what it says. One step to undo.
     fn apply(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
+        self.history.record(Snapshot { text: edit.text.clone(), selection: edit.selection.clone() }, false);
+        self.show(Snapshot { text: edit.text, selection: edit.selection }, window, cx);
+    }
+
+    /// Put `to` in the editor (its text, and what was selected), and keep it as the note's.
+    fn show(&mut self, to: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |s, cx| {
-            s.set_value(edit.text.clone(), window, cx);
-            s.set_selected_range(edit.selection.clone(), cx);
+            s.set_value(to.text.clone(), window, cx);
+            s.set_selected_range(to.selection.start.min(to.text.len())..to.selection.end.min(to.text.len()), cx);
         });
-        self.changed(edit.text, cx);
+        self.changed(to.text, cx);
         self.focus(window, cx);
+    }
+
+    /// Take back the last step in this note: a burst of typing, or one command.
+    fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(back) = self.history.undo() {
+            self.show(back, window, cx);
+        }
+    }
+
+    /// Put back what the last undo took.
+    fn redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(on) = self.history.redo() {
+            self.show(on, window, cx);
+        }
     }
 
     fn format(&mut self, f: impl FnOnce(&str, Range<usize>) -> Edit, window: &mut Window, cx: &mut Context<Self>) {
@@ -363,6 +458,9 @@ impl NotesView {
             .gap(px(1.))
             .border_b_1()
             .border_color(theme.foreground.opacity(0.06))
+            .child(crate::ui::icon_button("note-undo", crate::assets::Lucide::Undo2, "Undo (⌘Z)").disabled(self.history.past.is_empty()).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))))
+            .child(crate::ui::icon_button("note-redo", crate::assets::Lucide::Redo2, "Redo (⇧⌘Z)").disabled(self.history.future.is_empty()).on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))))
+            .child(Self::divider(cx))
             .child(self.tool("note-bold", crate::assets::Lucide::Bold, "Bold (⌘B)", cx, |t, w, cx| t.wrap("**", "**", w, cx)))
             .child(self.tool("note-italic", crate::assets::Lucide::Italic, "Italic (⌘I)", cx, |t, w, cx| t.wrap("*", "*", w, cx)))
             .child(self.tool("note-underline", crate::assets::Lucide::Underline, "Underline (⌘U)", cx, |t, w, cx| t.wrap("<u>", "</u>", w, cx)))
@@ -506,6 +604,16 @@ impl Render for NotesView {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    // Before the text box's own undo gets them: that one knows nothing of what
+                    // the toolbar did, and the two together would lose steps.
+                    .capture_action(cx.listener(|t, _: &Undo, w, cx| {
+                        cx.stop_propagation();
+                        t.undo(w, cx);
+                    }))
+                    .capture_action(cx.listener(|t, _: &Redo, w, cx| {
+                        cx.stop_propagation();
+                        t.redo(w, cx);
+                    }))
                     .on_action(cx.listener(|t, _: &Bold, w, cx| t.wrap("**", "**", w, cx)))
                     .on_action(cx.listener(|t, _: &Italic, w, cx| t.wrap("*", "*", w, cx)))
                     .on_action(cx.listener(|t, _: &Underline, w, cx| t.wrap("<u>", "</u>", w, cx)))
@@ -521,5 +629,59 @@ impl Render for NotesView {
                     .child(self.toolbar(cx))
                     .child(div().flex_1().min_h_0().flex().child(main)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{History, Snapshot, UNDO_STEPS};
+
+    fn at(text: &str) -> Snapshot {
+        Snapshot { text: text.into(), selection: text.len()..text.len() }
+    }
+
+    #[test]
+    fn typing_undoes_a_burst_at_a_time_and_a_command_by_itself() {
+        let mut h = History::starting_at(at(""));
+        // Keys in quick succession are one step.
+        for text in ["m", "mi", "mil", "milk"] {
+            h.record(at(text), true);
+        }
+        assert_eq!(h.past.len(), 1);
+        // A command (bold, a list, a colour) is a step of its own, and ends the burst.
+        h.record(at("**milk**"), false);
+        h.record(at("**milk** and"), true);
+        assert_eq!(h.past.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["", "milk", "**milk**"]);
+        // Back through them, and forward again.
+        assert_eq!(h.undo().map(|s| s.text).as_deref(), Some("**milk**"));
+        assert_eq!(h.undo().map(|s| s.text).as_deref(), Some("milk"));
+        assert_eq!(h.redo().map(|s| s.text).as_deref(), Some("**milk**"));
+        assert_eq!(h.undo().map(|s| s.text).as_deref(), Some("milk"));
+        assert_eq!(h.undo().map(|s| s.text).as_deref(), Some(""));
+        assert_eq!(h.undo(), None, "nothing before the note as it was opened");
+        // Something new after an undo: what was taken back can't be redone any more.
+        assert_eq!(h.redo().map(|s| s.text).as_deref(), Some("milk"));
+        h.record(at("milk, eggs"), true);
+        assert_eq!(h.redo(), None);
+        assert_eq!(h.undo().map(|s| s.text).as_deref(), Some("milk"));
+    }
+
+    #[test]
+    fn the_caret_moving_is_no_step_but_an_undo_comes_back_to_it() {
+        let mut h = History::starting_at(at("one two"));
+        h.record(Snapshot { text: "one two".into(), selection: 0..3 }, true);
+        assert!(h.past.is_empty());
+        h.record(at("**one** two"), false);
+        assert_eq!(h.undo(), Some(Snapshot { text: "one two".into(), selection: 0..3 }));
+    }
+
+    #[test]
+    fn only_so_many_steps_are_kept() {
+        let mut h = History::starting_at(at("0"));
+        for n in 1..=UNDO_STEPS + 20 {
+            h.record(at(&n.to_string()), false);
+        }
+        assert_eq!(h.past.len(), UNDO_STEPS);
+        assert_eq!(h.past[0].text, "20");
     }
 }

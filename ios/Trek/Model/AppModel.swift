@@ -8,6 +8,8 @@ protocol Backend: AnyObject {
     var onMessage: ((ServerMessage) -> Void)? { get set }
     var onState: ((ConnectionState) -> Void)? { get set }
     func start()
+    /// The app is in front again: check the connection now, and reconnect at once if it's gone.
+    func wake()
     /// False when the message couldn't go (no connection to the Mac).
     @discardableResult func send(_ message: ClientMessage, id: String?) -> Bool
     func stop()
@@ -176,6 +178,11 @@ final class AppModel {
         // The pairing screen (with its progress) stays up until the Mac says yes.
         attach(client, mode: .unpaired)
         self.transport = transport
+    }
+
+    /// The app came back to the front.
+    func foregrounded() {
+        backend?.wake()
     }
 
     func leave() {

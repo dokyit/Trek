@@ -43,7 +43,9 @@ then restart the agent session.";
 const INSTRUCTIONS: &str = "macOS computer use for the main display. Call `screenshot` first: it returns an image plus \
 the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the most recent \
 full-screen screenshot (origin top-left); trek-mcp converts them to screen points. Take a new screenshot after acting \
-to verify the result. Prefer `key` shortcuts and `open_app` over hunting for UI when possible.";
+to verify the result. Prefer `key` shortcuts and `open_app` over hunting for UI when possible. Trek's own windows \
+are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app \
+you mean forward first).";
 
 /// Maps full-screen screenshot pixels to logical screen points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,11 +113,54 @@ pub struct Computer {
     /// Whether this process may post mouse and keyboard events (Accessibility). A field so tests
     /// can check the gate without the real permission, and without ever reaching the real mouse.
     trusted: fn() -> bool,
+    /// The windows on screen, front to back (`on_screen_windows`): asked before every action,
+    /// to keep the mouse and keys out of Trek's own windows. A field so tests can say what's
+    /// on screen.
+    windows: fn() -> Result<Vec<WindowInfo>, String>,
 }
 
 impl Default for Computer {
     fn default() -> Self {
-        Self { last: None, trusted: || unsafe { AXIsProcessTrusted() } != 0 }
+        Self { last: None, trusted: || unsafe { AXIsProcessTrusted() } != 0, windows: on_screen_windows }
+    }
+}
+
+/// Said when an agent points at Trek itself.
+const OWN_WINDOW: &str = "That's in Trek's own window. Agents don't operate Trek itself: its approvals, questions and settings are the user's to answer. Ask the user, or work in another app's window.";
+
+/// Said when the keys would go to Trek itself.
+const OWN_KEYS: &str = "Trek's own window is in front, so the keys would go to Trek. Agents don't operate Trek itself. Bring the app you mean forward first (open_app, or a click in its window).";
+
+/// Whether a window is one of Trek's: the app's, or a build run from the repository.
+fn is_trek(w: &WindowInfo) -> bool {
+    w.owner.eq_ignore_ascii_case("trek")
+}
+
+/// The window a click at (`x`, `y`) in screen points would land in: the frontmost holding it.
+fn window_at(windows: &[WindowInfo], x: f64, y: f64) -> Option<&WindowInfo> {
+    windows.iter().find(|w| x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h)
+}
+
+impl Computer {
+    /// Refuses a mouse action at any of `points` (screen points) that would land in a window
+    /// of Trek's. An agent with the mouse could otherwise approve its own requests there, or
+    /// give itself Full access in Settings. When the windows can't be listed, nothing is done:
+    /// better no click than one nobody checked.
+    fn keep_off_trek(&self, points: &[(f64, f64)]) -> Result<(), String> {
+        let windows = (self.windows)().map_err(|e| format!("Couldn't check which window that is ({e}), so nothing was done."))?;
+        if points.iter().any(|(x, y)| window_at(&windows, *x, *y).is_some_and(is_trek)) {
+            return Err(OWN_WINDOW.into());
+        }
+        Ok(())
+    }
+
+    /// Refuses keys while Trek's own window is the one in front (they'd be typed into Trek).
+    fn keep_keys_off_trek(&self) -> Result<(), String> {
+        let windows = (self.windows)().map_err(|e| format!("Couldn't check which window is in front ({e}), so nothing was typed."))?;
+        if windows.first().is_some_and(is_trek) {
+            return Err(OWN_KEYS.into());
+        }
+        Ok(())
     }
 }
 
@@ -267,6 +312,7 @@ impl Computer {
             other => return Err(format!("Unknown button {other:?}; use \"left\" or \"right\"")),
         };
         let (px, py) = self.mapping().to_points(x, y)?;
+        self.keep_off_trek(&[(px, py)])?;
         let pt = CGPoint::new(px, py);
         post_mouse(CGEventType::MouseMoved, pt, CGMouseButton::Left, None)?;
         sleep_ms(30);
@@ -305,6 +351,7 @@ impl Computer {
         let m = self.mapping();
         let (ax, ay) = m.to_points(fx, fy)?;
         let (bx, by) = m.to_points(tx, ty)?;
+        self.keep_off_trek(&[(ax, ay), (bx, by)])?;
         let start = CGPoint::new(ax, ay);
         post_mouse(CGEventType::MouseMoved, start, CGMouseButton::Left, None)?;
         sleep_ms(30);
@@ -336,6 +383,7 @@ impl Computer {
             return Err("scroll needs a non-zero dx or dy".into());
         }
         let (px, py) = self.mapping().to_points(x, y)?;
+        self.keep_off_trek(&[(px, py)])?;
         post_mouse(CGEventType::MouseMoved, CGPoint::new(px, py), CGMouseButton::Left, None)?;
         sleep_ms(30);
         // CGEvent wheel deltas are positive for up/left; our API is positive for down/right.
@@ -354,6 +402,7 @@ impl Computer {
         if s.is_empty() {
             return Err("text is empty".into());
         }
+        self.keep_keys_off_trek()?;
         for segment in split_for_typing(s) {
             match segment {
                 TypeSegment::Key(code) => press(KeyCombo { keycode: code, flags: 0 })?,
@@ -375,6 +424,7 @@ impl Computer {
     fn key(&mut self, args: &Value) -> ToolResult {
         let combo = arg_str(args, "combo")?;
         let parsed = keys::parse_combo(combo)?;
+        self.keep_keys_off_trek()?;
         press(parsed)?;
         Ok(vec![text(format!("Pressed {combo}."))])
     }
@@ -750,7 +800,7 @@ mod tests {
 
     #[test]
     fn input_tools_need_accessibility_and_do_nothing_without_it() {
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false };
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false, windows: || Ok(vec![]) };
         for tool in ["click", "move_mouse", "drag", "scroll", "type_text", "key"] {
             assert!(needs_accessibility(tool));
             assert_eq!(c.call(tool, &acting_args(tool)), Err(ACCESSIBILITY_ERROR.to_string()), "{tool}");
@@ -762,10 +812,42 @@ mod tests {
         assert_eq!(c.call("wait", &json!({"ms": 0})), Ok(vec![text("Waited 0 ms.")]));
     }
 
+    /// A window as `on_screen_windows` lists one.
+    fn window(owner: &str, x: f64, y: f64, w: f64, h: f64) -> WindowInfo {
+        WindowInfo { owner: owner.into(), title: String::new(), pid: 1, id: 1, x, y, w, h }
+    }
+
+    #[test]
+    fn the_mouse_and_keys_stay_out_of_treks_own_windows() {
+        // Trek's window in front, covering the left of the screen; a browser behind it.
+        fn trek_in_front() -> Result<Vec<WindowInfo>, String> {
+            Ok(vec![window("Trek", 0.0, 0.0, 800.0, 900.0), window("Safari", 0.0, 0.0, 1512.0, 982.0)])
+        }
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true, windows: trek_in_front };
+        // Every action that would land in it (or type into it) is refused before any event:
+        // nothing here reaches the real mouse or keyboard.
+        assert_eq!(c.call("click", &json!({"x": 10, "y": 10})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(c.call("scroll", &json!({"x": 400, "y": 300, "dy": 3})), Err(OWN_WINDOW.to_string()));
+        // A drag that starts outside and ends inside is refused too.
+        assert_eq!(c.call("drag", &json!({"from": {"x": 1200, "y": 500}, "to": {"x": 100, "y": 100}})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(c.call("type_text", &json!({"text": "y"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(c.call("key", &json!({"combo": "return"})), Err(OWN_KEYS.to_string()));
+        // The window a point is in is the frontmost one holding it; a dev build counts as Trek.
+        let windows = trek_in_front().unwrap();
+        assert_eq!(window_at(&windows, 10.0, 10.0).map(|w| w.owner.as_str()), Some("Trek"));
+        assert_eq!(window_at(&windows, 1200.0, 500.0).map(|w| w.owner.as_str()), Some("Safari"));
+        assert_eq!(window_at(&windows, 5000.0, 5000.0).map(|w| w.owner.as_str()), None);
+        assert!(is_trek(&window("trek", 0.0, 0.0, 1.0, 1.0)) && !is_trek(&window("Trekking Maps", 0.0, 0.0, 1.0, 1.0)));
+        // The windows can't be listed: nothing is done unchecked.
+        let mut blind = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true, windows: || Err("no window list".into()) };
+        assert!(blind.call("click", &json!({"x": 10, "y": 10})).is_err_and(|e| e.contains("nothing was done")));
+        assert!(blind.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+    }
+
     #[test]
     fn bad_arguments_are_refused_before_any_event() {
         // Trusted, but every call here fails its checks before posting anything.
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true };
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true, windows: || Ok(vec![]) };
         let refused = |c: &mut Computer, tool: &str, args: Value| c.call(tool, &args).expect_err(tool);
         assert!(refused(&mut c, "click", json!({})).contains("`x`"));
         assert!(refused(&mut c, "click", json!({"x": 10, "y": 10, "count": 4})).contains("count must be"));
@@ -784,7 +866,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_an_object_schema_and_a_handler() {
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false };
+        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false, windows: || Ok(vec![]) };
         let tools = c.tools();
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();

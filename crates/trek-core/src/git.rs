@@ -5,7 +5,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).current_dir(cwd).output().ok()?;
+    // Read-only questions: never a lock an agent's own git would then wait on, never a prompt.
+    let out = Command::new("git").args(args).current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0").output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 

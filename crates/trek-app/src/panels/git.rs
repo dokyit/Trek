@@ -82,7 +82,7 @@ pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
         }
         let (additions, deletions) = match stats.get(&path) {
             Some(s) => *s,
-            None if status == "??" => (std::fs::read_to_string(cwd.join(&path)).map(|s| s.lines().count() as i64).unwrap_or(0), 0),
+            None if status == "??" => (untracked_text(&cwd.join(&path)).map(|s| s.lines().count() as i64).unwrap_or(0), 0),
             None => (0, 0),
         };
         files.push(FileChange { path, status, additions, deletions });
@@ -120,9 +120,23 @@ fn diff_lines(text: &str) -> Vec<(LineKind, String)> {
         .collect()
 }
 
+/// The largest untracked file that's read to count or show its lines: the list is read again
+/// whenever the files change, and an agent's log or a dataset left in the folder can run to
+/// gigabytes.
+const UNTRACKED_READ: u64 = 4 << 20;
+
+/// An untracked file's text, when it's text and no larger than `UNTRACKED_READ`.
+fn untracked_text(path: &Path) -> Option<String> {
+    let size = std::fs::metadata(path).ok()?.len();
+    (size <= UNTRACKED_READ).then(|| std::fs::read_to_string(path).ok()).flatten()
+}
+
 fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
     let text = if file.status == "??" {
-        std::fs::read_to_string(cwd.join(&file.path)).map(|s| s.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n")).unwrap_or_else(|_| "Binary or unreadable file".into())
+        match untracked_text(&cwd.join(&file.path)) {
+            Some(s) => s.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n"),
+            None => "Binary, unreadable, or too large to show".into(),
+        }
     } else {
         git(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|_| git(cwd, &["diff", "--", &file.path])).unwrap_or_default()
     };

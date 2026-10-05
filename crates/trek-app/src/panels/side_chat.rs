@@ -24,7 +24,7 @@ pub struct SideChatPanel {
 impl SideChatPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
-        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(!cmd_enter).placeholder("Ask on the side…"));
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(!cmd_enter).placeholder("Ask on the side…"));
         let subs = vec![
             cx.observe(&workspace, |this, ws, cx| {
                 let cmd_enter = ws.read(cx).settings.general.send_with_cmd_enter;
@@ -82,6 +82,14 @@ impl SideChatPanel {
     }
 }
 
+impl SideChatPanel {
+    /// Where the keys go in a side chat: its message box. A side chat that opens is ready to
+    /// be typed in (`RightPanel::after_activate`).
+    pub fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.read(cx).focus_handle(cx)
+    }
+}
+
 impl Attaching for SideChatPanel {
     fn outbox(&mut self) -> &mut Outbox {
         &mut self.outbox
@@ -98,7 +106,7 @@ impl Attaching for SideChatPanel {
 }
 
 impl Render for SideChatPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
@@ -114,6 +122,12 @@ impl Render for SideChatPanel {
         let cwd = thread.and_then(|t| t.cwd.clone());
         let folder = thread.and_then(|t| ws.thread_project_tint(t, cx));
         let text_size = px(ws.settings.appearance.transcript_font_size()) * 0.93;
+        let answering = working.is_some();
+        let empty = self.input.read(cx).value().trim().is_empty() && self.outbox.paths.is_empty() && self.outbox.saving == 0;
+        let none_yet = items.is_empty();
+        // The box says where to type: lit while the keys go to it, and plainly a box when not.
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let send_key = if self.cmd_enter { "⌘↩ to send" } else { "↩ to send, ⇧↩ for a new line" };
         v_flex()
             .size_full()
             .child(
@@ -127,8 +141,10 @@ impl Render for SideChatPanel {
                     .child(crate::ui::agent_glyph(&prefs.agent, cx))
                     .child(div().text_color(theme.muted_foreground).child("Separate session, same project"))
                     .child(div().flex_1())
-                    .child(crate::ui::icon_button("side-new", crate::assets::Lucide::SquarePen, "New side chat").on_click(cx.listener(|this, _, _, cx| {
+                    .child(crate::ui::icon_button("side-new", crate::assets::Lucide::SquarePen, "New side chat").on_click(cx.listener(|this, _, window, cx| {
                         this.thread_id = None;
+                        let handle = this.focus_handle(cx);
+                        handle.focus(window, cx);
                         cx.notify();
                     }))),
             )
@@ -143,14 +159,24 @@ impl Render for SideChatPanel {
                         v_flex()
                             .p_3()
                             .gap_3()
-                            .when(items.is_empty(), |el| {
+                            .when(none_yet, |el| {
                                 el.child(
-                                    div()
+                                    v_flex()
+                                        .id("side-empty")
+                                        .test_support()
                                         .pt_8()
-                                        .text_sm()
+                                        .px_4()
+                                        .gap_2()
+                                        .items_center()
                                         .text_center()
-                                        .text_color(theme.muted_foreground)
-                                        .child("Ask a quick question without derailing the main thread."),
+                                        .child(Icon::new(crate::assets::Lucide::MessagesSquare).text_color(theme.muted_foreground))
+                                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("A question on the side"))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child("Type it in the box below. The answer comes here, in a session of its own, and the main thread carries on undisturbed."),
+                                        ),
                                 )
                             })
                             .children(items.into_iter().enumerate().filter_map(|(i, item)| match item {
@@ -210,11 +236,12 @@ impl Render for SideChatPanel {
                         .id("side-input")
                         .test_support()
                         .px_2()
-                        .py_1()
+                        .pt_1()
+                        .pb(px(6.))
                         .rounded(px(12.))
                         .bg(theme.secondary)
                         .border_1()
-                        .border_color(theme.input)
+                        .border_color(if focused { theme.ring } else { theme.foreground.opacity(0.22) })
                         .cursor_text()
                         // In "send with ⌘↩" mode, send before the textarea turns ⌘↩ into a newline.
                         .capture_action(cx.listener(|this, action: &Enter, window, cx| {
@@ -251,7 +278,51 @@ impl Render for SideChatPanel {
                                     .is_ok(),
                                 None => false,
                             }
-                        })),
+                        }))
+                        .child(
+                            h_flex()
+                                .pl_1()
+                                .gap_2()
+                                .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(send_key))
+                                .child(if answering {
+                                    div()
+                                        .id("side-stop")
+                                        .test_support()
+                                        .size(px(26.))
+                                        .flex_none()
+                                        .rounded(px(8.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .bg(crate::palette::red(cx))
+                                        .child(div().size(px(9.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(id) = this.thread_id.clone() {
+                                                this.workspace.update(cx, |ws, cx| ws.interrupt(&id, cx));
+                                            }
+                                        }))
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .id("side-send")
+                                        .test_support()
+                                        .size(px(26.))
+                                        .flex_none()
+                                        .rounded(px(8.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(if empty { theme.foreground.opacity(0.08) } else { theme.foreground })
+                                        .when(!empty, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
+                                        .child(Icon::new(IconName::ArrowUp).small().text_color(if empty { theme.muted_foreground } else { theme.background }))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let input = this.input.clone();
+                                            this.submit(input, window, cx);
+                                        }))
+                                        .into_any_element()
+                                }),
+                        ),
                 ),
             )
     }

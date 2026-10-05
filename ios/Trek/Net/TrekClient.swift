@@ -130,6 +130,8 @@ final class TrekClient: Backend {
     private var pinning: PinningDelegate?
     private var stopped = false
     private var authenticated = false
+    /// A connection is being opened (not yet answered, not yet failed).
+    private var connecting = false
     private var attempt = 0
     private var pingTimer: Timer?
     /// When the Mac was last heard from (it answers every ping): silence for two pings means
@@ -168,6 +170,24 @@ final class TrekClient: Backend {
         task = nil
         session?.invalidateAndCancel()
         session = nil
+    }
+
+    /// Back in front after a while away. A connection iOS closed meanwhile is opened again now,
+    /// not at the next retry; one that looks open is pinged, and dropped at once if the Mac
+    /// hasn't been heard from for longer than a ping takes to come round.
+    func wake() {
+        guard !stopped else { return }
+        if task == nil || !authenticated {
+            // Waiting on a retry: don't make the user wait it out.
+            if !connecting {
+                attempt = 0
+                connect()
+            }
+        } else if Date().timeIntervalSince(heard) > Self.pingEvery * 2.5 {
+            silent()
+        } else {
+            send(.ping, id: nil)
+        }
     }
 
     @discardableResult
@@ -209,6 +229,7 @@ final class TrekClient: Backend {
         generation += 1
         let gen = generation
         authenticated = false
+        connecting = true
         onState?(.connecting)
         let session = makeSession()
         self.session = session
@@ -255,6 +276,7 @@ final class TrekClient: Backend {
         switch message {
         case .paired(_, let token, let host):
             authenticated = true
+            connecting = false
             attempt = 0
             auth = .hello(deviceId: Device.id, token: token)
             // Typed pairing pinned only 16 hex characters; from now on, the whole certificate.
@@ -264,6 +286,7 @@ final class TrekClient: Backend {
             startPings()
         case .welcome:
             authenticated = true
+            connecting = false
             attempt = 0
             onState?(.connected)
             startPings()
@@ -290,6 +313,7 @@ final class TrekClient: Backend {
     private func dropped(_ error: Error) {
         pingTimer?.invalidate()
         authenticated = false
+        connecting = false
         guard !stopped else { return }
         if case .tls(let pin) = transport, let rejected = pinning?.rejected {
             // Not a network problem: something answered with a different certificate. Never retry
@@ -308,8 +332,10 @@ final class TrekClient: Backend {
         attempt += 1
         let delay = min(30, pow(2, Double(min(attempt, 5))) / 2)
         onState?(.offline("Mac unreachable — retrying"))
+        // Unless something connected meanwhile (`wake`): this retry is then one too many.
+        let planned = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.stopped else { return }
+            guard let self, !self.stopped, self.generation == planned else { return }
             self.connect()
         }
     }

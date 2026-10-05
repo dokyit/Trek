@@ -507,14 +507,14 @@ whole change):
 {"type":"settings","id":"17"}
 {"type":"settings","re":"17","default_agent":"claude-code","default_effort":"high","default_access":"auto-accept-edits","follow_up":"steer",
  "notifications":"banner_and_sound","push":{"enabled":true,"when":"away","server":"https://ntfy.sh","topic":"trek-…",
- "topic_url":"https://ntfy.sh/trek-…","subscribe_url":"ntfy://ntfy.sh/trek-…"},"auto_settle_days":3,"theme":"system","full_access":false}
+ "topic_url":"https://ntfy.sh/trek-…","subscribe_url":"ntfy://ntfy.sh/trek-…"},"auto_settle_days":3,"theme":"system","full_access":false,"session_approvals":false}
 {"type":"set_settings","id":"18","default_agent":"codex","default_model":"gpt-6","default_effort":"high","default_access":"auto",
  "follow_up":"queue","notifications":"banner","push":true,"push_when":"always","push_server":"https://ntfy.example.com",
  "new_push_topic":true,"auto_settle_days":7,"theme":"paper"}       → settings, as they are now
 ```
 
 - `default_model: ""` goes back to the agent's default; `default_access: "full-access"` needs the
-  Mac's unlock. `full_access` is read-only. Turning `push` on makes a topic the first time.
+  Mac's unlock. `full_access` and `session_approvals` are read-only: the Mac alone decides whether threads may run with Full access, and whether a phone may answer a request with `allow_for_session` (off by default; refused then with `bad_request`, and the phone hides the option). Trek can't check from the Mac who is holding the phone, so anything that outlasts one request is the Mac's to grant. Turning `push` on makes a topic the first time.
 - `push_test: true` sends a test notification once the rest is changed (refused while `push` is
   off): what the phone's "Send a test" does.
 - ntfy: `topic_url` opens the topic in ntfy's web app. `subscribe_url` (`ntfy://<host>/<topic>`,

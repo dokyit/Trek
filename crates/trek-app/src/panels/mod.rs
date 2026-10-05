@@ -144,9 +144,17 @@ impl RightPanel {
 
     fn after_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_native(cx);
-        if let Some(Tab { view: View::Terminal(t), .. }) = self.active_tab() {
-            let handle = t.read(cx).focus_handle();
-            handle.focus(window, cx);
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Terminal(t)) => {
+                let handle = t.read(cx).focus_handle();
+                handle.focus(window, cx);
+            }
+            // A side chat is there to be typed in: the keys go to its box at once.
+            Some(View::SideChat(s)) => {
+                let handle = s.read(cx).focus_handle(cx);
+                handle.focus(window, cx);
+            }
+            _ => {}
         }
         cx.notify();
     }

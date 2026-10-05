@@ -92,6 +92,8 @@ final class MockHost: Backend {
         timer = nil
     }
 
+    func wake() {}
+
     @discardableResult
     func send(_ message: ClientMessage, id: String?) -> Bool {
         take(message, id: id)
