@@ -271,6 +271,10 @@ final class AppModel {
             if reset { transcripts[tid] = items } else { for item in items { upsert(item, in: tid) } }
             seqs[tid] = max(seqs[tid] ?? 0, seq)
             loadedTranscripts.insert(tid)
+            if let start = openStarts.removeValue(forKey: tid) {
+                Perf.report("open \(tid): reply after \(Perf.ms(Perf.now - start)), \(items.count) items")
+                Perf.untilFrame("open \(tid): on screen", from: start)
+            }
             reply(re, message)
         case .item(let tid, let item):
             guard subscribed.contains(tid) else { return }
@@ -323,7 +327,10 @@ final class AppModel {
         }
     }
 
+    @ObservationIgnored private var openStarts: [String: Double] = [:]
+
     func subscribe(_ tid: String) {
+        if Perf.enabled { openStarts[tid] = Perf.now }
         subscribed.insert(tid)
         request(.subscribe(threadId: tid, afterSeq: loadedTranscripts.contains(tid) ? seqs[tid] : nil))
         markSeen(tid)

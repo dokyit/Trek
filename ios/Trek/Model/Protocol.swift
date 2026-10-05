@@ -380,7 +380,7 @@ nonisolated struct TurnChanges: Hashable {
     var removed: Int
 }
 
-nonisolated struct TItem: Identifiable, Hashable, Decodable {
+nonisolated struct TItem: Identifiable, Hashable, Codable {
     var id: String
     var seq: Int64
     var at: Int64?
@@ -394,32 +394,32 @@ nonisolated struct TItem: Identifiable, Hashable, Decodable {
     }
 
     /// Every field any item kind can carry; the `kind` picks which ones matter.
-    private struct Raw: Decodable {
+    private struct Raw: Codable {
         var id: String
         var seq: Int64
         var at: Int64?
         var kind: String
-        var text: String?
-        var images: Int?
-        var streaming: Bool?
-        var callId: String?
-        var tool: ToolKind?
-        var title: String?
-        var detail: String?
-        var status: ToolStatus?
-        var output: String?
-        var added: Int?
-        var removed: Int?
-        var requestId: String?
-        var state: String?
-        var questions: [Question]?
-        var answers: [QuestionAnswer]?
-        var markdown: String?
-        var tookSecs: Int?
-        var resetsAt: Int64?
-        var from: String?
-        var to: String?
-        var files: [ChangedFile]?
+        var text: String? = nil
+        var images: Int? = nil
+        var streaming: Bool? = nil
+        var callId: String? = nil
+        var tool: ToolKind? = nil
+        var title: String? = nil
+        var detail: String? = nil
+        var status: ToolStatus? = nil
+        var output: String? = nil
+        var added: Int? = nil
+        var removed: Int? = nil
+        var requestId: String? = nil
+        var state: String? = nil
+        var questions: [Question]? = nil
+        var answers: [QuestionAnswer]? = nil
+        var markdown: String? = nil
+        var tookSecs: Int? = nil
+        var resetsAt: Int64? = nil
+        var from: String? = nil
+        var to: String? = nil
+        var files: [ChangedFile]? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -457,6 +457,31 @@ nonisolated struct TItem: Identifiable, Hashable, Decodable {
                                         removed: r.removed ?? files.reduce(0) { $0 + $1.removed }))
         default: body = .unknown(r.kind)
         }
+    }
+
+    /// The item as the wire carries it (with `convertToSnakeCase`), so what `init(from:)` reads
+    /// back: for the transcript cache on disk, and for the demo Mac.
+    func encode(to encoder: Encoder) throws {
+        var r = Raw(id: id, seq: seq, at: at, kind: "")
+        switch body {
+        case .user(let text, let images): r.kind = "user"; r.text = text; r.images = images
+        case .assistant(let text, let streaming): r.kind = "assistant"; r.text = text; r.streaming = streaming
+        case .reasoning(let text): r.kind = "reasoning"; r.text = text
+        case .tool(let c):
+            r.kind = "tool"; r.callId = c.callId; r.tool = c.tool; r.title = c.title; r.detail = c.detail
+            r.status = c.status; r.output = c.output; r.added = c.added; r.removed = c.removed
+        case .approval(let a): r.kind = "approval"; r.requestId = a.requestId; r.title = a.title; r.detail = a.detail; r.state = a.state.rawValue
+        case .question(let q): r.kind = "question"; r.requestId = q.requestId; r.questions = q.questions; r.state = q.state.rawValue; r.answers = q.answers
+        case .plan(let p): r.kind = "plan"; r.requestId = p.requestId; r.markdown = p.markdown; r.state = p.state.rawValue
+        case .turnEnd(let secs): r.kind = "turn_end"; r.tookSecs = secs
+        case .notice(let s): r.kind = "notice"; r.text = s
+        case .error(let s): r.kind = "error"; r.text = s
+        case .limit(let s, let at): r.kind = "limit"; r.text = s; r.resetsAt = at
+        case .handoff(let a, let b): r.kind = "handoff"; r.from = a; r.to = b
+        case .changes(let c): r.kind = "changes"; r.files = c.files; r.added = c.added; r.removed = c.removed
+        case .unknown(let kind): r.kind = kind
+        }
+        try r.encode(to: encoder)
     }
 
     /// A request that waits on the user right now.

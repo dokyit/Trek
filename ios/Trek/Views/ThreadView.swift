@@ -22,7 +22,7 @@ struct ThreadView: View {
     private var items: [TItem] { model.transcripts[threadID] ?? [] }
 
     var body: some View {
-        let blocks = Block.build(items)
+        let blocks = Perf.measure("ThreadView.body Block.build", "\(items.count) items") { Block.build(items) }
         let lastGroup = blocks.last { if case .group = $0 { true } else { false } }?.id
         let working = thread?.runState == .working
         let commands = CommandPicker.query(draft).map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
@@ -73,7 +73,7 @@ struct ThreadView: View {
                 } else if let t = thread {
                     ThreadSettingsBar(thread: t)
                 }
-                Composer(text: $draft, mode: $mode, photos: $photos, placeholder: "Message \(thread?.agent.name ?? "the agent")",
+                Composer(text: $draft.timed("keystroke"), mode: $mode, photos: $photos, placeholder: "Message \(thread?.agent.name ?? "the agent")",
                          working: working, send: send, stop: { model.interrupt(threadID) })
             }
             .padding(.horizontal, 14)

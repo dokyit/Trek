@@ -138,7 +138,7 @@ struct MainView: View {
     }
 
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: $tab.timed("tab switch")) {
             Tab("Threads", systemImage: "bubble.left.and.text.bubble.right", value: MainTab.threads) {
                 ThreadsView(path: $path, showNew: $showNew)
             }

@@ -92,7 +92,7 @@ final class MockHost: Backend {
             break
         case .subscribe(let tid, _):
             subscribed.insert(tid)
-            deliver(.transcript(re: id, threadId: tid, reset: true, seq: seq[tid] ?? 0, items: items[tid] ?? []), after: 0.05)
+            deliverWire(WireTranscript(re: id, threadId: tid, reset: true, seq: seq[tid] ?? 0, items: items[tid] ?? []), after: 0.05)
         case .unsubscribe(let tid):
             subscribed.remove(tid)
         case .markSeen(let tid):
@@ -381,6 +381,25 @@ final class MockHost: Backend {
         DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.onMessage?(m) }
     }
 
+    /// A transcript as a real Mac sends it: JSON, read back by the phone's own decoder.
+    private struct WireTranscript: Encodable {
+        var type = "transcript"
+        var re: String?
+        var threadId: String
+        var reset: Bool
+        var seq: Int64
+        var items: [TItem]
+    }
+
+    private func deliverWire(_ message: some Encodable, after: Double) {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        guard let data = try? encoder.encode(message) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in
+            if let m = try? Perf.measure("decode", "\(data.count / 1024) KB", { try ServerMessage.decode(data) }) { self?.onMessage?(m) }
+        }
+    }
+
     private func ack(_ id: String?, after: Double = 0.03) { deliver(.ack(re: id, threadId: nil), after: after) }
 
     private func nextSeq(_ tid: String) -> Int64 {
@@ -578,6 +597,17 @@ final class MockHost: Backend {
             add(tid, tool(.command, "Run", "cargo update -p tokio"))
             add(tid, .assistant(text: "Done, and the build is clean.", streaming: false))
             add(tid, .turnEnd(tookSecs: 64))
+        }
+
+        // `-TrekBigThread 3000`: a thread as long as a real day's work, to measure with.
+        let big = DemoMac.bigThreadSize
+        if big > 0 {
+            id = "t-big"
+            threads.insert(t(id, "Make the phone fast (\(big) items)", "p-trek", "claude-code", "claude-opus-5-5", .idle,
+                             section: .pinned, pinned: true, branch: "perf/phone", ago: 1, add: 1240, del: 388), at: 0)
+            seq[id] = 0
+            items[id] = []
+            for (body, at) in DemoMac.bigThread(big, endingAt: now) { add(id, body, at: at) }
         }
     }
 }
