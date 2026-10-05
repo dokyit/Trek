@@ -382,6 +382,16 @@ impl ThreadView {
         };
         let end = shown.end;
         let ticking = ws.any_task_live_in(&self.scope);
+        // Text added to messages already streaming moves no row: the rows built for the last
+        // revision stand for this one (building them reads every item, and this runs for each
+        // batch of tokens).
+        if appended && !switched && end == self.end {
+            if let Some((key, rows)) = self.rows_cache.borrow_mut().as_mut() {
+                if key.0 == self.current && key.1 == self.revision && live.is_some_and(|l| l.items.len() == rows.item_row.len()) {
+                    key.1 = revision;
+                }
+            }
+        }
         // Only the documents already built need updating: they follow their item to where it moved
         // and to its new text (while streaming, a longer tail). Those whose item left the
         // transcript go (`None`).

@@ -2,7 +2,7 @@
 //! Covers OpenCode, Droid and every ACP agent in the catalog. Trek acts as the ACP client:
 //! it answers permission prompts and `fs/*` requests; the agent keeps its own login.
 
-use crate::{AgentEvent, Command, CommandKind, Decision, SessionConfig, SlashCommand, StderrTail, Step, clip, plan_row};
+use crate::{AgentEvent, Command, CommandKind, Decision, GroupChild, SessionConfig, SlashCommand, StderrTail, Step, clip, plan_row};
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 use trek_core::catalog::{ACP_AGENTS, ModelInfo};
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost, detect};
 
@@ -56,7 +56,7 @@ fn launch_env(agent: &AgentId, cwd: &Path) -> Vec<(String, String)> {
 }
 
 struct Agent {
-    child: Child,
+    child: GroupChild,
     rpc: Rpc,
     lines: Lines<BufReader<ChildStdout>>,
     stderr: StderrTail,
@@ -68,17 +68,16 @@ impl Agent {
     fn spawn(agent: &AgentId, cwd: &Path, extra: &[String]) -> Result<Agent> {
         let (bin, mut args, name) = launch_spec(agent)?;
         args.extend(extra.iter().cloned());
-        let mut child = tokio::process::Command::new(&bin)
+        let mut command = tokio::process::Command::new(&bin);
+        command
             .args(&args)
             .envs(launch_env(agent, cwd))
             .current_dir(cwd)
             .env("PATH", detect::login_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("failed to start {}", bin.display()))?;
+            .stderr(Stdio::piped());
+        let mut child = crate::spawn_group(&mut command).with_context(|| format!("failed to start {}", bin.display()))?;
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
         let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -978,7 +977,7 @@ pub async fn run(
             }
         }
     }
-    let _ = agent.child.start_kill();
+    agent.child.terminate().await;
     Ok(())
 }
 
@@ -1177,8 +1176,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
             Err(e) if is_auth_error(&e) => info.needs_auth = true,
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
-        let _ = agent.child.start_kill();
-        let _ = agent.child.wait().await;
+        agent.child.terminate().await;
         if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
             info.models = copilot_models().await;
         }

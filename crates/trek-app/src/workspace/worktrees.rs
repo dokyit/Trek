@@ -219,8 +219,10 @@ impl Workspace {
         };
         // Nothing may be writing in the folder while it's deleted: the sessions of threads sharing
         // it end too, and messages to any of them wait until it's gone (or stays).
+        // Their sub-agents work in it too (unlisted, so not among the sharers).
         let sharers = self.worktree_sharers(id);
-        let threads: Vec<String> = sharers.iter().cloned().chain([id.to_string()]).collect();
+        let subs = self.threads.iter().filter(|o| o.parent_id.is_some() && o.worktree.as_ref().is_some_and(|w| w.path == wt.path)).map(|o| o.id.clone());
+        let threads: Vec<String> = sharers.iter().cloned().chain([id.to_string()]).chain(subs).collect();
         for t in &threads {
             self.live.entry(t.clone()).or_default().removing = true;
         }

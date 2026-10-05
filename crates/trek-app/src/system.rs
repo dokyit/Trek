@@ -268,10 +268,17 @@ pub fn display_if_hidden(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 pub fn display_if_hidden(_: &Window) {}
 
-/// Play the alert sound off the main thread.
+/// Play the alert sound off the main thread. One at a time: threads that finish together chime
+/// once, rather than each start a player of its own (two hundred of them at once kept chiming
+/// for minutes, and Trek crawled meanwhile).
 #[cfg(not(test))]
 pub fn play_alert_sound() {
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PLAYING: AtomicBool = AtomicBool::new(false);
+    if PLAYING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(|| {
         let _ = Command::new("/usr/bin/afplay")
             .arg("/System/Library/Sounds/Glass.aiff")
@@ -279,6 +286,7 @@ pub fn play_alert_sound() {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        PLAYING.store(false, Ordering::SeqCst);
     });
 }
 

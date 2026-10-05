@@ -17,6 +17,7 @@ reqwest.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 base64 = "0.22"
+libc = "0.2"
 # Devin shows its quota only in its terminal UI (`status::devin_status`).
 portable-pty = "0.9"
 vt100 = "0.16"

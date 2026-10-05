@@ -75,6 +75,45 @@ fn idle_seconds() -> f64 {
     f64::MAX
 }
 
+#[cfg(target_os = "macos")]
+fn screen_locked() -> bool {
+    use std::ffi::{c_char, c_void};
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithCString(allocator: *const c_void, text: *const c_char, encoding: u32) -> *const c_void;
+        fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFBooleanGetValue(value: *const c_void) -> u8;
+        fn CFRelease(value: *const c_void);
+    }
+    unsafe {
+        let dictionary = CGSessionCopyCurrentDictionary();
+        if dictionary.is_null() {
+            return false;
+        }
+        let key = CFStringCreateWithCString(std::ptr::null(), c"CGSSessionScreenIsLocked".as_ptr(), 0x0800_0100);
+        let value = if key.is_null() { std::ptr::null() } else { CFDictionaryGetValue(dictionary, key) };
+        let locked = !value.is_null() && CFBooleanGetValue(value) != 0;
+        if !key.is_null() {
+            CFRelease(key);
+        }
+        CFRelease(dictionary);
+        locked
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_locked() -> bool {
+    false
+}
+
+fn away(idle: f64, locked: bool) -> bool {
+    locked || idle >= AWAY_AFTER.as_secs_f64()
+}
+
 /// Publish `note` to `server` in the background; a failure is logged (there's no one to tell
 /// right then: the user is away).
 pub fn publish(server: &str, note: Note) -> tokio::task::JoinHandle<Result<(), String>> {
@@ -98,7 +137,7 @@ impl Workspace {
         if !m.push || m.push_topic.is_empty() || cfg!(test) {
             return;
         }
-        if m.push_when == PushWhen::Away && idle_seconds() < AWAY_AFTER.as_secs_f64() {
+        if m.push_when == PushWhen::Away && !away(idle_seconds(), screen_locked()) {
             return;
         }
         let project = self.thread(thread).and_then(|t| t.project_id.as_deref()).and_then(|p| self.project(p)).map(|p| p.name.clone());
@@ -158,6 +197,13 @@ mod tests {
         let json = serde_json::to_value(&done).unwrap();
         assert_eq!(json["topic"], "trek-abc");
         assert_eq!(json["tags"][0], "white_check_mark");
+    }
+
+    #[test]
+    fn a_locked_screen_counts_as_away() {
+        assert!(!away(1., false));
+        assert!(away(1., true));
+        assert!(away(AWAY_AFTER.as_secs_f64(), false));
     }
 
     #[test]

@@ -223,6 +223,8 @@ pub struct LiveThread {
     _git: Option<Task<()>>,
     /// A usage limit the running turn reported: the thread pauses when the turn ends.
     limit: Option<limits::Hit>,
+    /// The running turn was asked to wrap up ahead of a usage limit (once a turn).
+    wrap_up: Option<limits::WrapUp>,
     /// The running turn is a resume after a usage limit: hitting the limit again resumes again.
     resuming: Option<limits::Resuming>,
     /// A save of the transcript on its way (`persist_soon`).
@@ -2026,6 +2028,10 @@ impl Workspace {
                 Err(e) => (vec![Item::Error { text: format!("Couldn't load this thread: {e}") }], None),
             };
             let _ = this.update(cx, |this, cx| {
+                // Deleted while its history was read: nothing is left to show it in.
+                if this.thread(&id).is_none() {
+                    return;
+                }
                 let live = this.live.entry(id.clone()).or_default();
                 live.loading = false;
                 live.loaded = true;
@@ -2434,7 +2440,12 @@ impl Workspace {
                                 let ipc = self.warm_ipc.take();
                                 self.adopt_ipc_session(&id, ipc);
                             }
-                            _ => {}
+                            // It doesn't fit (or there's none): its tools' key goes with it.
+                            _ => {
+                                if let (Some(key), Some(ipc)) = (self.warm_ipc.take(), &self.ipc) {
+                                    ipc.close_session(&key);
+                                }
+                            }
                         }
                     }
                 }
@@ -2553,6 +2564,7 @@ impl Workspace {
         if !running {
             live.turn_started = Some(Instant::now());
             live.turn_error = false;
+            live.wrap_up = None;
             live.stopped_out = None;
             live.quiet_turn = false;
             live.self_started = false;
@@ -2604,6 +2616,10 @@ impl Workspace {
     /// Send what was queued while nothing ran (a thread whose history was loading): the first
     /// message starts a turn, and the rest wait for it as queued follow-ups do.
     fn send_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+        // A message its session never took (it ended under it) needs one to go to.
+        if !self.holds_messages(id) && self.live.get(id).is_some_and(|l| l.commands.is_none() && l.held.iter().any(|c| matches!(c, Command::Prompt { .. }))) {
+            self.ensure_session(id, cx);
+        }
         while !self.holds_messages(id) && self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
             let Some((text, images)) = self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0))) else { break };
             self.send_to(id, text, images, cx);
@@ -2689,7 +2705,7 @@ impl Workspace {
         live.session_gen += 1;
         let session = live.session_gen;
         let events = handle.events;
-        let id = id.to_string();
+        let (id, thread) = (id.to_string(), id.to_string());
         live._events = Some(cx.spawn(async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 // Batch everything already queued so a burst of tokens is one update.
@@ -2711,6 +2727,8 @@ impl Workspace {
                 cx.background_executor().timer(Duration::from_millis(16)).await;
             }
         }));
+        // What was held for a session that had gone (`run_git`) goes to this one.
+        self.run_git(&thread, cx);
     }
 
     fn draft_key(&self, cwd: &std::path::Path) -> WarmKey {
@@ -2833,6 +2851,10 @@ impl Workspace {
         let mut interrupted = false;
         // The turn ended at a usage limit: the thread pauses until it resets.
         let mut hit: Option<limits::Hit> = None;
+        // How full the agent said its plan's windows are.
+        let mut windows: Vec<limits::Window> = vec![];
+        // The turn ended as Trek asked it to, ahead of a usage limit.
+        let mut wrapped: Option<limits::WrapUp> = None;
         // The agent stopped to ask the user something.
         let mut asked = false;
         let mut commands: Option<Vec<SlashCommand>> = None;
@@ -2954,8 +2976,9 @@ impl Workspace {
                         live.streaming = None;
                         live.reasoning = None;
                         live.items.push(Item::Limit { text: message.clone(), resets_at, scope: scope.clone() });
-                        live.limit = Some(limits::Hit { message, resets_at, scope });
+                        live.limit = Some(limits::Hit { message, resets_at, scope, wrapped: false });
                     }
+                    AgentEvent::LimitUsed { scope, percent, resets_at } => windows.push(limits::Window { scope, percent, resets_at }),
                     AgentEvent::Commands(c) => commands = Some(c),
                     AgentEvent::Notice(text) => {
                         live.streaming = None;
@@ -3085,6 +3108,7 @@ impl Workspace {
                             // Paused at a usage limit isn't failed, but its time on the trail counts.
                             stopped = Some((took, e != "Interrupted" && live.limit.is_none()));
                         }
+                        let wrap_up = live.wrap_up.take();
                         if let Some(h) = live.limit.take() {
                             // Paused, not failed: its limit row says why.
                             hit = Some(h);
@@ -3106,6 +3130,7 @@ impl Workspace {
                             live.resuming = None;
                             run_state = Some(RunState::Idle);
                             continue_queue = true;
+                            wrapped = wrap_up;
                         }
                         finished = true;
                     }
@@ -3131,6 +3156,7 @@ impl Workspace {
                         // The process ended mid-turn: the turn failed, and ends here like any other
                         // (saved, queued follow-ups handed back, an alert). Unless the error it
                         // reported says why, that it stopped is all there is to say.
+                        live.wrap_up = None;
                         if let Some(began) = live.turn_started.take() {
                             stopped = Some((began.elapsed().as_secs() as u32, live.limit.is_none()));
                             live.close_turn(false);
@@ -3176,9 +3202,17 @@ impl Workspace {
             self.agent_commands.insert(key, c);
         }
         // Before anything hands queued messages back: they wait for the reset now.
-        let paused = hit.is_some();
+        let mut paused = hit.is_some();
         if let Some(hit) = hit {
             self.pause_at_limit(id, hit, cx);
+        }
+        // It stopped where Trek asked it to, ahead of its limit: the thread waits for the reset
+        // like one the limit stopped.
+        if let Some(wrap_up) = wrapped {
+            paused |= self.pause_wrapped(id, wrap_up, cx);
+        }
+        if !windows.is_empty() {
+            self.windows_used(id, windows, cx);
         }
         let viewing = self.on_screen(id);
         // Streaming text changes nothing on the thread row: skip the database write (this runs
@@ -3494,17 +3528,23 @@ impl Workspace {
     }
 
     fn send_answers(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
-        let mut still_waiting = false;
+        let (mut still_waiting, mut taken) = (false, false);
         if let Some(live) = self.live.get_mut(id) {
             live.settle_prompt(request_id);
             still_waiting = !live.permissions.is_empty();
             if let Some(tx) = &live.commands {
-                let _ = tx.try_send(Command::Answer { request_id: request_id.to_string(), answers });
+                taken = tx.try_send(Command::Answer { request_id: request_id.to_string(), answers }).is_ok();
             }
             live.revision += 1;
         }
         if !still_waiting {
-            self.mutate_thread(id, cx, |t| t.run_state = RunState::Working);
+            // The session that asked has gone (it quit, or was restarted): nothing is working on
+            // the answer, and the thread mustn't look as if something were.
+            let state = if taken { RunState::Working } else { RunState::Idle };
+            self.mutate_thread(id, cx, |t| t.run_state = state);
+            if !taken {
+                cx.emit(WorkspaceEvent::Toast { message: "The agent's session had ended before it took the answer. Send a message to carry on.".into(), undo: None });
+            }
         }
         cx.notify();
     }
@@ -3596,8 +3636,10 @@ impl Workspace {
     fn run_git(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(id).filter(|l| !l.git_busy) else { return };
         let Some(job) = live.git_jobs.pop_front() else {
-            let held = std::mem::take(&mut live.held);
+            // No session to take them (it ended while git worked, its worktree being removed):
+            // what's held stays held, for the session that starts next (`attach`).
             let Some(tx) = &live.commands else { return };
+            let held = std::mem::take(&mut live.held);
             let prompt = held.iter().any(|c| matches!(c, Command::Prompt { .. }));
             for cmd in held {
                 let _ = tx.try_send(cmd);
@@ -4052,6 +4094,10 @@ impl Workspace {
     /// here, saved as it stands.
     pub fn archive(&mut self, id: &str, cx: &mut Context<Self>) {
         self.archive_children(id, cx);
+        // A sub-agent still at its task: its parent hears it was stopped, rather than wait on it.
+        if self.delegations.contains_key(id) {
+            self.end_task_now(id, cx);
+        }
         let mut cut = false;
         if let Some(live) = self.live.get_mut(id) {
             if let Some(tx) = live.commands.take() {
@@ -4117,6 +4163,10 @@ impl Workspace {
     /// history, so here it's archived and its copy of the transcript dropped (it won't come back).
     pub fn delete_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
+        // A sub-agent still at its task: its parent hears it was stopped, rather than wait on it.
+        if self.delegations.contains_key(id) {
+            self.end_task_now(id, cx);
+        }
         if let Some(tx) = self.live.get(id).and_then(|l| l.commands.clone()) {
             let _ = tx.try_send(Command::Shutdown);
         }
@@ -4126,9 +4176,13 @@ impl Workspace {
         if thread.source == ThreadSource::Trek {
             threads.extend(self.threads.iter().filter(|t| t.side_of.as_deref() == Some(id)).cloned());
         }
-        // Its sub-agents go too, theirs as well.
-        let children = self.drop_children(id, cx);
+        // Its sub-agents go too, theirs as well, and those its side chats started.
+        let sides: Vec<String> = threads[1..].iter().map(|t| t.id.clone()).collect();
+        let mut children = self.drop_children(id, cx);
         let direct: Vec<String> = children.iter().filter(|c| c.parent_id.as_deref() == Some(id)).map(|c| c.id.clone()).collect();
+        for side in sides {
+            children.extend(self.drop_children(&side, cx));
+        }
         threads.extend(children);
         // A thread in no project takes its folder to the Trash (it's the thread's own), unless a
         // thread that stays (a fork) still works in it.
@@ -4342,8 +4396,11 @@ impl Workspace {
                 this.tidy_inbox(now, cx);
                 // Agent processes idle for a while are shut down (150–250 MB each); they resume on the next message.
                 this.reap_idle_sessions(cx.background_executor().now());
-                if now - this.status_fetched_at > 5 * 60_000 {
+                if now - this.status_fetched_at > this.usage_every() {
                     this.refresh_usage(cx);
+                }
+                if this.watches_devin_usage() {
+                    this.refresh_devin_usage(cx);
                 }
                 this.maybe_check_for_updates(cx);
                 this.maybe_check_agent_updates(cx);
@@ -4630,6 +4687,9 @@ impl Workspace {
                 this.usage_loading = false;
                 this.status_fetched_at = now_ms();
                 this.fill_unknown_resets(cx);
+                for agent in [AgentId::ClaudeCode, AgentId::Codex] {
+                    this.wrap_up_where_due(&agent, cx);
+                }
                 cx.notify();
             });
         });
@@ -4681,6 +4741,7 @@ impl Workspace {
         }
         self.devin_loading = false;
         self.fill_unknown_resets(cx);
+        self.wrap_up_where_due(&devin_agent(), cx);
         cx.notify();
     }
 

@@ -2,6 +2,7 @@
 //! [`RemoteHost`] and fans [`HostEvent`]s out to them.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -114,6 +115,7 @@ impl RemoteServer {
             events,
             notices,
             shutdown,
+            unauthenticated: Arc::new(Semaphore::new(16)),
             watchers: Watchers { counts: Mutex::new(HashMap::new()), unwatch },
             state: Mutex::new(State { registry, pairing: Pairing::default(), connections: HashMap::new(), next_conn: 0 }),
         });
@@ -223,6 +225,7 @@ struct Inner {
     events: broadcast::Sender<HostEvent>,
     notices: broadcast::Sender<ServerNotice>,
     shutdown: watch::Sender<bool>,
+    unauthenticated: Arc<Semaphore>,
     watchers: Watchers,
     state: Mutex<State>,
 }
@@ -307,7 +310,11 @@ async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, ho
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
                     let _ = stream.set_nodelay(true);
-                    tokio::spawn(serve(stream, peer, inner.clone(), host.clone()));
+                    let Ok(permit) = inner.unauthenticated.clone().try_acquire_owned() else {
+                        tracing::debug!(%peer, "too many unauthenticated connections");
+                        continue;
+                    };
+                    tokio::spawn(serve(stream, peer, inner.clone(), host.clone(), permit));
                 }
                 Err(err) => {
                     tracing::warn!(%err, "accept failed");
@@ -342,7 +349,7 @@ fn refuse_browsers(req: &Request, resp: Response) -> Result<Response, ErrorRespo
     Ok(resp)
 }
 
-async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<Inner>, host: Arc<H>) {
+async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<Inner>, host: Arc<H>, unauthenticated: OwnedSemaphorePermit) {
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(inner.config.max_message))
         .max_frame_size(Some(inner.config.max_message));
@@ -375,6 +382,7 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
         }
     };
     let Some(auth) = authenticate(&mut ws, peer, &inner, deadline).await else { return };
+    drop(unauthenticated);
     let device_id = auth.device_id.clone();
     let conn_id = auth.conn_id;
     tracing::info!(%peer, device_id, "phone connected");
@@ -384,13 +392,16 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
 
     {
         let mut state = inner.lock();
-        if state.connections.get(&device_id).is_some_and(|c| c.conn_id == conn_id) {
+        let current = state.connections.get(&device_id).is_some_and(|c| c.conn_id == conn_id);
+        if current {
             state.connections.remove(&device_id);
+            // Keep the notice ordered with registration: a replacement cannot become current
+            // between this check and the old connection saying it went away.
+            inner.notice(ServerNotice::Disconnected { device_id: device_id.clone() });
         }
         state.registry.touch(&device_id, now_ms());
     }
     tracing::info!(%peer, device_id, "phone disconnected");
-    inner.notice(ServerNotice::Disconnected { device_id });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -470,15 +481,13 @@ async fn authenticate(
         return match msg {
             ClientMessage::Pair { code, device_name, .. } => {
                 let name = clean_name(&device_name);
-                let outcome = {
+                let outcome: HostResult<(String, u64)> = {
                     let mut state = inner.lock();
-                    match state.pairing.redeem(&code) {
-                        Ok(()) => {
-                            let token = state.registry.register(&device_id, &name, now_ms());
-                            Ok((token, register_conn(&mut state, &device_id, kick_tx)))
-                        }
-                        Err(err) => Err(err),
-                    }
+                    state.pairing.check(&code).map_err(|err| HostError::new(ErrorCode::PairingFailed, err.to_string())).and_then(|()| {
+                        let token = state.registry.register(&device_id, &name, now_ms()).map_err(|err| HostError::other(format!("Couldn't save the paired device: {err}")))?;
+                        state.pairing.cancel();
+                        Ok((token, register_conn(&mut state, &device_id, kick_tx)))
+                    })
                 };
                 match outcome {
                     Ok((token, conn_id)) => {
@@ -490,7 +499,7 @@ async fn authenticate(
                     }
                     Err(err) => {
                         tracing::warn!(%peer, %err, "pairing refused");
-                        reject(ws, re, ErrorCode::PairingFailed, &err.to_string()).await;
+                        reject(ws, re, err.code, &err.message).await;
                         None
                     }
                 }
@@ -624,8 +633,20 @@ fn error(re: Option<String>, code: ErrorCode, message: impl Into<String>) -> Ser
     ServerEnvelope::reply(re, ServerMessage::Error { code, message: message.into() })
 }
 
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn write_before<T>(deadline: Duration, future: impl Future<Output = Result<T, tokio_tungstenite::tungstenite::Error>>) -> Result<T, tokio_tungstenite::tungstenite::Error> {
+    tokio::time::timeout(deadline, future).await.unwrap_or_else(|_| {
+        Err(tokio_tungstenite::tungstenite::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "socket write timed out")))
+    })
+}
+
+async fn write(ws: &mut Ws, message: Message) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    write_before(WRITE_TIMEOUT, ws.send(message)).await
+}
+
 async fn send(ws: &mut Ws, envelope: ServerEnvelope) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-    ws.send(Message::text(envelope.to_json())).await
+    write(ws, Message::text(envelope.to_json())).await
 }
 
 /// Send an error, then close the socket.
@@ -637,7 +658,7 @@ async fn reject(ws: &mut Ws, re: Option<String>, code: ErrorCode, message: &str)
 /// Close the socket, giving the phone a moment to answer the close frame.
 async fn close(ws: &mut Ws, code: CloseCode, reason: &str) {
     let frame = CloseFrame { code, reason: reason.to_string().into() };
-    let _ = ws.close(Some(frame)).await;
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, ws.close(Some(frame))).await;
     let drain = async { while let Some(Ok(_)) = ws.next().await {} };
     let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
 }
@@ -666,7 +687,7 @@ enum Done {
         generation: u64,
         result: HostResult<Transcript>,
     },
-    Reply(ServerEnvelope),
+    Reply { envelope: ServerEnvelope, query: bool },
 }
 
 async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<Job>, done: mpsc::UnboundedSender<Done>) {
@@ -684,11 +705,11 @@ async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<J
             Job::Call { re, msg } if msg.is_query() => {
                 let (host, done) = (host.clone(), done.clone());
                 tokio::spawn(async move {
-                    let _ = done.send(Done::Reply(call(&*host, re, msg).await));
+                    let _ = done.send(Done::Reply { envelope: call(&*host, re, msg).await, query: true });
                 });
                 continue;
             }
-            Job::Call { re, msg } => Done::Reply(call(&*host, re, msg).await),
+            Job::Call { re, msg } => Done::Reply { envelope: call(&*host, re, msg).await, query: false },
         };
         let _ = done.send(finished);
     }
@@ -758,6 +779,7 @@ struct Session {
     next_generation: u64,
     /// Snapshots requested but not sent yet; thread events wait behind them.
     snapshots_pending: u32,
+    queries_in_flight: u8,
     held_events: Vec<HostEvent>,
 }
 
@@ -793,8 +815,14 @@ impl Session {
                     None => Vec::new(),
                 }
             }
+            msg if msg.is_query() && self.queries_in_flight >= 8 => {
+                vec![error(re, ErrorCode::RateLimited, "Too many queries in flight")]
+            }
             // Everything else is the host's to answer, in the order sent.
             msg => {
+                if msg.is_query() {
+                    self.queries_in_flight += 1;
+                }
                 let _ = jobs.send(Job::Call { re, msg });
                 Vec::new()
             }
@@ -815,7 +843,12 @@ impl Session {
 
     fn on_done(&mut self, done: Done, watchers: &Watchers) -> Vec<ServerEnvelope> {
         match done {
-            Done::Reply(envelope) => vec![envelope],
+            Done::Reply { envelope, query } => {
+                if query {
+                    self.queries_in_flight = self.queries_in_flight.saturating_sub(1);
+                }
+                vec![envelope]
+            }
             Done::Snapshot(result) => {
                 self.snapshots_pending = self.snapshots_pending.saturating_sub(1);
                 let mut out = vec![match result {
@@ -1007,7 +1040,7 @@ async fn session_loop<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, a
                     close(ws, CloseCode::Away, "No response").await;
                     return;
                 }
-                if ws.send(Message::Ping(Default::default())).await.is_err() {
+                if write(ws, Message::Ping(Default::default())).await.is_err() {
                     return;
                 }
                 Vec::new()
@@ -1035,3 +1068,14 @@ async fn session_loop<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, a
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn socket_write_deadline_expires() {
+        let pending = std::future::pending::<Result<(), tokio_tungstenite::tungstenite::Error>>();
+        let err = write_before(Duration::from_millis(1), pending).await.unwrap_err();
+        assert!(matches!(err, tokio_tungstenite::tungstenite::Error::Io(ref err) if err.kind() == io::ErrorKind::TimedOut));
+    }
+}

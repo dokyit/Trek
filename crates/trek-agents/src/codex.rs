@@ -1,14 +1,14 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
-use crate::{AgentEvent, Billing, Command, Decision, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, Billing, Command, Decision, GroupChild, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{ChildStdin, ChildStdout};
 use trek_core::catalog::ModelInfo;
 use trek_core::{Effort, HandHolding, TokenUsage, UsageCost, detect};
 
@@ -37,11 +37,7 @@ impl Rpc {
 }
 
 /// Read until the response for `id` arrives, forwarding anything else.
-pub(crate) async fn await_response(
-    lines: &mut RpcLines,
-    id: i64,
-    backlog: &mut Vec<Value>,
-) -> Result<Value> {
+pub(crate) async fn await_response<R: AsyncBufRead + Unpin>(lines: &mut Lines<R>, id: i64, backlog: &mut Vec<Value>) -> Result<Value> {
     while let Some(line) = lines.next_line().await? {
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if v["id"].as_i64() == Some(id) && v.get("method").is_none() {
@@ -53,6 +49,39 @@ pub(crate) async fn await_response(
         backlog.push(v);
     }
     bail!("codex app-server exited")
+}
+
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug)]
+struct ResponseTimeout {
+    method: String,
+    seconds: u64,
+}
+
+impl std::fmt::Display for ResponseTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "codex app-server didn't answer {} in {}s", self.method, self.seconds)
+    }
+}
+
+impl std::error::Error for ResponseTimeout {}
+
+async fn response_with_timeout<R: AsyncBufRead + Unpin>(
+    lines: &mut Lines<R>,
+    id: i64,
+    backlog: &mut Vec<Value>,
+    method: &str,
+    timeout: std::time::Duration,
+) -> Result<Value> {
+    match tokio::time::timeout(timeout, await_response(lines, id, backlog)).await {
+        Ok(response) => response,
+        Err(_) => Err(ResponseTimeout { method: method.to_string(), seconds: timeout.as_secs() }.into()),
+    }
+}
+
+async fn startup_response<R: AsyncBufRead + Unpin>(lines: &mut Lines<R>, id: i64, backlog: &mut Vec<Value>, method: &str) -> Result<Value> {
+    response_with_timeout(lines, id, backlog, method, RESPONSE_TIMEOUT).await
 }
 
 /// Notifications a session never reads. Opting out keeps streamed output Trek doesn't show off
@@ -75,18 +104,17 @@ pub(crate) async fn start_app_server(
     cwd: &Path,
     opt_out: &[&str],
     backlog: &mut Vec<Value>,
-) -> Result<(Child, Rpc, RpcLines, StderrTail)> {
+) -> Result<(GroupChild, Rpc, RpcLines, StderrTail)> {
     let bin = detect::which("codex").context("Codex isn't installed (npm i -g @openai/codex)")?;
-    let mut child = tokio::process::Command::new(bin)
+    let mut command = tokio::process::Command::new(bin);
+    command
         .arg("app-server")
         .current_dir(cwd)
         .env("PATH", detect::login_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to start codex app-server")?;
+        .stderr(Stdio::piped());
+    let mut child = crate::spawn_group(&mut command).context("failed to start codex app-server")?;
     let stderr = StderrTail::capture(child.stderr.take().unwrap(), "codex");
     let mut rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -99,8 +127,8 @@ pub(crate) async fn start_app_server(
             }),
         )
         .await?;
-    if let Err(e) = await_response(&mut lines, id, backlog).await {
-        let _ = child.start_kill();
+    if let Err(e) = startup_response(&mut lines, id, backlog, "initialize").await {
+        child.terminate().await;
         return Err(if e.to_string().contains("exited") { stderr.exited("Codex") } else { e });
     }
     rpc.send(&json!({ "method": "initialized" })).await?;
@@ -203,6 +231,30 @@ fn snapshot_reset(snapshot: &Value, id: Option<&str>) -> Option<(i64, crate::Lim
         _ => crate::LimitScope::Other,
     };
     Some((at, scope))
+}
+
+/// How full the windows of one rate-limit snapshot are, for a session on `model`: the account's
+/// main limit counts for every model, a limit of its own (`id`) only for the model it names.
+/// Windows still without a percentage are left out.
+fn windows_used(snapshot: &Value, id: &str, model: Option<&str>) -> Vec<AgentEvent> {
+    let own = id != MAIN_LIMIT;
+    if own && !model.is_some_and(|m| snapshot["normalModelSlug"].as_str() == Some(m)) {
+        return vec![];
+    }
+    ["primary", "secondary"]
+        .iter()
+        .map(|k| &snapshot[*k])
+        .filter_map(|w| {
+            let percent = w["usedPercent"].as_f64()? as f32;
+            let scope = match (own, w["windowDurationMins"].as_i64()) {
+                (true, _) => crate::LimitScope::Model(snapshot["limitName"].as_str().unwrap_or(id).to_string()),
+                (false, Some(300)) => crate::LimitScope::Session,
+                (false, Some(10080)) => crate::LimitScope::Weekly,
+                _ => crate::LimitScope::Other,
+            };
+            Some(AgentEvent::LimitUsed { scope, percent, resets_at: w["resetsAt"].as_i64().map(|s| s * 1000) })
+        })
+        .collect()
 }
 
 /// Codex passes provider errors through as raw JSON; pull out the sentence a person can read.
@@ -344,8 +396,8 @@ fn permissions_summary(p: &Value) -> String {
     for e in fs["entries"].as_array().into_iter().flatten() {
         let path = &e["path"];
         let target = path["path"].as_str().or(path["pattern"].as_str()).map(String::from).unwrap_or_else(|| path["value"]["kind"].as_str().unwrap_or("files").replace('_', " "));
-        let access = e["access"].as_str().unwrap_or("read");
-        lines.push(format!("{}{}: {target}", access[..1].to_uppercase(), &access[1..]));
+        let access = crate::status::capitalize(e["access"].as_str().unwrap_or("read"));
+        lines.push(format!("{access}: {target}"));
     }
     if let Some(r) = p["reason"].as_str().filter(|r| !r.is_empty()) {
         lines.push(r.to_string());
@@ -943,7 +995,9 @@ impl Session {
             "account/rateLimits/updated" => {
                 let snapshot = &p["rateLimits"];
                 let id = snapshot["limitId"].as_str().unwrap_or(MAIN_LIMIT).to_string();
-                merge(self.rate_limits.entry(id).or_insert(Value::Null), snapshot);
+                let merged = self.rate_limits.entry(id.clone()).or_insert(Value::Null);
+                merge(merged, snapshot);
+                out.events.extend(windows_used(merged, &id, self.model.as_deref()));
                 None
             }
             "error" if p["willRetry"] != true => {
@@ -1024,13 +1078,13 @@ impl Session {
         for (model, tokens, cost) in std::mem::take(&mut self.turn_tokens) {
             out.events.push(AgentEvent::Usage { model, tokens, cost });
         }
-        out.events.push(AgentEvent::TurnComplete { error });
         // Commands still running when their turn ends carry on in the background.
         let left: Vec<String> = self.commands.keys().filter(|id| !self.background.contains(id)).cloned().collect();
         if !left.is_empty() {
             self.background.extend(left);
             out.events.push(self.background_event());
         }
+        out.events.push(AgentEvent::TurnComplete { error });
         // Messages that missed this turn start the next one, and answer its plan.
         let mut late = std::mem::take(&mut self.after_turn).into_iter();
         if let Some(first) = late.next() {
@@ -1272,11 +1326,15 @@ pub async fn run(
     let resumed = match opening(&config, &params) {
         Some((method, p)) => {
             let id = rpc.request(method, p).await?;
-            match await_response(&mut lines, id, &mut backlog).await {
+            match startup_response(&mut lines, id, &mut backlog, method).await {
                 Ok(r) if method == "thread/resume" && config.resume_at.is_some() => {
                     let (thread, at) = (r["thread"]["id"].as_str().unwrap_or_default().to_string(), config.resume_at.clone().unwrap_or_default());
                     match cut_back(&mut rpc, &mut lines, &mut backlog, &thread, &at).await {
                         Ok(()) => Some(r),
+                        Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
+                            child.terminate().await;
+                            return Err(e);
+                        }
                         Err(e) => {
                             tracing::warn!("codex couldn't cut thread {thread} back to turn {at}, starting a new one: {e:#}");
                             cut_off = true;
@@ -1285,6 +1343,10 @@ pub async fn run(
                     }
                 }
                 Ok(r) => Some(r),
+                Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
+                    child.terminate().await;
+                    return Err(e);
+                }
                 // Codex no longer has the thread (its rollout was deleted): carry on in a new one.
                 Err(e) if e.to_string().contains("no rollout found") => {
                     tracing::warn!("codex resume failed, starting a new thread: {e:#}");
@@ -1305,7 +1367,13 @@ pub async fn run(
         Some(r) => r,
         None => {
             let id = rpc.request("thread/start", params).await?;
-            await_response(&mut lines, id, &mut backlog).await?
+            match startup_response(&mut lines, id, &mut backlog, "thread/start").await {
+                Ok(r) => r,
+                Err(e) => {
+                    child.terminate().await;
+                    return Err(e);
+                }
+            }
         }
     };
     let thread_id = opened["thread"]["id"].as_str().context("no thread id")?.to_string();
@@ -1336,7 +1404,7 @@ pub async fn run(
         }
         for ev in std::mem::take(&mut out.events) {
             if events.send(ev).await.is_err() {
-                let _ = child.start_kill();
+                child.terminate().await;
                 return Ok(());
             }
         }
@@ -1359,7 +1427,7 @@ pub async fn run(
             }
         }
     }
-    let _ = child.start_kill();
+    child.terminate().await;
     Ok(())
 }
 
@@ -1404,7 +1472,7 @@ async fn cut_back(rpc: &mut Rpc, lines: &mut RpcLines, backlog: &mut Vec<Value>,
             p["cursor"] = json!(c);
         }
         let id = rpc.request("thread/turns/list", p).await?;
-        let page = await_response(lines, id, backlog).await?;
+        let page = startup_response(lines, id, backlog, "thread/turns/list").await?;
         if let Some(next) = turn_after(&page, at, &mut newer) {
             break next;
         }
@@ -1416,7 +1484,7 @@ async fn cut_back(rpc: &mut Rpc, lines: &mut RpcLines, backlog: &mut Vec<Value>,
     // `at` is the latest turn: nothing to drop.
     let Some(next) = next else { return Ok(()) };
     let id = rpc.request("thread/revert", json!({ "threadId": thread, "beforeTurnId": next })).await?;
-    await_response(lines, id, backlog).await.map(|_| ())
+    startup_response(lines, id, backlog, "thread/revert").await.map(|_| ())
 }
 
 /// How the login is billed, from an `account/read` result. Older Codex builds without the
@@ -1435,7 +1503,7 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, _) = start_app_server(&trek_core::paths::home(), &[], &mut backlog).await?;
     let out = fetch_models(&mut rpc, &mut lines, &mut backlog).await;
-    let _ = child.start_kill();
+    child.terminate().await;
     out
 }
 
@@ -1534,6 +1602,33 @@ mod tests {
         let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
         assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
         assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
+    }
+
+    #[test]
+    fn permission_access_names_are_unicode_safe() {
+        let request = |access: &str| json!({"permissions":{"fileSystem":{"entries":[{"path":{"path":"/tmp/x"},"access":access}]}}});
+        assert_eq!(permissions_summary(&request("")), ": /tmp/x");
+        assert_eq!(permissions_summary(&request("écrire")), "Écrire: /tmp/x");
+    }
+
+    #[tokio::test]
+    async fn startup_responses_have_a_timeout() {
+        let (_write, read) = tokio::io::duplex(64);
+        let mut lines = BufReader::new(read).lines();
+        let e = response_with_timeout(&mut lines, 1, &mut vec![], "thread/start", std::time::Duration::from_millis(10)).await.unwrap_err();
+        assert!(e.to_string().contains("didn't answer thread/start"), "{e:#}");
+        assert!(e.downcast_ref::<ResponseTimeout>().is_some(), "timeouts must not fall back to a new thread");
+    }
+
+    #[test]
+    fn background_commands_are_listed_before_the_turn_closes() {
+        let mut s = session("t", false);
+        s.turn = Turn::Running("u".into());
+        s.commands.insert("c".into(), ("sleep 300".into(), String::new()));
+        let out = s.incoming(&json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}));
+        let background = out.events.iter().position(|e| matches!(e, AgentEvent::Background(_))).unwrap();
+        let complete = out.events.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
+        assert!(background < complete, "{:?}", out.events);
     }
 
     #[test]
@@ -2001,10 +2096,14 @@ mod tests {
         s.command(prompt("keep going"));
         let out = feed(&mut s, &lines);
         let message = lines[2]["params"]["error"]["message"].as_str().unwrap().to_string();
-        // The reset comes from the used-up window of the snapshot, not the words.
+        // The reset comes from the used-up window of the snapshot, not the words. (The snapshot
+        // itself says how full each window is, before the limit does.)
+        let used = |scope, percent, at: i64| AgentEvent::LimitUsed { scope, percent, resets_at: Some(at) };
         assert_eq!(
             out.events,
             vec![
+                used(crate::LimitScope::Session, 100.0, 1_791_007_800_000),
+                used(crate::LimitScope::Weekly, 61.0, 1_791_065_371_000),
                 AgentEvent::LimitReached { message: message.clone(), resets_at: Some(1_791_007_800_000), scope: crate::LimitScope::Session },
                 AgentEvent::Mark("01a0fe5c-0a11-7c2e-9d41-5b7f0e2d1a90".into()),
                 AgentEvent::TurnComplete { error: Some(message) },
@@ -2049,6 +2148,24 @@ mod tests {
         // Main limit clear: the used-up one is the other's.
         update(&mut s, json!({"limitId":"codex","primary":{"usedPercent":10}}));
         assert_eq!(limit_reset(&s.rate_limits, None), (Some(700_000), Some(crate::LimitScope::Model("gpt-reserve".into()))));
+    }
+
+    #[test]
+    fn rate_limit_updates_say_how_full_the_windows_are() {
+        let update = |s: &mut Session, snapshot: Value| feed(s, &[json!({"method":"account/rateLimits/updated","params":{"rateLimits":snapshot}})]).events;
+        let used = |scope, percent, at: i64| AgentEvent::LimitUsed { scope, percent, resets_at: Some(at) };
+        let mut s = session("01a0fe5b-ce3d-7420-b4af-d01f2ab43c6b", false);
+        let ev = update(&mut s, json!({"limitId":"codex","limitName":null,"primary":{"usedPercent":94,"windowDurationMins":300,"resetsAt":50},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":900}}));
+        assert_eq!(ev, [used(crate::LimitScope::Session, 94.0, 50_000), used(crate::LimitScope::Weekly, 30.0, 900_000)]);
+        // A sparse update: the window it's about is the one remembered.
+        let ev = update(&mut s, json!({"limitId":null,"primary":{"usedPercent":96}}));
+        assert_eq!(ev[0], used(crate::LimitScope::Session, 96.0, 50_000));
+        // A model's own quota is news only to a session on that model.
+        let reserve = json!({"limitId":"base_model_inference","limitName":"gpt-reserve","normalModelSlug":"gpt-5.6-luna","primary":{"usedPercent":99,"windowDurationMins":10080,"resetsAt":700}});
+        s.model = Some("gpt-5.6-sol".into());
+        assert!(update(&mut s, reserve.clone()).is_empty());
+        s.model = Some("gpt-5.6-luna".into());
+        assert_eq!(update(&mut s, reserve), [used(crate::LimitScope::Model("gpt-reserve".into()), 99.0, 700_000)]);
     }
 
     #[test]
@@ -2352,7 +2469,8 @@ mod tests {
         let delta = |d: &str| json!({"method":"item/commandExecution/outputDelta","params":{"threadId":"t","turnId":"u","itemId":"exec-1","delta":d}});
         feed(&mut s, &[json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"u"}}}), item("item/started", "inProgress", Value::Null), delta("tick 1\r\n")]);
         let out = feed(&mut s, &[json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed","items":[]}}})]);
-        let Some(AgentEvent::Background(b)) = out.events.last() else { panic!("{:?}", out.events) };
+        let Some(AgentEvent::Background(b)) = out.events.get(out.events.len() - 2) else { panic!("{:?}", out.events) };
+        assert!(matches!(out.events.last(), Some(AgentEvent::TurnComplete { error: None })));
         let title = command_text(&json!({ "command": command }));
         assert_eq!(b[..], [crate::BackgroundTask { id: "exec-1".into(), kind: crate::BackgroundKind::Shell, title, call: Some("exec-1".into()), readable: true, stoppable: true }]);
         // Its output so far can be read while it runs, without a turn.

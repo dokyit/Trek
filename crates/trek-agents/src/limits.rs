@@ -62,7 +62,22 @@ pub fn looks_like_limit(message: &str) -> bool {
         "limit reached",
         "limit exceeded",
     ];
-    LIMIT.iter().any(|p| m.contains(p)) || m.split(|c: char| !c.is_ascii_digit()).any(|w| w == "429")
+    LIMIT.iter().any(|p| m.contains(p)) || http_429(&m)
+}
+
+fn http_429(message: &str) -> bool {
+    let code = |s: &str| s.strip_prefix("429").is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_ascii_digit()));
+    if code(message.trim_start()) || message.contains("(429)") {
+        return true;
+    }
+    ["status", "http", "error", "code"].iter().any(|lead| {
+        message.match_indices(lead).any(|(i, _)| {
+            let before = &message[..i];
+            let boundary = before.chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            let after = message[i + lead.len()..].trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | '='));
+            boundary && code(after)
+        })
+    })
 }
 
 /// Which limit a message names: "session limit" / "5-hour", "weekly", or a model's ("Opus limit").
@@ -365,6 +380,17 @@ pub fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool 
     matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains(word)) || model.is_some_and(|m| m.to_lowercase().contains(word))
 }
 
+/// Which limit usage window `l` is: the account's 5-hour or weekly one, or a model's or
+/// surface's own ("Weekly · Fable").
+pub fn window_scope(l: &UsageLimit) -> LimitScope {
+    match (l.label.split_once('·'), l.window.as_str()) {
+        (Some((_, name)), _) => LimitScope::Model(name.trim().to_string()),
+        (None, "5h") => LimitScope::Session,
+        (None, "7d") => LimitScope::Weekly,
+        _ => LimitScope::Other,
+    }
+}
+
 /// Until when the agent's usage windows still hold back a thread on `model` that a limit in
 /// `scope` stopped: the latest reset among the windows that apply to it and are used up. `None`
 /// when none is (the thread can go on).
@@ -409,11 +435,13 @@ pub(crate) fn from_response(headers: &reqwest::header::HeaderMap, message: Strin
             }
         }
     }
-    let retry_after = header("retry-after").and_then(|v| match v.parse::<f64>() {
+    if let Some(at) = header("retry-after").and_then(|v| match v.parse::<f64>() {
         Ok(secs) => Some(now + (secs * 1000.).round() as i64),
         Err(_) => chrono::DateTime::parse_from_rfc2822(v).ok().map(|d| d.timestamp_millis()),
-    });
-    let resets_at = resets.into_iter().max().or(retry_after).or_else(|| reset_from_text(&message, now));
+    }) {
+        resets.push(at);
+    }
+    let resets_at = resets.into_iter().max().or_else(|| reset_from_text(&message, now));
     Limit { scope: scope_of(&message), message, resets_at }
 }
 
@@ -498,10 +526,23 @@ mod tests {
             "API Error: 529 Server is temporarily limiting requests (not your usage limit)",
             "The 'gpt-nope-9' model is not supported when using Codex with a ChatGPT account.",
             "The agent hit its output limit.",
+            "Failed to load GitHub issue #429",
+            "The migration handles item 429 in a batch",
+            "Error code 1429 from the parser",
         ] {
             assert!(!looks_like_limit(not), "{not}");
         }
-        for limit in ["API Error: 429 {\"type\":\"rate_limit_error\"}", "You exceeded your current quota", "RESOURCE_EXHAUSTED: Quota exceeded for metric"] {
+        for limit in [
+            "API Error: 429 {\"type\":\"rate_limit_error\"}",
+            "429 Too Many Requests",
+            "status 429",
+            "HTTP 429",
+            "error 429",
+            "code 429",
+            "request failed (429)",
+            "You exceeded your current quota",
+            "RESOURCE_EXHAUSTED: Quota exceeded for metric",
+        ] {
             assert!(looks_like_limit(limit), "{limit}");
         }
         assert_eq!(Limit::from_text("Model not found", 0), None);
@@ -569,8 +610,8 @@ mod tests {
         let l = from_response(&anthropic, "Anthropic API 429: Number of request tokens has exceeded your per-minute rate limit".into(), now);
         assert_eq!(l.resets_at, Some(ms("2026-10-03T06:10:00Z")));
         // OpenAI-style spans, then plain retry-after (seconds or a date).
-        let openai = map(&[("x-ratelimit-remaining-requests", "0"), ("x-ratelimit-reset-requests", "6m0s"), ("x-ratelimit-remaining-tokens", "100")]);
-        assert_eq!(from_response(&openai, "429".into(), now).resets_at, Some(now + 360_000));
+        let openai = map(&[("x-ratelimit-remaining-requests", "0"), ("x-ratelimit-reset-requests", "6m0s"), ("x-ratelimit-remaining-tokens", "100"), ("retry-after", "600")]);
+        assert_eq!(from_response(&openai, "429".into(), now).resets_at, Some(now + 600_000));
         assert_eq!(from_response(&map(&[("retry-after", "30")]), "429".into(), now).resets_at, Some(now + 30_000));
         assert_eq!(from_response(&map(&[("retry-after", "Sat, 03 Oct 2026 06:10:00 GMT")]), "429".into(), now).resets_at, Some(ms("2026-10-03T06:10:00Z")));
         // Nothing in the headers: the message.

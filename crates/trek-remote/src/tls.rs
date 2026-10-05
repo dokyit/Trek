@@ -50,6 +50,7 @@ impl TlsIdentity {
     pub fn load_or_create(dir: &Path, host_name: &str) -> io::Result<Self> {
         let (cert_path, key_path) = (dir.join("identity.der"), dir.join("identity.key"));
         if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
+            private_permissions(&key_path)?;
             let identity = Self { fingerprint: fingerprint(&cert_der), cert_der, key_der };
             // A damaged pair is replaced (phones pair again) rather than served.
             if identity.acceptor().is_ok() {
@@ -85,10 +86,34 @@ impl TlsIdentity {
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(bytes)
+    let mut file = options.open(path)?;
+    // `mode` applies only to a new file. Repair an existing one before new key bytes touch it,
+    // then do it again after the write as an explicit postcondition.
+    private_file_permissions(&file)?;
+    file.set_len(0)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    private_permissions(path)
+}
+
+fn private_permissions(path: &Path) -> io::Result<()> {
+    private_file_permissions(&std::fs::File::open(path)?)
+}
+
+fn private_file_permissions(file: &std::fs::File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = file.metadata()?.permissions();
+        if permissions.mode() & 0o777 != 0o600 {
+            permissions.set_mode(0o600);
+            file.set_permissions(permissions)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -103,6 +128,11 @@ mod tests {
         assert_eq!(a.fingerprint, fingerprint(&a.cert_der));
         assert_eq!(a.short_fingerprint().len(), 19);
         assert!(a.fingerprint.to_uppercase().starts_with(&a.short_fingerprint().replace('-', "")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.join("identity.key"), std::fs::Permissions::from_mode(0o400)).unwrap();
+        }
         let b = TlsIdentity::load_or_create(&dir, "Tobias's MacBook").unwrap();
         assert_eq!(a.fingerprint, b.fingerprint, "loaded, not made again");
         #[cfg(unix)]
@@ -110,6 +140,20 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(dir.join("identity.key")).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "the key is the user's alone");
+        }
+        std::fs::remove_file(dir.join("identity.der")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.join("identity.key"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let c = TlsIdentity::load_or_create(&dir, "Tobias's MacBook").unwrap();
+        assert_ne!(b.fingerprint, c.fingerprint, "the incomplete identity was replaced");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("identity.key")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a replaced key is private too");
         }
         let _ = std::fs::remove_dir_all(dir);
     }

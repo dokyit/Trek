@@ -743,3 +743,151 @@ fn a_sub_agent_paused_when_trek_quit_is_not_resumed_on_its_own() {
         let _ = std::fs::remove_dir_all(dir);
     });
 }
+
+fn wrap_up_notes(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<String> {
+    trek.items(cx, id).into_iter().filter_map(|i| if let Item::Notice { text } = i { Some(text) } else { None }).filter(|t| t.contains("asked the agent to wrap up")).collect()
+}
+
+fn answers(trek: &Trek, cx: &TestAppContext, id: &str) -> String {
+    trek.items(cx, id).into_iter().filter_map(|i| if let Item::Assistant { text } = i { Some(text) } else { None }).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn a_turn_near_its_limit_wraps_up_and_the_thread_waits_for_the_reset() {
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        let seen = events(&trek, cx);
+        // The mock says its 5-hour window is 96% used partway through the turn.
+        let id = trek.send(cx, "mock:nearlimit 10m");
+        let thread = id.clone();
+        trek.wait(cx, "the wrapped-up turn to pause the thread", |ws| ws.pause(&thread).is_some() && !ws.turn_running(&thread)).await;
+        // Trek told the agent, once, and a note says so; it's no message of the user's.
+        let notes = wrap_up_notes(&trek, cx, &id);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("5-hour limit 96% used (resets "), "{notes:?}");
+        assert_eq!(said(&trek, cx, &id), ["mock:nearlimit 10m"]);
+        let session = trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.native_id.clone())).expect("a session");
+        let told = trek_agents::mock::remembered(&session);
+        assert_eq!(told.iter().filter(|m| m.starts_with(trek_core::limit::WRAP_UP_TAG)).count(), 1, "{told:?}");
+        assert!(told.iter().any(|m| m.contains("Your 5-hour limit is 96% used") && m.contains("start nothing new")), "{told:?}");
+        // The agent stopped by itself and said where: an answer, no limit row and no error.
+        let items = trek.items(cx, &id);
+        assert!(answers(&trek, cx, &id).contains("Stopping here, ahead of the limit"), "{items:?}");
+        assert!(!items.iter().any(|i| matches!(i, Item::Limit { .. } | Item::Error { .. })), "{items:?}");
+        assert!(matches!(items.last(), Some(Item::TurnEnd { .. })), "{items:?}");
+        // The thread waits for the reset like one the limit stopped: paused, idle, and asking.
+        let p = pause(&trek, cx, &id).unwrap();
+        assert!(p.wrapped && !p.resume, "{p:?}");
+        assert_eq!((p.scope.clone(), p.message.as_str()), (LimitScope::Session, "Wrapped up before the 5-hour limit (96% used)"));
+        assert!(p.resets_at.is_some_and(|at| at > trek.read(cx, |ws, _| ws.now())));
+        assert_eq!(trek.run_state(cx, &id), RunState::Idle);
+        // The finished turn is the news; the pause adds no alert of its own.
+        assert!(!seen.borrow().iter().any(|m| m.contains("Usage limit reached")), "{:?}", seen.borrow());
+        trek.render(cx);
+        assert!(trek.visible(cx, "limit-resume") && trek.visible(cx, "limit-snooze") && trek.visible(cx, "limit-switch"));
+        // Resumed at the reset, it carries on from where it stopped.
+        trek.update(cx, |ws, cx| ws.resume_at_reset(&id, cx));
+        skip(cx, 600 + RESUME_GRACE_MS as u64 / 1000 + 10);
+        trek.wait(cx, "the resume", |ws| ws.pause(&thread).is_none()).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["mock:nearlimit 10m", CONTINUE]);
+        assert_eq!(wrap_up_notes(&trek, cx, &id).len(), 1);
+    });
+}
+
+#[test]
+fn messages_queued_behind_a_wrapped_up_turn_wait_for_the_reset() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| {
+            s.general.follow_up = trek_core::settings::FollowUp::Queue;
+            s.general.on_usage_limit = OnUsageLimit::Resume;
+        });
+        test_clock(&trek, cx);
+        let id = trek.send(cx, "mock:nearlimit 10m");
+        let thread = id.clone();
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread)).await;
+        trek.send(cx, "then update the docs");
+        trek.wait(cx, "the wrapped-up turn to pause the thread", |ws| ws.pause(&thread).is_some() && !ws.turn_running(&thread)).await;
+        // Sent now, the follow-up would meet the limit: it waits, and the resume is on by itself.
+        let p = pause(&trek, cx, &id).unwrap();
+        assert!(p.wrapped && p.resume, "{p:?}");
+        assert_eq!(p.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["then update the docs"]);
+        assert_eq!(said(&trek, cx, &id), ["mock:nearlimit 10m"]);
+        skip(cx, 600 + RESUME_GRACE_MS as u64 / 1000 + 10);
+        trek.wait(cx, "the resume", |ws| ws.pause(&thread).is_none()).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["mock:nearlimit 10m", "then update the docs"]);
+    });
+}
+
+#[test]
+fn with_wrap_ups_off_a_turn_near_its_limit_runs_on() {
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.general.wrap_up_near_limit = false);
+        let id = trek.send(cx, "mock:nearlimit 10m");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(pause(&trek, cx, &id).is_none());
+        assert!(wrap_up_notes(&trek, cx, &id).is_empty());
+        assert!(answers(&trek, cx, &id).contains("The parser refactor is finished"));
+    });
+}
+
+#[test]
+fn usage_read_while_a_turn_runs_asks_it_to_wrap_up_once() {
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        let id = trek.send(cx, "mock:long 2s");
+        let thread = id.clone();
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
+        let now = trek.read(cx, |ws, _| ws.now());
+        let read = |trek: &Trek, cx: &mut TestAppContext, windows: &[(&str, &str, f32, i64)]| {
+            let status = usage(now, windows).unwrap();
+            trek.update(cx, |ws, cx| {
+                ws.agent_status.insert(mock().key(), status);
+                ws.wrap_up_where_due(&mock(), cx);
+            })
+        };
+        // Room left in every window that applies: nothing is said. Another model's doesn't apply.
+        read(&trek, cx, &[("5-hour limit", "5h", 94.0, 3_600_000), ("Weekly limit", "7d", 97.0, 86_400_000), ("Weekly · Fable", "7d", 99.0, 86_400_000)]);
+        assert!(wrap_up_notes(&trek, cx, &id).is_empty());
+        // Two windows close to their limits: the thread will wait for the later reset. Read
+        // again, the turn isn't told twice.
+        let close = [("5-hour limit", "5h", 97.0, 3_600_000), ("Weekly limit", "7d", 98.5, 86_400_000)];
+        read(&trek, cx, &close);
+        read(&trek, cx, &close);
+        let notes = wrap_up_notes(&trek, cx, &id);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("Weekly limit 98% used"), "{notes:?}");
+        trek.wait(cx, "the turn to end and the thread to pause", |ws| ws.pause(&thread).is_some() && !ws.turn_running(&thread)).await;
+        let p = pause(&trek, cx, &id).unwrap();
+        assert_eq!((p.wrapped, p.scope.clone(), p.resets_at), (true, LimitScope::Weekly, Some(now + 86_400_000)));
+        // The next turn starts afresh: near the limit still, it's asked again.
+        trek.update(cx, |ws, cx| ws.end_pause(&id, true, cx));
+        trek.wait(cx, "the next turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
+        read(&trek, cx, &close);
+        assert_eq!(wrap_up_notes(&trek, cx, &id).len(), 2);
+    });
+}
+
+#[test]
+fn a_stopped_or_failed_turn_asked_to_wrap_up_does_not_pause() {
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        let id = trek.send(cx, "mock:long 30s");
+        let thread = id.clone();
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
+        let now = trek.read(cx, |ws, _| ws.now());
+        trek.update(cx, |ws, cx| {
+            ws.agent_status.insert(mock().key(), usage(now, &[("5-hour limit", "5h", 96.0, 3_600_000)]).unwrap());
+            ws.wrap_up_where_due(&mock(), cx);
+        });
+        assert_eq!(wrap_up_notes(&trek, cx, &id).len(), 1);
+        // The user stops it: they've taken over, and nothing waits for a reset.
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(pause(&trek, cx, &id).is_none());
+    });
+}

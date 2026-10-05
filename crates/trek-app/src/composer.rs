@@ -613,10 +613,12 @@ impl Composer {
             let clock = crate::time::reset_clock(at, now);
             if compact { clock } else { format!("{clock} (in {})", crate::time::countdown(at, now)) }
         };
-        let (title, detail) = match (pause.resets_at, pause.resume) {
-            (Some(at), true) => ("Usage limit reached".to_string(), format!("Resumes at {}", when(at + trek_core::limit::RESUME_GRACE_MS))),
-            (Some(at), false) => ("Usage limit reached".to_string(), format!("Resets {}", when(at))),
-            (None, _) => ("Usage limit reached".to_string(), "Reset time unknown".to_string()),
+        // Stopped ahead of the limit, as Trek asked, rather than by it.
+        let title = if pause.wrapped { "Wrapped up before the limit" } else { "Usage limit reached" }.to_string();
+        let detail = match (pause.resets_at, pause.resume) {
+            (Some(at), true) => format!("Resumes at {}", when(at + trek_core::limit::RESUME_GRACE_MS)),
+            (Some(at), false) => format!("Resets {}", when(at)),
+            (None, _) => "Reset time unknown".to_string(),
         };
         let action = |key: &'static str, label: &'static str, strong: bool| {
             div()

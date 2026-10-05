@@ -127,10 +127,16 @@ impl Pairing {
     /// Redeem a typed code. Success consumes the code; a wrong code counts against the attempt
     /// budget and the code is burned when it runs out.
     pub fn redeem(&mut self, input: &str) -> Result<(), PairingError> {
-        self.redeem_at(input, Instant::now())
+        self.check_at(input, Instant::now())?;
+        self.cancel();
+        Ok(())
     }
 
-    pub(crate) fn redeem_at(&mut self, input: &str, now: Instant) -> Result<(), PairingError> {
+    pub(crate) fn check(&mut self, input: &str) -> Result<(), PairingError> {
+        self.check_at(input, Instant::now())
+    }
+
+    pub(crate) fn check_at(&mut self, input: &str, now: Instant) -> Result<(), PairingError> {
         let active = self.active.as_mut().ok_or(PairingError::NoOffer)?;
         if now >= active.expires {
             self.active = None;
@@ -139,7 +145,6 @@ impl Pairing {
         let matches = normalize_code(input)
             .is_some_and(|typed| bool::from(typed.as_bytes().ct_eq(active.normalized.as_bytes())));
         if matches {
-            self.active = None;
             return Ok(());
         }
         active.wrong += 1;
@@ -284,7 +289,7 @@ impl DeviceRegistry {
 
     /// Pair a device: store a fresh token's hash (replacing any earlier token of the same device)
     /// and return the token.
-    pub fn register(&mut self, device_id: &str, name: &str, now: i64) -> String {
+    pub fn register(&mut self, device_id: &str, name: &str, now: i64) -> io::Result<String> {
         let token = generate_token();
         let record = DeviceRecord {
             device_id: device_id.to_string(),
@@ -293,12 +298,16 @@ impl DeviceRegistry {
             paired_at: now,
             last_seen_at: Some(now),
         };
+        let before = self.devices.clone();
         match self.devices.iter_mut().find(|d| d.device_id == device_id) {
             Some(existing) => *existing = record,
             None => self.devices.push(record),
         }
-        self.save_logged();
-        token
+        if let Err(err) = self.save() {
+            self.devices = before;
+            return Err(err);
+        }
+        Ok(token)
     }
 
     /// Whether `token` is the current token of `device_id`.
@@ -409,7 +418,7 @@ mod tests {
     fn a_code_expires() {
         let mut p = Pairing::default();
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        assert_eq!(p.redeem_at("K7Q2-9XMV", Instant::now() + Duration::from_secs(61)), Err(PairingError::Expired));
+        assert_eq!(p.check_at("K7Q2-9XMV", Instant::now() + Duration::from_secs(61)), Err(PairingError::Expired));
         assert_eq!(p.redeem("K7Q2-9XMV"), Err(PairingError::NoOffer));
     }
 
@@ -459,10 +468,10 @@ mod tests {
     #[test]
     fn registry_pairs_replaces_and_revokes() {
         let mut r = DeviceRegistry::in_memory();
-        let t1 = r.register("dev-1", "Tobias's iPhone", 1);
+        let t1 = r.register("dev-1", "Tobias's iPhone", 1).unwrap();
         assert!(r.verify("dev-1", &t1));
         assert!(!r.verify("dev-2", &t1));
-        let t2 = r.register("dev-1", "Tobias's iPhone", 2);
+        let t2 = r.register("dev-1", "Tobias's iPhone", 2).unwrap();
         assert!(!r.verify("dev-1", &t1), "re-pairing replaces the old token");
         assert!(r.verify("dev-1", &t2));
         assert_eq!(r.list().len(), 1);
@@ -480,7 +489,7 @@ mod tests {
         let token = {
             let mut r = DeviceRegistry::load(&path).unwrap();
             assert!(r.list().is_empty());
-            r.register("dev-1", "Phone", 10)
+            r.register("dev-1", "Phone", 10).unwrap()
         };
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains(&token), "the token itself is never stored");

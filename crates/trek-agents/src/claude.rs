@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -270,7 +270,7 @@ fn session_missing(v: &Value) -> bool {
 
 /// A running `claude` process.
 struct Cli {
-    child: tokio::process::Child,
+    child: GroupChild,
     stdin: tokio::process::ChildStdin,
     stdout: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     stderr: StderrTail,
@@ -287,9 +287,8 @@ impl Cli {
             .env("PATH", detect::login_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn().context("failed to start claude")?;
+            .stderr(Stdio::piped());
+        let mut child = crate::spawn_group(&mut cmd).context("failed to start claude")?;
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "claude");
@@ -459,6 +458,23 @@ impl UsageLedger {
     }
 }
 
+/// How full each of the plan's windows is, from a `rate_limit_event` that lets the turn go on:
+/// every window Claude lists (`unifiedWindows`), else the one the event is about. None once
+/// the limit is hit (the turn's failure says that) or while overage pays for what's past it.
+fn windows_used(info: &Value) -> Vec<AgentEvent> {
+    if info["status"] == "rejected" || info["isUsingOverage"] == true {
+        return vec![];
+    }
+    let used = |kind: &str, w: &Value| {
+        let percent = (w["utilization"].as_f64()? * 100.0) as f32;
+        Some(AgentEvent::LimitUsed { scope: crate::limits::claude_scope(kind), percent, resets_at: w["resetsAt"].as_i64().map(|s| s * 1000) })
+    };
+    match info["unifiedWindows"].as_object() {
+        Some(windows) => windows.iter().filter_map(|(kind, w)| used(kind, w)).collect(),
+        None => used(info["rateLimitType"].as_str().unwrap_or_default(), info).into_iter().collect(),
+    }
+}
+
 impl Turns {
     fn sent(&mut self, text: &str, mid_turn: bool) {
         if !text.trim_start().starts_with('/') {
@@ -499,7 +515,7 @@ impl Turns {
             // Past the limit but carrying on, paid as overage: no limit to stop at.
             let rejected = info["status"] == "rejected" && info["isUsingOverage"] != true;
             self.rejected = rejected.then(|| (info["resetsAt"].as_i64().map(|s| s * 1000), crate::limits::claude_scope(info["rateLimitType"].as_str().unwrap_or_default())));
-            return vec![];
+            return windows_used(info);
         }
         if v["type"] == "system" && v["subtype"] == "background_tasks_changed" {
             self.background.set(v);
@@ -686,11 +702,13 @@ impl Turns {
     }
 
     /// Claude never took in what it was sent after the held result: the turn ends with it.
-    fn give_up(&mut self) -> Option<AgentEvent> {
+    fn give_up(&mut self) -> Option<Vec<AgentEvent>> {
         self.waiting.take()?;
-        tracing::warn!("claude: {} message(s) sent mid-turn were never taken in", self.unread.len());
+        let missed: Vec<String> = self.unread.iter().filter(|(_, mid_turn)| *mid_turn).map(|(text, _)| format!("“{}”", clip(text, 120))).collect();
+        tracing::warn!("claude: {} message(s) sent mid-turn were never taken in", missed.len());
         self.unread.clear();
-        Some(AgentEvent::TurnComplete { error: None })
+        let message = format!("Claude Code didn't take up {}. Send it again.", missed.join(", "));
+        Some(vec![AgentEvent::Notice(message), AgentEvent::TurnComplete { error: None }])
     }
 }
 
@@ -814,10 +832,12 @@ pub async fn run(
                 }
             }
             _ = tokio::time::sleep_until(turns.waiting.unwrap_or_else(tokio::time::Instant::now)), if turns.waiting.is_some() => {
-                if let Some(ev) = turns.give_up() {
+                if let Some(out) = turns.give_up() {
                     in_turn = false;
-                    if events.send(ev).await.is_err() {
-                        return Ok(());
+                    for ev in out {
+                        if events.send(ev).await.is_err() {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -836,7 +856,7 @@ pub async fn run(
                     config.resume_at = None;
                     config.fork = false;
                     resumed_at = None;
-                    let _ = cli.child.start_kill();
+                    cli.child.terminate().await;
                     cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
                     init_id = cli.initialize(&mut ctl).await?;
                     context_requests.clear();
@@ -932,7 +952,7 @@ pub async fn run(
             }
         }
     }
-    let _ = cli.child.start_kill();
+    cli.child.terminate().await;
     Ok(())
 }
 
@@ -1472,7 +1492,8 @@ mod tests {
         turns.sent("first", false);
         turns.sent("steer", true);
         assert!(turns.step(&ok, &mut pending, &mut streamed).is_empty());
-        assert_eq!(turns.give_up(), Some(AgentEvent::TurnComplete { error: None }));
+        let gave_up = turns.give_up().unwrap();
+        assert!(matches!(&gave_up[..], [AgentEvent::Notice(n), AgentEvent::TurnComplete { error: None }] if n.contains("“steer”") && n.contains("Send it again")), "{gave_up:?}");
         assert!(turns.unread.is_empty() && turns.give_up().is_none());
 
         // A stopped turn ends whatever is unread.
@@ -1557,8 +1578,15 @@ mod tests {
         // Recorded (Claude Code 2.1.288): the event every turn starts with, a warning near the weekly limit.
         let v: Value = serde_json::from_str(include_str!("../fixtures/claude-rate-limit-allowed.json")).unwrap();
         let mut turns = Turns::default();
-        assert!(turns.step(&v, &mut HashMap::new(), &mut false).is_empty());
+        // No limit, and nothing for the transcript: only how full the plan's windows are.
+        let used = |scope, percent, at: i64| AgentEvent::LimitUsed { scope, percent, resets_at: Some(at * 1000) };
+        assert_eq!(turns.step(&v, &mut HashMap::new(), &mut false), [used(crate::LimitScope::Session, 1.0, 1791058200), used(crate::LimitScope::Weekly, 59.0, 1791471600)]);
         assert_eq!(turns.rejected, None);
+        // An older Claude Code names one window; overage, or the limit itself, none to wrap up for.
+        let one = json!({"status":"allowed_warning","resetsAt":50,"rateLimitType":"seven_day_opus","utilization":0.985});
+        assert_eq!(windows_used(&one), [AgentEvent::LimitUsed { scope: crate::LimitScope::Model("Opus".into()), percent: 98.5, resets_at: Some(50_000) }]);
+        assert!(windows_used(&json!({"status":"allowed","isUsingOverage":true,"rateLimitType":"five_hour","utilization":0.99})).is_empty());
+        assert!(windows_used(&json!({"status":"rejected","rateLimitType":"five_hour","utilization":1})).is_empty());
     }
 
     #[test]
