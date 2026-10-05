@@ -48,6 +48,9 @@ struct Toast: Identifiable, Equatable {
 
 @Observable
 final class AppModel {
+    /// A thread to bring up, from a notification's `trek://open?thread=…` link.
+    var openRequest: String?
+
     var mode: AppMode = .unpaired
     var connection: ConnectionState = .idle
     var host: HostInfo?
