@@ -10,6 +10,8 @@ struct Composer: View {
     @Binding var photos: [PickedPhoto]
     var placeholder: String
     var working: Bool
+    /// Bumped to bring the keyboard up.
+    var focusRequest = 0
     var send: () -> Void
     var stop: () -> Void
     @FocusState private var focused: Bool
@@ -87,6 +89,7 @@ struct Composer: View {
         }
         .animation(.snappy(duration: 0.2), value: working)
         .animation(.snappy(duration: 0.2), value: empty)
+        .onChange(of: focusRequest) { focused = true }
         .onChange(of: picked) {
             let items = picked
             picked = []

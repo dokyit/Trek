@@ -11,6 +11,12 @@ final class MockHost: Backend {
     private var items: [String: [TItem]] = [:]
     private var seq: [String: Int64] = [:]
     private var subscribed: Set<String> = []
+    /// Each thread's item counter, for the Mac's ids: `i<n>`, `c<n>` for a turn's changes, `r<n>`
+    /// for requests.
+    private var counters: [String: Int] = [:]
+    /// The seq at which a thread was last rewound (undo, retry, rewind): a subscribe from before
+    /// it gets the whole transcript again.
+    private var rewritten: [String: Int64] = [:]
     private var timer: Timer?
     private var tick = 0
     private var notes = DemoMac.notes()
@@ -90,9 +96,34 @@ final class MockHost: Backend {
         switch message {
         case .pair, .hello:
             break
-        case .subscribe(let tid, _):
+        case .subscribe(let tid, let afterSeq, let limit):
             subscribed.insert(tid)
-            deliver(.transcript(re: id, threadId: tid, reset: true, seq: seq[tid] ?? 0, items: items[tid] ?? []), after: 0.05)
+            let all = items[tid] ?? []
+            let current = seq[tid] ?? 0
+            if let after = afterSeq, after <= current, after >= (rewritten[tid] ?? 0) {
+                // What changed since the phone's copy.
+                deliverWire(WireMessage(type: "transcript", re: id, threadId: tid, reset: false, seq: current,
+                                        items: all.filter { $0.seq > after }), after: 0.05)
+            } else {
+                // The last `limit` items, and every request still pending.
+                var list = all
+                var more = false
+                // Turns' changed files (`c…`) come with their ends and don't count.
+                if let limit, let cut = Self.cut(all, keeping: limit) {
+                    list = all[..<cut].filter(\.isPendingRequest) + all[cut...]
+                    more = true
+                }
+                deliverWire(WireMessage(type: "transcript", re: id, threadId: tid, reset: true, seq: current, items: list, more: more),
+                            after: 0.05)
+            }
+        case .transcriptBefore(let tid, let before, let limit):
+            let all = items[tid] ?? []
+            guard let i = all.firstIndex(where: { $0.id == before }) else { return refuse(id, .notFound, "That item isn't in this thread any more.") }
+            let start = max(0, i - min(limit, 500))
+            deliverWire(WireMessage(type: "transcript_page", re: id, threadId: tid, items: Array(all[start..<i]), more: start > 0),
+                        after: 0.12)
+        case .turnAction(let tid, let itemID, let action, let model, let restore):
+            turnAction(tid, itemID, action, model: model, restoreFiles: restore, id: id)
         case .unsubscribe(let tid):
             subscribed.remove(tid)
         case .markSeen(let tid):
@@ -256,6 +287,101 @@ final class MockHost: Backend {
         if case .thread(let tid) = target { thread(tid) } else { nil }
     }
 
+    /// Where to cut so `limit` items that aren't changed files are kept; nil when they all fit.
+    private static func cut(_ all: [TItem], keeping limit: Int) -> Int? {
+        var kept = 0
+        var i = all.count
+        while i > 0 {
+            if !all[i - 1].id.hasPrefix("c") {
+                if kept == limit { return i }
+                kept += 1
+            }
+            i -= 1
+        }
+        return nil
+    }
+
+    /// Undo, retry, rewind or fork, as the Mac does them: undo, retry and rewind cut the
+    /// transcript back (to before the turn's message) and tell subscribers to load it again.
+    private func turnAction(_ tid: String, _ itemID: String, _ action: TurnAction, model: String?, restoreFiles: Bool, id: String?) {
+        let all = items[tid] ?? []
+        guard let i = all.firstIndex(where: { $0.id == itemID }) else {
+            return refuse(id, .notFound, "That message isn't in this thread any more.")
+        }
+        if action != .fork, thread(tid)?.runState == .working {
+            return refuse(id, .badRequest, "Stop the running turn to \(action.rawValue).")
+        }
+        let isMessage = if case .user = all[i].body { true } else { false }
+        switch action {
+        case .fork:
+            // From a turn: everything up to its end (and what it changed). From a message: what came before it.
+            var end = isMessage ? i : i + 1
+            if !isMessage, end < all.count, case .changes = all[end].body { end += 1 }
+            guard var t = thread(tid) else { return }
+            let newID = "t-fork-\(Self.nowMs)"
+            t.id = newID
+            t.title = "Fork of \(t.title)"
+            t.runState = .idle
+            t.needs = nil
+            t.activity = nil
+            t.workingSince = nil
+            t.section = .inbox
+            t.pinned = false
+            t.unseen = false
+            t.updatedAt = Self.now
+            threads.insert(t, at: 0)
+            items[newID] = all.prefix(end).filter { !$0.isPendingRequest }
+            seq[newID] = seq[tid]
+            counters[newID] = counters[tid]
+            if isMessage, case .user(let text, _) = all[i].body {
+                deliver(.ack(re: id, threadId: newID, text: text))
+            } else {
+                deliver(.ack(re: id, threadId: newID))
+            }
+            deliver(.thread(t))
+        case .rewind:
+            guard case .user(let text, _) = all[i].body else { return refuse(id, .badRequest, "Rewind from one of your messages.") }
+            cut(tid, at: i)
+            deliver(.ack(re: id, threadId: nil, text: text))
+            rewound(tid, restoreFiles: restoreFiles)
+        case .undo, .retry:
+            guard let start = all[...i].lastIndex(where: { if case .user = $0.body { true } else { false } }),
+                  case .user(let text, let images) = all[start].body else {
+                return refuse(id, .badRequest, "This turn didn't start from a message of yours.")
+            }
+            cut(tid, at: start)
+            if action == .undo { deliver(.ack(re: id, threadId: nil, text: text)) } else { ack(id) }
+            rewound(tid, restoreFiles: restoreFiles)
+            if action == .retry {
+                if let model {
+                    update(tid) { t in
+                        t.model = model
+                        t.modelLabel = self.agents.flatMap(\.models).first { $0.id == model }?.label
+                    }
+                }
+                later(0.3) { [weak self] in
+                    guard let self else { return }
+                    self.append(tid, .user(text: text, images: images))
+                    self.update(tid) { $0.runState = .working; $0.needs = nil; $0.workingSince = Self.now; $0.activity = "Thinking" }
+                    self.respond(in: tid, to: text)
+                }
+            }
+        }
+    }
+
+    /// Drops item `at` and everything after it.
+    private func cut(_ tid: String, at i: Int) {
+        items[tid] = Array((items[tid] ?? []).prefix(i))
+        let n = nextSeq(tid)
+        rewritten[tid] = n
+        update(tid) { $0.runState = .idle; $0.needs = nil; $0.activity = nil; $0.workingSince = nil; $0.updatedAt = Self.now }
+    }
+
+    private func rewound(_ tid: String, restoreFiles: Bool) {
+        if restoreFiles { update(tid, push: true) { $0.additions = max(0, $0.additions - 12); $0.deletions = max(0, $0.deletions - 3) } }
+        if subscribed.contains(tid) { deliver(.transcriptReset(tid), after: 0.05) }
+    }
+
     private func refuse(_ id: String?, _ code: ErrorCode, _ message: String) {
         deliver(.error(re: id, code: code, message: message), after: 0.2)
     }
@@ -288,7 +414,7 @@ final class MockHost: Backend {
         }
         update(tid) { $0.needs = nil; $0.runState = .working; $0.workingSince = Self.now; $0.activity = allowed ? "Running" : "Thinking" }
         if case .approval(let a) = item.body, allowed {
-            let tool = TItem(id: "\(tid)-run-\(Self.nowMs)", seq: 0, body: .tool(ToolCall(callId: "c\(Self.nowMs)", tool: .command, title: "Run", detail: a.detail, status: .running, output: "", added: nil, removed: nil)))
+            let tool = TItem(id: newID(tid, .notice("")), seq: 0, body: .tool(ToolCall(callId: "c\(Self.nowMs)", tool: .command, title: "Run", detail: a.detail, status: .running, output: "", added: nil, removed: nil)))
             put(tid, tool)
             later(2.2) { [weak self] in
                 guard let self else { return }
@@ -346,7 +472,7 @@ final class MockHost: Backend {
             (.read, "Read", "crates/trek-app/src/sidebar.rs"),
         ]
         let (kind, title, detail) = steps[tick % steps.count]
-        let id = "\(tid)-live-\(tick)"
+        let id = newID(tid, .notice(""))
         put(tid, TItem(id: id, seq: 0, body: .tool(ToolCall(callId: id, tool: kind, title: title, detail: detail, status: kind == .command ? .running : .done, output: "", added: kind == .edit ? 9 : nil, removed: kind == .edit ? 2 : nil))))
         update(tid, push: true) {
             $0.activity = kind == .command ? "Running \(detail)" : "\(title == "Edit" ? "Editing" : title == "Read" ? "Reading" : "Searching") \((detail as NSString).lastPathComponent)"
@@ -378,7 +504,60 @@ final class MockHost: Backend {
     }
 
     private func deliver(_ m: ServerMessage, after: Double = 0.03) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.onMessage?(m) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.post(.message(m)) }
+    }
+
+    /// What's on its way to the phone, in order. Transcripts go as JSON, encoded (as the Mac
+    /// would) and read back (as `TrekClient` does) off the main thread.
+    private enum Outgoing {
+        case message(ServerMessage)
+        case wire(WireMessage)
+    }
+
+    private var outbox: [Outgoing] = []
+    private var sending = false
+
+    private func post(_ o: Outgoing) {
+        outbox.append(o)
+        guard !sending else { return }
+        sending = true
+        Task { await drain() }
+    }
+
+    private func drain() async {
+        while !outbox.isEmpty {
+            switch outbox.removeFirst() {
+            case .message(let m):
+                onMessage?(m)
+            case .wire(let w):
+                guard let data = await Self.encode(w) else { continue }
+                if let m = await Perf.measureAsync("decode", "\(data.count / 1024) KB", { await ServerMessage.decodeInBackground(data) }) {
+                    onMessage?(m)
+                }
+            }
+        }
+        sending = false
+    }
+
+    @concurrent private nonisolated static func encode(_ w: WireMessage) async -> Data? {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        return try? encoder.encode(w)
+    }
+
+    /// A transcript or a page of one, as a real Mac sends it.
+    nonisolated struct WireMessage: Encodable, Sendable {
+        var type: String
+        var re: String?
+        var threadId: String
+        var reset: Bool? = nil
+        var seq: Int64? = nil
+        var items: [TItem]
+        var more: Bool? = nil
+    }
+
+    private func deliverWire(_ message: WireMessage, after: Double) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.post(.wire(message)) }
     }
 
     private func ack(_ id: String?, after: Double = 0.03) { deliver(.ack(re: id, threadId: nil), after: after) }
@@ -390,14 +569,25 @@ final class MockHost: Backend {
     }
 
     private func append(_ tid: String, _ body: ItemBody) {
-        put(tid, TItem(id: "\(tid)-\(UUID().uuidString.prefix(8))", seq: 0, body: body))
+        put(tid, TItem(id: newID(tid, body), seq: 0, body: body))
+    }
+
+    /// The next item id, as the Mac makes them.
+    private func newID(_ tid: String, _ body: ItemBody) -> String {
+        let n = (counters[tid] ?? 0) + 1
+        counters[tid] = n
+        switch body {
+        case .approval, .question, .plan: return "r\(n)"
+        case .changes: return "c\(n)"
+        default: return "i\(n)"
+        }
     }
 
     /// Adds or replaces an item (a fresh seq either way) and tells subscribers.
     private func put(_ tid: String, _ item: TItem, keepID: Bool = false) {
         var item = item
         item.seq = nextSeq(tid)
-        if item.at == nil, case .user = item.body { item.at = Self.now }
+        if item.at == nil { if case .user = item.body { item.at = Self.now } else if case .turnEnd = item.body { item.at = Self.now } }
         var list = items[tid] ?? []
         if let i = list.firstIndex(where: { $0.id == item.id }) { list[i] = item } else { list.append(item) }
         items[tid] = list
@@ -462,9 +652,14 @@ final class MockHost: Backend {
         ]
         for th in threads { seq[th.id] = 0; items[th.id] = [] }
 
+        var sentAt: [String: Int64] = [:]
         func add(_ tid: String, _ body: ItemBody, at: Int64? = nil) {
             let n = nextSeq(tid)
-            items[tid, default: []].append(TItem(id: "\(tid)-\(n)", seq: n, at: at, body: body))
+            var at = at
+            // A turn ends its took-seconds after the message that started it.
+            if case .user = body { sentAt[tid] = at }
+            if at == nil, case .turnEnd(let secs) = body { at = (sentAt[tid] ?? now) + Int64(secs) * 1000 }
+            items[tid, default: []].append(TItem(id: newID(tid, body), seq: n, at: at, body: body))
         }
         func tool(_ kind: ToolKind, _ title: String, _ detail: String, _ status: ToolStatus = .done, out: String = "",
                   add: Int? = nil, del: Int? = nil) -> ItemBody {
@@ -578,6 +773,20 @@ final class MockHost: Backend {
             add(tid, tool(.command, "Run", "cargo update -p tokio"))
             add(tid, .assistant(text: "Done, and the build is clean.", streaming: false))
             add(tid, .turnEnd(tookSecs: 64))
+        }
+
+        // `-TrekBigThread 3000`: a thread as long as a real day's work, to measure with.
+        let big = DemoMac.bigThreadSize
+        if big > 0 {
+            for (n, tid) in ["t-big", "t-big2"].enumerated() {
+                id = tid
+                threads.insert(t(id, n == 0 ? "Make the phone fast (\(big) items)" : "Another long day (\(big) items)", "p-trek",
+                                 "claude-code", "claude-opus-5-5", .idle, section: .pinned, pinned: true, branch: "perf/phone",
+                                 ago: 1 + Int64(n), add: 1240, del: 388), at: 0)
+                seq[id] = 0
+                items[id] = []
+                for (body, at) in DemoMac.bigThread(big, endingAt: now) { add(id, body, at: at) }
+            }
         }
     }
 }

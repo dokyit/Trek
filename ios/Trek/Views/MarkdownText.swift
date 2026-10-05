@@ -1,30 +1,23 @@
+import Synchronization
 import SwiftUI
 
 /// Agent Markdown, block by block: headings, paragraphs, bullet and numbered lists, quotes, fenced
 /// code and tables. Inline styling (bold, italics, links, `code` and file chips) is `RichText`.
-struct MarkdownText: View {
+/// The text is parsed once (and may already be, in the background, as the transcript arrived).
+struct MarkdownText: View, Equatable {
     var text: String
     var size: CGFloat = 16
 
+    typealias Align = Markdown.Align
+    typealias Block = Markdown.Block
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(Self.blocks(text).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { _, block in
                 view(for: block)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    enum Align: Equatable { case leading, center, trailing }
-
-    enum Block: Equatable {
-        case heading(Int, String)
-        case paragraph(String)
-        case bullet([String])
-        case numbered([String])
-        case quote(String)
-        case code(String, String)
-        case table(header: [String], align: [Align], rows: [[String]])
     }
 
     @ViewBuilder
@@ -72,7 +65,59 @@ struct MarkdownText: View {
         }
     }
 
+}
+
+/// The Markdown parser behind `MarkdownText`, with a cache: safe off the main thread, so a
+/// transcript's answers can be parsed in the background before they're drawn.
+nonisolated enum Markdown {
+    enum Align: Equatable, Sendable { case leading, center, trailing }
+
+    enum Block: Equatable, Sendable {
+        case heading(Int, String)
+        case paragraph(String)
+        case bullet([String])
+        case numbered([String])
+        case quote(String)
+        case code(String, String)
+        case table(header: [String], align: [Align], rows: [[String]])
+
+        /// The inline Markdown in it, for `RichText` (code isn't).
+        var inlines: [String] {
+            switch self {
+            case .heading(_, let s), .paragraph(let s), .quote(let s): [s]
+            case .bullet(let items), .numbered(let items): items
+            case .code: []
+            case .table(let header, _, let rows): header + rows.flatMap { $0 }
+            }
+        }
+    }
+
+    private static let cache = Mutex<[String: [Block]]>([:])
+
+    /// `text`'s blocks, parsed once.
     static func blocks(_ text: String) -> [Block] {
+        if let hit = cache.withLock({ $0[text] }) { return hit }
+        let parsed = parse(text)
+        cache.withLock { c in
+            if c.count > 3000 { c.removeAll(keepingCapacity: true) }
+            c[text] = parsed
+        }
+        return parsed
+    }
+
+    /// Parses `texts` (and their inline Markdown) in the background, so they draw at once.
+    static func prewarm(_ texts: [String]) {
+        guard !texts.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            for text in texts {
+                for block in blocks(text) {
+                    for inline in block.inlines { _ = Inline.parsed(inline) }
+                }
+            }
+        }
+    }
+
+    static func parse(_ text: String) -> [Block] {
         var out: [Block] = []
         var para: [String] = []
         var bullets: [String] = []

@@ -54,13 +54,19 @@ final class AppModel {
     var mode: AppMode = .unpaired
     var connection: ConnectionState = .idle
     var host: HostInfo?
-    var threads: [ThreadSummary] = []
+    var threads: [ThreadSummary] = [] {
+        didSet { threadsChanged() }
+    }
     var projects: [ProjectSummary] = []
     var agents: [AgentOption] = []
     /// The Mac lets threads run with Full access (unlocked in its Permissions settings).
     var fullAccessAllowed = false
-    var transcripts: [String: [TItem]] = [:]
-    var loadedTranscripts: Set<String> = []
+    /// Each opened thread's own store (its row, transcript and paging), so an update to one
+    /// thread redraws only what shows it. Not observed itself: views observe the stores.
+    @ObservationIgnored private var stores: [String: ThreadStore] = [:]
+    /// The tab bar's counts, kept as values so views that show them don't redraw on every row update.
+    private(set) var workingCount = 0
+    private(set) var needsYouCount = 0
     var toast: Toast?
     var pairing = false
     var pairingError: String?
@@ -100,8 +106,12 @@ final class AppModel {
     private var backend: Backend?
     private var nextRequest = 1
     private var replies: [String: (ServerMessage) -> Void] = [:]
-    private var subscribed: Set<String> = []
-    private var seqs: [String: Int64] = [:]
+    /// How many items a thread opens with; earlier ones come a page at a time as the user scrolls up.
+    static let firstPage = 60
+    static let earlierPage = 200
+    /// Which Mac the transcript cache is for.
+    @ObservationIgnored private var cacheHost: String?
+    @ObservationIgnored private var cacheSaves: Set<String> = []
 
     init() {
         followUpMode = SendMode(rawValue: UserDefaults.standard.string(forKey: "followUpMode") ?? "") ?? .steer
@@ -187,7 +197,7 @@ final class AppModel {
             self.connection = state
             if state == .connected {
                 // Resubscribe after a reconnect, from where we were.
-                for id in self.subscribed { self.request(.subscribe(threadId: id, afterSeq: self.seqs[id])) }
+                for s in self.stores.values where s.subscribed { self.resubscribe(s) }
             }
             if self.pairing, let why = Self.pairingFailure(state) {
                 self.pairing = false
@@ -227,10 +237,8 @@ final class AppModel {
         threads = []
         projects = []
         agents = []
-        transcripts = [:]
-        loadedTranscripts = []
-        subscribed = []
-        seqs = [:]
+        stores = [:]
+        cacheHost = nil
         replies = [:]
         host = nil
         transport = nil
@@ -254,6 +262,7 @@ final class AppModel {
         switch message {
         case .paired(_, _, let host), .welcome(_, let host):
             self.host = host
+            cacheHost = host.id
         case .snapshot(let s):
             withAnimation(.snappy) {
                 threads = s.threads
@@ -262,23 +271,40 @@ final class AppModel {
                 fullAccessAllowed = s.fullAccess ?? false
             }
         case .thread(let t):
-            withAnimation(.snappy) {
-                if let i = threads.firstIndex(where: { $0.id == t.id }) { threads[i] = t } else { threads.insert(t, at: 0) }
+            if let i = threads.firstIndex(where: { $0.id == t.id }) {
+                let old = threads[i]
+                guard old != t else { break }
+                // A working thread's row changes several times a second (its activity): only a
+                // move between sections is animated, not every update in place.
+                if old.section != t.section || old.runState != t.runState || (old.needs == nil) != (t.needs == nil) {
+                    withAnimation(.snappy) { threads[i] = t }
+                } else {
+                    threads[i] = t
+                }
+            } else {
+                withAnimation(.snappy) { threads.insert(t, at: 0) }
             }
         case .threadRemoved(let id):
             threads.removeAll { $0.id == id }
-        case .transcript(let re, let tid, let reset, let seq, let items):
-            if reset { transcripts[tid] = items } else { for item in items { upsert(item, in: tid) } }
-            seqs[tid] = max(seqs[tid] ?? 0, seq)
-            loadedTranscripts.insert(tid)
+            if let host = cacheHost ?? currentCacheHost { TranscriptCache.remove(host: host, thread: id) }
+        case .transcript(let re, let tid, let reset, let seq, let items, let more):
+            if let s = stores[tid] {
+                s.applyReply(reset: reset, seq: seq, items: items, more: more)
+                if let start = openStarts.removeValue(forKey: tid) {
+                    Perf.report("open \(tid): reply after \(Perf.ms(Perf.now - start)), \(items.count) items\(reset ? "" : " since the cache")")
+                    Perf.untilFrame("open \(tid): on screen", from: start)
+                }
+            }
+            reply(re, message)
+        case .transcriptPage(let re, _, _, _):
             reply(re, message)
         case .item(let tid, let item):
-            guard subscribed.contains(tid) else { return }
-            withAnimation(.smooth(duration: 0.25)) { upsert(item, in: tid) }
-            seqs[tid] = max(seqs[tid] ?? 0, item.seq)
+            guard let s = stores[tid], s.subscribed else { return }
+            s.enqueue(item)
         case .transcriptReset(let tid):
-            if subscribed.contains(tid) { request(.subscribe(threadId: tid, afterSeq: nil)) }
-        case .ack(let re, _, _), .pong(let re):
+            // Rewound or rewritten on the Mac: the whole (last page of the) transcript again.
+            if let s = stores[tid], s.subscribed { request(.subscribe(threadId: tid, afterSeq: nil, limit: Self.firstPage)) }
+        case .ack(let re, _, _, _), .pong(let re):
             reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _):
@@ -290,14 +316,16 @@ final class AppModel {
         }
     }
 
-    private func upsert(_ item: TItem, in tid: String) {
-        var list = transcripts[tid] ?? []
-        if let i = list.firstIndex(where: { $0.id == item.id }) {
-            list[i] = item
-        } else {
-            list.append(item)
+    /// Keeps each opened thread's store in step with its row, and the tab bar's counts.
+    private func threadsChanged() {
+        if !stores.isEmpty {
+            let byID = Dictionary(threads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            for (id, s) in stores { s.setSummary(byID[id]) }
         }
-        transcripts[tid] = list
+        let working = threads.count { $0.runState == .working }
+        let needs = threads.count { $0.waitsOnYou && $0.section != .snoozed }
+        if working != workingCount { workingCount = working }
+        if needs != needsYouCount { needsYouCount = needs }
     }
 
     private func reply(_ re: String?, _ message: ServerMessage) {
@@ -323,15 +351,114 @@ final class AppModel {
         }
     }
 
+    @ObservationIgnored private var openStarts: [String: Double] = [:]
+
+    /// The thread's store, made on first use.
+    func store(_ tid: String) -> ThreadStore {
+        if let s = stores[tid] { return s }
+        let s = ThreadStore(id: tid, summary: thread(tid))
+        s.onChange = { [weak self, weak s] in if let s { self?.scheduleCacheSave(s) } }
+        stores[tid] = s
+        return s
+    }
+
+    /// Opens a thread's transcript: what the cache has shows at once, and the Mac sends what's
+    /// newer (or the last page, when it's the first time).
     func subscribe(_ tid: String) {
-        subscribed.insert(tid)
-        request(.subscribe(threadId: tid, afterSeq: loadedTranscripts.contains(tid) ? seqs[tid] : nil))
+        let s = store(tid)
+        guard !s.subscribed else { return }
+        if Perf.enabled { openStarts[tid] = Perf.navigated ?? Perf.now; Perf.navigated = nil }
+        if !s.loaded, let host = cacheHost ?? currentCacheHost,
+           let cached = Perf.measure("cache load", tid, { TranscriptCache.load(host: host, thread: tid) }) {
+            s.restore(items: cached.items, seq: cached.seq, more: cached.more)
+            if let start = openStarts[tid] { Perf.untilFrame("open \(tid): cache on screen (\(cached.items.count) items)", from: start) }
+        }
+        s.subscribed = true
+        resubscribe(s)
         markSeen(tid)
     }
 
+    private func resubscribe(_ s: ThreadStore) {
+        request(.subscribe(threadId: s.id, afterSeq: s.loaded ? s.seq : nil, limit: Self.firstPage))
+    }
+
     func unsubscribe(_ tid: String) {
-        subscribed.remove(tid)
+        guard let s = stores[tid], s.subscribed else { return }
+        s.subscribed = false
+        s.flushQueued()
+        saveCache(s)
+        s.trim(to: TranscriptCache.keepItems)
         backend?.send(.unsubscribe(threadId: tid), id: nil)
+    }
+
+    /// The page before the earliest item loaded, when there is one.
+    func loadEarlier(_ tid: String) {
+        guard let s = stores[tid], s.more, !s.loadingEarlier, let before = s.earliestID else { return }
+        s.loadingEarlier = true
+        let start = Perf.now
+        request(.transcriptBefore(threadId: tid, before: before, limit: Self.earlierPage)) { [weak self, weak s] reply in
+            guard let s else { return }
+            switch reply {
+            case .transcriptPage(_, _, let items, let more):
+                s.prepend(items, more: more)
+                Perf.untilFrame("earlier page (\(items.count) items) on screen", from: start)
+            case .error(_, _, let text):
+                s.loadingEarlier = false
+                self?.show(text, error: true)
+            default: s.loadingEarlier = false
+            }
+        }
+    }
+
+    /// The Mac whose transcripts the cache holds: the one answering, else the one paired with.
+    private var currentCacheHost: String? {
+        switch mode {
+        case .demo: host?.id ?? "demo-mac"
+        case .live: host?.id ?? PairedMac.load()?.hostId
+        case .unpaired: nil
+        }
+    }
+
+    private func scheduleCacheSave(_ s: ThreadStore) {
+        guard !cacheSaves.contains(s.id) else { return }
+        cacheSaves.insert(s.id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak s] in
+            guard let self, let s else { return }
+            self.cacheSaves.remove(s.id)
+            self.saveCache(s)
+        }
+    }
+
+    private func saveCache(_ s: ThreadStore) {
+        guard s.loaded, let host = cacheHost ?? currentCacheHost else { return }
+        TranscriptCache.save(host: host, thread: s.id, items: s.items, seq: s.seq, more: s.more)
+    }
+
+    // MARK: Turn actions
+
+    /// Text for a thread's composer when it opens (a fork from a message).
+    @ObservationIgnored private var drafts: [String: String] = [:]
+
+    func takeDraft(_ tid: String) -> String? { drafts.removeValue(forKey: tid) }
+
+    /// Undo, retry or fork a turn (from its `turn_end` item), or rewind or fork from a message
+    /// (its `user` item). A fork opens the new thread; a rewind puts the message in `compose`.
+    func turnAction(_ tid: String, item: String, _ action: TurnAction, model: String? = nil, restoreFiles: Bool = true,
+                    compose: ((String) -> Void)? = nil) {
+        act(.turnAction(threadId: tid, itemId: item, action: action, model: model, restoreFiles: restoreFiles)) { [weak self] reply in
+            guard case .ack(_, let newThread, _, let text) = reply else { return }
+            switch action {
+            case .fork:
+                guard let self, let newThread else { self?.show("Forked"); return }
+                // Forked from a message: it waits in the new thread's composer.
+                if let text { self.drafts[newThread] = text }
+                self.openRequest = newThread
+            case .rewind, .undo:
+                if let text { compose?(text) }
+            case .retry:
+                break
+            }
+        }
     }
 
     func markSeen(_ tid: String) {
@@ -342,7 +469,7 @@ final class AppModel {
     func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = []) {
         act(.send(threadId: tid, text: text, mode: mode, images: images)) { [weak self] reply in
             // `/new`: the Mac leaves its own screen be and asks the phone to open its sheet.
-            if case .ack(_, _, let open?) = reply, open.screen == "new_thread" { self?.newThreadPrompt = open.projectId ?? "" }
+            if case .ack(_, _, let open?, _) = reply, open.screen == "new_thread" { self?.newThreadPrompt = open.projectId ?? "" }
         }
     }
 
@@ -358,7 +485,7 @@ final class AppModel {
             }
             if let model {
                 threads[i].model = model
-                threads[i].modelLabel = agents.first { $0.key == threads[i].agent.key }?.models.first { $0.id == model }?.label ?? model
+                threads[i].modelLabel = agents.first { $0.key == threads[i].agent.key }?.models.first { $0.id == model }?.label ?? ModelNaming.display(model)
             }
             if let effort { threads[i].effort = effort }
             if let access { threads[i].access = access }
@@ -399,7 +526,7 @@ final class AppModel {
                    opened: @escaping (String) -> Void) {
         act(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree,
                        effort: effort, access: access, plan: plan, images: images)) { reply in
-            if case .ack(_, let tid?, _) = reply { opened(tid) }
+            if case .ack(_, let tid?, _, _) = reply { opened(tid) }
         }
     }
 
@@ -654,8 +781,6 @@ final class AppModel {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    var workingCount: Int { threads.filter { $0.runState == .working }.count }
-    var needsYouCount: Int { threads.filter { $0.waitsOnYou && $0.section != .snoozed }.count }
 }
 
 extension ThreadSummary {
@@ -693,16 +818,26 @@ struct PairedMac: Codable {
         transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .plain
     }
 
+    /// The Keychain read once: views ask for it as they draw (the Settings tab, the connection
+    /// banner), and a Keychain query on every redraw made them slow to appear.
+    private static var cached: PairedMac??
+
     static func load() -> PairedMac? {
-        guard let data = Keychain.read("paired-mac") else { return nil }
-        return try? JSONDecoder().decode(PairedMac.self, from: data)
+        if let cached { return cached }
+        let paired = Keychain.read("paired-mac").flatMap { try? JSONDecoder().decode(PairedMac.self, from: $0) }
+        cached = .some(paired)
+        return paired
     }
 
     func save() {
         if let data = try? JSONEncoder().encode(self) { Keychain.write("paired-mac", data) }
+        Self.cached = .some(self)
     }
 
-    static func clear() { Keychain.delete("paired-mac") }
+    static func clear() {
+        Keychain.delete("paired-mac")
+        cached = .some(nil)
+    }
 }
 
 enum Device {

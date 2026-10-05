@@ -133,6 +133,18 @@ nonisolated enum ThreadAction: Hashable {
     }
 }
 
+/// What `turn_action` does to a turn.
+nonisolated enum TurnAction: String, Hashable {
+    /// Take back the turn: the message and everything after it.
+    case undo
+    /// Take it back and send the message again (with `model`, another model).
+    case retry
+    /// A new thread with the conversation up to here.
+    case fork
+    /// Back to before a message; the ack carries its text, to edit and send again.
+    case rewind
+}
+
 nonisolated enum Decision: String, Codable {
     case allow, allowForSession = "allow_for_session", deny
 }
@@ -380,7 +392,7 @@ nonisolated struct TurnChanges: Hashable {
     var removed: Int
 }
 
-nonisolated struct TItem: Identifiable, Hashable, Decodable {
+nonisolated struct TItem: Identifiable, Hashable, Codable {
     var id: String
     var seq: Int64
     var at: Int64?
@@ -394,32 +406,32 @@ nonisolated struct TItem: Identifiable, Hashable, Decodable {
     }
 
     /// Every field any item kind can carry; the `kind` picks which ones matter.
-    private struct Raw: Decodable {
+    private struct Raw: Codable {
         var id: String
         var seq: Int64
         var at: Int64?
         var kind: String
-        var text: String?
-        var images: Int?
-        var streaming: Bool?
-        var callId: String?
-        var tool: ToolKind?
-        var title: String?
-        var detail: String?
-        var status: ToolStatus?
-        var output: String?
-        var added: Int?
-        var removed: Int?
-        var requestId: String?
-        var state: String?
-        var questions: [Question]?
-        var answers: [QuestionAnswer]?
-        var markdown: String?
-        var tookSecs: Int?
-        var resetsAt: Int64?
-        var from: String?
-        var to: String?
-        var files: [ChangedFile]?
+        var text: String? = nil
+        var images: Int? = nil
+        var streaming: Bool? = nil
+        var callId: String? = nil
+        var tool: ToolKind? = nil
+        var title: String? = nil
+        var detail: String? = nil
+        var status: ToolStatus? = nil
+        var output: String? = nil
+        var added: Int? = nil
+        var removed: Int? = nil
+        var requestId: String? = nil
+        var state: String? = nil
+        var questions: [Question]? = nil
+        var answers: [QuestionAnswer]? = nil
+        var markdown: String? = nil
+        var tookSecs: Int? = nil
+        var resetsAt: Int64? = nil
+        var from: String? = nil
+        var to: String? = nil
+        var files: [ChangedFile]? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -459,6 +471,31 @@ nonisolated struct TItem: Identifiable, Hashable, Decodable {
         }
     }
 
+    /// The item as the wire carries it (with `convertToSnakeCase`), so what `init(from:)` reads
+    /// back: for the transcript cache on disk, and for the demo Mac.
+    func encode(to encoder: Encoder) throws {
+        var r = Raw(id: id, seq: seq, at: at, kind: "")
+        switch body {
+        case .user(let text, let images): r.kind = "user"; r.text = text; r.images = images
+        case .assistant(let text, let streaming): r.kind = "assistant"; r.text = text; r.streaming = streaming
+        case .reasoning(let text): r.kind = "reasoning"; r.text = text
+        case .tool(let c):
+            r.kind = "tool"; r.callId = c.callId; r.tool = c.tool; r.title = c.title; r.detail = c.detail
+            r.status = c.status; r.output = c.output; r.added = c.added; r.removed = c.removed
+        case .approval(let a): r.kind = "approval"; r.requestId = a.requestId; r.title = a.title; r.detail = a.detail; r.state = a.state.rawValue
+        case .question(let q): r.kind = "question"; r.requestId = q.requestId; r.questions = q.questions; r.state = q.state.rawValue; r.answers = q.answers
+        case .plan(let p): r.kind = "plan"; r.requestId = p.requestId; r.markdown = p.markdown; r.state = p.state.rawValue
+        case .turnEnd(let secs): r.kind = "turn_end"; r.tookSecs = secs
+        case .notice(let s): r.kind = "notice"; r.text = s
+        case .error(let s): r.kind = "error"; r.text = s
+        case .limit(let s, let at): r.kind = "limit"; r.text = s; r.resetsAt = at
+        case .handoff(let a, let b): r.kind = "handoff"; r.from = a; r.to = b
+        case .changes(let c): r.kind = "changes"; r.files = c.files; r.added = c.added; r.removed = c.removed
+        case .unknown(let kind): r.kind = kind
+        }
+        try r.encode(to: encoder)
+    }
+
     /// A request that waits on the user right now.
     var isPendingRequest: Bool {
         switch body {
@@ -493,11 +530,15 @@ nonisolated enum ServerMessage {
     case snapshot(Snapshot)
     case thread(ThreadSummary)
     case threadRemoved(String)
-    case transcript(re: String?, threadId: String, reset: Bool, seq: Int64, items: [TItem])
+    /// `more`: items before these exist (load them with `transcriptBefore`).
+    case transcript(re: String?, threadId: String, reset: Bool, seq: Int64, items: [TItem], more: Bool = false)
+    /// The items just before the one asked for, in order.
+    case transcriptPage(re: String?, threadId: String, items: [TItem], more: Bool)
     case item(threadId: String, item: TItem)
     case transcriptReset(String)
     /// `open`: the phone carries on by itself (`/new` sent to a thread opens the new-thread sheet).
-    case ack(re: String?, threadId: String?, open: OpenScreen? = nil)
+    /// `text`: a rewound message, for the composer.
+    case ack(re: String?, threadId: String?, open: OpenScreen? = nil, text: String? = nil)
     case pong(re: String?)
     case error(re: String?, code: ErrorCode, message: String)
     case usage(re: String?, Usage)
@@ -532,6 +573,8 @@ nonisolated enum ServerMessage {
         var notes: [NoteSummary]?
         var note: Note?
         var commands: [CommandInfo]?
+        var text: String?
+        var more: Bool?
     }
 
     static let decoder: JSONDecoder = {
@@ -557,12 +600,15 @@ nonisolated enum ServerMessage {
             return .thread(t)
         case "thread_removed": return .threadRemoved(r.threadId ?? "")
         case "transcript":
-            return .transcript(re: r.re, threadId: r.threadId ?? "", reset: r.reset ?? true, seq: r.seq ?? 0, items: r.items ?? [])
+            return .transcript(re: r.re, threadId: r.threadId ?? "", reset: r.reset ?? true, seq: r.seq ?? 0, items: r.items ?? [],
+                               more: r.more ?? false)
+        case "transcript_page":
+            return .transcriptPage(re: r.re, threadId: r.threadId ?? "", items: r.items ?? [], more: r.more ?? false)
         case "item":
             guard let item = r.item, let tid = r.threadId else { throw ProtocolError.missing("item") }
             return .item(threadId: tid, item: item)
         case "transcript_reset": return .transcriptReset(r.threadId ?? "")
-        case "ack": return .ack(re: r.re, threadId: r.threadId, open: r.open)
+        case "ack": return .ack(re: r.re, threadId: r.threadId, open: r.open, text: r.text)
         case "pong": return .pong(re: r.re)
         case "error": return .error(re: r.re, code: r.code ?? .unknown, message: r.message ?? "")
         // Replies that are a value whole: decoded from the message itself.
@@ -579,6 +625,13 @@ nonisolated enum ServerMessage {
         case "settings": return .settings(re: r.re, try decoder.decode(MacSettings.self, from: data))
         default: return .unknown(r.type)
         }
+    }
+}
+
+nonisolated extension ServerMessage {
+    /// Decodes off the main actor: a long transcript takes a while to read, and the UI keeps going.
+    @concurrent static func decodeInBackground(_ data: Data) async -> ServerMessage? {
+        try? decode(data)
     }
 }
 
@@ -607,7 +660,13 @@ nonisolated enum AnswerResponse {
 nonisolated enum ClientMessage {
     case pair(code: String, deviceId: String, deviceName: String)
     case hello(deviceId: String, token: String)
-    case subscribe(threadId: String, afterSeq: Int64?)
+    /// `limit`: on a reset, only the last `limit` items (and every pending request).
+    case subscribe(threadId: String, afterSeq: Int64?, limit: Int? = nil)
+    /// The `limit` items just before item `before` (the Mac caps it at 500).
+    case transcriptBefore(threadId: String, before: String, limit: Int)
+    /// Undo, retry, fork or rewind a turn, from its `turn_end` item (or, rewinding and forking from
+    /// a message, its `user` item). `model`: retry with another model.
+    case turnAction(threadId: String, itemId: String, action: TurnAction, model: String? = nil, restoreFiles: Bool = true)
     case unsubscribe(threadId: String)
     case send(threadId: String, text: String, mode: SendMode?, images: [ImageUpload])
     case newThread(projectId: String, agent: String, model: String?, text: String, worktree: Bool,
@@ -651,8 +710,15 @@ nonisolated enum ClientMessage {
         case .hello(let deviceId, let token):
             o = ["type": "hello", "protocol": trekProtocolVersion, "device_id": deviceId, "token": token,
                  "app_version": Self.appVersion]
-        case .subscribe(let threadId, let afterSeq):
+        case .subscribe(let threadId, let afterSeq, let limit):
             o = ["type": "subscribe", "thread_id": threadId, "after_seq": afterSeq.map { $0 as Any } ?? NSNull()]
+            if let limit { o["limit"] = limit }
+        case .transcriptBefore(let threadId, let before, let limit):
+            o = ["type": "transcript_before", "thread_id": threadId, "before": before, "limit": limit]
+        case .turnAction(let threadId, let itemId, let action, let model, let restoreFiles):
+            o = ["type": "turn_action", "thread_id": threadId, "item_id": itemId, "action": action.rawValue]
+            if let model { o["model"] = model }
+            if action != .fork { o["restore_files"] = restoreFiles }
         case .unsubscribe(let threadId):
             o = ["type": "unsubscribe", "thread_id": threadId]
         case .send(let threadId, let text, let mode, let images):

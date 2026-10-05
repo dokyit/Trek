@@ -11,7 +11,7 @@ struct ThreadsView: View {
     @Environment(\.compactRows) private var compact
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack(path: $path.onSet { if Perf.enabled { Perf.navigated = Perf.now } }) {
             List {
                 if model.mode == .live, model.connection != .connected {
                     Group {
