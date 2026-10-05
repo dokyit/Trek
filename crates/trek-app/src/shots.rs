@@ -6,7 +6,9 @@
 //! behind others still draws.
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|first`,
-//! `send <prompt>`, `pair` (a pairing code, its link written to `pair.txt`), `new` (⌘N), `settled` (fold or open settled history), `glass on|off`, `tint <0.3–0.9>`, `theme night|paper`, `tools`, `wait <ms>`, `shot <name>`.
+//! `send <prompt>`, `pair` (a pairing code, its link written to `pair.txt`), `new` (⌘N), `settled`
+//! (fold or open settled history), `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools`,
+//! `range today|week|all` (Basecamp's), `wait <ms>`, `shot <name>`.
 
 use crate::workspace::{Route, SettingsPage, Workspace};
 use gpui_kit::*;
@@ -56,6 +58,25 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
 }
 
 fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) {
+    if verb == "range" {
+        use trek_core::basecamp::Range;
+        let range = match arg {
+            "week" => Range::Week,
+            "all" => Range::All,
+            _ => Range::Today,
+        };
+        if let Some(main) = ws.read(cx).main_window {
+            let _ = main.update(cx, |root, _, cx| {
+                let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+                if let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) {
+                    let basecamp = trek.read(cx).basecamp.clone();
+                    basecamp.update(cx, |b, cx| b.set_range(range, cx));
+                }
+            });
+        }
+        cx.refresh_windows();
+        return;
+    }
     ws.update(cx, |ws, cx| match (verb, arg) {
         ("route", "draft") => ws.new_thread(cx),
         ("route", "no-project") => ws.navigate(Route::Draft { project: None }, cx),

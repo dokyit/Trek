@@ -1,12 +1,13 @@
-//! Basecamp: the day's (or week's) trek at a glance. On the left, what's ready for review; on
-//! the right, the recap in a few sentences, the day's elevation profile (activity drawn as a
-//! mountain, the summit flagged, the hiker at "now") and quiet stat tiles.
+//! Basecamp: the day's (or week's, or all time's) trek at a glance. On the left, what's ready
+//! for review; on the right, the recap in a few sentences, the elevation profile (activity drawn
+//! as a mountain, the summit flagged, the hiker at "now") and quiet stat tiles.
 //!
 //! The recap is computed off the main thread (`trek_core::basecamp`) when Basecamp opens and
 //! whenever threads change while it's open; frames only draw it.
 
 use crate::palette;
 use crate::ui;
+use chrono::Datelike as _;
 use crate::workspace::{Route, Workspace, fmt_tokens};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -113,7 +114,6 @@ impl Basecamp {
         self.shown_at = None;
     }
 
-    #[cfg(test)]
     pub fn range(&self) -> Range {
         self.range
     }
@@ -178,6 +178,8 @@ impl Basecamp {
     /// finishes looks again.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
+        // A new day (or week) makes the recap out of date. All time's own start is found with the
+        // history, off the main thread; this one is today's, so it's computed again each day too.
         let window = self.range.window(&chrono::Local::now());
         let key = Key {
             range: self.range,
@@ -191,12 +193,13 @@ impl Basecamp {
         }
         self.computing = true;
         let store = ws.store.clone();
+        let range = self.range;
         let work = cx.background_executor().spawn(async move {
-            let threads = basecamp::gather(&store, &window).unwrap_or_else(|e| {
+            let now = chrono::Local::now();
+            basecamp::recap(&store, range, &now).unwrap_or_else(|e| {
                 tracing::warn!("basecamp: {e:#}");
-                vec![]
-            });
-            Recap::compute(window, now_ms(), &threads)
+                Recap::compute(range.window(&now), now.timestamp_millis(), &[])
+            })
         });
         self._compute = Some(cx.spawn(async move |this, cx| {
             let recap = work.await;
@@ -235,8 +238,15 @@ impl Basecamp {
     fn header(&self, review_unread: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let now = chrono::Local::now();
-        let greeting = format!("{}, {}", basecamp::greeting(chrono::Timelike::hour(&now)), now.format("%A %-d %B"));
+        let hello = basecamp::greeting(chrono::Timelike::hour(&now));
         let range = self.range;
+        // All time says since when, once the recap knows.
+        let since = self.recap.as_deref().filter(|r| r.window.range == Range::All && range == Range::All).and_then(|r| r.first).map(local);
+        let greeting = match since {
+            Some(d) if d.year() == now.year() => format!("{hello} — on the trail since {}", d.format("%-d %B")),
+            Some(d) => format!("{hello} — on the trail since {}", d.format("%-d %B %Y")),
+            None => format!("{hello}, {}", now.format("%A %-d %B")),
+        };
         let this = cx.entity().downgrade();
         h_flex()
             .w_full()
@@ -247,7 +257,7 @@ impl Basecamp {
             .child(div().flex_1())
             .child(ui::segmented(
                 "basecamp-range",
-                vec![(Range::Today, Range::Today.label()), (Range::Week, Range::Week.label())],
+                [Range::Today, Range::Week, Range::All].map(|r| (r, r.label())).to_vec(),
                 range,
                 move |r, _, cx| {
                     let _ = this.update(cx, |this, cx| this.set_range(r, cx));
@@ -310,6 +320,7 @@ impl Basecamp {
         let title = match recap.window.range {
             Range::Today => "Today's trek",
             Range::Week => "This week's trek",
+            Range::All => "Your trek so far",
         };
         let updated = if self.computing { "Updating…".to_string() } else { format!("Updated {}", crate::time::clock(recap.now)) };
         v_flex()
@@ -411,11 +422,7 @@ impl Basecamp {
         }
         let total = recap.tokens.total();
         if total > 0 {
-            let when = match recap.window.range {
-                Range::Today => "today",
-                Range::Week => "this week",
-            };
-            let note = tokens_note(recap, when);
+            let note = tokens_note(recap, during(recap.window.range));
             let spark = Sparkline::of(recap, p, cx);
             tiles.push(tile(
                 "You used",
@@ -430,10 +437,7 @@ impl Basecamp {
         if recap.agent_secs > 0 || recap.failed > 0 {
             // Said of the range, so a failure from before it still waiting for review (on the
             // left) doesn't contradict it.
-            let when = match recap.window.range {
-                Range::Today => "today",
-                Range::Week => "this week",
-            };
+            let when = during(recap.window.range);
             let note = match recap.failed {
                 0 => format!("Nothing failed {when}"),
                 n => format!("{} failed {when}", basecamp::count(n, "turn", "turns")),
@@ -485,9 +489,9 @@ impl Basecamp {
     /// Nothing on the trail in this range yet.
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let when = match self.range {
-            Range::Today => "today",
-            Range::Week => "this week",
+        let invitation = match self.range {
+            Range::All => "Nothing on the trail yet — start a thread.".to_string(),
+            range => format!("Nothing on the trail yet {} — start a thread.", during(range)),
         };
         let data = Profile::flat(self.recap.as_deref(), cx);
         v_flex()
@@ -495,7 +499,7 @@ impl Basecamp {
             .test_support()
             .gap(px(12.))
             .child(div().w_full().h(px(PROFILE_TOP + 40.)).child(canvas(|_, _, _| {}, move |b, _, window, cx| data.paint(b, window, cx)).size_full()))
-            .child(div().text_size(px(17.)).line_height(px(26.)).text_color(theme.foreground.opacity(0.85)).child(format!("Nothing on the trail yet {when} — start a thread.")))
+            .child(div().text_size(px(17.)).line_height(px(26.)).text_color(theme.foreground.opacity(0.85)).child(invitation))
             .child(
                 h_flex().child(
                     Button::new("basecamp-new-thread")
@@ -810,39 +814,97 @@ fn tween(text: &str, p: f32) -> String {
     out
 }
 
-/// The local hour of `ms`: "2 PM".
-fn hour(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%-I %p").to_string()).unwrap_or_default()
+const HOUR: i64 = 3_600_000;
+const DAY: i64 = 24 * HOUR;
+
+/// The range as a sentence ends with it: "Nothing failed today", "… so far".
+fn during(range: Range) -> &'static str {
+    match range {
+        Range::Today => "today",
+        Range::Week => "this week",
+        Range::All => "so far",
+    }
 }
 
-/// A stretch of the profile, for the line above it: "2–3 PM", "Tue 3–6 PM".
+fn local(ms: i64) -> chrono::DateTime<chrono::Local> {
+    chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default().with_timezone(&chrono::Local)
+}
+
+/// The local hour of `ms`: "2 PM".
+fn hour(ms: i64) -> String {
+    local(ms).format("%-I %p").to_string()
+}
+
+/// The day a stretch of days or weeks starts on: "Sep 14", with the year when it isn't this
+/// one. Read at its noon, as across a clock change it may start an hour either side of midnight.
+fn day(start: i64) -> String {
+    let d = local(start + DAY / 2);
+    if d.year() == chrono::Local::now().year() { d.format("%b %-d").to_string() } else { d.format("%b %-d, %Y").to_string() }
+}
+
+/// A stretch of the profile, for the line above it: "2–3 PM", "Tue 3–6 PM", "Sep 14", "week of
+/// Sep 8", "Sep 8 – Oct 5".
 fn stretch_label(recap: &Recap, i: usize) -> String {
-    let start = recap.window.start + i as i64 * recap.window.bucket_ms;
-    let end = start + recap.window.bucket_ms;
-    let (a, b) = (hour(start), hour(end));
+    let w = &recap.window;
+    let start = w.start + i as i64 * w.bucket_ms;
+    if w.bucket_ms >= 2 * 7 * DAY {
+        return format!("{} – {}", day(start), day(start + w.bucket_ms - DAY));
+    }
+    if w.bucket_ms >= 7 * DAY {
+        return format!("week of {}", day(start));
+    }
+    if w.bucket_ms >= DAY {
+        return day(start);
+    }
+    let (a, b) = (hour(start), hour(start + w.bucket_ms));
     let span = match (a.split_once(' '), b.split_once(' ')) {
         (Some((h0, m0)), Some((h1, m1))) if m0 == m1 => format!("{h0}–{h1} {m1}"),
         _ => format!("{a}–{b}"),
     };
-    match recap.window.range {
-        Range::Today => span,
-        Range::Week => {
-            let day = chrono::DateTime::from_timestamp_millis(start).map(|d| d.with_timezone(&chrono::Local).format("%a").to_string()).unwrap_or_default();
-            format!("{day} {span}")
-        }
+    // Over more than a day, which day.
+    if w.end - w.start > DAY + HOUR { format!("{} {span}", local(start).format("%a")) } else { span }
+}
+
+/// Where the summit was: "at 2 PM", "on Tuesday", "on Sep 14", "the week of Sep 8".
+fn summit_label(recap: &Recap, i: usize) -> String {
+    let w = &recap.window;
+    let start = w.start + i as i64 * w.bucket_ms;
+    if w.bucket_ms >= 2 * 7 * DAY {
+        format!("in the weeks from {}", day(start))
+    } else if w.bucket_ms >= 7 * DAY {
+        format!("the week of {}", day(start))
+    } else if w.bucket_ms >= DAY {
+        format!("on {}", day(start))
+    } else if w.end - w.start > DAY + HOUR {
+        format!("on {}", local(start).format("%A"))
+    } else {
+        format!("at {}", hour(start))
     }
 }
 
-/// Where the summit was: "at 2 PM", "on Tuesday".
-fn summit_label(recap: &Recap, i: usize) -> String {
-    let start = recap.window.start + i as i64 * recap.window.bucket_ms;
-    match recap.window.range {
-        Range::Today => format!("at {}", hour(start)),
-        Range::Week => {
-            let day = chrono::DateTime::from_timestamp_millis(start).map(|d| d.with_timezone(&chrono::Local).format("%A").to_string()).unwrap_or_default();
-            format!("on {day}")
+/// The profile's axis labels, as fractions of its width: the hours of a day, the days of a few,
+/// else five dates spread across it ("Sep 14", or "Sep 2025" when it reaches back past this year).
+fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
+    let span = (w.end - w.start).max(1) as f32;
+    if w.bucket_ms < 3 * HOUR {
+        return [(6, "6 AM"), (12, "Noon"), (18, "6 PM")].iter().map(|(h, l)| ((*h as f32 * HOUR as f32) / span, l.to_string())).collect();
+    }
+    if w.bucket_ms < DAY {
+        let days = ((w.end - w.start + DAY / 2) / DAY).max(1);
+        return (0..days).map(|d| ((d as f32 + 0.5) / days as f32, local(w.start + d * DAY + DAY / 2).format("%a").to_string())).collect();
+    }
+    let n = w.buckets();
+    let years = local(w.start + DAY / 2).year() != chrono::Local::now().year();
+    let mut out: Vec<(f32, String)> = vec![];
+    for f in [0.1, 0.3, 0.5, 0.7, 0.9] {
+        let i = ((f * n as f32) as usize).min(n - 1);
+        let d = local(w.start + i as i64 * w.bucket_ms + DAY / 2);
+        let label = if years { d.format("%b %Y") } else { d.format("%b %-d") }.to_string();
+        if out.last().is_none_or(|(_, l)| *l != label) {
+            out.push(((i as f32 + 0.5) / n as f32, label));
         }
     }
+    out
 }
 
 /// What the elevation profile draws, worked out once per render.
@@ -875,12 +937,7 @@ impl Profile {
         let (now, ticks) = match recap {
             Some(r) => {
                 let span = (r.window.end - r.window.start).max(1) as f32;
-                let now = ((r.now - r.window.start) as f32 / span).clamp(0., 1.);
-                let ticks = match r.window.range {
-                    Range::Today => [(6, "6 AM"), (12, "Noon"), (18, "6 PM")].iter().map(|(h, l)| ((*h as f32 * 3_600_000.) / span, l.to_string())).collect(),
-                    Range::Week => ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().enumerate().map(|(d, l)| ((d as f32 + 0.5) / 7., l.to_string())).collect(),
-                };
-                (now, ticks)
+                (((r.now - r.window.start) as f32 / span).clamp(0., 1.), ticks(&r.window))
             }
             None => (0.5, vec![]),
         };
@@ -1051,7 +1108,7 @@ impl Sparkline {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokens_note, tween};
+    use super::{DAY, stretch_label, summit_label, ticks, tokens_note, tween};
     use trek_core::basecamp::{Range, Recap, ThreadActivity};
     use trek_core::store::{Activity, Store, UsageRow};
     use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
@@ -1073,6 +1130,7 @@ mod tests {
         codex.usage = vec![row(&codex, "gpt-5.6-luna", TokenUsage { input: 100_000, output: 10_000, ..Default::default() }, None)];
         let r = Recap::compute(window, at + 5_000, &[claude.clone(), codex]);
         assert_eq!(tokens_note(&r, "today"), "≈ $1.28 at API prices today");
+        assert_eq!(tokens_note(&r, super::during(Range::All)), "≈ $1.28 at API prices so far");
         // Threads that didn't report their tokens are said to be missing from it.
         let quiet = thread(AgentId::Acp("gemini".into()));
         let r = Recap::compute(window, at + 5_000, &[claude.clone(), quiet]);
@@ -1087,6 +1145,40 @@ mod tests {
         // Nothing priced: just where the tokens came from.
         let r = Recap::compute(window, at + 5_000, &[fusion, thread(AgentId::Acp("gemini".into()))]);
         assert_eq!(tokens_note(&r, "today"), "From 1 of 2 threads");
+    }
+
+    #[test]
+    fn all_time_is_labelled_by_the_hour_day_or_week_it_is_drawn_in() {
+        let now = chrono::Local::now();
+        let ago = |days: i64| now - chrono::Duration::days(days);
+        let recap = |days: i64| Recap::compute(Range::All.window_from(&now, Some(ago(days).timestamp_millis())), now.timestamp_millis(), &[]);
+        // Just today: as today.
+        let r = recap(0);
+        assert_eq!(ticks(&r.window).iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), ["6 AM", "Noon", "6 PM"]);
+        let afternoon = stretch_label(&r, 14);
+        assert!(afternoon.ends_with(" PM") && !afternoon.contains(&now.format("%a").to_string()), "{afternoon}");
+        // A few days: the day's name with the hours.
+        let r = recap(3);
+        assert_eq!(ticks(&r.window).len(), 4);
+        assert!(stretch_label(&r, 0).starts_with(&ago(3).format("%a ").to_string()), "{}", stretch_label(&r, 0));
+        assert_eq!(summit_label(&r, 0), format!("on {}", ago(3).format("%A")));
+        // Six weeks: dates.
+        let r = recap(41);
+        assert!(stretch_label(&r, 0).starts_with(&ago(41).format("%b %-d").to_string()), "{}", stretch_label(&r, 0));
+        assert!(summit_label(&r, 0).starts_with("on "));
+        assert_eq!(ticks(&r.window).len(), 5);
+        // A year: weeks, with the year on the axis.
+        let r = recap(400);
+        assert_eq!(r.window.bucket_ms, 7 * DAY);
+        let week = stretch_label(&r, 0);
+        assert!(week.starts_with("week of ") && week.ends_with(&super::local(r.window.start + DAY / 2).format(", %Y").to_string()), "{week}");
+        let axis = ticks(&r.window);
+        assert!(axis.len() == 5 && axis[0].1.chars().rev().take(4).all(|c| c.is_ascii_digit()), "{axis:?}");
+        assert_eq!(super::profile_line(&r, None), "A flat trail so far");
+        // Years: several weeks a stretch.
+        let r = recap(3 * 365);
+        assert!(stretch_label(&r, 0).contains(" – "), "{}", stretch_label(&r, 0));
+        assert!(summit_label(&r, 0).starts_with("in the weeks from "));
     }
 
     #[test]

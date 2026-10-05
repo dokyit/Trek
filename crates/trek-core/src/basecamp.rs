@@ -1,5 +1,6 @@
-//! Basecamp: a recap of the work done today or this week. What was asked (prompts), how long
-//! the agents worked (turns), which models and projects it went into, and the tokens it took.
+//! Basecamp: a recap of the work done today, this week or all along. What was asked (prompts),
+//! how long the agents worked (turns), which models and projects it went into, and the tokens
+//! it took.
 //!
 //! Everything comes from the store: transcripts' prompts and turn ends, and the token usage
 //! agents report as turns end. Imported threads that weren't continued here are read from the
@@ -14,6 +15,11 @@ use chrono::{DateTime, Datelike as _, Duration, NaiveDate, TimeZone};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
+/// All time is drawn a day a stretch up to this many days, a week a stretch beyond.
+const ALL_DAYS: i64 = 91;
+/// All time in at most this many stretches: a longer history takes several weeks a stretch.
+const ALL_WEEKS: i64 = 104;
+
 /// The stretch of time a recap covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Range {
@@ -21,6 +27,8 @@ pub enum Range {
     Today,
     /// Since Monday.
     Week,
+    /// Since the day of the earliest activity recorded.
+    All,
 }
 
 impl Range {
@@ -28,17 +36,41 @@ impl Range {
         match self {
             Range::Today => "Today",
             Range::Week => "This week",
+            Range::All => "All time",
         }
     }
 
-    /// The calendar day or week (from Monday) holding `now`, in `now`'s time zone, cut into
-    /// buckets for the elevation profile: hours for a day, three hours for a week.
+    /// `window_from` with nothing recorded before today (all time is just today then).
     pub fn window<Tz: TimeZone>(self, now: &DateTime<Tz>) -> Window {
+        self.window_from(now, None)
+    }
+
+    /// The calendar day or week (from Monday) holding `now`, in `now`'s time zone, cut into
+    /// buckets for the elevation profile: hours for a day, three hours for a week. All time runs
+    /// from the day of `first`, the earliest activity, to the end of today, in stretches that
+    /// keep the profile readable however long it is: hours for a day, three hours up to a week,
+    /// days up to three months, then weeks from Monday (several a stretch past two years).
+    pub fn window_from<Tz: TimeZone>(self, now: &DateTime<Tz>, first: Option<i64>) -> Window {
         let today = now.date_naive();
         let tz = now.timezone();
+        let monday = |day: NaiveDate| day - Duration::days(day.weekday().num_days_from_monday() as i64);
         let (first, days, bucket_hours) = match self {
             Range::Today => (today, 1, 1),
-            Range::Week => (today - Duration::days(today.weekday().num_days_from_monday() as i64), 7, 3),
+            Range::Week => (monday(today), 7, 3),
+            Range::All => {
+                let first = first.and_then(|f| tz.timestamp_millis_opt(f).single()).map(|d| d.date_naive()).filter(|d| *d < today).unwrap_or(today);
+                match (today - first).num_days() + 1 {
+                    1 => (today, 1, 1),
+                    days @ 2..=7 => (first, days, 3),
+                    days @ 8..=ALL_DAYS => (first, days, 24),
+                    _ => {
+                        let weeks = (today - monday(first)).num_days() / 7 + 1;
+                        let per = (weeks + ALL_WEEKS - 1) / ALL_WEEKS;
+                        let weeks = (weeks + per - 1) / per * per;
+                        (monday(first), weeks * 7, per * 7 * 24)
+                    }
+                }
+            }
         };
         let start = midnight(&tz, first);
         let end = midnight(&tz, first + Duration::days(days));
@@ -66,8 +98,10 @@ pub struct Window {
 }
 
 impl Window {
+    /// Rounded: across a clock change a span of days or weeks is an hour off a whole number of
+    /// stretches, and that hour goes to the last one rather than making a stretch of its own.
     pub fn buckets(&self) -> usize {
-        ((self.end - self.start + self.bucket_ms - 1) / self.bucket_ms).max(1) as usize
+        ((self.end - self.start + self.bucket_ms / 2) / self.bucket_ms).max(1) as usize
     }
 
     pub fn contains(&self, at: i64) -> bool {
@@ -112,30 +146,77 @@ pub fn gather(store: &Store, window: &Window) -> anyhow::Result<Vec<ThreadActivi
     for row in store.usage_between(window.start, window.end)? {
         usage.entry(row.thread_id.clone()).or_default().push(row);
     }
+    // Imported histories are files to read and parse (all time can mean thousands): a few at once.
+    let found = par_map(&threads, |t| match (&t.native_id, t.source) {
+        (Some(native), source) if source != ThreadSource::Trek && !stored.contains(&t.id) => Some(imported(t, source, native, window, window.end, true)),
+        // An imported thread continued here, in the same session: the agent's history has what
+        // it used until Trek recorded its first turn, Trek's rows the rest.
+        (Some(native), source) if source != ThreadSource::Trek => {
+            let until = recorded_from.get(&t.id).map_or(window.end, |at| (*at).min(window.end));
+            (until > window.start).then(|| imported(t, source, native, window, until, false))
+        }
+        _ => None,
+    });
     Ok(threads
         .into_iter()
-        .map(|t| {
-            let (activity, usage) = match (&t.native_id, t.source) {
-                (Some(native), source) if source != ThreadSource::Trek && !stored.contains(&t.id) => {
-                    let found = imported(&t, source, native, window, window.end, true);
-                    (found.0.clone(), found.1.clone())
-                }
-                // An imported thread continued here, in the same session: the agent's history
-                // has what it used until Trek recorded its first turn, Trek's rows the rest.
-                (Some(native), source) if source != ThreadSource::Trek => {
+        .zip(found)
+        .map(|(t, found)| {
+            let (activity, usage) = match found {
+                Some(found) if !stored.contains(&t.id) => (found.0.clone(), found.1.clone()),
+                found => {
                     let mut usage = usage.remove(&t.id).unwrap_or_default();
-                    let until = recorded_from.get(&t.id).map_or(window.end, |at| (*at).min(window.end));
-                    if until > window.start {
-                        usage.splice(0..0, imported(&t, source, native, window, until, false).1.iter().cloned());
+                    if let Some(found) = found {
+                        usage.splice(0..0, found.1.iter().cloned());
                     }
                     (activity.remove(&t.id).unwrap_or_default(), usage)
                 }
-                _ => (activity.remove(&t.id).unwrap_or_default(), usage.remove(&t.id).unwrap_or_default()),
             };
             let project = t.project_id.as_ref().and_then(|p| names.get(p).cloned());
             ThreadActivity { thread: t, project, activity, usage }
         })
         .collect())
+}
+
+/// `f` over `items`, in order, on a few threads at once. Each takes the next item when it's done
+/// with one, as some histories take far longer to read than others.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8).min(items.len());
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (f, next) = (&f, &next);
+    let mut out: Vec<(usize, R)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(move || {
+                    let mut done = vec![];
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break done };
+                        done.push((i, f(item)));
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("basecamp: a reader panicked")).collect()
+    });
+    out.sort_unstable_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The recap of `range` at `now`, from the store (see `gather`). All time opens on the day of the
+/// earliest activity found. Slow: run it off the main thread.
+pub fn recap<Tz: TimeZone>(store: &Store, range: Range, now: &DateTime<Tz>) -> anyhow::Result<Recap> {
+    let at = now.timestamp_millis();
+    if range != Range::All {
+        let window = range.window(now);
+        return Ok(Recap::compute(window, at, &gather(store, &window)?));
+    }
+    // Everything there is, whenever it was; then the window around it.
+    let threads = gather(store, &Window { range, start: 0, end: i64::MAX, bucket_ms: i64::MAX })?;
+    let first = threads.iter().flat_map(|t| t.activity.iter().map(Activity::at).chain(t.usage.iter().map(|u| u.at))).filter(|at| *at > 0).min();
+    Ok(Recap::compute(range.window_from(now, first), at, &threads))
 }
 
 /// An imported thread's tokens in `window` up to `until`, from its agent's history, and its
@@ -230,6 +311,8 @@ pub struct Recap {
     /// when the thread failed in the window).
     pub failed: usize,
     pub buckets: Vec<Bucket>,
+    /// The earliest prompt, turn or report in the window: where all time's trek set out.
+    pub first: Option<i64>,
 }
 
 /// Comparable model ids: dated snapshots (`claude-haiku-4-5-20251001`) count as their model.
@@ -258,18 +341,23 @@ impl Recap {
             models: vec![],
             failed: 0,
             buckets: vec![],
+            first: None,
         };
         let mut projects: Vec<ProjectShare> = vec![];
         let mut models: Vec<ModelShare> = vec![];
+        let mut spend = SpendByDay::default();
         for t in threads {
             let mut prompts = 0;
             let mut turns = 0;
             let mut failed = 0;
-            let usage: Vec<&UsageRow> = t.usage.iter().filter(|u| window.contains(u.at)).collect();
+            // By time, for finding each turn's reports quickly in a long history.
+            let mut usage: Vec<&UsageRow> = t.usage.iter().filter(|u| window.contains(u.at)).collect();
+            usage.sort_by_key(|u| u.at);
             // Turns no report names a model for go to the thread's, or to the one its reports
             // name most (a thread left on the agent's default).
             let thread_model = t.thread.model.clone().or_else(|| busiest_model(&usage, i64::MIN, i64::MAX));
             for a in t.activity.iter().filter(|a| window.contains(a.at())) {
+                recap.first = Some(recap.first.map_or(a.at(), |f| f.min(a.at())));
                 match *a {
                     Activity::Prompt { at } => {
                         prompts += 1;
@@ -306,9 +394,12 @@ impl Recap {
             recap.prompts += prompts;
             recap.turns += turns;
             let mut tokens = 0;
+            if let Some(u) = usage.first() {
+                recap.first = Some(recap.first.map_or(u.at, |f| f.min(u.at)));
+            }
             for u in &usage {
                 recap.tokens.add(&u.tokens);
-                recap.spend.add(&u.agent, u.model.as_deref(), &u.tokens, u.cost, u.at);
+                spend.add(u);
                 tokens += u.tokens.total();
                 buckets[window.bucket(u.at)].tokens += u.tokens.total();
                 let i = model_at(&mut models, &u.agent, u.model.as_deref());
@@ -333,6 +424,7 @@ impl Recap {
         models.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(b.turns.cmp(&a.turns)));
         recap.projects = projects;
         recap.models = models;
+        recap.spend = spend.total();
         recap.buckets = buckets;
         recap
     }
@@ -396,7 +488,14 @@ impl Recap {
         }
         let text = |out: &mut Vec<Span>, s: &str| out.push(Span::Text(s.to_string()));
         let model = |m: &ModelShare| Span::Model { agent: m.agent.clone(), label: label(&m.agent, m.model.as_deref()) };
-        text(&mut out, if self.window.range == Range::Week { "This week you sent " } else { "You sent " });
+        text(
+            &mut out,
+            match self.window.range {
+                Range::Today => "You sent ",
+                Range::Week => "This week you sent ",
+                Range::All => "So far you've sent ",
+            },
+        );
         out.push(Span::Strong(count(self.prompts, "prompt", "prompts")));
         text(&mut out, " across ");
         out.push(Span::Strong(count(self.threads, "thread", "threads")));
@@ -456,10 +555,41 @@ impl Recap {
     }
 }
 
-/// The model `usage` reported the most tokens for in `[from, to]`, if any report named one.
+/// Reports summed by agent, model, day (UTC, as prices change) and how their cost was known,
+/// then priced once each: pricing every report of a long history one by one is slow.
+#[derive(Default)]
+struct SpendByDay<'a> {
+    at: HashMap<(&'a AgentId, Option<&'a str>, i64, Option<bool>), usize>,
+    /// In the order first seen: the agent, model, a time on the day, tokens, recorded dollars.
+    sums: Vec<(&'a AgentId, Option<&'a str>, i64, Option<bool>, TokenUsage, f64)>,
+}
+
+impl<'a> SpendByDay<'a> {
+    fn add(&mut self, u: &'a UsageRow) {
+        let key = (&u.agent, u.model.as_deref(), u.at.div_euclid(86_400_000), u.cost.map(|c| c.reported));
+        let i = *self.at.entry(key).or_insert_with(|| {
+            self.sums.push((key.0, key.1, u.at, key.3, TokenUsage::default(), 0.));
+            self.sums.len() - 1
+        });
+        self.sums[i].4.add(&u.tokens);
+        self.sums[i].5 += u.cost.map_or(0., |c| c.usd);
+    }
+
+    fn total(&self) -> crate::pricing::Spend {
+        let mut spend = crate::pricing::Spend::default();
+        for (agent, model, at, reported, tokens, usd) in &self.sums {
+            spend.add(agent, *model, tokens, reported.map(|reported| crate::types::UsageCost { usd: *usd, reported }), *at);
+        }
+        spend
+    }
+}
+
+/// The model `usage` (by time) reported the most tokens for in `[from, to]`, if any report
+/// named one.
 fn busiest_model(usage: &[&UsageRow], from: i64, to: i64) -> Option<String> {
     let mut by: Vec<(String, &str, u64)> = vec![];
-    for u in usage.iter().filter(|u| (from..=to).contains(&u.at)) {
+    let skip = usage.partition_point(|u| u.at < from);
+    for u in usage[skip..].iter().take_while(|u| u.at <= to) {
         let Some(m) = u.model.as_deref() else { continue };
         let key = model_key(m);
         match by.iter_mut().find(|(k, ..)| *k == key) {
@@ -489,8 +619,11 @@ fn spread(buckets: &mut [Bucket], window: &Window, from: i64, to: i64) {
         return;
     }
     let (first, last) = (window.bucket(from), window.bucket(to - 1));
+    let n = buckets.len();
     for (i, bucket) in buckets.iter_mut().enumerate().take(last + 1).skip(first) {
-        let (b0, b1) = (window.start + i as i64 * window.bucket_ms, window.start + (i as i64 + 1) * window.bucket_ms);
+        let b0 = window.start + i as i64 * window.bucket_ms;
+        // The last stretch runs to the window's end (see `Window::buckets`).
+        let b1 = if i + 1 == n { window.end } else { b0 + window.bucket_ms };
         let overlap = to.min(b1) - from.max(b0);
         if overlap > 0 {
             bucket.agent_secs += (overlap / 1000) as u64;
@@ -724,6 +857,117 @@ mod tests {
         // Next week's recap holds none of it.
         let next = Recap::compute(Range::Week.window(&now(&tz, "2026-10-06 10:00")), at(&tz, "2026-10-06 10:00"), &threads);
         assert!(next.is_empty() && next.narrative(model_label).is_empty() && next.peak().is_none());
+    }
+
+    #[test]
+    fn all_time_runs_from_the_first_day_in_stretches_that_stay_readable() {
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let today = now(&tz, "2026-10-03 22:30");
+        let from = |first: &str| Range::All.window_from(&today, Some(at(&tz, first)));
+        // Nothing before today (or nothing at all): today, by the hour.
+        for w in [Range::All.window(&today), from("2026-10-03 09:00"), from("2026-10-09 09:00")] {
+            assert_eq!((w.start, w.end, w.bucket_ms, w.buckets()), (at(&tz, "2026-10-03 00:00"), at(&tz, "2026-10-04 00:00"), 3_600_000, 24));
+        }
+        // A few days: by three hours, from the first one's midnight.
+        let w = from("2026-09-30 17:45");
+        assert_eq!((w.start, w.end, w.bucket_ms, w.buckets()), (at(&tz, "2026-09-30 00:00"), at(&tz, "2026-10-04 00:00"), 3 * 3_600_000, 32));
+        // Up to three months: by the day.
+        let w = from("2026-08-01 08:00");
+        assert_eq!((w.start, w.bucket_ms, w.buckets()), (at(&tz, "2026-08-01 00:00"), 24 * 3_600_000, 64));
+        assert!(w.contains(at(&tz, "2026-10-03 23:59")));
+        // Longer: by the week, from the Monday before the first day to the one after today.
+        let w = from("2026-03-12 08:00");
+        assert_eq!((w.start, w.end, w.bucket_ms), (at(&tz, "2026-03-09 00:00"), at(&tz, "2026-10-05 00:00"), 7 * 24 * 3_600_000));
+        assert_eq!(w.buckets(), 30);
+        // Years: still no more than a hundred-odd stretches, each a whole number of weeks.
+        let w = from("2019-01-02 08:00");
+        assert!(w.buckets() <= ALL_WEEKS as usize && w.bucket_ms % (7 * 24 * 3_600_000) == 0 && w.bucket_ms > 7 * 24 * 3_600_000, "{w:?}");
+        assert!(w.contains(at(&tz, "2019-01-02 08:00")) && w.contains(at(&tz, "2026-10-03 22:30")));
+        // Across a clock change the days stay whole: 65 of them, not 65 and an hour.
+        let fall = Shifting { switch: utc("2026-10-25 01:00"), before: 7200, after: 3600 };
+        let w = Range::All.window_from(&fall.timestamp_millis_opt(utc("2026-12-01 10:00")).unwrap(), Some(utc("2026-09-28 12:00")));
+        assert_eq!((w.end - w.start, w.buckets()), (65 * 24 * 3_600_000 + 3_600_000, 65));
+    }
+
+    #[test]
+    fn all_time_adds_up_everything() {
+        let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+        let mut threads = day(&tz);
+        // A thread from the spring.
+        let mut f = thread("f", AgentId::ClaudeCode, Some("claude-opus-5-5"), Some(("p3", "old")));
+        f.activity = vec![Activity::Prompt { at: at(&tz, "2026-04-14 10:00") }, Activity::TurnEnd { at: at(&tz, "2026-04-14 10:20"), took_secs: 1_200 }];
+        f.usage = vec![used(&f, at(&tz, "2026-04-14 10:20"), Some("claude-opus-5-5"), 50_000)];
+        threads.push(f);
+        let first = threads.iter().flat_map(|t| t.activity.iter().map(Activity::at)).min();
+        let r = Recap::compute(Range::All.window_from(&now(&tz, "2026-10-03 22:30"), first), at(&tz, "2026-10-03 22:30"), &threads);
+        let prompts = threads.iter().flat_map(|t| &t.activity).filter(|a| matches!(a, Activity::Prompt { .. })).count();
+        let turns: Vec<u64> = threads.iter().flat_map(|t| &t.activity).filter_map(|a| if let Activity::TurnEnd { took_secs, .. } = a { Some(*took_secs as u64) } else { None }).collect();
+        let tokens: u64 = threads.iter().flat_map(|t| &t.usage).map(|u| u.tokens.total()).sum();
+        assert_eq!((r.prompts, r.threads, r.turns, r.agent_secs), (prompts, 6, turns.len(), turns.iter().sum()));
+        assert_eq!(r.tokens.total(), tokens);
+        assert_eq!(r.first, Some(at(&tz, "2026-04-14 10:00")));
+        // By the week from Monday 13 April; every stretch adds up to the totals.
+        assert_eq!((r.window.start, r.window.bucket_ms), (at(&tz, "2026-04-13 00:00"), 7 * 24 * 3_600_000));
+        assert_eq!(r.buckets.iter().map(|b| b.prompts).sum::<usize>(), r.prompts);
+        assert_eq!(r.buckets.iter().map(|b| b.tokens).sum::<u64>(), r.tokens.total());
+        assert_eq!(r.buckets.iter().map(|b| b.agent_secs).sum::<u64>(), r.agent_secs);
+        assert_eq!((r.buckets.len(), r.buckets[0].prompts), (25, 1));
+        // This week is the summit, and where the hiker stands.
+        assert_eq!((r.peak(), r.now_bucket()), (Some(24), Some(24)));
+        assert_eq!(r.projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["synara", "old", "trek"]);
+        let said = words(&r.narrative(model_label));
+        assert!(said.starts_with("So far you've sent *8 prompts* across *6 threads*. Most of it went into [synara]"), "{said}");
+    }
+
+    #[test]
+    fn all_time_with_no_history_is_an_empty_today() {
+        let s = Store::in_memory().unwrap();
+        let today = chrono::Local::now();
+        let r = recap(&s, Range::All, &today).unwrap();
+        assert!(r.is_empty() && r.first.is_none() && r.narrative(model_label).is_empty() && r.peak().is_none());
+        let w = Range::Today.window(&today);
+        assert_eq!((r.window.range, r.window.start, r.window.end, r.window.bucket_ms), (Range::All, w.start, w.end, w.bucket_ms));
+    }
+
+    #[test]
+    fn all_time_over_a_long_busy_history_is_quick() {
+        // Two thousand threads over a year and a half, ten turns each: twenty thousand turns.
+        const THREADS: usize = 2_000;
+        const TURNS: usize = 10;
+        let s = Store::in_memory().unwrap();
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let today = now(&tz, "2026-10-03 22:30");
+        let t0 = at(&tz, "2025-04-01 09:00");
+        let span = today.timestamp_millis() - t0;
+        let models = ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra"];
+        for i in 0..THREADS {
+            let agent = if i % 3 == 2 { AgentId::Codex } else { AgentId::ClaudeCode };
+            let t = s.create_thread(None, agent.clone(), Some(models[i % 3].into()), Effort::High, HandHolding::Auto).unwrap();
+            let start = t0 + span / THREADS as i64 * i as i64;
+            let mut items = vec![];
+            for k in 0..TURNS as i64 {
+                let p = start + k * 600_000;
+                items.push(Item::User { text: format!("step {k}"), images: vec![], at: Some(p), resume: None, aside: false });
+                items.push(Item::Reasoning { text: "Thinking it over.".into() });
+                items.push(Item::Tool { id: format!("t{k}"), title: "Read".into(), detail: "src/lib.rs".into(), output: "fn main() {}\n".repeat(40), status: crate::store::ToolStatus::Done });
+                items.push(Item::Assistant { text: "Done.".into() });
+                items.push(Item::TurnEnd { at: p + 120_000, took_secs: 120 });
+                s.record_usage(&t.id, p + 120_000, &agent, Some(models[i % 3]), &TokenUsage { input: 100, output: 900, cache_read: 9_000, cache_write: 0 }, None).unwrap();
+            }
+            s.save_transcript(&t.id, &mut crate::transcript::Transcript::unsaved(items)).unwrap();
+            s.update_thread(&t.id, |t| t.updated_at = start + TURNS as i64 * 600_000).unwrap();
+        }
+        let began = std::time::Instant::now();
+        let r = recap(&s, Range::All, &today).unwrap();
+        let took = began.elapsed();
+        assert_eq!((r.threads, r.prompts, r.turns), (THREADS, THREADS * TURNS, THREADS * TURNS));
+        assert_eq!(r.tokens.total(), (THREADS * TURNS) as u64 * 10_000);
+        assert_eq!(r.agent_secs, (THREADS * TURNS) as u64 * 120);
+        assert_eq!(r.window.start, at(&tz, "2025-03-31 00:00"));
+        assert_eq!(r.buckets.len(), 79, "a week a stretch");
+        assert_eq!(r.buckets.iter().map(|b| b.prompts).sum::<usize>(), r.prompts);
+        // A fraction of a second; pricing every report on its own took over one.
+        assert!(took < std::time::Duration::from_secs(3), "all time took {took:?}");
     }
 
     fn words(spans: &[Span]) -> String {
