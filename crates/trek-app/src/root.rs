@@ -438,7 +438,10 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     });
     cx.subscribe(&workspace, |ws, event: &WorkspaceEvent, cx| match event {
         WorkspaceEvent::Toast { message, undo } => toast(&ws, message.clone(), undo.clone(), cx),
-        WorkspaceEvent::Attention { message, thread } => attention(&ws, message.clone(), thread, cx),
+        WorkspaceEvent::Attention { message, thread } => {
+            ws.update(cx, |ws, _| ws.push_alert(message, thread));
+            attention(&ws, message.clone(), thread, cx)
+        }
         WorkspaceEvent::ActivateMain => show_main(ws, cx),
         WorkspaceEvent::OpenPalette => show_palette(ws, cx),
         _ => {}

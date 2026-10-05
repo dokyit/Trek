@@ -41,12 +41,30 @@ pub struct Mobile {
     pub port: u16,
     /// Which of this Mac's addresses the pairing code points phones at.
     pub reach: Reach,
+    /// Notifications on the phone, through ntfy (its free app and server): a thread needs you,
+    /// finished or failed.
+    pub push: bool,
+    /// The ntfy server (`https://ntfy.sh`, or one of your own).
+    pub push_server: String,
+    /// The topic notifications go to: a long random name, as anyone who knows it can read them.
+    /// Made when push is first turned on.
+    pub push_topic: String,
+    pub push_when: PushWhen,
 }
 
 impl Default for Mobile {
     fn default() -> Self {
-        Self { enabled: false, port: 7420, reach: Reach::Wifi }
+        Self { enabled: false, port: 7420, reach: Reach::Wifi, push: false, push_server: "https://ntfy.sh".into(), push_topic: String::new(), push_when: PushWhen::Away }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PushWhen {
+    /// Only while you're away from the Mac: no keyboard or mouse for two minutes, or the screen
+    /// is locked.
+    Away,
+    Always,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

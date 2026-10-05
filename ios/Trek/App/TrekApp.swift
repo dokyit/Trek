@@ -21,6 +21,12 @@ struct TrekApp: App {
                     #endif
                 }
                 .onOpenURL { url in
+                    // A notification from the Mac: open its thread.
+                    if url.scheme == "trek", url.host == "open",
+                       let thread = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "thread" })?.value {
+                        model.openRequest = thread
+                        return
+                    }
                     // Never pairs by itself: the link waits in a confirmation sheet.
                     if let link = PairingLink(url.absoluteString) {
                         model.offer(link)
@@ -132,7 +138,20 @@ struct MainView: View {
             }
             if let open = Launch.open { path = [open] }
             if Launch.sheet == "new" { showNew = true }
+            openRequested()
         }
+        .onChange(of: model.openRequest) { openRequested() }
+    }
+}
+
+extension MainView {
+    /// Bring up the thread a notification asked for.
+    fileprivate func openRequested() {
+        guard let id = model.openRequest else { return }
+        model.openRequest = nil
+        showNew = false
+        tab = .threads
+        path = [id]
     }
 }
 

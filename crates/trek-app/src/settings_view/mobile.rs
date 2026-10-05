@@ -30,6 +30,94 @@ fn qr(url: &str, module: f32) -> AnyElement {
 }
 
 impl SettingsView {
+    /// Notifications on the phone, through the ntfy app: on its own switch, as it works without
+    /// the phone server.
+    fn push_section(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let m = &s.mobile;
+        let ws = self.workspace.clone();
+        let mut out = vec![
+            Self::heading("Notifications on your phone", cx),
+            ui::group(
+                vec![Self::row(
+                    "Tell my phone when a thread needs me",
+                    "Also when one finishes or fails: what this Mac would alert you for, sent through the free ntfy app. Tapping one opens the thread in Trek on iPhone.",
+                    gpui_kit::component::switch::Switch::new("push-on").checked(m.push).on_click(move |v: &bool, _, cx| ws.update(cx, |ws, cx| ws.set_push(*v, cx))),
+                    cx,
+                )],
+                cx,
+            ),
+        ];
+        if !m.push {
+            return out;
+        }
+        let topic = m.push_topic.clone();
+        let url = format!("{}/{}", m.push_server.trim_end_matches('/'), topic);
+        out.push(div().h(px(12.)).into_any_element());
+        out.push(ui::group(
+            vec![Self::row(
+                "Send them",
+                "Away means no keyboard or mouse on this Mac for two minutes, or the screen locked.",
+                ui::segmented("push-when", vec![(trek_core::settings::PushWhen::Away, "When I'm away"), (trek_core::settings::PushWhen::Always, "Always")], m.push_when, self.setter(|s, v| s.mobile.push_when = v), cx),
+                cx,
+            )],
+            cx,
+        ));
+        let (copy_topic, test, fresh) = (topic.clone(), self.workspace.clone(), self.workspace.clone());
+        out.push(div().h(px(12.)).into_any_element());
+        out.push(
+            h_flex()
+                .id("push-setup")
+                .test_support()
+                .gap(px(28.))
+                .p(px(20.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(theme.border)
+                .items_start()
+                .child(qr(&url, 3.))
+                .child(
+                    v_flex()
+                        .gap(px(10.))
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.5))
+                        .child(div().text_size(px(13.5)).font_semibold().child("Set up ntfy on your iPhone"))
+                        .child(div().text_color(theme.muted_foreground).child("1. Install ntfy from the App Store."))
+                        .child(div().text_color(theme.muted_foreground).child("2. In ntfy, tap + and subscribe to this topic:"))
+                        .child(
+                            div()
+                                .px(px(10.))
+                                .py(px(6.))
+                                .rounded(px(7.))
+                                .bg(theme.foreground.opacity(0.06))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(12.))
+                                .child(topic.clone()),
+                        )
+                        .child(div().text_color(theme.muted_foreground).child("3. Send a test. Keep the topic to yourself: anyone who has it can read what's sent."))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(Button::new("push-test").small().outline().label("Send a test").on_click(move |_, _, cx| test.update(cx, |ws, cx| ws.test_push(cx))))
+                                .child(Button::new("push-copy").small().ghost().label("Copy topic").on_click(move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy_topic.clone()));
+                                    gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
+                                }))
+                                .child(Button::new("push-new-topic").small().ghost().label("New topic").on_click(move |_, _, cx| {
+                                    fresh.update(cx, |ws, cx| {
+                                        ws.settings.mobile.push_topic = crate::push::new_topic();
+                                        ws.save_settings(cx);
+                                    })
+                                })),
+                        )
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(format!("Through {}", m.push_server))),
+                )
+                .into_any_element(),
+        );
+        out
+    }
+
     pub(super) fn mobile_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
@@ -48,6 +136,7 @@ impl SettingsView {
         if starting {
             out.push(Self::note("Starting…", cx));
         }
+        out.extend(self.push_section(s, cx));
         let Some((offer, addresses, advertise, devices, connected)) = running else {
             out.push(div().h(px(16.)).into_any_element());
             out.push(Self::note(
