@@ -1,0 +1,23 @@
+[package]
+name = "trek-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Trek's WebSocket server for the iPhone companion app: pairing, device tokens and protocol v1"
+
+[dependencies]
+tokio.workspace = true
+futures-util = "0.3"
+async-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio-tungstenite = "0.30"
+sha2 = "0.10"
+rand = "0.9"
+base64 = "0.22"
+subtle = "2.6"
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
