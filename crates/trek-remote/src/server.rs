@@ -528,6 +528,24 @@ const CLIENT_TYPES: &[&str] = &[
     "mark_seen",
     "set_prefs",
     "thread_action",
+    "usage",
+    "basecamp",
+    "notes",
+    "note",
+    "create_note",
+    "save_note",
+    "delete_note",
+    "git_status",
+    "git_diff",
+    "git_commit",
+    "git_push",
+    "git_branches",
+    "git_switch",
+    "worktree_merge",
+    "worktree_remove",
+    "commands",
+    "settings",
+    "set_settings",
     "ping",
 ];
 
@@ -615,6 +633,15 @@ async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<J
                 let result = host.transcript(&thread_id).await;
                 Done::Transcript { re, thread_id, after_seq, generation, result }
             }
+            // Reads that may take a while (asking the agents for their usage, a recap of all
+            // time, git) don't hold up what the phone does next.
+            Job::Call { re, msg } if msg.is_query() => {
+                let (host, done) = (host.clone(), done.clone());
+                tokio::spawn(async move {
+                    let _ = done.send(Done::Reply(call(&*host, re, msg).await));
+                });
+                continue;
+            }
             Job::Call { re, msg } => Done::Reply(call(&*host, re, msg).await),
         };
         let _ = done.send(finished);
@@ -623,18 +650,39 @@ async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<J
 
 async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -> ServerEnvelope {
     let kind = msg.kind();
-    let result: HostResult<Option<String>> = match msg {
-        ClientMessage::Send(req) => host.send(req).await.map(|()| None),
-        ClientMessage::NewThread(req) => host.new_thread(req).await.map(Some),
-        ClientMessage::Answer(req) => host.answer(req).await.map(|()| None),
-        ClientMessage::Interrupt { thread_id } => host.interrupt(&thread_id).await.map(|()| None),
-        ClientMessage::MarkSeen { thread_id } => host.mark_seen(&thread_id).await.map(|()| None),
-        ClientMessage::SetPrefs(req) => host.set_prefs(req).await.map(|()| None),
-        ClientMessage::ThreadAction(req) => host.thread_action(req).await.map(|()| None),
+    let ack = |thread_id: Option<String>| ServerMessage::Ack { thread_id, open: None };
+    let result: HostResult<ServerMessage> = match msg {
+        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack { thread_id: None, open }),
+        ClientMessage::NewThread(req) => host.new_thread(req).await.map(|id| ack(Some(id))),
+        ClientMessage::Answer(req) => host.answer(req).await.map(|()| ack(None)),
+        ClientMessage::Interrupt { thread_id } => host.interrupt(&thread_id).await.map(|()| ack(None)),
+        ClientMessage::MarkSeen { thread_id } => host.mark_seen(&thread_id).await.map(|()| ack(None)),
+        ClientMessage::SetPrefs(req) => host.set_prefs(req).await.map(|()| ack(None)),
+        ClientMessage::ThreadAction(req) => host.thread_action(req).await.map(|()| ack(None)),
+        ClientMessage::Usage => host.usage().await.map(ServerMessage::Usage),
+        ClientMessage::Basecamp { range } => host.basecamp(range).await.map(ServerMessage::Basecamp),
+        ClientMessage::Notes => host.notes().await.map(|notes| ServerMessage::Notes { notes }),
+        ClientMessage::Note { note_id } => host.note(&note_id).await.map(|note| ServerMessage::Note { note }),
+        ClientMessage::CreateNote { body } => host.create_note(body).await.map(|note| ServerMessage::Note { note }),
+        ClientMessage::SaveNote(req) => host.save_note(req).await.map(|note| ServerMessage::Note { note }),
+        ClientMessage::DeleteNote { note_id } => host.delete_note(&note_id).await.map(|()| ack(None)),
+        ClientMessage::GitStatus(target) => host.git_status(target).await.map(ServerMessage::GitStatus),
+        ClientMessage::GitDiff(req) => host.git_diff(req).await.map(ServerMessage::GitDiff),
+        ClientMessage::GitCommit(req) => host.git_commit(req).await.map(|()| ack(None)),
+        ClientMessage::GitPush(target) => host.git_push(target).await.map(|()| ack(None)),
+        ClientMessage::GitBranches(target) => host.git_branches(target).await.map(ServerMessage::GitBranches),
+        ClientMessage::GitSwitch(req) => host.git_switch(req).await.map(|()| ack(None)),
+        ClientMessage::WorktreeMerge { thread_id } => host.worktree_merge(&thread_id).await.map(|()| ack(None)),
+        ClientMessage::WorktreeRemove(req) => host.worktree_remove(req).await.map(|()| ack(None)),
+        ClientMessage::Commands { thread_id } => {
+            host.commands(&thread_id).await.map(|commands| ServerMessage::Commands { thread_id, commands })
+        }
+        ClientMessage::Settings => host.settings().await.map(ServerMessage::Settings),
+        ClientMessage::SetSettings(change) => host.set_settings(change).await.map(ServerMessage::Settings),
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {
-        Ok(thread_id) => ServerEnvelope::reply(re, ServerMessage::Ack { thread_id }),
+        Ok(reply) => ServerEnvelope::reply(re, reply),
         Err(err) => {
             tracing::debug!(kind, %err, "remote request failed");
             error(re, err.code, err.message)
@@ -682,17 +730,12 @@ impl Session {
             ClientMessage::Unsubscribe { thread_id } => {
                 self.subs.remove(&thread_id);
                 match re {
-                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None })],
+                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None, open: None })],
                     None => Vec::new(),
                 }
             }
-            msg @ (ClientMessage::Send(_)
-            | ClientMessage::NewThread(_)
-            | ClientMessage::Answer(_)
-            | ClientMessage::Interrupt { .. }
-            | ClientMessage::MarkSeen { .. }
-            | ClientMessage::SetPrefs(_)
-            | ClientMessage::ThreadAction(_)) => {
+            // Everything else is the host's to answer, in the order sent.
+            msg => {
                 let _ = jobs.send(Job::Call { re, msg });
                 Vec::new()
             }

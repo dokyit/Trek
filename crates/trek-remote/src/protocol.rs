@@ -96,6 +96,47 @@ pub enum ClientMessage {
     SetPrefs(PrefsRequest),
     /// Pin, settle or archive a thread, or rename it.
     ThreadAction(ThreadActionRequest),
+    /// Plan limits of every agent that reports them (answered with `usage`).
+    Usage,
+    /// The Basecamp recap (answered with `basecamp`).
+    Basecamp {
+        #[serde(default)]
+        range: BasecampRange,
+    },
+    /// Every note, newest first (answered with `notes`).
+    Notes,
+    /// One note, whole (answered with `note`).
+    Note { note_id: String },
+    /// A new note (answered with `note`).
+    CreateNote {
+        #[serde(default)]
+        body: String,
+    },
+    /// Write a note (answered with `note`).
+    SaveNote(SaveNoteRequest),
+    /// Move a note to the notes folder's `Deleted/`.
+    DeleteNote { note_id: String },
+    /// A thread's or project's git status (answered with `git_status`).
+    GitStatus(GitTarget),
+    /// One changed file's diff (answered with `git_diff`).
+    GitDiff(GitDiffRequest),
+    /// Commit every change, with a message.
+    GitCommit(GitCommitRequest),
+    GitPush(GitTarget),
+    /// Local branches (answered with `git_branches`).
+    GitBranches(GitTarget),
+    /// Check out another branch (not in a worktree thread, nor while the thread works).
+    GitSwitch(GitSwitchRequest),
+    /// Merge a worktree thread's branch into its base, in the project folder.
+    WorktreeMerge { thread_id: String },
+    /// Remove a worktree thread's worktree; the thread carries on in the project folder.
+    WorktreeRemove(WorktreeRemoveRequest),
+    /// The slash commands a thread offers (answered with `commands`).
+    Commands { thread_id: String },
+    /// The Mac's settings the phone may see and change (answered with `settings`).
+    Settings,
+    /// Change some of them (answered with `settings`, as they are now).
+    SetSettings(SettingsChange),
     /// Application-level ping (answered with `pong`).
     Ping,
 }
@@ -115,8 +156,44 @@ impl ClientMessage {
             Self::MarkSeen { .. } => "mark_seen",
             Self::SetPrefs(_) => "set_prefs",
             Self::ThreadAction(_) => "thread_action",
+            Self::Usage => "usage",
+            Self::Basecamp { .. } => "basecamp",
+            Self::Notes => "notes",
+            Self::Note { .. } => "note",
+            Self::CreateNote { .. } => "create_note",
+            Self::SaveNote(_) => "save_note",
+            Self::DeleteNote { .. } => "delete_note",
+            Self::GitStatus(_) => "git_status",
+            Self::GitDiff(_) => "git_diff",
+            Self::GitCommit(_) => "git_commit",
+            Self::GitPush(_) => "git_push",
+            Self::GitBranches(_) => "git_branches",
+            Self::GitSwitch(_) => "git_switch",
+            Self::WorktreeMerge { .. } => "worktree_merge",
+            Self::WorktreeRemove(_) => "worktree_remove",
+            Self::Commands { .. } => "commands",
+            Self::Settings => "settings",
+            Self::SetSettings(_) => "set_settings",
             Self::Ping => "ping",
         }
+    }
+}
+
+impl ClientMessage {
+    /// It only reads: it may be answered out of order with what the phone sends after it.
+    pub fn is_query(&self) -> bool {
+        matches!(
+            self,
+            Self::Usage
+                | Self::Basecamp { .. }
+                | Self::Notes
+                | Self::Note { .. }
+                | Self::GitStatus(_)
+                | Self::GitDiff(_)
+                | Self::GitBranches(_)
+                | Self::Commands { .. }
+                | Self::Settings
+        )
     }
 }
 
@@ -205,6 +282,106 @@ pub enum ThreadAction {
     Unsettle,
     Archive,
     Rename { title: String },
+}
+
+/// `save_note`: a note's new text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveNoteRequest {
+    pub note_id: String,
+    pub body: String,
+    /// The `modified` of the copy the phone edited: if the note changed on the Mac since, nothing
+    /// is written and the phone gets `conflict`. `None` writes it regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<i64>,
+}
+
+/// Whose folder a git request is about: a thread's (its worktree, for one in a worktree), else a
+/// project's.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+impl GitTarget {
+    pub fn thread(id: impl Into<String>) -> Self {
+        Self { thread_id: Some(id.into()), project_id: None }
+    }
+
+    pub fn project(id: impl Into<String>) -> Self {
+        Self { thread_id: None, project_id: Some(id.into()) }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDiffRequest {
+    #[serde(flatten)]
+    pub target: GitTarget,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommitRequest {
+    #[serde(flatten)]
+    pub target: GitTarget,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSwitchRequest {
+    #[serde(flatten)]
+    pub target: GitTarget,
+    pub branch: String,
+}
+
+/// `worktree_remove`. Without `force`, the Mac refuses when something would be lost: uncommitted
+/// changes (they go with the folder), or, with `delete_branch`, commits its base doesn't have. The
+/// refusal (`conflict`) says what, as the Mac's confirmation does; sending it again with `force`
+/// is the user agreeing to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRemoveRequest {
+    pub thread_id: String,
+    /// Delete the branch too (it's kept otherwise, unless its base has all of it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_branch: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+}
+
+/// `set_settings`: what to change; `None` leaves it as it is. Only these can be changed from a
+/// phone: never Full access's unlock, API keys or the phone server itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SettingsChange {
+    /// New threads' agent (its key), model, effort and access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    /// `""` goes back to the agent's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_access: Option<Access>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<SendMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotifyMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_when: Option<PushWhen>,
+    /// The ntfy server, `https://…`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_server: Option<String>,
+    /// Make a new random topic (the old one stops getting notes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_push_topic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_settle_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Theme>,
 }
 
 /// How a follow-up reaches a working thread. On an idle thread both just start a turn.
@@ -320,9 +497,31 @@ pub enum ServerMessage {
         /// Set for `new_thread`: the id of the new thread.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        /// Set when the phone carries on by itself: `/new` sent to a thread asks it to open its
+        /// new-thread sheet (the Mac's own screen stays where it is).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<Open>,
     },
     /// The reply to `ping`.
     Pong,
+    /// The reply to `usage`.
+    Usage(Usage),
+    /// The reply to `basecamp`.
+    Basecamp(Basecamp),
+    /// The reply to `notes`.
+    Notes { notes: Vec<NoteSummary> },
+    /// The reply to `note`, `create_note` and `save_note`.
+    Note { note: Note },
+    /// The reply to `git_status`.
+    GitStatus(GitStatus),
+    /// The reply to `git_diff`.
+    GitDiff(GitDiff),
+    /// The reply to `git_branches`.
+    GitBranches(GitBranches),
+    /// The reply to `commands`.
+    Commands { thread_id: String, commands: Vec<CommandInfo> },
+    /// The reply to `settings` and `set_settings`.
+    Settings(MacSettings),
     /// A request failed.
     Error { code: ErrorCode, message: String },
 }
@@ -363,6 +562,17 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// A screen the phone should open for the user, as an `ack` asks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "screen", rename_all = "snake_case")]
+pub enum Open {
+    /// The new-thread sheet, in this project (none: no project).
+    NewThread {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+    },
+}
+
 /// The Mac, as the phone sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostInfo {
@@ -390,7 +600,7 @@ pub struct Snapshot {
 }
 
 /// One thread's row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ThreadSummary {
     pub id: String,
     pub title: String,
@@ -433,10 +643,113 @@ pub struct ThreadSummary {
     pub access: Option<Access>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan: bool,
+    /// The effort as the Mac labels it ("Extra high").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_label: Option<String>,
+    /// How full its context window is, as the composer's ring shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextUse>,
+    /// What it cost, as the line under the composer says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    /// Its sub-agents at work: Trek's, and its agent's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_agents: Vec<SubAgent>,
+    /// What its agent runs in the background (dev servers, watchers), by title.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<String>,
+    /// For a thread in a worktree: the branch it started from and merges back into (`branch`
+    /// is the worktree's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// Its folder's git state, as last read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitSummary>,
+}
+
+/// A context window's use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUse {
+    /// Tokens in it.
+    pub used: u64,
+    /// Its size.
+    pub window: u64,
+    /// 0–100.
+    pub percent: u8,
+}
+
+/// What a thread's tokens cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cost {
+    /// "$1.24" (billed per token), "≈ $1.24 at API prices" (a plan covers it), "12.3K tokens ·
+    /// price unknown", "202K tokens · free".
+    pub label: String,
+    /// How its session is billed, once its agent has said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<Billing>,
+    /// The plan's name ("Claude Max") when billed through one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// "Included in your Claude Max plan", "Billed per token by your API provider".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing {
+    /// A subscription covers it: the figure is what it would cost at API prices.
+    Plan,
+    /// Billed per token.
+    Metered,
+    /// A model on the Mac: nothing is billed.
+    Local,
+}
+
+/// A sub-agent at work for a thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubAgent {
+    /// Whose logo it wears.
+    pub agent: AgentRef,
+    /// The model it runs ("Sol"), for one Trek runs; `None` for the agent's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// What it was given to do.
+    pub title: String,
+    pub state: SubAgentState,
+    /// When it started (ms; working time so far is now minus this).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentState {
+    Running,
+    /// Waits on an approval (in its own thread).
+    NeedsYou,
+    Done,
+    Failed,
+    Stopped,
+}
+
+/// A folder's git state in a row.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitSummary {
+    /// Files with changes not committed (untracked ones included).
+    #[serde(default)]
+    pub changed: u32,
+    /// Commits not pushed to its upstream, and the upstream's not pulled.
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
 }
 
 /// A project, as referenced from a thread row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProjectRef {
     pub id: String,
     pub name: String,
@@ -466,11 +779,21 @@ impl ProjectSummary {
 }
 
 /// An agent, as referenced from a thread row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AgentRef {
     /// Trek's `AgentId::key()`.
     pub key: String,
     pub name: String,
+    /// The logo the Mac draws for it (`claude-code`, `codex`, `gemini`, `openai`…: its
+    /// `assets/logos/{dark,light}/<logo>.png`); `None` draws a neutral glyph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+}
+
+impl AgentRef {
+    pub fn new(key: impl Into<String>, name: impl Into<String>, logo: Option<&str>) -> Self {
+        Self { key: key.into(), name: name.into(), logo: logo.map(str::to_string) }
+    }
 }
 
 /// An agent the phone can start threads with.
@@ -478,6 +801,9 @@ pub struct AgentRef {
 pub struct AgentOption {
     pub key: String,
     pub name: String,
+    /// As in [`AgentRef::logo`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
@@ -513,9 +839,10 @@ pub enum NeedsKind {
 }
 
 /// Trek's `RunState`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunState {
+    #[default]
     Idle,
     Working,
     NeedsYou,
@@ -523,10 +850,11 @@ pub enum RunState {
 }
 
 /// Trek's sidebar `Section`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Section {
     Pinned,
+    #[default]
     Inbox,
     Working,
     Snoozed,
@@ -624,6 +952,44 @@ pub enum ItemBody {
         from: String,
         to: String,
     },
+    /// The files a turn changed, after its `turn_end`.
+    Changes {
+        files: Vec<ChangedFile>,
+        /// Lines added and removed in all.
+        #[serde(default)]
+        added: u32,
+        #[serde(default)]
+        removed: u32,
+    },
+}
+
+/// A changed file: in a turn's `changes`, or in a folder's `git_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedFile {
+    /// Relative to the folder.
+    pub path: String,
+    pub status: FileStatus,
+    /// A renamed file's old path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub added: u32,
+    #[serde(default)]
+    pub removed: u32,
+    /// No line counts: it isn't text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    /// New and not added to git yet (`git_status` only; a turn's `changes` says `added`).
+    Untracked,
 }
 
 impl ItemBody {
@@ -642,6 +1008,7 @@ impl ItemBody {
             Self::Error { .. } => "error",
             Self::Limit { .. } => "limit",
             Self::Handoff { .. } => "handoff",
+            Self::Changes { .. } => "changes",
         }
     }
 }
@@ -733,6 +1100,479 @@ pub struct QuestionOption {
     pub label: String,
     #[serde(default)]
     pub description: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Usage
+// ---------------------------------------------------------------------------------------------
+
+/// Plan usage, as the Mac's Usage popover shows it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Usage {
+    /// The agents that reported their plan, in the Mac's agent order.
+    #[serde(default)]
+    pub providers: Vec<ProviderUsage>,
+    /// The Mac was still asking an agent when it answered (ask again shortly for the rest).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loading: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderUsage {
+    pub agent: AgentRef,
+    /// "Claude Max", "ChatGPT Plus".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// 5-hour, weekly and per-model windows. Empty: the plan has none.
+    #[serde(default)]
+    pub limits: Vec<UsageLimit>,
+    /// Something the plan reports besides its limits (Devin's on-demand balance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Asking it partly failed (what's here may still hold).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// "5-hour limit", "Weekly limit", "Weekly · Fable".
+    pub label: String,
+    /// 0–100 used.
+    pub percent: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    /// The window's length: "5h", "7d".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub window: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Basecamp
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BasecampRange {
+    #[default]
+    Today,
+    /// Since Monday.
+    Week,
+    All,
+}
+
+/// The Basecamp recap, worded as the Mac words it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Basecamp {
+    pub range: BasecampRange,
+    /// "Good evening, Monday 5 October", or "Good evening — on the trail since 3 June".
+    pub greeting: String,
+    /// "Today's trek", "This week's trek", "Your trek so far".
+    pub title: String,
+    /// When the recap was worked out (ms).
+    pub updated_at: i64,
+    /// "Ready for review": what needs the user first, then finished threads not looked at yet.
+    #[serde(default)]
+    pub review: Vec<ReviewRow>,
+    /// Nothing on the trail in the range: `invitation` says so, and there's no recap.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation: Option<String>,
+    /// The recap in sentences: text, numbers worth reading first, project and model badges.
+    #[serde(default)]
+    pub narrative: Vec<Span>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<RecapSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
+    #[serde(default)]
+    pub tiles: Vec<Tile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRow {
+    pub thread_id: String,
+    pub title: String,
+    pub status: ReviewStatus,
+    /// "Approval", "Question", "Plan to review", "Paused until 3 PM", "Failed"; `None` when done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub agent: AgentRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectRef>,
+    #[serde(default)]
+    pub additions: u32,
+    #[serde(default)]
+    pub deletions: u32,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub unseen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    NeedsYou,
+    Failed,
+    /// Stopped at a usage limit, to go on at its reset.
+    Paused,
+    Done,
+}
+
+/// A piece of the narrative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Span {
+    Text { text: String },
+    /// A number worth reading first ("18 prompts").
+    Strong { text: String },
+    /// A project, drawn as its badge.
+    Project {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectRef>,
+    },
+    /// A model, drawn with its agent's logo.
+    Model { text: String, agent: AgentRef },
+}
+
+/// The recap's figures, for laying out a sentence of one's own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecapSummary {
+    pub prompts: u32,
+    pub threads: u32,
+    pub turns: u32,
+    /// Agent time in seconds, and as the Mac says it ("1h 2m", "under a minute").
+    pub agent_secs: u64,
+    pub agent_time: String,
+    pub tokens: u64,
+    /// Turns that failed in the range.
+    #[serde(default)]
+    pub failed: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_project: Option<ProjectShare>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_model: Option<ModelShare>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectShare {
+    pub project: ProjectRef,
+    pub prompts: u32,
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelShare {
+    pub agent: AgentRef,
+    /// "Claude Opus 5.5".
+    pub label: String,
+    #[serde(default)]
+    pub tokens: u64,
+    #[serde(default)]
+    pub turns: u32,
+    /// Its share of the reported tokens, in percent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<u32>,
+}
+
+/// The elevation profile: activity drawn as a mountain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Profile {
+    /// Left to right.
+    pub buckets: Vec<ProfileBucket>,
+    /// The summit (the busiest stretch), if anything happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summit: Option<usize>,
+    /// The stretch "now" falls in, while the range is current (the hiker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<usize>,
+    /// Where "now" is across the range, 0–1.
+    #[serde(default)]
+    pub now_at: f32,
+    /// The line over it: "Summit at 2 PM", "A flat trail so far".
+    pub line: String,
+    /// "18 prompts".
+    pub total: String,
+    /// Axis labels, at fractions of its width.
+    #[serde(default)]
+    pub ticks: Vec<Tick>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileBucket {
+    /// How high it stands: agent minutes when turns were timed, else prompts.
+    pub value: f32,
+    /// "2–3 PM", "Tue 3–6 PM", "Sep 14", "week of Sep 8".
+    pub label: String,
+    /// What the Mac says over it when it's hovered: "2–3 PM · 4 prompts · 12m of agent time".
+    pub line: String,
+    #[serde(default)]
+    pub prompts: u32,
+    #[serde(default)]
+    pub agent_secs: u64,
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tick {
+    pub at: f32,
+    pub label: String,
+}
+
+/// A stat tile: a quiet label, the figure, a note under it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tile {
+    pub kind: TileKind,
+    /// "Your best model", "Left on Claude Max".
+    pub label: String,
+    /// "Claude Opus 5.5", "182K tokens", "1h 2m", "64%".
+    pub figure: String,
+    /// "77% of tokens · 9 turns", "Nothing failed today", "5-hour limit · resets in 2h".
+    pub note: String,
+    /// The logo beside the figure (best model, plan left).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
+    /// The badge beside the figure (worked most on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectRef>,
+    /// Tokens used so far through the range, 0–1, one point a stretch (tokens).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sparkline: Vec<f32>,
+    /// How much is left, 0–100 (plan left: the bar).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TileKind {
+    BestModel,
+    WorkedMostOn,
+    Tokens,
+    /// Agent time, with failed turns in its note.
+    AgentTime,
+    PlanLeft,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Notes
+// ---------------------------------------------------------------------------------------------
+
+/// A note in the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteSummary {
+    pub id: String,
+    /// Its first line with words in it, without markdown; "Untitled".
+    pub title: String,
+    /// The text after the title, on one line.
+    #[serde(default)]
+    pub preview: String,
+    /// Last changed (ms).
+    pub modified: i64,
+}
+
+/// A note, whole: markdown (colour and highlights are inline `<span style="color: …">` and
+/// `<mark>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub modified: i64,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Git
+// ---------------------------------------------------------------------------------------------
+
+/// A folder's git status, as the Mac's Git panel shows it. For a thread in a worktree, its
+/// changes against its base (its commits and what isn't committed yet).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitStatus {
+    #[serde(default)]
+    pub is_repo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    /// Against the upstream (`has_upstream`), or for a worktree, against its base.
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    #[serde(default)]
+    pub has_upstream: bool,
+    #[serde(default)]
+    pub files: Vec<ChangedFile>,
+    /// For a worktree thread: what merging and removing it would do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeStatus>,
+    /// Another branch can be checked out here now; else `switch_blocked` says why.
+    #[serde(default)]
+    pub can_switch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_blocked: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WorktreeStatus {
+    pub branch: String,
+    pub base: String,
+    /// Files with changes not committed.
+    #[serde(default)]
+    pub uncommitted: u32,
+    /// Commits not pushed, when the branch has an upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpushed: Option<u32>,
+    /// Why it can't be merged into its base right now ("The project folder is on main, not
+    /// develop…"); `None`: it can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_blocked: Option<String>,
+    /// Commits its base doesn't have (lost with the branch, if it's deleted).
+    #[serde(default)]
+    pub unmerged: u32,
+    /// The folder is gone already.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDiff {
+    pub path: String,
+    /// Unified diff text (an untracked file: all its lines, `+`).
+    pub diff: String,
+    /// It was longer than the Mac sends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitBranches {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    /// Local branches, most recently committed first.
+    #[serde(default)]
+    pub branches: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------------------------
+
+/// A slash command, as the composer's `/` picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandInfo {
+    /// Without the slash: `permissions full`, `compact`, `review`.
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub kind: CommandKind,
+    /// One of Trek's own (answered by the Mac, not the agent).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trek: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKind {
+    Command,
+    Skill,
+    Agent,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------------------------
+
+/// The Mac's settings a phone may see and change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacSettings {
+    /// New threads' agent (its key), model (`None`: the agent's default), effort and access.
+    pub default_agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    pub default_effort: String,
+    pub default_access: Access,
+    /// What a message to a working thread does.
+    pub follow_up: SendMode,
+    /// The Mac's own notifications.
+    pub notifications: NotifyMode,
+    pub push: PushSettings,
+    /// Settle finished threads after this many idle days (0: never).
+    pub auto_settle_days: u32,
+    pub theme: Theme,
+    /// Full access is unlocked on the Mac (only the Mac can change that).
+    #[serde(default)]
+    pub full_access: bool,
+}
+
+/// Notifications on the phone through ntfy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSettings {
+    pub enabled: bool,
+    pub when: PushWhen,
+    /// The ntfy server, `https://ntfy.sh` or one of the user's own.
+    pub server: String,
+    /// The topic notes go to (empty until push is first turned on). Anyone who has it can read
+    /// them: keep it private.
+    #[serde(default)]
+    pub topic: String,
+    /// The topic on the web (`https://ntfy.sh/<topic>`): it opens in ntfy's web app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_url: Option<String>,
+    /// ntfy's subscribe link, `ntfy://<host>/<topic>` (`ntfy://ntfy.sh/trek-…`). ntfy documents it
+    /// for its Android app; its iOS app registers no link scheme (as of its 2026 source), so on
+    /// an iPhone the topic is added by hand in ntfy (+, then the topic; another server under
+    /// "Use another server").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribe_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyMode {
+    Off,
+    Banner,
+    Sound,
+    BannerAndSound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushWhen {
+    /// Only while the user is away from the Mac (two minutes idle, or locked).
+    Away,
+    Always,
+}
+
+/// The Mac's theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Follows macOS.
+    System,
+    Night,
+    Paper,
+}
+
+/// ntfy's links for `topic` on `server`: the web page, and the `ntfy://` subscribe link.
+pub fn ntfy_links(server: &str, topic: &str) -> (Option<String>, Option<String>) {
+    if topic.is_empty() {
+        return (None, None);
+    }
+    let server = server.trim().trim_end_matches('/');
+    let host = server.split_once("://").map_or(server, |(_, h)| h);
+    // `ntfy://` is https; a plain-http server says so (`?secure=false`).
+    let insecure = if server.starts_with("http://") { "?secure=false" } else { "" };
+    (Some(format!("{server}/{topic}")), Some(format!("ntfy://{host}/{topic}{insecure}")))
 }
 
 // ---------------------------------------------------------------------------------------------

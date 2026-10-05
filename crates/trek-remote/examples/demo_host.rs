@@ -41,6 +41,8 @@ struct State {
     /// Per-thread turn generation: a turn's task stops when it changes (interrupt, new turn).
     turns: HashMap<String, u64>,
     next_id: u64,
+    notes: Vec<Note>,
+    settings: MacSettings,
 }
 
 struct Shared {
@@ -465,10 +467,30 @@ impl RemoteHost for DemoHost {
         Ok(Transcript { seq: log.seq, items: log.items.clone() })
     }
 
-    async fn send(&self, req: SendRequest) -> HostResult<()> {
+    async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {
         let thread = self.thread(&req.thread_id).ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
         if req.text.trim().is_empty() {
             return Err(HostError::bad_request("Empty message"));
+        }
+        // Trek's own commands: `/new` opens the phone's new-thread sheet; the rest are answered
+        // with a notice, as the Mac answers them.
+        if let Some(cmd) = req.text.trim().strip_prefix('/').and_then(|c| c.split_whitespace().next()) {
+            match cmd {
+                "new" | "clear" => return Ok(Some(Open::NewThread { project_id: Some(thread.project.id.clone()) })),
+                "usage" | "context" | "cost" | "model" | "permissions" => {
+                    self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0 });
+                    let reply = match cmd {
+                        "usage" => "**Claude Code** · Claude Max\n- 5-hour limit: 42% used, resets in 2h 10m\n- Weekly limit: 18% used, resets in 4d",
+                        "context" => "61.2K of 200K tokens in context (31%).",
+                        "cost" => "≈ $1.84 at API prices (included in your Claude Max plan).",
+                        "model" => "Claude Code · claude-opus-5-5",
+                        _ => "Hand-holding is **Auto-accept edits**.",
+                    };
+                    self.add(&req.thread_id, ItemBody::Notice { text: reply.into() });
+                    return Ok(None);
+                }
+                _ => {}
+            }
         }
         self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0 });
         self.update(&req.thread_id, |t| t.unseen = false);
@@ -481,10 +503,10 @@ impl RemoteHost for DemoHost {
                     self.add(&req.thread_id, ItemBody::Notice { text: "Queued for after this turn".into() });
                 }
             }
-            return Ok(());
+            return Ok(None);
         }
         tokio::spawn(self.clone().echo_turn(req.thread_id, req.text));
-        Ok(())
+        Ok(None)
     }
 
     async fn new_thread(&self, req: NewThreadRequest) -> HostResult<String> {
@@ -511,24 +533,17 @@ impl RemoteHost for DemoHost {
             id: id.clone(),
             title,
             project: project.to_ref(),
-            agent: AgentRef { key: agent.key.clone(), name: agent.name.clone() },
+            agent: AgentRef { key: agent.key.clone(), name: agent.name.clone(), logo: agent.logo.clone() },
             model,
             model_label,
-            run_state: RunState::Idle,
-            needs: None,
-            section: Section::Inbox,
-            unseen: false,
-            pinned: false,
             branch: if worktree { Some(format!("trek/{id}")) } else { project.branch.clone() },
             worktree,
-            activity: None,
-            working_since: None,
+            base: worktree.then(|| project.branch.clone()).flatten(),
             updated_at: now_ms(),
-            additions: 0,
-            deletions: 0,
             effort: req.effort.clone().or(Some("high".into())),
             access: req.access.or(Some(Access::AutoAcceptEdits)),
             plan: req.plan,
+            ..Default::default()
         };
         {
             let mut st = self.lock();
@@ -618,8 +633,9 @@ impl RemoteHost for DemoHost {
         }
         self.update(&req.thread_id, |t| {
             if let Some(a) = req.agent.as_ref().and_then(|k| agents.iter().find(|a| &a.key == k)) {
-                t.agent = AgentRef { key: a.key.clone(), name: a.name.clone() };
+                t.agent = AgentRef { key: a.key.clone(), name: a.name.clone(), logo: a.logo.clone() };
                 t.model = a.default_model.clone();
+                t.model_label = a.models.iter().find(|o| Some(&o.id) == a.default_model.as_ref()).map(|o| o.label.clone());
             }
             if let Some(m) = &req.model {
                 t.model = Some(m.clone());
@@ -660,6 +676,263 @@ impl RemoteHost for DemoHost {
         });
         Ok(())
     }
+
+    async fn usage(&self) -> HostResult<Usage> {
+        let hours = |h: i64| Some(now_ms() + h * 3_600_000);
+        let limit = |label: &str, percent: f32, resets_at: Option<i64>, window: &str| UsageLimit { label: label.into(), percent, resets_at, window: window.into() };
+        Ok(Usage {
+            providers: vec![
+                ProviderUsage {
+                    agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
+                    plan: Some("Claude Max".into()),
+                    limits: vec![limit("5-hour limit", 42.0, hours(2), "5h"), limit("Weekly limit", 18.0, hours(96), "7d"), limit("Weekly · Opus", 64.0, hours(96), "7d")],
+                    note: None,
+                    error: None,
+                },
+                ProviderUsage {
+                    agent: AgentRef::new("codex", "Codex", Some("codex")),
+                    plan: Some("ChatGPT Pro".into()),
+                    limits: vec![limit("5-hour limit", 91.0, hours(1), "5h"), limit("Weekly limit", 33.0, hours(130), "7d")],
+                    note: None,
+                    error: None,
+                },
+            ],
+            loading: false,
+        })
+    }
+
+    async fn basecamp(&self, range: BasecampRange) -> HostResult<Basecamp> {
+        Ok(demo_basecamp(range, &self.lock().threads))
+    }
+
+    async fn notes(&self) -> HostResult<Vec<NoteSummary>> {
+        let mut notes = self.lock().notes.clone();
+        notes.sort_by_key(|n| std::cmp::Reverse(n.modified));
+        let preview = |body: &str| body.lines().skip(1).filter(|l| !l.trim().is_empty()).take(3).collect::<Vec<_>>().join(" ");
+        Ok(notes.into_iter().map(|n| NoteSummary { preview: preview(&n.body), id: n.id, title: n.title, modified: n.modified }).collect())
+    }
+
+    async fn note(&self, note_id: &str) -> HostResult<Note> {
+        self.lock().notes.iter().find(|n| n.id == note_id).cloned().ok_or_else(|| HostError::not_found("No such note"))
+    }
+
+    async fn create_note(&self, body: String) -> HostResult<Note> {
+        let id = self.new_id("n");
+        let note = Note { id, title: note_title(&body), body, modified: now_ms() };
+        self.lock().notes.push(note.clone());
+        Ok(note)
+    }
+
+    async fn save_note(&self, req: SaveNoteRequest) -> HostResult<Note> {
+        let mut st = self.lock();
+        let note = st.notes.iter_mut().find(|n| n.id == req.note_id).ok_or_else(|| HostError::not_found("No such note"))?;
+        if req.modified.is_some_and(|m| m != note.modified) {
+            return Err(HostError::conflict("This note changed on the Mac since you opened it"));
+        }
+        note.title = note_title(&req.body);
+        note.body = req.body;
+        note.modified = now_ms();
+        Ok(note.clone())
+    }
+
+    async fn delete_note(&self, note_id: &str) -> HostResult<()> {
+        let mut st = self.lock();
+        let before = st.notes.len();
+        st.notes.retain(|n| n.id != note_id);
+        if st.notes.len() == before {
+            return Err(HostError::not_found("No such note"));
+        }
+        Ok(())
+    }
+
+    async fn git_status(&self, target: GitTarget) -> HostResult<GitStatus> {
+        let thread = self.git_thread(&target)?;
+        let file = |path: &str, status: FileStatus, added: u32, removed: u32| ChangedFile { path: path.into(), status, from: None, added, removed, binary: false };
+        let mut status = GitStatus {
+            is_repo: true,
+            branch: thread.as_ref().and_then(|t| t.branch.clone()).or(Some("main".into())),
+            default_branch: Some("main".into()),
+            ..Default::default()
+        };
+        match thread.as_ref().filter(|t| t.worktree) {
+            Some(t) => {
+                status.files = vec![
+                    file("src/auth/session.rs", FileStatus::Modified, 12, 3),
+                    file("tests/auth/session_test.rs", FileStatus::Modified, 30, 4),
+                    file("tests/auth/fixtures.rs", FileStatus::Untracked, 18, 0),
+                ];
+                status.ahead = 1;
+                status.switch_blocked = Some("This thread works in a worktree: its branch stays checked out there.".into());
+                status.worktree = Some(WorktreeStatus {
+                    branch: t.branch.clone().unwrap_or_default(),
+                    base: t.base.clone().unwrap_or_else(|| "main".into()),
+                    uncommitted: 2,
+                    unpushed: None,
+                    merge_blocked: Some("2 files aren't committed yet. Commit or revert them first.".into()),
+                    unmerged: 1,
+                    missing: false,
+                });
+            }
+            None => {
+                status.files = vec![file("README.md", FileStatus::Modified, 31, 54)];
+                status.has_upstream = true;
+                status.behind = 2;
+                status.can_switch = thread.as_ref().is_none_or(|t| t.run_state != RunState::Working);
+            }
+        }
+        Ok(status)
+    }
+
+    async fn git_diff(&self, req: GitDiffRequest) -> HostResult<GitDiff> {
+        self.git_thread(&req.target)?;
+        let p = &req.path;
+        let diff = format!(
+            "diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -84,9 +84,14 @@ impl Session {{\n     pub async fn refresh(&self) -> Result<Token> {{\n-        let expired = self.token.expires_at < now();\n-        let mut guard = self.lock.lock().await;\n+        let mut guard = self.lock.lock().await;\n+        // Checked under the lock: another refresh may have just finished.\n+        if guard.expires_at > now() {{\n+            return Ok(guard.clone());\n+        }}\n         let fresh = self.client.refresh(&guard.refresh_token).await?;\n"
+        );
+        Ok(GitDiff { path: req.path, diff, truncated: false })
+    }
+
+    async fn git_commit(&self, req: GitCommitRequest) -> HostResult<()> {
+        self.git_thread(&req.target)?;
+        if req.message.trim().is_empty() {
+            return Err(HostError::bad_request("Write a commit message first."));
+        }
+        Ok(())
+    }
+
+    async fn git_push(&self, target: GitTarget) -> HostResult<()> {
+        self.git_thread(&target).map(|_| ())
+    }
+
+    async fn git_branches(&self, target: GitTarget) -> HostResult<GitBranches> {
+        let current = self.git_thread(&target)?.and_then(|t| t.branch).or(Some("main".into()));
+        let branches = ["main", "fix/auth-flake", "feat/dark-settings", "release/2.4"].map(String::from).to_vec();
+        Ok(GitBranches { current, default_branch: Some("main".into()), branches })
+    }
+
+    async fn git_switch(&self, req: GitSwitchRequest) -> HostResult<()> {
+        if let Some(t) = self.git_thread(&req.target)? {
+            if t.worktree {
+                return Err(HostError::conflict("This thread works in a worktree: its branch stays checked out there."));
+            }
+            if t.run_state == RunState::Working {
+                return Err(HostError::conflict("The thread is working: switch once it's done."));
+            }
+            self.update(&t.id, |t| t.branch = Some(req.branch.clone()));
+        }
+        Ok(())
+    }
+
+    async fn worktree_merge(&self, thread_id: &str) -> HostResult<()> {
+        let t = self.thread(thread_id).ok_or_else(|| HostError::not_found("No such thread"))?;
+        if !t.worktree {
+            return Err(HostError::bad_request("This thread has no worktree."));
+        }
+        Err(HostError::conflict("2 files aren't committed yet. Commit or revert them first."))
+    }
+
+    async fn worktree_remove(&self, req: WorktreeRemoveRequest) -> HostResult<()> {
+        let t = self.thread(&req.thread_id).ok_or_else(|| HostError::not_found("No such thread"))?;
+        if !t.worktree {
+            return Err(HostError::bad_request("This thread has no worktree."));
+        }
+        if !req.force {
+            return Err(HostError::conflict("2 uncommitted changes in the worktree would be lost."));
+        }
+        self.update(&req.thread_id, |t| {
+            t.worktree = false;
+            t.base = None;
+            t.branch = Some("main".into());
+        });
+        self.add(&req.thread_id, ItemBody::Notice { text: "Its worktree was removed. The thread runs in the project folder now, in a new agent session.".into() });
+        Ok(())
+    }
+
+    async fn commands(&self, thread_id: &str) -> HostResult<Vec<CommandInfo>> {
+        self.thread(thread_id).ok_or_else(|| HostError::not_found("No such thread"))?;
+        let c = |name: &str, description: &str, kind: CommandKind, trek: bool| CommandInfo { name: name.into(), description: description.into(), kind, trek };
+        Ok(vec![
+            c("new", "Start a new thread in this project", CommandKind::Command, true),
+            c("usage", "Show plan usage and reset times", CommandKind::Command, true),
+            c("context", "Show how much of the context window is used", CommandKind::Command, true),
+            c("cost", "Show this session's estimated cost", CommandKind::Command, true),
+            c("model", "Show the model this thread uses", CommandKind::Command, true),
+            c("permissions", "Show or change how much the agent asks first", CommandKind::Command, true),
+            c("permissions full", "No prompts and no sandbox", CommandKind::Command, true),
+            c("consult", "Ask other models first: /consult sol high, opus max: your message", CommandKind::Command, true),
+            c("restate", "Have the agent say back what you asked before it starts", CommandKind::Command, true),
+            c("compact", "Clear the conversation but keep a summary in context", CommandKind::Command, false),
+            c("review", "Review a pull request", CommandKind::Command, false),
+            c("frontend-design", "Create distinctive, production-grade frontend interfaces", CommandKind::Skill, false),
+            c("code-reviewer", "Reviews code for bugs and style", CommandKind::Agent, false),
+        ])
+    }
+
+    async fn settings(&self) -> HostResult<MacSettings> {
+        Ok(self.lock().settings.clone())
+    }
+
+    async fn set_settings(&self, change: SettingsChange) -> HostResult<MacSettings> {
+        let mut st = self.lock();
+        let s = &mut st.settings;
+        if change.default_access == Some(Access::FullAccess) && !s.full_access {
+            return Err(HostError::bad_request("Full access is locked on this Mac: unlock it in Trek's Permissions settings first."));
+        }
+        if let Some(a) = change.default_agent {
+            s.default_agent = a;
+            s.default_model = None;
+        }
+        if let Some(m) = change.default_model {
+            s.default_model = Some(m).filter(|m| !m.is_empty());
+        }
+        if let Some(e) = change.default_effort {
+            s.default_effort = e;
+        }
+        if let Some(a) = change.default_access {
+            s.default_access = a;
+        }
+        if let Some(f) = change.follow_up {
+            s.follow_up = f;
+        }
+        if let Some(n) = change.notifications {
+            s.notifications = n;
+        }
+        if let Some(on) = change.push {
+            s.push.enabled = on;
+            if on && s.push.topic.is_empty() {
+                s.push.topic = "trek-demo7Hq2xVb9KpL3mN8RtY4wZ6cE1fJ5".into();
+            }
+        }
+        if let Some(w) = change.push_when {
+            s.push.when = w;
+        }
+        if let Some(server) = change.push_server {
+            s.push.server = server;
+        }
+        if change.new_push_topic {
+            s.push.topic = format!("trek-demo{}", now_ms());
+        }
+        if let Some(d) = change.auto_settle_days {
+            s.auto_settle_days = d;
+        }
+        if let Some(t) = change.theme {
+            s.theme = t;
+        }
+        (s.push.topic_url, s.push.subscribe_url) = ntfy_links(&s.push.server, &s.push.topic);
+        Ok(s.clone())
+    }
+}
+
+impl DemoHost {
+    /// The thread a git request names (`None` for a project), or why there's none.
+    fn git_thread(&self, target: &GitTarget) -> HostResult<Option<ThreadSummary>> {
+        match (&target.thread_id, &target.project_id) {
+            (Some(id), _) => self.thread(id).map(Some).ok_or_else(|| HostError::not_found("No such thread")),
+            (None, Some(p)) if self.lock().projects.iter().any(|x| &x.id == p) => Ok(None),
+            (None, Some(_)) => Err(HostError::not_found("No such project")),
+            (None, None) => Err(HostError::bad_request("Name a thread or a project")),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -684,18 +957,21 @@ fn agents() -> Vec<AgentOption> {
         AgentOption {
             key: "claude-code".into(),
             name: "Claude Code".into(),
+            logo: Some("claude-code".into()),
             default_model: Some("claude-opus-5-5".into()),
             models: vec![m("claude-opus-5-5", "Opus 5.5"), m("claude-sonnet-5-5", "Sonnet 5.5"), m("claude-haiku-5", "Haiku 5")],
         },
         AgentOption {
             key: "codex".into(),
             name: "Codex".into(),
+            logo: Some("codex".into()),
             default_model: Some("gpt-6".into()),
             models: vec![m("gpt-6", "GPT-6"), m("gpt-6-mini", "GPT-6 mini")],
         },
         AgentOption {
             key: "opencode".into(),
             name: "OpenCode".into(),
+            logo: Some("opencode".into()),
             default_model: None,
             models: vec![m("anthropic/claude-sonnet-5-5", "Sonnet 5.5"), m("openai/gpt-6", "GPT-6")],
         },
@@ -747,24 +1023,18 @@ fn summary(
         id: id.into(),
         title: title.into(),
         project: project.to_ref(),
-        agent: AgentRef { key: agent.0.into(), name: agent.1.into() },
+        agent: AgentRef::new(agent.0, agent.1, Some(agent.0)),
         model: Some(model.0.into()),
         model_label: Some(model.1.into()),
         run_state,
-        needs: None,
         section,
-        unseen: false,
-        pinned: false,
         branch: project.branch.clone(),
-        worktree: false,
-        activity: None,
-        working_since: None,
         updated_at: now_ms() - minutes_ago * 60_000,
-        additions: 0,
-        deletions: 0,
         effort: Some("high".into()),
+        effort_label: Some("High".into()),
         access: Some(Access::AutoAcceptEdits),
-        plan: false,
+        git: Some(GitSummary { changed: 0, ahead: 0, behind: 0, default_branch: Some("main".into()) }),
+        ..Default::default()
     }
 }
 
@@ -787,8 +1057,17 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     t.unseen = true;
     t.branch = Some("fix/auth-flake".into());
     t.worktree = true;
+    t.base = Some("main".into());
     t.additions = 42;
     t.deletions = 7;
+    t.context = Some(ContextUse { used: 61_200, window: 200_000, percent: 31 });
+    t.cost = Some(Cost {
+        label: "≈ $1.84 at API prices".into(),
+        billing: Some(Billing::Plan),
+        plan: Some("Claude Max".into()),
+        detail: Some("Included in your Claude Max plan".into()),
+    });
+    t.git = Some(GitSummary { changed: 2, ahead: 1, behind: 0, default_branch: Some("main".into()) });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -821,6 +1100,8 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     let mut t = summary("t-rate", "Add rate limiting to /login", &api, codex, gpt, RunState::NeedsYou, Section::Inbox, 9);
     t.needs = Some(Needs { kind: NeedsKind::Question, text: "Per IP or per account?".into() });
     t.unseen = true;
+    t.context = Some(ContextUse { used: 22_400, window: 272_000, percent: 8 });
+    t.cost = Some(Cost { label: "$0.41".into(), billing: Some(Billing::Metered), plan: None, detail: Some("Billed per token by your API provider".into()) });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -852,8 +1133,16 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     let mut t = summary("t-dark", "Dark mode for the settings page", &web, claude, sonnet, RunState::Idle, Section::Inbox, 1);
     t.branch = Some("feat/dark-settings".into());
     t.worktree = true;
+    t.base = Some("main".into());
     t.additions = 65;
     t.deletions = 8;
+    t.context = Some(ContextUse { used: 171_000, window: 200_000, percent: 85 });
+    t.sub_agents = vec![
+        SubAgent { agent: AgentRef::new("codex", "Codex", Some("codex")), model: Some("Sol".into()), title: "Review the theme tokens".into(), state: SubAgentState::Running, since: Some(now_ms() - 95_000) },
+        SubAgent { agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")), model: None, title: "Find every hard-coded colour".into(), state: SubAgentState::Running, since: Some(now_ms() - 40_000) },
+    ];
+    t.background = vec!["pnpm dev".into()];
+    t.git = Some(GitSummary { changed: 5, ahead: 0, behind: 2, default_branch: Some("main".into()) });
     seeds.push(Seed { thread: t, items: vec![user("Add dark mode to the settings page")] });
 
     // 4. Needs a plan approval.
@@ -888,6 +1177,15 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
             tool("Write", "README.md", ToolStatus::Done, "", Some((31, 54))),
             assistant("Rewrote **Quick start**:\n\n- `pnpm install` instead of `npm ci`\n- Node 22 as the minimum\n- a `pnpm dev` section with the env vars it needs\n\nI also removed the Docker section; it pointed at an image we no longer publish."),
             ItemBody::TurnEnd { took_secs: 95 },
+            ItemBody::Changes {
+                files: vec![
+                    ChangedFile { path: "README.md".into(), status: FileStatus::Modified, from: None, added: 31, removed: 54, binary: false },
+                    ChangedFile { path: "docs/quick-start.md".into(), status: FileStatus::Renamed, from: Some("docs/getting-started.md".into()), added: 4, removed: 2, binary: false },
+                    ChangedFile { path: "docs/img/docker.png".into(), status: FileStatus::Deleted, from: None, added: 0, removed: 0, binary: true },
+                ],
+                added: 35,
+                removed: 56,
+            },
         ],
     });
 
@@ -920,6 +1218,150 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     (vec![api, web, infra], seeds)
+}
+
+fn note_title(body: &str) -> String {
+    body.lines().map(|l| l.trim_start_matches(['#', '-', '*', ' ']).trim()).find(|l| !l.is_empty()).unwrap_or("Untitled").chars().take(80).collect()
+}
+
+fn notes() -> Vec<Note> {
+    let note = |id: &str, body: &str, minutes_ago: i64| Note { id: id.into(), title: note_title(body), body: body.into(), modified: now_ms() - minutes_ago * 60_000 };
+    vec![
+        note("n-release", "# 2.4 release\n\n- [x] Migrations reviewed\n- [ ] Changelog\n- [ ] Tag and publish\n\nAsk **Mara** about the <mark>pricing page</mark> copy.", 35),
+        note("n-ideas", "Ideas\n\n- Rate limit per account *and* per IP\n- Cache the dashboard query for 30 s\n- <span style=\"color: #e5484d\">Drop</span> the Docker image", 60 * 20),
+    ]
+}
+
+fn settings() -> MacSettings {
+    let (topic_url, subscribe_url) = ntfy_links("https://ntfy.sh", "");
+    MacSettings {
+        default_agent: "claude-code".into(),
+        default_model: None,
+        default_effort: "high".into(),
+        default_access: Access::AutoAcceptEdits,
+        follow_up: SendMode::Steer,
+        notifications: NotifyMode::BannerAndSound,
+        push: PushSettings { enabled: false, when: PushWhen::Away, server: "https://ntfy.sh".into(), topic: String::new(), topic_url, subscribe_url },
+        auto_settle_days: 3,
+        theme: Theme::System,
+        full_access: true,
+    }
+}
+
+/// A recap like the Mac's, made up: today by the hour, a week by three hours, all time by day.
+fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
+    let (n, title, label): (usize, &str, fn(usize) -> String) = match range {
+        BasecampRange::Today => (24, "Today's trek", |i| format!("{}–{} {}", (i + 11) % 12 + 1, (i + 12) % 12 + 1, if i < 12 { "AM" } else { "PM" })),
+        BasecampRange::Week => (56, "This week's trek", |i| format!("{} {}", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i / 8], ["12–3 AM", "3–6 AM", "6–9 AM", "9 AM–12 PM", "12–3 PM", "3–6 PM", "6–9 PM", "9 PM–12 AM"][i % 8])),
+        BasecampRange::All => (60, "Your trek so far", |i| format!("Day {}", i + 1)),
+    };
+    let shape = |i: usize| ((i as f32 * 0.7).sin() * 0.5 + 0.5) * if range == BasecampRange::Today && !(9..20).contains(&i) { 0.0 } else { 1.0 };
+    let buckets: Vec<ProfileBucket> = (0..n)
+        .map(|i| {
+            let prompts = (shape(i) * 6.0).round() as u32;
+            let agent_secs = (shape(i) * 1_500.0) as u64;
+            let label = label(i);
+            let line = if prompts == 0 { format!("{label} · quiet") } else { format!("{label} · {prompts} prompts · {}m of agent time", agent_secs / 60) };
+            ProfileBucket { value: agent_secs as f32 / 60.0, label, line, prompts, agent_secs, tokens: agent_secs * 900 }
+        })
+        .collect();
+    let summit = (0..n).max_by(|a, b| buckets[*a].value.total_cmp(&buckets[*b].value));
+    let prompts: u32 = buckets.iter().map(|b| b.prompts).sum();
+    let agent_secs: u64 = buckets.iter().map(|b| b.agent_secs).sum();
+    let tokens: u64 = buckets.iter().map(|b| b.tokens).sum();
+    let api = ProjectRef { id: "p-api".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into() };
+    let opus = AgentRef::new("claude-code", "Claude Code", Some("claude-code"));
+    let codex = AgentRef::new("codex", "Codex", Some("codex"));
+    let text = |t: &str| Span::Text { text: t.into() };
+    let strong = |t: String| Span::Strong { text: t };
+    let mut sum = 0u64;
+    let sparkline = buckets
+        .iter()
+        .map(|b| {
+            sum += b.tokens;
+            sum as f32 / tokens.max(1) as f32
+        })
+        .collect();
+    let review = threads
+        .iter()
+        .filter(|t| t.needs.is_some() || t.unseen)
+        .map(|t| {
+            let (status, label) = match (&t.needs, t.run_state) {
+                (Some(n), _) if n.kind == NeedsKind::Limit => (ReviewStatus::Paused, Some("Paused until 4 PM".to_string())),
+                (_, RunState::Failed) => (ReviewStatus::Failed, Some("Failed".to_string())),
+                (Some(n), _) => (ReviewStatus::NeedsYou, Some(match n.kind {
+                    NeedsKind::Question => "Question",
+                    NeedsKind::Plan => "Plan to review",
+                    _ => "Approval",
+                }.to_string())),
+                _ => (ReviewStatus::Done, None),
+            };
+            ReviewRow { thread_id: t.id.clone(), title: t.title.clone(), status, label, agent: t.agent.clone(), project: Some(t.project.clone()), additions: t.additions, deletions: t.deletions, updated_at: t.updated_at, unseen: t.unseen }
+        })
+        .collect();
+    Basecamp {
+        range,
+        greeting: match range {
+            BasecampRange::All => "Good evening — on the trail since 3 June".into(),
+            _ => "Good evening, Monday 5 October".into(),
+        },
+        title: title.into(),
+        updated_at: now_ms(),
+        review,
+        empty: false,
+        invitation: None,
+        narrative: vec![
+            text(match range {
+                BasecampRange::Today => "You sent ",
+                BasecampRange::Week => "This week you sent ",
+                BasecampRange::All => "So far you've sent ",
+            }),
+            strong(format!("{prompts} prompts")),
+            text(" across "),
+            strong("7 threads".into()),
+            text(". Most of it went into "),
+            Span::Project { text: "trek-api".into(), project: Some(api.clone()) },
+            text(", with "),
+            Span::Model { text: "Claude Opus 5.5".into(), agent: opus.clone() },
+            text(" carrying "),
+            strong("77%".into()),
+            text(" of the tokens, ahead of "),
+            Span::Model { text: "GPT-6".into(), agent: codex },
+            text(". Your agents were on the trail for "),
+            strong(format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60)),
+            text("."),
+        ],
+        summary: Some(RecapSummary {
+            prompts,
+            threads: 7,
+            turns: prompts + 4,
+            agent_secs,
+            agent_time: format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60),
+            tokens,
+            failed: 1,
+            top_project: Some(ProjectShare { project: api.clone(), prompts: prompts * 2 / 3, tokens: tokens / 2 }),
+            best_model: Some(ModelShare { agent: opus.clone(), label: "Claude Opus 5.5".into(), tokens: tokens * 77 / 100, turns: 9, share: Some(77) }),
+        }),
+        profile: Some(Profile {
+            summit,
+            now: Some(n * 3 / 4),
+            now_at: 0.75,
+            line: summit.map(|i| format!("Summit {}", buckets[i].label)).unwrap_or_else(|| "A flat trail so far".into()),
+            total: format!("{prompts} prompts"),
+            ticks: match range {
+                BasecampRange::Today => [(0.25, "6 AM"), (0.5, "Noon"), (0.75, "6 PM")].map(|(at, l)| Tick { at, label: l.into() }).to_vec(),
+                _ => vec![Tick { at: 0.1, label: "Sep 14".into() }, Tick { at: 0.5, label: "Sep 21".into() }, Tick { at: 0.9, label: "Oct 1".into() }],
+            },
+            buckets,
+        }),
+        tiles: vec![
+            Tile { kind: TileKind::BestModel, label: "Your best model".into(), figure: "Claude Opus 5.5".into(), note: "77% of tokens · 9 turns".into(), agent: Some(opus.clone()), project: None, sparkline: vec![], percent: None, resets_at: None },
+            Tile { kind: TileKind::WorkedMostOn, label: "You worked most on".into(), figure: "trek-api".into(), note: format!("{} prompts · 1.2M tokens", prompts * 2 / 3), agent: None, project: Some(api), sparkline: vec![], percent: None, resets_at: None },
+            Tile { kind: TileKind::Tokens, label: "You used".into(), figure: format!("{:.1}M tokens", tokens as f64 / 1e6), note: "≈ $14.20 at API prices today".into(), agent: None, project: None, sparkline, percent: None, resets_at: None },
+            Tile { kind: TileKind::AgentTime, label: "Your agents worked for".into(), figure: format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60), note: "1 turn failed today".into(), agent: None, project: None, sparkline: vec![], percent: None, resets_at: None },
+            Tile { kind: TileKind::PlanLeft, label: "Left on Claude Max".into(), figure: "36%".into(), note: "Weekly · Opus · resets in 4d".into(), agent: Some(opus), project: None, sparkline: vec![], percent: Some(36.0), resets_at: Some(now_ms() + 96 * 3_600_000) },
+        ],
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -962,6 +1404,8 @@ async fn main() -> std::io::Result<()> {
         logs: HashMap::new(),
         turns: HashMap::new(),
         next_id: 100,
+        notes: notes(),
+        settings: settings(),
     };
     for Seed { thread, items } in seeds {
         let base = thread.updated_at - items.len() as i64 * 20_000;

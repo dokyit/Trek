@@ -130,14 +130,14 @@ pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
 
 /// `/consult`'s models and message, split at the first colon followed by a space (or ending
 /// it): model ids may have colons of their own (`qwen2.5-coder:7b`).
-fn consult_split(rest: &str) -> Option<(&str, &str)> {
+pub(crate) fn consult_split(rest: &str) -> Option<(&str, &str)> {
     let at = rest.char_indices().find(|&(i, c)| c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))?.0;
     Some((&rest[..at], &rest[at + 1..]))
 }
 
 /// `/restate` alone (`Some(None)`), or with the message to send (`Some(Some(message))`); `None`
 /// when `text` isn't the command.
-fn restate_command(text: &str) -> Option<Option<String>> {
+pub(crate) fn restate_command(text: &str) -> Option<Option<String>> {
     let rest = text.trim_start().strip_prefix("/restate")?;
     let rest = rest.strip_prefix(':').unwrap_or(rest);
     if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
@@ -148,7 +148,7 @@ fn restate_command(text: &str) -> Option<Option<String>> {
 }
 
 /// A consultant on `model` of `agent`, at `effort` (High, unless asked) within what the model takes.
-fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
+pub(crate) fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
     let effort = effort.unwrap_or(Effort::High);
     let effort = if model.efforts.is_empty() { effort } else { effort.clamp_to(&model.efforts) };
     Consultant { agent, model: model.id.clone(), effort }
@@ -156,7 +156,7 @@ fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Cons
 
 /// The model `query` names among the agents the user can pick: by id or name, whole or in part
 /// ("sol", "opus 5.5", "gpt-5.6-luna"), optionally after its agent ("codex sol").
-fn find_model(ws: &crate::workspace::Workspace, query: &str) -> Option<(AgentId, ModelInfo)> {
+pub(crate) fn find_model(ws: &crate::workspace::Workspace, query: &str) -> Option<(AgentId, ModelInfo)> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return None;
@@ -170,6 +170,26 @@ fn find_model(ws: &crate::workspace::Workspace, query: &str) -> Option<(AgentId,
         .find(named)
         .or_else(|| all.iter().find(|(_, m)| m.name.to_lowercase().contains(&q) || m.id.to_lowercase().contains(&q)))
         .cloned()
+}
+
+/// Every model on offer for an arena, each agent's default first, then its others, smartest
+/// first.
+pub(crate) fn arena_options(ws: &crate::workspace::Workspace) -> Vec<(AgentId, ModelInfo)> {
+    let (mut defaults, mut others) = (vec![], vec![]);
+    for agent in ws.ready_agents() {
+        let mut models = ws.models_for(&agent);
+        let default = default_model(&models).map(|m| m.id.clone());
+        models.sort_by_key(|m| std::cmp::Reverse(m.tier));
+        for m in models {
+            if Some(&m.id) == default.as_ref() {
+                defaults.push((agent.clone(), m));
+            } else {
+                others.push((agent.clone(), m));
+            }
+        }
+    }
+    defaults.append(&mut others);
+    defaults
 }
 
 pub(crate) fn hand_icon(level: HandHolding) -> Icon {
@@ -1578,25 +1598,8 @@ impl Composer {
         }
     }
 
-    /// Every model on offer for an arena, each agent's default first, then its others, smartest
-    /// first.
     fn arena_options(&self, cx: &App) -> Vec<(AgentId, ModelInfo)> {
-        let ws = self.workspace.read(cx);
-        let (mut defaults, mut others) = (vec![], vec![]);
-        for agent in ws.ready_agents() {
-            let mut models = ws.models_for(&agent);
-            let default = default_model(&models).map(|m| m.id.clone());
-            models.sort_by_key(|m| std::cmp::Reverse(m.tier));
-            for m in models {
-                if Some(&m.id) == default.as_ref() {
-                    defaults.push((agent.clone(), m));
-                } else {
-                    others.push((agent.clone(), m));
-                }
-            }
-        }
-        defaults.append(&mut others);
-        defaults
+        arena_options(self.workspace.read(cx))
     }
 
     /// The thread's own agent and model.
@@ -2333,12 +2336,7 @@ impl Render for Composer {
         let billing = thread.as_ref().and_then(|t| ws.billing_of(t));
         let spend = live.and_then(|l| l.spend.clone()).unwrap_or_default();
         let cost_label = crate::cost::label(billing.as_ref(), &spend);
-        let billing_tip = match &billing {
-            Some(trek_agents::Billing::Plan(plan)) => Some(format!("Included in {}", crate::cost::plan_phrase(plan))),
-            Some(trek_agents::Billing::Metered) => Some("Billed per token by your API provider".to_string()),
-            Some(trek_agents::Billing::Local) => Some("Runs on this Mac, nothing is billed".to_string()),
-            None => None,
-        };
+        let billing_tip = crate::cost::billing_note(billing.as_ref());
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let models = ws.models_for(&prefs.agent);
         let model_label = prefs

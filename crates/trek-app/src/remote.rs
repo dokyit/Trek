@@ -2,10 +2,13 @@
 //! workspace. Off until Settings › Phone turns it on. Phones pair with a one-time code shown as
 //! a QR code, then connect with their own token over TLS pinned to this Mac's certificate.
 //!
-//! What a phone can do is what the thread's own controls do on the Mac: read threads, send a
-//! follow-up (steered or queued as the user's setting says), start a thread, answer an approval,
-//! a question or a plan, stop a turn. It can't run Trek's own commands (`/permissions full` would
-//! raise what agents may do), and nothing is ever answered on the phone's behalf.
+//! What a phone can do is what the Mac's own controls do: read threads, send a follow-up (steered
+//! or queued as the user's setting says), start a thread, answer an approval, a question or a
+//! plan, stop a turn; read usage, Basecamp and notes; review, commit and merge git work; change
+//! some settings. Trek's own commands run as typed on the Mac, except that Full access stays
+//! locked until the Mac unlocks it (whichever way it's asked for), and commands that move the
+//! Mac's window (`/new`) open the phone's sheet instead. Nothing is ever answered on the phone's
+//! behalf.
 //!
 //! Changes go out on a short tick while the server runs: thread rows that changed, and the
 //! transcript items of threads a phone has open (by index; each change takes the next `seq` of
@@ -22,6 +25,13 @@ use std::time::Duration;
 use trek_core::store::{Item, Section, Thread, ToolStatus, now_ms};
 use trek_core::{AgentId, RunState};
 use trek_remote as tr;
+
+mod basecamp;
+mod commands;
+mod git;
+mod notes;
+mod settings;
+mod usage;
 
 /// How often changes go out to phones.
 const TICK: Duration = Duration::from_millis(250);
@@ -58,6 +68,8 @@ struct Watched {
     items: Vec<u64>,
     /// Requests shown as cards, by id, as last sent.
     requests: Vec<(String, tr::ItemBody)>,
+    /// The files each turn changed, by the index of its turn end, as last sent.
+    changes: HashMap<usize, u64>,
     revision: u64,
 }
 
@@ -237,6 +249,19 @@ impl Workspace {
         .detach();
     }
 
+    /// A phone server on the loopback, plain and in memory, with a phone taken as connected:
+    /// what `start_remote` sets up, for tests of what goes out to phones.
+    #[cfg(test)]
+    pub(crate) fn start_test_remote(&mut self) {
+        let mut config = tr::ServerConfig::new(tr::HostInfo { id: "test".into(), name: "Test Mac".into(), version: "0".into() });
+        config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let (host, _requests) = tr::ChannelHost::new();
+        let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
+        let connected = HashSet::from(["phone".to_string()]);
+        let started_with = (0, trek_core::settings::Reach::Wifi);
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), _tasks: vec![] });
+    }
+
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
         if let Some(remote) = self.remote.take() {
             remote.handle.shutdown();
@@ -331,16 +356,51 @@ impl Workspace {
                 }
                 let _ = reply.send(Ok(()));
             }
+            tr::HostRequest::Usage { reply } => self.remote_usage(reply, cx),
+            tr::HostRequest::Basecamp { range, reply } => self.remote_basecamp(range, reply, cx),
+            tr::HostRequest::Notes { reply } => {
+                let _ = reply.send(Ok(notes::list()));
+            }
+            tr::HostRequest::Note { note_id, reply } => {
+                let _ = reply.send(notes::get(&note_id));
+            }
+            tr::HostRequest::CreateNote { body, reply } => {
+                let _ = reply.send(self.remote_create_note(body, cx));
+            }
+            tr::HostRequest::SaveNote { req, reply } => {
+                let _ = reply.send(self.remote_save_note(req, cx));
+            }
+            tr::HostRequest::DeleteNote { note_id, reply } => {
+                let _ = reply.send(self.remote_delete_note(&note_id, cx));
+            }
+            tr::HostRequest::GitStatus { target, reply } => self.remote_git_status(target, reply, cx),
+            tr::HostRequest::GitDiff { req, reply } => self.remote_git_diff(req, reply, cx),
+            tr::HostRequest::GitCommit { req, reply } => self.remote_git_commit(req, reply, cx),
+            tr::HostRequest::GitPush { target, reply } => self.remote_git_push(target, reply, cx),
+            tr::HostRequest::GitBranches { target, reply } => self.remote_git_branches(target, reply, cx),
+            tr::HostRequest::GitSwitch { req, reply } => self.remote_git_switch(req, reply, cx),
+            tr::HostRequest::WorktreeMerge { thread_id, reply } => self.remote_worktree_merge(&thread_id, reply, cx),
+            tr::HostRequest::WorktreeRemove { req, reply } => self.remote_worktree_remove(req, reply, cx),
+            tr::HostRequest::Commands { thread_id, reply } => {
+                let _ = reply.send(self.remote_commands(&thread_id));
+            }
+            tr::HostRequest::Settings { reply } => {
+                let _ = reply.send(Ok(self.remote_settings()));
+            }
+            tr::HostRequest::SetSettings { change, reply } => {
+                let _ = reply.send(self.remote_set_settings(change, cx));
+            }
         }
     }
 
-    fn remote_send(&mut self, req: tr::SendRequest, cx: &mut Context<Self>) -> tr::HostResult<()> {
-        if self.thread(&req.thread_id).is_none() {
-            return Err(tr::HostError::not_found("No such thread"));
-        }
-        if is_trek_command(&req.text) {
-            return Err(tr::HostError::bad_request("That's one of Trek's own commands: run it on the Mac."));
-        }
+    fn remote_send(&mut self, req: tr::SendRequest, cx: &mut Context<Self>) -> tr::HostResult<Option<tr::Open>> {
+        let Some(t) = self.thread(&req.thread_id).cloned() else { return Err(tr::HostError::not_found("No such thread")) };
+        // Trek's own commands: `/new` is the phone's to carry out, `/consult` and `/restate` become
+        // the message the composer would send, the rest are answered as on the Mac.
+        let text = match self.phone_command(&t, &req.text)? {
+            commands::Phone::Open(open) => return Ok(Some(open)),
+            commands::Phone::Send(text) => text,
+        };
         // An explicit choice from the phone wins over the setting, for this message only.
         let before = self.settings.general.follow_up;
         if let Some(mode) = req.mode {
@@ -350,9 +410,9 @@ impl Workspace {
             };
         }
         let images = save_uploads(&req.images)?;
-        self.send_to(&req.thread_id, req.text, images, cx);
+        self.send_to(&req.thread_id, text, images, cx);
         self.settings.general.follow_up = before;
-        Ok(())
+        Ok(None)
     }
 
     /// A thread's agent, model, effort, access or plan mode, changed as its composer would.
@@ -368,19 +428,24 @@ impl Workspace {
                 return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
             }
             if agent != prefs.agent {
+                // Another agent starts on its default model, as its model menu shows first.
+                prefs.model = crate::composer::default_model(&self.models_for(&agent)).map(|m| m.id.clone());
                 prefs.agent = agent;
-                prefs.model = None;
             }
         }
+        let models = self.models_for(&prefs.agent);
         if let Some(model) = &req.model {
-            let known = self.models_for(&prefs.agent);
-            if !known.is_empty() && !known.iter().any(|m| &m.id == model) {
+            if !models.is_empty() && !models.iter().any(|m| &m.id == model) {
                 return Err(tr::HostError::not_found(format!("{model} isn't one of {}'s models", prefs.agent.display_name())));
             }
             prefs.model = Some(model.clone());
         }
         if let Some(effort) = &req.effort {
             prefs.effort = trek_core::Effort::parse(effort).ok_or_else(|| tr::HostError::bad_request(format!("No effort called {effort}")))?;
+        }
+        // An effort the model doesn't take becomes the nearest it does (Codex has no "max").
+        if let Some(m) = prefs.model.as_ref().and_then(|id| models.iter().find(|m| crate::composer::same_model(id, &m.id))).filter(|m| !m.efforts.is_empty()) {
+            prefs.effort = prefs.effort.clamp_to(&m.efforts);
         }
         if let Some(access) = req.access {
             prefs.hand_holding = hand_holding(access, &self.settings)?;
@@ -408,14 +473,12 @@ impl Workspace {
     }
 
     fn remote_new_thread(&mut self, req: tr::NewThreadRequest, cx: &mut Context<Self>) -> tr::HostResult<String> {
-        if is_trek_command(&req.text) {
-            return Err(tr::HostError::bad_request("That's one of Trek's own commands: run it on the Mac."));
-        }
+        let agent = AgentId::from_key(&req.agent);
+        let text = self.phone_first_message(&agent, req.model.as_deref(), &req.text)?;
         let project = match req.project_id.as_str() {
             "" => None,
             id => Some(self.project(id).map(|p| p.path.clone()).ok_or_else(|| tr::HostError::not_found("No such project"))?),
         };
-        let agent = AgentId::from_key(&req.agent);
         if !self.ready_agents().contains(&agent) {
             return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
         }
@@ -435,7 +498,7 @@ impl Workspace {
         if let Some(e) = effort {
             self.draft_prefs.effort = e;
         }
-        self.send(req.text, images, cx);
+        self.send(text, images, cx);
         let started = match &self.route {
             Route::Thread(id) => Some(id.clone()),
             _ => None,
@@ -474,8 +537,12 @@ impl Workspace {
             (tr::AnswerResponse::Plan { approve: true, .. }, Some(trek_agents::Prompt::Plan(_))) => self.approve_plan(&id, &req.request_id, cx),
             (tr::AnswerResponse::Plan { approve: false, feedback }, Some(trek_agents::Prompt::Plan(_))) => {
                 self.respond(&id, &req.request_id, trek_agents::Decision::Deny, cx);
-                if let Some(feedback) = feedback.filter(|f| !f.trim().is_empty() && !is_trek_command(f)) {
-                    self.send_to(&id, feedback, vec![], cx);
+                // Feedback is a message like any other (`/new` in it opens nothing: it was an answer).
+                let thread = self.thread(&id).cloned();
+                if let (Some(feedback), Some(t)) = (feedback.filter(|f| !f.trim().is_empty()), thread)
+                    && let Ok(commands::Phone::Send(text)) = self.phone_command(&t, &feedback)
+                {
+                    self.send_to(&id, text, vec![], cx);
                 }
             }
             _ => return Err(tr::HostError::bad_request("That answer doesn't fit the request")),
@@ -528,14 +595,45 @@ impl Workspace {
                 _ => None,
             })
         });
-        let working_since = live.and_then(|l| l.turn_started).map(|s| now - s.elapsed().as_millis() as i64);
+        let working_since = live.and_then(|l| l.turn_started).map(instant_ms);
+        // The composer's context ring and cost line, once the thread has been opened (here or on
+        // the phone): what its session reported.
+        let context = live.and_then(|l| l.context).filter(|(_, window)| *window > 0).map(|(used, window)| tr::ContextUse {
+            used,
+            window,
+            percent: ((used as f64 / window as f64) * 100.).round().clamp(0., 100.) as u8,
+        });
+        let cost = live.and_then(|l| l.spend.as_ref()).and_then(|spend| {
+            let billing = self.billing_of(t);
+            Some(tr::Cost {
+                label: crate::cost::label(billing.as_ref(), spend)?,
+                detail: crate::cost::billing_note(billing.as_ref()),
+                plan: match &billing {
+                    Some(trek_agents::Billing::Plan(plan)) => plan.clone(),
+                    _ => None,
+                },
+                billing: billing.map(|b| match b {
+                    trek_agents::Billing::Plan(_) => tr::Billing::Plan,
+                    trek_agents::Billing::Metered => tr::Billing::Metered,
+                    trek_agents::Billing::Local => tr::Billing::Local,
+                }),
+            })
+        });
+        let (sub_agents, background) = self.remote_at_work(t);
+        let git = t.cwd.as_ref().and_then(|c| self.git_info.get(c)).filter(|g| g.is_repo).map(|g| tr::GitSummary {
+            changed: g.changed as u32,
+            ahead: g.ahead,
+            behind: g.behind,
+            default_branch: g.default_branch.clone(),
+        });
         tr::ThreadSummary {
             id: t.id.clone(),
             title: t.title.clone(),
             project: self.remote_project(t),
-            agent: tr::AgentRef { key: t.agent.key(), name: t.agent.display_name() },
+            agent: agent_ref(&t.agent),
             model: t.model.clone(),
-            model_label: t.model.as_ref().map(|m| self.models_for(&t.agent).into_iter().find(|x| &x.id == m).map(|x| x.name).unwrap_or_else(|| m.clone())),
+            // The default's name too ("Opus 5.5"), as the composer's model pill shows it.
+            model_label: Some(self.model_label(t)),
             run_state: match t.run_state {
                 RunState::Idle => tr::RunState::Idle,
                 RunState::Working => tr::RunState::Working,
@@ -561,7 +659,52 @@ impl Workspace {
                 trek_core::HandHolding::FullAccess => tr::Access::FullAccess,
             }),
             plan: live.is_some_and(|l| l.plan),
+            effort_label: Some(t.effort.label().to_string()),
+            context,
+            cost,
+            sub_agents,
+            background,
+            base: t.worktree.as_ref().map(|w| w.base.clone()),
+            git,
         }
+    }
+
+    /// What `t` has at work, as its sidebar card and its tooltip say: its sub-agents (Trek's, and
+    /// its agent's own, in its turn or in the background), then what else its agent runs in the
+    /// background, by title.
+    fn remote_at_work(&self, t: &Thread) -> (Vec<tr::SubAgent>, Vec<String>) {
+        use crate::workspace::TaskState;
+        let mut kids: Vec<tr::SubAgent> = self
+            .running_children(&t.id)
+            .into_iter()
+            .map(|c| tr::SubAgent {
+                agent: agent_ref(&c.agent),
+                model: Some(self.model_label(c)),
+                title: c.title.clone(),
+                state: match self.task_state(&c.id) {
+                    TaskState::Running => tr::SubAgentState::Running,
+                    TaskState::NeedsYou => tr::SubAgentState::NeedsYou,
+                    TaskState::Done => tr::SubAgentState::Done,
+                    TaskState::Failed => tr::SubAgentState::Failed,
+                    TaskState::Cancelled => tr::SubAgentState::Stopped,
+                },
+                // Rounded: what it's worked for is time paused at a limit aside, so this can
+                // drift by the odd millisecond between ticks.
+                since: Some((now_ms() - self.task_elapsed(&c.id).as_millis() as i64) / 1000 * 1000),
+            })
+            .collect();
+        let Some(l) = self.live.get(&t.id) else { return (kids, vec![]) };
+        let own = |title: &str, started: std::time::Instant| tr::SubAgent {
+            agent: agent_ref(&t.agent),
+            model: None,
+            title: title.to_string(),
+            state: tr::SubAgentState::Running,
+            since: Some(instant_ms(started)),
+        };
+        let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
+        kids.extend(l.tasks.iter().filter(|k| k.done.is_none()).map(|k| own(&k.description, k.started)));
+        kids.extend(l.background_agents().filter(|b| !b.task.call.as_deref().is_some_and(out)).map(|b| own(&b.task.title, b.started)));
+        (kids, l.background_work().map(|b| b.task.title.clone()).collect())
     }
 
     /// The threads a phone lists: the sidebar's, without side chats and sub-agents, and only the
@@ -604,12 +747,14 @@ impl Workspace {
             .ready_agents()
             .into_iter()
             .map(|agent| {
-                let models: Vec<tr::ModelOption> = self
-                    .models_for(&agent)
+                let infos = self.models_for(&agent);
+                // The one the model menu starts on (Opus 5.5 for Claude Code, else the first).
+                let default_model = crate::composer::default_model(&infos).map(|m| m.id.clone());
+                let models = infos
                     .into_iter()
                     .map(|m| tr::ModelOption { id: m.id, label: m.name, efforts: m.efforts.iter().map(|e| e.as_str().to_string()).collect() })
                     .collect();
-                tr::AgentOption { key: agent.key(), name: agent.display_name(), default_model: models.first().map(|m| m.id.clone()), models }
+                tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models }
             })
             .collect();
         tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked }
@@ -685,8 +830,21 @@ impl Workspace {
         (items, requests)
     }
 
+    /// The files each finished turn of `id` changed, as `changes` items after their turn ends,
+    /// by the turn end's index.
+    fn remote_changes(&self, id: &str) -> HashMap<usize, tr::ItemBody> {
+        let Some(live) = self.live.get(id) else { return HashMap::new() };
+        live.items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| matches!(i, Item::TurnEnd { .. }))
+            .filter_map(|(ix, _)| Some((ix, turn_changes(self, id, ix)?)))
+            .collect()
+    }
+
     fn remote_transcript(&mut self, id: &str) -> tr::Transcript {
         let (items, requests) = self.remote_items(id);
+        let mut changes = self.remote_changes(id);
         let at = self.live.get(id).map(|l| item_times(&l.items)).unwrap_or_default();
         let revision = self.live.get(id).map(|l| l.revision).unwrap_or_default();
         let Some(remote) = self.remote.as_mut() else { return tr::Transcript::default() };
@@ -694,10 +852,17 @@ impl Workspace {
         let watched = remote.watched.entry(id.to_string()).or_default();
         let mut out = Vec::with_capacity(items.len() + requests.len());
         watched.items.clear();
+        watched.changes.clear();
         for (ix, body) in items.into_iter().enumerate() {
             watched.seq += 1;
             watched.items.push(hash(&body));
             out.push(tr::Item { id: format!("i{ix}"), seq: watched.seq, at: at.get(ix).copied().flatten(), body });
+            // A turn's changed files follow its end.
+            if let Some(body) = changes.remove(&ix) {
+                watched.seq += 1;
+                watched.changes.insert(ix, hash(&body));
+                out.push(tr::Item { id: format!("c{ix}"), seq: watched.seq, at: at.get(ix).copied().flatten(), body });
+            }
         }
         watched.requests.clear();
         for (rid, body) in requests {
@@ -718,6 +883,9 @@ impl Workspace {
         let now = now_ms();
         let rows: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
         let watched: Vec<String> = remote.watched.keys().cloned().collect();
+        // What turns changed may be worked out after they end: looked at every tick.
+        let turn_files: Vec<(String, HashMap<usize, tr::ItemBody>, Vec<Option<i64>>)> =
+            watched.iter().filter_map(|id| Some((id.clone(), self.remote_changes(id), item_times(&self.live.get(id)?.items)))).collect();
         let changes: Vec<(String, u64, Vec<tr::ItemBody>, Vec<(String, tr::ItemBody)>, Vec<Option<i64>>)> = watched
             .into_iter()
             .filter_map(|id| {
@@ -753,6 +921,7 @@ impl Workspace {
             if items.len() < w.items.len() {
                 w.items.clear();
                 w.requests.clear();
+                w.changes.clear();
                 remote.handle.push(tr::HostEvent::TranscriptReset(id.clone()));
                 continue;
             }
@@ -786,6 +955,58 @@ impl Workspace {
                 remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("r{rid}"), seq: w.seq, at: None, body } });
             }
         }
+        // Turns' changed files, new or changed (after the items they follow, so a turn end
+        // reaches the phone before its files do).
+        for (id, files, at) in turn_files {
+            let Some(w) = remote.watched.get_mut(&id) else { continue };
+            let mut files: Vec<(usize, tr::ItemBody)> = files.into_iter().filter(|(ix, _)| *ix < w.items.len()).collect();
+            files.sort_by_key(|(ix, _)| *ix);
+            for (ix, body) in files {
+                let h = hash(&body);
+                if w.changes.get(&ix) == Some(&h) {
+                    continue;
+                }
+                w.seq += 1;
+                w.changes.insert(ix, h);
+                remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("c{ix}"), seq: w.seq, at: at.get(ix).copied().flatten(), body } });
+            }
+        }
+    }
+}
+
+/// The files the turn ending at item `turn_end` of thread `id` changed, as a `changes` item.
+/// The Mac works them out per turn (`Workspace::turn_changes`, from the checkpoints) on another
+/// branch; until that's merged there's nothing to send.
+// TODO(merge): turn_changes — `ws.turn_changes(id, turn_end).map(|c| changes_item(c.files.iter().map(|f| tr::ChangedFile { … })))`.
+fn turn_changes(ws: &Workspace, id: &str, turn_end: usize) -> Option<tr::ItemBody> {
+    let _ = (ws, id, turn_end);
+    #[cfg(test)]
+    if let Some(files) = tests::TURN_FILES.with(|f| f.borrow().get(&(id.to_string(), turn_end)).cloned()) {
+        return Some(changes_item(files));
+    }
+    None
+}
+
+/// A `changes` item for `files`, with their totals.
+#[cfg_attr(not(test), allow(dead_code))] // until `turn_changes` has the Mac's own to give
+fn changes_item(files: Vec<tr::ChangedFile>) -> tr::ItemBody {
+    let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+    tr::ItemBody::Changes { files, added, removed }
+}
+
+/// An agent as phones see it: its key, name and the logo the Mac draws for it.
+pub(crate) fn agent_ref(agent: &AgentId) -> tr::AgentRef {
+    tr::AgentRef { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(agent).map(str::to_string) }
+}
+
+/// An instant as unix ms, the same each time it's asked (`now - elapsed` drifts by the time it
+/// takes to ask, which would send an unchanged row again every tick).
+fn instant_ms(at: std::time::Instant) -> i64 {
+    static ANCHOR: std::sync::LazyLock<(std::time::Instant, i64)> = std::sync::LazyLock::new(|| (std::time::Instant::now(), now_ms()));
+    let (then, ms) = *ANCHOR;
+    match at.checked_duration_since(then) {
+        Some(after) => ms + after.as_millis() as i64,
+        None => ms - then.duration_since(at).as_millis() as i64,
     }
 }
 
@@ -948,11 +1169,19 @@ fn hear_notices(ws: WeakEntity<Workspace>, mut notices: tokio::sync::broadcast::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::is_trek_command;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        /// Changed files tests give turns, by (thread, turn end index), until the Mac works
+        /// them out itself (`turn_changes`).
+        pub(crate) static TURN_FILES: RefCell<HashMap<(String, usize), Vec<trek_remote::ChangedFile>>> = RefCell::default();
+    }
 
     #[test]
-    fn trek_commands_stay_on_the_mac() {
+    fn trek_commands_are_told_apart_from_the_agent_s() {
         assert!(is_trek_command("/permissions full"));
         assert!(is_trek_command("  /PERMISSIONS full"));
         assert!(is_trek_command("/access full"));

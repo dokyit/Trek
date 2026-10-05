@@ -25,24 +25,28 @@ fn thread(id: &str) -> ThreadSummary {
         id: id.into(),
         title: format!("Thread {id}"),
         project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into() },
-        agent: AgentRef { key: "claude-code".into(), name: "Claude Code".into() },
-        model: None,
-        model_label: None,
-        run_state: RunState::Idle,
-        needs: None,
-        section: Section::Inbox,
-        unseen: false,
-        pinned: false,
-        branch: None,
-        worktree: false,
-        activity: None,
-        working_since: None,
+        agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
         updated_at: 1,
-        additions: 0,
-        deletions: 0,
-        effort: None,
-        access: None,
-        plan: false,
+        ..Default::default()
+    }
+}
+
+fn note(id: &str, body: &str) -> Note {
+    Note { id: id.into(), title: body.lines().next().unwrap_or("Untitled").into(), body: body.into(), modified: 5 }
+}
+
+fn settings() -> MacSettings {
+    MacSettings {
+        default_agent: "claude-code".into(),
+        default_model: None,
+        default_effort: "high".into(),
+        default_access: Access::AutoAcceptEdits,
+        follow_up: SendMode::Steer,
+        notifications: NotifyMode::BannerAndSound,
+        push: PushSettings { enabled: false, when: PushWhen::Away, server: "https://ntfy.sh".into(), topic: String::new(), topic_url: None, subscribe_url: None },
+        auto_settle_days: 3,
+        theme: Theme::System,
+        full_access: false,
     }
 }
 
@@ -77,12 +81,13 @@ impl RemoteHost for FakeHost {
         }
     }
 
-    async fn send(&self, req: SendRequest) -> HostResult<()> {
+    async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {
         if req.thread_id == "missing" {
             return Err(HostError::not_found("No thread missing"));
         }
         self.record(format!("send {} {} {:?}", req.thread_id, req.text, req.mode));
-        Ok(())
+        // `/new` in a thread: the phone opens its own new-thread sheet.
+        Ok((req.text == "/new").then(|| Open::NewThread { project_id: Some("p1".into()) }))
     }
 
     async fn new_thread(&self, req: NewThreadRequest) -> HostResult<String> {
@@ -109,6 +114,122 @@ impl RemoteHost for FakeHost {
     async fn mark_seen(&self, thread_id: &str) -> HostResult<()> {
         self.record(format!("mark_seen {thread_id}"));
         Ok(())
+    }
+
+    async fn usage(&self) -> HostResult<Usage> {
+        self.record("usage".into());
+        let limit = UsageLimit { label: "5-hour limit".into(), percent: 42.0, resets_at: Some(9), window: "5h".into() };
+        Ok(Usage { providers: vec![ProviderUsage { agent: thread("x").agent, plan: Some("Claude Max".into()), limits: vec![limit], note: None, error: None }], loading: false })
+    }
+
+    async fn basecamp(&self, range: BasecampRange) -> HostResult<Basecamp> {
+        self.record(format!("basecamp {range:?}"));
+        if range == BasecampRange::All {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        Ok(Basecamp {
+            range,
+            greeting: "Good evening".into(),
+            title: "This week's trek".into(),
+            updated_at: 1,
+            review: vec![],
+            empty: true,
+            invitation: Some("Nothing on the trail yet this week — start a thread.".into()),
+            narrative: vec![],
+            summary: None,
+            profile: None,
+            tiles: vec![],
+        })
+    }
+
+    async fn notes(&self) -> HostResult<Vec<NoteSummary>> {
+        self.record("notes".into());
+        Ok(vec![NoteSummary { id: "n1".into(), title: "Groceries".into(), preview: "milk".into(), modified: 5 }])
+    }
+
+    async fn note(&self, note_id: &str) -> HostResult<Note> {
+        self.record(format!("note {note_id}"));
+        match note_id {
+            "n1" => Ok(note("n1", "Groceries\nmilk")),
+            other => Err(HostError::not_found(format!("No note {other}"))),
+        }
+    }
+
+    async fn create_note(&self, body: String) -> HostResult<Note> {
+        self.record(format!("create_note {body}"));
+        Ok(note("n2", &body))
+    }
+
+    async fn save_note(&self, req: SaveNoteRequest) -> HostResult<Note> {
+        self.record(format!("save_note {} {:?}", req.note_id, req.modified));
+        if req.modified == Some(1) {
+            return Err(HostError::conflict("It changed on the Mac"));
+        }
+        Ok(note(&req.note_id, &req.body))
+    }
+
+    async fn delete_note(&self, note_id: &str) -> HostResult<()> {
+        self.record(format!("delete_note {note_id}"));
+        Ok(())
+    }
+
+    async fn git_status(&self, target: GitTarget) -> HostResult<GitStatus> {
+        self.record(format!("git_status {target:?}"));
+        let file = ChangedFile { path: "src/a.rs".into(), status: FileStatus::Modified, from: None, added: 3, removed: 1, binary: false };
+        Ok(GitStatus { is_repo: true, branch: Some("main".into()), files: vec![file], can_switch: true, ..Default::default() })
+    }
+
+    async fn git_diff(&self, req: GitDiffRequest) -> HostResult<GitDiff> {
+        self.record(format!("git_diff {:?} {}", req.target, req.path));
+        Ok(GitDiff { path: req.path, diff: "@@ -1 +1 @@\n-a\n+b".into(), truncated: false })
+    }
+
+    async fn git_commit(&self, req: GitCommitRequest) -> HostResult<()> {
+        self.record(format!("git_commit {:?} {}", req.target, req.message));
+        Ok(())
+    }
+
+    async fn git_push(&self, target: GitTarget) -> HostResult<()> {
+        self.record(format!("git_push {target:?}"));
+        Ok(())
+    }
+
+    async fn git_branches(&self, target: GitTarget) -> HostResult<GitBranches> {
+        self.record(format!("git_branches {target:?}"));
+        Ok(GitBranches { current: Some("main".into()), default_branch: Some("main".into()), branches: vec!["main".into(), "dev".into()] })
+    }
+
+    async fn git_switch(&self, req: GitSwitchRequest) -> HostResult<()> {
+        self.record(format!("git_switch {:?} {}", req.target, req.branch));
+        Ok(())
+    }
+
+    async fn worktree_merge(&self, thread_id: &str) -> HostResult<()> {
+        self.record(format!("worktree_merge {thread_id}"));
+        Ok(())
+    }
+
+    async fn worktree_remove(&self, req: WorktreeRemoveRequest) -> HostResult<()> {
+        self.record(format!("worktree_remove {} {} {}", req.thread_id, req.delete_branch, req.force));
+        if !req.force {
+            return Err(HostError::conflict("2 uncommitted changes in the worktree would be lost."));
+        }
+        Ok(())
+    }
+
+    async fn commands(&self, thread_id: &str) -> HostResult<Vec<CommandInfo>> {
+        self.record(format!("commands {thread_id}"));
+        Ok(vec![CommandInfo { name: "usage".into(), description: "Show plan usage".into(), kind: CommandKind::Command, trek: true }])
+    }
+
+    async fn settings(&self) -> HostResult<MacSettings> {
+        self.record("settings".into());
+        Ok(settings())
+    }
+
+    async fn set_settings(&self, change: SettingsChange) -> HostResult<MacSettings> {
+        self.record(format!("set_settings {:?}", change.theme));
+        Ok(MacSettings { theme: change.theme.unwrap_or(Theme::System), ..settings() })
     }
 }
 
@@ -518,6 +639,107 @@ async fn actions_reach_the_host() {
     assert_eq!(recv(&mut c).await, json!({"type": "pong", "re": "still"}));
 }
 
+/// Every request added after the first phones, sent over the wire as the phone sends it: each
+/// must get past the server's list of known types and reach the host.
+#[tokio::test]
+async fn newer_requests_reach_the_host_over_the_wire() {
+    let (handle, host) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+
+    let requests = [
+        (json!({"type": "usage", "id": "u"}), "usage"),
+        (json!({"type": "basecamp", "id": "b", "range": "week"}), "basecamp"),
+        (json!({"type": "notes", "id": "n"}), "notes"),
+        (json!({"type": "note", "id": "n1", "note_id": "n1"}), "note"),
+        (json!({"type": "create_note", "id": "n2", "body": "Groceries"}), "note"),
+        (json!({"type": "save_note", "id": "n3", "note_id": "n1", "body": "Groceries\nbread", "modified": 5}), "note"),
+        (json!({"type": "delete_note", "id": "n4", "note_id": "n1"}), "ack"),
+        (json!({"type": "git_status", "id": "g1", "thread_id": "t1"}), "git_status"),
+        (json!({"type": "git_diff", "id": "g2", "project_id": "p1", "path": "src/a.rs"}), "git_diff"),
+        (json!({"type": "git_commit", "id": "g3", "thread_id": "t1", "message": "Fix the race"}), "ack"),
+        (json!({"type": "git_push", "id": "g4", "thread_id": "t1"}), "ack"),
+        (json!({"type": "git_branches", "id": "g5", "project_id": "p1"}), "git_branches"),
+        (json!({"type": "git_switch", "id": "g6", "project_id": "p1", "branch": "dev"}), "ack"),
+        (json!({"type": "worktree_merge", "id": "w1", "thread_id": "t1"}), "ack"),
+        (json!({"type": "worktree_remove", "id": "w2", "thread_id": "t1", "delete_branch": true, "force": true}), "ack"),
+        (json!({"type": "commands", "id": "c", "thread_id": "t1"}), "commands"),
+        (json!({"type": "settings", "id": "s1"}), "settings"),
+        (json!({"type": "set_settings", "id": "s2", "theme": "paper"}), "settings"),
+    ];
+    for (request, kind) in requests {
+        let id = request["id"].clone();
+        send(&mut c, request.clone()).await;
+        let reply = recv(&mut c).await;
+        assert_eq!((reply["type"].as_str(), &reply["re"]), (Some(kind), &id), "{request} → {reply}");
+    }
+    // What came back is what the host said, whole.
+    send(&mut c, json!({"type": "usage", "id": "u2"})).await;
+    let usage = recv(&mut c).await;
+    assert_eq!(usage["providers"][0]["limits"][0], json!({"label": "5-hour limit", "percent": 42.0, "resets_at": 9, "window": "5h"}));
+    assert_eq!(usage["providers"][0]["agent"]["logo"], "claude-code");
+    send(&mut c, json!({"type": "git_status", "id": "g7", "project_id": "p1"})).await;
+    let status = recv(&mut c).await;
+    assert_eq!(status["files"][0], json!({"path": "src/a.rs", "status": "modified", "added": 3, "removed": 1}));
+    send(&mut c, json!({"type": "commands", "id": "c2", "thread_id": "t9"})).await;
+    let commands = recv(&mut c).await;
+    assert_eq!((commands["thread_id"].as_str(), commands["commands"][0]["trek"].as_bool()), (Some("t9"), Some(true)));
+    send(&mut c, json!({"type": "set_settings", "id": "s3", "theme": "night"})).await;
+    assert_eq!(recv(&mut c).await["theme"], "night");
+
+    // Refusals keep their codes: a note changed on the Mac, a worktree with work to lose.
+    send(&mut c, json!({"type": "save_note", "id": "x1", "note_id": "n1", "body": "x", "modified": 1})).await;
+    assert_eq!(recv(&mut c).await["code"], "conflict");
+    send(&mut c, json!({"type": "worktree_remove", "id": "x2", "thread_id": "t1"})).await;
+    let refused = recv(&mut c).await;
+    assert_eq!((refused["code"].as_str(), refused["message"].as_str()), (Some("conflict"), Some("2 uncommitted changes in the worktree would be lost.")));
+    send(&mut c, json!({"type": "note", "id": "x3", "note_id": "zz"})).await;
+    assert_eq!(recv(&mut c).await["code"], "not_found");
+    // Malformed ones don't reach it.
+    send(&mut c, json!({"type": "git_diff", "id": "x4", "thread_id": "t1"})).await;
+    assert_eq!(recv(&mut c).await["code"], "bad_request");
+    send(&mut c, json!({"type": "basecamp", "id": "x5", "range": "decade"})).await;
+    assert_eq!(recv(&mut c).await["code"], "bad_request");
+
+    // `/new` sent to a thread asks the phone to open its new-thread sheet.
+    send(&mut c, json!({"type": "send", "id": "o", "thread_id": "t1", "text": "/new"})).await;
+    assert_eq!(recv(&mut c).await, json!({"type": "ack", "re": "o", "open": {"screen": "new_thread", "project_id": "p1"}}));
+
+    let calls = host.calls();
+    for expected in [
+        "usage",
+        "basecamp Week",
+        "notes",
+        "note n1",
+        "create_note Groceries",
+        "save_note n1 Some(5)",
+        "delete_note n1",
+        "git_status GitTarget { thread_id: Some(\"t1\"), project_id: None }",
+        "git_diff GitTarget { thread_id: None, project_id: Some(\"p1\") } src/a.rs",
+        "git_commit GitTarget { thread_id: Some(\"t1\"), project_id: None } Fix the race",
+        "git_push GitTarget { thread_id: Some(\"t1\"), project_id: None }",
+        "git_branches GitTarget { thread_id: None, project_id: Some(\"p1\") }",
+        "git_switch GitTarget { thread_id: None, project_id: Some(\"p1\") } dev",
+        "worktree_merge t1",
+        "worktree_remove t1 true true",
+        "commands t1",
+        "settings",
+        "set_settings Some(Paper)",
+    ] {
+        assert!(calls.iter().any(|c| c == expected), "{expected} not in {calls:?}");
+    }
+}
+
+/// A slow read (usage asks every agent) doesn't hold up what the phone does next.
+#[tokio::test]
+async fn slow_reads_dont_hold_up_actions() {
+    let (handle, _) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    send(&mut c, json!({"type": "basecamp", "id": "slow", "range": "all"})).await;
+    send(&mut c, json!({"type": "interrupt", "id": "fast", "thread_id": "t1"})).await;
+    assert_eq!(recv(&mut c).await["re"], "fast");
+    assert_eq!(recv(&mut c).await["re"], "slow");
+}
+
 #[tokio::test]
 async fn revoking_closes_the_connection() {
     let (handle, _) = start().await;
@@ -608,7 +830,7 @@ async fn channel_host_round_trip() {
                 }
                 HostRequest::Send { req, reply } => {
                     seen.push(req.text);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(None));
                 }
                 HostRequest::SetPrefs { reply, .. } | HostRequest::ThreadAction { reply, .. } => {
                     let _ = reply.send(Ok(()));
@@ -621,6 +843,14 @@ async fn channel_host_round_trip() {
                 HostRequest::Interrupt { reply, .. } | HostRequest::MarkSeen { reply, .. } => {
                     let _ = reply.send(Ok(()));
                 }
+                HostRequest::Notes { reply } => {
+                    let _ = reply.send(Ok(vec![NoteSummary { id: "n1".into(), title: "Groceries".into(), preview: String::new(), modified: 1 }]));
+                }
+                HostRequest::Settings { reply } => {
+                    let _ = reply.send(Ok(settings()));
+                }
+                // The rest go unanswered here (a host error).
+                _ => {}
             }
         }
         seen
@@ -639,6 +869,9 @@ async fn channel_host_round_trip() {
     assert_eq!(host.answer(answer).await.unwrap_err().code, ErrorCode::HostError);
     host.interrupt("c1").await.unwrap();
     host.mark_seen("c1").await.unwrap();
+    assert_eq!(host.notes().await.unwrap()[0].title, "Groceries");
+    assert_eq!(host.settings().await.unwrap().default_agent, "claude-code");
+    assert_eq!(host.usage().await.unwrap_err().code, ErrorCode::HostError);
 
     // Through the server too.
     let mut config = ServerConfig::new(host_info());

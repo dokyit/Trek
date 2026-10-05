@@ -73,6 +73,15 @@ pub fn plan_phrase(plan: &Option<String>) -> String {
     plan.as_deref().map(|p| format!("your {p} plan")).unwrap_or_else(|| "your subscription".into())
 }
 
+/// How a session is billed, in words: the tooltip over the agent's name under the composer.
+pub fn billing_note(billing: Option<&Billing>) -> Option<String> {
+    match billing? {
+        Billing::Plan(plan) => Some(format!("Included in {}", plan_phrase(plan))),
+        Billing::Metered => Some("Billed per token by your API provider".to_string()),
+        Billing::Local => Some("Runs on this Mac, nothing is billed".to_string()),
+    }
+}
+
 /// The status strip's text: "≈ $1.24 at API prices" (a plan covers it, or how it's billed isn't
 /// known), "$1.24" (billed per token; "$1.00 + ≈ $0.30 from consults" when sub-agents, which
 /// may run on a plan, spent some of it), "12.3K tokens · price unknown" (nothing has a price),

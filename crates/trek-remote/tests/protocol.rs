@@ -96,7 +96,7 @@ fn thread_summary_serializes_like_the_spec() {
         id: "01J".into(),
         title: "Fix the flaky auth test".into(),
         project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into() },
-        agent: AgentRef { key: "claude-code".into(), name: "Claude Code".into() },
+        agent: AgentRef { key: "claude-code".into(), name: "Claude Code".into(), logo: None },
         model: Some("claude-opus-5-5".into()),
         model_label: Some("Opus 5.5".into()),
         run_state: RunState::NeedsYou,
@@ -114,6 +114,7 @@ fn thread_summary_serializes_like_the_spec() {
         effort: Some("high".into()),
         access: Some(Access::Auto),
         plan: false,
+        ..Default::default()
     };
     let v = serde_json::to_value(&thread).unwrap();
     assert_eq!(v["run_state"], "needs-you");
@@ -396,7 +397,7 @@ fn spec_actions() {
 
     server_round_trip(r#"{"type":"ack","re":"9"}"#);
     let ack = server_round_trip(r#"{"type":"ack","re":"10","thread_id":"01J…"}"#);
-    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()) });
+    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()), open: None });
     server_round_trip(r#"{"type":"pong","re":"15"}"#);
     let err = server_round_trip(r#"{"type":"error","re":"9","code":"not_found","message":"No thread 01J…"}"#);
     assert_eq!(err.msg, ServerMessage::Error { code: ErrorCode::NotFound, message: "No thread 01J…".into() });
@@ -406,7 +407,7 @@ fn spec_actions() {
 fn exact_server_json() {
     assert_eq!(ServerEnvelope::reply(Some("15".into()), ServerMessage::Pong).to_json(), r#"{"type":"pong","re":"15"}"#);
     assert_eq!(
-        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None }).to_json(),
+        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None, open: None }).to_json(),
         r#"{"type":"ack","re":"9"}"#
     );
     assert_eq!(
@@ -501,4 +502,136 @@ fn output_truncation_keeps_the_tail() {
     let cut = truncate_output(&long);
     assert!(cut.len() <= MAX_TOOL_OUTPUT);
     assert!(cut.ends_with("end"));
+}
+
+#[test]
+fn thread_details_ride_on_the_row_and_older_rows_still_read() {
+    let row = r#"{"id":"t","title":"Dark mode","project":{"id":"p","name":"web","hue":10,"monogram":"WE"},
+        "agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"model":"claude-opus-5-5","model_label":"Opus 5.5",
+        "run_state":"working","needs":null,"section":"working","unseen":false,"pinned":false,"branch":"trek/dark","worktree":true,
+        "activity":"Editing theme.css","working_since":1791020400000,"updated_at":1791020400000,"additions":65,"deletions":8,
+        "effort":"xhigh","access":"auto","effort_label":"Extra high",
+        "context":{"used":171000,"window":200000,"percent":85},
+        "cost":{"label":"≈ $1.84 at API prices","billing":"plan","plan":"Claude Max","detail":"Included in your Claude Max plan"},
+        "sub_agents":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"model":"Sol","title":"Review the tokens","state":"running","since":1791020300000},
+                      {"agent":{"key":"claude-code","name":"Claude Code"},"title":"Find hard-coded colours","state":"needs_you"}],
+        "background":["pnpm dev"],"base":"main",
+        "git":{"changed":5,"ahead":1,"behind":2,"default_branch":"main"}}"#;
+    let t: ThreadSummary = serde_json::from_str(row).unwrap();
+    assert_eq!(serde_json::to_value(&t).unwrap(), value(row));
+    assert_eq!(t.context, Some(ContextUse { used: 171_000, window: 200_000, percent: 85 }));
+    assert_eq!((t.sub_agents[1].state, t.sub_agents[1].since), (SubAgentState::NeedsYou, None));
+    assert_eq!(t.cost.unwrap().billing, Some(Billing::Plan));
+    // Without them: nothing extra on the wire.
+    let plain = ThreadSummary { id: "t".into(), ..Default::default() };
+    let v = serde_json::to_value(&plain).unwrap();
+    for key in ["effort_label", "context", "cost", "sub_agents", "background", "base", "git"] {
+        assert!(v.get(key).is_none(), "{key} should be skipped when empty");
+    }
+    assert!(v["agent"].get("logo").is_none());
+}
+
+#[test]
+fn a_turn_s_changed_files() {
+    let item = item_round_trip(
+        r#"{"id":"c12","seq":40,"at":null,"kind":"changes","files":[
+            {"path":"README.md","status":"modified","added":31,"removed":54},
+            {"path":"docs/quick-start.md","status":"renamed","from":"docs/getting-started.md","added":4,"removed":2},
+            {"path":"docs/img/docker.png","status":"deleted","added":0,"removed":0,"binary":true},
+            {"path":"src/new.rs","status":"added","added":12,"removed":0}],"added":47,"removed":56}"#,
+    );
+    let ItemBody::Changes { files, added, removed } = item.body else { panic!("{:?}", item.body) };
+    assert_eq!((files.len(), added, removed), (4, 47, 56));
+    assert_eq!(files[1].from.as_deref(), Some("docs/getting-started.md"));
+    assert!(files[2].binary && files[2].status == FileStatus::Deleted);
+    assert_eq!(ItemBody::Changes { files: vec![], added: 0, removed: 0 }.kind(), "changes");
+}
+
+#[test]
+fn the_newer_requests() {
+    let cases = [
+        r#"{"type":"usage","id":"1"}"#,
+        r#"{"type":"basecamp","id":"2","range":"all"}"#,
+        r#"{"type":"notes","id":"3"}"#,
+        r#"{"type":"note","id":"4","note_id":"0192abc"}"#,
+        r#"{"type":"create_note","id":"5","body":"Groceries"}"#,
+        r#"{"type":"save_note","id":"6","note_id":"0192abc","body":"Groceries\n- milk","modified":1791020400000}"#,
+        r#"{"type":"delete_note","id":"7","note_id":"0192abc"}"#,
+        r#"{"type":"git_status","id":"8","thread_id":"t"}"#,
+        r#"{"type":"git_diff","id":"9","project_id":"p","path":"src/main.rs"}"#,
+        r#"{"type":"git_commit","id":"10","thread_id":"t","message":"Fix the race"}"#,
+        r#"{"type":"git_push","id":"11","thread_id":"t"}"#,
+        r#"{"type":"git_branches","id":"12","project_id":"p"}"#,
+        r#"{"type":"git_switch","id":"13","project_id":"p","branch":"develop"}"#,
+        r#"{"type":"worktree_merge","id":"14","thread_id":"t"}"#,
+        r#"{"type":"worktree_remove","id":"15","thread_id":"t","delete_branch":true,"force":true}"#,
+        r#"{"type":"commands","id":"16","thread_id":"t"}"#,
+        r#"{"type":"settings","id":"17"}"#,
+        r#"{"type":"set_settings","id":"18","default_agent":"codex","default_access":"auto","follow_up":"queue","notifications":"banner_and_sound","push":true,"push_when":"always","new_push_topic":true,"auto_settle_days":7,"theme":"paper"}"#,
+    ];
+    for line in cases {
+        let env = client_round_trip(line);
+        assert_eq!(env.msg.kind(), value(line)["type"].as_str().unwrap());
+    }
+    // Defaults: today's recap; a removal that loses nothing.
+    let b: ClientEnvelope = serde_json::from_str(r#"{"type":"basecamp"}"#).unwrap();
+    assert_eq!(b.msg, ClientMessage::Basecamp { range: BasecampRange::Today });
+    let r: ClientEnvelope = serde_json::from_str(r#"{"type":"worktree_remove","thread_id":"t"}"#).unwrap();
+    assert_eq!(r.msg, ClientMessage::WorktreeRemove(WorktreeRemoveRequest { thread_id: "t".into(), delete_branch: false, force: false }));
+    let d: ClientEnvelope = serde_json::from_str(r#"{"type":"git_diff","thread_id":"t","path":"a"}"#).unwrap();
+    assert_eq!(d.msg, ClientMessage::GitDiff(GitDiffRequest { target: GitTarget::thread("t"), path: "a".into() }));
+    assert!(d.msg.is_query() && !r.msg.is_query());
+}
+
+#[test]
+fn the_newer_replies() {
+    let cases = [
+        r#"{"type":"ack","re":"1","open":{"screen":"new_thread","project_id":"p"}}"#,
+        r#"{"type":"usage","re":"2","providers":[{"agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"plan":"Claude Max",
+            "limits":[{"label":"5-hour limit","percent":42.5,"resets_at":1791030000000,"window":"5h"},{"label":"Weekly · Opus","percent":64.0}]}],"loading":true}"#,
+        r#"{"type":"notes","re":"3","notes":[{"id":"n","title":"Groceries","preview":"milk bread","modified":1}]}"#,
+        r#"{"type":"note","re":"4","note":{"id":"n","title":"Groceries","body":"Groceries\n- milk","modified":1}}"#,
+        r#"{"type":"git_status","re":"5","is_repo":true,"branch":"trek/fix","default_branch":"main","ahead":2,"behind":0,"has_upstream":false,
+            "files":[{"path":"a.rs","status":"untracked","added":9,"removed":0}],
+            "worktree":{"branch":"trek/fix","base":"main","uncommitted":1,"merge_blocked":"1 file isn't committed yet. Commit or revert it first.","unmerged":2},
+            "can_switch":false,"switch_blocked":"This thread works in a worktree."}"#,
+        r#"{"type":"git_diff","re":"6","path":"a.rs","diff":"@@ -1 +1 @@\n-a\n+b","truncated":true}"#,
+        r#"{"type":"git_branches","re":"7","current":"main","default_branch":"main","branches":["main","dev"]}"#,
+        r#"{"type":"commands","re":"8","thread_id":"t","commands":[{"name":"permissions full","description":"No prompts and no sandbox","kind":"command","trek":true},{"name":"frontend-design","description":"","kind":"skill"}]}"#,
+        r#"{"type":"settings","re":"9","default_agent":"claude-code","default_effort":"high","default_access":"auto-accept-edits","follow_up":"steer",
+            "notifications":"banner","push":{"enabled":true,"when":"away","server":"https://ntfy.sh","topic":"trek-abc","topic_url":"https://ntfy.sh/trek-abc","subscribe_url":"ntfy://ntfy.sh/trek-abc"},
+            "auto_settle_days":3,"theme":"system","full_access":false}"#,
+    ];
+    for line in cases {
+        server_round_trip(line);
+    }
+}
+
+#[test]
+fn a_basecamp_recap() {
+    let line = r#"{"type":"basecamp","re":"1","range":"today","greeting":"Good evening, Monday 5 October","title":"Today's trek","updated_at":1791020400000,
+        "review":[{"thread_id":"t","title":"Fix the flaky test","status":"needs_you","label":"Approval","agent":{"key":"codex","name":"Codex","logo":"codex"},
+                   "project":{"id":"p","name":"api","hue":212,"monogram":"AP"},"additions":4,"deletions":1,"updated_at":1791020000000,"unseen":true}],
+        "narrative":[{"kind":"text","text":"You sent "},{"kind":"strong","text":"18 prompts"},{"kind":"project","text":"api","project":{"id":"p","name":"api","hue":212,"monogram":"AP"}},
+                     {"kind":"model","text":"GPT-6","agent":{"key":"codex","name":"Codex"}}],
+        "summary":{"prompts":18,"threads":4,"turns":20,"agent_secs":3720,"agent_time":"1h 2m","tokens":182000,"failed":1,
+                   "top_project":{"project":{"id":"p","name":"api","hue":212,"monogram":"AP"},"prompts":12,"tokens":90000},
+                   "best_model":{"agent":{"key":"codex","name":"Codex"},"label":"GPT-6","tokens":140000,"turns":9,"share":77}},
+        "profile":{"buckets":[{"value":0.0,"label":"12–1 AM","line":"12–1 AM · quiet","prompts":0,"agent_secs":0,"tokens":0},
+                              {"value":12.5,"label":"2–3 PM","line":"2–3 PM · 4 prompts · 12m of agent time","prompts":4,"agent_secs":750,"tokens":3000}],
+                   "summit":1,"now":1,"now_at":0.75,"line":"Summit at 2 PM","total":"18 prompts","ticks":[{"at":0.25,"label":"6 AM"}]},
+        "tiles":[{"kind":"tokens","label":"You used","figure":"182K tokens","note":"≈ $1.28 at API prices today","sparkline":[0.0,0.5,1.0]},
+                 {"kind":"plan_left","label":"Left on Claude Max","figure":"36%","note":"Weekly limit · resets in 4d","agent":{"key":"claude-code","name":"Claude Code"},"percent":36.0,"resets_at":1791030000000}]}"#;
+    let env = server_round_trip(line);
+    let ServerMessage::Basecamp(b) = env.msg else { panic!() };
+    assert_eq!(b.profile.unwrap().summit, Some(1));
+    assert_eq!(b.tiles[1].kind, TileKind::PlanLeft);
+    assert!(!b.empty);
+}
+
+#[test]
+fn ntfy_links_for_a_topic() {
+    assert_eq!(ntfy_links("https://ntfy.sh", "trek-abc"), (Some("https://ntfy.sh/trek-abc".into()), Some("ntfy://ntfy.sh/trek-abc".into())));
+    assert_eq!(ntfy_links("http://pi.local:8080/", "t"), (Some("http://pi.local:8080/t".into()), Some("ntfy://pi.local:8080/t?secure=false".into())));
+    assert_eq!(ntfy_links("https://ntfy.sh", ""), (None, None));
 }

@@ -783,6 +783,8 @@ pub struct GitInfo {
     pub branch: Option<String>,
     pub changed: usize,
     pub ahead: u32,
+    /// Commits on its upstream not pulled yet.
+    pub behind: u32,
     /// The remote's default branch (origin/HEAD), else main/master.
     pub default_branch: Option<String>,
     /// Local branches, most recently committed first.
@@ -796,7 +798,7 @@ impl GitInfo {
     }
 }
 
-fn read_git_info(cwd: &std::path::Path) -> GitInfo {
+pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     let run = |args: &[&str]| {
         std::process::Command::new("git").args(args).current_dir(cwd).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
@@ -809,6 +811,7 @@ fn read_git_info(cwd: &std::path::Path) -> GitInfo {
         // Every untracked file, not their folders, so the count matches the Git panel's list.
         changed: run(&["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0),
         ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
+        behind: run(&["rev-list", "--count", "HEAD..@{u}"]).and_then(|s| s.parse().ok()).unwrap_or(0),
         default_branch: run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
             .and_then(|s| s.split_once('/').map(|(_, b)| b.to_string()))
             .or_else(|| {
@@ -866,6 +869,8 @@ pub struct Workspace {
     pub project_filter: Option<String>,
     /// Bumped whenever any agent turn finishes (tools refresh on it).
     pub turns_finished: u64,
+    /// Bumped when a phone changes a note: the Notes screen reads them again.
+    pub notes_epoch: u64,
     pub git_info: HashMap<PathBuf, GitInfo>,
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
@@ -1113,6 +1118,7 @@ impl Workspace {
             index_again: false,
             project_filter: None,
             turns_finished: 0,
+            notes_epoch: 0,
             git_info: HashMap::new(),
             agent_status: HashMap::new(),
             agent_commands: HashMap::new(),

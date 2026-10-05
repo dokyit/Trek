@@ -25,8 +25,8 @@ impl RemoteHost for NoopHost {
     async fn transcript(&self, _: &str) -> HostResult<Transcript> {
         Ok(Transcript::default())
     }
-    async fn send(&self, _: SendRequest) -> HostResult<()> {
-        Ok(())
+    async fn send(&self, _: SendRequest) -> HostResult<Option<Open>> {
+        Ok(None)
     }
     async fn new_thread(&self, _: NewThreadRequest) -> HostResult<String> {
         Ok("t".into())

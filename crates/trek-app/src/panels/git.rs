@@ -18,19 +18,20 @@ use std::process::Command;
 use trek_core::worktree::{self, Change, MergeBlock, Review, Worktree};
 
 #[derive(Clone, Debug)]
-struct FileChange {
-    path: String,
-    status: String,
-    additions: i64,
-    deletions: i64,
+pub(crate) struct FileChange {
+    pub(crate) path: String,
+    pub(crate) status: String,
+    pub(crate) additions: i64,
+    pub(crate) deletions: i64,
 }
 
 #[derive(Clone, Debug, Default)]
-struct Snapshot {
-    is_repo: bool,
-    branch: String,
-    upstream: Option<(u32, u32)>,
-    files: Vec<FileChange>,
+pub(crate) struct Snapshot {
+    pub(crate) is_repo: bool,
+    pub(crate) branch: String,
+    /// (behind, ahead) its upstream.
+    pub(crate) upstream: Option<(u32, u32)>,
+    pub(crate) files: Vec<FileChange>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -42,7 +43,7 @@ enum LineKind {
     Ctx,
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git").args(args).current_dir(cwd).env("PATH", trek_core::detect::login_path()).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -51,7 +52,7 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn snapshot(cwd: &Path) -> Snapshot {
+pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
     if git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_err() {
         return Snapshot::default();
     }

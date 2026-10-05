@@ -2,7 +2,7 @@
 
 mod browser;
 mod explorer;
-mod git;
+pub(crate) mod git;
 mod side_chat;
 mod simhid;
 mod simulator;

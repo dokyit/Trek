@@ -2,11 +2,12 @@
 //! certificate as the iPhone app does), lists the threads, opens one and prints what changes.
 //!
 //! ```sh
-//! cargo run -p trek-remote --example probe -- 'trek://pair?host=…&code=…&fp=…' [--thread <id> [--send "text"] [--answer allow|deny]] [--secs 20]
+//! cargo run -p trek-remote --example probe -- 'trek://pair?host=…&code=…&fp=…' [--thread <id> [--send "text"] [--answer allow|deny]] [--request '{"type":"usage"}']… [--secs 20]
 //! ```
 //!
 //! It opens and sends to a thread only when told which (`--thread`): a message reaches a real
-//! agent in that thread's folder.
+//! agent in that thread's folder. `--request` (any number) sends a message as written once the
+//! snapshot is in (an `id` is added) and prints the reply whole.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,6 +65,7 @@ async fn main() {
     let thread = args.iter().position(|a| a == "--thread").and_then(|i| args.get(i + 1)).cloned();
     let answer = args.iter().position(|a| a == "--answer").and_then(|i| args.get(i + 1)).cloned();
     let effort = args.iter().position(|a| a == "--effort").and_then(|i| args.get(i + 1)).cloned();
+    let requests: Vec<Value> = args.windows(2).filter(|w| w[0] == "--request").map(|w| serde_json::from_str(&w[1]).expect("--request takes JSON")).collect();
     assert!(send_text.is_none() || thread.is_some(), "--send needs --thread <id>");
     let secs: u64 = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(15);
     let host = param(&url, "host").expect("host=");
@@ -85,6 +87,7 @@ async fn main() {
     let send = |v: Value| Message::text(v.to_string());
     ws.send(send(json!({"type": "pair", "id": "1", "protocol": 1, "code": code, "device_id": "probe", "device_name": "Probe (terminal)"}))).await.unwrap();
     let mut subscribed = false;
+    let mut asked = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, ws.next()).await {
         let Message::Text(text) = msg else { continue };
@@ -95,6 +98,14 @@ async fn main() {
                 println!("snapshot: {} threads, {} projects, {} agents", threads.len(), v["projects"].as_array().map_or(0, |a| a.len()), v["agents"].as_array().map_or(0, |a| a.len()));
                 for t in threads.iter().take(12) {
                     println!("  {} [{}] {} · {} · {}", t["id"].as_str().unwrap_or(""), t["section"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""), t["project"]["name"].as_str().unwrap_or(""), t["run_state"].as_str().unwrap_or(""));
+                }
+                if !asked {
+                    asked = true;
+                    for (n, mut r) in requests.iter().cloned().enumerate() {
+                        r["id"] = json!(format!("q{n}"));
+                        println!("> {r}");
+                        ws.send(send(r)).await.unwrap();
+                    }
                 }
                 if let (false, Some(id)) = (subscribed, thread.clone()) {
                     subscribed = true;
@@ -114,6 +125,7 @@ async fn main() {
                 ws.send(send(reply)).await.unwrap();
                 println!("answered: {decision}");
             }
+            _ if v["re"].as_str().is_some_and(|re| re.starts_with('q')) => println!("< {}", serde_json::to_string_pretty(&v).unwrap()),
             Some("transcript") => println!("transcript of {}: {} items, seq {}", v["thread_id"], v["items"].as_array().map_or(0, |a| a.len()), v["seq"]),
             _ => println!("{}", short(&v)),
         }
