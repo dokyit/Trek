@@ -45,7 +45,7 @@ struct NewThreadSheet: View {
             .background(alignment: .top) {
                 RidgeBackdrop(height: 520)
             }
-            .navigationTitle("New session")
+            .navigationTitle("New thread")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -87,7 +87,7 @@ struct NewThreadSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(empty || sending)
-                .accessibilityLabel("Start session")
+                .accessibilityLabel("Start thread")
             }
         }
         .padding(12)

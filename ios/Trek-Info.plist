@@ -2,15 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Phase 1a talks plain ws:// to the Mac on the LAN or a tailnet (WireGuard-encrypted).
-	     Phase 1b moves to wss:// with a pinned per-Mac certificate and drops arbitrary loads. -->
+	<!-- The Mac serves wss:// with a self-signed certificate the app pins (TrekClient's
+	     PinningDelegate checks SHA-256 of its DER against the paired fingerprint).
+	     NSAllowsLocalNetworking: LAN and tailnet IP addresses, `.local` and bare host names.
+	     ts.net: Tailscale MagicDNS names. ATS refuses a self-signed certificate on a fully
+	     qualified name even after the pin accepted it; this exception lets the pin decide.
+	     Nothing else is exempt (no NSAllowsArbitraryLoads). -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>ts.net</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Trek asks for Face ID before letting an agent skip approvals for the rest of a session.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

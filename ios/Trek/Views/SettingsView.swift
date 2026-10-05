@@ -3,7 +3,6 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("appearance") private var appearance = "system"
-    @AppStorage("faceIDForSession") private var faceIDForSession = true
     @State private var confirmUnpair = false
 
     var body: some View {
@@ -29,6 +28,10 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
                     if model.mode == .live, let paired = PairedMac.load() {
                         LabeledContent("Address", value: paired.address)
+                        SecurityRow(transport: model.transport ?? paired.transport)
+                        if case .tls(let pin) = model.transport ?? paired.transport {
+                            LabeledContent("Fingerprint") { Text(pin.short).monospaced() }
+                        }
                     }
                     if let host = model.host {
                         LabeledContent("Trek", value: host.version)
@@ -66,7 +69,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Toggle("Face ID for “Allow for session”", isOn: $faceIDForSession)
+                    LabeledContent("“Allow for session”", value: "Needs \(DeviceOwner.methodName)")
                     LabeledContent("Requests time out", value: "Never")
                 } header: {
                     Text("Approvals")
@@ -101,6 +104,34 @@ struct SettingsView: View {
         case .connected: return Trek.done
         case .connecting: return Trek.approval
         default: return Trek.failed
+        }
+    }
+}
+
+/// "Encrypted · pinned" with a lock, or "Unencrypted" in amber for a plain `ws://` Mac.
+struct SecurityRow: View {
+    var transport: Transport
+
+    var body: some View {
+        LabeledContent("Connection") {
+            if transport.isEncrypted {
+                Label("Encrypted · pinned", systemImage: "lock.fill")
+                    .foregroundStyle(Trek.done)
+            } else {
+                Label("Unencrypted", systemImage: "lock.open.fill")
+                    .foregroundStyle(Trek.approval)
+            }
+        }
+        .labelStyle(SecurityLabelStyle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct SecurityLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 5) {
+            configuration.icon.font(.footnote.weight(.semibold))
+            configuration.title.fontWeight(.medium)
         }
     }
 }

@@ -18,6 +18,9 @@ enum ConnectionState: Equatable {
     case connected
     case offline(String)
     case unauthorized(String)
+    /// The Mac answered with a certificate other than the one pinned: maybe an impostor on the
+    /// network, maybe Trek was reinstalled. Either way the user pairs again; nothing reconnects.
+    case identityChanged(expected: String, seen: String?)
 
     var label: String {
         switch self {
@@ -26,6 +29,7 @@ enum ConnectionState: Equatable {
         case .connected: "Connected"
         case .offline(let why): why.isEmpty ? "Offline" : why
         case .unauthorized(let why): why
+        case .identityChanged: "This Mac's identity changed — pair again"
         }
     }
 }
@@ -55,6 +59,10 @@ final class AppModel {
     var toast: Toast?
     var pairing = false
     var pairingError: String?
+    /// A pairing link (deep link or QR code) waiting for the user to confirm it.
+    var pendingLink: PairingLink?
+    /// How the live connection is carried, for the Settings indicator.
+    var transport: Transport?
 
     var followUpMode: SendMode {
         didSet { UserDefaults.standard.set(followUpMode.rawValue, forKey: "followUpMode") }
@@ -95,21 +103,39 @@ final class AppModel {
 
     func startLive(_ paired: PairedMac) {
         UserDefaults.standard.set(false, forKey: "demoMode")
-        attach(TrekClient(address: paired.address, auth: .hello(deviceId: Device.id, token: paired.token)), mode: .live)
+        let transport = paired.transport
+        attach(TrekClient(address: paired.address, auth: .hello(deviceId: Device.id, token: paired.token), transport: transport),
+               mode: .live)
+        self.transport = transport
     }
 
-    /// Pairs with a Mac from its QR code or typed details; on success the token is kept and the
-    /// connection stays up as the live one.
-    func pair(address: String, code: String) {
+    /// A `trek://pair` link arrived (deep link or QR code). Nothing happens until the user
+    /// confirms it in the sheet: a link alone must never pair the phone.
+    func offer(_ link: PairingLink) {
+        pairingError = nil
+        pendingLink = link
+    }
+
+    /// Pairs with a Mac from its QR code or typed details; on success the token and the
+    /// certificate fingerprint are kept and the connection stays up as the live one. If pairing
+    /// fails, a Mac this phone was already paired with is reconnected.
+    func pair(address: String, code: String, transport: Transport) {
+        pendingLink = nil
         pairing = true
         pairingError = nil
-        let client = TrekClient(address: address, auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name))
-        client.onPaired = { [weak self] token, host in
-            PairedMac(address: address, token: token, hostName: host.name, hostId: host.id).save()
+        let client = TrekClient(address: address, auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name),
+                                transport: transport)
+        client.onPaired = { [weak self] token, host, kept in
+            PairedMac(address: address, token: token, hostName: host.name, hostId: host.id, transport: kept).save()
+            UserDefaults.standard.set(false, forKey: "demoMode")
+            self?.transport = kept
             self?.pairing = false
+            self?.mode = .live
             self?.show("Paired with \(host.name)")
         }
-        attach(client, mode: .live)
+        // The pairing screen (with its progress) stays up until the Mac says yes.
+        attach(client, mode: .unpaired)
+        self.transport = transport
     }
 
     func leave() {
@@ -134,15 +160,38 @@ final class AppModel {
                 // Resubscribe after a reconnect, from where we were.
                 for id in self.subscribed { self.request(.subscribe(threadId: id, afterSeq: self.seqs[id])) }
             }
-            if case .unauthorized(let why) = state, self.pairing {
+            if self.pairing, let why = Self.pairingFailure(state) {
                 self.pairing = false
-                self.pairingError = why
                 self.backend?.stop()
                 self.backend = nil
-                self.mode = .unpaired
+                if let previous = PairedMac.load() {
+                    // Back to the Mac this phone was paired with before.
+                    self.startLive(previous)
+                    self.show(why, error: true)
+                } else {
+                    self.pairingError = why
+                    self.mode = .unpaired
+                }
             }
         }
         b.start()
+    }
+
+    /// Why pairing stopped, for the pairing screen; nil while it may still succeed.
+    private static func pairingFailure(_ state: ConnectionState) -> String? {
+        switch state {
+        case .unauthorized(let why): why
+        case .identityChanged(let expected, let seen):
+            if let seen, seen != expected {
+                "That Mac's fingerprint is \(seen), not \(expected). Nothing was sent to it. Check the fingerprint your Mac shows and try again."
+            } else {
+                "That Mac's certificate doesn't match the pairing code. Nothing was sent to it. Show a new code on your Mac and try again."
+            }
+        case .offline(let why) where why == "Mac unreachable — retrying":
+            "Couldn't reach that Mac. Check the address, and that this iPhone is on the same network or tailnet."
+        case .offline(let why): why
+        default: nil
+        }
     }
 
     private func reset() {
@@ -155,6 +204,7 @@ final class AppModel {
         seqs = [:]
         replies = [:]
         host = nil
+        transport = nil
         connection = .idle
     }
 
@@ -319,6 +369,29 @@ struct PairedMac: Codable {
     var token: String
     var hostName: String
     var hostId: String
+    /// Pinned TLS (the full fingerprint) or plain `ws://` (chosen by the user when pairing).
+    var transport: Transport
+
+    init(address: String, token: String, hostName: String, hostId: String, transport: Transport) {
+        self.address = address
+        self.token = token
+        self.hostName = hostName
+        self.hostId = hostId
+        self.transport = transport
+    }
+
+    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        address = try c.decode(String.self, forKey: .address)
+        token = try c.decode(String.self, forKey: .token)
+        hostName = try c.decode(String.self, forKey: .hostName)
+        hostId = try c.decode(String.self, forKey: .hostId)
+        // Records from before TLS were paired over plain ws:// and stay that way (Settings says
+        // "Unencrypted") until paired again.
+        transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .plain
+    }
 
     static func load() -> PairedMac? {
         guard let data = Keychain.read("paired-mac") else { return nil }

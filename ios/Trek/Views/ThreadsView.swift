@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Home: every thread on the Mac, grouped like the desktop sidebar (Pinned · Needs you · Working ·
 /// Recent). Colour only where something wants action, is moving or broke; the rest recedes.
-struct SessionsView: View {
+struct ThreadsView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [String]
     @Binding var showNew: Bool
@@ -13,10 +13,16 @@ struct SessionsView: View {
         NavigationStack(path: $path) {
             List {
                 if model.mode == .live, model.connection != .connected {
-                    ConnectionBanner(state: model.connection, host: model.host?.name ?? PairedMac.load()?.hostName)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
+                    Group {
+                        if case .identityChanged(let expected, let seen) = model.connection {
+                            IdentityChangedCard(host: PairedMac.load()?.hostName, expected: expected, seen: seen) { model.leave() }
+                        } else {
+                            ConnectionBanner(state: model.connection, host: model.host?.name ?? PairedMac.load()?.hostName) { model.leave() }
+                        }
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
                 }
                 section("Pinned", filtered(model.pinned))
                 section("Needs you", filtered(model.needsYou), tint: Trek.approval)
@@ -33,7 +39,11 @@ struct SessionsView: View {
             .environment(\.defaultMinListHeaderHeight, 0)
             .scrollContentBackground(.hidden)
             .background(RidgeBackdrop(height: 300))
-            .navigationTitle("Sessions")
+            // Rows pass cleanly under the "New thread" pill and the tab bar (one hard edge for both
+            // bars), and the last row clears them.
+            .scrollEdgeEffectStyle(.hard, for: .bottom)
+            .contentMargins(.bottom, 14, for: .scrollContent)
+            .navigationTitle("Threads")
             .refreshable { await model.refresh() }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -50,7 +60,7 @@ struct SessionsView: View {
                             Button("Mark all read", systemImage: "checkmark.circle") {
                                 for t in model.threads where t.unseen { model.markSeen(t.id) }
                             }
-                            Button("New session", systemImage: "plus") { showNew = true }
+                            Button("New thread", systemImage: "plus") { showNew = true }
                         }
                     } label: {
                         Image(systemName: projectFilter == nil ? "ellipsis" : "line.3.horizontal.decrease")
@@ -207,6 +217,8 @@ private struct BranchLabelStyle: LabelStyle {
 struct ConnectionBanner: View {
     var state: ConnectionState
     var host: String?
+    /// Offered when the Mac refused this iPhone (revoked, or a code that didn't work).
+    var pairAgain: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 10) {
@@ -218,10 +230,64 @@ struct ConnectionBanner: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(host ?? "Your Mac").font(.subheadline.weight(.semibold))
                 Text(state.label).font(.caption).foregroundStyle(Trek.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
+            if case .unauthorized = state, let pairAgain {
+                Button("Pair again", action: pairAgain)
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.glass)
+            }
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+/// The Mac answered with a certificate other than the pinned one. Nothing reconnects until the
+/// user pairs again: that's the only way a new certificate becomes trusted.
+struct IdentityChangedCard: View {
+    var host: String?
+    var expected: String
+    var seen: String?
+    var pairAgain: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                Text("This Mac's identity changed").font(.headline)
+            } icon: {
+                Image(systemName: "exclamationmark.shield.fill").foregroundStyle(Trek.failed)
+            }
+            Text("\(host ?? "Your Mac") answered with a different certificate than the one this iPhone paired with. Trek may have been reinstalled on it, or something else on the network is posing as it. Trek won't connect until you pair again.")
+                .font(.subheadline)
+                .foregroundStyle(Trek.foreground.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 14) {
+                LabeledContent("Paired") { Text(expected).monospaced() }
+                if let seen { LabeledContent("Now") { Text(seen).monospaced().foregroundStyle(Trek.failed) } }
+            }
+            .labeledContentStyle(FingerprintLabelStyle())
+            Button(action: pairAgain) {
+                Text("Pair again").fontWeight(.semibold).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Trek.foreground)
+            .controlSize(.large)
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .background(Trek.failed.opacity(0.08), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Trek.failed.opacity(0.4), lineWidth: 1))
+    }
+}
+
+private struct FingerprintLabelStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.label.foregroundStyle(Trek.muted)
+            configuration.content
+        }
+        .font(.footnote)
     }
 }

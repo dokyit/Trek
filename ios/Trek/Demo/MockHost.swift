@@ -346,7 +346,7 @@ final class MockHost: Backend {
         add(id, tool(.edit, "Edit", "src/auth/session.rs", add: 12, del: 3))
         add(id, tool(.edit, "Write", "tests/concurrent_refresh.rs", add: 31, del: 0))
         add(id, .assistant(text: "Both edits are in. The build cache still has artifacts from the old lockfile, so I'd like to clear `target/` and run the auth tests.", streaming: false))
-        add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "rm -rf target/ && cargo test -p auth", state: .pending)))
+        add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "rm -rf target/ && cargo test -p auth session_refresh -- --test-threads=8 --nocapture 2>&1 | tee /tmp/auth-flaky.log", state: .pending)))
 
         // Question
         id = "t-ratelimit"
