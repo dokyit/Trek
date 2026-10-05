@@ -2,8 +2,12 @@
 //! certificate as the iPhone app does), lists the threads, opens one and prints what changes.
 //!
 //! ```sh
-//! cargo run -p trek-remote --example probe -- 'trek://pair?host=…&code=…&fp=…' [--thread <id> [--send "text"] [--answer allow|deny]] [--request '{"type":"usage"}']… [--secs 20]
+//! cargo run -p trek-remote --example probe -- 'trek://pair?host=…&code=…&fp=…' [--thread <id> [--limit 200] [--before i340|first] [--send "text"] [--answer allow|deny]] [--request '{"type":"usage"}']… [--secs 20]
 //! ```
+//!
+//! `--limit` opens the thread at its last `n` items (and says how long that took); `--before`
+//! then pages in the items before one (`first`: the first one the transcript brought), `--limit`
+//! (or 100) at a time, until the start.
 //!
 //! It opens and sends to a thread only when told which (`--thread`): a message reaches a real
 //! agent in that thread's folder. `--request` (any number) sends a message as written once the
@@ -65,6 +69,8 @@ async fn main() {
     let thread = args.iter().position(|a| a == "--thread").and_then(|i| args.get(i + 1)).cloned();
     let answer = args.iter().position(|a| a == "--answer").and_then(|i| args.get(i + 1)).cloned();
     let effort = args.iter().position(|a| a == "--effort").and_then(|i| args.get(i + 1)).cloned();
+    let limit: Option<u32> = args.iter().position(|a| a == "--limit").and_then(|i| args.get(i + 1)).map(|n| n.parse().expect("--limit takes a number"));
+    let mut before = args.iter().position(|a| a == "--before").and_then(|i| args.get(i + 1)).cloned();
     let requests: Vec<Value> = args.windows(2).filter(|w| w[0] == "--request").map(|w| serde_json::from_str(&w[1]).expect("--request takes JSON")).collect();
     assert!(send_text.is_none() || thread.is_some(), "--send needs --thread <id>");
     let secs: u64 = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(15);
@@ -87,6 +93,8 @@ async fn main() {
     let send = |v: Value| Message::text(v.to_string());
     ws.send(send(json!({"type": "pair", "id": "1", "protocol": 1, "code": code, "device_id": "probe", "device_name": "Probe (terminal)"}))).await.unwrap();
     let mut subscribed = false;
+    let mut asked_at = std::time::Instant::now();
+    let mut pages = 0;
     let mut asked = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, ws.next()).await {
@@ -109,7 +117,12 @@ async fn main() {
                 }
                 if let (false, Some(id)) = (subscribed, thread.clone()) {
                     subscribed = true;
-                    ws.send(send(json!({"type": "subscribe", "id": "2", "thread_id": id}))).await.unwrap();
+                    asked_at = std::time::Instant::now();
+                    let mut sub = json!({"type": "subscribe", "id": "2", "thread_id": id});
+                    if let Some(n) = limit {
+                        sub["limit"] = json!(n);
+                    }
+                    ws.send(send(sub)).await.unwrap();
                     if let Some(e) = &effort {
                         ws.send(send(json!({"type": "set_prefs", "id": "5", "thread_id": id, "effort": e}))).await.unwrap();
                     }
@@ -129,9 +142,31 @@ async fn main() {
             Some("transcript") => {
                 let items = v["items"].as_array().cloned().unwrap_or_default();
                 let kinds: Vec<&str> = items.iter().map(|i| i["kind"].as_str().unwrap_or("?")).collect();
-                println!("transcript of {}: {} items, seq {} ({})", v["thread_id"], items.len(), v["seq"], kinds.join(", "));
-                for changes in items.iter().filter(|i| i["kind"] == "changes") {
-                    println!("  changes: {changes}");
+                println!("transcript of {}: {} items, seq {}, more: {}, {:?} after asking ({} bytes)", v["thread_id"], items.len(), v["seq"], v["more"].as_bool().unwrap_or(false), asked_at.elapsed(), text.len());
+                if items.len() <= 40 {
+                    println!("  {}", kinds.join(", "));
+                }
+                for changes in items.iter().filter(|i| i["kind"] == "changes").take(3) {
+                    println!("  changes: {}", short(changes));
+                }
+                if before.as_deref() == Some("first") {
+                    before = items.first().and_then(|i| i["id"].as_str()).map(str::to_string);
+                }
+                if let (Some(b), Some(id)) = (&before, &thread) {
+                    asked_at = std::time::Instant::now();
+                    ws.send(send(json!({"type": "transcript_before", "id": "page", "thread_id": id, "before": b, "limit": limit.unwrap_or(100)}))).await.unwrap();
+                }
+            }
+            Some("transcript_page") => {
+                let items = v["items"].as_array().cloned().unwrap_or_default();
+                pages += 1;
+                let (first, last) = (items.first().map(|i| i["id"].to_string()), items.last().map(|i| i["id"].to_string()));
+                println!("page {pages}: {} items ({} … {}), more: {}, {:?}", items.len(), first.unwrap_or_default(), last.unwrap_or_default(), v["more"], asked_at.elapsed());
+                if v["more"] == true
+                    && let (Some(b), Some(id)) = (items.first().and_then(|i| i["id"].as_str()), &thread)
+                {
+                    asked_at = std::time::Instant::now();
+                    ws.send(send(json!({"type": "transcript_before", "id": "page", "thread_id": id, "before": b, "limit": limit.unwrap_or(100)}))).await.unwrap();
                 }
             }
             _ => println!("{}", short(&v)),

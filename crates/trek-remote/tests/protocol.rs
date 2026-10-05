@@ -164,11 +164,11 @@ fn thread_summary_serializes_like_the_spec() {
 #[test]
 fn spec_transcript_messages() {
     let sub = client_round_trip(r#"{"type":"subscribe","id":"7","thread_id":"01J…","after_seq":null}"#);
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "01J…".into(), after_seq: None });
+    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "01J…".into(), after_seq: None, limit: None });
     let sub: ClientEnvelope = serde_json::from_str(r#"{"type":"subscribe","thread_id":"t","after_seq":5}"#).unwrap();
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: Some(5) });
+    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: Some(5), limit: None });
     let sub: ClientEnvelope = serde_json::from_str(r#"{"type":"subscribe","thread_id":"t"}"#).unwrap();
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: None });
+    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: None, limit: None });
     client_round_trip(r#"{"type":"unsubscribe","thread_id":"01J…"}"#);
 
     server_round_trip(r#"{"type":"transcript","re":"7","thread_id":"01J…","reset":true,"seq":118,"items":[]}"#);
@@ -179,6 +179,39 @@ fn spec_transcript_messages() {
         r#"{"type":"item","thread_id":"01J…","item":{"id":"a6","seq":6,"at":null,"kind":"assistant","text":"The race is in **`refresh()`**…","streaming":false}}"#,
     );
     server_round_trip(r#"{"type":"transcript_reset","thread_id":"01J…"}"#);
+}
+
+#[test]
+fn long_transcripts_and_turn_actions() {
+    let sub = client_round_trip(r#"{"type":"subscribe","id":"7","thread_id":"t","after_seq":null,"limit":200}"#);
+    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: None, limit: Some(200) });
+    server_round_trip(r#"{"type":"transcript","re":"7","thread_id":"t","reset":true,"seq":118,"items":[],"more":true}"#);
+    // `more` is left out when false, and missing reads as false.
+    let t = server_round_trip(r#"{"type":"transcript","thread_id":"t","reset":true,"seq":1,"items":[]}"#);
+    assert!(matches!(t.msg, ServerMessage::Transcript { more: false, .. }));
+
+    let before = client_round_trip(r#"{"type":"transcript_before","id":"8","thread_id":"t","before":"i340","limit":200}"#);
+    assert_eq!(before.msg, ClientMessage::TranscriptBefore { thread_id: "t".into(), before: "i340".into(), limit: 200 });
+    assert!(before.msg.is_query(), "a read: it doesn't wait behind actions");
+    server_round_trip(
+        r#"{"type":"transcript_page","re":"8","thread_id":"t","items":[{"id":"i139","seq":4,"at":null,"kind":"notice","text":"Interrupted"}],"more":true}"#,
+    );
+    server_round_trip(r#"{"type":"transcript_page","re":"8","thread_id":"t","items":[],"more":false}"#);
+
+    let undo = client_round_trip(r#"{"type":"turn_action","id":"9","thread_id":"t","item_id":"i12","action":"undo","restore_files":true}"#);
+    assert_eq!(undo.msg, ClientMessage::TurnAction(TurnActionRequest { thread_id: "t".into(), item_id: "i12".into(), action: TurnAction::Undo, model: None, restore_files: true }));
+    client_round_trip(r#"{"type":"turn_action","thread_id":"t","item_id":"i12","action":"retry","model":"gpt-6","restore_files":false}"#);
+    // Files are restored unless asked not to.
+    let fork: ClientEnvelope = serde_json::from_str(r#"{"type":"turn_action","thread_id":"t","item_id":"i3","action":"fork"}"#).unwrap();
+    assert!(matches!(fork.msg, ClientMessage::TurnAction(TurnActionRequest { action: TurnAction::Fork, restore_files: true, .. })));
+    for action in ["undo", "retry", "fork", "rewind"] {
+        let line = format!(r#"{{"type":"turn_action","thread_id":"t","item_id":"i1","action":"{action}"}}"#);
+        assert_eq!(serde_json::from_str::<ClientEnvelope>(&line).unwrap().msg.kind(), "turn_action");
+    }
+    assert!(serde_json::from_str::<ClientEnvelope>(r#"{"type":"turn_action","thread_id":"t","item_id":"i1","action":"redo"}"#).is_err());
+    let ack = server_round_trip(r#"{"type":"ack","re":"9","text":"Fix the parser"}"#);
+    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: None, open: None, text: Some("Fix the parser".into()) });
+    server_round_trip(r#"{"type":"ack","re":"10","thread_id":"t-fork","text":"Fix the parser"}"#);
 }
 
 const SPEC_ITEMS: &[&str] = &[
@@ -397,7 +430,7 @@ fn spec_actions() {
 
     server_round_trip(r#"{"type":"ack","re":"9"}"#);
     let ack = server_round_trip(r#"{"type":"ack","re":"10","thread_id":"01J…"}"#);
-    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()), open: None });
+    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()), open: None, text: None });
     server_round_trip(r#"{"type":"pong","re":"15"}"#);
     let err = server_round_trip(r#"{"type":"error","re":"9","code":"not_found","message":"No thread 01J…"}"#);
     assert_eq!(err.msg, ServerMessage::Error { code: ErrorCode::NotFound, message: "No thread 01J…".into() });
@@ -407,7 +440,7 @@ fn spec_actions() {
 fn exact_server_json() {
     assert_eq!(ServerEnvelope::reply(Some("15".into()), ServerMessage::Pong).to_json(), r#"{"type":"pong","re":"15"}"#);
     assert_eq!(
-        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None, open: None }).to_json(),
+        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None, open: None, text: None }).to_json(),
         r#"{"type":"ack","re":"9"}"#
     );
     assert_eq!(

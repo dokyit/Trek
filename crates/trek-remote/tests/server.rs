@@ -54,6 +54,20 @@ fn item(id: &str, seq: u64, text: &str) -> Item {
     Item { id: id.into(), seq, at: None, body: ItemBody::Assistant { text: text.into(), streaming: false } }
 }
 
+/// Ten items, `i0`…`i9`, with the files `i4`'s turn changed after it and an approval open.
+fn long_transcript() -> Transcript {
+    let mut items: Vec<Item> = (0..10).map(|n| item(&format!("i{n}"), n + 1, &format!("item {n}"))).collect();
+    let changes = ItemBody::Changes { files: vec![], added: 1, removed: 0 };
+    items.insert(5, Item { id: "c4".into(), seq: 11, at: None, body: changes });
+    let approval = ItemBody::Approval { request_id: "req".into(), title: "Run command".into(), detail: "make".into(), state: ApprovalState::Pending };
+    items.push(Item { id: "rreq".into(), seq: 12, at: None, body: approval });
+    Transcript { seq: 12, items, ..Default::default() }
+}
+
+fn ids(v: &Value) -> Vec<&str> {
+    v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect()
+}
+
 impl FakeHost {
     fn record(&self, call: String) {
         self.calls.lock().unwrap().push(call);
@@ -71,14 +85,38 @@ impl RemoteHost for FakeHost {
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
         match thread_id {
-            "t1" => Ok(Transcript { seq: 3, items: vec![item("a", 1, "one"), item("b", 2, "two"), item("c", 3, "three")] }),
-            "t2" => Ok(Transcript { seq: 0, items: vec![] }),
+            "t1" => Ok(Transcript { seq: 3, items: vec![item("a", 1, "one"), item("b", 2, "two"), item("c", 3, "three")], ..Default::default() }),
+            "t2" => Ok(Transcript::default()),
             "slow" => {
                 tokio::time::sleep(Duration::from_millis(300)).await;
-                Ok(Transcript { seq: 3, items: vec![item("a", 3, "one")] })
+                Ok(Transcript { seq: 3, items: vec![item("a", 3, "one")], ..Default::default() })
             }
+            "long" => Ok(long_transcript()),
             other => Err(HostError::not_found(format!("No thread {other}"))),
         }
+    }
+
+    async fn transcript_before(&self, thread_id: &str, before: &str, limit: u32) -> HostResult<TranscriptPage> {
+        self.record(format!("transcript_before {thread_id} {before} {limit}"));
+        if thread_id == "slow" {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let transcript = if thread_id == "slow" { long_transcript() } else { self.transcript(thread_id).await? };
+        transcript.page_before(before, limit).ok_or_else(|| HostError::not_found("No such item"))
+    }
+
+    async fn turn_action(&self, req: TurnActionRequest) -> HostResult<TurnActionDone> {
+        self.record(format!("turn_action {} {} {:?} {:?} {}", req.thread_id, req.item_id, req.action, req.model, req.restore_files));
+        match req.action {
+            TurnAction::Undo if req.item_id == "i9" => Err(HostError::bad_request("Stop the running turn to undo")),
+            TurnAction::Undo | TurnAction::Rewind => Ok(TurnActionDone { thread_id: None, text: Some("Fix the parser".into()) }),
+            TurnAction::Retry => Ok(TurnActionDone::default()),
+            TurnAction::Fork => Ok(TurnActionDone { thread_id: Some("t-fork".into()), text: None }),
+        }
+    }
+
+    fn unwatch(&self, thread_id: &str) {
+        self.record(format!("unwatch {thread_id}"));
     }
 
     async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {
@@ -665,6 +703,8 @@ async fn newer_requests_reach_the_host_over_the_wire() {
         (json!({"type": "commands", "id": "c", "thread_id": "t1"}), "commands"),
         (json!({"type": "settings", "id": "s1"}), "settings"),
         (json!({"type": "set_settings", "id": "s2", "theme": "paper"}), "settings"),
+        (json!({"type": "transcript_before", "id": "tb", "thread_id": "long", "before": "i5", "limit": 2}), "transcript_page"),
+        (json!({"type": "turn_action", "id": "ta", "thread_id": "t1", "item_id": "i4", "action": "fork"}), "ack"),
     ];
     for (request, kind) in requests {
         let id = request["id"].clone();
@@ -724,6 +764,8 @@ async fn newer_requests_reach_the_host_over_the_wire() {
         "commands t1",
         "settings",
         "set_settings Some(Paper)",
+        "transcript_before long i5 2",
+        "turn_action t1 i4 Fork None true",
     ] {
         assert!(calls.iter().any(|c| c == expected), "{expected} not in {calls:?}");
     }
@@ -738,6 +780,128 @@ async fn slow_reads_dont_hold_up_actions() {
     send(&mut c, json!({"type": "interrupt", "id": "fast", "thread_id": "t1"})).await;
     assert_eq!(recv(&mut c).await["re"], "fast");
     assert_eq!(recv(&mut c).await["re"], "slow");
+    // Paging a long transcript in is a read too.
+    send(&mut c, json!({"type": "transcript_before", "id": "page", "thread_id": "slow", "before": "i5", "limit": 2})).await;
+    send(&mut c, json!({"type": "interrupt", "id": "fast2", "thread_id": "t1"})).await;
+    assert_eq!(recv(&mut c).await["re"], "fast2");
+    assert_eq!(recv(&mut c).await["re"], "page");
+}
+
+#[tokio::test]
+async fn a_limited_subscribe_sends_the_end_and_earlier_items_come_in_pages() {
+    let (handle, host) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+
+    // The last three items and the open request; more before them.
+    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 3})).await;
+    let t = recv(&mut c).await;
+    assert_eq!((t["type"].as_str(), t["reset"].as_bool(), t["more"].as_bool()), (Some("transcript"), Some(true), Some(true)));
+    assert_eq!(ids(&t), ["i7", "i8", "i9", "rreq"]);
+    // A turn's files go with the turn end they follow, and only with it.
+    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 6})).await;
+    assert_eq!(ids(&recv(&mut c).await), ["i4", "c4", "i5", "i6", "i7", "i8", "i9", "rreq"]);
+    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 5})).await;
+    assert_eq!(ids(&recv(&mut c).await), ["i5", "i6", "i7", "i8", "i9", "rreq"]);
+    // All of it fits: no `more`.
+    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 10})).await;
+    let t = recv(&mut c).await;
+    assert_eq!((ids(&t).len(), t.get("more")), (12, None));
+    // What changed since a seq is unchanged by a limit.
+    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "after_seq": 9, "limit": 1})).await;
+    let t = recv(&mut c).await;
+    assert_eq!((t["reset"].as_bool(), t.get("more"), ids(&t)), (Some(false), None, vec!["c4", "i9", "rreq"]));
+
+    // Pages, back to the start.
+    send(&mut c, json!({"type": "transcript_before", "id": "p1", "thread_id": "long", "before": "i7", "limit": 3})).await;
+    let page = recv(&mut c).await;
+    assert_eq!((page["type"].as_str(), page["re"].as_str(), page["thread_id"].as_str(), page["more"].as_bool()), (Some("transcript_page"), Some("p1"), Some("long"), Some(true)));
+    assert_eq!(ids(&page), ["i4", "c4", "i5", "i6"]);
+    send(&mut c, json!({"type": "transcript_before", "id": "p2", "thread_id": "long", "before": "i4", "limit": 3})).await;
+    let page = recv(&mut c).await;
+    assert_eq!((ids(&page), page["more"].as_bool()), (vec!["i1", "i2", "i3"], Some(true)));
+    send(&mut c, json!({"type": "transcript_before", "id": "p3", "thread_id": "long", "before": "i1", "limit": 3})).await;
+    let page = recv(&mut c).await;
+    assert_eq!((ids(&page), page["more"].as_bool()), (vec!["i0"], Some(false)));
+    // The page size is capped on the Mac; unknown items and malformed requests are refused.
+    send(&mut c, json!({"type": "transcript_before", "id": "p4", "thread_id": "long", "before": "i9", "limit": 100000})).await;
+    assert_eq!(recv(&mut c).await["more"], false);
+    assert!(host.calls().contains(&"transcript_before long i9 500".to_string()));
+    send(&mut c, json!({"type": "transcript_before", "id": "p5", "thread_id": "long", "before": "i99", "limit": 3})).await;
+    assert_eq!(recv(&mut c).await["code"], "not_found");
+    send(&mut c, json!({"type": "transcript_before", "id": "p6", "thread_id": "long", "before": "i3"})).await;
+    assert_eq!(recv(&mut c).await["code"], "bad_request");
+}
+
+#[tokio::test]
+async fn turn_actions_reach_the_host() {
+    let (handle, host) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    let requests = [
+        (json!({"type": "turn_action", "id": "1", "thread_id": "t1", "item_id": "i4", "action": "undo"}), json!({"type": "ack", "re": "1", "text": "Fix the parser"})),
+        (
+            json!({"type": "turn_action", "id": "2", "thread_id": "t1", "item_id": "i4", "action": "retry", "model": "gpt-6", "restore_files": false}),
+            json!({"type": "ack", "re": "2"}),
+        ),
+        (json!({"type": "turn_action", "id": "3", "thread_id": "t1", "item_id": "i4", "action": "fork"}), json!({"type": "ack", "re": "3", "thread_id": "t-fork"})),
+        (json!({"type": "turn_action", "id": "4", "thread_id": "t1", "item_id": "i0", "action": "rewind"}), json!({"type": "ack", "re": "4", "text": "Fix the parser"})),
+        (
+            json!({"type": "turn_action", "id": "5", "thread_id": "t1", "item_id": "i9", "action": "undo"}),
+            json!({"type": "error", "re": "5", "code": "bad_request", "message": "Stop the running turn to undo"}),
+        ),
+    ];
+    for (request, reply) in requests {
+        send(&mut c, request).await;
+        assert_eq!(recv(&mut c).await, reply);
+    }
+    send(&mut c, json!({"type": "turn_action", "id": "6", "thread_id": "t1", "item_id": "i4", "action": "explode"})).await;
+    assert_eq!(recv(&mut c).await["code"], "bad_request");
+    let calls: Vec<String> = host.calls().into_iter().filter(|c| c.starts_with("turn_action")).collect();
+    assert_eq!(
+        calls,
+        [
+            "turn_action t1 i4 Undo None true",
+            "turn_action t1 i4 Retry Some(\"gpt-6\") false",
+            "turn_action t1 i4 Fork None true",
+            "turn_action t1 i0 Rewind None true",
+            "turn_action t1 i9 Undo None true",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_host_hears_when_no_phone_has_a_thread_open() {
+    let (handle, host) = start().await;
+    let (mut a, _) = pair(&handle, "dev-a").await;
+    let (mut b, _) = pair(&handle, "dev-b").await;
+    let unwatched = |host: &FakeHost| host.calls().into_iter().filter(|c| c.starts_with("unwatch")).collect::<Vec<_>>();
+    for c in [&mut a, &mut b] {
+        send(c, json!({"type": "subscribe", "id": "s", "thread_id": "t1"})).await;
+        assert_eq!(recv(c).await["type"], "transcript");
+    }
+    // Subscribing twice is still one subscription.
+    send(&mut a, json!({"type": "subscribe", "id": "s2", "thread_id": "t1"})).await;
+    assert_eq!(recv(&mut a).await["type"], "transcript");
+    send(&mut a, json!({"type": "unsubscribe", "id": "u", "thread_id": "t1"})).await;
+    assert_eq!(recv(&mut a).await["type"], "ack");
+    assert!(unwatched(&host).is_empty(), "b still has it open");
+    // b goes away: nobody has it open.
+    drop(b);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while unwatched(&host).is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "the host wasn't told");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(unwatched(&host), ["unwatch t1"]);
+    // Opened again, and let go again.
+    send(&mut a, json!({"type": "subscribe", "id": "s3", "thread_id": "t1"})).await;
+    assert_eq!(recv(&mut a).await["seq"], 3);
+    send(&mut a, json!({"type": "unsubscribe", "thread_id": "t1"})).await;
+    // A thread that couldn't be opened was never open.
+    send(&mut a, json!({"type": "subscribe", "id": "x", "thread_id": "nope"})).await;
+    assert_eq!(recv(&mut a).await["code"], "not_found");
+    send(&mut a, json!({"type": "ping", "id": "p"})).await;
+    assert_eq!(recv(&mut a).await["type"], "pong");
+    assert_eq!(unwatched(&host), ["unwatch t1", "unwatch t1", "unwatch nope"]);
 }
 
 #[tokio::test]
@@ -825,7 +989,7 @@ async fn channel_host_round_trip() {
                 HostRequest::Snapshot { reply } => {
                     let _ = reply.send(Ok(Snapshot { threads: vec![thread("c1")], ..Default::default() }));
                 }
-                HostRequest::Transcript { thread_id, reply } => {
+                HostRequest::Transcript { thread_id, reply, .. } => {
                     let _ = reply.send(Err(HostError::not_found(format!("No thread {thread_id}"))));
                 }
                 HostRequest::Send { req, reply } => {

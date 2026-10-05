@@ -7,7 +7,7 @@
 use crate::store::Item;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Transcript {
     items: Vec<Item>,
     ids: Vec<String>,
@@ -17,6 +17,15 @@ pub struct Transcript {
     changed: HashSet<String>,
     /// Ids of stored rows that left the transcript.
     removed: Vec<String>,
+    /// The first position anything changed at (an edit, an item added or removed) since
+    /// `take_edited_from` last asked; a new transcript has changed from the start.
+    edited_from: Option<usize>,
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Transcript { items: vec![], ids: vec![], unsaved: HashSet::new(), changed: HashSet::new(), removed: vec![], edited_from: Some(0) }
+    }
 }
 
 /// What a save has to write.
@@ -76,6 +85,7 @@ impl Transcript {
     /// collecting items) in front of everything here. Only for transcripts with nothing stored
     /// yet: rows are appended in transcript order, after the thread's last stored one.
     pub fn prepend_unsaved(&mut self, history: Vec<Item>) {
+        self.edited(0);
         debug_assert!(self.ids.iter().all(|id| self.unsaved.contains(id)) && self.removed.is_empty(), "stored rows would end up out of order");
         let ids: Vec<String> = history.iter().map(|_| new_id()).collect();
         self.unsaved.extend(ids.iter().cloned());
@@ -85,6 +95,7 @@ impl Transcript {
 
     /// Append an item; returns its index.
     pub fn push(&mut self, item: Item) -> usize {
+        self.edited(self.items.len());
         let id = new_id();
         self.unsaved.insert(id.clone());
         self.ids.push(id);
@@ -92,7 +103,25 @@ impl Transcript {
         self.items.len() - 1
     }
 
+    fn edited(&mut self, ix: usize) {
+        self.edited_from = Some(self.edited_from.map_or(ix, |e| e.min(ix)));
+    }
+
+    /// The item at `ix` looks different though it didn't change (something shown with it did,
+    /// like the lines a tool call changed): `take_edited_from` reports it; nothing is saved.
+    pub fn mark_edited(&mut self, ix: usize) {
+        self.edited(ix);
+    }
+
+    /// The first position that may have changed since the last call (`None`: nothing did), for
+    /// the one follower that keeps a copy of its own (the phone bridge). Every change goes
+    /// through this type's methods, so nothing before it changed.
+    pub fn take_edited_from(&mut self) -> Option<usize> {
+        self.edited_from.take()
+    }
+
     fn touch(&mut self, ix: usize) {
+        self.edited(ix);
         let id = &self.ids[ix];
         if !self.unsaved.contains(id) {
             self.changed.insert(id.clone());
@@ -135,6 +164,7 @@ impl Transcript {
                 kept_items.push(item);
                 kept_ids.push(id);
             } else {
+                self.edited(kept_items.len());
                 self.forget(id);
             }
         }
@@ -147,6 +177,7 @@ impl Transcript {
         if len >= self.items.len() {
             return;
         }
+        self.edited(len);
         self.items.truncate(len);
         for id in self.ids.split_off(len) {
             self.forget(id);
@@ -259,6 +290,25 @@ mod tests {
         let c = t.changes();
         assert_eq!(c.removed, ["b".to_string(), "c".to_string()]);
         assert!(c.changed.is_empty() && c.appended.is_empty());
+    }
+
+    #[test]
+    fn the_first_position_changed_is_told_once() {
+        let mut t = Transcript::stored(vec![("a".into(), text("1")), ("b".into(), text("2")), ("c".into(), text("3"))]);
+        assert_eq!(t.take_edited_from(), Some(0), "new: all of it");
+        assert_eq!(t.take_edited_from(), None);
+        let _ = t.get_mut(1);
+        t.push(text("4"));
+        assert_eq!(t.take_edited_from(), Some(1));
+        t.mark_edited(3);
+        assert_eq!(t.take_edited_from(), Some(3));
+        assert_eq!(t.changes().changed.len(), 1, "marking saves nothing");
+        t.retain(|i| *i != text("3"));
+        assert_eq!(t.take_edited_from(), Some(2));
+        t.truncate(1);
+        assert_eq!(t.take_edited_from(), Some(1));
+        let _ = &t[0];
+        assert_eq!(t.take_edited_from(), None, "reading changes nothing");
     }
 
     #[test]

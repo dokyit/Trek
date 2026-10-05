@@ -39,6 +39,10 @@
 //!   the store's positional seq): every new item *and every update of an item* takes the next
 //!   value, and `Transcript::seq` is the highest one handed out. Tool rows: [`ToolKind::from_title`],
 //!   output cut with [`truncate_output`], `added`/`removed` from the file change's line counts.
+//!   [`RemoteHost::transcript_for`] may serve a `subscribe`'s `limit` and `after_seq` itself, and
+//!   [`RemoteHost::transcript_before`] pages of earlier items (both default to cutting the whole
+//!   transcript); [`RemoteHost::unwatch`] says when no phone has a thread open any more.
+//! - **`turn_action`**: undo, retry, fork or rewind, as the Mac's buttons do.
 //! - **`send`**: the Workspace's send for an idle thread; for a working one, `SendMode::Steer`
 //!   injects into the running turn and `SendMode::Queue` queues a follow-up; `None` follows the
 //!   user's follow-up setting.

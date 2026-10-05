@@ -24,7 +24,7 @@ use crate::pairing::{
     pairing_url,
 };
 use crate::protocol::{
-    ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, PROTOCOL_VERSION, ServerEnvelope, ServerMessage,
+    ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION, ServerEnvelope, ServerMessage,
     Snapshot, Transcript,
 };
 
@@ -103,6 +103,10 @@ impl RemoteServer {
         let (events, _) = broadcast::channel(1024);
         let (notices, _) = broadcast::channel(64);
         let (shutdown, _) = watch::channel(false);
+        let unwatch = {
+            let host = host.clone();
+            Box::new(move |thread_id: &str| host.unwatch(thread_id))
+        };
         let inner = Arc::new(Inner {
             config,
             tls,
@@ -110,6 +114,7 @@ impl RemoteServer {
             events,
             notices,
             shutdown,
+            watchers: Watchers { counts: Mutex::new(HashMap::new()), unwatch },
             state: Mutex::new(State { registry, pairing: Pairing::default(), connections: HashMap::new(), next_conn: 0 }),
         });
         tracing::info!(%local_addr, "trek-remote listening");
@@ -218,7 +223,45 @@ struct Inner {
     events: broadcast::Sender<HostEvent>,
     notices: broadcast::Sender<ServerNotice>,
     shutdown: watch::Sender<bool>,
+    watchers: Watchers,
     state: Mutex<State>,
+}
+
+/// How many sessions have each thread open, across every phone: the host hears when a thread's
+/// last one lets go ([`RemoteHost::unwatch`]).
+struct Watchers {
+    counts: Mutex<HashMap<String, usize>>,
+    unwatch: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl Watchers {
+    fn counts(&self) -> MutexGuard<'_, HashMap<String, usize>> {
+        self.counts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn add(&self, thread_id: &str) {
+        *self.counts().entry(thread_id.to_string()).or_default() += 1;
+    }
+
+    fn remove(&self, thread_id: &str) {
+        let mut counts = self.counts();
+        let Some(n) = counts.get_mut(thread_id) else { return };
+        *n -= 1;
+        if *n == 0 {
+            counts.remove(thread_id);
+            // Under the lock: a subscribe that follows is told after this.
+            (self.unwatch)(thread_id);
+        }
+    }
+
+    /// The host read `thread_id` for a subscription dropped meanwhile: if nobody has it open,
+    /// say so again.
+    fn recheck(&self, thread_id: &str) {
+        let counts = self.counts();
+        if !counts.contains_key(thread_id) {
+            (self.unwatch)(thread_id);
+        }
+    }
 }
 
 impl Inner {
@@ -521,6 +564,8 @@ const CLIENT_TYPES: &[&str] = &[
     "hello",
     "subscribe",
     "unsubscribe",
+    "transcript_before",
+    "turn_action",
     "send",
     "new_thread",
     "answer",
@@ -605,7 +650,7 @@ async fn close(ws: &mut Ws, code: CloseCode, reason: &str) {
 /// them, off the connection's loop (so a slow host never stalls pings or pushes).
 enum Job {
     Snapshot,
-    Transcript { re: Option<String>, thread_id: String, after_seq: Option<u64>, generation: u64 },
+    Transcript { re: Option<String>, thread_id: String, after_seq: Option<u64>, limit: Option<u32>, generation: u64 },
     Call { re: Option<String>, msg: ClientMessage },
 }
 
@@ -617,6 +662,7 @@ enum Done {
         re: Option<String>,
         thread_id: String,
         after_seq: Option<u64>,
+        limit: Option<u32>,
         generation: u64,
         result: HostResult<Transcript>,
     },
@@ -629,9 +675,9 @@ async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<J
             // Reads are only worth doing for a live connection; actions the phone sent still run.
             Job::Snapshot | Job::Transcript { .. } if done.is_closed() => continue,
             Job::Snapshot => Done::Snapshot(host.snapshot().await),
-            Job::Transcript { re, thread_id, after_seq, generation } => {
-                let result = host.transcript(&thread_id).await;
-                Done::Transcript { re, thread_id, after_seq, generation, result }
+            Job::Transcript { re, thread_id, after_seq, limit, generation } => {
+                let result = host.transcript_for(&thread_id, after_seq, limit).await;
+                Done::Transcript { re, thread_id, after_seq, limit, generation, result }
             }
             // Reads that may take a while (asking the agents for their usage, a recap of all
             // time, git) don't hold up what the phone does next.
@@ -650,9 +696,16 @@ async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<J
 
 async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -> ServerEnvelope {
     let kind = msg.kind();
-    let ack = |thread_id: Option<String>| ServerMessage::Ack { thread_id, open: None };
+    let ack = |thread_id: Option<String>| ServerMessage::Ack { thread_id, open: None, text: None };
     let result: HostResult<ServerMessage> = match msg {
-        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack { thread_id: None, open }),
+        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack { thread_id: None, open, text: None }),
+        ClientMessage::TranscriptBefore { thread_id, before, limit } => host
+            .transcript_before(&thread_id, &before, limit.min(MAX_PAGE))
+            .await
+            .map(|page| ServerMessage::TranscriptPage { thread_id, items: page.items, more: page.more }),
+        ClientMessage::TurnAction(req) => {
+            host.turn_action(req).await.map(|done| ServerMessage::Ack { thread_id: done.thread_id, open: None, text: done.text })
+        }
         ClientMessage::NewThread(req) => host.new_thread(req).await.map(|id| ack(Some(id))),
         ClientMessage::Answer(req) => host.answer(req).await.map(|()| ack(None)),
         ClientMessage::Interrupt { thread_id } => host.interrupt(&thread_id).await.map(|()| ack(None)),
@@ -714,23 +767,29 @@ impl Session {
         re: Option<String>,
         msg: ClientMessage,
         jobs: &mpsc::UnboundedSender<Job>,
+        watchers: &Watchers,
     ) -> Vec<ServerEnvelope> {
         match msg {
             ClientMessage::Pair { .. } | ClientMessage::Hello { .. } => {
                 vec![error(re, ErrorCode::BadRequest, "Already authenticated")]
             }
             ClientMessage::Ping => vec![ServerEnvelope::reply(re, ServerMessage::Pong)],
-            ClientMessage::Subscribe { thread_id, after_seq } => {
+            ClientMessage::Subscribe { thread_id, after_seq, limit } => {
                 self.next_generation += 1;
                 let generation = self.next_generation;
-                self.subs.insert(thread_id.clone(), Sub::Pending { generation, held: Vec::new(), reset: false });
-                let _ = jobs.send(Job::Transcript { re, thread_id, after_seq, generation });
+                let sub = Sub::Pending { generation, held: Vec::new(), reset: false };
+                if self.subs.insert(thread_id.clone(), sub).is_none() {
+                    watchers.add(&thread_id);
+                }
+                let _ = jobs.send(Job::Transcript { re, thread_id, after_seq, limit, generation });
                 Vec::new()
             }
             ClientMessage::Unsubscribe { thread_id } => {
-                self.subs.remove(&thread_id);
+                if self.subs.remove(&thread_id).is_some() {
+                    watchers.remove(&thread_id);
+                }
                 match re {
-                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None, open: None })],
+                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None, open: None, text: None })],
                     None => Vec::new(),
                 }
             }
@@ -747,7 +806,14 @@ impl Session {
         let _ = jobs.send(Job::Snapshot);
     }
 
-    fn on_done(&mut self, done: Done) -> Vec<ServerEnvelope> {
+    /// The connection is over: what it had open, it has open no more.
+    fn close(&mut self, watchers: &Watchers) {
+        for thread_id in std::mem::take(&mut self.subs).into_keys() {
+            watchers.remove(&thread_id);
+        }
+    }
+
+    fn on_done(&mut self, done: Done, watchers: &Watchers) -> Vec<ServerEnvelope> {
         match done {
             Done::Reply(envelope) => vec![envelope],
             Done::Snapshot(result) => {
@@ -763,20 +829,25 @@ impl Session {
                 }
                 out
             }
-            Done::Transcript { re, thread_id, after_seq, generation, result } => {
+            Done::Transcript { re, thread_id, after_seq, limit, generation, result } => {
                 let current =
                     matches!(self.subs.get(&thread_id), Some(Sub::Pending { generation: g, .. }) if *g == generation);
+                if !self.subs.contains_key(&thread_id) {
+                    // Unsubscribed while the host read it (and so started following it again).
+                    watchers.recheck(&thread_id);
+                }
                 let transcript = match result {
                     Ok(transcript) => transcript,
                     Err(err) => {
                         if current {
                             self.subs.remove(&thread_id);
+                            watchers.remove(&thread_id);
                         }
                         return vec![error(re, err.code, err.message)];
                     }
                 };
                 let seq = transcript.seq;
-                let reply = transcript_message(thread_id.clone(), after_seq, transcript);
+                let reply = transcript_message(thread_id.clone(), after_seq, limit, transcript);
                 let mut out = vec![ServerEnvelope::reply(re, reply)];
                 if current
                     && let Some(Sub::Pending { held, reset, .. }) = self.subs.insert(thread_id.clone(), Sub::Active)
@@ -840,22 +911,56 @@ impl Session {
     }
 }
 
-/// The reply to `subscribe`: only what's after `after_seq` when the host can serve it, else all.
-fn transcript_message(thread_id: String, after_seq: Option<u64>, transcript: Transcript) -> ServerMessage {
-    let Transcript { seq, items } = transcript;
+/// The reply to `subscribe`: only what's after `after_seq` when the host can serve it, else all
+/// (or, with a `limit`, the last `limit` items with what follows them, and every open request).
+fn transcript_message(thread_id: String, after_seq: Option<u64>, limit: Option<u32>, transcript: Transcript) -> ServerMessage {
+    let Transcript { seq, items, base, more } = transcript;
     match after_seq {
-        Some(after) if after <= seq => ServerMessage::Transcript {
+        Some(after) if base <= after && after <= seq => ServerMessage::Transcript {
             thread_id,
             reset: false,
             seq,
             items: items.into_iter().filter(|item| item.seq > after).collect(),
+            more: false,
         },
-        _ => ServerMessage::Transcript { thread_id, reset: true, seq, items },
+        _ => {
+            let (items, cut) = last_items(items, limit);
+            ServerMessage::Transcript { thread_id, reset: true, seq, items, more: more || cut }
+        }
     }
 }
 
+/// The last `limit` items (those standing on their own: a turn's changed files go with the turn
+/// end they follow) and every open request; and whether any were left out.
+fn last_items(items: Vec<Item>, limit: Option<u32>) -> (Vec<Item>, bool) {
+    let Some(limit) = limit else { return (items, false) };
+    let (requests, mut rest): (Vec<Item>, Vec<Item>) = items.into_iter().partition(|i| i.body.is_request());
+    let mut kept = 0;
+    let mut start = rest.len();
+    for (ix, item) in rest.iter().enumerate().rev() {
+        if kept == limit {
+            break;
+        }
+        if !item.body.is_attached() {
+            kept += 1;
+        }
+        start = ix;
+    }
+    let cut = start > 0;
+    let mut out = rest.split_off(start);
+    out.extend(requests);
+    (out, cut)
+}
+
 async fn run_session<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, auth: Authenticated) {
+    let mut session = Session::default();
+    session_loop(ws, inner, host, auth, &mut session).await;
+    session.close(&inner.watchers);
+}
+
+async fn session_loop<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, auth: Authenticated, session: &mut Session) {
     let Authenticated { device_id, mut kick, .. } = auth;
+    let watchers = &inner.watchers;
     // Listen for events before asking for the snapshot, so nothing falls between the two.
     let mut events = inner.events.subscribe();
     let mut shutdown = inner.shutdown.subscribe();
@@ -863,7 +968,6 @@ async fn run_session<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, au
     let (done_tx, mut done) = mpsc::unbounded_channel();
     tokio::spawn(worker(host, jobs_rx, done_tx));
 
-    let mut session = Session::default();
     session.request_snapshot(&jobs);
 
     let ping_every = inner.config.ping_interval;
@@ -880,7 +984,7 @@ async fn run_session<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, au
                     Some(Ok(Message::Text(text))) => match parse_client(&text) {
                         (re, Ok(msg)) => {
                             tracing::trace!(device_id, kind = msg.kind(), "request");
-                            session.on_request(re, msg, &jobs)
+                            session.on_request(re, msg, &jobs, watchers)
                         }
                         (re, Err(bad)) => vec![error(re, ErrorCode::BadRequest, bad.message)],
                     },
@@ -888,7 +992,7 @@ async fn run_session<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, au
                     Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => Vec::new(),
                 }
             }
-            Some(finished) = done.recv() => session.on_done(finished),
+            Some(finished) = done.recv() => session.on_done(finished, watchers),
             event = events.recv() => match event {
                 Ok(event) => session.on_event(event),
                 Err(broadcast::error::RecvError::Lagged(missed)) => {

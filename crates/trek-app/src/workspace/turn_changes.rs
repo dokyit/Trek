@@ -144,6 +144,7 @@ impl Workspace {
                         if let Some(slot) = ws.changes_cache.slots.get_mut(&key) {
                             *slot = Slot { shown, range, state: State::Ready { now } };
                         }
+                        ws.remote_turn_changes_moved(&key.0);
                         cx.emit(WorkspaceEvent::TurnChanges { id: key.0.clone(), end: key.1.clone() });
                     });
                 });
@@ -158,6 +159,14 @@ impl Workspace {
     pub fn turn_range(&self, id: &str, end: &str) -> Option<(TurnRange, Arc<TurnChanges>)> {
         let slot = self.changes_cache.slots.get(&(id.to_string(), end.to_string()))?;
         Some((slot.range.clone()?, slot.shown.clone()?))
+    }
+
+    /// Whether the count of the turn ending at `end` of `id` waits on something that may finish
+    /// without a word (a checkpoint being taken, a turn the agent took by itself): asked again
+    /// until it doesn't.
+    pub fn turn_changes_waiting(&self, id: &str, end: usize) -> bool {
+        let key = self.live.get(id).and_then(|l| l.items.id_at(end)).map(|e| (id.to_string(), e.to_string()));
+        key.and_then(|k| self.changes_cache.slots.get(&k)).is_some_and(|s| matches!(s.state, State::Waiting | State::Stale))
     }
 
     /// Whether the turn ending at `end` of `id` has been worked out and isn't being again.
@@ -216,6 +225,9 @@ impl Workspace {
             slot.state = State::Stale;
             !all || live.is_some_and(|l| l.items.position(end).is_some())
         });
+        if !moved.is_empty() {
+            self.remote_turn_changes_moved(id);
+        }
         for end in moved {
             cx.emit(WorkspaceEvent::TurnChanges { id: id.to_string(), end });
         }

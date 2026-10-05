@@ -260,7 +260,7 @@ fn a_turn_s_changed_files_follow_its_end() {
         let end = trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::TurnEnd { .. }));
         let file = tr::ChangedFile { path: "src/a.rs".into(), status: tr::FileStatus::Modified, from: None, added: 3, removed: 1, binary: false };
         crate::remote::tests::TURN_FILES.with(|f| f.borrow_mut().insert((id.clone(), end), vec![file.clone(), tr::ChangedFile { path: "b.png".into(), status: tr::FileStatus::Added, binary: true, added: 0, removed: 0, from: None }]));
-        let transcript = ask_later(&trek, cx, |reply| tr::HostRequest::Transcript { thread_id: id.clone(), reply }).await.unwrap();
+        let transcript = ask_later(&trek, cx, |reply| tr::HostRequest::Transcript { thread_id: id.clone(), after_seq: None, limit: None, reply }).await.unwrap();
         let at = transcript.items.iter().position(|i| i.id == format!("i{end}")).expect("the turn end");
         let changes = &transcript.items[at + 1];
         assert_eq!(changes.id, format!("c{end}"));
@@ -454,3 +454,283 @@ fn basecamp_and_usage_for_the_phone() {
         assert!(!usage.loading);
     });
 }
+
+fn transcript_req(id: &str, after_seq: Option<u64>, limit: Option<u32>) -> impl FnOnce(tr::Reply<tr::Transcript>) -> tr::HostRequest {
+    let thread_id = id.to_string();
+    move |reply| tr::HostRequest::Transcript { thread_id, after_seq, limit, reply }
+}
+
+fn page_req(id: &str, before: &str, limit: u32) -> impl FnOnce(tr::Reply<tr::TranscriptPage>) -> tr::HostRequest {
+    let (thread_id, before) = (id.to_string(), before.to_string());
+    move |reply| tr::HostRequest::TranscriptBefore { thread_id, before, limit, reply }
+}
+
+fn turn_action(id: &str, item_id: String, action: tr::TurnAction, model: Option<&str>) -> impl FnOnce(tr::Reply<tr::TurnActionDone>) -> tr::HostRequest {
+    let req = tr::TurnActionRequest { thread_id: id.to_string(), item_id, action, model: model.map(str::to_string), restore_files: true };
+    move |reply| tr::HostRequest::TurnAction { req, reply }
+}
+
+/// A thread whose transcript is `turns` made-up turns (five items each), and a request open.
+async fn long_thread(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, turns: usize) -> String {
+    let id = trek.send(cx, "first thread");
+    trek.wait_done(cx, &id, RunState::Idle).await;
+    trek.update(cx, |ws, _| {
+        let live = ws.live.get_mut(&id).unwrap();
+        live.items = trek_core::transcript::Transcript::unsaved(super::harness::transcript(turns));
+        live.permissions.push(crate::workspace::PendingPermission { request_id: "req-1".into(), title: "Run command".into(), detail: "rm -rf build".into(), prompt: None, after_turn: false });
+        live.revision += 1;
+        ws.start_test_remote();
+    });
+    id
+}
+
+#[test]
+fn a_long_thread_opens_at_its_end_and_pages_back_to_its_start() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = long_thread(&trek, cx, 100).await;
+        let end = trek.read(cx, |ws, _| ws.live[&id].items.len()) - 1;
+        crate::remote::tests::TURN_FILES.with(|f| f.borrow_mut().insert((id.clone(), end), vec![tr::ChangedFile { path: "src/parser.rs".into(), status: tr::FileStatus::Modified, from: None, added: 2, removed: 1, binary: false }]));
+
+        // The last 50 items, the changed files after the last turn end, and the open request.
+        let t = ask(&trek, cx, transcript_req(&id, None, Some(50))).unwrap();
+        assert!(t.more, "earlier items were left out");
+        let ids: Vec<&str> = t.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids.iter().filter(|i| i.starts_with('i')).count(), 50);
+        assert_eq!(ids[0], format!("i{}", end - 49));
+        assert_eq!(&ids[ids.len() - 3..], [format!("i{end}").as_str(), &format!("c{end}"), "rreq-1"]);
+        assert!(t.items.iter().all(|i| i.seq <= t.seq && i.seq >= t.base));
+
+        // Nothing changed since: an incremental subscribe brings nothing.
+        let again = ask(&trek, cx, transcript_req(&id, Some(t.seq), Some(50))).unwrap();
+        assert!(again.items.is_empty() && !again.more, "{:?}", again.items.len());
+        assert_eq!(again.seq, t.seq);
+
+        // Paging back to the start, 200 at a time (and never more than the Mac's cap).
+        let mut first = ids[0].to_string();
+        let mut all: Vec<String> = vec![];
+        loop {
+            let page = ask(&trek, cx, page_req(&id, &first, 200)).unwrap();
+            assert!(page.items.iter().filter(|i| i.id.starts_with('i')).count() <= 200);
+            let mut ids: Vec<String> = page.items.iter().map(|i| i.id.clone()).collect();
+            first = ids.first().cloned().unwrap();
+            ids.append(&mut all);
+            all = ids;
+            if !page.more {
+                break;
+            }
+        }
+        // Every earlier item, once, in order, each turn's edits (counted from its edit tools)
+        // right after its end.
+        let expected: Vec<String> = (0..end - 49).flat_map(|ix| if ix % 5 == 4 { vec![format!("i{ix}"), format!("c{ix}")] } else { vec![format!("i{ix}")] }).collect();
+        assert_eq!(all, expected);
+        let big = ask(&trek, cx, page_req(&id, &format!("c{end}"), 10_000)).unwrap();
+        assert_eq!(big.items.iter().filter(|i| i.id.starts_with('i')).count(), tr::MAX_PAGE as usize);
+        // Before a turn's changed files: up to and with its end.
+        let page = ask(&trek, cx, page_req(&id, &format!("c{end}"), 1)).unwrap();
+        assert_eq!(page.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [format!("i{end}")]);
+        assert_eq!(ask(&trek, cx, page_req(&id, "i99999", 10)).unwrap_err().code, tr::ErrorCode::NotFound);
+        assert_eq!(ask(&trek, cx, page_req(&id, "rreq-1", 10)).unwrap_err().code, tr::ErrorCode::NotFound);
+
+        // Without a limit (an older phone): all of it.
+        let whole = ask(&trek, cx, transcript_req(&id, None, None)).unwrap();
+        assert!(!whole.more);
+        assert_eq!(whole.items.iter().filter(|i| i.id.starts_with('i')).count(), end + 1);
+    });
+}
+
+/// The mock agent's long history, end to end: over 2000 items, opened at its end and paged in.
+#[test]
+fn a_thread_of_thousands_of_items_from_the_mock_agent() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:history 450");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let n = trek.read(cx, |ws, _| ws.live[&id].items.len());
+        assert!(n > 2250, "{n} items");
+        let t = ask(&trek, cx, transcript_req(&id, None, Some(200))).unwrap();
+        assert!(t.more);
+        assert_eq!(t.items.iter().filter(|i| i.id.starts_with('i')).count(), 200);
+        let mut before = t.items[0].id.clone();
+        let mut seen = 200;
+        loop {
+            let page = ask(&trek, cx, page_req(&id, &before, 500)).unwrap();
+            seen += page.items.iter().filter(|i| i.id.starts_with('i')).count();
+            before = page.items[0].id.clone();
+            if !page.more {
+                break;
+            }
+        }
+        assert_eq!((seen, before.as_str()), (n, "i0"));
+        let edits = t.items.iter().filter(|i| matches!(&i.body, tr::ItemBody::Tool { added: Some(_), .. })).count();
+        assert!(edits > 30, "edits carry their lines: {edits}");
+    });
+}
+
+#[test]
+fn the_mac_follows_only_threads_a_phone_has_open() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = long_thread(&trek, cx, 20).await;
+        let t = ask(&trek, cx, transcript_req(&id, None, Some(10))).unwrap();
+        let following = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.remote.as_ref().map(|r| (r.watched.contains_key(&id), r.dormant.contains_key(&id))).unwrap());
+        assert_eq!(following(&trek, cx), (true, false));
+
+        // An answer arrives on the Mac: the tick takes it in.
+        trek.update(cx, |ws, cx| {
+            ws.live.get_mut(&id).unwrap().items.push(trek_core::store::Item::Notice { text: "Seen on the Mac".into() });
+            ws.live.get_mut(&id).unwrap().revision += 1;
+            ws.push_remote_changes(cx);
+        });
+        let seq = trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().watched[&id].seq);
+        assert_eq!(seq, t.seq + 1, "one item changed, one seq");
+
+        // The last phone let go: not followed any more.
+        trek.update(cx, |ws, cx| ws.remote_request(tr::HostRequest::Unwatch { thread_id: id.clone() }, cx));
+        assert_eq!(following(&trek, cx), (false, true));
+        trek.update(cx, |ws, cx| {
+            ws.live.get_mut(&id).unwrap().items.push(trek_core::store::Item::Notice { text: "While nobody looked".into() });
+            ws.live.get_mut(&id).unwrap().revision += 1;
+            ws.push_remote_changes(cx);
+        });
+        assert_eq!(trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().dormant[&id].seq), seq, "nothing done for it");
+
+        // Opened again: numbering carries on, and a phone that saw up to `seq` gets just what's new.
+        let back = ask(&trek, cx, transcript_req(&id, Some(seq), Some(10))).unwrap();
+        assert_eq!(following(&trek, cx), (true, false));
+        assert!(back.seq > seq);
+        let n = trek.read(cx, |ws, _| ws.live[&id].items.len());
+        assert_eq!(back.items.iter().map(|i| i.id.clone()).collect::<Vec<_>>(), [format!("i{}", n - 1)]);
+        // A phone from before (or another run of Trek) gets it whole.
+        let stale = ask(&trek, cx, transcript_req(&id, Some(3), Some(10))).unwrap();
+        assert!(stale.items.len() > 10 && stale.more);
+
+        // A rewind: shorter, so phones read it again, and earlier seqs can't be brought up to date.
+        trek.update(cx, |ws, cx| {
+            ws.live.get_mut(&id).unwrap().items.truncate(5);
+            ws.live.get_mut(&id).unwrap().revision += 1;
+            ws.push_remote_changes(cx);
+        });
+        let after = ask(&trek, cx, transcript_req(&id, Some(back.seq), Some(10))).unwrap();
+        assert!(after.base > back.seq && after.seq >= after.base);
+        assert_eq!(after.items.iter().filter(|i| i.id.starts_with('i')).count(), 5, "whole again");
+    });
+}
+
+#[test]
+fn a_phone_undoes_retries_forks_and_rewinds_turns_without_moving_the_mac() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "apple");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.send_to(&id, "banana".into(), vec![], cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        let (route, tabs) = trek.read(cx, |ws, _| (ws.route.clone(), ws.tabs.clone()));
+        let said = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext, id: &str| -> Vec<String> {
+            trek.items(cx, id).into_iter().filter_map(|i| if let trek_core::store::Item::User { text, .. } = i { Some(text) } else { None }).collect()
+        };
+        let last_end = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| format!("i{}", trek.items(cx, &id).iter().rposition(|i| matches!(i, trek_core::store::Item::TurnEnd { .. })).unwrap());
+        let user = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext, text: &str| format!("i{}", trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::User { text: t, .. } if t == text)));
+
+        // Unknown items, and items that aren't what the action takes.
+        assert_eq!(ask(&trek, cx, turn_action(&id, "i9999".into(), tr::TurnAction::Undo, None)).unwrap_err().code, tr::ErrorCode::NotFound);
+        assert_eq!(ask(&trek, cx, turn_action(&id, "x".into(), tr::TurnAction::Undo, None)).unwrap_err().code, tr::ErrorCode::NotFound);
+        assert_eq!(ask(&trek, cx, turn_action(&id, user(&trek, cx, "apple"), tr::TurnAction::Undo, None)).unwrap_err().code, tr::ErrorCode::BadRequest);
+        assert_eq!(ask(&trek, cx, turn_action(&id, last_end(&trek, cx), tr::TurnAction::Rewind, None)).unwrap_err().code, tr::ErrorCode::BadRequest);
+        assert_eq!(ask(&trek, cx, turn_action(&id, last_end(&trek, cx), tr::TurnAction::Retry, Some("no-such-model"))).unwrap_err().code, tr::ErrorCode::NotFound);
+
+        // Fork after the first turn, and from before the second message.
+        let first_end = format!("i{}", trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::TurnEnd { .. })));
+        let fork = ask(&trek, cx, turn_action(&id, first_end, tr::TurnAction::Fork, None)).unwrap();
+        let fork_id = fork.thread_id.expect("the new thread");
+        assert_eq!((said(&trek, cx, &fork_id), fork.text), (vec!["apple".to_string()], None));
+        let before = ask(&trek, cx, turn_action(&id, user(&trek, cx, "banana"), tr::TurnAction::Fork, None)).unwrap();
+        assert_eq!(before.text.as_deref(), Some("banana"), "the message, for the phone's composer");
+        assert_eq!(said(&trek, cx, &before.thread_id.unwrap()), ["apple"]);
+
+        // Retry the last turn: the same message, answered again.
+        ask(&trek, cx, turn_action(&id, last_end(&trek, cx), tr::TurnAction::Retry, None)).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(said(&trek, cx, &id), ["apple", "banana"]);
+
+        // Undo it: the message comes back for the composer.
+        let undone = ask(&trek, cx, turn_action(&id, last_end(&trek, cx), tr::TurnAction::Undo, None)).unwrap();
+        assert_eq!((undone.thread_id, undone.text.as_deref()), (None, Some("banana")));
+        assert_eq!(said(&trek, cx, &id), ["apple"]);
+
+        // While a turn runs, nothing is taken back.
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 20s".into(), vec![], cx));
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&id)).await;
+        let busy = ask(&trek, cx, turn_action(&id, last_end(&trek, cx), tr::TurnAction::Undo, None)).unwrap_err();
+        assert_eq!((busy.code, busy.message.as_str()), (tr::ErrorCode::BadRequest, "Stop the running turn to undo"));
+        let busy = ask(&trek, cx, turn_action(&id, user(&trek, cx, "apple"), tr::TurnAction::Rewind, None)).unwrap_err();
+        assert_eq!(busy.message, "Stop the running turn to rewind");
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait(cx, "the turn to stop", |ws| !ws.turn_running(&id)).await;
+
+        // A turn no message of the user's started can't be undone.
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.items.push(trek_core::store::Item::Assistant { text: "A sub-agent reported back.".into() });
+            live.items.push(trek_core::store::Item::TurnEnd { at: 1, took_secs: 1 });
+        });
+        let refused = ask(&trek, cx, turn_action(&id, last_end(&trek, cx), tr::TurnAction::Undo, None)).unwrap_err();
+        assert_eq!(refused.message, "This turn didn't start from a message of yours");
+
+        // Rewind to before the first message (how "Edit" works on the phone).
+        let rewound = ask(&trek, cx, turn_action(&id, user(&trek, cx, "apple"), tr::TurnAction::Rewind, None)).unwrap();
+        assert_eq!(rewound.text.as_deref(), Some("apple"));
+        assert!(said(&trek, cx, &id).is_empty());
+
+        assert_eq!(trek.read(cx, |ws, _| (ws.route.clone(), ws.tabs.clone())), (route, tabs), "the Mac's screen didn't move");
+    });
+}
+
+/// How long serving and following a 3000-item thread takes (run with `--ignored --nocapture`).
+#[test]
+#[ignore]
+fn timing_of_a_long_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = long_thread(&trek, cx, 600).await;
+        let n = trek.read(cx, |ws, _| ws.live[&id].items.len());
+        type Step<'a> = &'a dyn Fn(&mut crate::workspace::Workspace, &mut gpui_kit::Context<crate::workspace::Workspace>);
+        let time = |label: &str, runs: u32, cx: &mut gpui_kit::TestAppContext, f: Step| {
+            let t = std::time::Instant::now();
+            for _ in 0..runs {
+                trek.update(cx, |ws, cx| f(ws, cx));
+            }
+            eprintln!("{n} items: {label}: {:?}", t.elapsed() / runs);
+        };
+        time("subscribe, whole transcript", 1, cx, &|ws, cx| _ = ws.remote_transcript(&id, None, None, cx));
+        trek.update(cx, |ws, _| {
+            let r = ws.remote.as_mut().unwrap();
+            r.watched.clear();
+            r.dormant.clear();
+        });
+        time("subscribe, last 200", 1, cx, &|ws, cx| _ = ws.remote_transcript(&id, None, Some(200), cx));
+        time("subscribe again, nothing new (after_seq)", 1, cx, &|ws, cx| {
+            let seq = ws.remote.as_ref().unwrap().watched[&id].seq;
+            _ = ws.remote_transcript(&id, Some(seq), Some(200), cx)
+        });
+        time("page of 200", 1, cx, &|ws, cx| _ = ws.remote_transcript_before(&id, &format!("i{}", n - 200), 200, cx));
+        time("tick, idle", 50, cx, &|ws, cx| ws.push_remote_changes(cx));
+        trek.update(cx, |ws, _| {
+            let l = ws.live.get_mut(&id).unwrap();
+            let ix = l.items.push(trek_core::store::Item::Assistant { text: "streaming".into() });
+            l.streaming = Some(ix);
+            l.revision += 1;
+        });
+        time("tick, streaming", 50, cx, &|ws, cx| {
+            let l = ws.live.get_mut(&id).unwrap();
+            if let Some(trek_core::store::Item::Assistant { text }) = l.items.last_mut() {
+                text.push_str(" more words");
+            }
+            l.revision += 1;
+            ws.push_remote_changes(cx)
+        });
+    });
+}
+
