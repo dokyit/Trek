@@ -12,9 +12,14 @@
 //!
 //! Changes go out on a short tick while the server runs: thread rows that changed, and the
 //! transcript items of threads a phone has open (by index; each change takes the next `seq` of
-//! that thread, as the protocol asks).
+//! that thread, as the protocol asks). A tick looks only at what can have changed: nothing for a
+//! thread whose transcript didn't move, and from the first item edited (or the one streaming)
+//! on for one that did. A thread no phone has open any more isn't followed (the server says
+//! when, `unwatch`); one opened again carries on from where it was. Long transcripts open at
+//! their end (`subscribe` with a `limit`) and are paged in (`transcript_before`); items no phone
+//! has been sent aren't followed either.
 
-use crate::workspace::{Route, Workspace, WorkspaceEvent};
+use crate::workspace::{ForkAt, LiveThread, Route, Workspace, WorkspaceEvent};
 use gpui_kit::{AsyncApp, Context, Task, WeakEntity};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
@@ -56,21 +61,75 @@ pub struct Remote {
     sent: HashMap<String, tr::ThreadSummary>,
     /// How phones answered requests, by request id, so their cards close saying so.
     answered: HashMap<String, tr::AnswerResponse>,
-    /// Transcripts phones have open.
-    watched: HashMap<String, Watched>,
+    /// Transcripts phones have open: followed every tick.
+    pub(crate) watched: HashMap<String, Watched>,
+    /// Transcripts no phone has open any more, as they were last sent: nothing is done for them
+    /// each tick, and a phone opening one again carries on where they left off (seq, and what
+    /// changed since).
+    pub(crate) dormant: HashMap<String, Watched>,
     _tasks: Vec<Task<()>>,
 }
 
-/// A transcript a phone has open: what each item looked like when last sent.
-#[derive(Default)]
-struct Watched {
-    seq: u64,
-    items: Vec<u64>,
-    /// Requests shown as cards, by id, as last sent.
-    requests: Vec<(String, tr::ItemBody)>,
+/// A transcript phones follow: what each item looked like when last sent.
+pub(crate) struct Watched {
+    /// The last seq handed out.
+    pub(crate) seq: u64,
+    /// Phones that saw less than this get the whole transcript again (`tr::Transcript::base`).
+    base: u64,
+    /// Each item, by index: its seq, and the hash of what was sent.
+    items: Vec<Sent>,
+    /// Items before this one haven't gone to any phone (a subscribe with a `limit` left them
+    /// out): changes to them aren't sent, and a page of them brings them as they are.
+    from: usize,
+    /// Requests shown as cards, by id, as last sent, with their seq.
+    requests: Vec<(String, tr::ItemBody, u64)>,
     /// The files each turn changed, by the index of its turn end, as last sent.
-    changes: HashMap<usize, u64>,
+    changes: HashMap<usize, Sent>,
+    /// What the transcript was last looked at with: its revision, the item streaming, the
+    /// thread's folder (tool rows name paths in it).
     revision: u64,
+    streaming: Option<usize>,
+    cwd: Option<PathBuf>,
+    /// Turns' changed files are looked at again on the next tick (one was counted, or waits).
+    recount: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Sent {
+    seq: u64,
+    /// `None`: not sent yet.
+    hash: Option<u64>,
+}
+
+impl Watched {
+    /// Nothing sent yet, `len` items numbered. Seqs start at the time (in µs) so a phone holding
+    /// seqs from before Trek last started can't take them for this run's.
+    fn fresh(len: usize) -> Self {
+        let seq = now_ms().max(0) as u64 * 1000;
+        Watched {
+            seq,
+            base: seq,
+            items: vec![Sent { seq, hash: None }; len],
+            from: len,
+            requests: vec![],
+            changes: HashMap::new(),
+            revision: 0,
+            streaming: None,
+            cwd: None,
+            recount: false,
+        }
+    }
+
+    /// The transcript went shorter (a rewind, a rewrite): numbered afresh, nothing sent, and
+    /// phones that saw it before read it whole again.
+    fn restart(&mut self, len: usize) {
+        self.seq += 1;
+        self.base = self.seq;
+        self.items = vec![Sent { seq: self.seq, hash: None }; len];
+        self.from = len;
+        self.requests.clear();
+        self.changes.clear();
+    }
 }
 
 /// This Mac's IPv4 addresses a phone could reach.
@@ -233,7 +292,7 @@ impl Workspace {
                     Ok((handle, requests, addresses, advertise)) if ws.settings.mobile.enabled => {
                         let tasks = vec![serve_requests(cx.weak_entity(), requests, cx), push_changes(cx.weak_entity(), cx), hear_notices(cx.weak_entity(), handle.notices(), cx)];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
@@ -259,7 +318,7 @@ impl Workspace {
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
         let connected = HashSet::from(["phone".to_string()]);
         let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), _tasks: vec![] });
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), _tasks: vec![] });
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -301,35 +360,18 @@ impl Workspace {
             tr::HostRequest::Snapshot { reply } => {
                 let _ = reply.send(Ok(self.remote_snapshot()));
             }
-            tr::HostRequest::Transcript { thread_id, reply } => {
-                if self.thread(&thread_id).is_none() {
-                    let _ = reply.send(Err(tr::HostError::not_found("No such thread")));
-                    return;
-                }
-                if self.live.get(&thread_id).is_some_and(|l| l.loaded) {
-                    self.count_remote_changes(&thread_id, cx);
-                    let _ = reply.send(Ok(self.remote_transcript(&thread_id)));
-                    return;
-                }
-                // Read from the agent's files or the database first.
-                self.ensure_loaded(&thread_id, cx);
-                cx.spawn(async move |this, cx| {
-                    for _ in 0..200 {
-                        let loaded = this.read_with(cx, |ws, _| ws.live.get(&thread_id).is_some_and(|l| l.loaded)).unwrap_or(true);
-                        if loaded {
-                            break;
-                        }
-                        cx.background_executor().timer(Duration::from_millis(25)).await;
-                    }
-                    let transcript = this
-                        .update(cx, |ws, cx| {
-                            ws.count_remote_changes(&thread_id, cx);
-                            ws.remote_transcript(&thread_id)
-                        }).map_err(|_| tr::HostError::other("Trek is closing"));
-                    let _ = reply.send(transcript);
-                })
-                .detach();
+            tr::HostRequest::Transcript { thread_id, after_seq, limit, reply } => {
+                let id = thread_id.clone();
+                self.when_loaded(thread_id, reply, cx, move |ws, cx| Ok(ws.remote_transcript(&id, after_seq, limit, cx)));
             }
+            tr::HostRequest::TranscriptBefore { thread_id, before, limit, reply } => {
+                let id = thread_id.clone();
+                self.when_loaded(thread_id, reply, cx, move |ws, cx| ws.remote_transcript_before(&id, &before, limit, cx));
+            }
+            tr::HostRequest::TurnAction { req, reply } => {
+                self.when_loaded(req.thread_id.clone(), reply, cx, move |ws, cx| ws.remote_turn_action(req, cx));
+            }
+            tr::HostRequest::Unwatch { thread_id } => self.remote_unwatch(&thread_id),
             tr::HostRequest::Send { req, reply } => {
                 let _ = reply.send(self.remote_send(req, cx));
             }
@@ -555,6 +597,124 @@ impl Workspace {
         Ok(())
     }
 
+    /// Answer `reply` with `f` once thread `id` is read in (from the agent's files or the
+    /// database), as opening it on the Mac would.
+    fn when_loaded<T: 'static>(
+        &mut self,
+        id: String,
+        reply: tr::Reply<T>,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Self, &mut Context<Self>) -> tr::HostResult<T> + 'static,
+    ) {
+        if self.thread(&id).is_none() {
+            let _ = reply.send(Err(tr::HostError::not_found("No such thread")));
+            return;
+        }
+        if self.live.get(&id).is_some_and(|l| l.loaded && !l.loading) {
+            let _ = reply.send(f(self, cx));
+            return;
+        }
+        self.ensure_loaded(&id, cx);
+        cx.spawn(async move |this, cx| {
+            for _ in 0..200 {
+                let loaded = this.read_with(cx, |ws, _| ws.live.get(&id).is_some_and(|l| l.loaded && !l.loading)).unwrap_or(true);
+                if loaded {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_millis(25)).await;
+            }
+            let answer = this.update(cx, |ws, cx| f(ws, cx)).unwrap_or_else(|_| Err(tr::HostError::other("Trek is closing")));
+            let _ = reply.send(answer);
+        })
+        .detach();
+    }
+
+    /// Undo, retry, fork or rewind, as the turn footer's and message's buttons do on the Mac
+    /// (after its confirmation, files restored when asked and Trek has them), without moving
+    /// the Mac's screen.
+    fn remote_turn_action(&mut self, req: tr::TurnActionRequest, cx: &mut Context<Self>) -> tr::HostResult<tr::TurnActionDone> {
+        let id = req.thread_id.as_str();
+        let Some(live) = self.live.get(id) else { return Err(tr::HostError::not_found("No such thread")) };
+        let ix = req.item_id.strip_prefix('i').and_then(|n| n.parse::<usize>().ok()).filter(|ix| *ix < live.items.len());
+        let Some(ix) = ix else { return Err(tr::HostError::not_found("No such item")) };
+        let item = live.items[ix].clone();
+        let key = live.items.id_at(ix).unwrap_or_default().to_string();
+        let message = matches!(item, Item::User { aside: false, .. });
+        let ends_turn = trek_core::rewind::ends_turn(&item);
+        let refuse_busy = |what: &str| tr::HostError::bad_request(format!("Stop the running turn to {what}"));
+        let busy = self.turn_running(id);
+        // Restored as the confirmation does by default: when there's a checkpoint to go back to.
+        let restore = |ws: &Self, message: &str| req.restore_files && ws.restorable_checkpoint(id, message).is_some();
+        match req.action {
+            tr::TurnAction::Undo | tr::TurnAction::Retry => {
+                let what = if req.action == tr::TurnAction::Undo { "undo" } else { "retry" };
+                if !ends_turn {
+                    return Err(tr::HostError::bad_request("That item doesn't end a turn"));
+                }
+                if busy {
+                    return Err(refuse_busy(what));
+                }
+                let Some(start) = self.turn_start_item(id, &key) else {
+                    return Err(tr::HostError::bad_request("This turn didn't start from a message of yours"));
+                };
+                let restore = restore(self, &start);
+                if req.action == tr::TurnAction::Undo {
+                    let (text, _) = self.undo_turn(id, &key, restore, cx).ok_or_else(|| tr::HostError::other("The turn couldn't be undone"))?;
+                    return Ok(tr::TurnActionDone { thread_id: None, text: Some(text) });
+                }
+                if let Some(model) = &req.model
+                    && let Some(agent) = self.thread(id).map(|t| t.agent.clone())
+                {
+                    let models = self.models_for(&agent);
+                    if !models.is_empty() && !models.iter().any(|m| crate::composer::same_model(model, &m.id)) {
+                        return Err(tr::HostError::not_found(format!("{model} isn't one of {}'s models", agent.display_name())));
+                    }
+                }
+                self.retry(id, &key, req.model.clone(), restore, cx);
+                Ok(tr::TurnActionDone::default())
+            }
+            tr::TurnAction::Fork => {
+                let at = if message {
+                    ForkAt::Before(key)
+                } else if ends_turn {
+                    ForkAt::After(key)
+                } else {
+                    return Err(tr::HostError::bad_request("Fork from one of your messages or the end of a turn"));
+                };
+                let (fork, message) = self.fork_quietly(id, &at, cx).ok_or_else(|| tr::HostError::other("Couldn't fork the thread"))?;
+                Ok(tr::TurnActionDone { thread_id: Some(fork), text: message.map(|(text, _)| text) })
+            }
+            tr::TurnAction::Rewind => {
+                if !message {
+                    return Err(tr::HostError::bad_request("Only your own messages can be rewound to"));
+                }
+                if busy {
+                    return Err(refuse_busy("rewind"));
+                }
+                let restore = restore(self, &key);
+                let (text, _) = self.rewind(id, &key, restore, cx).ok_or_else(|| tr::HostError::other("The thread couldn't be rewound"))?;
+                Ok(tr::TurnActionDone { thread_id: None, text: Some(text) })
+            }
+        }
+    }
+
+    /// No phone has `id` open any more: it's no longer followed each tick.
+    fn remote_unwatch(&mut self, id: &str) {
+        let Some(remote) = self.remote.as_mut() else { return };
+        if let Some(w) = remote.watched.remove(id) {
+            remote.dormant.insert(id.to_string(), w);
+        }
+    }
+
+    /// A turn of `id` was counted (or may have moved): phones following it hear on the next tick.
+    pub(crate) fn remote_turn_changes_moved(&mut self, id: &str) {
+        if let Some(remote) = self.remote.as_mut()
+            && let Some(w) = remote.watched.get_mut(id).or_else(|| remote.dormant.get_mut(id))
+        {
+            w.recount = true;
+        }
+    }
+
     // ---- what phones see ----
 
     fn remote_project(&self, t: &Thread) -> tr::ProjectRef {
@@ -765,154 +925,254 @@ impl Workspace {
         tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked }
     }
 
-    /// `id`'s transcript as the phone shows it: its items by index, then its open requests.
-    fn remote_items(&self, id: &str) -> (Vec<tr::ItemBody>, Vec<(String, tr::ItemBody)>) {
-        let Some(live) = self.live.get(id) else { return (vec![], vec![]) };
+    /// Bring `w` up to date with `id`'s transcript, looking only at what can have changed since
+    /// it last was (`Transcript::take_edited_from`, the item streaming then and now): the events
+    /// phones following it need, in order. Turns' changed files are looked at again when the
+    /// transcript moved or a count came in (`remote_turn_changes_moved`).
+    fn sync_watched(&mut self, id: &str, w: &mut Watched, cx: &mut Context<Self>) -> Vec<tr::HostEvent> {
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
-        let items = live
-            .items
-            .iter()
-            .enumerate()
-            .map(|(ix, item)| match item {
-                Item::User { text, images, .. } => tr::ItemBody::User { text: text.clone(), images: images.len() as u32 },
-                Item::Assistant { text } => tr::ItemBody::Assistant { text: text.clone(), streaming: live.streaming == Some(ix) },
-                Item::Reasoning { text } => tr::ItemBody::Reasoning { text: text.clone() },
-                Item::Tool { id: call, title, detail, output, status } => {
-                    let op = crate::activity::op(title, detail, cwd.as_deref());
-                    let lines = live.lines.get(call).copied();
-                    tr::ItemBody::Tool {
-                        call_id: call.clone(),
-                        tool: tr::ToolKind::from_title(title),
-                        title: if op.verb.is_empty() { title.clone() } else { op.verb },
-                        detail: if op.text.is_empty() { detail.clone() } else { op.text },
-                        status: match status {
-                            ToolStatus::Running => tr::ToolStatus::Running,
-                            ToolStatus::Done => tr::ToolStatus::Done,
-                            ToolStatus::Failed => tr::ToolStatus::Failed,
-                            ToolStatus::Denied => tr::ToolStatus::Denied,
-                        },
-                        output: tr::truncate_output(output).to_string(),
-                        added: lines.map(|l| l.0),
-                        removed: lines.map(|l| l.1),
-                    }
-                }
-                Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd { took_secs: *took_secs },
-                Item::Notice { text } => tr::ItemBody::Notice { text: text.clone() },
-                Item::Error { text } => tr::ItemBody::Error { text: text.clone() },
-                Item::Limit { text, resets_at, .. } => tr::ItemBody::Limit { text: text.clone(), resets_at: *resets_at },
-                Item::Handoff { from, to, from_name, to_name, .. } => tr::ItemBody::Handoff {
-                    from: from_name.clone().unwrap_or_else(|| AgentId::from_key(from).display_name()),
-                    to: to_name.clone().unwrap_or_else(|| AgentId::from_key(to).display_name()),
-                },
-            })
-            .collect();
-        let requests = live
-            .permissions
-            .iter()
-            .map(|p| {
-                let body = match &p.prompt {
-                    None => tr::ItemBody::Approval { request_id: p.request_id.clone(), title: p.title.clone(), detail: p.detail.clone(), state: tr::ApprovalState::Pending },
-                    Some(trek_agents::Prompt::Questions(qs)) => tr::ItemBody::Question {
-                        request_id: p.request_id.clone(),
-                        questions: qs
-                            .iter()
-                            .map(|q| tr::Question {
-                                header: q.header.clone(),
-                                question: q.question.clone(),
-                                options: q.options.iter().map(|(label, description)| tr::QuestionOption { label: label.clone(), description: description.clone() }).collect(),
-                                multi: q.multi,
-                                secret: q.secret,
-                            })
-                            .collect(),
-                        state: tr::QuestionState::Pending,
-                        answers: None,
-                    },
-                    Some(trek_agents::Prompt::Plan(markdown)) => tr::ItemBody::Plan { request_id: p.request_id.clone(), markdown: markdown.clone(), state: tr::PlanState::Pending },
-                };
-                (p.request_id.clone(), body)
-            })
-            .collect();
-        (items, requests)
-    }
-
-    /// The files each finished turn of `id` changed, as `changes` items after their turn ends,
-    /// by the turn end's index.
-    fn remote_changes(&self, id: &str) -> HashMap<usize, tr::ItemBody> {
-        let Some(live) = self.live.get(id) else { return HashMap::new() };
-        live.items
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| matches!(i, Item::TurnEnd { .. }))
-            .filter_map(|(ix, _)| Some((ix, turn_changes(self, id, ix)?)))
-            .collect()
-    }
-
-    /// Have every finished turn of `id` counted (off the main thread), for the phone; each count
-    /// goes out on the tick after it's in.
-    fn count_remote_changes(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(live) = self.live.get(id) else { return };
-        let ends: Vec<usize> = live.items.iter().enumerate().filter(|(_, i)| matches!(i, Item::TurnEnd { .. })).map(|(ix, _)| ix).collect();
-        for end in ends {
-            self.load_turn_changes(id, end, cx);
+        let Some(live) = self.live.get_mut(id) else { return vec![] };
+        let edited = live.items.take_edited_from();
+        let (len, revision, streaming) = (live.items.len(), live.revision, live.streaming);
+        let moved = revision != w.revision;
+        // Requests come and go with a revision bump, mostly: looked at whenever they differ too.
+        let asks = moved || live.permissions.len() != w.requests.len() || live.permissions.iter().zip(&w.requests).any(|(p, (r, ..))| p.request_id != *r);
+        if edited.is_none() && !asks && streaming == w.streaming && cwd == w.cwd && !w.recount {
+            return vec![];
         }
-    }
-
-    fn remote_transcript(&mut self, id: &str) -> tr::Transcript {
-        let (items, requests) = self.remote_items(id);
-        let mut changes = self.remote_changes(id);
-        let at = self.live.get(id).map(|l| item_times(&l.items)).unwrap_or_default();
-        let revision = self.live.get(id).map(|l| l.revision).unwrap_or_default();
-        let Some(remote) = self.remote.as_mut() else { return tr::Transcript::default() };
-        // A phone opening the thread again starts its numbering where it left off.
-        let watched = remote.watched.entry(id.to_string()).or_default();
-        let mut out = Vec::with_capacity(items.len() + requests.len());
-        watched.items.clear();
-        watched.changes.clear();
-        for (ix, body) in items.into_iter().enumerate() {
-            watched.seq += 1;
-            watched.items.push(hash(&body));
-            out.push(tr::Item { id: format!("i{ix}"), seq: watched.seq, at: at.get(ix).copied().flatten(), body });
-            // A turn's changed files follow its end.
-            if let Some(body) = changes.remove(&ix) {
-                watched.seq += 1;
-                watched.changes.insert(ix, hash(&body));
-                out.push(tr::Item { id: format!("c{ix}"), seq: watched.seq, at: at.get(ix).copied().flatten(), body });
+        let mut out = vec![];
+        // Shorter than sent (a rewind, a rewrite): the phone reads it again.
+        if len < w.items.len() {
+            w.restart(len);
+            (w.revision, w.streaming, w.cwd) = (revision, streaming, cwd);
+            out.push(tr::HostEvent::TranscriptReset(id.to_string()));
+            return out;
+        }
+        // Nothing before the first edit changed, nor anything but the item streaming now or
+        // before (its flag), unless the folder its paths are shown in did.
+        let mut floor = edited.unwrap_or(len).min(w.items.len());
+        for s in [w.streaming, streaming].into_iter().flatten() {
+            floor = floor.min(s);
+        }
+        if cwd != w.cwd {
+            floor = 0;
+        }
+        let unsent = Sent { seq: w.seq, hash: None };
+        w.items.resize(len, unsent);
+        let live = &self.live[id];
+        for ix in floor.max(w.from)..len {
+            let body = item_body(live, cwd.as_deref(), ix);
+            let h = hash(&body);
+            if w.items[ix].hash == Some(h) {
+                continue;
+            }
+            w.seq += 1;
+            w.items[ix] = Sent { seq: w.seq, hash: Some(h) };
+            out.push(item_event(id, format!("i{ix}"), w.seq, item_time(&live.items[ix]), body));
+        }
+        if asks {
+            // Requests: new or changed ones as they are, answered ones as resolved.
+            let requests = request_cards(live);
+            let open: HashSet<&str> = requests.iter().map(|(r, _)| r.as_str()).collect();
+            for (rid, last, _) in w.requests.iter().filter(|(r, ..)| !open.contains(r.as_str())) {
+                w.seq += 1;
+                let answer = self.remote.as_mut().and_then(|r| r.answered.remove(rid));
+                out.push(item_event(id, format!("r{rid}"), w.seq, None, resolved(last.clone(), answer)));
+            }
+            w.requests.retain(|(r, ..)| open.contains(r.as_str()));
+            for (rid, body) in requests {
+                if w.requests.iter().any(|(r, x, _)| *r == rid && *x == body) {
+                    continue;
+                }
+                w.seq += 1;
+                w.requests.retain(|(r, ..)| *r != rid);
+                w.requests.push((rid.clone(), body.clone(), w.seq));
+                out.push(item_event(id, format!("r{rid}"), w.seq, None, body));
             }
         }
-        watched.requests.clear();
-        for (rid, body) in requests {
-            watched.seq += 1;
-            watched.requests.push((rid.clone(), body.clone()));
-            out.push(tr::Item { id: format!("r{rid}"), seq: watched.seq, at: None, body });
+        // Turns' changed files, new or changed (after the items they follow, so a turn end
+        // reaches the phone before its files do): the turns that just ended, or all of them
+        // when a count came in.
+        let recount = std::mem::take(&mut w.recount);
+        if recount || moved {
+            let first = if recount { w.from } else { floor.max(w.from) };
+            let counted = self.sync_changes(id, w, first..len, cx);
+            let live = &self.live[id];
+            out.extend(counted.into_iter().map(|(end, seq, body)| item_event(id, format!("c{end}"), seq, item_time(&live.items[end]), body)));
         }
-        watched.revision = revision;
-        tr::Transcript { seq: watched.seq, items: out }
+        (w.revision, w.streaming, w.cwd) = (revision, streaming, cwd);
+        out
     }
 
-    /// Send phones what changed since the last tick.
-    fn push_remote_changes(&mut self) {
+    /// Have the turns ending in `range` counted (off the main thread, for those counted from
+    /// git), and record (and return, by turn end, with their seq) the counts that are in and
+    /// changed.
+    fn sync_changes(&mut self, id: &str, w: &mut Watched, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<(usize, u64, tr::ItemBody)> {
+        let Some(live) = self.live.get(id) else { return vec![] };
+        let range = range.start..range.end.min(live.items.len());
+        let ends: Vec<usize> = range.filter(|ix| matches!(live.items[*ix], Item::TurnEnd { .. })).collect();
+        for &end in &ends {
+            self.load_turn_changes(id, end, cx);
+        }
+        let mut out = vec![];
+        for end in ends {
+            if self.turn_changes_waiting(id, end) {
+                w.recount = true;
+            }
+            let Some(body) = turn_changes(self, id, end) else { continue };
+            let h = hash(&body);
+            if w.changes.get(&end).and_then(|s| s.hash) == Some(h) {
+                continue;
+            }
+            w.seq += 1;
+            w.changes.insert(end, Sent { seq: w.seq, hash: Some(h) });
+            out.push((end, w.seq, body));
+        }
+        out
+    }
+
+    /// Phones may hold `id`'s items from `start` on: they're followed from there (their turns'
+    /// changed files too). What it converted on the way, to be sent now.
+    fn send_from(&mut self, id: &str, w: &mut Watched, start: usize, cx: &mut Context<Self>) -> Converted {
+        let mut out = Converted::default();
+        if start >= w.from {
+            return out;
+        }
+        let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+        let Some(live) = self.live.get(id) else { return out };
+        let old = w.from.min(live.items.len()).min(w.items.len());
+        for ix in start..old {
+            let body = item_body(live, cwd.as_deref(), ix);
+            w.items[ix].hash = Some(hash(&body));
+            out.items.insert(ix, body);
+        }
+        w.from = start;
+        // What's counted now goes out with them; what comes in later, on a tick.
+        out.changes = self.sync_changes(id, w, start..old, cx).into_iter().map(|(end, _, body)| (end, body)).collect();
+        out
+    }
+
+    /// The reply to a phone's `subscribe`: what changed since `after_seq` when that can be told,
+    /// else the last `limit` items (all of them without one), with what follows them, and every
+    /// open request. From then on the thread is followed every tick.
+    pub(crate) fn remote_transcript(&mut self, id: &str, after_seq: Option<u64>, limit: Option<u32>, cx: &mut Context<Self>) -> tr::Transcript {
+        let Some(remote) = self.remote.as_mut() else { return tr::Transcript::default() };
+        // A phone opening the thread again carries on where it left off.
+        let known = remote.watched.remove(id).or_else(|| remote.dormant.remove(id));
+        let mut w = match known {
+            Some(mut w) => {
+                let events = self.sync_watched(id, &mut w, cx);
+                if let Some(remote) = self.remote.as_ref() {
+                    for event in events {
+                        remote.handle.push(event);
+                    }
+                }
+                w
+            }
+            None => {
+                let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+                let Some(live) = self.live.get_mut(id) else { return tr::Transcript::default() };
+                let _ = live.items.take_edited_from();
+                let mut w = Watched::fresh(live.items.len());
+                (w.revision, w.streaming, w.cwd) = (live.revision, live.streaming, cwd);
+                for (rid, body) in request_cards(live) {
+                    w.seq += 1;
+                    w.requests.push((rid, body, w.seq));
+                }
+                w
+            }
+        };
+        let len = w.items.len();
+        let start = limit.map_or(0, |l| len.saturating_sub(l as usize));
+        let mut converted = self.send_from(id, &mut w, start, cx);
+        let delta = after_seq.filter(|a| w.base <= *a && *a <= w.seq);
+        let newer = |seq: u64| delta.is_none_or(|after| seq > after);
+        let first = if delta.is_some() { w.from } else { start };
+        let mut items = vec![];
+        if let Some(live) = self.live.get(id) {
+            let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+            for ix in first..len.min(live.items.len()) {
+                let at = item_time(&live.items[ix]);
+                if newer(w.items[ix].seq) {
+                    let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(live, cwd.as_deref(), ix));
+                    items.push(tr::Item { id: format!("i{ix}"), seq: w.items[ix].seq, at, body });
+                }
+                if let Some(c) = w.changes.get(&ix).filter(|c| newer(c.seq))
+                    && let Some(body) = converted.changes.remove(&ix).or_else(|| turn_changes(self, id, ix))
+                {
+                    items.push(tr::Item { id: format!("c{ix}"), seq: c.seq, at, body });
+                }
+            }
+        }
+        for (rid, body, seq) in &w.requests {
+            if newer(*seq) {
+                items.push(tr::Item { id: format!("r{rid}"), seq: *seq, at: None, body: body.clone() });
+            }
+        }
+        let out = tr::Transcript { seq: w.seq, items, base: w.base, more: delta.is_none() && start > 0 };
+        if let Some(remote) = self.remote.as_mut() {
+            remote.watched.insert(id.to_string(), w);
+        }
+        out
+    }
+
+    /// The reply to `transcript_before`: up to `limit` items just before item `before` (`i…`,
+    /// or a turn's `c…`, which follows its turn end), with their turns' changed files.
+    pub(crate) fn remote_transcript_before(&mut self, id: &str, before: &str, limit: u32, cx: &mut Context<Self>) -> tr::HostResult<tr::TranscriptPage> {
+        let len = self.live.get(id).map_or(0, |l| l.items.len());
+        let index = |n: &str| n.parse::<usize>().ok().filter(|n| *n < len);
+        let end = match before.split_at_checked(1) {
+            Some(("i", n)) => index(n),
+            Some(("c", n)) => index(n).map(|n| n + 1),
+            _ => None,
+        };
+        let Some(end) = end else { return Err(tr::HostError::not_found("No such item")) };
+        let start = end.saturating_sub(limit.min(tr::MAX_PAGE) as usize);
+        let mut w = self.remote.as_mut().and_then(|r| r.watched.remove(id));
+        let mut converted = Converted::default();
+        if let Some(w) = w.as_mut() {
+            let events = self.sync_watched(id, w, cx);
+            if let Some(remote) = self.remote.as_ref() {
+                for event in events {
+                    remote.handle.push(event);
+                }
+            }
+            converted = self.send_from(id, w, start, cx);
+        }
+        let mut items = vec![];
+        if let Some(live) = self.live.get(id) {
+            let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+            // A thread no phone follows (it wasn't subscribed to) pages with no seqs.
+            let seq = |ix: usize| w.as_ref().and_then(|w| w.items.get(ix)).map_or(0, |s| s.seq);
+            for ix in start..end.min(live.items.len()) {
+                let at = item_time(&live.items[ix]);
+                let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(live, cwd.as_deref(), ix));
+                items.push(tr::Item { id: format!("i{ix}"), seq: seq(ix), at, body });
+                // A turn's changed files follow its end (not the files asked to come before).
+                if !matches!(live.items[ix], Item::TurnEnd { .. }) || (ix + 1 == end && before.starts_with('c')) {
+                    continue;
+                }
+                if let Some(body) = converted.changes.remove(&ix).or_else(|| turn_changes(self, id, ix)) {
+                    let seq = w.as_ref().and_then(|w| w.changes.get(&ix)).map_or(0, |c| c.seq);
+                    items.push(tr::Item { id: format!("c{ix}"), seq, at, body });
+                }
+            }
+        }
+        if let (Some(w), Some(remote)) = (w, self.remote.as_mut()) {
+            remote.watched.insert(id.to_string(), w);
+        }
+        Ok(tr::TranscriptPage { items, more: start > 0 })
+    }
+
+    /// Send phones what changed since the last tick: thread rows, and the transcripts they
+    /// follow (only what can have changed in them).
+    pub(crate) fn push_remote_changes(&mut self, cx: &mut Context<Self>) {
         let Some(remote) = self.remote.as_ref() else { return };
         if remote.connected.is_empty() {
             return;
         }
         let now = now_ms();
         let rows: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
-        let watched: Vec<String> = remote.watched.keys().cloned().collect();
-        // What turns changed may be worked out after they end: looked at every tick.
-        let turn_files: Vec<_> =
-            watched.iter().filter_map(|id| Some((id.clone(), self.remote_changes(id), item_times(&self.live.get(id)?.items)))).collect();
-        let changes: Vec<(String, u64, Vec<tr::ItemBody>, Vec<(String, tr::ItemBody)>, Vec<Option<i64>>)> = watched
-            .into_iter()
-            .filter_map(|id| {
-                let live = self.live.get(&id)?;
-                let rev = live.revision;
-                if self.remote.as_ref()?.watched.get(&id).is_some_and(|w| w.revision == rev) && live.streaming.is_none() {
-                    return None;
-                }
-                let (items, requests) = self.remote_items(&id);
-                Some((id, rev, items, requests, item_times(&live.items)))
-            })
-            .collect();
         let Some(remote) = self.remote.as_mut() else { return };
         // Thread rows.
         let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
@@ -920,6 +1180,7 @@ impl Workspace {
         for id in gone {
             remote.sent.remove(&id);
             remote.watched.remove(&id);
+            remote.dormant.remove(&id);
             remote.handle.push(tr::HostEvent::ThreadRemoved(id));
         }
         for row in rows {
@@ -929,69 +1190,96 @@ impl Workspace {
             }
         }
         // Open transcripts.
-        for (id, rev, items, requests, at) in changes {
-            let Some(w) = remote.watched.get_mut(&id) else { continue };
-            w.revision = rev;
-            // Shorter than sent (a rewind, a rewrite): the phone reads it again.
-            if items.len() < w.items.len() {
-                w.items.clear();
-                w.requests.clear();
-                w.changes.clear();
-                remote.handle.push(tr::HostEvent::TranscriptReset(id.clone()));
-                continue;
+        let watched: Vec<String> = remote.watched.keys().cloned().collect();
+        for id in watched {
+            let Some(mut w) = self.remote.as_mut().and_then(|r| r.watched.remove(&id)) else { continue };
+            let events = self.sync_watched(&id, &mut w, cx);
+            let Some(remote) = self.remote.as_mut() else { return };
+            for event in events {
+                remote.handle.push(event);
             }
-            for (ix, body) in items.into_iter().enumerate() {
-                let h = hash(&body);
-                if w.items.get(ix) == Some(&h) {
-                    continue;
-                }
-                w.seq += 1;
-                match w.items.get_mut(ix) {
-                    Some(old) => *old = h,
-                    None => w.items.push(h),
-                }
-                remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("i{ix}"), seq: w.seq, at: at.get(ix).copied().flatten(), body } });
-            }
-            // Requests: new or changed ones as they are, answered ones as resolved.
-            let open: HashSet<String> = requests.iter().map(|(r, _)| r.clone()).collect();
-            for (rid, last) in w.requests.iter().filter(|(r, _)| !open.contains(r)) {
-                w.seq += 1;
-                let body = resolved(last.clone(), remote.answered.remove(rid));
-                remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("r{rid}"), seq: w.seq, at: None, body } });
-            }
-            w.requests.retain(|(r, _)| open.contains(r));
-            for (rid, body) in requests {
-                if w.requests.iter().any(|(r, x)| *r == rid && *x == body) {
-                    continue;
-                }
-                w.seq += 1;
-                w.requests.retain(|(r, _)| *r != rid);
-                w.requests.push((rid.clone(), body.clone()));
-                remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("r{rid}"), seq: w.seq, at: None, body } });
-            }
-        }
-        // Turns' changed files, new or changed (after the items they follow, so a turn end
-        // reaches the phone before its files do).
-        for (id, files, at) in turn_files {
-            let Some(w) = remote.watched.get_mut(&id) else { continue };
-            let mut files: Vec<(usize, tr::ItemBody)> = files.into_iter().filter(|(ix, _)| *ix < w.items.len()).collect();
-            files.sort_by_key(|(ix, _)| *ix);
-            for (ix, body) in files {
-                let h = hash(&body);
-                if w.changes.get(&ix) == Some(&h) {
-                    continue;
-                }
-                w.seq += 1;
-                w.changes.insert(ix, h);
-                remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("c{ix}"), seq: w.seq, at: at.get(ix).copied().flatten(), body } });
-            }
+            remote.watched.insert(id, w);
         }
     }
 }
 
-/// The files the turn ending at item `turn_end` of thread `id` changed, as a `changes` item.
-/// The Mac works them out per turn (`Workspace::turn_changes`, from the checkpoints) on another
-/// branch; until that's merged there's nothing to send.
+/// Items and turns' changed files converted for the phone, by index.
+#[derive(Default)]
+struct Converted {
+    items: HashMap<usize, tr::ItemBody>,
+    changes: HashMap<usize, tr::ItemBody>,
+}
+
+/// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
+fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
+    match &live.items[ix] {
+        Item::User { text, images, .. } => tr::ItemBody::User { text: text.clone(), images: images.len() as u32 },
+        Item::Assistant { text } => tr::ItemBody::Assistant { text: text.clone(), streaming: live.streaming == Some(ix) },
+        Item::Reasoning { text } => tr::ItemBody::Reasoning { text: text.clone() },
+        Item::Tool { id: call, title, detail, output, status } => {
+            let op = crate::activity::op(title, detail, cwd);
+            let lines = live.lines.get(call).copied();
+            tr::ItemBody::Tool {
+                call_id: call.clone(),
+                tool: tr::ToolKind::from_title(title),
+                title: if op.verb.is_empty() { title.clone() } else { op.verb },
+                detail: if op.text.is_empty() { detail.clone() } else { op.text },
+                status: match status {
+                    ToolStatus::Running => tr::ToolStatus::Running,
+                    ToolStatus::Done => tr::ToolStatus::Done,
+                    ToolStatus::Failed => tr::ToolStatus::Failed,
+                    ToolStatus::Denied => tr::ToolStatus::Denied,
+                },
+                output: tr::truncate_output(output).to_string(),
+                added: lines.map(|l| l.0),
+                removed: lines.map(|l| l.1),
+            }
+        }
+        Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd { took_secs: *took_secs },
+        Item::Notice { text } => tr::ItemBody::Notice { text: text.clone() },
+        Item::Error { text } => tr::ItemBody::Error { text: text.clone() },
+        Item::Limit { text, resets_at, .. } => tr::ItemBody::Limit { text: text.clone(), resets_at: *resets_at },
+        Item::Handoff { from, to, from_name, to_name, .. } => tr::ItemBody::Handoff {
+            from: from_name.clone().unwrap_or_else(|| AgentId::from_key(from).display_name()),
+            to: to_name.clone().unwrap_or_else(|| AgentId::from_key(to).display_name()),
+        },
+    }
+}
+
+/// The requests open in `live`, as cards, by request id.
+fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
+    live.permissions
+        .iter()
+        .map(|p| {
+            let body = match &p.prompt {
+                None => tr::ItemBody::Approval { request_id: p.request_id.clone(), title: p.title.clone(), detail: p.detail.clone(), state: tr::ApprovalState::Pending },
+                Some(trek_agents::Prompt::Questions(qs)) => tr::ItemBody::Question {
+                    request_id: p.request_id.clone(),
+                    questions: qs
+                        .iter()
+                        .map(|q| tr::Question {
+                            header: q.header.clone(),
+                            question: q.question.clone(),
+                            options: q.options.iter().map(|(label, description)| tr::QuestionOption { label: label.clone(), description: description.clone() }).collect(),
+                            multi: q.multi,
+                            secret: q.secret,
+                        })
+                        .collect(),
+                    state: tr::QuestionState::Pending,
+                    answers: None,
+                },
+                Some(trek_agents::Prompt::Plan(markdown)) => tr::ItemBody::Plan { request_id: p.request_id.clone(), markdown: markdown.clone(), state: tr::PlanState::Pending },
+            };
+            (p.request_id.clone(), body)
+        })
+        .collect()
+}
+
+/// An item upsert for the phones following thread `id`.
+fn item_event(id: &str, item_id: String, seq: u64, at: Option<i64>, body: tr::ItemBody) -> tr::HostEvent {
+    tr::HostEvent::Item { thread_id: id.to_string(), item: tr::Item { id: item_id, seq, at, body } }
+}
+
 /// What the turn ending at `turn_end` changed, as a `changes` item, once the Mac has counted it.
 fn turn_changes(ws: &Workspace, id: &str, turn_end: usize) -> Option<tr::ItemBody> {
     #[cfg(test)]
@@ -1065,21 +1353,29 @@ fn resolved(mut body: tr::ItemBody, answer: Option<tr::AnswerResponse>) -> tr::I
 }
 
 /// When each item happened, as far as the transcript says: a message's time, a turn's end.
-fn item_times(items: &[Item]) -> Vec<Option<i64>> {
-    items
-        .iter()
-        .map(|i| match i {
-            Item::User { at, .. } => *at,
-            Item::TurnEnd { at, .. } => Some(*at),
-            _ => None,
-        })
-        .collect()
+fn item_time(item: &Item) -> Option<i64> {
+    match item {
+        Item::User { at, .. } => *at,
+        Item::TurnEnd { at, .. } => Some(*at),
+        _ => None,
+    }
 }
 
+/// What a phone would read of `body`, hashed (its JSON, written straight into the hasher).
 fn hash(body: &tr::ItemBody) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(body).unwrap_or_default().hash(&mut h);
-    h.finish()
+    struct Hashing(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for Hashing {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut h = Hashing(std::collections::hash_map::DefaultHasher::new());
+    let _ = serde_json::to_writer(&mut h, body);
+    h.0.finish()
 }
 
 fn first_line(s: &str) -> String {
@@ -1145,14 +1441,7 @@ fn push_changes(ws: WeakEntity<Workspace>, cx: &mut Context<Workspace>) -> Task<
     cx.spawn(async move |_, cx: &mut AsyncApp| {
         loop {
             cx.background_executor().timer(TICK).await;
-            let pushed = ws.update(cx, |ws, cx| {
-                // Turns that ended on threads a phone has open are counted for it.
-                let watched: Vec<String> = ws.remote.as_ref().filter(|r| !r.connected.is_empty()).map(|r| r.watched.keys().cloned().collect()).unwrap_or_default();
-                for id in &watched {
-                    ws.count_remote_changes(id, cx);
-                }
-                ws.push_remote_changes()
-            });
+            let pushed = ws.update(cx, |ws, cx| ws.push_remote_changes(cx));
             if pushed.is_err() {
                 break;
             }

@@ -1982,6 +1982,7 @@ impl Workspace {
         }
         live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
         live.lines = self.store.tool_lines(id).unwrap_or_default();
+        live.items.mark_edited(0);
         let rows = self.store.items_with_ids(id).unwrap_or_default();
         if !rows.is_empty() {
             live.items = Transcript::stored(rows);
@@ -3031,6 +3032,10 @@ impl Workspace {
                         if let Err(e) = self.store.set_tool_lines(id, &tid, lines) {
                             tracing::warn!("save tool lines: {e}");
                         }
+                        // The call's row shows them: followers of the transcript look at it again.
+                        if let Some(ix) = live.items.iter().rposition(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                            live.items.mark_edited(ix);
+                        }
                         match lines {
                             Some(l) => live.lines.insert(tid, l),
                             None => live.lines.remove(&tid),
@@ -3884,11 +3889,30 @@ impl Workspace {
             self.keep(task);
             return None;
         }
+        let (fork_id, message) = self.fork_quietly(id, &at, cx)?;
+        match scope {
+            Scope::Main => self.navigate(Route::Thread(fork_id.clone()), cx),
+            Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
+        }
+        if let Some((text, images)) = message {
+            // A main window reopened for the fork can't hear it yet: it takes the message itself.
+            if self.main_window.is_some() {
+                cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Main, thread: fork_id.clone(), text, images, edit: None });
+            } else {
+                self.pending_compose = Some((fork_id.clone(), text, images));
+            }
+        }
+        Some(fork_id)
+    }
+
+    /// `fork_thread` of a loaded thread, without opening the fork anywhere: its id, and for a
+    /// fork from before a message, that message (for a composer).
+    pub(crate) fn fork_quietly(&mut self, id: &str, at: &ForkAt, cx: &mut Context<Self>) -> Option<(String, Option<(String, Vec<PathBuf>)>)> {
         let thread = self.thread(id)?.clone();
         let native = trek_agents::resumes_partway(&thread.agent, thread.model.as_deref());
         let live = self.live.get(id)?;
         let items = &live.items;
-        let (cut, point, message) = match &at {
+        let (cut, point, message) = match at {
             ForkAt::Before(item) => {
                 let pos = items.position(item)?;
                 let Item::User { text, images, resume, .. } = &items[pos] else { return None };
@@ -3967,20 +3991,8 @@ impl Workspace {
         live.mark = fork.native_at.clone();
         live.git_jobs.extend(links.into_iter().map(|(repo, checkpoints)| GitJob::Link { repo, checkpoints }));
         self.reload(cx);
-        match scope {
-            Scope::Main => self.navigate(Route::Thread(fork_id.clone()), cx),
-            Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
-        }
-        if let Some((text, images)) = message {
-            // A main window reopened for the fork can't hear it yet: it takes the message itself.
-            if self.main_window.is_some() {
-                cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Main, thread: fork_id.clone(), text, images, edit: None });
-            } else {
-                self.pending_compose = Some((fork_id.clone(), text, images));
-            }
-        }
         self.run_git(&fork_id, cx);
-        Some(fork_id)
+        Some((fork_id, message))
     }
 
     // ---------- inbox lifecycle ----------

@@ -16,6 +16,10 @@
 //! |                              | a table, code, paths and a link (for reviewing typography)   |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
+//! | `mock:history` [n]           | a long history in one go, at once: `n` rounds (default 100,   |
+//! |                              | at most 5000) of a thought, three tool calls (one an edit)    |
+//! |                              | and an answer with markdown, code and a table: five items a   |
+//! |                              | round (for long transcripts: `mock:history 500` is 2500)      |
 //! | `error`                      | a turn that fails                                             |
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
@@ -145,6 +149,8 @@ enum Script {
     /// A long answer with every kind of block, for reviewing how answers read.
     Prose,
     Explore(Duration),
+    /// `n` rounds of work at once, for a long transcript.
+    History(u32),
     Error,
     Write,
     Recall,
@@ -214,6 +220,7 @@ impl Script {
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "prose" if w.starts_with("mock:") => Script::Prose,
                 "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
+                "history" if w.starts_with("mock:") => Script::History(words.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(100).clamp(1, MAX_HISTORY)),
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write,
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
@@ -262,6 +269,7 @@ pub fn title(request: &str) -> String {
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
         Script::Explore(_) => "Animate the title as it appears",
+        Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
         Script::Write => "Add a note",
         Script::Recall => "What was said",
@@ -621,6 +629,7 @@ impl Session {
                 self.say_at(PROSE, 45).await?;
             }
             Script::Explore(total) => self.explore(total).await?,
+            Script::History(rounds) => self.history(rounds).await?,
             Script::Write => self.write().await?,
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
@@ -1465,6 +1474,43 @@ impl Session {
     }
 }
 
+/// The most rounds `mock:history` plays.
+const MAX_HISTORY: u32 = 5000;
+
+impl Session {
+    /// `rounds` rounds of work, as fast as Trek takes them: a thought, a read, a search, an edit
+    /// (with its lines) and an answer using markdown, a code block and a table.
+    async fn history(&mut self, rounds: u32) -> Step {
+        for n in 1..=rounds {
+            self.emit(AgentEvent::ReasoningDelta(format!("**Step {n}**\n\nLooking at how `parse_header` handles case {n} before changing it."))).await?;
+            let file = HISTORY_FILES[n as usize % HISTORY_FILES.len()];
+            for (title, detail, output) in [
+                ("Read", file.to_string(), format!("fn parse_header(line: &str) -> Result<Header> {{\n    // case {n}\n    let (name, value) = line.split_once(':').ok_or(ParseError::BadHeader)?;\n    Ok(Header::new(name.trim(), value.trim()))\n}}")),
+                ("Search", format!("ParseError::BadHeader case_{n}"), format!("{file}:{}:    Err(ParseError::BadHeader)", 10 + n % 90)),
+                ("Run command", format!("cargo test parser::case_{n}"), format!("running 1 test\ntest parser::case_{n} ... ok\n\ntest result: ok. 1 passed; 0 failed")),
+            ] {
+                let id = self.id("tool");
+                self.tool_start(&id, title, &detail).await?;
+                self.emit(AgentEvent::ToolFinished { id, output, ok: true }).await?;
+            }
+            let id = self.id("tool");
+            self.tool_start(&id, "Edit", file).await?;
+            self.emit(AgentEvent::ToolLines { id: id.clone(), added: 3 + n % 7, removed: n % 3 }).await?;
+            self.emit(AgentEvent::ToolFinished { id, output: format!("Applied 1 edit to {file}"), ok: true }).await?;
+            let answer = format!(
+                "### Step {n}: case {n}\n\n`parse_header` in `{file}` now **rejects** case {n} with a typed error instead of panicking:\n\n```rust\nmatch parse_header(line) {{\n    Ok(h) => headers.push(h),\n    Err(ParseError::BadHeader) => return reply(400, \"bad header (case {n})\"),\n    Err(e) => return Err(e.into()),\n}}\n```\n\n| Case | Before | After |\n| --- | --- | --- |\n| {n} | panic | `400 Bad Request` |\n| {} | ok | ok |\n\n- [x] regression test `parser::case_{n}`\n- [ ] the remaining {} cases",
+                n + 1,
+                rounds - n
+            );
+            self.emit(AgentEvent::TextDone(answer)).await?;
+            self.pause(Duration::ZERO).await?;
+        }
+        self.say(&format!("Done: {rounds} cases of `parse_header` are handled, each with its test.")).await
+    }
+}
+
+const HISTORY_FILES: &[&str] = &["src/parser.rs", "src/headers.rs", "src/request.rs", "tests/parser.rs"];
+
 /// One step of `mock:explore`.
 #[derive(Clone, Copy)]
 enum Explore {
@@ -1561,6 +1607,10 @@ mod tests {
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("mock:prose", false), Script::Prose);
+        assert_eq!(Script::parse("mock:history", false), Script::History(100));
+        assert_eq!(Script::parse("mock:history 500", false), Script::History(500));
+        assert_eq!(Script::parse("mock:history 999999", false), Script::History(MAX_HISTORY));
+        assert_eq!(Script::parse("the history of it", false), Script::Answer, "only by its full name");
         assert_eq!(Script::parse("purple prose", false), Script::Answer, "bare `prose` is just a word");
         assert_eq!(Script::parse("send subagents 300ms", false), Script::Agents(Some(Duration::from_millis(300))));
         assert_eq!(Script::parse("ask a question", false), Script::Questions);
@@ -2052,6 +2102,22 @@ mod tests {
             assert!(streamed.starts_with("## Part 1\n\n## How the app starts"), "{streamed}");
             assert_eq!(text(&events), streamed, "one message, sent whole at the end");
             assert!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta(_))).count() > 10);
+        });
+    }
+
+    #[test]
+    fn plays_a_long_history_at_once() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            let start = std::time::Instant::now();
+            m.prompt("mock:history 400").await;
+            let events = m.turn().await;
+            assert!(start.elapsed() < Duration::from_secs(10), "fast: {:?}", start.elapsed());
+            let tools = events.iter().filter(|e| matches!(e, AgentEvent::ToolStarted { .. })).count();
+            let answers: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::TextDone(t) = e { Some(t.as_str()) } else { None }).collect();
+            assert_eq!((tools, answers.len()), (1600, 401));
+            assert!(answers[0].contains("```rust") && answers[0].contains("| Case | Before | After |"), "{}", answers[0]);
+            assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::ToolLines { .. })).count(), 400);
         });
     }
 
