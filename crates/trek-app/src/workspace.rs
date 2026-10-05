@@ -4,6 +4,7 @@ mod agent_updates;
 mod limits;
 mod orchestrate;
 mod tabs;
+#[cfg(test)]
 pub use tabs::MAX_TABS;
 mod verification;
 mod worktrees;
@@ -62,6 +63,7 @@ pub enum SettingsPage {
     Agents,
     Skills,
     Tools,
+    Mobile,
     ApiKeys,
     LocalModels,
     Permissions,
@@ -82,6 +84,7 @@ impl SettingsPage {
             SettingsPage::Shortcuts => "Keyboard Shortcuts",
             SettingsPage::Agents => "Agents & Subscriptions",
             SettingsPage::Tools => "Tools & MCP",
+            SettingsPage::Mobile => "Phone",
             SettingsPage::ApiKeys => "API Keys",
             SettingsPage::LocalModels => "Local Models",
             SettingsPage::Permissions => "Permissions",
@@ -839,6 +842,9 @@ pub struct Workspace {
     pub sidebar_collapsed: bool,
     /// The threads open as tabs in the main window, by id, in order (see `tabs`).
     pub tabs: Vec<String>,
+    /// The phone server, while Settings › Phone has it on (see `remote`).
+    pub remote: Option<crate::remote::Remote>,
+    pub(crate) remote_starting: bool,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
@@ -1017,6 +1023,8 @@ impl Workspace {
         // new version come out) while Trek was closed. Its cached finds show meanwhile.
         this.check_agent_updates(false, cx);
         this.start_housekeeping(cx);
+        // The phone server, if it was on.
+        this.sync_remote(cx);
         let keep = this.settings.snapshots.keep_days;
         cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
         // TREK_MOCK_PROMPT starts a mock thread at launch, for performance measurements and demos
@@ -1092,6 +1100,8 @@ impl Workspace {
             agent_updates: Default::default(),
             sidebar_collapsed: false,
             tabs: if cfg!(test) { vec![] } else { tabs::load_tabs() },
+            remote: None,
+            remote_starting: false,
             settled_open: false,
             search: String::new(),
             search_results: SearchResults::default(),
@@ -1370,6 +1380,7 @@ impl Workspace {
             self.drop_update(cx);
             self.check_for_updates(true, cx);
         }
+        self.sync_remote(cx);
         cx.notify();
     }
 
@@ -1963,7 +1974,7 @@ impl Workspace {
         }
     }
 
-    fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.live.get(id).is_none_or(|l| l.spend.is_none()) {
             let spend = self.load_spend(id);
             self.live.entry(id.to_string()).or_default().spend = Some(spend);

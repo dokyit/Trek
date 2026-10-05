@@ -333,20 +333,26 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row(
-                        "Glass",
-                        "How much of the theme's colour the glass keeps.",
-                        div().when(!glass, |el| el.opacity(0.45)).child(ui::segmented(
-                            "glass-tint",
-                            vec![(0u8, "Clear"), (1, "Balanced"), (2, "Frosted")],
-                            match s.appearance.glass_tint {
-                                t if t < 0.5 => 0u8,
-                                t if t < 0.7 => 1,
-                                _ => 2,
-                            },
-                            self.setter(|s, v: u8| s.appearance.glass_tint = [0.4, 0.6, 0.8][v as usize]),
-                            cx,
-                        ))
-                        .into_any_element(),
+                        "Frost",
+                        "Clear lets more of your desktop through; frosted keeps more of the theme's colour.",
+                        h_flex()
+                            .id("glass-frost")
+                            .test_support()
+                            .w(px(280.))
+                            .gap(px(10.))
+                            .when(!glass, |el| el.opacity(0.45))
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Clear"))
+                            .child(div().flex_1().child(gpui_kit::component::slider::Slider::new(&self.glass_slider).disabled(!glass)))
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frosted"))
+                            .child(
+                                div()
+                                    .w(px(34.))
+                                    .text_xs()
+                                    .text_right()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(format!("{:.0}%", super::frost_of(s.appearance.glass_tint))),
+                            )
+                            .into_any_element(),
                         cx,
                     ),
                 ],

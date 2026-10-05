@@ -792,6 +792,8 @@ impl Render for TrekWindow {
                                     .border_color(crate::ui::panel_border(glass, cx))
                                     .bg(crate::ui::panel_bg(glass, cx))
                                     .overflow_hidden()
+                                    .relative()
+                                    .children(crate::ui::glass_sheen(glass, cx))
                                     .child(content),
                             ),
                     )
@@ -843,6 +845,8 @@ impl Render for TrekWindow {
                                     .border_color(crate::ui::panel_border(glass, cx))
                                     .bg(crate::ui::panel_bg(glass, cx))
                                     .overflow_hidden()
+                                    .relative()
+                                    .children(crate::ui::glass_sheen(glass, cx))
                                     .child(self.right_panel.clone().cached(fill())),
                             ),
                         )

@@ -89,8 +89,8 @@ pub struct PairingOffer {
     pub expires_at: i64,
     /// `trek://pair?host=…&code=…&name=…&hid=…&fp=…`, for the QR code.
     pub url: String,
-    /// The certificate's short fingerprint (`ABCD-1234`), to type with the code when there's no
-    /// camera; `None` without TLS.
+    /// The certificate's short fingerprint (`ABCD-1234-EF56-7890`), to type with the code when
+    /// there's no camera; `None` without TLS.
     pub fingerprint: Option<String>,
 }
 

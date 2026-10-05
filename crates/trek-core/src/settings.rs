@@ -29,6 +29,33 @@ pub struct Settings {
     pub projects: std::collections::BTreeMap<String, ProjectPrefs>,
     /// Projects removed from Trek (paths); adding the folder again brings one back.
     pub hidden_projects: Vec<String>,
+    /// Trek on your iPhone (Settings › Phone).
+    pub mobile: Mobile,
+}
+
+/// The phone server: off until the user turns it on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mobile {
+    pub enabled: bool,
+    pub port: u16,
+    /// Which of this Mac's addresses the pairing code points phones at.
+    pub reach: Reach,
+}
+
+impl Default for Mobile {
+    fn default() -> Self {
+        Self { enabled: false, port: 7420, reach: Reach::Wifi }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reach {
+    /// The Mac's address on the local network: the phone on the same Wi-Fi.
+    Wifi,
+    /// The Mac's Tailscale address: the phone anywhere on the tailnet.
+    Tailscale,
 }
 
 /// A command a project can run from the title bar (build, test, dev server…).
@@ -220,6 +247,7 @@ impl Default for Settings {
             layout: Layout::default(),
             projects: Default::default(),
             hidden_projects: vec![],
+            mobile: Mobile::default(),
         }
     }
 }
@@ -307,7 +335,7 @@ pub struct Appearance {
     pub background_dim: f32,
     /// Liquid glass: the window lets the desktop show through, blurred, under translucent chrome.
     pub glass: bool,
-    /// How much of the theme's colour the glass keeps, 0.3 (clear) to 0.9 (frosted).
+    /// How much of the theme's colour the glass keeps, 0.2 (clear) to 0.95 (frosted).
     pub glass_tint: f32,
 }
 
@@ -343,7 +371,7 @@ impl Appearance {
 
     /// The glass's tint to draw with, when glass is on: the stored one, kept in its range.
     pub fn glass_tint(&self) -> Option<f32> {
-        self.glass.then(|| if self.glass_tint.is_finite() { self.glass_tint.clamp(0.3, 0.9) } else { 0.6 })
+        self.glass.then(|| if self.glass_tint.is_finite() { self.glass_tint.clamp(0.2, 0.95) } else { 0.6 })
     }
 }
 

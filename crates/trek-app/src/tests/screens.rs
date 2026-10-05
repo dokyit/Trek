@@ -110,7 +110,7 @@ fn every_screen_renders_in_both_themes() {
             t.id
         });
         let pages: Vec<SettingsPage> = crate::settings_view::pages().collect();
-        assert_eq!(pages.len(), 15, "every page is listed");
+        assert_eq!(pages.len(), 16, "every page is listed");
         for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
             theme(cx, choice);
             assert_eq!(cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark()), choice == ThemeChoice::Night);

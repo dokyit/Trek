@@ -5,8 +5,8 @@
 //! blurred, as macOS would show the desktop. Run it with `TREK_FORCE_ACTIVE=1` so a window kept
 //! behind others still draws.
 //!
-//! Commands: `route draft|no-project|basecamp|notes|appearance|thread:<id>|first`,
-//! `send <prompt>`, `new` (⌘N), `settled` (fold or open settled history), `glass on|off`, `tint <0.3–0.9>`, `theme night|paper`, `tools`, `wait <ms>`, `shot <name>`.
+//! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|first`,
+//! `send <prompt>`, `pair` (a pairing code, its link written to `pair.txt`), `new` (⌘N), `settled` (fold or open settled history), `glass on|off`, `tint <0.3–0.9>`, `theme night|paper`, `tools`, `wait <ms>`, `shot <name>`.
 
 use crate::workspace::{Route, SettingsPage, Workspace};
 use gpui_kit::*;
@@ -67,6 +67,11 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) {
                 ws.navigate(Route::Thread(id), cx)
             }
         }
+        ("route", other) if other.starts_with("settings:") => {
+            if let Some(page) = crate::settings_view::page_named(&other["settings:".len()..]) {
+                ws.navigate(Route::Settings(page), cx)
+            }
+        }
         ("route", other) if other.starts_with("title:") => {
             let q = other["title:".len()..].to_lowercase();
             if let Some(id) = ws.threads.iter().find(|t| t.title.to_lowercase().contains(&q)).map(|t| t.id.clone()) {
@@ -75,6 +80,12 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) {
         }
         ("route", other) if other.starts_with("thread:") => ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx),
         ("send", text) => ws.send(text.to_string(), vec![], cx),
+        ("pair", _) => {
+            ws.offer_pairing(cx);
+            if let (Some(offer), Some(dir)) = (ws.remote.as_ref().and_then(|r| r.offer.clone()), std::env::var_os("TREK_SHOT_DIR")) {
+                let _ = std::fs::write(std::path::Path::new(&dir).join("pair.txt"), offer.url);
+            }
+        }
         ("settled", _) => ws.settled_open = !ws.settled_open,
         ("new", _) => ws.new_thread(cx),
         ("glass", on) => {

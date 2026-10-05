@@ -18,6 +18,9 @@ tokio.workspace = true
 trek-core.workspace = true
 trek-agents.workspace = true
 trek-ipc.workspace = true
+trek-remote = { path = "../trek-remote" }
+# The pairing QR code in Settings › Phone, drawn as squares.
+qrcode = { version = "0.14", default-features = false }
 gpui-kit.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true

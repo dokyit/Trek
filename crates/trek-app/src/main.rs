@@ -20,6 +20,7 @@ mod notes;
 mod onboarding;
 mod panels;
 mod palette;
+mod remote;
 mod root;
 mod settings_view;
 #[cfg(feature = "shots")]

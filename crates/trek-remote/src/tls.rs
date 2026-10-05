@@ -1,8 +1,9 @@
 //! The Mac's TLS identity: a self-signed certificate made once and kept beside the paired
 //! devices. Phones don't trust it through any authority; they pin it. The QR code carries the
 //! SHA-256 of its DER encoding (`fp`), and the phone accepts a server only if its certificate
-//! hashes to that. Typed pairing (no camera) checks the first 8 hex characters instead, which the
-//! Mac shows beside the code.
+//! hashes to that. Typed pairing (no camera) checks the first 16 hex characters instead, which
+//! the Mac shows beside the code: 64 bits, which no one makes a certificate to match in the ten
+//! minutes a code lasts (8, the first design, could be matched on a GPU in minutes).
 
 use std::io;
 use std::path::Path;
@@ -63,10 +64,10 @@ impl TlsIdentity {
         Ok(identity)
     }
 
-    /// The first 8 hex characters, grouped `ABCD-1234`, for checking by eye or typing.
+    /// The first 16 hex characters in fours, `ABCD-1234-EF56-7890`, for typing or checking by eye.
     pub fn short_fingerprint(&self) -> String {
-        let f = self.fingerprint[..8].to_uppercase();
-        format!("{}-{}", &f[..4], &f[4..])
+        let f = self.fingerprint[..16].to_uppercase();
+        format!("{}-{}-{}-{}", &f[..4], &f[4..8], &f[8..12], &f[12..])
     }
 
     pub fn acceptor(&self) -> io::Result<TlsAcceptor> {
@@ -100,7 +101,8 @@ mod tests {
         let a = TlsIdentity::load_or_create(&dir, "Tobias's MacBook").unwrap();
         assert_eq!(a.fingerprint.len(), 64);
         assert_eq!(a.fingerprint, fingerprint(&a.cert_der));
-        assert_eq!(a.short_fingerprint().len(), 9);
+        assert_eq!(a.short_fingerprint().len(), 19);
+        assert!(a.fingerprint.to_uppercase().starts_with(&a.short_fingerprint().replace('-', "")));
         let b = TlsIdentity::load_or_create(&dir, "Tobias's MacBook").unwrap();
         assert_eq!(a.fingerprint, b.fingerprint, "loaded, not made again");
         #[cfg(unix)]

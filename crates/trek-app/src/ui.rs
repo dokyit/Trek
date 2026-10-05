@@ -6,16 +6,22 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::AgentId;
 
-/// Liquid glass on `window`: blur what's behind it when `on`, opaque otherwise. `applied` is what
-/// was last asked of the window, so it's only told when that changes. The window's root paints
-/// the theme's background under everything; under glass it paints nothing, after this frame (it's
-/// drawing this one).
+/// Liquid glass on `window`: the system's Liquid Glass behind it when there is one (macOS 26),
+/// else a blur of what's behind; opaque when off. `applied` is what was last asked of the
+/// window, so it's only told when that changes. The window's root paints the theme's background
+/// under everything; under glass it paints nothing, after this frame (it's drawing this one).
 pub fn apply_glass(window: &mut Window, on: bool, applied: &mut Option<bool>, cx: &mut App) {
     if *applied == Some(on) {
         return;
     }
     *applied = Some(on);
-    window.set_background_appearance(if on { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque });
+    let native = crate::system::native_glass(window, on);
+    NATIVE_GLASS.store(native, std::sync::atomic::Ordering::Relaxed);
+    window.set_background_appearance(match (on, native) {
+        (false, _) => WindowBackgroundAppearance::Opaque,
+        (true, true) => WindowBackgroundAppearance::Transparent,
+        (true, false) => WindowBackgroundAppearance::Blurred,
+    });
     window.defer(cx, move |window, cx| {
         if let Some(Some(root)) = window.root::<gpui_kit::component::Root>() {
             root.update(cx, |root, cx| {
@@ -36,13 +42,18 @@ pub fn chrome_bg(glass: Option<f32>, cx: &App) -> Hsla {
     }
 }
 
+/// The system's Liquid Glass backs the windows (macOS 26), rather than GPUI's lighter blur.
+static NATIVE_GLASS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// An inset panel's fill (the transcript, the tools panel): the theme's background, or under glass
-/// more of it than the chrome keeps, never under 82%: what's read there stays readable over any
-/// desktop, and the panels read as frosted panes on the glass.
+/// more of it than the chrome keeps, so the panels read as frosted panes on the glass. The
+/// system's glass frosts the desktop heavily, so panels can let it through down to 60%; over the
+/// lighter blur of older macOS they stay at 82% or more, or what's behind shows through the text.
 pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
     let bg = cx.theme().background;
+    let floor = if NATIVE_GLASS.load(std::sync::atomic::Ordering::Relaxed) { 0.6 } else { 0.82 };
     match glass {
-        Some(t) => bg.opacity((t + 0.25).clamp(0.82, 0.95)),
+        Some(t) => bg.opacity((t + 0.2).clamp(floor, 0.95)),
         None => bg,
     }
 }
@@ -54,6 +65,25 @@ pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
         Some(_) => theme.foreground.opacity(if theme.mode.is_dark() { 0.1 } else { 0.14 }),
         None => theme.sidebar_border,
     }
+}
+
+/// Under glass, the light a pane catches: a bright rim along its top edge and a sheen fading
+/// down from it. Laid over a pane's top (it doesn't take clicks); nothing without glass.
+pub fn glass_sheen(glass: Option<f32>, cx: &App) -> Option<AnyElement> {
+    glass?;
+    let dark = cx.theme().mode.is_dark();
+    let light = gpui_kit::white();
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(90.))
+            .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(light.opacity(if dark { 0.16 } else { 0.7 })))
+            .child(div().size_full().bg(linear_gradient(180., linear_color_stop(light.opacity(if dark { 0.045 } else { 0.25 }), 0.), linear_color_stop(light.opacity(0.), 1.))))
+            .into_any_element(),
+    )
 }
 
 /// Square ghost icon button with a tooltip.
