@@ -44,6 +44,8 @@ pub struct Remote {
     pub connected: HashSet<String>,
     /// Thread rows as last sent.
     sent: HashMap<String, tr::ThreadSummary>,
+    /// How phones answered requests, by request id, so their cards close saying so.
+    answered: HashMap<String, tr::AnswerResponse>,
     /// Transcripts phones have open.
     watched: HashMap<String, Watched>,
     _tasks: Vec<Task<()>>,
@@ -219,7 +221,7 @@ impl Workspace {
                     Ok((handle, requests, addresses, advertise)) if ws.settings.mobile.enabled => {
                         let tasks = vec![serve_requests(cx.weak_entity(), requests, cx), push_changes(cx.weak_entity(), cx), hear_notices(cx.weak_entity(), handle.notices(), cx)];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), watched: HashMap::new(), _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
@@ -385,6 +387,9 @@ impl Workspace {
         let Some(prompt) = pending else {
             return Err(tr::HostError::conflict("Already answered"));
         };
+        if let Some(remote) = self.remote.as_mut() {
+            remote.answered.insert(req.request_id.clone(), req.response.clone());
+        }
         match (req.response, prompt) {
             (tr::AnswerResponse::Approval { decision }, None) => {
                 let decision = match decision {
@@ -686,7 +691,7 @@ impl Workspace {
             let open: HashSet<String> = requests.iter().map(|(r, _)| r.clone()).collect();
             for (rid, last) in w.requests.iter().filter(|(r, _)| !open.contains(r)) {
                 w.seq += 1;
-                let body = resolved(last.clone());
+                let body = resolved(last.clone(), remote.answered.remove(rid));
                 remote.handle.push(tr::HostEvent::Item { thread_id: id.clone(), item: tr::Item { id: format!("r{rid}"), seq: w.seq, at: None, body } });
             }
             w.requests.retain(|(r, _)| open.contains(r));
@@ -703,12 +708,27 @@ impl Workspace {
     }
 }
 
-/// A request answered (here or on the phone): its card as last sent, marked done.
-fn resolved(mut body: tr::ItemBody) -> tr::ItemBody {
-    match &mut body {
-        tr::ItemBody::Approval { state, .. } => *state = tr::ApprovalState::Resolved,
-        tr::ItemBody::Question { state, .. } => *state = tr::QuestionState::Resolved,
-        tr::ItemBody::Plan { state, .. } => *state = tr::PlanState::Resolved,
+/// A request answered: its card as last sent, saying how a phone answered it, or just closed
+/// when it was answered on the Mac (or the turn ended).
+fn resolved(mut body: tr::ItemBody, answer: Option<tr::AnswerResponse>) -> tr::ItemBody {
+    match (&mut body, answer) {
+        (tr::ItemBody::Approval { state, .. }, Some(tr::AnswerResponse::Approval { decision })) => {
+            *state = match decision {
+                tr::Decision::Allow => tr::ApprovalState::Allowed,
+                tr::Decision::AllowForSession => tr::ApprovalState::AllowedForSession,
+                tr::Decision::Deny => tr::ApprovalState::Denied,
+            }
+        }
+        (tr::ItemBody::Question { state, answers, .. }, Some(tr::AnswerResponse::Questions { answers: given })) => {
+            *state = tr::QuestionState::Answered;
+            *answers = Some(given);
+        }
+        (tr::ItemBody::Plan { state, .. }, Some(tr::AnswerResponse::Plan { approve, .. })) => {
+            *state = if approve { tr::PlanState::Approved } else { tr::PlanState::Rejected }
+        }
+        (tr::ItemBody::Approval { state, .. }, _) => *state = tr::ApprovalState::Resolved,
+        (tr::ItemBody::Question { state, .. }, _) => *state = tr::QuestionState::Resolved,
+        (tr::ItemBody::Plan { state, .. }, _) => *state = tr::PlanState::Resolved,
         _ => {}
     }
     body
