@@ -268,6 +268,67 @@ pub fn display_if_hidden(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 pub fn display_if_hidden(_: &Window) {}
 
+/// What the disk said of a path a moment ago, for the views that ask each time they draw: a
+/// worktree's folder, a project's `.git`, a path named in an answer. A stat a frame adds up
+/// while text streams, and stalls the window on a slow or networked disk. Answers are kept for
+/// two seconds (not at all in tests, which change the disk and look again at once).
+pub mod lately {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    const KEPT: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 2 });
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Asked {
+        Exists,
+        IsDir,
+        InRepo,
+    }
+
+    thread_local! {
+        static ANSWERS: RefCell<HashMap<(Asked, PathBuf), (Instant, bool)>> = RefCell::default();
+    }
+
+    fn answer(asked: Asked, path: &Path, ask: impl FnOnce() -> bool) -> bool {
+        ANSWERS.with(|a| {
+            let mut a = a.borrow_mut();
+            let now = Instant::now();
+            if let Some((at, yes)) = a.get(&(asked, path.to_path_buf())) {
+                if now.duration_since(*at) < KEPT {
+                    return *yes;
+                }
+            }
+            // Paths come and go with the threads on screen: start over rather than grow.
+            if a.len() > 2000 {
+                a.clear();
+            }
+            let yes = ask();
+            a.insert((asked, path.to_path_buf()), (now, yes));
+            yes
+        })
+    }
+
+    pub fn exists(path: &Path) -> bool {
+        answer(Asked::Exists, path, || path.exists())
+    }
+
+    pub fn is_dir(path: &Path) -> bool {
+        answer(Asked::IsDir, path, || path.is_dir())
+    }
+
+    /// `workspace::in_repo`, for a view.
+    pub fn in_repo(cwd: Option<&Path>) -> bool {
+        cwd.is_some_and(|c| answer(Asked::InRepo, c, || crate::workspace::in_repo(Some(c))))
+    }
+
+    /// `Worktree::is_missing`, for a view.
+    pub fn worktree_missing(w: &trek_core::worktree::Worktree) -> bool {
+        !exists(&w.path.join(".git"))
+    }
+}
+
 /// Play the alert sound off the main thread. One at a time: threads that finish together chime
 /// once, rather than each start a player of its own (two hundred of them at once kept chiming
 /// for minutes, and Trek crawled meanwhile).

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use trek_core::catalog::ModelInfo;
 use trek_core::{Effort, HandHolding, TokenUsage, UsageCost, detect};
@@ -17,7 +17,7 @@ pub(crate) struct Rpc {
     pub(crate) next_id: i64,
 }
 
-pub(crate) type RpcLines = Lines<BufReader<ChildStdout>>;
+pub(crate) type RpcLines = crate::ProtocolLines<BufReader<ChildStdout>>;
 
 impl Rpc {
     pub(crate) async fn send(&mut self, v: &Value) -> Result<()> {
@@ -37,7 +37,7 @@ impl Rpc {
 }
 
 /// Read until the response for `id` arrives, forwarding anything else.
-pub(crate) async fn await_response<R: AsyncBufRead + Unpin>(lines: &mut Lines<R>, id: i64, backlog: &mut Vec<Value>) -> Result<Value> {
+pub(crate) async fn await_response<R: AsyncBufRead + Unpin>(lines: &mut crate::ProtocolLines<R>, id: i64, backlog: &mut Vec<Value>) -> Result<Value> {
     while let Some(line) = lines.next_line().await? {
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         if v["id"].as_i64() == Some(id) && v.get("method").is_none() {
@@ -68,7 +68,7 @@ impl std::fmt::Display for ResponseTimeout {
 impl std::error::Error for ResponseTimeout {}
 
 async fn response_with_timeout<R: AsyncBufRead + Unpin>(
-    lines: &mut Lines<R>,
+    lines: &mut crate::ProtocolLines<R>,
     id: i64,
     backlog: &mut Vec<Value>,
     method: &str,
@@ -80,7 +80,7 @@ async fn response_with_timeout<R: AsyncBufRead + Unpin>(
     }
 }
 
-async fn startup_response<R: AsyncBufRead + Unpin>(lines: &mut Lines<R>, id: i64, backlog: &mut Vec<Value>, method: &str) -> Result<Value> {
+async fn startup_response<R: AsyncBufRead + Unpin>(lines: &mut crate::ProtocolLines<R>, id: i64, backlog: &mut Vec<Value>, method: &str) -> Result<Value> {
     response_with_timeout(lines, id, backlog, method, RESPONSE_TIMEOUT).await
 }
 
@@ -117,7 +117,7 @@ pub(crate) async fn start_app_server(
     let mut child = crate::spawn_group(&mut command).context("failed to start codex app-server")?;
     let stderr = StderrTail::capture(child.stderr.take().unwrap(), "codex");
     let mut rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut lines = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
     let id = rpc
         .request(
             "initialize",
@@ -1614,7 +1614,7 @@ mod tests {
     #[tokio::test]
     async fn startup_responses_have_a_timeout() {
         let (_write, read) = tokio::io::duplex(64);
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = crate::ProtocolLines::new(BufReader::new(read));
         let e = response_with_timeout(&mut lines, 1, &mut vec![], "thread/start", std::time::Duration::from_millis(10)).await.unwrap_err();
         assert!(e.to_string().contains("didn't answer thread/start"), "{e:#}");
         assert!(e.downcast_ref::<ResponseTimeout>().is_some(), "timeouts must not fall back to a new thread");

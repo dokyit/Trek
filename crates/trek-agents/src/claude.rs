@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use trek_core::{Effort, TokenUsage, UsageCost, detect};
 
 fn tool_title(name: &str, input: &Value) -> (String, String) {
@@ -213,13 +213,18 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
             args.push("--fork-session".into());
         }
     }
+    let mut settings = serde_json::Map::new();
     if config.fast.is_some() {
-        flag(&mut args, "--settings", r#"{"fastMode":true}"#);
+        settings.insert("fastMode".into(), json!(true));
     }
     // Denied tools stay denied whatever the user's allow rules say; asking to run anything else
     // still comes to Trek, which declines it for a session that only advises.
     if config.read_only {
         flag(&mut args, "--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit");
+        settings.insert("sandbox".into(), read_only_sandbox(config));
+    }
+    if !settings.is_empty() {
+        flag(&mut args, "--settings", &Value::Object(settings).to_string());
     }
     // Added to Claude Code's own system prompt, not in place of it, at every launch: a resumed
     // session hears it again without it piling up in the conversation.
@@ -260,6 +265,16 @@ async fn check_resume_point(mut config: SessionConfig) -> (SessionConfig, Option
     (config, recap)
 }
 
+/// The shell of a session that only advises, shut in Claude Code's own sandbox: the system
+/// refuses its commands' writes to the folder it works in (and the ones it may read), whatever
+/// they are. Turning the edit tools off isn't enough: a command the user's settings allow
+/// (`npm run …`, `git commit`) runs without asking Trek, and a shell can write anything. With
+/// no way round (`allowUnsandboxedCommands`), a repository's settings can't loosen it either.
+fn read_only_sandbox(config: &SessionConfig) -> Value {
+    let folders: Vec<String> = std::iter::once(&config.cwd).chain(config.read_dirs.iter()).map(|d| d.display().to_string()).collect();
+    json!({ "enabled": true, "allowUnsandboxedCommands": false, "filesystem": { "denyWrite": folders } })
+}
+
 /// The CLI's answer to `--resume` with a session it doesn't have (deleted by hand, or cleaned up
 /// after `cleanupPeriodDays`): an error result before the session starts, then it exits.
 fn session_missing(v: &Value) -> bool {
@@ -272,7 +287,7 @@ fn session_missing(v: &Value) -> bool {
 struct Cli {
     child: GroupChild,
     stdin: tokio::process::ChildStdin,
-    stdout: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    stdout: crate::ProtocolLines<BufReader<tokio::process::ChildStdout>>,
     stderr: StderrTail,
 }
 
@@ -290,7 +305,7 @@ impl Cli {
             .stderr(Stdio::piped());
         let mut child = crate::spawn_group(&mut cmd).context("failed to start claude")?;
         let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+        let stdout = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "claude");
         Ok(Cli { child, stdin, stdout, stderr })
     }
@@ -1697,6 +1712,29 @@ mod tests {
         let args = cli_args(&SessionConfig { read_only: true, ..config() });
         assert!(has(&args, &["--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit"]), "{args:?}");
         assert!(!cli_args(&config()).iter().any(|a| a == "--disallowedTools"));
+    }
+
+    #[test]
+    fn a_read_only_sessions_shell_cannot_write_where_it_works() {
+        let settings = |c: &SessionConfig| -> Option<Value> {
+            let args = cli_args(c);
+            assert!(args.iter().filter(|a| *a == "--settings").count() <= 1, "one --settings: {args:?}");
+            args.iter().position(|a| a == "--settings").map(|i| serde_json::from_str(&args[i + 1]).unwrap())
+        };
+        // The sandbox is on with no way round it, and its folder (and what it may read) is
+        // write-denied: checked against Claude Code 2.1.289, where an allow-listed `touch`
+        // then fails with "Operation not permitted".
+        let guides = std::env::temp_dir();
+        let s = settings(&SessionConfig { read_only: true, read_dirs: vec![guides.clone()], ..config() }).unwrap();
+        assert_eq!(s["sandbox"]["enabled"], true);
+        assert_eq!(s["sandbox"]["allowUnsandboxedCommands"], false);
+        assert_eq!(s["sandbox"]["filesystem"]["denyWrite"], json!(["/tmp", guides.display().to_string()]));
+        // With Fast on too, both go in the one settings argument.
+        let both = settings(&SessionConfig { read_only: true, fast: Some("fast".into()), ..config() }).unwrap();
+        assert!(both["fastMode"] == true && both["sandbox"]["enabled"] == true, "{both}");
+        // A session that may change things isn't sandboxed by Trek.
+        assert_eq!(settings(&config()), None);
+        assert_eq!(settings(&SessionConfig { fast: Some("fast".into()), ..config() }), Some(json!({"fastMode": true})));
     }
 
     #[test]

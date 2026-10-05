@@ -285,7 +285,7 @@ impl Render for WindowTitle {
         let actions = root.as_ref().map(|r| ws.project_prefs(r).actions).unwrap_or_default();
         let project_id = project_entry.map(|p| p.id.clone());
         // A worktree thread's actions run on its own copy of the code, where its changes are.
-        let run_dir = worktree.as_ref().filter(|w| !w.is_missing()).map(|w| w.path.clone()).or_else(|| root.clone());
+        let run_dir = worktree.as_ref().filter(|w| !crate::system::lately::worktree_missing(w)).map(|w| w.path.clone()).or_else(|| root.clone());
         let transparent = self.workspace.read(cx).see_through();
         TitleBar::new().when(transparent, |t| t.bg(gpui_kit::transparent_black())).child(
             h_flex()

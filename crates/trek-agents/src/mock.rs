@@ -159,6 +159,8 @@ enum Script {
     Limit(Duration),
     /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
     NearLimit(Duration),
+    /// Work on for a while, taking no notice of Stop (`mock:deaf`).
+    Deaf(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate { wait: bool },
     /// Start two sub-agents on the same task, and end the turn.
@@ -227,6 +229,7 @@ impl Script {
                 "write" if w.starts_with("mock:") => Script::Write,
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
                 "nearlimit" if w.starts_with("mock:") => Script::NearLimit(duration_after(i).unwrap_or(Duration::from_secs(60))),
+                "deaf" if w.starts_with("mock:") => Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60))),
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
@@ -278,6 +281,7 @@ pub fn title(request: &str) -> String {
         Script::Recall => "What was said",
         Script::Told => "What Trek said",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
+        Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
         Script::Pair => "Get two opinions",
         Script::Server(_) => "Start the dev server",
@@ -649,6 +653,7 @@ impl Session {
             }
             Script::Limit(after) => return self.limit(after).await,
             Script::NearLimit(after) => return self.near_limit(after).await,
+            Script::Deaf(d) => return self.deaf(d).await,
             Script::Cost { plan } => return self.priced_turn(plan).await,
             Script::Restate => self.restate(text).await?,
             Script::Arena => self.arena(text).await?,
@@ -709,6 +714,27 @@ impl Session {
         }
         self.tool("Edit", "src/cli.rs", "Switched both callers to the new `Ast`.", 150).await?;
         self.say("The parser refactor is finished: `parse` returns an `Ast` and both callers use it.").await?;
+        self.finish().await
+    }
+
+    /// Work on for `d` (real time), deaf to Stop: an agent hung in a tool, as far as Trek can
+    /// tell. Only the end of its session ends the turn early.
+    async fn deaf(&mut self, d: Duration) -> Step {
+        let id = self.id("tool");
+        self.tool_start(&id, "Run command", "./scripts/migrate.sh --all").await?;
+        let sleep = tokio::time::sleep(d);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => break,
+                cmd = self.commands.recv() => match cmd {
+                    Ok(Command::Interrupt) => {}
+                    other => self.handle_midturn(other)?,
+                },
+            }
+        }
+        self.emit(AgentEvent::ToolFinished { id, output: "migrated 12 tables".into(), ok: true }).await?;
+        self.say("The migration ran to the end.").await?;
         self.finish().await
     }
 

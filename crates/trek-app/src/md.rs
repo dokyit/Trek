@@ -261,7 +261,7 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     } else {
         cwd?.join(raw)
     };
-    p.exists().then_some(p)
+    crate::system::lately::exists(&p).then_some(p)
 }
 
 /// A path that stays in the thread's folder `cwd`: relative ones that don't climb out of it, and
@@ -303,7 +303,7 @@ impl MarkdownPlugin for PathChips {
     fn render_inline(&self, node: &MarkdownNode, context: &InlineRenderContext, _: &mut Window, cx: &mut App) -> Option<InlineElement> {
         let data = node.data::<PathRef>()?;
         let theme = cx.theme();
-        let dir = data.raw.ends_with('/') || data.resolved.as_ref().is_some_and(|p| p.is_dir());
+        let dir = data.raw.ends_with('/') || data.resolved.as_ref().is_some_and(|p| crate::system::lately::is_dir(p));
         let trimmed = data.raw.trim_end_matches('/');
         let label = trimmed.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(trimmed).to_string();
         let size = context.font_size() * 0.88;

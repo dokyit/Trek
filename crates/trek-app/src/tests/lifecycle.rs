@@ -653,3 +653,51 @@ fn the_last_turn_of_a_transcript_saved_without_turn_ends_gets_its_footer() {
         assert!(trek.visible(cx, ("copy-turn", 2usize)));
     });
 }
+
+#[test]
+fn a_stop_the_agent_ignores_ends_the_turn_after_a_while() {
+    run(async |cx| {
+        let trek = open(cx);
+        // An agent that takes no notice of Stop (hung in a tool, as far as Trek can tell).
+        let id = trek.send(cx, "mock:deaf 60s");
+        let thread = id.clone();
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        cx.run_until_parked();
+        // Asked, it gets a while to wind down.
+        assert!(trek.read(cx, |ws, _| ws.turn_running(&id)));
+        cx.executor().advance_clock(crate::workspace::STOP_GRACE + Duration::from_secs(1));
+        cx.run_until_parked();
+        // Then the turn ends here, as the user's stop (no failure), and the session goes.
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let items = trek.items(cx, &id);
+        assert!(items.iter().any(|i| matches!(i, Item::Notice { text } if text == "Interrupted")), "{items:?}");
+        assert!(!items.iter().any(|i| matches!(i, Item::Error { .. })), "{items:?}");
+        assert!(!items.iter().any(|i| matches!(i, Item::Tool { status: ToolStatus::Running, .. })), "{items:?}");
+        assert!(trek.read(cx, |ws, _| ws.live.get(&id).is_some_and(|l| l.commands.is_none())));
+        // The next message starts a session and is answered.
+        trek.send(cx, "and now?");
+        trek.wait(cx, "the next turn's answer", |ws| ws.live.get(&thread).is_some_and(|l| l.turn_started.is_none() && matches!(l.items.last(), Some(Item::TurnEnd { .. })))).await;
+        assert_eq!(trek.run_state(cx, &id), RunState::Idle);
+    });
+}
+
+#[test]
+fn a_stop_the_agent_heeds_leaves_its_session_alone() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:long 30s");
+        let thread = id.clone();
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // The next turn, started before the grace is over, isn't the one that was stopped.
+        trek.send(cx, "mock:long 30s");
+        trek.wait(cx, "the next turn", |ws| ws.turn_running(&thread)).await;
+        cx.executor().advance_clock(crate::workspace::STOP_GRACE + Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(trek.read(cx, |ws, _| ws.turn_running(&id) && ws.live.get(&id).is_some_and(|l| l.commands.is_some())));
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+    });
+}

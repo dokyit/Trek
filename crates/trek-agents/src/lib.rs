@@ -414,6 +414,62 @@ pub(crate) fn plan_title(plan: &str) -> String {
     clip(plan.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim_start_matches('#').trim(), 200)
 }
 
+/// The longest line of an agent's protocol stream that's read: far more than any message a
+/// CLI sends (a tool's whole output in one JSON line runs to a few megabytes).
+const MAX_LINE: usize = 64 << 20;
+
+/// An agent's protocol stream, a line at a time. Unlike `tokio::io::Lines`, a line has a longest
+/// length (`MAX_LINE`): one that never ends, or runs to gigabytes, is skipped rather than read
+/// into memory until there's none left. And a line that isn't UTF-8 is read as well as it can
+/// be, where `Lines` ends the stream (and so the session) with an error.
+pub(crate) struct ProtocolLines<R> {
+    reader: R,
+    line: Vec<u8>,
+    /// The line being read is over the limit: the rest of it is passed over.
+    skipping: bool,
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        ProtocolLines { reader, line: Vec::new(), skipping: false }
+    }
+
+    /// The next line, without its line ending; `None` at the end of the stream. What's read of a
+    /// line stays read if this is dropped partway (it's used in `select!`).
+    pub(crate) async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        use tokio::io::AsyncBufReadExt as _;
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            if chunk.is_empty() {
+                let rest = std::mem::take(&mut self.line);
+                return Ok((!rest.is_empty() && !std::mem::take(&mut self.skipping)).then(|| String::from_utf8_lossy(&rest).into_owned()));
+            }
+            let end = chunk.iter().position(|b| *b == b'\n');
+            let taken = end.map_or(chunk.len(), |e| e + 1);
+            if !self.skipping {
+                if self.line.len() + taken > MAX_LINE {
+                    tracing::warn!("a protocol line over {} MB was skipped", MAX_LINE >> 20);
+                    self.skipping = true;
+                    self.line = Vec::new();
+                } else {
+                    self.line.extend_from_slice(&chunk[..end.unwrap_or(chunk.len())]);
+                }
+            }
+            self.reader.consume(taken);
+            if end.is_some() {
+                if std::mem::take(&mut self.skipping) {
+                    continue;
+                }
+                let mut line = std::mem::take(&mut self.line);
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+            }
+        }
+    }
+}
+
 /// A child and everything it starts, in a process group of its own.
 pub(crate) struct GroupChild {
     child: Option<tokio::process::Child>,
@@ -602,6 +658,30 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn protocol_lines_are_read_whole_and_overlong_ones_skipped() {
+        let lines = |text: &'static [u8]| ProtocolLines::new(tokio::io::BufReader::with_capacity(8, text));
+        // Lines longer than the reader's buffer, either line ending, a last one without any.
+        let mut l = lines(b"{\"a\":\"0123456789abcdef\"}\r\nsecond\n\nlast");
+        let mut got = vec![];
+        while let Some(line) = l.next_line().await.unwrap() {
+            got.push(line);
+        }
+        assert_eq!(got, ["{\"a\":\"0123456789abcdef\"}", "second", "", "last"]);
+        // Not UTF-8: read as well as it can be, and the stream goes on.
+        let mut l = lines(b"caf\xff\nnext\n");
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("caf\u{fffd}"));
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("next"));
+        assert_eq!(l.next_line().await.unwrap(), None);
+        // A line over the limit is passed over, and the one after it read.
+        let long = vec![b'x'; MAX_LINE + 10];
+        let text: Vec<u8> = [b"first\n".as_slice(), &long, b"\nafter\n"].concat();
+        let mut l = ProtocolLines::new(tokio::io::BufReader::new(std::io::Cursor::new(text)));
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("first"));
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("after"));
+        assert_eq!(l.next_line().await.unwrap(), None);
+    }
 
     #[tokio::test]
     async fn stderr_tail_keeps_draining_after_invalid_utf8() {

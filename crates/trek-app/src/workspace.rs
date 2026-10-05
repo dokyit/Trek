@@ -225,6 +225,8 @@ pub struct LiveThread {
     limit: Option<limits::Hit>,
     /// The running turn was asked to wrap up ahead of a usage limit (once a turn).
     wrap_up: Option<limits::WrapUp>,
+    /// Ends the turn here if the agent takes no notice of a stop (`Workspace::interrupt`).
+    _stop: Option<Task<()>>,
     /// The running turn is a resume after a usage limit: hitting the limit again resumes again.
     resuming: Option<limits::Resuming>,
     /// A save of the transcript on its way (`persist_soon`).
@@ -778,6 +780,10 @@ pub const RESTART_GRACE: Duration = Duration::from_secs(10);
 /// How long after one alert from a turn an agent took by itself (a watcher or a monitor woke it),
 /// the next such turn ends without another.
 const WOKE_ALERT_GAP: Duration = Duration::from_secs(10 * 60);
+
+/// How long an agent has to act on a stop before Trek ends the turn itself (`force_stop`):
+/// longer than any of them takes to wind a tool down.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(20);
 
 /// How soon after the user stops its sub-agents an agent's turn of its own is taken to be it
 /// saying so (Claude Code takes one within seconds).
@@ -3606,6 +3612,39 @@ impl Workspace {
         if let Some(tx) = &live.commands {
             let _ = tx.try_send(Command::Interrupt);
         }
+        // Stop is a request, and an agent can sit on it (hung in a tool, or gone deaf): the turn
+        // that's still running after a while is ended here, and its session with it.
+        if let Some(turn) = live.turn_started.filter(|_| live.commands.is_some()) {
+            let thread = id.to_string();
+            live._stop = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(STOP_GRACE).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.live.get(&thread).is_some_and(|l| l.turn_started == Some(turn)) {
+                        this.force_stop(&thread, cx);
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    /// The agent didn't stop when asked (`interrupt`): the turn ends as the user's stop, and the
+    /// session goes (its processes with it), so nothing it says late lands in the transcript. The
+    /// next message starts a new one, from where this one stood.
+    fn force_stop(&mut self, id: &str, cx: &mut Context<Self>) {
+        tracing::warn!("{id}: the agent took no notice of a stop; ending its session");
+        self.apply_events(id, vec![AgentEvent::TurnComplete { error: Some("Interrupted".into()) }], cx);
+        if let Some(live) = self.live.get_mut(id) {
+            if let Some(tx) = live.commands.take() {
+                let _ = tx.try_send(Command::Shutdown);
+            }
+            live._events = None;
+            live.permissions.clear();
+            live.lose_background();
+            live.revision += 1;
+        }
+        self.retire_ipc_session(id);
+        self.persist_items(id, cx);
         cx.notify();
     }
 

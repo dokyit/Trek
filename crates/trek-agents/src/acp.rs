@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use trek_core::catalog::{ACP_AGENTS, ModelInfo};
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost, detect};
@@ -58,7 +58,7 @@ fn launch_env(agent: &AgentId, cwd: &Path) -> Vec<(String, String)> {
 struct Agent {
     child: GroupChild,
     rpc: Rpc,
-    lines: Lines<BufReader<ChildStdout>>,
+    lines: crate::ProtocolLines<BufReader<ChildStdout>>,
     stderr: StderrTail,
     name: String,
     bin: PathBuf,
@@ -80,7 +80,7 @@ impl Agent {
         let mut child = crate::spawn_group(&mut command).with_context(|| format!("failed to start {}", bin.display()))?;
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
         let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
-        let lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let lines = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
         Ok(Agent { child, rpc, lines, stderr, name, bin })
     }
 

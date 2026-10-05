@@ -2359,11 +2359,11 @@ impl Render for Composer {
         let preparing = live.is_some_and(|l| l.preparing);
         // Its agent's CLI is being updated: messages wait for the new version.
         let updating = thread.as_ref().filter(|t| ws.agent_updating(&t.agent.key())).map(|t| t.agent.display_name());
-        let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && w.is_missing())?, t.id.clone())));
+        let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && crate::system::lately::worktree_missing(w))?, t.id.clone())));
         // Another thread edits the same folder right now: offer a worktree for the next one.
         let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).map(|t| ws.project_dir(t));
         // The way out is a worktree, for git projects.
-        let crowded_repo = crowded.clone().flatten().filter(|p| p.join(".git").exists());
+        let crowded_repo = crowded.clone().flatten().filter(|p| crate::system::lately::exists(&p.join(".git")));
 
         // Model pill + menu.
         let model_open = self.model_open;
