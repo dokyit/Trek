@@ -6,6 +6,8 @@
 //! # TREK_REMOTE_CODE=K7Q2-9XMV      the pairing code (re-armed after every pairing)
 //! # TREK_REMOTE_ADVERTISE=host:port what the pairing URL points at (default: this Mac's LAN address)
 //! # TREK_REMOTE_DEVICES=path        where paired devices are kept (default: a file in $TMPDIR)
+//! # TREK_REMOTE_PLAIN=1             plain ws:// instead of TLS (the identity is kept beside the
+//! #                                 devices file, so phones stay paired across runs)
 //! ```
 //!
 //! Seven threads across three projects and three agents. "Dark mode for the settings page" keeps
@@ -925,6 +927,11 @@ async fn main() -> std::io::Result<()> {
     config.bind = bind;
     config.advertise = Some(advertise.clone());
     config.devices_path = Some(devices_path.clone());
+    if std::env::var_os("TREK_REMOTE_PLAIN").is_none() {
+        let dir = devices_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
+        config.tls = Some(TlsIdentity::load_or_create(&dir, "Trek Demo Mac").expect("TLS identity"));
+    }
+    let fp = config.tls.as_ref().map(|t| (t.fingerprint.clone(), t.short_fingerprint()));
     let handle = RemoteServer::start(config, Arc::new(host.clone())).await?;
     let _ = host.handle.set(handle.clone());
 
@@ -934,7 +941,14 @@ async fn main() -> std::io::Result<()> {
     println!("  Trek remote demo host on {}", handle.local_addr());
     println!("  Pairing code  {}", offer.code);
     println!("  Pairing URL   {}", offer.url);
-    println!("  Simulator     {}", trek_remote::pairing::pairing_url(&format!("127.0.0.1:{port}"), &offer.code, "Trek Demo Mac", "demo-host-7f3c"));
+    println!(
+        "  Simulator     {}",
+        trek_remote::pairing::pairing_url(&format!("127.0.0.1:{port}"), &offer.code, "Trek Demo Mac", "demo-host-7f3c", fp.as_ref().map(|(f, _)| f.as_str()))
+    );
+    match &fp {
+        Some((full, short)) => println!("  TLS           wss://, fingerprint {short} ({full})"),
+        None => println!("  TLS           off (plain ws://)"),
+    }
     println!("  Devices file  {}", devices_path.display());
     println!("  Paired        {}", handle.devices().len());
     println!();

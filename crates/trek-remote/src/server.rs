@@ -48,6 +48,9 @@ pub struct ServerConfig {
     pub max_message: usize,
     /// How often the server pings phones (a phone silent for three intervals is dropped).
     pub ping_interval: Duration,
+    /// Speak TLS with this certificate (`wss://`), pinned by phones through the pairing QR code.
+    /// `None` is plain `ws://`, for tests and the demo host only.
+    pub tls: Option<crate::tls::TlsIdentity>,
 }
 
 /// The default port.
@@ -66,6 +69,7 @@ impl ServerConfig {
             pairing_ttl: Duration::from_secs(10 * 60),
             max_message: 1 << 20,
             ping_interval: Duration::from_secs(20),
+            tls: None,
         }
     }
 }
@@ -92,6 +96,7 @@ impl RemoteServer {
             Some(path) => DeviceRegistry::load(path.clone())?,
             None => DeviceRegistry::in_memory(),
         };
+        let tls = config.tls.as_ref().map(|t| t.acceptor()).transpose()?;
         let listener = TcpListener::bind(config.bind).await?;
         let local_addr = listener.local_addr()?;
         let (events, _) = broadcast::channel(1024);
@@ -99,6 +104,7 @@ impl RemoteServer {
         let (shutdown, _) = watch::channel(false);
         let inner = Arc::new(Inner {
             config,
+            tls,
             local_addr,
             events,
             notices,
@@ -151,8 +157,9 @@ impl RemoteHandle {
         let config = &self.inner.config;
         let advertise = config.advertise.clone().unwrap_or_else(|| self.inner.local_addr.to_string());
         PairingOffer {
-            url: pairing_url(&advertise, &code, &config.host.name, &config.host.id),
+            url: pairing_url(&advertise, &code, &config.host.name, &config.host.id, config.tls.as_ref().map(|t| t.fingerprint.as_str())),
             expires_at: now_ms() + ttl.as_millis() as i64,
+            fingerprint: config.tls.as_ref().map(|t| t.short_fingerprint()),
             code,
         }
     }
@@ -204,6 +211,8 @@ impl RemoteHandle {
 
 struct Inner {
     config: ServerConfig,
+    /// Made from `config.tls`.
+    tls: Option<tokio_rustls::TlsAcceptor>,
     local_addr: SocketAddr,
     events: broadcast::Sender<HostEvent>,
     notices: broadcast::Sender<ServerNotice>,
@@ -267,7 +276,11 @@ async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, ho
     tracing::info!("trek-remote stopped listening");
 }
 
-type Ws = WebSocketStream<TcpStream>;
+/// A phone's connection under the WebSocket: TLS, or plain TCP for tests and demos.
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
+type Ws = WebSocketStream<Box<dyn Io>>;
 
 /// Resolves once the server is shutting down (or its handle state is gone).
 async fn stopped(shutdown: &mut watch::Receiver<bool>) {
@@ -291,6 +304,20 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
         .max_frame_size(Some(inner.config.max_message));
     // The handshake and the first message share one deadline.
     let deadline = tokio::time::Instant::now() + inner.config.auth_timeout;
+    let stream: Box<dyn Io> = match &inner.tls {
+        Some(acceptor) => match tokio::time::timeout_at(deadline, acceptor.accept(stream)).await {
+            Ok(Ok(tls)) => Box::new(tls),
+            Ok(Err(err)) => {
+                tracing::debug!(%peer, %err, "TLS handshake failed");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!(%peer, "TLS handshake timed out");
+                return;
+            }
+        },
+        None => Box::new(stream),
+    };
     let handshake = tokio_tungstenite::accept_hdr_async_with_config(stream, refuse_browsers, Some(ws_config));
     let mut ws = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(ws)) => ws,

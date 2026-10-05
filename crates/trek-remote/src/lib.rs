@@ -65,8 +65,10 @@ pub mod host;
 pub mod pairing;
 pub mod protocol;
 pub mod server;
+pub mod tls;
 
 pub use host::{ChannelHost, HostError, HostEvent, HostRequest, HostResult, RemoteHost, Reply};
 pub use pairing::{DeviceInfo, DeviceRegistry, PairingError, PairingOffer};
 pub use protocol::*;
 pub use server::{DEFAULT_PORT, RemoteHandle, RemoteServer, ServerConfig, ServerNotice};
+pub use tls::TlsIdentity;

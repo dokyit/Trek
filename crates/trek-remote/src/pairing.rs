@@ -87,8 +87,11 @@ pub struct PairingOffer {
     pub code: String,
     /// When it stops working (unix ms).
     pub expires_at: i64,
-    /// `trek://pair?host=…&code=…&name=…&hid=…`, for the QR code.
+    /// `trek://pair?host=…&code=…&name=…&hid=…&fp=…`, for the QR code.
     pub url: String,
+    /// The certificate's short fingerprint (`ABCD-1234`), to type with the code when there's no
+    /// camera; `None` without TLS.
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -148,15 +151,20 @@ impl Pairing {
     }
 }
 
-/// The QR code's URL: `trek://pair?host=<host:port>&code=<code>&name=<host name>&hid=<host id>`.
-pub fn pairing_url(advertise: &str, code: &str, host_name: &str, host_id: &str) -> String {
-    format!(
+/// The QR code's URL: `trek://pair?host=<host:port>&code=<code>&name=<host name>&hid=<host id>`,
+/// and `&fp=<SHA-256 of the server's certificate>` when it speaks TLS (the phone pins it).
+pub fn pairing_url(advertise: &str, code: &str, host_name: &str, host_id: &str, fingerprint: Option<&str>) -> String {
+    let mut url = format!(
         "trek://pair?host={}&code={}&name={}&hid={}",
         percent_encode(advertise, b":[]"),
         percent_encode(code, b""),
         percent_encode(host_name, b""),
         percent_encode(host_id, b""),
-    )
+    );
+    if let Some(fp) = fingerprint {
+        url.push_str(&format!("&fp={}", percent_encode(fp, b"")));
+    }
+    url
 }
 
 /// Percent-encode everything but RFC 3986 unreserved characters and `keep`.
@@ -489,8 +497,10 @@ mod tests {
 
     #[test]
     fn urls_are_encoded() {
-        let url = pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Tobias\u{2019}s MacBook Pro", "7f3c");
+        let url = pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Tobias\u{2019}s MacBook Pro", "7f3c", None);
         assert_eq!(url, "trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c");
+        let pinned = pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Mac", "7f3c", Some("ab12"));
+        assert!(pinned.ends_with("&hid=7f3c&fp=ab12"), "{pinned}");
         assert_eq!(percent_encode("a&b=c/d?", b""), "a%26b%3Dc%2Fd%3F");
     }
 }
