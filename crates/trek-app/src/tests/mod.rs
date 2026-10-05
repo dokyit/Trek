@@ -16,6 +16,7 @@ mod limits;
 mod orchestrate;
 mod pstack;
 mod readability;
+mod remote;
 mod render;
 mod rewind;
 mod screens;

@@ -161,6 +161,68 @@ pub fn order_back(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 pub fn order_back(_: &Window) {}
 
+/// Liquid glass from the system (macOS 26 and later): an `NSGlassEffectView` under the window's
+/// content, which frosts whatever is behind the window. `on` adds it (once), off removes it.
+/// Returns false where the system has no Liquid Glass; GPUI's blurred background stands in.
+#[cfg(target_os = "macos")]
+pub fn native_glass(window: &Window, on: bool) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSRect;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Some(glass) = AnyClass::get(c"NSGlassEffectView") else { return false };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return false };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return false };
+    // SAFETY: plain AppKit messages on this window's live content view, on the main thread. The
+    // glass view is retained by its superview once added; `alloc`/`init` hand over the one
+    // reference that `addSubview:` then takes (released below).
+    unsafe {
+        let view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return true;
+        }
+        let content: *mut AnyObject = msg_send![ns_window, contentView];
+        if content.is_null() {
+            return true;
+        }
+        let subviews: *mut AnyObject = msg_send![content, subviews];
+        let count: usize = msg_send![subviews, count];
+        let mut existing = vec![];
+        for i in 0..count {
+            let sub: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+            let is_glass: bool = msg_send![sub, isKindOfClass: glass];
+            if is_glass {
+                existing.push(sub);
+            }
+        }
+        match (on, existing.is_empty()) {
+            (true, true) => {
+                let frame: NSRect = msg_send![content, bounds];
+                let g: *mut AnyObject = msg_send![glass, alloc];
+                let g: *mut AnyObject = msg_send![g, initWithFrame: frame];
+                // Width and height follow the window.
+                let _: () = msg_send![g, setAutoresizingMask: 18u64];
+                // Below everything GPUI draws (NSWindowBelow).
+                let _: () = msg_send![content, addSubview: g, positioned: -1i64, relativeTo: std::ptr::null_mut::<AnyObject>()];
+                let _: () = msg_send![g, release];
+            }
+            (false, false) => {
+                for g in existing {
+                    let _: () = msg_send![g, removeFromSuperview];
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn native_glass(_: &Window, _: bool) -> bool {
+    false
+}
+
 /// With `TREK_FORCE_ACTIVE`, a display link's worth of frame requests (60 Hz) for `window` while
 /// macOS hides it, so measurements and screenshots of a window kept behind others
 /// (`TREK_BACKGROUND`) cover drawing too. Every Trek window keeps one for as long as it's open.

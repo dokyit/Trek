@@ -253,6 +253,8 @@ impl Render for ThreadWindow {
                         .border_color(crate::ui::panel_border(glass, cx))
                         .bg(crate::ui::panel_bg(glass, cx))
                         .overflow_hidden()
+                        .relative()
+                        .children(crate::ui::glass_sheen(glass, cx))
                         // Cached as in the main window: the working bar's frames redraw only the bar.
                         .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(StyleRefinement::default().size_full())))
                         .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))

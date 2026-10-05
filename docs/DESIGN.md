@@ -147,13 +147,15 @@ project), with `snoozed_until`, `pinned_at`, `pending_approval_count`, `pending_
 ### Basecamp (the day's recap)
 The sidebar is the inbox; **Basecamp** (Tent row at the top of the sidebar, ⌘K, ⌘⇧H; Esc goes back) is the
 recap of the work behind it, after Synara's Inbox, in Trek's trail language:
-- Header: "Basecamp", the greeting and date, a Today / This week switch, Mark all read.
+- Header: "Basecamp", the greeting and date (for all time: since when), a Today / This week / All time
+  switch, Mark all read. All time runs from the day of the earliest recorded activity.
 - **Ready for review** (left): needs-you threads first, each saying what it waits for (Approval, Question,
   Plan to review, Failed), then finished unread ones, newest first: status icon, title, agent logo, diff
   stat, project. One paused at a usage limit says until when (amber clock), not done and not failed. A
   click opens the thread; Mark all read clears just the unread rows listed.
 - **Today's trek** (right): the recap in sentences with inline project badges and model logos; an
-  **elevation profile** (agent time per hour, or per three hours for the week, as a filled mountain
+  **elevation profile** (agent time per hour, or per three hours for the week; all time by the hour for a
+  day, three hours up to a week, days up to three months, then weeks; as a filled mountain
   silhouette, the summit flagged in ember, the hiker standing at "now", the trail ahead dotted; hover shows a
   stretch's numbers); then quiet tiles between hairlines: best model, worked most on, tokens (with a
   sparkline), agent time and the turns that failed in the range, and what's left of each plan limit.
@@ -234,12 +236,14 @@ Keyboard Shortcuts · Updates · Advanced · About.
   list of the MCP servers, skills and plugins each agent already loads.
 
 ## v5 (request 4)
-- **Liquid glass** (Settings › Appearance › Material, ⌘K "Turn on liquid glass"): the window blurs the desktop
-  behind it (`WindowBackgroundAppearance::Blurred`, a colourless `NSVisualEffectView`) and the chrome lets it
-  through: the sidebar and title bar keep the theme's colour at the chosen tint (Clear 0.4 · Balanced 0.6 ·
-  Frosted 0.8), inset panels more of it (never under 82%, so text stays readable), with a faint rim of light; the composer is a firmer frosted
-  pane. The window root's opaque fill is cleared while glass is on. Off while background art fills the window
-  and while macOS reduces transparency.
+- **Liquid glass** (Settings › Appearance › Material, ⌘K "Turn on liquid glass"): the system's own
+  Liquid Glass (`NSGlassEffectView`, macOS 26) sits under the window's content and frosts the desktop
+  behind it; on older macOS, GPUI's blurred background stands in. The chrome keeps the theme's colour
+  at the **Frost** slider's level (clear 0.2 → frosted 0.95); inset panels keep more of it (60–95%
+  over the system's glass, never under 82% over the lighter fallback blur, so text stays readable),
+  with a rim of light along their top edge and a sheen fading down from it. The window root's opaque
+  fill is cleared while glass is on. Off while background art fills the window and while macOS
+  reduces transparency.
 - **Files in colour.** A file anywhere in the transcript (path chips in answers, tool rows, the live rows of
   the working bar) sits in a chip of its type's colour: a wash of it behind the name, a rim, and the name in a
   shade of it that keeps 4.5:1 on both themes (`file_icon::tint`, tested). Plain files and lockfiles stay
@@ -261,3 +265,6 @@ Keyboard Shortcuts · Updates · Advanced · About.
   ⌘↩), quotes, code, text colour and highlights (`<span style="color: …">`, `<mark>`, rendered by Trek's
   gpui-base patch). Return carries a list on; Return on an empty item ends it. Saved as you type (and on quit); a deleted
   note moves to `notes/Deleted/`.
+- **Phone** (Settings › Phone): Trek on your iPhone. Off by default; on, Trek serves paired phones
+  over TLS pinned to this Mac's certificate, on Wi-Fi or Tailscale. Pairing is a QR code, or the code
+  and the Mac's 16-character fingerprint typed in. See docs/MOBILE.md.

@@ -1,6 +1,7 @@
 //! Settings. A nav column replaces the thread sidebar (as in Codex). Pages are flat sections of
 //! hairline-separated rows: a label and one-line explanation on the left, the control on the right.
 
+mod mobile;
 mod pages;
 
 use crate::palette;
@@ -31,6 +32,7 @@ pub(crate) fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::Shortcuts => Icon::new(crate::assets::Lucide::Keyboard),
         SettingsPage::Agents => Icon::new(IconName::Bot),
         SettingsPage::Tools => Icon::new(crate::assets::Lucide::Plug),
+        SettingsPage::Mobile => Icon::new(crate::assets::Lucide::Smartphone),
         SettingsPage::ApiKeys => Icon::new(crate::assets::Lucide::Lock),
         SettingsPage::LocalModels => Icon::new(IconName::Cpu),
         SettingsPage::Permissions => Icon::new(crate::assets::Lucide::ShieldCheck),
@@ -42,7 +44,7 @@ pub(crate) fn page_icon(p: SettingsPage) -> Icon {
 
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
     ("Project", &[SettingsPage::Project]),
-    ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Snapshots, SettingsPage::Shortcuts]),
+    ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Mobile, SettingsPage::Snapshots, SettingsPage::Shortcuts]),
     ("Agents", &[SettingsPage::Agents, SettingsPage::Skills, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
     ("Workflow", &[SettingsPage::Permissions, SettingsPage::Import]),
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
@@ -70,6 +72,7 @@ pub(crate) fn page_blurb(p: SettingsPage) -> &'static str {
         SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.",
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.",
+        SettingsPage::Mobile => "Keep your threads going from your iPhone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on this Mac.",
         SettingsPage::ApiKeys => "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically.",
         SettingsPage::LocalModels => "Model servers running on this Mac: Ollama, LM Studio, and llama.cpp or MLX. Trek finds them on their usual ports.",
         SettingsPage::Permissions => "How much each agent may do without asking.",
@@ -177,7 +180,18 @@ pub struct SettingsView {
     action_command: Entity<InputState>,
     /// Import page: rules whose left-out sessions are listed.
     left_out_open: HashSet<Skip>,
+    /// Appearance › Material: how frosted liquid glass is, 0 (clear) to 100 (frosted).
+    pub(super) glass_slider: Entity<gpui_kit::component::slider::SliderState>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Liquid glass's tint at frost `percent` (the slider), and back.
+pub(crate) fn tint_at(percent: f32) -> f32 {
+    0.2 + percent.clamp(0., 100.) / 100. * 0.75
+}
+
+pub(crate) fn frost_of(tint: f32) -> f32 {
+    ((tint - 0.2) / 0.75 * 100.).clamp(0., 100.)
 }
 
 impl SettingsView {
@@ -218,6 +232,22 @@ impl SettingsView {
             }
         }));
         let action_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. cargo test"));
+        let frost = frost_of(workspace.read(cx).settings.appearance.glass_tint);
+        let glass_slider = cx.new(|_| gpui_kit::component::slider::SliderState::new().min(0.).max(100.).step(1.).default_value(frost));
+        // The glass follows the slider as it moves; the setting is saved when it's let go.
+        subs.push(cx.subscribe(&glass_slider, |this: &mut Self, _, event: &gpui_kit::component::slider::SliderEvent, cx| {
+            let (gpui_kit::component::slider::SliderEvent::Change(v) | gpui_kit::component::slider::SliderEvent::Release(v)) = event;
+            let gpui_kit::component::slider::SliderValue::Single(percent) = *v else { return };
+            let release = matches!(event, gpui_kit::component::slider::SliderEvent::Release(_));
+            this.workspace.update(cx, |ws, cx| {
+                ws.settings.appearance.glass_tint = tint_at(percent);
+                if release {
+                    ws.save_settings(cx);
+                } else {
+                    cx.notify();
+                }
+            });
+        }));
         subs.push(cx.subscribe_in(&project_name, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
             if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
                 let name = input.read(cx).value().to_string();
@@ -247,6 +277,7 @@ impl SettingsView {
             skill_desc,
             skill_home: trek_core::skills::SkillHome::ClaudeCode,
             left_out_open: HashSet::new(),
+            glass_slider,
             _subscriptions: subs,
         }
     }
@@ -745,6 +776,7 @@ impl SettingsView {
             SettingsPage::Shortcuts => out.extend(self.shortcuts_page(cx)),
             SettingsPage::Agents => out.extend(self.agents_page(cx)),
             SettingsPage::Tools => out.extend(self.tools_page(cx)),
+            SettingsPage::Mobile => out.extend(self.mobile_page(&s, cx)),
             SettingsPage::Skills => out.extend(self.skills_page(cx)),
             SettingsPage::Snapshots => out.extend(self.snapshots_page(&s, cx)),
             SettingsPage::ApiKeys => out.extend(self.api_keys_page(cx)),

@@ -72,7 +72,7 @@ impl TrekWindow {
             p.width = saved_width.max(crate::panels::MIN_PANEL);
             p
         });
-        let palette = cx.new(|cx| CommandPalette::new(workspace.clone(), right_panel.clone(), window, cx));
+        let palette = cx.new(|cx| CommandPalette::new(workspace.clone(), right_panel.clone(), basecamp.clone(), window, cx));
         let title = cx.new(|cx| WindowTitle::new(workspace.clone(), right_panel.clone(), cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
@@ -163,10 +163,12 @@ impl TrekWindow {
                 .detach();
             }
         }
-        // TREK_OPEN_BASECAMP=1 (or =week) opens Basecamp at launch, the same way.
+        // TREK_OPEN_BASECAMP=1 (or =week, =all) opens Basecamp at launch, the same way.
         if let Ok(which) = std::env::var("TREK_OPEN_BASECAMP") {
-            if which.trim() == "week" {
-                basecamp.update(cx, |b, cx| b.set_range(trek_core::basecamp::Range::Week, cx));
+            match which.trim() {
+                "week" => basecamp.update(cx, |b, cx| b.set_range(trek_core::basecamp::Range::Week, cx)),
+                "all" => basecamp.update(cx, |b, cx| b.set_range(trek_core::basecamp::Range::All, cx)),
+                _ => {}
             }
             workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
         }
@@ -792,6 +794,8 @@ impl Render for TrekWindow {
                                     .border_color(crate::ui::panel_border(glass, cx))
                                     .bg(crate::ui::panel_bg(glass, cx))
                                     .overflow_hidden()
+                                    .relative()
+                                    .children(crate::ui::glass_sheen(glass, cx))
                                     .child(content),
                             ),
                     )
@@ -843,6 +847,8 @@ impl Render for TrekWindow {
                                     .border_color(crate::ui::panel_border(glass, cx))
                                     .bg(crate::ui::panel_bg(glass, cx))
                                     .overflow_hidden()
+                                    .relative()
+                                    .children(crate::ui::glass_sheen(glass, cx))
                                     .child(self.right_panel.clone().cached(fill())),
                             ),
                         )
