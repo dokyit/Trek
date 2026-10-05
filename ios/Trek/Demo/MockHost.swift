@@ -92,7 +92,13 @@ final class MockHost: Backend {
         timer = nil
     }
 
-    func send(_ message: ClientMessage, id: String?) {
+    @discardableResult
+    func send(_ message: ClientMessage, id: String?) -> Bool {
+        take(message, id: id)
+        return true
+    }
+
+    private func take(_ message: ClientMessage, id: String?) {
         switch message {
         case .pair, .hello:
             break

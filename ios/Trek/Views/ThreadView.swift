@@ -519,6 +519,11 @@ private struct ComposerArea: View {
     private func send() {
         let text = composer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !composer.photos.isEmpty else { return }
+        // Nothing can go while the Mac is out of reach: what's typed stays in the composer.
+        guard model.connection == .connected else {
+            model.show(AppModel.notConnected, error: true)
+            return
+        }
         let uploads = composer.photos.compactMap(\.upload)
         // `/new` and `/clear` open the new-thread sheet: what follows them is its prompt.
         var prompt = ""

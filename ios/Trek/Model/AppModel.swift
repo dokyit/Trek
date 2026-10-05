@@ -8,7 +8,8 @@ protocol Backend: AnyObject {
     var onMessage: ((ServerMessage) -> Void)? { get set }
     var onState: ((ConnectionState) -> Void)? { get set }
     func start()
-    func send(_ message: ClientMessage, id: String?)
+    /// False when the message couldn't go (no connection to the Mac).
+    @discardableResult func send(_ message: ClientMessage, id: String?) -> Bool
     func stop()
 }
 
@@ -194,7 +195,9 @@ final class AppModel {
         b.onMessage = { [weak self] in self?.handle($0) }
         b.onState = { [weak self] state in
             guard let self else { return }
+            let was = self.connection
             self.connection = state
+            if was == .connected, state != .connected { self.failPending() }
             if state == .connected {
                 // Resubscribe after a reconnect, from where we were.
                 for s in self.stores.values where s.subscribed { self.resubscribe(s) }
@@ -340,8 +343,19 @@ final class AppModel {
         let id = "\(nextRequest)"
         nextRequest += 1
         if let then { replies[id] = then }
-        backend?.send(message, id: id)
+        // Not connected: nothing went, and whoever waits for the answer hears so now.
+        if backend?.send(message, id: id) != true { reply(id, .error(re: id, code: .unknown, message: Self.notConnected)) }
         return id
+    }
+
+    static let notConnected = "Not connected to your Mac."
+
+    /// The connection went: the answers still awaited aren't coming (a request isn't sent again
+    /// by itself, the Mac may have done it already), so what waits on them stops waiting.
+    private func failPending() {
+        let waiting = replies
+        replies.removeAll()
+        for (id, f) in waiting { f(.error(re: id, code: .unknown, message: "The connection to your Mac dropped. Check that it went through before trying again.")) }
     }
 
     /// Failures of an action become a toast; `ok` runs on success.

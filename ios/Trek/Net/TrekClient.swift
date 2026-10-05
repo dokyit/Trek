@@ -132,6 +132,10 @@ final class TrekClient: Backend {
     private var authenticated = false
     private var attempt = 0
     private var pingTimer: Timer?
+    /// When the Mac was last heard from (it answers every ping): silence for two pings means
+    /// the connection is dead in the Mac's direction, though writes to it still go through.
+    private var heard = Date()
+    private static let pingEvery: TimeInterval = 25
     private var generation = 0
 
     init(address: String, auth: Auth, transport: Transport) {
@@ -166,10 +170,12 @@ final class TrekClient: Backend {
         session = nil
     }
 
-    func send(_ message: ClientMessage, id: String?) {
-        guard let task, authenticated || isAuthMessage(message) else { return }
-        guard let data = try? message.encoded(id: id), let text = String(data: data, encoding: .utf8) else { return }
+    @discardableResult
+    func send(_ message: ClientMessage, id: String?) -> Bool {
+        guard let task, authenticated || isAuthMessage(message) else { return false }
+        guard let data = try? message.encoded(id: id), let text = String(data: data, encoding: .utf8) else { return false }
         task.send(.string(text)) { _ in }
+        return true
     }
 
     private func isAuthMessage(_ m: ClientMessage) -> Bool {
@@ -209,7 +215,9 @@ final class TrekClient: Backend {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         let task = session.webSocketTask(with: request)
-        task.maximumMessageSize = 4 << 20
+        // Above anything the Mac sends (it clips an item's text well under this): a frame over
+        // the limit ends the connection, and reconnecting would only meet it again.
+        task.maximumMessageSize = 16 << 20
         self.task = task
         task.resume()
         // Queued until the socket opens, which for TLS is after the pin was checked.
@@ -225,6 +233,7 @@ final class TrekClient: Backend {
         while gen == generation {
             do {
                 let frame = try await task.receive()
+                if gen == generation { heard = Date() }
                 let data: Data
                 switch frame {
                 case .string(let s): data = Data(s.utf8)
@@ -314,9 +323,26 @@ final class TrekClient: Backend {
 
     private func startPings() {
         pingTimer?.invalidate()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.send(.ping, id: nil) }
+        heard = Date()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: Self.pingEvery, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if Date().timeIntervalSince(self.heard) > Self.pingEvery * 2.5 {
+                    self.silent()
+                } else {
+                    self.send(.ping, id: nil)
+                }
+            }
         }
+    }
+
+    /// Nothing has come from the Mac for too long: drop this socket and connect afresh, rather
+    /// than show a connection that no longer brings anything.
+    private func silent() {
+        generation += 1
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        dropped(URLError(.timedOut))
     }
 }
 
