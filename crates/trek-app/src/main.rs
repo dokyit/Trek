@@ -7,6 +7,7 @@ mod attachments;
 mod background_strip;
 mod basecamp;
 mod brand;
+mod changes_card;
 mod command_palette;
 mod composer;
 mod cost;

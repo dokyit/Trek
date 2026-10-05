@@ -158,6 +158,12 @@ impl SettingsView {
                     Self::row("Agent", "New threads start with this agent. Any installed agent is one click away in the composer.", agent_picker, cx),
                     Self::row("Model", "Leave on the agent's default to follow whatever it recommends.", model_picker, cx),
                     Self::row("Reasoning effort", "Higher effort thinks longer before answering and uses more of your plan.", effort_picker, cx),
+                    Self::row(
+                        "Ask agents for a recap",
+                        "An agent that changed things starts its last answer with what's done, what's still to do and what it found. Sessions that start from now on are asked.",
+                        self.switch("ask-recap", s.general.ask_recap, |s, v| s.general.ask_recap = v),
+                        cx,
+                    ),
                 ],
                 cx,
             ),

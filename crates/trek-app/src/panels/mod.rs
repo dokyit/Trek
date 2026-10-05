@@ -124,6 +124,15 @@ impl RightPanel {
         self.after_activate(window, cx);
     }
 
+    /// Open the Git tool on the changes of the turn ending at `end` (by item id) of `thread`,
+    /// `path`'s diff open.
+    pub fn show_turn_diff(&mut self, thread: String, end: String, path: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tool(PanelTool::Git, window, cx);
+        if let Some(Tab { view: View::Git(g), .. }) = self.active_tab() {
+            g.update(cx, |g, cx| g.show_turn(thread, end, path, cx));
+        }
+    }
+
     /// Run a setup command (install / sign in) in a fresh terminal tab, then rescan agents.
     pub fn run_command(&mut self, command: String, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
@@ -162,6 +171,15 @@ impl RightPanel {
     pub(crate) fn git_message(&self, cx: &App) -> Option<String> {
         match self.active_tab().map(|t| &t.view) {
             Some(View::Git(g)) => Some(g.read(cx).message_text(cx)),
+            _ => None,
+        }
+    }
+
+    /// The turn the Git tool shows (its files) and the file selected, while it's the tab on show.
+    #[cfg(test)]
+    pub(crate) fn git_turn(&self, cx: &App) -> Option<(Vec<String>, Option<String>)> {
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Git(g)) => g.read(cx).turn_shown(),
             _ => None,
         }
     }

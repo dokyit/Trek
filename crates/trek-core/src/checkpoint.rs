@@ -208,7 +208,7 @@ impl Repo {
     /// ignored, as `git add -A` sees them. Files git can't take are left out, the same way each
     /// time (a nested repository with no commit yet, an unreadable file), rather than failing it,
     /// and so are untracked files over `UNTRACKED_MAX`.
-    fn tree_now(&self) -> Result<String> {
+    pub fn tree_now(&self) -> Result<String> {
         let index = TempIndex::new();
         // Starting from the user's index keeps its stat data: only files that changed are read.
         if self.index.exists() {
@@ -295,6 +295,23 @@ impl Repo {
             c.change = Change::Nested;
         }
         Ok(changes)
+    }
+
+    /// What changed from checkpoint `from` to `to` (a later checkpoint, or `tree_now`): each file
+    /// with how it changed and the lines added and removed, renames found. Nested repositories
+    /// are left out (their history isn't in the checkpoints).
+    pub fn diff_stat(&self, from: &str, to: &str) -> Result<Vec<crate::changes::FileChange>> {
+        let out = self.run(None, &["diff-tree", "-r", "-z", "-M", "--raw", "--numstat", from, to], None)?;
+        Ok(crate::changes::parse_diff_stat(&out))
+    }
+
+    /// The patch of one file from `from` to `to` (as `diff_stat` takes them); `old` is where a
+    /// renamed file was, so the rename shows as one.
+    pub fn diff_patch(&self, from: &str, to: &str, path: &str, old: Option<&str>) -> Result<String> {
+        let mut args = vec!["diff-tree", "-p", "-M", "--no-color", "--no-ext-diff", from, to, "--"];
+        args.extend(old);
+        args.push(path);
+        self.run(None, &args, None)
     }
 
     /// Put the working tree back as checkpoint `sha` had it: files changed since get their old
@@ -607,6 +624,50 @@ mod tests {
         assert!(repo.changes_since(&undo).unwrap().is_empty());
         // Nothing to put back: nothing kept.
         assert_eq!(repo.restore(&undo, "t1").unwrap(), Restored::default());
+    }
+
+    #[test]
+    fn diff_stat_counts_lines_between_checkpoints_and_against_the_files_now() {
+        use crate::changes::FileStatus;
+        let s = Scratch::new(true);
+        s.write("keep/long.txt", &(1..=20).map(|i| format!("line {i}\n")).collect::<String>());
+        s.git(&["add", "-A"]);
+        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "long"]);
+        let repo = s.repo();
+        let start = repo.snapshot("t", "u1").unwrap();
+        // The turn: an edit, a new file (untracked), a deletion, a rename with a small change,
+        // a binary rewrite; an ignored file doesn't count.
+        s.write("a.txt", "one\ntwo\nthree\n");
+        s.write("src/new.rs", "fn a() {}\nfn b() {}\n");
+        std::fs::remove_file(s.0.join("keep/old.txt")).unwrap();
+        let long = s.read("keep/long.txt").unwrap();
+        std::fs::remove_file(s.0.join("keep/long.txt")).unwrap();
+        s.write("keep/moved.txt", &long.replace("line 20\n", "line twenty\n"));
+        std::fs::write(s.0.join("bin.dat"), [7u8, 0, 7]).unwrap();
+        s.write("build.log", "ignored\n");
+        let now = repo.tree_now().unwrap();
+        let files = repo.diff_stat(&start, &now).unwrap();
+        let got: Vec<(&str, FileStatus, u32, u32, bool)> = files.iter().map(|f| (f.path.as_str(), f.status.clone(), f.added, f.removed, f.binary)).collect();
+        assert_eq!(
+            got,
+            [
+                ("a.txt", FileStatus::Modified, 2, 0, false),
+                ("bin.dat", FileStatus::Modified, 0, 0, true),
+                ("keep/moved.txt", FileStatus::Renamed { from: "keep/long.txt".into() }, 1, 1, false),
+                ("keep/old.txt", FileStatus::Deleted, 0, 1, false),
+                ("src/new.rs", FileStatus::Added, 2, 0, false),
+            ]
+        );
+        // A file's patch, a rename as one.
+        let patch = repo.diff_patch(&start, &now, "keep/moved.txt", Some("keep/long.txt")).unwrap();
+        assert!(patch.contains("rename from keep/long.txt") && patch.contains("-line 20") && patch.contains("+line twenty"), "{patch}");
+        let patch = repo.diff_patch(&start, &now, "src/new.rs", None).unwrap();
+        assert!(patch.contains("+fn b() {}"), "{patch}");
+        // The next turn's checkpoint bounds this one: what came after it doesn't count.
+        let next = repo.snapshot("t", "u2").unwrap();
+        s.write("a.txt", "changed again later\n");
+        assert_eq!(repo.diff_stat(&start, &next).unwrap(), files);
+        assert!(repo.diff_stat(&next, &next).unwrap().is_empty());
     }
 
     #[test]

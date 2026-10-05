@@ -7,6 +7,7 @@ mod agent_updates;
 mod alerts;
 mod background;
 mod basecamp;
+mod changes;
 mod cost;
 mod flows;
 mod harness;

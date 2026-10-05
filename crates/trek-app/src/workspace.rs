@@ -6,12 +6,14 @@ mod orchestrate;
 mod tabs;
 #[cfg(test)]
 pub use tabs::MAX_TABS;
+mod turn_changes;
 mod verification;
 mod worktrees;
 
 pub use agent_updates::Hold;
 pub use limits::Clock;
 pub use orchestrate::{TaskState, waiting_label};
+pub use turn_changes::TurnRange;
 pub use verification::ago;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
@@ -746,6 +748,12 @@ pub enum WorkspaceEvent {
     Transcript { id: String, appended: bool },
     /// Only the output of this thread's background tasks changed (it's read while they run).
     Background { id: String },
+    /// What the turn ending at `end` (its `TurnEnd`, by item id) changed is in, or may have moved
+    /// (`Workspace::load_turn_changes`).
+    TurnChanges { id: String, end: String },
+    /// Show the changes of the turn ending at `end` (by item id) of `thread` in the Git tool,
+    /// with `path`'s diff open (relative to the repository's top folder).
+    ShowTurnDiff { thread: String, end: String, path: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -935,6 +943,8 @@ pub struct Workspace {
     warm_ipc: Option<String>,
     /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
     verify_runs: HashMap<String, verification::VerifyRun>,
+    /// What finished turns changed (`turn_changes`).
+    changes_cache: turn_changes::Cache,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -1148,6 +1158,7 @@ impl Workspace {
             gathering: HashMap::new(),
             warm_ipc: None,
             verify_runs: HashMap::new(),
+            changes_cache: Default::default(),
         };
         this.reload(cx);
         this.start_ipc(cx);
@@ -2633,7 +2644,9 @@ impl Workspace {
         }
         let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
         let told = resume.is_some().then(|| self.store.told_notes(id).ok().flatten()).flatten();
-        let instructions = verification::notes_to_give(self.project_notes(project.as_deref(), &cwd), &thread.agent, resume.is_some(), told.as_deref());
+        // A sub-agent that only advises, and a side chat, change nothing: they aren't asked for a recap.
+        let recaps = !self.advising(id) && thread.side_of.is_none();
+        let instructions = verification::notes_to_give(self.session_notes(project.as_deref(), &cwd, recaps), &thread.agent, resume.is_some(), told.as_deref());
         self.live.entry(id.to_string()).or_default().notes_pending = instructions.clone().filter(|_| !trek_agents::notes_in_system_prompt(&thread.agent));
         let handle = start_session(SessionConfig {
             agent: thread.agent.clone(),
@@ -2694,7 +2707,16 @@ impl Workspace {
 
     fn draft_key(&self, cwd: &std::path::Path) -> WarmKey {
         let p = &self.draft_prefs;
-        (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast, self.project_notes(Some(cwd), cwd))
+        (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast, self.session_notes(Some(cwd), cwd, true))
+    }
+
+    /// What a new session is told besides its messages (`SessionConfig::instructions`): the
+    /// project's notes, and the recap Trek asks for at the end of work while that's on and the
+    /// session `recaps` (it can change things).
+    pub(crate) fn session_notes(&self, project: Option<&std::path::Path>, cwd: &std::path::Path, recaps: bool) -> Option<String> {
+        let recap = (recaps && self.settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
+        let notes: Vec<String> = self.project_notes(project, cwd).into_iter().chain(recap).collect();
+        (!notes.is_empty()).then(|| notes.join("\n\n"))
     }
 
     /// Start the agent before the first message is sent (called when the user begins typing), so
@@ -3226,6 +3248,8 @@ impl Workspace {
         }
         if finished {
             self.turns_finished += 1;
+            // The turn before is counted against the files as they are, or waits on this one.
+            self.forget_turn_changes(id, false, cx);
             self.refresh_git(cx);
             if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()).filter(|c| Some(c) != self.current_cwd().as_ref()) {
                 self.refresh_git_at(cwd, cx);
@@ -3592,6 +3616,8 @@ impl Workspace {
     fn git_done(&mut self, id: &str, job: GitJob, result: anyhow::Result<GitDone>, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(id) else { return };
         live.git_busy = false;
+        // A checkpoint ends the latest turn's count; restored files move it.
+        let files_moved = matches!(job, GitJob::Checkpoint { .. } | GitJob::Restore { .. });
         match (job, result) {
             // Taking one may have pruned the oldest.
             (GitJob::Checkpoint { .. }, Ok(GitDone::Taken)) => live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect(),
@@ -3655,6 +3681,9 @@ impl Workspace {
             (GitJob::Link { checkpoints, .. }, Ok(_)) => live.checkpointed.extend(checkpoints.into_iter().map(|(item, _)| item)),
             (_, Err(e)) => tracing::warn!("git work for {id}: {e:#}"),
             _ => {}
+        }
+        if files_moved {
+            self.forget_turn_changes(id, false, cx);
         }
         self.run_git(id, cx);
     }
@@ -3729,6 +3758,7 @@ impl Workspace {
         }
         live.git_jobs.extend(gone.into_iter().map(|(repo, items)| GitJob::Forget { repo, items }));
         let mark = live.mark.clone();
+        self.forget_turn_changes(id, true, cx);
         self.persist_items(id, cx);
         let same_session = matches!(reopen, Some(Reopen::Native { fork: false, .. }));
         if let Some(old) = thread.native_id.as_deref().filter(|_| !same_session) {

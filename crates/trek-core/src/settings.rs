@@ -289,6 +289,9 @@ pub struct General {
     pub favorite_models: Vec<String>,
     /// What a thread does when its agent hits a usage limit.
     pub on_usage_limit: OnUsageLimit,
+    /// Ask agents to start an answer that ends work with a recap: Done, Still to do, Found
+    /// (`changes::RECAP`).
+    pub ask_recap: bool,
 }
 
 impl Default for General {
@@ -304,6 +307,7 @@ impl Default for General {
             prevent_sleep_while_running: true,
             favorite_models: vec![],
             on_usage_limit: OnUsageLimit::Ask,
+            ask_recap: true,
         }
     }
 }

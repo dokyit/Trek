@@ -5,8 +5,8 @@
 //! blurred, as macOS would show the desktop. Run it with `TREK_FORCE_ACTIVE=1` so a window kept
 //! behind others still draws.
 //!
-//! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|first`,
-//! `send <prompt>`, `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled`
+//! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|project:<path>|first`,
+//! `send <prompt>`, `diff` (the latest turn's changes in the Git tool), `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled`
 //! (fold or open settled history), `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools`,
 //! `range today|week|all` (Basecamp's), `wait <ms>`, `shot <name>`.
 
@@ -99,6 +99,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) {
                 ws.navigate(Route::Thread(id), cx)
             }
         }
+        ("route", other) if other.starts_with("project:") => ws.navigate(Route::Draft { project: Some(PathBuf::from(&other["project:".len()..])) }, cx),
         ("route", other) if other.starts_with("thread:") => ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx),
         ("send", text) => ws.send(text.to_string(), vec![], cx),
         ("push", "on") => ws.set_push(true, cx),
@@ -116,6 +117,17 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) {
             }
         }
         ("settled", _) => ws.settled_open = !ws.settled_open,
+        ("diff", _) => {
+            // The latest turn's changes on screen, in the Git tool.
+            let end = ws.current_thread().map(|t| t.id.clone()).and_then(|id| {
+                let items = &ws.live.get(&id)?.items;
+                let ix = items.iter().rposition(|i| matches!(i, trek_core::store::Item::TurnEnd { .. }))?;
+                Some((id, items.id_at(ix)?.to_string()))
+            });
+            if let Some((thread, end)) = end {
+                cx.emit(crate::workspace::WorkspaceEvent::ShowTurnDiff { thread, end, path: None });
+            }
+        }
         ("new", _) => ws.new_thread(cx),
         ("glass", on) => {
             ws.settings.appearance.glass = on == "on";
