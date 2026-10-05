@@ -12,7 +12,9 @@
 //!
 //! Seven threads across three projects and three agents. "Dark mode for the settings page" keeps
 //! working in the background (tools, streaming text, sometimes an approval); sends get an echoing
-//! turn; answers resolve their cards and continue the turn; interrupts stop it.
+//! turn; answers resolve their cards and continue the turn; interrupts stop it. "Harden the
+//! request parser" is 2,500 items long, for opening at its end (`subscribe` with a `limit`) and
+//! paging back (`transcript_before`). Turns can be undone, retried, forked and rewound.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -464,7 +466,7 @@ impl RemoteHost for DemoHost {
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
         let st = self.lock();
         let log = st.logs.get(thread_id).ok_or_else(|| HostError::not_found(format!("No thread {thread_id}")))?;
-        Ok(Transcript { seq: log.seq, items: log.items.clone() })
+        Ok(Transcript { seq: log.seq, items: log.items.clone(), ..Default::default() })
     }
 
     async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {
@@ -554,6 +556,72 @@ impl RemoteHost for DemoHost {
         self.add(&id, ItemBody::User { text: req.text.clone(), images: 0 });
         tokio::spawn(self.clone().echo_turn(id.clone(), req.text));
         Ok(id)
+    }
+
+    async fn turn_action(&self, req: TurnActionRequest) -> HostResult<TurnActionDone> {
+        let thread = self.thread(&req.thread_id).ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
+        let items = self.lock().logs.get(&req.thread_id).map(|l| l.items.clone()).unwrap_or_default();
+        let pos = items.iter().position(|i| i.id == req.item_id).ok_or_else(|| HostError::not_found("No such item"))?;
+        let busy = matches!(thread.run_state, RunState::Working | RunState::NeedsYou);
+        let ends_turn = matches!(items[pos].body, ItemBody::TurnEnd { .. } | ItemBody::Error { .. } | ItemBody::Limit { .. });
+        // The message that started the turn ending at `pos`.
+        let start = || {
+            let from = items[..pos].iter().rposition(|i| matches!(i.body, ItemBody::TurnEnd { .. } | ItemBody::Error { .. } | ItemBody::Limit { .. })).map_or(0, |b| b + 1);
+            items[from..pos].iter().position(|i| matches!(i.body, ItemBody::User { .. })).map(|p| from + p)
+        };
+        let text_at = |at: usize| match &items[at].body {
+            ItemBody::User { text, .. } => text.clone(),
+            _ => String::new(),
+        };
+        let (cut, text) = match req.action {
+            TurnAction::Fork => {
+                let (keep, text) = match &items[pos].body {
+                    ItemBody::User { text, .. } => (pos, Some(text.clone())),
+                    _ if ends_turn => (pos + 1, None),
+                    _ => return Err(HostError::bad_request("Fork from one of your messages or the end of a turn")),
+                };
+                let id = self.new_id("t-");
+                let fork = ThreadSummary { id: id.clone(), title: format!("{} (fork)", thread.title), run_state: RunState::Idle, needs: None, updated_at: now_ms(), ..thread };
+                {
+                    let mut st = self.lock();
+                    let kept: Vec<Item> = items[..keep].iter().filter(|i| !i.body.is_request()).cloned().collect();
+                    st.logs.insert(id.clone(), Log { seq: kept.iter().map(|i| i.seq).max().unwrap_or(0), items: kept });
+                    st.threads.push(fork.clone());
+                }
+                self.push(HostEvent::Thread(fork));
+                return Ok(TurnActionDone { thread_id: Some(id), text });
+            }
+            TurnAction::Rewind => {
+                if !matches!(items[pos].body, ItemBody::User { .. }) {
+                    return Err(HostError::bad_request("Only your own messages can be rewound to"));
+                }
+                if busy {
+                    return Err(HostError::bad_request("Stop the running turn to rewind"));
+                }
+                (pos, text_at(pos))
+            }
+            TurnAction::Undo | TurnAction::Retry => {
+                if !ends_turn {
+                    return Err(HostError::bad_request("That item doesn't end a turn"));
+                }
+                if busy {
+                    let what = if req.action == TurnAction::Undo { "undo" } else { "retry" };
+                    return Err(HostError::bad_request(format!("Stop the running turn to {what}")));
+                }
+                let at = start().ok_or_else(|| HostError::bad_request("This turn didn't start from a message of yours"))?;
+                (at, text_at(at))
+            }
+        };
+        if let Some(log) = self.lock().logs.get_mut(&req.thread_id) {
+            log.items.truncate(cut);
+        }
+        self.push(HostEvent::TranscriptReset(req.thread_id.clone()));
+        if req.action == TurnAction::Retry {
+            self.add(&req.thread_id, ItemBody::User { text: text.clone(), images: 0 });
+            tokio::spawn(self.clone().echo_turn(req.thread_id, text));
+            return Ok(TurnActionDone::default());
+        }
+        Ok(TurnActionDone { thread_id: None, text: Some(text) })
     }
 
     async fn answer(&self, req: AnswerRequest) -> HostResult<()> {
@@ -1219,6 +1287,20 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
             ItemBody::Error { text: "Interrupted".into() },
         ],
     });
+
+    // A long one (2,500 items), for opening at the end and paging back.
+    let t = summary("t-history", "Harden the request parser", &api, claude, opus, RunState::Idle, Section::Settled, 60 * 24);
+    let mut items = Vec::new();
+    for n in 1..=500 {
+        items.push(user(&format!("Step {n}: make `parse_header` reject case {n} with a typed error")));
+        items.push(tool("Read", "src/parser.rs", ToolStatus::Done, "fn parse_header(line: &str) -> Result<Header> { … }", None));
+        items.push(tool("Edit", "src/parser.rs", ToolStatus::Done, "Applied 1 edit", Some((3 + n % 7, n % 3))));
+        items.push(assistant(&format!(
+            "### Step {n}\n\n`parse_header` now returns `ParseError::BadHeader` for case {n}:\n\n```rust\nErr(ParseError::BadHeader) => reply(400, \"bad header ({n})\"),\n```\n\n| Case | Before | After |\n| --- | --- | --- |\n| {n} | panic | 400 |"
+        )));
+        items.push(ItemBody::TurnEnd { took_secs: 20 + n % 40 });
+    }
+    seeds.push(Seed { thread: t, items });
 
     (vec![api, web, infra], seeds)
 }

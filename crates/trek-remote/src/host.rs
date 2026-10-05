@@ -9,8 +9,8 @@ use tokio::sync::oneshot;
 use crate::protocol::{
     AnswerRequest, Basecamp, BasecampRange, CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest,
     GitStatus, GitSwitchRequest, GitTarget, Item, MacSettings, NewThreadRequest, Note, NoteSummary, Open, PrefsRequest,
-    SaveNoteRequest, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, Usage,
-    WorktreeRemoveRequest,
+    SaveNoteRequest, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
+    TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
 
 pub type HostResult<T> = Result<T, HostError>;
@@ -158,6 +158,33 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = change;
         unsupported("change its settings")
     }
+    /// `transcript` for a phone that has seen up to `after_seq` and wants at most the last
+    /// `limit` items of a full one. A host may serve just that (the server cuts it to fit either
+    /// way): only items newer than `after_seq` when `base <= after_seq <= seq`, else the last
+    /// `limit` items with `more` set when it left any out. By default, the whole transcript.
+    fn transcript_for(&self, thread_id: &str, after_seq: Option<u64>, limit: Option<u32>) -> impl Future<Output = HostResult<Transcript>> + Send {
+        let _ = (after_seq, limit);
+        self.transcript(thread_id)
+    }
+    /// The items just before item `before` (at most `limit`, already capped at `MAX_PAGE`). By
+    /// default cut from the whole transcript.
+    fn transcript_before(&self, thread_id: &str, before: &str, limit: u32) -> impl Future<Output = HostResult<TranscriptPage>> + Send {
+        async move {
+            let transcript = self.transcript(thread_id).await?;
+            transcript.page_before(before, limit).ok_or_else(|| HostError::not_found("No such item"))
+        }
+    }
+    /// Undo, retry, fork or rewind a turn, as the Mac's buttons do.
+    fn turn_action(&self, req: TurnActionRequest) -> impl Future<Output = HostResult<TurnActionDone>> + Send {
+        let _ = req;
+        unsupported("undo, retry or fork turns")
+    }
+    /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
+    /// the host can stop following its transcript. A `transcript` call for it after this starts
+    /// following it again. Called as it happens, in order with the calls that follow.
+    fn unwatch(&self, thread_id: &str) {
+        let _ = thread_id;
+    }
 }
 
 fn unsupported<T>(what: &str) -> std::future::Ready<HostResult<T>> {
@@ -192,7 +219,12 @@ pub type Reply<T> = oneshot::Sender<HostResult<T>>;
 #[derive(Debug)]
 pub enum HostRequest {
     Snapshot { reply: Reply<Snapshot> },
-    Transcript { thread_id: String, reply: Reply<Transcript> },
+    /// See [`RemoteHost::transcript_for`].
+    Transcript { thread_id: String, after_seq: Option<u64>, limit: Option<u32>, reply: Reply<Transcript> },
+    TranscriptBefore { thread_id: String, before: String, limit: u32, reply: Reply<TranscriptPage> },
+    TurnAction { req: TurnActionRequest, reply: Reply<TurnActionDone> },
+    /// No phone has the thread open any more (nothing to reply).
+    Unwatch { thread_id: String },
     Send { req: SendRequest, reply: Reply<Option<Open>> },
     NewThread { req: NewThreadRequest, reply: Reply<String> },
     Answer { req: AnswerRequest, reply: Reply<()> },
@@ -255,8 +287,26 @@ impl RemoteHost for ChannelHost {
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
+        self.transcript_for(thread_id, None, None).await
+    }
+
+    async fn transcript_for(&self, thread_id: &str, after_seq: Option<u64>, limit: Option<u32>) -> HostResult<Transcript> {
         let thread_id = thread_id.to_string();
-        self.call(|reply| HostRequest::Transcript { thread_id, reply }).await
+        self.call(|reply| HostRequest::Transcript { thread_id, after_seq, limit, reply }).await
+    }
+
+    async fn transcript_before(&self, thread_id: &str, before: &str, limit: u32) -> HostResult<TranscriptPage> {
+        let (thread_id, before) = (thread_id.to_string(), before.to_string());
+        self.call(|reply| HostRequest::TranscriptBefore { thread_id, before, limit, reply }).await
+    }
+
+    async fn turn_action(&self, req: TurnActionRequest) -> HostResult<TurnActionDone> {
+        self.call(|reply| HostRequest::TurnAction { req, reply }).await
+    }
+
+    fn unwatch(&self, thread_id: &str) {
+        // Unbounded: queued at once, ahead of any request made after it.
+        let _ = self.tx.try_send(HostRequest::Unwatch { thread_id: thread_id.to_string() });
     }
 
     async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {

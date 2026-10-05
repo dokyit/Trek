@@ -79,9 +79,19 @@ pub enum ClientMessage {
         thread_id: String,
         #[serde(default)]
         after_seq: Option<u64>,
+        /// A full transcript (`reset`) holds only the last `limit` items (`i…`), with the cards
+        /// that follow them (`c…`) and every open request (`r…`); `more` says earlier ones were
+        /// left out (`transcript_before` pages them in).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
     },
     /// Stop receiving a thread's transcript.
     Unsubscribe { thread_id: String },
+    /// The items just before `before` (an item id, `i340`), at most `limit` of them (the Mac
+    /// caps it at [`MAX_PAGE`]); answered with `transcript_page`.
+    TranscriptBefore { thread_id: String, before: String, limit: u32 },
+    /// Undo, retry, fork or rewind, as a turn's footer and a message's actions do on the Mac.
+    TurnAction(TurnActionRequest),
     /// A follow-up message to a thread.
     Send(SendRequest),
     /// Start a new thread.
@@ -149,6 +159,8 @@ impl ClientMessage {
             Self::Hello { .. } => "hello",
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
+            Self::TranscriptBefore { .. } => "transcript_before",
+            Self::TurnAction(_) => "turn_action",
             Self::Send(_) => "send",
             Self::NewThread(_) => "new_thread",
             Self::Answer(_) => "answer",
@@ -193,8 +205,56 @@ impl ClientMessage {
                 | Self::GitBranches(_)
                 | Self::Commands { .. }
                 | Self::Settings
+                | Self::TranscriptBefore { .. }
         )
     }
+}
+
+/// The most items one `transcript_before` returns.
+pub const MAX_PAGE: u32 = 500;
+
+/// `turn_action`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnActionRequest {
+    pub thread_id: String,
+    /// For `undo`, `retry` and `fork`: the item that ends the turn (its `turn_end`; a turn that
+    /// failed, hit a limit or was interrupted ends with that item instead). For `rewind`, and a
+    /// `fork` from just before a message: one of the user's messages (`user`).
+    pub item_id: String,
+    pub action: TurnAction,
+    /// `retry` with this model (one of the thread's agent's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Put the files back as they were when the message was sent (when Trek has them).
+    #[serde(default = "yes")]
+    pub restore_files: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnAction {
+    /// Take back the turn (and everything after it); its message comes back in `ack.text`.
+    Undo,
+    /// Take back the turn and send its message again (with `model`, if given).
+    Retry,
+    /// A new thread with the conversation up to the end of the turn, or up to just before the
+    /// message; `ack.thread_id` is the new thread (and `ack.text` the message, for a message).
+    Fork,
+    /// Take back the message and everything after it; it comes back in `ack.text`.
+    Rewind,
+}
+
+/// What a `turn_action` did, for its `ack`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TurnActionDone {
+    /// The new thread, for a fork.
+    pub thread_id: Option<String>,
+    /// The message taken back (for the phone's composer).
+    pub text: Option<String>,
 }
 
 /// `send`: a follow-up to a thread.
@@ -490,6 +550,16 @@ pub enum ServerMessage {
         reset: bool,
         seq: u64,
         items: Vec<Item>,
+        /// Earlier items were left out (a `subscribe` with a `limit`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        more: bool,
+    },
+    /// The reply to `transcript_before`: the items just before the one asked about, in order.
+    TranscriptPage {
+        thread_id: String,
+        items: Vec<Item>,
+        /// Still earlier ones exist.
+        more: bool,
     },
     /// Upsert of one transcript item (by `id`).
     Item { thread_id: String, item: Item },
@@ -504,6 +574,10 @@ pub enum ServerMessage {
         /// new-thread sheet (the Mac's own screen stays where it is).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         open: Option<Open>,
+        /// Set for `turn_action` when a message was taken back (`undo`, `rewind`, a `fork` from
+        /// a message): its text, for the phone's composer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// The reply to `ping`.
     Pong,
@@ -868,11 +942,64 @@ pub enum Section {
 // Transcripts
 // ---------------------------------------------------------------------------------------------
 
-/// A thread's transcript as the host serves it: every item, and the highest seq handed out so far.
+/// A thread's transcript as the host serves it: its items, and the highest seq handed out so far.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Transcript {
     pub seq: u64,
     pub items: Vec<Item>,
+    /// Phones that saw a seq below this can't be brought up to date by what changed since: they
+    /// get it all again (items went away, or numbering started over). 0: any seq will do.
+    #[serde(default)]
+    pub base: u64,
+    /// The host left out earlier items (it served a `limit` itself).
+    #[serde(default)]
+    pub more: bool,
+}
+
+/// Items just before one, as `transcript_before` asks.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TranscriptPage {
+    pub items: Vec<Item>,
+    /// Still earlier ones exist.
+    pub more: bool,
+}
+
+impl Transcript {
+    /// The page of up to `limit` items just before the item `before`, from a whole transcript:
+    /// open requests aside, and a turn's changed files counted with the item they follow. `None`
+    /// when there's no such item.
+    pub fn page_before(&self, before: &str, limit: u32) -> Option<TranscriptPage> {
+        let items: Vec<&Item> = self.items.iter().filter(|i| !i.body.is_request()).collect();
+        let end = items.iter().position(|i| i.id == before)?;
+        let limit = limit.min(MAX_PAGE);
+        let (mut kept, mut start) = (0, end);
+        for (ix, item) in items[..end].iter().enumerate().rev() {
+            if kept == limit {
+                break;
+            }
+            if !item.body.is_attached() {
+                kept += 1;
+            }
+            start = ix;
+        }
+        // Files whose turn end is on the next page go with it.
+        while start < end && items[start].body.is_attached() {
+            start += 1;
+        }
+        Some(TranscriptPage { items: items[start..end].iter().map(|i| (*i).clone()).collect(), more: start > 0 })
+    }
+}
+
+impl ItemBody {
+    /// An approval, question or plan card (an `r…` item).
+    pub fn is_request(&self) -> bool {
+        matches!(self, Self::Approval { .. } | Self::Question { .. } | Self::Plan { .. })
+    }
+
+    /// What follows another item rather than standing on its own: a turn's changed files.
+    pub fn is_attached(&self) -> bool {
+        matches!(self, Self::Changes { .. })
+    }
 }
 
 /// One transcript item. `id` is stable; `seq` is per thread and grows on every update.

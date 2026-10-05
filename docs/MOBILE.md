@@ -280,8 +280,14 @@ Phone → Mac:
 
 ```json
 {"type":"subscribe","id":"7","thread_id":"01J…","after_seq":null}
+{"type":"subscribe","id":"7","thread_id":"01J…","after_seq":null,"limit":200}
 {"type":"unsubscribe","thread_id":"01J…"}
 ```
+
+`limit` (optional) is for long threads: a full transcript (`reset: true`) then holds only the last
+`limit` items (`i…`), each turn's changed files after its end (`c…`, not counted), and every open
+request (`r…`, always), with `"more":true` when earlier items were left out. Replies to an
+`after_seq` the Mac can serve aren't limited (and have no `more`).
 
 Mac → phone, the reply (`reset: true` replaces the phone's copy; `false` appends to it; the Mac
 answers with `reset: true` whenever it can't serve `after_seq`, e.g. after a rewind):
@@ -299,6 +305,24 @@ streaming text growing, a tool finishing, an approval resolving):
 ```
 
 `transcript_reset` tells the phone to `subscribe` again (the thread was rewound or rewritten).
+
+Earlier items come in pages, oldest last-asked first; a read, so it never waits behind an action:
+
+```json
+{"type":"transcript_before","id":"8","thread_id":"01J…","before":"i340","limit":200}
+{"type":"transcript_page","re":"8","thread_id":"01J…","items":[ …i140…i339, with their c… items… ],"more":true}
+```
+
+`before` is an item id (`i<n>`, or `c<n>`: up to and with `i<n>`); the page holds the `limit` (at
+most 500) items just before it, in order, with their turns' changed files, and `more` says whether
+still earlier ones exist. Unknown ids answer `not_found`. Items in a page are as they are now, with
+the seq they were last sent with. The Mac only follows items some phone was sent: an `item` may
+still arrive for an id earlier than the phone's first (another phone paged further back); a phone
+that doesn't hold it can drop it (paging it in brings it as it is).
+
+`seq`s carry on across subscriptions, also after the last phone let go of the thread: re-subscribe
+with `after_seq` to get only what changed since. They start at the time the Mac first served the
+thread (in µs), so a seq from before Trek restarted gets the transcript whole.
 
 Every item has `id` (stable, Trek's item id), `seq` (per-thread, increasing; an update gets a new,
 higher seq), `at` (ms or null) and `kind`:
@@ -364,6 +388,28 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
   `thread` message. `model` null = the project's or agent's default. `worktree` is a request; a
   project that isn't a git repo runs locally.
 - `decision`: `allow` · `allow_for_session` · `deny`.
+- `turn_action`: what a turn's footer and a message's actions do on the Mac, after its
+  confirmation:
+
+  ```json
+  {"type":"turn_action","id":"16","thread_id":"01J…","item_id":"i412","action":"undo","restore_files":true}
+  {"type":"turn_action","id":"17","thread_id":"01J…","item_id":"i412","action":"retry","model":"gpt-6"}
+  {"type":"turn_action","id":"18","thread_id":"01J…","item_id":"i412","action":"fork"}
+  {"type":"turn_action","id":"19","thread_id":"01J…","item_id":"i405","action":"rewind"}
+  ```
+
+  `undo` · `retry` (optionally with another of the agent's `model`s) · `fork` take the item that
+  ends a turn (its `turn_end`; a turn that failed, hit a limit or was interrupted ends with that
+  `error`/`limit`/`notice` instead). `rewind` takes one of the user's messages (`user`) and goes
+  back to just before it; `fork` of a message forks from just before it, as the message's own fork
+  button does. `restore_files` (default `true`) also puts the files back as they were when the
+  message was sent, when Trek has a checkpoint for it. Acks: `undo` and `rewind` carry the message
+  taken back, for the composer (that's "Edit"): `{"type":"ack","re":"16","text":"Fix the parser"}`;
+  `fork` the new thread, `{"type":"ack","re":"18","thread_id":"01K…"}` (and `text`, from a
+  message); `retry` a plain ack. The Mac's screen doesn't move. Refused, with the Mac's words, as
+  `bad_request`: while a turn runs ("Stop the running turn to undo" / "…to retry" / "…to rewind"),
+  a turn no message of the user's started ("This turn didn't start from a message of yours"), an
+  item the action doesn't take; `not_found` for an unknown thread, item or model.
 - `ping` → `{"type":"pong","re":"15"}`. The Mac also sends WebSocket pings every 20 s.
 
 ### Everything else the Mac has (phone → Mac, answered with a reply of its own)
@@ -502,9 +548,19 @@ pub trait RemoteHost: Send + Sync + 'static {
     // Defaults answer "This Mac can't …" (bad_request):
     fn set_prefs, thread_action, usage, basecamp, notes, note, create_note, save_note, delete_note,
        git_status, git_diff, git_commit, git_push, git_branches, git_switch, worktree_merge,
-       worktree_remove, commands, settings, set_settings
+       worktree_remove, commands, settings, set_settings, turn_action
+    // Defaults built on `transcript`:
+    fn transcript_for(&self, thread_id, after_seq, limit)   // what `subscribe` calls
+    fn transcript_before(&self, thread_id, before, limit)   // a page, cut from the whole transcript
+    // Called (not awaited) when a thread's last subscriber, across every phone, unsubscribes or
+    // disconnects: the host can stop following it. In order with the calls after it.
+    fn unwatch(&self, thread_id: &str) {}
 }
 ```
+
+`transcript_for` may serve just what the phone needs: items newer than `after_seq` when
+`Transcript::base <= after_seq <= seq`, else the last `limit` items with `more` set. The server
+cuts what it gets to the same shape either way, so a host can return everything.
 
 (`send` returns `Option<Open>`: a screen the phone opens, for `/new`.) A new message type needs
 its name in `server.rs`'s `CLIENT_TYPES` too: anything not listed there is refused as unknown
@@ -589,7 +645,26 @@ instead and queue).
   transcript shorter than what was sent (a rewind) sends `transcript_reset`. Answered requests are
   re-sent with state `resolved`.
 - **Changes** go out every 250 ms while a phone is connected: thread rows that changed (and
-  removals), and the items of transcripts a phone has open.
+  removals), and the items of transcripts a phone has open. A tick costs what changed, not how
+  long the thread is: a thread whose transcript didn't move costs nothing, and one that did is
+  looked at from the first item edited on (`Transcript::take_edited_from`, which every change goes
+  through; plus the item streaming before and now, and everything if the thread's folder moved).
+  Requests are compared when the revision moved or they differ; turns' changed files are counted
+  for turns that just ended, when a count comes in (`WorkspaceEvent::TurnChanges`), or while one
+  waits. Threads no phone has open are dropped from the tick (`unwatch`) and kept as last sent, so
+  a phone opening one again carries on (seq, and a delta for its `after_seq`). Items no phone was
+  sent (left out by a `limit`) aren't followed until a page asks for them.
+- **Turn actions** (`turn_action`) call the same `Workspace` methods as the buttons:
+  `undo_turn`, `retry`, `rewind` (files restored when asked and `restorable_checkpoint` has one),
+  and `fork_quietly`, `fork_thread` without opening the fork.
+- **Timing** (a 3000-item thread, test profile, `tests::remote::timing_of_a_long_thread`): a
+  subscribe with `limit: 200` takes 0.2 ms (the whole transcript 13 ms), a page of 200 0.2 ms, a
+  re-subscribe with nothing new 5 µs; a tick 2–8 µs idle and 4 µs while streaming (before: 2 ms
+  re-subscribe, 0.35 ms idle tick, 1.6 ms streaming tick, and every thread ever opened stayed in
+  the tick).
+- **Mock history**: `mock:history <n>` (with `TREK_MOCK_AGENT=1`) plays `n` rounds of five items at
+  once (a thought, a read, a search, a command, an edit with its lines, an answer with code and a
+  table): `mock:history 500` makes a 2500-item thread for trying all this end to end.
 - **Trek's own slash commands** run from the phone as typed on the Mac (`remote/commands.rs`):
   `/permissions` and its aliases through `set_hand_holding`, which keeps Full access behind the
   unlock; `/consult` and `/restate` rewritten as the composer does; `/new` and `/clear` answered
@@ -607,6 +682,8 @@ instead and queue).
 - **Changed files per turn** go out as `changes` items from one function, `turn_changes`, which
   answers `None` until the Mac works them out (`Workspace::turn_changes`, another branch: marked
   `TODO(merge)`).
-- `cargo run -p trek-remote --example probe -- '<trek://pair link>' [--thread <id> [--send "…"]
-  [--answer allow|deny]]` is a phone in a terminal, for testing a running Trek. It sends only to a
+- `cargo run -p trek-remote --example probe -- '<trek://pair link>' [--thread <id> [--limit 200]
+  [--before first] [--send "…"] [--answer allow|deny]]` is a phone in a terminal, for testing a
+  running Trek (`--limit` and `--before` open a thread at its end and page back to its start,
+  timing each). It sends only to a
   thread named explicitly: a message reaches a real agent in that thread's folder.
