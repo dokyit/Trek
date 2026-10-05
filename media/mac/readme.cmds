@@ -1,0 +1,42 @@
+# media/mac/readme.cmds — the README/doc set: hero stills and one working-turn clip.
+# Run: script/capture.sh mac/readme     (SIZE=1280x820 FPS=15 TREK_SHOT_UNDER=assets/backgrounds/night.png)
+# Ordering rule of thumb: `wait idle` only passes once every open turn has ended — so shots that
+# leave a permission or plan card up must come AFTER any `wait idle` you still need.
+#
+# The mock agent answers these prompts deterministically: "tools", "permission", "plan",
+# "mock:stream <n>s", "mock:long <n>s", "subagents <n>s", "question", "mock:consult", "error".
+# `pace 0` plays scripts without delays (fast stills); `pace 1` is demo speed (for film).
+
+# A working turn, filmed: the streaming answer is the clip.
+theme night
+route draft
+record clip-stream 9000 15
+send mock:stream 8s
+wait idle 30000
+record wait
+shot 01-working-night
+
+# The same thread a moment later, settled.
+wait idle 5000
+shot 02-finished-night
+
+# Cards that wait on a person — shot them last, they keep their turns open.
+route draft
+send permission
+wait permission 20000
+shot 03-approval-night
+
+route draft
+send plan
+wait plan 20000
+shot 04-plan-night
+
+# The lighter theme and the wider app.
+theme paper
+route basecamp
+shot 05-basecamp-paper
+tools on
+wait 600
+shot 06-tools-paper
+
+quit

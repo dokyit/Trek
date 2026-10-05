@@ -1,0 +1,13 @@
+# Smoke suite — exercises the protocol end to end; not marketing art.
+theme night
+route draft
+record smoke-clip 4000 5
+send mock:stream 4s
+wait idle 20000
+record wait
+shot smoke-working
+route draft
+send permission
+wait permission 20000
+shot smoke-permission
+quit
