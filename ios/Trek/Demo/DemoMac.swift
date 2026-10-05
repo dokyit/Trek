@@ -288,7 +288,7 @@ enum DemoMac {
                     push: PushSettings(enabled: true, when: .away, server: "https://ntfy.sh", topic: "trek-q7Hx2VbK9pL3mN8RtY4wZ6cE1fJ5aD0s",
                                        topicUrl: "https://ntfy.sh/trek-q7Hx2VbK9pL3mN8RtY4wZ6cE1fJ5aD0s",
                                        subscribeUrl: "ntfy://ntfy.sh/trek-q7Hx2VbK9pL3mN8RtY4wZ6cE1fJ5aD0s"),
-                    autoSettleDays: 3, theme: .system, fullAccess: true)
+                    autoSettleDays: 3, theme: .system, fullAccess: true, sessionApprovals: false)
     }
 
     /// ntfy's links for a topic, as the Mac makes them.

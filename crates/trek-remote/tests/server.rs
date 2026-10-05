@@ -1136,3 +1136,29 @@ async fn channel_host_round_trip() {
     drop(requests);
     assert_eq!(host.snapshot().await.unwrap_err().code, ErrorCode::HostError);
 }
+
+/// "Tailscale only" against a real tailnet: run with the Mac on Tailscale and its 100.x address
+/// in TAILSCALE_ADDR (`TAILSCALE_ADDR=100.x.y.z cargo test -p trek-remote --test server
+/// tailscale_only -- --ignored`). Skips quietly with no tailnet.
+#[tokio::test]
+#[ignore = "needs a live tailnet: set TAILSCALE_ADDR to this Mac's 100.x address"]
+async fn serving_on_the_tailscale_address_only_answers_there() {
+    let Ok(ip) = std::env::var("TAILSCALE_ADDR").map(|s| s.parse::<std::net::IpAddr>().unwrap()) else {
+        return;
+    };
+    let mut config = ServerConfig::new(host_info());
+    config.bind = std::net::SocketAddr::from((ip, 0));
+    let (handle, _host) = start_with(|c| *c = config).await;
+    let addr = handle.local_addr();
+    assert_eq!(addr.ip(), ip);
+
+    // A phone on the tailnet reaches it and can pair.
+    let offer = handle.pairing_offer();
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.unwrap();
+    let mut c = ws;
+    send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "ts-1", "device_name": "Tailnet iPhone", "app_version": "0.1.0"})).await;
+    assert_eq!(recv(&mut c).await["type"], "paired");
+
+    // Nothing answers on the other interfaces: loopback refuses the same port.
+    assert!(TcpStream::connect(("127.0.0.1", addr.port())).await.is_err());
+}
