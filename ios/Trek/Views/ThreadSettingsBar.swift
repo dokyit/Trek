@@ -8,65 +8,62 @@ struct ThreadSettingsBar: View {
     @Environment(AppModel.self) private var model
     @State private var confirmingFull = false
 
-    private var efforts: [String] { model.efforts(agent: thread.agent.key, model: thread.model) }
+    @State private var picking = false
+
+    private var agent: AgentOption? { model.agents.first { $0.key == thread.agent.key } }
+    private var current: ModelOption? { ModelNaming.current(thread.model, agent: agent) }
     private var access: Access { thread.access ?? .autoAcceptEdits }
     private var plan: Bool { thread.plan ?? false }
+    /// The model's name: the Mac's label, else the agent's default model, else the agent.
+    private var modelName: String {
+        if let label = thread.modelLabel, !label.isEmpty, thread.model != nil { return label }
+        return current?.label ?? thread.agent.name
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 modelChip
-                if !efforts.isEmpty { effortChip }
                 accessChip
                 planChip
             }
             .padding(.horizontal, 2)
         }
         .scrollClipDisabled()
+        .onAppear { if Launch.sheet == "model" { picking = true } }
     }
 
+    /// Logo, model and effort, like the Mac's composer pill; opens the model picker.
     private var modelChip: some View {
-        Menu {
-            Section(thread.agent.name) {
-                ForEach(model.models(of: thread.agent.key)) { m in
-                    Button {
-                        model.setPrefs(thread.id, model: m.id)
-                    } label: {
-                        if m.id == thread.model { Label(m.label, systemImage: "checkmark") } else { Text(m.label) }
-                    }
-                }
-            }
-            let others = model.agents.filter { $0.key != thread.agent.key }
-            if !others.isEmpty {
-                Menu("Switch agent") {
-                    ForEach(others) { a in
-                        Button(a.name) { model.setPrefs(thread.id, agent: a.key) }
-                    }
-                }
-            }
+        Button {
+            picking = true
         } label: {
             chip {
-                AgentGlyph(key: thread.agent.key, size: 15)
-                Text(thread.modelLabel ?? thread.model ?? thread.agent.name).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Trek.muted)
+                ModelChipLabel(agentKey: thread.agent.key, model: modelName, effort: thread.effort)
             }
         }
-        .accessibilityLabel("Model: \(thread.modelLabel ?? thread.agent.name)")
-    }
-
-    private var effortChip: some View {
-        Menu {
-            Picker("Effort", selection: Binding(get: { thread.effort ?? "" }, set: { model.setPrefs(thread.id, effort: $0) })) {
-                ForEach(efforts, id: \.self) { e in Text(Effort.label(e)).tag(e) }
-            }
-        } label: {
-            chip {
-                Image(systemName: "gauge.with.dots.needle.67percent").font(.system(size: 12, weight: .medium))
-                Text(thread.effort.map(Effort.label) ?? "Effort")
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Trek.muted)
-            }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Model: \(modelName)\(thread.effort.map { ", effort \(Effort.label($0))" } ?? "")")
+        .sheet(isPresented: $picking) {
+            ModelPickerSheet(
+                agents: model.agents,
+                agentKey: thread.agent.key,
+                modelID: thread.model ?? current?.id,
+                effort: thread.effort,
+                efforts: { agentKey, modelID in
+                    let a = model.agents.first { $0.key == agentKey }
+                    return ModelNaming.current(modelID, agent: a)?.efforts ?? []
+                },
+                pickModel: { agentKey, modelID in
+                    if agentKey != thread.agent.key {
+                        // Another provider: switch the agent and pick its model in one request.
+                        model.setPrefs(thread.id, agent: agentKey, model: modelID)
+                    } else if modelID != thread.model {
+                        model.setPrefs(thread.id, model: modelID)
+                    }
+                },
+                pickEffort: { model.setPrefs(thread.id, effort: $0) })
         }
-        .accessibilityLabel("Effort: \(thread.effort.map(Effort.label) ?? "default")")
     }
 
     private var accessChip: some View {
@@ -85,8 +82,8 @@ struct ThreadSettingsBar: View {
                 .disabled(level == .fullAccess && !model.fullAccessAllowed)
             }
         } label: {
-            chip(tint: access == .fullAccess ? Trek.failed : nil) {
-                Image(systemName: access.icon).font(.system(size: 12, weight: .medium))
+            chip(tint: access.tint) {
+                Image(systemName: access.icon).font(.system(size: 12, weight: .semibold))
                 Text(access.label)
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Trek.muted)
             }
@@ -107,7 +104,7 @@ struct ThreadSettingsBar: View {
             model.setPrefs(thread.id, plan: !plan)
         } label: {
             chip(tint: plan ? Trek.plan : nil) {
-                Image(systemName: "list.bullet.clipboard").font(.system(size: 12, weight: .medium))
+                Image(systemName: plan ? "list.bullet.clipboard.fill" : "list.bullet.clipboard").font(.system(size: 12, weight: .semibold))
                 Text("Plan")
             }
         }
@@ -121,6 +118,9 @@ struct ThreadSettingsBar: View {
             .foregroundStyle(tint ?? Trek.foreground)
             .padding(.horizontal, 11)
             .frame(height: 30)
-            .glassEffect(tint.map { .regular.tint($0.opacity(0.18)).interactive() } ?? .regular.interactive(), in: Capsule())
+            .glassEffect(tint.map { .regular.tint($0.opacity(0.16)).interactive() } ?? .regular.interactive(), in: Capsule())
+            .overlay {
+                if let tint { Capsule().strokeBorder(tint.opacity(0.35), lineWidth: 0.75) }
+            }
     }
 }

@@ -37,8 +37,10 @@ plan, a failed build, threads that keep working, and replies to whatever you sen
 same protocol messages a Mac does, so everything in the app works without one.
 
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
-`t-ratelimit`, `t-settings`), `-TrekTab settings|search`, `-TrekSheet new`,
-`-TrekAppearance light|dark`, `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
+`t-ratelimit`, `t-settings`), `-TrekTab settings|search`, `-TrekSheet new` (or `model`, with
+`-TrekOpen`: the model picker), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
+`-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
+one page), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
 the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmation for it).
 `ios/scripts/screenshots.sh` rebuilds and captures the demo set in `ios/screenshots/`;
 `ios/scripts/live-screenshots.sh '<pairing URL>'` pairs with a running demo host (debug-only

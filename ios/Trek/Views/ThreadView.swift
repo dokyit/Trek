@@ -28,7 +28,7 @@ struct ThreadView: View {
                         .id(block.id)
                 }
                 if working, let t = thread {
-                    WorkingLine(since: t.workingSince, activity: t.activity)
+                    WorkingLine(threadID: t.id, agentKey: t.agent.key, since: t.workingSince, activity: t.activity)
                         .padding(.top, 2)
                         .transaction { $0.animation = nil }
                 }
@@ -38,6 +38,7 @@ struct ThreadView: View {
             .padding(.top, 12)
             .padding(.bottom, 16)
         }
+        .environment(\.projectHue, thread?.project?.hue)
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .background(Trek.background)

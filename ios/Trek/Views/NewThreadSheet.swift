@@ -18,13 +18,13 @@ struct NewThreadSheet: View {
     @State private var picking = false
     @State private var picked: [PhotosPickerItem] = []
     @State private var sending = false
+    @State private var choosingModel = false
     @FocusState private var focused: Bool
 
     private var project: ProjectSummary? { model.project(projectID) ?? model.projects.first }
     private var agent: AgentOption? { model.agents.first { $0.key == agentKey } ?? model.agents.first }
     private var modelLabel: String {
-        let id = modelID ?? agent?.defaultModel
-        return agent?.models.first { $0.id == id }?.label ?? agent?.name ?? "Agent"
+        ModelNaming.current(modelID, agent: agent)?.label ?? agent?.name ?? "Agent"
     }
 
     var body: some View {
@@ -82,7 +82,6 @@ struct NewThreadSheet: View {
                         photoChip
                         projectChip
                         agentChip
-                        if !efforts.isEmpty { effortChip }
                         accessChip
                         planChip
                         if project?.isRepo ?? true { worktreeChip }
@@ -115,28 +114,12 @@ struct NewThreadSheet: View {
         }
     }
 
-    private var efforts: [String] { agent.map { model.efforts(agent: $0.key, model: modelID ?? $0.defaultModel) } ?? [] }
-
     private var photoChip: some View {
         Button { picking = true } label: {
             chip { Image(systemName: "photo.on.rectangle").font(.system(size: 14, weight: .medium)) }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Add photos")
-    }
-
-    private var effortChip: some View {
-        Menu {
-            Picker("Effort", selection: Binding(get: { effort ?? "" }, set: { effort = $0 })) {
-                Text("Default").tag("")
-                ForEach(efforts, id: \.self) { e in Text(Effort.label(e)).tag(e) }
-            }
-        } label: {
-            chip {
-                Image(systemName: "gauge.with.dots.needle.67percent").font(.system(size: 13, weight: .medium))
-                Text(effort.map(Effort.label) ?? "Effort")
-            }
-        }
     }
 
     private var accessChip: some View {
@@ -148,7 +131,7 @@ struct NewThreadSheet: View {
                 }
             }
         } label: {
-            chip {
+            chip(tint: access?.tint) {
                 Image(systemName: (access ?? .autoAcceptEdits).icon).font(.system(size: 13, weight: .medium))
                 Text(access?.label ?? "Access")
             }
@@ -157,11 +140,10 @@ struct NewThreadSheet: View {
 
     private var planChip: some View {
         Button { withAnimation(.snappy(duration: 0.15)) { plan.toggle() } } label: {
-            chip {
-                Image(systemName: "list.bullet.clipboard").font(.system(size: 13, weight: .medium))
+            chip(tint: plan ? Trek.plan : nil) {
+                Image(systemName: plan ? "list.bullet.clipboard.fill" : "list.bullet.clipboard").font(.system(size: 13, weight: .medium))
                 Text("Plan")
             }
-            .foregroundStyle(plan ? Trek.plan : Trek.foreground)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(plan ? "Plan first: on" : "Plan first: off")
@@ -188,31 +170,25 @@ struct NewThreadSheet: View {
         }
     }
 
+    /// Logo, model and effort, like the thread's chip; opens the same picker.
     private var agentChip: some View {
-        Menu {
-            ForEach(model.agents) { a in
-                Menu {
-                    ForEach(a.models) { m in
-                        Button {
-                            agentKey = a.key
-                            modelID = m.id
-                        } label: {
-                            if a.key == agent?.key && (modelID ?? a.defaultModel) == m.id {
-                                Label(m.label, systemImage: "checkmark")
-                            } else {
-                                Text(m.label)
-                            }
-                        }
-                    }
-                } label: {
-                    Text(a.name)
-                }
-            }
-        } label: {
-            chip {
-                AgentGlyph(key: agent?.key ?? "", size: 17)
-                Text(modelLabel)
-            }
+        Button { choosingModel = true } label: {
+            chip { ModelChipLabel(agentKey: agent?.key ?? "", model: modelLabel, effort: effort, logo: 17) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Model: \(modelLabel)")
+        .sheet(isPresented: $choosingModel) {
+            ModelPickerSheet(
+                agents: model.agents,
+                agentKey: agent?.key ?? "",
+                modelID: modelID ?? ModelNaming.defaultModel(agent)?.id,
+                effort: effort,
+                efforts: { key, id in ModelNaming.current(id, agent: model.agents.first { $0.key == key })?.efforts ?? [] },
+                pickModel: { key, id in
+                    agentKey = key
+                    modelID = id
+                },
+                pickEffort: { effort = $0 })
         }
     }
 
@@ -229,19 +205,23 @@ struct NewThreadSheet: View {
         .buttonStyle(.plain)
     }
 
-    private func chip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+    /// A chip on a neutral wash, or on a wash of `tint` with a rim of it (access level, plan on).
+    private func chip<Content: View>(tint: Color? = nil, @ViewBuilder _ content: () -> Content) -> some View {
         HStack(spacing: 6) { content() }
             .font(.subheadline.weight(.medium))
-            .foregroundStyle(Trek.foreground)
+            .foregroundStyle(tint ?? Trek.foreground)
             .padding(.horizontal, 12)
             .frame(height: 36)
-            .background(Trek.foreground.opacity(0.06), in: Capsule())
+            .background((tint ?? Trek.foreground).opacity(tint == nil ? 0.06 : 0.13), in: Capsule())
+            .overlay {
+                if let tint { Capsule().strokeBorder(tint.opacity(0.3), lineWidth: 0.75) }
+            }
     }
 
     private func start() {
         guard let project, let agent else { return }
         sending = true
-        model.newThread(project: project.id, agent: agent.key, model: modelID ?? agent.defaultModel,
+        model.newThread(project: project.id, agent: agent.key, model: modelID ?? ModelNaming.defaultModel(agent)?.id,
                         text: text.trimmingCharacters(in: .whitespacesAndNewlines), worktree: worktree && project.isRepo,
                         effort: effort, access: access, plan: plan, images: photos.compactMap(\.upload)) { tid in
             dismiss()

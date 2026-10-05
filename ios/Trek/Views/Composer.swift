@@ -54,7 +54,7 @@ struct Composer: View {
                                     Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
                                 }
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(Trek.ember)
+                                .foregroundStyle(Trek.muted)
                             }
                             .transition(.opacity)
                             .accessibilityLabel("Follow-up mode: \(mode.label)")

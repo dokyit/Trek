@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
-    @AppStorage("appearance") private var appearance = "system"
     @State private var confirmUnpair = false
 
     var body: some View {
@@ -55,18 +54,7 @@ struct SettingsView: View {
                     Text("Steer adds your message to the running turn at its next step. Queue waits until the turn ends. You can switch per message from the composer.")
                 }
 
-                Section {
-                    Picker("Theme", selection: $appearance) {
-                        Text("System").tag("system")
-                        Text("Night").tag("dark")
-                        Text("Paper").tag("light")
-                    }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
-                } header: {
-                    Text("Appearance")
-                }
+                AppearanceSection()
 
                 Section {
                     LabeledContent("“Allow for session”", value: "Needs \(DeviceOwner.methodName)")
@@ -139,6 +127,7 @@ private struct SecurityLabelStyle: LabelStyle {
 struct SearchView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
+    @Environment(\.compactRows) private var compact
 
     private var results: [ThreadSummary] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -157,7 +146,7 @@ struct SearchView: View {
                     .navigationLinkIndicatorVisibility(.hidden)
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 9, leading: 20, bottom: 9, trailing: 18))
+                    .listRowInsets(EdgeInsets(top: compact ? 7 : 9, leading: 20, bottom: compact ? 7 : 9, trailing: 18))
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
