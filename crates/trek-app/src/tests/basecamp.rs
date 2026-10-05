@@ -5,6 +5,7 @@ use super::harness::{Trek, mock, open, run, store_items};
 use crate::basecamp::Waiting;
 use crate::workspace::Route;
 use gpui_kit::TestAppContext;
+use trek_core::basecamp::Range;
 use trek_core::settings::ThemeChoice;
 use trek_core::store::{Item, now_ms};
 use trek_core::{AgentId, Effort, HandHolding, RunState, TokenUsage};
@@ -189,6 +190,61 @@ fn the_week_the_palette_and_the_clock() {
         let later = week.now + 60_000;
         basecamp.update(cx, |b, cx| b.tick(later, cx));
         assert_eq!(recap(&trek, cx).now, later);
+    });
+}
+
+#[test]
+fn all_time_reaches_back_to_the_first_thing_done() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        recap(&trek, cx);
+        let basecamp = cx.read(|cx| trek.root.read(cx).basecamp.clone());
+        // Nothing yet: all time is an empty today, and says so without a "today".
+        trek.click(cx, ("basecamp-range", 2usize));
+        let empty = recap(&trek, cx);
+        assert_eq!(basecamp.read_with(cx, |b, _| b.range()), Range::All);
+        assert!(empty.is_empty() && empty.first.is_none());
+        assert_eq!((empty.window.range, empty.window.bucket_ms), (Range::All, 3_600_000));
+        trek.render(cx);
+        assert!(trek.visible(cx, "basecamp-empty"));
+        // Work today (even a minute after midnight), and a thread from six weeks ago.
+        let now = now_ms().max(Range::Today.window(&chrono::Local::now()).start + 61_000);
+        let long_ago = now - 42 * 24 * 3_600_000;
+        trek.update(cx, |ws, cx| {
+            for (at, model) in [(now - 60_000, "mock-swift"), (long_ago, "mock-deep")] {
+                let t = ws.store.create_thread(Some(&trek.project), mock(), Some(model.into()), Effort::Medium, HandHolding::Auto).unwrap();
+                let items = vec![
+                    Item::User { text: "go".into(), images: vec![], at: Some(at), resume: None, aside: false },
+                    Item::Assistant { text: "ok".into() },
+                    Item::TurnEnd { at: at + 30_000, took_secs: 30 },
+                ];
+                store_items(&ws.store, &t.id, items);
+                ws.store.record_usage(&t.id, at + 30_000, &mock(), Some(model), &TokenUsage { input: 1_000, output: 500, cache_read: 0, cache_write: 0 }, None).unwrap();
+            }
+            ws.reload(cx);
+        });
+        let all = recap(&trek, cx);
+        assert_eq!((all.prompts, all.threads, all.turns, all.agent_secs, all.tokens.total()), (2, 2, 2, 60, 3_000));
+        assert_eq!(all.first, Some(long_ago));
+        // Six weeks, a day a stretch, from the first day's midnight.
+        let first_day = Range::Today.window(&chrono::DateTime::from_timestamp_millis(long_ago).unwrap().with_timezone(&chrono::Local)).start;
+        assert_eq!((all.window.start, all.window.bucket_ms, all.buckets.len()), (first_day, 24 * 3_600_000, 43));
+        assert_eq!((all.buckets[0].prompts, all.buckets[42].prompts), (1, 1));
+        for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
+            theme(cx, choice);
+            trek.render(cx);
+            assert!(trek.visible(cx, "basecamp-narrative") && trek.visible(cx, "basecamp-profile"), "{choice:?}");
+        }
+        assert!(basecamp.read_with(cx, |b, _| b.profile_line()).unwrap().starts_with("Summit on "));
+        // Today's recap leaves the old thread out; ⌘K on Basecamp switches the range.
+        trek.press(cx, "cmd-k");
+        trek.type_text(cx, "Basecamp: Today");
+        trek.press(cx, "enter");
+        let today = recap(&trek, cx);
+        assert_eq!(basecamp.read_with(cx, |b, _| b.range()), Range::Today);
+        assert_eq!((today.prompts, today.threads), (1, 1));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Basecamp);
     });
 }
 

@@ -35,6 +35,7 @@ enum Action {
     NewThread,
     OpenFolder,
     Basecamp,
+    BasecampRange(trek_core::basecamp::Range),
     Notes,
     NewChat,
     Glass(bool),
@@ -222,6 +223,7 @@ fn rank<T>(query: &str, candidates: Vec<(T, String, String)>) -> Vec<T> {
 pub struct CommandPalette {
     workspace: Entity<Workspace>,
     right_panel: Entity<RightPanel>,
+    basecamp: Entity<crate::basecamp::Basecamp>,
     input: Entity<InputState>,
     pub open: bool,
     query: String,
@@ -241,7 +243,7 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, basecamp: Entity<crate::basecamp::Basecamp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads, projects and commands"));
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
@@ -260,6 +262,7 @@ impl CommandPalette {
         Self {
             workspace,
             right_panel,
+            basecamp,
             input,
             open: false,
             query: String::new(),
@@ -464,7 +467,15 @@ impl CommandPalette {
         let c = Group::Commands;
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint("⌘N"), "create start chat compose");
         add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint("⌘O"), "project add repository");
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week summary inbox review usage tokens stats");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week all time summary inbox review usage tokens stats");
+        // On Basecamp, the span its recap covers.
+        if ws.route == Route::Basecamp {
+            let current = self.basecamp.read(cx).range();
+            for range in [trek_core::basecamp::Range::Today, trek_core::basecamp::Range::Week, trek_core::basecamp::Range::All] {
+                let e = Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), format!("Basecamp: {}", range.label()), Action::BasecampRange(range)).checked(range == current);
+                add(e, "recap range span today week all time ever history");
+            }
+        }
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint("⌘⇧J"), "jot write todo checklist scratch pad memo");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New thread without a project", Action::NewChat), "chat scratch no project question");
         let glass = ws.settings.appearance.glass;
@@ -538,6 +549,7 @@ impl CommandPalette {
             Action::ProjectSettings(id) => ws.update(cx, |ws, cx| ws.open_project_settings(Some(id), cx)),
             Action::NewThread => ws.update(cx, |ws, cx| ws.new_thread(cx)),
             Action::Basecamp => ws.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx)),
+            Action::BasecampRange(range) => self.basecamp.update(cx, |b, cx| b.set_range(range, cx)),
             Action::Notes => ws.update(cx, |ws, cx| ws.navigate(Route::Notes, cx)),
             Action::NewChat => ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx)),
             Action::Glass(on) => ws.update(cx, |ws, cx| {

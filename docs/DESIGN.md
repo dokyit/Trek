@@ -147,13 +147,15 @@ project), with `snoozed_until`, `pinned_at`, `pending_approval_count`, `pending_
 ### Basecamp (the day's recap)
 The sidebar is the inbox; **Basecamp** (Tent row at the top of the sidebar, ⌘K, ⌘⇧H; Esc goes back) is the
 recap of the work behind it, after Synara's Inbox, in Trek's trail language:
-- Header: "Basecamp", the greeting and date, a Today / This week switch, Mark all read.
+- Header: "Basecamp", the greeting and date (for all time: since when), a Today / This week / All time
+  switch, Mark all read. All time runs from the day of the earliest recorded activity.
 - **Ready for review** (left): needs-you threads first, each saying what it waits for (Approval, Question,
   Plan to review, Failed), then finished unread ones, newest first: status icon, title, agent logo, diff
   stat, project. One paused at a usage limit says until when (amber clock), not done and not failed. A
   click opens the thread; Mark all read clears just the unread rows listed.
 - **Today's trek** (right): the recap in sentences with inline project badges and model logos; an
-  **elevation profile** (agent time per hour, or per three hours for the week, as a filled mountain
+  **elevation profile** (agent time per hour, or per three hours for the week; all time by the hour for a
+  day, three hours up to a week, days up to three months, then weeks; as a filled mountain
   silhouette, the summit flagged in ember, the hiker standing at "now", the trail ahead dotted; hover shows a
   stretch's numbers); then quiet tiles between hairlines: best model, worked most on, tokens (with a
   sparkline), agent time and the turns that failed in the range, and what's left of each plan limit.

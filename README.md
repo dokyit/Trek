@@ -123,7 +123,7 @@ Handy environment variables: `TREK_DATA_DIR=/some/folder` runs Trek against anot
 one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens behind other apps' windows
 without taking focus, `TREK_OPEN_SETTINGS=updates`, `TREK_OPEN_TOOL=browser` and
 `TREK_OPEN_THREAD_WINDOW=<thread id>` open a settings page, a tool or a thread window at launch,
-`TREK_OPEN_BASECAMP=1` (or `=week`) opens Basecamp, and
+`TREK_OPEN_BASECAMP=1` (or `=week`, `=all`) opens Basecamp, and
 `TREK_ONBOARDING=1` replays onboarding. macOS stops drawing windows that other windows cover, so
 screenshots of a `TREK_BACKGROUND=1` launch also need `TREK_FORCE_ACTIVE=1` (below), which keeps every Trek
 window drawing. An update's relaunch keeps `TREK_DATA_DIR` and the like, never these launch-only flags.
