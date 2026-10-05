@@ -99,34 +99,18 @@ struct DiffStat: View {
     }
 }
 
-/// A file type's badge (`file_icon::badge`): "RS" on rust, "{}" on gold, a lock for lockfiles.
+/// A file's icon (`file_icon::badge`): Catppuccin's for its name or type, a folder's when the
+/// path ends in "/".
 struct FileBadge: View {
     var path: String
     var size: CGFloat = 14
 
     var body: some View {
-        let t = FileType.of(path)
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                .fill(t.fill.map { Color(hex: $0) } ?? Trek.foreground.opacity(0.09))
-            switch t.mark {
-            case .text(let label):
-                Text(label)
-                    .font(.system(size: size * (label.count > 1 ? 0.5 : 0.62), weight: .bold, design: .rounded))
-                    .foregroundStyle(t.darkMark ? Color(hex: 0x1F1F1F) : .white)
-                    .minimumScaleFactor(0.5)
-            case .lock:
-                Image(systemName: "lock.fill").font(.system(size: size * 0.55, weight: .semibold)).foregroundStyle(Trek.muted)
-            case .image:
-                Image(systemName: "photo.fill").font(.system(size: size * 0.5, weight: .semibold)).foregroundStyle(.white)
-            case .folder:
-                Image(systemName: "folder.fill").font(.system(size: size * 0.55, weight: .semibold)).foregroundStyle(Trek.muted)
-            case .file:
-                Image(systemName: "doc.text").font(.system(size: size * 0.58, weight: .medium)).foregroundStyle(Trek.muted)
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        Image(FileIcons.any(path))
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }
 

@@ -118,7 +118,7 @@ struct ChangesCard: View {
                     .font(.system(size: 9, weight: .bold))
                     .rotationEffect(.degrees(open ? 90 : 0))
                     .frame(width: 12)
-                Image(systemName: open ? "folder" : "folder.fill").font(.system(size: 12))
+                FolderIcon(path: dir.isEmpty ? rootName : dir, open: open, size: 15)
                 Text(dir.isEmpty ? rootName : dir)
                     .lineLimit(1)
                     .truncationMode(.middle)

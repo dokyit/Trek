@@ -149,44 +149,19 @@ enum Inline {
     }
 }
 
-/// A file type's badge as an image, to sit inline in text (`Text(Image)`). Cached per type, size
-/// and theme.
+/// A file's icon as an image, to sit inline in text (`Text(Image)`). Cached per icon, size and
+/// theme.
 enum BadgeImage {
     @MainActor private static var cache: [String: UIImage] = [:]
 
     @MainActor static func make(_ path: String, size: CGFloat, dark: Bool) -> UIImage {
-        let type = FileType.of(path)
-        let key = "\(type.mark)-\(type.fill ?? 0)-\(size)-\(dark)"
+        let name = FileIcons.any(path)
+        let key = "\(name)-\(size)-\(dark)"
         if let hit = cache[key] { return hit }
-        let neutralFill = dark ? UIColor(white: 1, alpha: 0.12) : UIColor(white: 0, alpha: 0.08)
-        let neutralInk = dark ? UIColor(hex: 0x8A93A3) : UIColor(hex: 0x6B6558)
-        let fill = type.fill.map(UIColor.init(hex:)) ?? neutralFill
-        let ink: UIColor = type.fill == nil ? neutralInk : (type.darkMark ? UIColor(hex: 0x1F1F1F) : .white)
+        let traits = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
+        let icon = UIImage(named: name, in: nil, compatibleWith: traits)
         let image = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { _ in
-            let rect = CGRect(x: 0, y: 0, width: size, height: size)
-            fill.setFill()
-            UIBezierPath(roundedRect: rect, cornerRadius: size * 0.24).fill()
-            switch type.mark {
-            case .text(let label):
-                let base = UIFont.systemFont(ofSize: size * (label.count > 1 ? 0.5 : 0.62), weight: .bold)
-                let font = base.fontDescriptor.withDesign(.rounded).map { UIFont(descriptor: $0, size: 0) } ?? base
-                let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ink]
-                let s = NSAttributedString(string: label, attributes: attrs)
-                let b = s.size()
-                s.draw(at: CGPoint(x: (size - b.width) / 2, y: (size - b.height) / 2))
-            case .lock, .image, .folder, .file:
-                let name = switch type.mark {
-                case .lock: "lock.fill"
-                case .image: "photo.fill"
-                case .folder: "folder.fill"
-                default: "doc.text"
-                }
-                let config = UIImage.SymbolConfiguration(pointSize: size * 0.52, weight: .semibold)
-                if let symbol = UIImage(systemName: name, withConfiguration: config)?.withTintColor(ink, renderingMode: .alwaysOriginal) {
-                    let s = symbol.size
-                    symbol.draw(in: CGRect(x: (size - s.width) / 2, y: (size - s.height) / 2, width: s.width, height: s.height))
-                }
-            }
+            icon?.draw(in: CGRect(x: 0, y: 0, width: size, height: size))
         }
         cache[key] = image
         return image
