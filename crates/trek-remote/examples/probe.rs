@@ -126,7 +126,14 @@ async fn main() {
                 println!("answered: {decision}");
             }
             _ if v["re"].as_str().is_some_and(|re| re.starts_with('q')) => println!("< {}", serde_json::to_string_pretty(&v).unwrap()),
-            Some("transcript") => println!("transcript of {}: {} items, seq {}", v["thread_id"], v["items"].as_array().map_or(0, |a| a.len()), v["seq"]),
+            Some("transcript") => {
+                let items = v["items"].as_array().cloned().unwrap_or_default();
+                let kinds: Vec<&str> = items.iter().map(|i| i["kind"].as_str().unwrap_or("?")).collect();
+                println!("transcript of {}: {} items, seq {} ({})", v["thread_id"], items.len(), v["seq"], kinds.join(", "));
+                for changes in items.iter().filter(|i| i["kind"] == "changes") {
+                    println!("  changes: {changes}");
+                }
+            }
             _ => println!("{}", short(&v)),
         }
     }
