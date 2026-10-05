@@ -10,6 +10,13 @@ struct ThreadView: View {
     @State private var newTitle = ""
     @State private var archiving = false
     @State private var groupOpen: [String: Bool] = [:]
+    /// Each changes card's folded folders, by item.
+    @State private var folded: [String: Set<String>] = [:]
+    @State private var showingGit = false
+    /// What followed `/new` in the message just sent: the new thread's prompt, if the Mac asks
+    /// for the sheet.
+    @State private var newPrompt = ""
+    @State private var newThread: NewThreadRequest?
 
     private var thread: ThreadSummary? { model.thread(threadID) }
     private var items: [TItem] { model.transcripts[threadID] ?? [] }
@@ -18,6 +25,7 @@ struct ThreadView: View {
         let blocks = Block.build(items)
         let lastGroup = blocks.last { if case .group = $0 { true } else { false } }?.id
         let working = thread?.runState == .working
+        let commands = CommandPicker.query(draft).map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if !model.loadedTranscripts.contains(threadID) {
@@ -42,6 +50,13 @@ struct ThreadView: View {
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .background(Trek.background)
+        .safeAreaBar(edge: .top, spacing: 0) {
+            if let t = thread {
+                ThreadStatusStrip(thread: t)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 10) {
                 ForEach(items.filter(\.isPendingRequest)) { item in
@@ -50,7 +65,14 @@ struct ThreadView: View {
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                if let t = thread { ThreadSettingsBar(thread: t) }
+                if !commands.isEmpty {
+                    CommandPicker(commands: model.commands[threadID] ?? [], query: CommandPicker.query(draft) ?? "") { c in
+                        draft = "/\(c.name) "
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if let t = thread {
+                    ThreadSettingsBar(thread: t)
+                }
                 Composer(text: $draft, mode: $mode, photos: $photos, placeholder: "Message \(thread?.agent.name ?? "the agent")",
                          working: working, send: send, stop: { model.interrupt(threadID) })
             }
@@ -58,12 +80,19 @@ struct ThreadView: View {
             .padding(.bottom, 6)
             .padding(.top, 8)
             .animation(.smooth(duration: 0.3), value: items.filter(\.isPendingRequest).map(\.id))
+            .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         }
         .navigationTitle(thread?.title ?? "Thread")
         .navigationSubtitle(subtitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarVisibility(.hidden, for: .tabBar)
         .toolbar {
+            if let t = thread, t.git != nil || t.branch != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showingGit = true } label: { GitButtonLabel(changed: t.git?.changed ?? 0) }
+                }
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let t = thread {
@@ -114,9 +143,32 @@ struct ThreadView: View {
         } message: {
             Text("It leaves your threads on the Mac too.")
         }
+        .sheet(isPresented: $showingGit) { GitSheet(threadID: threadID) }
+        .sheet(item: $newThread) { request in
+            NewThreadSheet(project: request.project, prompt: request.prompt) { model.openRequest = $0 }
+        }
+        .onChange(of: draft) {
+            // `/` typed at the start: the picker wants the thread's commands (asked again each
+            // time, as the agent's may have changed).
+            if draft == "/" || (CommandPicker.query(draft) != nil && model.commands[threadID] == nil) {
+                model.loadCommands(threadID)
+            }
+        }
+        .onChange(of: model.newThreadPrompt) {
+            // `/new` was sent: the Mac asks for the new-thread sheet, in this project.
+            guard let project = model.newThreadPrompt else { return }
+            model.newThreadPrompt = nil
+            newThread = NewThreadRequest(project: project, prompt: newPrompt)
+            newPrompt = ""
+        }
         .onAppear {
             mode = model.followUpMode
             model.subscribe(threadID)
+            switch Launch.sheet {
+            case "git": showingGit = true
+            case "commands": draft = "/"
+            default: break
+            }
         }
         .onDisappear { model.unsubscribe(threadID) }
     }
@@ -175,6 +227,9 @@ struct ThreadView: View {
         case .handoff(_, let from, let to):
             Label("Handed over from \(from) to \(to)", systemImage: "arrow.left.arrow.right")
                 .font(.subheadline).foregroundStyle(Trek.muted)
+        case .changes(let item, let changes):
+            ChangesCard(changes: changes, threadID: threadID, rootName: thread?.project?.name ?? "Project",
+                        folded: Binding(get: { folded[item.id] ?? [] }, set: { folded[item.id] = $0 }))
         }
     }
 
@@ -191,8 +246,20 @@ struct ThreadView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !photos.isEmpty else { return }
         let uploads = photos.compactMap(\.upload)
+        // `/new` and `/clear` open the new-thread sheet: what follows them is its prompt.
+        newPrompt = ""
+        for command in ["/new ", "/clear "] where text.hasPrefix(command) {
+            newPrompt = String(text.dropFirst(command.count)).trimmingCharacters(in: .whitespaces)
+        }
         model.send(text.isEmpty ? "Here's a photo." : text, to: threadID, mode: thread?.runState == .working ? mode : nil, images: uploads)
         draft = ""
         photos = []
     }
+}
+
+/// The Mac asked for the new-thread sheet from a thread (`/new`): in which project, with what.
+struct NewThreadRequest: Identifiable {
+    let id = UUID()
+    var project: String
+    var prompt: String
 }

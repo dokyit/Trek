@@ -12,11 +12,13 @@ enum Block: Identifiable {
     case error(TItem, String)
     case limit(TItem, String, Int64?)
     case handoff(TItem, String, String)
+    /// The files a turn changed, under its end.
+    case changes(TItem, TurnChanges)
 
     var id: String {
         switch self {
         case .user(let i, _, _), .assistant(let i, _), .resolved(let i), .turnEnd(let i, _), .notice(let i, _),
-             .error(let i, _), .limit(let i, _, _), .handoff(let i, _, _): i.id
+             .error(let i, _), .limit(let i, _, _), .handoff(let i, _, _), .changes(let i, _): i.id
         case .group(let id, _): id
         }
     }
@@ -48,7 +50,8 @@ enum Block: Identifiable {
             case .error(let s): out.append(.error(item, s))
             case .limit(let s, let at): out.append(.limit(item, s, at))
             case .handoff(let a, let b): out.append(.handoff(item, a, b))
-            case .reasoning, .tool, .changes, .unknown: break
+            case .changes(let c): if !c.files.isEmpty { out.append(.changes(item, c)) }
+            case .reasoning, .tool, .unknown: break
             }
         }
         flush()
