@@ -1555,28 +1555,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Quitting now would cut agent work short: a turn under way, whether it's working or paused
-    /// on an approval, a question or a plan; sub-agents still out; a plan offered after its turn,
-    /// waiting for an answer; or messages that haven't reached an agent yet (waiting for a
-    /// worktree, for history to load or for git work, or queued behind a turn). All of those live
-    /// only in memory. An agent CLI update under way or about to start, too: a restart would cut
-    /// its package manager off mid-install. One waiting on its agent's background work isn't
-    /// about to start (a dev server can run all day), and a restart ends that work anyway.
-    /// Updates wait until there's none.
-    pub fn work_in_flight(&self) -> bool {
-        let update_due = self.agent_updates.queued_where(|a| self.agent_hold(a) != Some(Hold::Background));
-        self.agent_updates.running() || update_due || self.live.values().any(|l| {
-            (l.commands.is_some() && (l.turn_started.is_some() || l.background_agents().next().is_some()))
-                || l.permissions.iter().any(|p| p.after_turn)
-                || l.preparing
-                || l.loading
-                || l.removing
-                || l.git_busy
-                || !l.queued.is_empty()
-                || !l.left_over.is_empty()
-                || !l.held.is_empty()
-        })
-    }
 
     // ---------- navigation ----------
 
@@ -4949,6 +4927,13 @@ impl Workspace {
             UpdateAction::Check => self.check_for_updates(true, cx),
             UpdateAction::Download => self.download_update(cx),
             UpdateAction::Restart => self.restart_to_update(cx),
+            // The user's call: what's running stops.
+            UpdateAction::RestartNow => {
+                if let UpdateStatus::RestartPending { staged, .. } = self.updater.status.clone() {
+                    self.restart_countdown = None;
+                    self.install_update(staged, cx);
+                }
+            }
         }
     }
 
@@ -5092,7 +5077,25 @@ impl Workspace {
         }
     }
 
-    /// Install now unless agent work is in flight (`work_in_flight`); otherwise once it's over.
+    /// What holds an update's restart back: agent turns and Trek's own work on files. An agent's
+    /// background sub-agents don't: they can run for an hour after their turn is over, and the
+    /// restart notice says it stops them, as it does shells.
+    pub fn work_in_flight(&self) -> bool {
+        let update_due = self.agent_updates.queued_where(|a| self.agent_hold(a) != Some(Hold::Background));
+        self.agent_updates.running() || update_due || self.live.values().any(|l| {
+            (l.commands.is_some() && l.turn_started.is_some())
+                || l.permissions.iter().any(|p| p.after_turn)
+                || l.preparing
+                || l.loading
+                || l.removing
+                || l.git_busy
+                || !l.queued.is_empty()
+                || !l.left_over.is_empty()
+                || !l.held.is_empty()
+        })
+    }
+
+    /// Install now unless agent turns are under way (`work_in_flight`); otherwise once they're over.
     pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
         if let UpdateStatus::Ready { version, staged } = self.updater.status.clone() {
             if self.work_in_flight() {
@@ -5113,7 +5116,7 @@ impl Workspace {
         }
         // Shells left running don't hold the update back (a dev server can run all day), but the
         // restart ends them: the toast says so while it can still be cancelled.
-        let work: Vec<&str> = self.live.values().filter(|l| l.commands.is_some()).flat_map(|l| l.background_work().map(|b| b.task.title.as_str())).collect();
+        let work: Vec<&str> = self.live.values().filter(|l| l.commands.is_some()).flat_map(|l| l.background.iter().map(|b| b.task.title.as_str())).collect();
         let message = restart_message(RESTART_GRACE.as_secs(), &work);
         cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::CancelRestart) });
         self.restart_countdown = Some(cx.spawn(async move |this, cx| {

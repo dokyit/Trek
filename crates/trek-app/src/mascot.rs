@@ -128,10 +128,15 @@ pub fn force_active() -> bool {
 /// Frames per second for the working animation. Pixel art reads fine at this rate, and each frame
 /// still redraws the window (the other views come from GPUI's cache), so 15 instead of 60 is a
 /// quarter of the CPU.
-pub const FPS: u64 = 15;
+pub const FPS: u64 = 16;
 
-/// A dotted trail the width of its parent with the hiker walking it. `clock` is seconds since the
-/// turn started; the caller re-renders at [`FPS`] while it wants motion (see `WorkingBar`).
+/// Steps a second while walking: half the frame rate, so each pose holds exactly two frames
+/// (7 a second at 15 frames held some poses two frames and some three: a limp).
+const STEPS: f32 = 8.;
+
+/// A dotted trail the width of its parent with the hiker walking it. `clock` is seconds walked
+/// (the bar's own clock, which pauses rather than skipping); the caller re-renders at [`FPS`]
+/// while it wants motion (see `WorkingBar`).
 pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
     let dots = cx.theme().foreground.opacity(0.16);
     let (pos, frame, right) = if still {
@@ -144,7 +149,7 @@ pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
         // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
         let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
         let speed = (std::f32::consts::PI * raw).sin();
-        let frame = if speed < 0.15 { 1 } else { (clock * 7.) as usize % 4 };
+        let frame = if speed < 0.15 { 1 } else { (clock * STEPS) as usize % 4 };
         (pos, frame, right)
     };
     div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full()).into_any_element()

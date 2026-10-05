@@ -231,16 +231,16 @@ fn the_live_group_opens_in_the_transcript_from_the_bar() {
 }
 
 #[test]
-fn a_window_in_the_background_holds_the_folding_group_still() {
+fn a_window_in_the_background_keeps_walking_at_half_pace() {
     run(async |cx| {
         let trek = open(cx);
-        // Motion on, but the window isn't in front: the bar is still.
+        // Motion on, but the window isn't in front: still on show, so the hiker keeps walking,
+        // at half the frames (it froze before, then jumped when the window came back).
         cx.update(|cx| cx.set_reduce_motion(false));
         trek.window(cx, |window, cx| window.blur(cx));
         let id = trek.quiet_thread(cx);
         feed(&trek, cx, &id, vec![start("t1", "Run command", "ls -la")]);
-        assert_eq!(bar(&trek, cx, |b| b.frame_interval()), Some(Duration::from_secs(1)));
-        assert_eq!(bar(&trek, cx, |b| b.sliding()), 0, "nothing slides in");
+        assert_eq!(bar(&trek, cx, |b| b.frame_interval()), Some(Duration::from_millis(2000 / crate::mascot::FPS)));
         feed(&trek, cx, &id, vec![done("t1"), AgentEvent::TextDelta("Two files.".into())]);
         // The transcript holds the group back for the fold, so the bar shows it meanwhile, as it
         // was, rather than leave a gap.
