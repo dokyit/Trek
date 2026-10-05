@@ -468,6 +468,15 @@ async fn actions_reach_the_host() {
         (json!({"type": "interrupt", "id": "14", "thread_id": "t1"}), json!({"type": "ack", "re": "14"})),
         (json!({"type": "mark_seen", "thread_id": "t1"}), json!({"type": "ack"})),
         (json!({"type": "ping", "id": "15"}), json!({"type": "pong", "re": "15"})),
+        // Over the wire to the host (which here, like an older Mac, can't do them).
+        (
+            json!({"type": "set_prefs", "id": "16", "thread_id": "t1", "effort": "low"}),
+            json!({"type": "error", "re": "16", "code": "bad_request", "message": "This Mac can't change a thread's settings"}),
+        ),
+        (
+            json!({"type": "thread_action", "id": "17", "thread_id": "t1", "action": {"kind": "pin"}}),
+            json!({"type": "error", "re": "17", "code": "bad_request", "message": "This Mac can't do that to a thread"}),
+        ),
     ];
     for (request, reply) in requests {
         send(&mut c, request).await;

@@ -516,8 +516,20 @@ impl BadMessage {
     }
 }
 
-const CLIENT_TYPES: &[&str] =
-    &["pair", "hello", "subscribe", "unsubscribe", "send", "new_thread", "answer", "interrupt", "mark_seen", "ping"];
+const CLIENT_TYPES: &[&str] = &[
+    "pair",
+    "hello",
+    "subscribe",
+    "unsubscribe",
+    "send",
+    "new_thread",
+    "answer",
+    "interrupt",
+    "mark_seen",
+    "set_prefs",
+    "thread_action",
+    "ping",
+];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
 fn parse_client(text: &str) -> (Option<String>, Result<ClientMessage, BadMessage>) {

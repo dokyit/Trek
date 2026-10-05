@@ -22,7 +22,7 @@ final class MockHost: Backend {
         MockHost.project("p-field", "fieldnotes-ios", hue: 275, branch: "main"),
     ]
 
-    let agents: [AgentOption] = [
+    var agents: [AgentOption] = [
         AgentOption(key: "claude-code", name: "Claude Code", defaultModel: "claude-opus-5-5", models: [
             ModelOption(id: "claude-opus-5-5", label: "Opus 5.5"), ModelOption(id: "claude-sonnet-5-5", label: "Sonnet 5.5"),
             ModelOption(id: "claude-haiku-4-5", label: "Haiku 4.5")]),
@@ -56,8 +56,21 @@ final class MockHost: Backend {
     func start() {
         onState?(.connecting)
         seed()
+        // What the Mac's composer shows for each: efforts per model, each thread's effort and access.
+        let efforts = ["low", "medium", "high", "xhigh", "max"]
+        agents = agents.map { a in
+            var a = a
+            a.models = a.models.map { m in var m = m; m.efforts = efforts; return m }
+            return a
+        }
+        threads = threads.map { t in
+            var t = t
+            t.effort = t.effort ?? "high"
+            t.access = t.access ?? .autoAcceptEdits
+            return t
+        }
         deliver(.welcome(re: "auth", host: host), after: 0.15)
-        deliver(.snapshot(Snapshot(threads: threads, projects: projects, agents: agents)), after: 0.2)
+        deliver(.snapshot(Snapshot(threads: threads, projects: projects, agents: agents, fullAccess: true)), after: 0.2)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advanceWorkingThread() }
@@ -92,12 +105,38 @@ final class MockHost: Backend {
             }
             append(tid, .error("Interrupted"))
             update(tid) { $0.runState = .idle; $0.activity = nil; $0.workingSince = nil }
-        case .send(let tid, let text, _):
+        case .send(let tid, let text, _, let images):
             ack(id)
-            append(tid, .user(text: text, images: 0))
+            append(tid, .user(text: text, images: images.count))
             update(tid) { $0.runState = .working; $0.needs = nil; $0.workingSince = Self.now; $0.activity = "Thinking"; $0.section = $0.pinned ? .pinned : .working }
             respond(in: tid, to: text)
-        case .newThread(let pid, let agentKey, let model, let text, let worktree):
+        case .setPrefs(let tid, let agentKey, let model, let effort, let access, let plan):
+            ack(id)
+            update(tid) { t in
+                if let agentKey, let a = self.agents.first(where: { $0.key == agentKey }) {
+                    t.agent = AgentRef(key: a.key, name: a.name)
+                    t.model = a.defaultModel
+                    t.modelLabel = a.models.first { $0.id == a.defaultModel }?.label
+                }
+                if let model {
+                    t.model = model
+                    t.modelLabel = self.agents.flatMap(\.models).first { $0.id == model }?.label
+                }
+                if let effort { t.effort = effort }
+                if let access { t.access = access }
+                if let plan { t.plan = plan }
+            }
+        case .threadAction(let tid, let action):
+            ack(id)
+            update(tid) { t in
+                switch action {
+                case .pin: t.pinned = true; t.section = .pinned
+                case .unpin, .unsettle: t.pinned = false; t.section = .inbox
+                case .settle, .archive: t.pinned = false; t.section = .settled
+                case .rename(let title): t.title = title
+                }
+            }
+        case .newThread(let pid, let agentKey, let model, let text, let worktree, _, _, _, let images):
             let tid = "t-new-\(Int(Date().timeIntervalSince1970))"
             let project = projects.first { $0.id == pid } ?? projects[0]
             let agent = agents.first { $0.key == agentKey } ?? agents[0]
@@ -114,7 +153,7 @@ final class MockHost: Backend {
             items[tid] = []
             deliver(.ack(re: id, threadId: tid))
             deliver(.thread(t))
-            append(tid, .user(text: text, images: 0))
+            append(tid, .user(text: text, images: images.count))
             respond(in: tid, to: text)
         case .answer(let tid, let rid, let response):
             answer(tid, rid, response, id: id)
