@@ -111,6 +111,9 @@ fn thread_summary_serializes_like_the_spec() {
         updated_at: 1_791_020_400_000,
         additions: 42,
         deletions: 7,
+        effort: Some("high".into()),
+        access: Some(Access::Auto),
+        plan: false,
     };
     let v = serde_json::to_value(&thread).unwrap();
     assert_eq!(v["run_state"], "needs-you");
@@ -305,6 +308,33 @@ fn items_tolerate_missing_optional_fields() {
 }
 
 #[test]
+fn settings_actions_and_photos() {
+    let p = client_round_trip(r#"{"type":"set_prefs","id":"1","thread_id":"t","model":"gpt-6","effort":"high","access":"auto-accept-edits","plan":true}"#);
+    assert_eq!(
+        p.msg,
+        ClientMessage::SetPrefs(PrefsRequest {
+            thread_id: "t".into(),
+            agent: None,
+            model: Some("gpt-6".into()),
+            effort: Some("high".into()),
+            access: Some(Access::AutoAcceptEdits),
+            plan: Some(true),
+        })
+    );
+    let a = client_round_trip(r#"{"type":"thread_action","id":"2","thread_id":"t","action":{"kind":"rename","title":"Login limits"}}"#);
+    assert_eq!(a.msg, ClientMessage::ThreadAction(ThreadActionRequest { thread_id: "t".into(), action: ThreadAction::Rename { title: "Login limits".into() } }));
+    let pin: ClientEnvelope = serde_json::from_str(r#"{"type":"thread_action","thread_id":"t","action":{"kind":"pin"}}"#).unwrap();
+    assert!(matches!(pin.msg, ClientMessage::ThreadAction(ThreadActionRequest { action: ThreadAction::Pin, .. })));
+    let photo: ClientEnvelope = serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"see","images":[{"mime":"image/png","data":"iVBORw0KGgo="}]}"#).unwrap();
+    let ClientMessage::Send(req) = photo.msg else { panic!() };
+    assert_eq!(req.images[0].decode().unwrap().1, "png");
+    assert!(ImageUpload { mime: "image/png".into(), data: "aGVsbG8=".into() }.decode().is_err(), "not a picture");
+    // Older Macs' rows and snapshots, without the new fields, still read.
+    let s: Snapshot = serde_json::from_str(r#"{"threads":[],"projects":[],"agents":[{"key":"codex","name":"Codex","models":[{"id":"gpt-6","label":"GPT-6"}]}]}"#).unwrap();
+    assert!(!s.full_access && s.agents[0].models[0].efforts.is_empty());
+}
+
+#[test]
 fn spec_actions() {
     let send = client_round_trip(r#"{"type":"send","id":"9","thread_id":"01J…","text":"Also add a regression test","mode":"steer"}"#);
     assert_eq!(
@@ -312,7 +342,8 @@ fn spec_actions() {
         ClientMessage::Send(SendRequest {
             thread_id: "01J…".into(),
             text: "Also add a regression test".into(),
-            mode: Some(SendMode::Steer)
+            mode: Some(SendMode::Steer),
+            images: vec![],
         })
     );
     let queued: ClientEnvelope = serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"x","mode":"queue"}"#).unwrap();

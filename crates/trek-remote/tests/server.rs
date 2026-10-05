@@ -40,6 +40,9 @@ fn thread(id: &str) -> ThreadSummary {
         updated_at: 1,
         additions: 0,
         deletions: 0,
+        effort: None,
+        access: None,
+        plan: false,
     }
 }
 
@@ -59,7 +62,7 @@ impl FakeHost {
 
 impl RemoteHost for FakeHost {
     async fn snapshot(&self) -> HostResult<Snapshot> {
-        Ok(Snapshot { threads: vec![thread("t1"), thread("t2")], projects: vec![], agents: vec![] })
+        Ok(Snapshot { threads: vec![thread("t1"), thread("t2")], projects: vec![], agents: vec![], full_access: false })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
@@ -598,6 +601,9 @@ async fn channel_host_round_trip() {
                     seen.push(req.text);
                     let _ = reply.send(Ok(()));
                 }
+                HostRequest::SetPrefs { reply, .. } | HostRequest::ThreadAction { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
                 HostRequest::NewThread { reply, .. } => {
                     let _ = reply.send(Ok("c2".into()));
                 }
@@ -613,8 +619,8 @@ async fn channel_host_round_trip() {
 
     assert_eq!(host.snapshot().await.unwrap().threads[0].id, "c1");
     assert_eq!(host.transcript("zz").await.unwrap_err().code, ErrorCode::NotFound);
-    host.send(SendRequest { thread_id: "c1".into(), text: "hi".into(), mode: None }).await.unwrap();
-    let req = NewThreadRequest { project_id: "p".into(), agent: "codex".into(), model: None, text: "go".into(), worktree: false };
+    host.send(SendRequest { thread_id: "c1".into(), text: "hi".into(), mode: None, images: vec![] }).await.unwrap();
+    let req = NewThreadRequest { project_id: "p".into(), agent: "codex".into(), model: None, text: "go".into(), worktree: false, effort: None, access: None, plan: false, images: vec![] };
     assert_eq!(host.new_thread(req).await.unwrap(), "c2");
     let answer = AnswerRequest {
         thread_id: "c1".into(),

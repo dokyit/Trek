@@ -7,7 +7,8 @@ use std::future::Future;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    AnswerRequest, ErrorCode, Item, NewThreadRequest, SendRequest, Snapshot, ThreadSummary, Transcript,
+    AnswerRequest, ErrorCode, Item, NewThreadRequest, PrefsRequest, SendRequest, Snapshot, ThreadActionRequest, ThreadSummary,
+    Transcript,
 };
 
 pub type HostResult<T> = Result<T, HostError>;
@@ -65,6 +66,16 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = thread_id;
         async { Ok(()) }
     }
+    /// Change a thread's agent, model, effort, access or plan mode.
+    fn set_prefs(&self, req: PrefsRequest) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = req;
+        async { Err(HostError::bad_request("This Mac can't change a thread's settings")) }
+    }
+    /// Pin, settle, archive or rename a thread.
+    fn thread_action(&self, req: ThreadActionRequest) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = req;
+        async { Err(HostError::bad_request("This Mac can't do that to a thread")) }
+    }
 }
 
 /// A change the app pushes to connected phones through [`crate::RemoteHandle::push`].
@@ -100,6 +111,8 @@ pub enum HostRequest {
     Answer { req: AnswerRequest, reply: Reply<()> },
     Interrupt { thread_id: String, reply: Reply<()> },
     MarkSeen { thread_id: String, reply: Reply<()> },
+    SetPrefs { req: PrefsRequest, reply: Reply<()> },
+    ThreadAction { req: ThreadActionRequest, reply: Reply<()> },
 }
 
 /// A [`RemoteHost`] that forwards every call as a [`HostRequest`] over an `async_channel`.
@@ -161,5 +174,13 @@ impl RemoteHost for ChannelHost {
     async fn mark_seen(&self, thread_id: &str) -> HostResult<()> {
         let thread_id = thread_id.to_string();
         self.call(|reply| HostRequest::MarkSeen { thread_id, reply }).await
+    }
+
+    async fn set_prefs(&self, req: PrefsRequest) -> HostResult<()> {
+        self.call(|reply| HostRequest::SetPrefs { req, reply }).await
+    }
+
+    async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
+        self.call(|reply| HostRequest::ThreadAction { req, reply }).await
     }
 }

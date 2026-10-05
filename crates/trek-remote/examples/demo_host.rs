@@ -456,7 +456,7 @@ impl RemoteHost for DemoHost {
         let st = self.lock();
         let mut threads = st.threads.clone();
         threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
-        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone() })
+        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone(), full_access: true })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
@@ -526,6 +526,9 @@ impl RemoteHost for DemoHost {
             updated_at: now_ms(),
             additions: 0,
             deletions: 0,
+            effort: req.effort.clone().or(Some("high".into())),
+            access: req.access.or(Some(Access::AutoAcceptEdits)),
+            plan: req.plan,
         };
         {
             let mut st = self.lock();
@@ -607,6 +610,56 @@ impl RemoteHost for DemoHost {
         self.update(thread_id, |t| t.unseen = false);
         Ok(())
     }
+
+    async fn set_prefs(&self, req: PrefsRequest) -> HostResult<()> {
+        let agents = self.lock().agents.clone();
+        if self.thread(&req.thread_id).is_none() {
+            return Err(HostError::not_found(format!("No thread {}", req.thread_id)));
+        }
+        self.update(&req.thread_id, |t| {
+            if let Some(a) = req.agent.as_ref().and_then(|k| agents.iter().find(|a| &a.key == k)) {
+                t.agent = AgentRef { key: a.key.clone(), name: a.name.clone() };
+                t.model = a.default_model.clone();
+            }
+            if let Some(m) = &req.model {
+                t.model = Some(m.clone());
+                t.model_label = agents.iter().flat_map(|a| &a.models).find(|o| &o.id == m).map(|o| o.label.clone());
+            }
+            if let Some(e) = &req.effort {
+                t.effort = Some(e.clone());
+            }
+            if let Some(a) = req.access {
+                t.access = Some(a);
+            }
+            if let Some(p) = req.plan {
+                t.plan = p;
+            }
+        });
+        Ok(())
+    }
+
+    async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
+        if self.thread(&req.thread_id).is_none() {
+            return Err(HostError::not_found(format!("No thread {}", req.thread_id)));
+        }
+        self.update(&req.thread_id, |t| match &req.action {
+            ThreadAction::Pin => {
+                t.pinned = true;
+                t.section = Section::Pinned;
+            }
+            ThreadAction::Unpin | ThreadAction::Unsettle => {
+                t.pinned = false;
+                t.section = Section::Inbox;
+            }
+            ThreadAction::Settle => {
+                t.pinned = false;
+                t.section = Section::Settled;
+            }
+            ThreadAction::Archive => t.section = Section::Settled,
+            ThreadAction::Rename { title } => t.title = title.clone(),
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -625,7 +678,8 @@ fn project(id: &str, name: &str, hue: Option<u16>, branch: &str, is_repo: bool) 
 }
 
 fn agents() -> Vec<AgentOption> {
-    let m = |id: &str, label: &str| ModelOption { id: id.into(), label: label.into() };
+    let efforts = || ["low", "medium", "high", "xhigh", "max"].map(String::from).to_vec();
+    let m = |id: &str, label: &str| ModelOption { id: id.into(), label: label.into(), efforts: efforts() };
     vec![
         AgentOption {
             key: "claude-code".into(),
@@ -708,6 +762,9 @@ fn summary(
         updated_at: now_ms() - minutes_ago * 60_000,
         additions: 0,
         deletions: 0,
+        effort: Some("high".into()),
+        access: Some(Access::AutoAcceptEdits),
+        plan: false,
     }
 }
 
