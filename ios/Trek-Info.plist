@@ -23,6 +23,8 @@
 			</dict>
 		</dict>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Trek connects to Trek on your Mac, on your local network, to show your agents and relay your answers.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Trek asks for Face ID before letting an agent skip approvals for the rest of a session.</string>
 	<key>CFBundleURLTypes</key>

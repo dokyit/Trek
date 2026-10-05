@@ -64,7 +64,23 @@ roughly 50 MB on disk. A built-in updater installs signed releases without ever 
 
 ## Screenshots
 
-Screenshots are coming with the first public release.
+<img src="docs/media/01-working-night.png" alt="Trek's inbox: a working turn streaming a plan, threads waiting in the sidebar" width="800">
+
+<table>
+  <tr>
+    <td><img src="docs/media/03-approval-night.png" alt="An approval card waiting for a decision"></td>
+    <td><img src="docs/media/04-plan-night.png" alt="A plan awaiting approval"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/media/05-basecamp-paper.png" alt="Basecamp, the paper theme: today's trek at a glance"></td>
+    <td><img src="docs/media/02-threads-dark.png" alt="The iPhone companion: every thread, approvals on the go"></td>
+  </tr>
+</table>
+
+A turn under the mock agent, captured by `script/capture.sh` — [video](docs/media/clip-stream.mp4),
+[animated](docs/media/clip-stream.gif):
+
+<img src="docs/media/clip-stream.gif" alt="A working turn streaming" width="800">
 
 ## Install
 
@@ -169,8 +185,9 @@ crates/trek-mcp      MCP server agents use for computer use, the iOS Simulator a
 crates/trek-ipc      the local socket protocol between Trek and its trek-mcp servers
 vendor/gpui-base     gpui-base 0.7 with Trek's small markdown patch (semibold emphasis, calmer headings)
 assets/              brand art, backgrounds, the update signing public key
-script/              bundle, release, signing identity, updater end-to-end test
-docs/                DECISIONS.md, DESIGN.md, RESEARCH.md, RELEASING.md
+script/              bundle, release, signing identity, updater end-to-end test, media capture
+media/               capture manifests for screenshots and clips (media/README.md)
+docs/                DECISIONS.md, MOBILE.md (iPhone protocol), RELEASING.md
 ```
 
 The engine crates don't depend on the UI toolkit. All I/O runs on one shared tokio runtime and reaches the
@@ -187,10 +204,17 @@ last reported, so Trek doesn't open a session to ask again). See
   gates) isn't built yet; use a CLI agent for real work in a repository.
 - **Imports** cover Claude Code, Codex and OpenCode; Cursor, Copilot and other agents' history isn't
   imported yet.
-- **No screenshots or website yet**, and no delta updates (each update downloads the whole app, about
-  15 MB).
+- **No website yet**, and no delta updates (each update downloads the whole app, about 15 MB).
 
 ## License
 
 [Apache-2.0](LICENSE). `vendor/gpui-base` is a patched copy of Longbridge's gpui-base, Apache-2.0 under its
-own [license](vendor/gpui-base/LICENSE-APACHE).
+own [license](vendor/gpui-base/LICENSE-APACHE). Third-party attributions live in [NOTICE](NOTICE).
+
+## Trademarks
+
+Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft, or any other maker
+of the agents it runs. Agent and provider names and logos belong to their respective owners and
+are shown only to identify which agent a thread uses — the same nominative use as any tool that
+drives several CLIs. If you hold one of those marks and want Trek's copy of it changed or removed,
+open an issue.

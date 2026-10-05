@@ -1,0 +1,13 @@
+# media/ios/store.list — the App Store set. Pin a 6.9" simulator for store sizes:
+#   SIM="iPhone 17 Pro Max" script/capture.sh ios/store
+# Shape: NAME [record=SECS] [wait=N] [demo=0|1|live] -- <launch args>
+# Demo-mode thread ids: t-flaky (failed build/approval), t-inbox, t-ratelimit, t-settings.
+
+01-threads-light          -- -TrekAppearance light
+02-threads-dark           -- -TrekAppearance dark
+03-approval-light         wait=4 -- -TrekAppearance light -TrekOpen t-flaky
+04-working-dark           wait=4 -- -TrekAppearance dark -TrekOpen t-inbox -TrekExpand YES
+05-question-light         wait=4 -- -TrekAppearance light -TrekOpen t-ratelimit
+06-new-thread-light       wait=4 -- -TrekAppearance light -TrekSheet new
+07-settings-dark          -- -TrekAppearance dark -TrekTab settings
+clip-approve              record=8 wait=2 -- -TrekAppearance dark -TrekOpen t-flaky

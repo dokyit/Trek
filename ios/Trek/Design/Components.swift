@@ -33,7 +33,7 @@ struct ProjectBadge: View {
     }
 }
 
-/// The beacon: a dot that breathes while an agent works (DESIGN.md "Beacon status dot").
+/// The beacon: a dot that breathes while an agent works (design spec: "beacon status dot").
 struct BeaconDot: View {
     var color: Color
     var pulses: Bool

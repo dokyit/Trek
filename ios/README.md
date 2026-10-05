@@ -92,7 +92,7 @@ Trek/Model      Protocol.swift (wire types, mirrors trek-remote/src/protocol.rs)
 Trek/Net        TrekClient: URLSessionWebSocketTask over pinned TLS (PinningDelegate), pair/hello,
                 reconnect with backoff, pings; PairingLink
 Trek/Demo       MockHost: the in-process demo Mac
-Trek/Design     Trek palette (DESIGN.md), status colours, project hues, file-type chips, agent logos
+Trek/Design     Trek palette (design spec), status colours, project hues, file-type chips, agent logos
 Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer),
                 New thread sheet, Pairing (QR scanner, typed pairing, confirmation sheet), Settings, Search
 ```

@@ -1,7 +1,6 @@
 # Trek Mobile — Design
 
 > Status: phase 1 in progress (2026-10). Mac side: `crates/trek-remote`. iPhone app: `ios/`.
-> Background research: `reports/Trek competitors and mobile app plan.md`.
 
 ## Goal
 

@@ -215,6 +215,16 @@ fn main() {
         app_actions(cx);
         cx.set_menus(menus());
 
+        // A capture run must never reach the user's data or accounts: TREK_SHOT_DIR isolates the
+        // process (all storage under TREK_DATA_DIR, no Keychain, only the mock agent can start).
+        #[cfg(feature = "shots")]
+        if std::env::var_os("TREK_SHOT_DIR").is_some() {
+            let dir = std::env::var_os("TREK_DATA_DIR")
+                .map(std::path::PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::env::temp_dir().join(format!("trek-shots-{}", std::process::id())));
+            trek_core::paths::isolate(dir);
+        }
         let ws = workspace::init(cx);
         tray::init(ws.clone(), cx);
         let theme = ws.read(cx).settings.appearance.theme;
