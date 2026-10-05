@@ -77,7 +77,7 @@ pipe, not the messages. LAN/Tailscale is what power users already run.
    `code` is 8 Crockford base32 characters (40 bits) shown as `XXXX-XXXX`: one use, valid 10
    minutes, burned after 5 wrong attempts (from anyone). `fp` is the SHA-256 of the Mac's
    certificate (DER), 64 lowercase hex characters; the Mac also shows its short form beside the
-   code: the first 8 hex characters, uppercased, as `ABCD-1234`. A link without `fp` comes from a
+   code: the first 16 hex characters, uppercased, as `ABCD-1234-EF56-7890`. A link without `fp` comes from a
    Mac serving plain `ws://`.
 2. The phone scans it (or opens it as a deep link, or the user types host:port, the code and the
    short fingerprint). A link never pairs by itself: the phone first shows **"Pair with
@@ -102,14 +102,13 @@ What `ios/Trek/Net/TrekClient.swift` does, as built:
   host-name check; the fingerprint is the whole trust decision. `pair` and `hello` are only sent
   once the socket is open, i.e. after the pin was checked, so a wrong server never sees the code or
   the token.
-- **What is pinned.** From a QR code or link, the full `fp`. From typed pairing, the 8 hex
-  characters the user entered (`ABCD-1234`, case and dash ignored) match any certificate whose
-  fingerprint starts with them; the full fingerprint seen during that handshake is what gets kept.
-  **Limitation:** an 8-hex-character prefix is only 32 bits, and the fingerprint isn't secret
-  (anyone on the network can fetch the certificate), so an attacker in the path can grind a
-  certificate with the same prefix in minutes of GPU time. Typed pairing is therefore weaker than
-  scanning; prefer the QR code, and a longer short form (or a post-pairing check of the full
-  fingerprint on both screens) is an open question below.
+- **What is pinned.** From a QR code or link, the full `fp`. From typed pairing, the 16 hex
+  characters the user entered (`ABCD-1234-EF56-7890`, case, spaces and dashes ignored) match any
+  certificate whose fingerprint starts with them; the full fingerprint seen during that handshake is
+  what gets kept. 16 characters are 64 bits: the fingerprint isn't secret (anyone on the network can
+  fetch the certificate), but making a certificate whose fingerprint starts the same takes about 2^63
+  tries, far beyond the ten minutes a code lasts. (The first design showed 8 characters, 32 bits,
+  which a GPU could match in minutes.)
 - **Storage.** The pin is stored with the paired Mac (address, device token, host name and id) as
   one Keychain item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), and every later `hello`
   connection is pinned to it.
@@ -405,10 +404,27 @@ instead and queue).
 
 ## Open questions
 
-- Typed pairing's 8-hex fingerprint prefix (32 bits) can be ground by an active attacker who
-  fetched the Mac's certificate. Options: show 16+ hex characters beside the code, or show the full
-  fingerprint on both screens after pairing for comparison.
 - Whether vendor terms tolerate a third-party remote steering their CLIs (Happy, Omnara and Moshi do
   it openly; precedent, not permission).
-- Seq numbers: the store's `seq` is positional and rewinds truncate. The host should keep a
-  per-thread monotonic counter for the protocol (or send `transcript_reset` after rewinds).
+- "Allow for session" asks for Face ID on the phone only; the Mac takes the phone's word.
+
+## The Mac side as built (Trek 0.3.4)
+
+- **Settings › Phone** turns the server on (off by default; `[mobile]` in settings.toml: `enabled`,
+  `port` 7420, `reach` wifi or tailscale). It binds `0.0.0.0:<port>` with TLS from
+  `mobile/identity.{der,key}` in Trek's data folder (the key 0600), keeps paired devices in
+  `mobile/devices.json`, and advertises the Wi-Fi or Tailscale address in the pairing code. The page
+  shows the QR code, the code and the 16-character fingerprint, and the paired phones with Unpair.
+- **Requests** (`crates/trek-app/src/remote.rs`) come through `ChannelHost` and are answered on the
+  main thread from the workspace. Transcript items are numbered by index (`i<n>`), requests as
+  `r<request id>`; each thread keeps its own `seq`, bumped for every new or changed item; a
+  transcript shorter than what was sent (a rewind) sends `transcript_reset`. Answered requests are
+  re-sent with state `resolved`.
+- **Changes** go out every 250 ms while a phone is connected: thread rows that changed (and
+  removals), and the items of transcripts a phone has open.
+- **Refused:** Trek's own slash commands (`/permissions`, `/new`, `/consult`…), from `send`,
+  `new_thread` and plan feedback alike. A thread started from the phone doesn't move the Mac's
+  screen or open a tab.
+- `cargo run -p trek-remote --example probe -- '<trek://pair link>' [--thread <id> [--send "…"]
+  [--answer allow|deny]]` is a phone in a terminal, for testing a running Trek. It sends only to a
+  thread named explicitly: a message reaches a real agent in that thread's folder.

@@ -16,18 +16,19 @@ nonisolated enum Transport: Equatable, Codable {
 nonisolated enum CertificatePin: Equatable, Codable {
     /// The full fingerprint, 64 lowercase hex characters (from the QR code, or seen while pairing).
     case full(String)
-    /// The first 8 hex characters the Mac shows beside the pairing code, typed by the user. Only
-    /// used to pair; the full fingerprint seen then is what's kept.
+    /// The first 16 hex characters the Mac shows beside the pairing code, typed by the user. Only
+    /// used to pair; the full fingerprint seen then is what's kept. (64 bits: no one makes a
+    /// certificate to match them while a code lasts.)
     case prefix(String)
 
     func matches(_ fingerprint: String) -> Bool {
         switch self {
         case .full(let fp): fp == fingerprint
-        case .prefix(let p): p.count == 8 && fingerprint.hasPrefix(p)
+        case .prefix(let p): p.count == Fingerprint.typedLength && fingerprint.hasPrefix(p)
         }
     }
 
-    /// `ABCD-1234`, as the Mac shows it.
+    /// `ABCD-1234-EF56-7890`, as the Mac shows it.
     var short: String {
         switch self {
         case .full(let fp), .prefix(let fp): Fingerprint.short(fp)
@@ -41,11 +42,13 @@ nonisolated enum Fingerprint {
         SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// `ABCD-1234`: the first 8 hex characters, uppercased and grouped.
+    /// How many hex characters the Mac shows to type.
+    static let typedLength = 16
+
+    /// `ABCD-1234-EF56-7890`: the first 16 hex characters, uppercased and grouped in fours.
     static func short(_ fp: String) -> String {
-        let head = String(fp.prefix(8)).uppercased()
-        guard head.count == 8 else { return head }
-        return "\(head.prefix(4))-\(head.suffix(4))"
+        let head = Array(String(fp.prefix(typedLength)).uppercased())
+        return stride(from: 0, to: head.count, by: 4).map { String(head[$0..<min($0 + 4, head.count)]) }.joined(separator: "-")
     }
 
     /// A full fingerprint from a link, or nil if it isn't 64 hex characters.
@@ -54,10 +57,11 @@ nonisolated enum Fingerprint {
         return fp.count == 64 && fp.allSatisfy(\.isHexDigit) ? fp : nil
     }
 
-    /// The short form as typed ("abcd 1234", "ABCD-1234"…) → 8 lowercase hex characters, or nil.
+    /// The short form as typed ("abcd 1234 ef56 7890", "ABCD-1234-…") → 16 lowercase hex
+    /// characters, or nil.
     static func typedPrefix(_ s: String) -> String? {
         let hex = s.lowercased().filter { !$0.isWhitespace && $0 != "-" }
-        return hex.count == 8 && hex.allSatisfy(\.isHexDigit) ? hex : nil
+        return hex.count == typedLength && hex.allSatisfy(\.isHexDigit) ? hex : nil
     }
 }
 
@@ -242,7 +246,7 @@ final class TrekClient: Backend {
             authenticated = true
             attempt = 0
             auth = .hello(deviceId: Device.id, token: token)
-            // Typed pairing pinned only 8 hex characters; from now on, the whole certificate.
+            // Typed pairing pinned only 16 hex characters; from now on, the whole certificate.
             if case .tls = transport, let seen = pinning?.seen { transport = .tls(.full(seen)) }
             onPaired?(token, host, transport)
             onState?(.connected)

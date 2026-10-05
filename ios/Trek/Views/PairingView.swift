@@ -140,7 +140,7 @@ struct PairingView: View {
                 .font(.body.monospaced())
             Divider()
             HStack(spacing: 8) {
-                TextField("Fingerprint, e.g. ABCD-1234", text: $fingerprint)
+                TextField("Fingerprint, e.g. ABCD-1234-EF56-7890", text: $fingerprint)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
