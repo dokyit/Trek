@@ -45,6 +45,8 @@ enum Launch {
     static var tab: String? { UserDefaults.standard.string(forKey: "TrekTab") }
     static var sheet: String? { UserDefaults.standard.string(forKey: "TrekSheet") }
     static var appearance: String? { UserDefaults.standard.string(forKey: "TrekAppearance") }
+    /// A text size for screenshots: `small`, `large`, `xxLarge`…
+    static var textSize: String? { UserDefaults.standard.string(forKey: "TrekTextSize") }
     static var expandAll: Bool { UserDefaults.standard.bool(forKey: "TrekExpand") }
     static var link: String? { UserDefaults.standard.string(forKey: "TrekLink") }
     static var pairNow: String? { UserDefaults.standard.string(forKey: "TrekPair") }
@@ -56,11 +58,25 @@ enum MainTab: Hashable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @AppStorage("appearance") private var appearance = "system"
+    @AppStorage(AppearanceKey.theme) private var appearance = ThemeChoice.system.rawValue
+    @AppStorage(AppearanceKey.textSize) private var textSize = TextSizeChoice.system.rawValue
+    @AppStorage(AppearanceKey.calm) private var calm = false
+    @AppStorage(AppearanceKey.compact) private var compact = false
 
     var body: some View {
         @Bindable var model = model
         Group {
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "TrekGallery") {
+                DesignGallery()
+            } else if model.mode == .unpaired {
+                PairingView()
+                    .transition(.opacity)
+            } else {
+                MainView()
+                    .transition(.opacity)
+            }
+            #else
             if model.mode == .unpaired {
                 PairingView()
                     .transition(.opacity)
@@ -68,6 +84,7 @@ struct RootView: View {
                 MainView()
                     .transition(.opacity)
             }
+            #endif
         }
         .animation(.smooth, value: model.mode)
         .overlay(alignment: .top) {
@@ -82,14 +99,22 @@ struct RootView: View {
             PairingConfirmSheet(link: link)
         }
         .preferredColorScheme(scheme)
+        .modifier(TextSizeModifier(size: TextSizeChoice(rawValue: Launch.textSize ?? textSize)?.dynamicType))
+        .environment(\.trekCalm, calm)
+        .environment(\.compactRows, compact)
     }
 
     private var scheme: ColorScheme? {
-        switch Launch.appearance ?? appearance {
-        case "dark": .dark
-        case "light": .light
-        default: nil
-        }
+        ThemeChoice(rawValue: Launch.appearance ?? appearance)?.scheme
+    }
+}
+
+/// Pins Dynamic Type to the size chosen in Settings, or leaves the iPhone's own.
+private struct TextSizeModifier: ViewModifier {
+    var size: DynamicTypeSize?
+
+    func body(content: Content) -> some View {
+        if let size { content.dynamicTypeSize(size) } else { content }
     }
 }
 
@@ -121,7 +146,10 @@ struct MainView: View {
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
-        .modifier(NewThreadAccessoryModifier(enabled: tab == .threads && path.isEmpty && canStartThreads) {
+        // The accessory stays on every tab. Shown on Threads alone, it left the bar to shrink to
+        // its tabs on the others, and the bar resizing under the moving selection sent the
+        // selection through Search on its way from Threads to Settings.
+        .modifier(NewThreadAccessoryModifier(enabled: path.isEmpty && canStartThreads) {
             NewThreadAccessory(working: model.workingCount, needsYou: model.needsYouCount) { showNew = true }
         })
         .sheet(isPresented: $showNew) {

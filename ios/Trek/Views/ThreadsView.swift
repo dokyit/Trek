@@ -8,6 +8,7 @@ struct ThreadsView: View {
     @Binding var showNew: Bool
     @State private var collapsed: Set<String> = []
     @State private var projectFilter: String?
+    @Environment(\.compactRows) private var compact
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -90,7 +91,7 @@ struct ThreadsView: View {
                         .navigationLinkIndicatorVisibility(.hidden)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 9, leading: 20, bottom: 9, trailing: 18))
+                        .listRowInsets(EdgeInsets(top: compact ? 7 : 9, leading: 20, bottom: compact ? 7 : 9, trailing: 18))
                         .swipeActions(edge: .leading) {
                             if t.unseen {
                                 Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
@@ -132,18 +133,39 @@ struct ThreadsView: View {
 
 struct ThreadRow: View {
     var thread: ThreadSummary
+    @Environment(\.compactRows) private var compact
 
     private var recedes: Bool { thread.runState == .idle && !thread.unseen && thread.needs == nil }
 
     var body: some View {
+        if compact { compactBody } else { fullBody }
+    }
+
+    /// One line: logo, project badge, title, status.
+    private var compactBody: some View {
+        HStack(alignment: .center, spacing: 10) {
+            AgentGlyph(key: thread.agent.key, size: 18)
+                .opacity(recedes ? 0.7 : 1)
+            if let p = thread.project { ProjectBadge(project: p, size: 15) }
+            Text(thread.title)
+                .scaledFont(16, weight: thread.unseen ? .semibold : .regular)
+                .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            trailing
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var fullBody: some View {
         HStack(alignment: .top, spacing: 13) {
             AgentGlyph(key: thread.agent.key, size: 24)
                 .padding(.top, 1)
                 .opacity(recedes ? 0.7 : 1)
             VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
                     Text(thread.title)
-                        .font(.system(size: 17, weight: thread.unseen ? .semibold : .regular))
+                        .scaledFont(17, weight: thread.unseen ? .semibold : .regular)
                         .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
                         .lineLimit(1)
                     Spacer(minLength: 4)
@@ -173,13 +195,23 @@ struct ThreadRow: View {
     private var trailing: some View {
         if let look = StatusLook.of(thread) {
             StatusPill(look: look)
-        } else {
-            HStack(spacing: 6) {
-                if thread.unseen { Circle().fill(Trek.done).frame(width: 7, height: 7) }
-                Text(When.short(thread.updatedAt))
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(thread.unseen ? Trek.done : Trek.muted.opacity(0.8))
+        } else if thread.unseen {
+            // Done and not read yet: emerald, on its own wash.
+            HStack(spacing: 5) {
+                Circle().fill(Trek.done).frame(width: 6, height: 6)
+                Text(When.short(thread.updatedAt)).font(.footnote.weight(.semibold).monospacedDigit())
             }
+            .foregroundStyle(Trek.done)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Trek.done.opacity(0.13), in: Capsule())
+            .overlay(Capsule().strokeBorder(Trek.done.opacity(0.24), lineWidth: 0.5))
+            .fixedSize()
+            .accessibilityLabel("Done, unread, \(When.short(thread.updatedAt))")
+        } else {
+            Text(When.short(thread.updatedAt))
+                .font(.subheadline.monospacedDigit())
+                .foregroundStyle(Trek.muted.opacity(0.8))
         }
     }
 
@@ -189,7 +221,9 @@ struct ThreadRow: View {
         if let needs = thread.needs {
             Text(needs.text.replacingOccurrences(of: "`", with: "")).foregroundStyle(Trek.muted)
         } else if thread.runState == .working, let activity = thread.activity {
-            Text(activity).foregroundStyle(Trek.muted)
+            RichText(markdown: activity, size: 15, style: .subheadline, autoPaths: true)
+                .foregroundStyle(Trek.muted)
+                .environment(\.projectHue, thread.project?.hue)
         } else if let branch = thread.branch {
             Label {
                 Text(branch)

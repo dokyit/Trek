@@ -68,8 +68,7 @@ struct UserBubble: View {
                     Label("\(images) image\(images == 1 ? "" : "s")", systemImage: "photo")
                         .font(.caption).foregroundStyle(Trek.muted)
                 }
-                Text(MarkdownText.inline(text))
-                    .font(.system(size: 16))
+                RichText(markdown: text, size: 16)
                     .lineSpacing(2)
             }
             .padding(.horizontal, 15)
@@ -314,9 +313,9 @@ struct ResolvedRequestRow: View {
     var item: TItem
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: symbol).foregroundStyle(color)
-            Text(text).lineLimit(2)
+            RichText(markdown: text, size: 15, style: .subheadline).lineLimit(2)
         }
         .font(.subheadline)
         .foregroundStyle(Trek.muted)
@@ -340,7 +339,8 @@ struct ResolvedRequestRow: View {
         }
     }
 
-    private var text: AttributedString {
+    /// Markdown: the approved command in a code chip.
+    private var text: String {
         switch item.body {
         case .approval(let a):
             let verb = switch a.state {
@@ -349,53 +349,75 @@ struct ResolvedRequestRow: View {
             case .denied: "Denied"
             default: "Settled by the agent"
             }
-            return MarkdownText.inline("\(verb) · `\(a.detail)`")
+            return "\(verb) · `\(a.detail.replacingOccurrences(of: "`", with: "'"))`"
         case .question(let q):
             let answers = (q.answers ?? []).map(\.answer).joined(separator: ", ")
-            return AttributedString(answers.isEmpty ? "Question settled" : "Answered: \(answers)")
+            return answers.isEmpty ? "Question settled" : "Answered: \(answers)"
         case .plan(let p):
-            return AttributedString(p.state == .approved ? "Plan approved" : p.state == .rejected ? "Sent the plan back" : "Plan settled")
+            return p.state == .approved ? "Plan approved" : p.state == .rejected ? "Sent the plan back" : "Plan settled"
         default:
-            return AttributedString("")
+            return ""
         }
     }
 }
 
-/// "Working… 1m 12s · Running cargo test" under the transcript while the agent is busy.
+/// Under the transcript while the agent is busy, as the Mac's working bar: the hiker walking its
+/// dotted trail, then the agent's logo, a trail word ("Breaking trail…") that changes every few
+/// seconds, how long the turn has run, and what it's doing now.
 struct WorkingLine: View {
+    var threadID: String
+    var agentKey: String
     var since: Int64?
     var activity: String?
+    @MotionAllowed private var motion
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { ctx in
-            HStack(spacing: 8) {
-                BeaconDot(color: Trek.working, pulses: true, size: 7)
-                Text(activity ?? "Working…").shimmering().lineLimit(1)
-                if let since {
-                    Text(When.duration(Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000)))
-                        .monospacedDigit()
-                        .foregroundStyle(Trek.muted.opacity(0.7))
+        VStack(alignment: .leading, spacing: 4) {
+            TrailView(id: threadID, still: !motion)
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                HStack(spacing: 7) {
+                    AgentGlyph(key: agentKey, size: 15)
+                    Text(TrailWord.line(threadID, since: since, now: ctx.date))
+                        .foregroundStyle(Trek.foreground.opacity(0.88))
+                        .shimmering()
+                        .lineLimit(1)
+                        .fixedSize()
+                        .contentTransition(.opacity)
+                        .animation(motion ? .easeInOut(duration: 0.35) : nil, value: TrailWord.line(threadID, since: since, now: ctx.date))
+                    if let since {
+                        Text(When.duration(Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000)))
+                            .monospacedDigit()
+                            .foregroundStyle(Trek.muted)
+                            .fixedSize()
+                    }
+                    if let activity, !activity.isEmpty {
+                        Text("·").foregroundStyle(Trek.muted.opacity(0.6))
+                        RichText(markdown: activity, size: 15, style: .subheadline, autoPaths: true)
+                            .foregroundStyle(Trek.muted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
+                .font(.subheadline)
             }
-            .font(.subheadline)
-            .foregroundStyle(Trek.muted)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
 extension View {
-    /// The sunrise-tinted sweep the desktop uses for "Thinking".
+    /// The sunrise-tinted sweep the desktop uses for work under way.
     func shimmering() -> some View { modifier(Shimmer()) }
 }
 
 private struct Shimmer: ViewModifier {
     @State private var phase: CGFloat = -1
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @MotionAllowed private var motion
 
     func body(content: Content) -> some View {
         content
             .overlay {
-                if !reduceMotion {
+                if motion {
                     GeometryReader { geo in
                         LinearGradient(colors: [.clear, Color(hex: 0xFFC56B).opacity(0.9), Color(hex: 0xFF8A3D).opacity(0.9), .clear],
                                        startPoint: .leading, endPoint: .trailing)

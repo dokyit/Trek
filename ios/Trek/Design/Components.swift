@@ -39,27 +39,27 @@ struct BeaconDot: View {
     var pulses: Bool
     var size: CGFloat = 7
     @State private var lit = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @MotionAllowed private var motion
 
     var body: some View {
         Circle()
             .fill(color)
             .frame(width: size, height: size)
-            .opacity(pulses && !reduceMotion ? (lit ? 1 : 0.4) : 1)
+            .opacity(pulses && motion ? (lit ? 1 : 0.4) : 1)
             .background {
-                if pulses {
+                if pulses && motion {
                     Circle().fill(color.opacity(0.35)).frame(width: size * 2.2, height: size * 2.2).blur(radius: 3)
                         .opacity(lit ? 0.9 : 0.1)
                 }
             }
             .onAppear {
-                guard pulses, !reduceMotion else { return }
+                guard pulses, motion else { return }
                 withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { lit = true }
             }
     }
 }
 
-/// "Working", "Approval", "Question"… in Trek's status colours.
+/// "Working", "Approval", "Question"… in Trek's status colours, on a wash of the same colour.
 struct StatusPill: View {
     var look: StatusLook
     var compact = false
@@ -72,10 +72,15 @@ struct StatusPill: View {
                 BeaconDot(color: look.color, pulses: look.pulses, size: 6)
             }
             if !compact {
-                Text(look.label).font(.subheadline.weight(.medium))
+                Text(look.label).font(.footnote.weight(.semibold))
             }
         }
         .foregroundStyle(look.color)
+        .padding(.horizontal, compact ? 6 : 9)
+        .padding(.vertical, 4)
+        .background(look.color.opacity(0.13), in: Capsule())
+        .overlay(Capsule().strokeBorder(look.color.opacity(0.24), lineWidth: 0.5))
+        .fixedSize()
         .accessibilityElement(children: .combine)
     }
 }
@@ -94,28 +99,73 @@ struct DiffStat: View {
     }
 }
 
-/// A file named in a tool row: its type's glyph and colour, then the file name.
+/// A file type's badge (`file_icon::badge`): "RS" on rust, "{}" on gold, a lock for lockfiles.
+struct FileBadge: View {
+    var path: String
+    var size: CGFloat = 14
+
+    var body: some View {
+        let t = FileType.of(path)
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                .fill(t.fill.map { Color(hex: $0) } ?? Trek.foreground.opacity(0.09))
+            switch t.mark {
+            case .text(let label):
+                Text(label)
+                    .font(.system(size: size * (label.count > 1 ? 0.5 : 0.62), weight: .bold, design: .rounded))
+                    .foregroundStyle(t.darkMark ? Color(hex: 0x1F1F1F) : .white)
+                    .minimumScaleFactor(0.5)
+            case .lock:
+                Image(systemName: "lock.fill").font(.system(size: size * 0.55, weight: .semibold)).foregroundStyle(Trek.muted)
+            case .image:
+                Image(systemName: "photo.fill").font(.system(size: size * 0.5, weight: .semibold)).foregroundStyle(.white)
+            case .folder:
+                Image(systemName: "folder.fill").font(.system(size: size * 0.55, weight: .semibold)).foregroundStyle(Trek.muted)
+            case .file:
+                Image(systemName: "doc.text").font(.system(size: size * 0.58, weight: .medium)).foregroundStyle(Trek.muted)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A file in a chip of its type's colour (`file_icon::chip`): its badge, then its name in a shade
+/// of the colour, on a wash of it with a rim. What tool rows show for the files they touched.
 struct FileChip: View {
     var path: String
     var added: Int? = nil
     var removed: Int? = nil
+    var size: CGFloat = 12.5
+    @Environment(\.projectHue) private var projectHue
+    @Environment(\.dynamicTypeSize) private var dynamicType
 
     var body: some View {
-        let look = FileType.look(path)
-        HStack(spacing: 5) {
-            Image(systemName: look.symbol).font(.system(size: 10, weight: .semibold)).foregroundStyle(look.color)
-            Text((path as NSString).lastPathComponent)
-                .font(.system(.caption, design: .monospaced).weight(.medium))
-                .foregroundStyle(Trek.foreground)
+        let tint = FileTint.of(path, projectHue: projectHue)
+        let s = size * TextScale.factor(dynamicType, style: .footnote)
+        HStack(spacing: s * 0.4) {
+            FileBadge(path: path, size: s * 1.1)
+            Text(name)
+                .font(.system(size: s, weight: .medium, design: .monospaced))
+                .foregroundStyle(tint.ink)
                 .lineLimit(1)
+                .truncationMode(.middle)
             if let added, let removed, added + removed > 0 {
-                DiffStat(additions: added, deletions: removed, font: .system(size: 10.5, design: .monospaced))
+                DiffStat(additions: added, deletions: removed, font: .system(size: s * 0.88, weight: .medium, design: .monospaced))
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(look.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(look.color.opacity(0.22), lineWidth: 0.5))
+        .padding(.leading, s * 0.38)
+        .padding(.trailing, s * 0.6)
+        .frame(minHeight: s * 1.85)
+        .background(tint.fill, in: RoundedRectangle(cornerRadius: s * 0.48, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: s * 0.48, style: .continuous).strokeBorder(tint.edge, lineWidth: 0.75))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var name: String {
+        let folder = path.hasSuffix("/")
+        let last = ((folder ? String(path.dropLast()) : path) as NSString).lastPathComponent
+        return folder ? last + "/" : last
     }
 }
 
