@@ -197,16 +197,18 @@ enum DemoMac {
 
     static func gitStatus(thread t: ThreadSummary?) -> GitStatus {
         let f = { (path: String, status: FileStatus, added: Int, removed: Int) in ChangedFile(path: path, status: status, added: added, removed: removed) }
+        // A finished turn's files are still uncommitted, so their diffs can be shown.
+        let turn = t.flatMap { changes(for: $0.id)?.files } ?? []
         guard let t, t.worktree else {
             return GitStatus(isRepo: true, branch: t?.branch ?? "main", defaultBranch: "main", ahead: 0, behind: 2, hasUpstream: true,
-                             files: [f("README.md", .modified, 12, 4), f("docs/phone.md", .untracked, 38, 0)],
+                             files: turn + [f("README.md", .modified, 12, 4), f("docs/phone.md", .untracked, 38, 0)],
                              canSwitch: t?.runState != .working,
                              switchBlocked: t?.runState == .working ? "A thread is working in this folder: switch once it's done." : nil)
         }
         let branch = t.branch ?? "trek/work"
         return GitStatus(isRepo: true, branch: branch, defaultBranch: "main", ahead: 2, behind: 0, hasUpstream: false,
-                         files: [f("crates/trek-core/src/store.rs", .modified, 18, 4), f("crates/trek-app/src/sidebar.rs", .modified, 22, 6),
-                                 f("crates/trek-core/tests/inbox.rs", .untracked, 46, 0)],
+                         files: turn.isEmpty ? [f("crates/trek-core/src/store.rs", .modified, 18, 4), f("crates/trek-app/src/sidebar.rs", .modified, 22, 6),
+                                                f("crates/trek-core/tests/inbox.rs", .untracked, 46, 0)] : turn,
                          worktree: WorktreeStatus(branch: branch, base: t.base ?? "main", uncommitted: 2, unpushed: nil,
                                                   mergeBlocked: "2 files aren't committed yet. Commit or revert them first.", unmerged: 2, missing: false),
                          canSwitch: false,

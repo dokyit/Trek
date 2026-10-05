@@ -21,6 +21,14 @@ struct NewThreadSheet: View {
     @State private var choosingModel = false
     @FocusState private var focused: Bool
 
+    /// `project` and `prompt` start it filled in (`/new` sent from a thread: its project, and what
+    /// was typed after the command).
+    init(project: String? = nil, prompt: String = "", opened: @escaping (String) -> Void) {
+        self.opened = opened
+        _projectID = State(initialValue: project.flatMap { $0.isEmpty ? nil : $0 })
+        _text = State(initialValue: prompt)
+    }
+
     private var project: ProjectSummary? { model.project(projectID) ?? model.projects.first }
     private var agent: AgentOption? { model.agents.first { $0.key == agentKey } ?? model.agents.first }
     private var modelLabel: String {
