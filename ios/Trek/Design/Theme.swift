@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-// Trek's palette (docs/DESIGN.md): Night in dark mode, Paper in light. Ember is for the logo and
+// Trek's palette — Night in dark mode, Paper in light. Ember is for the logo and
 // for status, never for buttons; colour only where something wants action, is moving, or broke.
 
 nonisolated extension Color {
@@ -62,7 +62,7 @@ enum Trek {
     static let plan = Color(light: 0x7C4DDB, dark: 0xB48CFF)
     static let done = Color(light: 0x1E9E62, dark: 0x3FCF8E)
     static let failed = Color(light: 0xD93A3F, dark: 0xFF5A5F)
-    /// Hand-holding tints (DESIGN.md): auto-accept edits sky, auto amber, full access red.
+    /// Hand-holding tints (design spec): auto-accept edits sky, auto amber, full access red.
     static let sky = Color(light: 0x1F78B4, dark: 0x5DB7F2)
     static let additions = done
     static let deletions = failed

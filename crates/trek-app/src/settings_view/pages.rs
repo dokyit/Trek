@@ -858,6 +858,12 @@ impl SettingsView {
             cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
             window.push_notification("Diagnostics copied", cx);
         }));
+        let trademarks = div()
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .pt(px(18.))
+            .child("Trek isn't affiliated with or endorsed by the makers of the agents it runs.                     Agent and provider names and logos are trademarks of their respective owners,                     shown only to identify which agent a thread uses.")
+            .into_any_element();
         vec![
             header,
             ui::group(
@@ -868,6 +874,7 @@ impl SettingsView {
                 ],
                 cx,
             ),
+            trademarks,
         ]
     }
 }

@@ -1,0 +1,18 @@
+Trek — every agent, one trail.
+Copyright 2026 Toby Dokyi. Apache-2.0, see LICENSE.
+
+Third-party materials bundled in this repository:
+
+* vendor/gpui-base — a patched copy of Longbridge's gpui-base, Apache-2.0
+  (vendor/gpui-base/LICENSE-APACHE).
+* crates/trek-app/assets/file-icons — Catppuccin file icons, MIT
+  (crates/trek-app/assets/file-icons/LICENSE).
+* Agent and provider logos under crates/trek-app/assets/logos and
+  ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
+  (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,
+  Moonshot, Alibaba, Ollama, LM Studio, OpenRouter, Mistral, Groq, Cognition,
+  Sourcegraph, SST, Pi, and others). They are included solely to identify which
+  agent or provider a thread or setting uses; no endorsement or affiliation is
+  implied, and Trek claims no rights in those marks. Trademark holders may
+  request removal via a GitHub issue.
+* Model metadata (context windows, pricing) is sourced from models.dev.

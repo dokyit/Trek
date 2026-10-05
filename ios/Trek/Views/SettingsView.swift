@@ -80,6 +80,9 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("About")
+                } footer: {
+                    Text("Trek is not affiliated with or endorsed by the makers of the agents it connects. Agent and provider names and logos are trademarks of their respective owners, shown only to identify the agent a thread uses.")
+                        .font(.footnote)
                 }
             }
             .scrollContentBackground(.hidden)
