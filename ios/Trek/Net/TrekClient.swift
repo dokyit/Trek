@@ -231,7 +231,9 @@ final class TrekClient: Backend {
                 case .data(let d): data = d
                 @unknown default: continue
                 }
-                guard gen == generation, let message = try? ServerMessage.decode(data) else { continue }
+                // Read off the main thread (a transcript can be large); handled back on it, in order.
+                let message = await Perf.measureAsync("decode", "\(data.count / 1024) KB") { await ServerMessage.decodeInBackground(data) }
+                guard gen == generation, let message else { continue }
                 handle(message)
             } catch {
                 if gen == generation { dropped(error) }

@@ -42,6 +42,8 @@ struct TrekApp: App {
 enum Launch {
     static var demo: Bool { UserDefaults.standard.bool(forKey: "TrekDemo") }
     static var open: String? { UserDefaults.standard.string(forKey: "TrekOpen") }
+    /// Seconds to wait before opening `open`, as if tapped once the app has settled (to measure).
+    static var openDelay: Double { UserDefaults.standard.double(forKey: "TrekOpenDelay") }
     /// `basecamp`, `notes`, `settings` or `search`.
     static var tab: String? { UserDefaults.standard.string(forKey: "TrekTab") }
     /// A note to open on the Notes tab.
@@ -177,7 +179,22 @@ struct MainView: View {
             case "search": tab = .search
             default: break
             }
-            if let open = Launch.open { path = [open] }
+            if let open = Launch.open {
+                if Launch.openDelay > 0 {
+                    // Measuring: open each thread listed in turn, `openDelay` seconds apart, back to
+                    // the list in between (the first warms the app up; the later ones are typical).
+                    for (i, tid) in open.split(separator: ",").map(String.init).enumerated() {
+                        let at = Launch.openDelay * Double(i + 1)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + at - 1) { path = [] }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                            Perf.navigated = Perf.now
+                            path = [tid]
+                        }
+                    }
+                } else {
+                    path = [open]
+                }
+            }
             if let note = Launch.note {
                 tab = .notes
                 notesPath = [note]

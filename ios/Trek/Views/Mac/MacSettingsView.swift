@@ -46,7 +46,7 @@ private struct MacSettingsForm: View {
             Picker("Model", selection: Binding(get: { s.defaultModel ?? "" }, set: { set(SettingsChange(defaultModel: $0)) })) {
                 Text("Agent's default").tag("")
                 ForEach(models) { m in Text(m.label).tag(m.id) }
-                if let id = s.defaultModel, !models.contains(where: { $0.id == id }) { Text(id).tag(id) }
+                if let id = s.defaultModel, !models.contains(where: { $0.id == id }) { Text(ModelNaming.display(id)).tag(id) }
             }
             if !efforts.isEmpty {
                 Picker("Reasoning effort", selection: Binding(get: { s.defaultEffort }, set: { set(SettingsChange(defaultEffort: $0)) })) {

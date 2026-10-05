@@ -1,3 +1,4 @@
+import Synchronization
 import SwiftUI
 import UIKit
 
@@ -18,7 +19,7 @@ struct RichText: View {
 
     var body: some View {
         let s = size * TextScale.factor(dynamicType, style: style)
-        Inline.text(markdown, size: s, weight: weight, dark: scheme == .dark, projectHue: projectHue, autoPaths: autoPaths)
+        Inline.cachedText(markdown, size: s, weight: weight, dark: scheme == .dark, projectHue: projectHue, autoPaths: autoPaths)
             .font(.system(size: s, weight: weight))
             .textRenderer(ChipRenderer())
     }
@@ -68,10 +69,45 @@ enum Inline {
     /// A chip's padding from its neighbours: a thin space on each side, outside the chip.
     private static let pad = "\u{2009}"
 
+    private struct Key: Hashable {
+        var markdown: String
+        var size: CGFloat
+        var weight: Font.Weight
+        var dark: Bool
+        var projectHue: Int?
+        var autoPaths: Bool
+    }
+
+    @MainActor private static var texts: [Key: Text] = [:]
+    private nonisolated static let attributed = Mutex<[String: AttributedString]>([:])
+
+    /// `text(…)`, built once per Markdown, size and look: a transcript redrawn (scrolled back
+    /// to, or around a row that changed) doesn't parse and assemble its text again.
+    @MainActor static func cachedText(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dark: Bool,
+                                      projectHue: Int? = nil, autoPaths: Bool = false) -> Text {
+        let key = Key(markdown: markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths)
+        if let hit = texts[key] { return hit }
+        let t = text(markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths)
+        if texts.count > 4000 { texts.removeAll(keepingCapacity: true) }
+        texts[key] = t
+        return t
+    }
+
+    /// Inline Markdown parsed, once (safe off the main thread, to parse ahead).
+    nonisolated static func parsed(_ markdown: String) -> AttributedString {
+        if let hit = attributed.withLock({ $0[markdown] }) { return hit }
+        let a = (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(markdown)
+        attributed.withLock { c in
+            if c.count > 6000 { c.removeAll(keepingCapacity: true) }
+            c[markdown] = a
+        }
+        return a
+    }
+
     static func text(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dark: Bool,
                      projectHue: Int? = nil, autoPaths: Bool = false) -> Text {
-        let attributed = (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(markdown)
+        let attributed = parsed(markdown)
         var out = Text(verbatim: "")
         var empty = true
         func append(_ t: Text) {

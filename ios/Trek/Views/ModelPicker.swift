@@ -21,9 +21,39 @@ enum ModelNaming {
     /// The model a thread runs: its own pick, else its agent's default.
     static func current(_ modelID: String?, agent: AgentOption?) -> ModelOption? {
         if let id = modelID {
-            return agent?.models.first { same(id, $0.id) } ?? ModelOption(id: id, label: id)
+            return agent?.models.first { same(id, $0.id) } ?? ModelOption(id: id, label: display(id))
         }
         return defaultModel(agent)
+    }
+
+    /// A model the agent didn't name, named from its id: `claude-opus-5-5` → "Opus 5.5",
+    /// `gpt-5.6-sol` → "GPT-5.6 Sol", `kimi-k3` → "Kimi K3". The id itself is never shown.
+    static func display(_ id: String) -> String {
+        var words = id.split(separator: "-").map(String.init)
+        // A dated snapshot (`…-20251001`) and the vendor before the family say nothing more.
+        if let last = words.last, last.count == 8, last.allSatisfy(\.isNumber) { words.removeLast() }
+        if words.count > 1, ["claude", "anthropic"].contains(words[0].lowercased()) { words.removeFirst() }
+        var out: [String] = []
+        for w in words {
+            if w.lowercased() == "gpt" {
+                out.append("GPT")
+                continue
+            }
+            if let prev = out.last {
+                // `gpt-5.6` → "GPT-5.6".
+                if prev == "GPT", w.first?.isNumber == true {
+                    out[out.count - 1] = "GPT-" + w
+                    continue
+                }
+                // Version digits split by hyphens (`5-5`) join with a dot.
+                if w.allSatisfy(\.isNumber), prev.allSatisfy({ $0.isNumber || $0 == "." }) {
+                    out[out.count - 1] = prev + "." + w
+                    continue
+                }
+            }
+            out.append(w.prefix(1).uppercased() + w.dropFirst())
+        }
+        return out.isEmpty ? id : out.joined(separator: " ")
     }
 }
 
@@ -72,7 +102,7 @@ struct ModelPickerSheet: View {
     /// screen (it scrolls, or drags up to full height, past that).
     private var fitHeight: CGFloat {
         let rail = CGFloat(agents.count) * 56 + 8
-        let list = CGFloat(agents.map(\.models.count).max() ?? 0) * 64 + 40
+        let list = CGFloat(agents.map(\.models.count).max() ?? 0) * 52 + 40
         let effort: CGFloat = currentEfforts.isEmpty ? 16 : 128
         return min(96 + max(rail, list) + effort, 640)
     }
@@ -199,19 +229,16 @@ struct ModelPickerSheet: View {
             pickModel(a.key, m.id)
         } label: {
             HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(m.label).font(.body.weight(selected ? .semibold : .regular)).foregroundStyle(Trek.foreground)
-                        if isDefault {
-                            Text("Default")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(Trek.muted)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Trek.foreground.opacity(0.06), in: Capsule())
-                        }
+                HStack(spacing: 6) {
+                    Text(m.label).font(.body.weight(selected ? .semibold : .regular)).foregroundStyle(Trek.foreground)
+                    if isDefault {
+                        Text("Default")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Trek.muted)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Trek.foreground.opacity(0.06), in: Capsule())
                     }
-                    Text(m.id).font(.system(.caption, design: .monospaced)).foregroundStyle(Trek.muted).lineLimit(1)
                 }
                 Spacer(minLength: 6)
                 if selected {
@@ -219,7 +246,7 @@ struct ModelPickerSheet: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 14)
             .background {
                 if selected {
                     RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Trek.foreground.opacity(0.06))

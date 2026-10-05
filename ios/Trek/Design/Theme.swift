@@ -279,6 +279,32 @@ enum When {
         }
     }
 
+    private static let time: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("jmm")
+        return f
+    }()
+    private static let dayTime: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEEjmm")
+        return f
+    }()
+    private static let dateTime: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMMdjmm")
+        return f
+    }()
+
+    /// When something happened, as a message's footer says it: "10:42" today, "Mon 10:42" this
+    /// week, else "3 Oct, 10:42".
+    static func clock(_ ms: Int64, now: Date = .now) -> String {
+        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
+        let cal = Calendar.current
+        if cal.isDate(date, inSameDayAs: now) { return time.string(from: date) }
+        if now.timeIntervalSince(date) < 6 * 86_400 { return dayTime.string(from: date) }
+        return dateTime.string(from: date)
+    }
+
     static func duration(_ secs: Int) -> String {
         if secs < 60 { return "\(secs)s" }
         if secs < 3600 { return "\(secs / 60)m \(secs % 60)s" }

@@ -1,64 +1,5 @@
 import SwiftUI
 
-/// A transcript as the phone shows it: messages stand alone; runs of thinking and tool calls fold
-/// into one summary line ("Thought 2 times · ran 4 commands · edited 1 file").
-enum Block: Identifiable {
-    case user(TItem, String, Int)
-    case assistant(TItem, String)
-    case group(id: String, items: [TItem])
-    case resolved(TItem)
-    case turnEnd(TItem, Int)
-    case notice(TItem, String)
-    case error(TItem, String)
-    case limit(TItem, String, Int64?)
-    case handoff(TItem, String, String)
-    /// The files a turn changed, under its end.
-    case changes(TItem, TurnChanges)
-
-    var id: String {
-        switch self {
-        case .user(let i, _, _), .assistant(let i, _), .resolved(let i), .turnEnd(let i, _), .notice(let i, _),
-             .error(let i, _), .limit(let i, _, _), .handoff(let i, _, _), .changes(let i, _): i.id
-        case .group(let id, _): id
-        }
-    }
-
-    /// Pending requests are left out: the thread pins them above the composer.
-    static func build(_ items: [TItem]) -> [Block] {
-        var out: [Block] = []
-        var run: [TItem] = []
-        func flush() {
-            if let first = run.first { out.append(.group(id: "g-\(first.id)", items: run)) }
-            run = []
-        }
-        for item in items {
-            switch item.body {
-            case .reasoning, .tool:
-                run.append(item)
-                continue
-            default:
-                break
-            }
-            if item.isPendingRequest { continue }
-            flush()
-            switch item.body {
-            case .user(let text, let images): out.append(.user(item, text, images))
-            case .assistant(let text, _): out.append(.assistant(item, text))
-            case .approval, .question, .plan: out.append(.resolved(item))
-            case .turnEnd(let secs): out.append(.turnEnd(item, secs))
-            case .notice(let s): out.append(.notice(item, s))
-            case .error(let s): out.append(.error(item, s))
-            case .limit(let s, let at): out.append(.limit(item, s, at))
-            case .handoff(let a, let b): out.append(.handoff(item, a, b))
-            case .changes(let c): if !c.files.isEmpty { out.append(.changes(item, c)) }
-            case .reasoning, .tool, .unknown: break
-            }
-        }
-        flush()
-        return out
-    }
-}
-
 struct UserBubble: View {
     var text: String
     var images: Int
@@ -85,12 +26,13 @@ struct UserBubble: View {
 /// A folded run of thinking and tool calls; tap to open it.
 struct ToolGroupView: View {
     var items: [TItem]
-    @Binding var expanded: Bool
+    var expanded: Bool
+    var toggle: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(.snappy(duration: 0.22)) { expanded.toggle() }
+                withAnimation(.snappy(duration: 0.22)) { toggle() }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "chevron.right")

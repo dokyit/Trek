@@ -14,6 +14,9 @@ enum Perf {
 
     static var now: Double { CACurrentMediaTime() }
 
+    /// When the user last asked for a thread (a tap in the list): opening it is timed from here.
+    static var navigated: Double?
+
     static func report(_ line: String) {
         guard enabled else { return }
         print("[perf] \(line)")
@@ -33,6 +36,15 @@ enum Perf {
             report("\(label)\(detail().isEmpty ? "" : " (\(detail()))"): \(ms(now - start))")
         }
         return try f()
+    }
+
+    /// As `measure`, for work awaited (off the main thread).
+    static func measureAsync<T>(_ label: StaticString, _ detail: @autoclosure () -> String = "", _ f: () async -> T) async -> T {
+        guard enabled else { return await f() }
+        let start = now
+        let value = await f()
+        report("\(label)\(detail().isEmpty ? "" : " (\(detail()))"), off the main thread: \(ms(now - start))")
+        return value
     }
 
     /// Reports `label` with the time from `start` until the main thread has committed the frame
@@ -91,6 +103,14 @@ extension Binding {
             let start = Perf.now
             self.transaction(transaction).wrappedValue = value
             Perf.untilFrame(label, from: start)
+        })
+    }
+
+    /// Runs `f` before each change (to time what follows it).
+    func onSet(_ f: @escaping () -> Void) -> Binding<Value> {
+        Binding(get: { wrappedValue }, set: { value, transaction in
+            f()
+            self.transaction(transaction).wrappedValue = value
         })
     }
 }
