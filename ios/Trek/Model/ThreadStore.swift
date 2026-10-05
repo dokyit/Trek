@@ -288,6 +288,12 @@ final class ThreadStore {
             } else if more, let key = Self.order(item.id), let first = items.first.flatMap({ Self.order($0.id) }), key < first {
                 // An update to an item before the loaded ones: it comes with its page.
                 continue
+            } else if let at = place(for: item.id), at < items.count {
+                // One that belongs before the end (a turn's changed files, counted after later
+                // turns were already here): put where it goes, not under the newest message.
+                items.insert(item, at: at)
+                for i in at..<items.count { index[items[i].id] = i }
+                dirty = min(dirty, at)
             } else {
                 index[item.id] = items.count
                 dirty = min(dirty, items.count)
@@ -323,6 +329,18 @@ final class ThreadStore {
     private func refreshPending() {
         let list = items.filter(\.isPendingRequest)
         if list != pending { pending = list }
+    }
+
+    /// Where a new item with `id` goes among the loaded ones: after the last one the Mac orders
+    /// at or before it (`order`). Nil for ids it doesn't order (requests), which go at the end.
+    private func place(for id: String) -> Int? {
+        guard let key = Self.order(id) else { return nil }
+        var i = items.count - 1
+        while i >= 0 {
+            if let k = Self.order(items[i].id), k <= key { return i + 1 }
+            i -= 1
+        }
+        return nil
     }
 
     /// Where an item id sits in the transcript, for the Mac's `i<n>` / `c<n>` ids (a turn's

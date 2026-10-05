@@ -40,7 +40,21 @@ pub struct Sidebar {
     /// otherwise, so "5m" ages (this view is cached; nothing else would redraw it). The flag is
     /// whether it's the fast one.
     _clock: Option<(bool, Task<()>)>,
+    /// Which threads have sub-agents, wait on them, or have one waiting on the user: worked out
+    /// once as the list is drawn, not for each of its rows (each answer reads every thread).
+    graph: Graph,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The threads' standing among their sub-agents, as of the last render (`Sidebar::graph`).
+#[derive(Default)]
+struct Graph {
+    /// Threads with sub-agents in Trek's lists.
+    parents: HashSet<String>,
+    /// `Workspace::waiting_on_sub_agents`.
+    needs: HashSet<String>,
+    /// `Workspace::waiting_threads`.
+    waiting: HashSet<String>,
 }
 
 impl Sidebar {
@@ -95,6 +109,7 @@ impl Sidebar {
             // TREK_OPEN_AGENT_UPDATES=1 opens the agent updates card at launch, the same way.
             agent_updates_open: std::env::var_os("TREK_OPEN_AGENT_UPDATES").is_some(),
             _clock: None,
+            graph: Graph::default(),
             _subscriptions: subscriptions,
         };
         this.sync_clock(cx);
@@ -281,7 +296,7 @@ impl Sidebar {
         let theme = cx.theme();
         let ws = self.workspace.read(cx);
         // A sub-agent of its own waits on an approval: sub-agents have no cards, so this one says it.
-        if t.run_state != RunState::NeedsYou && ws.sub_agent_needs_you(&t.id) {
+        if t.run_state != RunState::NeedsYou && self.graph.needs.contains(&t.id) {
             return div()
                 .id(SharedString::from(format!("card-sub-needs-{}", t.id)))
                 .test_support()
@@ -307,7 +322,7 @@ impl Sidebar {
                 .into_any_element();
         }
         // Its turn is over but its sub-agents are still out: it's at work, waiting on them.
-        if t.run_state == RunState::Idle && ws.waiting(&t.id) {
+        if t.run_state == RunState::Idle && self.graph.waiting.contains(&t.id) {
             let longest = ws.waiting_on(&t.id).iter().map(|w| w.elapsed).max();
             return h_flex()
                 .id(SharedString::from(format!("card-waiting-{}", t.id)))
@@ -376,7 +391,8 @@ impl Sidebar {
     /// in the background), by logo and name, and what else its agent runs in the background.
     pub(crate) fn at_work(&self, t: &Thread, cx: &App) -> (Vec<(trek_core::AgentId, String)>, Vec<String>) {
         let ws = self.workspace.read(cx);
-        let mut kids: Vec<(trek_core::AgentId, String)> = ws.running_children(&t.id).into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect();
+        let children = if self.graph.parents.contains(&t.id) { ws.running_children(&t.id) } else { vec![] };
+        let mut kids: Vec<(trek_core::AgentId, String)> = children.into_iter().map(|c| (c.agent.clone(), format!("{}: {}", ws.model_label(c), c.title))).collect();
         let Some(l) = ws.live.get(&t.id) else { return (kids, vec![]) };
         let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
         kids.extend(l.tasks.iter().filter(|k| k.done.is_none()).map(|k| (t.agent.clone(), k.description.clone())));
@@ -543,9 +559,12 @@ impl Sidebar {
         };
         let cwd = t.cwd.clone();
         let in_worktree = t.worktree.is_some();
-        let (archive_note, delete_note) = {
-            let ws = self.workspace.read(cx);
-            (ws.sub_agents_note(&t.id, "archived"), ws.sub_agents_note(&t.id, "deleted"))
+        let (archive_note, delete_note) = match self.graph.parents.contains(&t.id) {
+            true => {
+                let ws = self.workspace.read(cx);
+                (ws.sub_agents_note(&t.id, "archived"), ws.sub_agents_note(&t.id, "deleted"))
+            }
+            false => (None, None),
         };
         let project = t.project_id.clone().and_then(|pid| self.workspace.read(cx).project(&pid).map(|p| (p.id.clone(), p.name.clone())));
         row.context_menu(move |menu, window, cx| {
@@ -1082,6 +1101,8 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Sidebar");
+        let ws = self.workspace.read(cx);
+        self.graph = Graph { parents: ws.threads.iter().filter_map(|t| t.parent_id.clone()).collect(), needs: ws.waiting_on_sub_agents(), waiting: ws.waiting_threads() };
         let ws = self.workspace.read(cx);
         // A title animating in draws a frame at a time, for the moment it takes.
         if ws.retitled.keys().any(|id| ws.title_reveal(id).is_some()) {

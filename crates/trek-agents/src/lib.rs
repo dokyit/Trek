@@ -228,6 +228,9 @@ pub enum AgentEvent {
     /// `resets_at`: unix ms, when the agent said or it could be worked out. The turn then ends
     /// with an error saying the same.
     LimitReached { message: String, resets_at: Option<i64>, scope: LimitScope },
+    /// How much of one of the plan's usage windows is used (0–100) and when it resets (unix ms),
+    /// as the agent reports it while it works. Not a limit reached: the turn goes on.
+    LimitUsed { scope: LimitScope, percent: f32, resets_at: Option<i64> },
     /// Something went wrong. It ends no turn by itself (an unreadable image, a refused model
     /// change): a turn that fails says so as it completes, or its session ends.
     Error(String),
@@ -411,6 +414,140 @@ pub(crate) fn plan_title(plan: &str) -> String {
     clip(plan.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim_start_matches('#').trim(), 200)
 }
 
+/// The longest line of an agent's protocol stream that's read: far more than any message a
+/// CLI sends (a tool's whole output in one JSON line runs to a few megabytes).
+const MAX_LINE: usize = 64 << 20;
+
+/// An agent's protocol stream, a line at a time. Unlike `tokio::io::Lines`, a line has a longest
+/// length (`MAX_LINE`): one that never ends, or runs to gigabytes, is skipped rather than read
+/// into memory until there's none left. And a line that isn't UTF-8 is read as well as it can
+/// be, where `Lines` ends the stream (and so the session) with an error.
+pub(crate) struct ProtocolLines<R> {
+    reader: R,
+    line: Vec<u8>,
+    /// The line being read is over the limit: the rest of it is passed over.
+    skipping: bool,
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        ProtocolLines { reader, line: Vec::new(), skipping: false }
+    }
+
+    /// The next line, without its line ending; `None` at the end of the stream. What's read of a
+    /// line stays read if this is dropped partway (it's used in `select!`).
+    pub(crate) async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        use tokio::io::AsyncBufReadExt as _;
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            if chunk.is_empty() {
+                let rest = std::mem::take(&mut self.line);
+                return Ok((!rest.is_empty() && !std::mem::take(&mut self.skipping)).then(|| String::from_utf8_lossy(&rest).into_owned()));
+            }
+            let end = chunk.iter().position(|b| *b == b'\n');
+            let taken = end.map_or(chunk.len(), |e| e + 1);
+            if !self.skipping {
+                if self.line.len() + taken > MAX_LINE {
+                    tracing::warn!("a protocol line over {} MB was skipped", MAX_LINE >> 20);
+                    self.skipping = true;
+                    self.line = Vec::new();
+                } else {
+                    self.line.extend_from_slice(&chunk[..end.unwrap_or(chunk.len())]);
+                }
+            }
+            self.reader.consume(taken);
+            if end.is_some() {
+                if std::mem::take(&mut self.skipping) {
+                    continue;
+                }
+                let mut line = std::mem::take(&mut self.line);
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+            }
+        }
+    }
+}
+
+/// A child and everything it starts, in a process group of its own.
+pub(crate) struct GroupChild {
+    child: Option<tokio::process::Child>,
+    group: i32,
+}
+
+pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
+    command.process_group(0);
+    let child = command.spawn()?;
+    let group = child.id().unwrap_or_default() as i32;
+    Ok(GroupChild { child: Some(child), group })
+}
+
+impl GroupChild {
+    pub(crate) async fn terminate(&mut self) {
+        let Some(child) = self.child.take() else { return };
+        finish_group(child, self.group).await;
+    }
+}
+
+impl std::ops::Deref for GroupChild {
+    type Target = tokio::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.child.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for GroupChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child.as_mut().unwrap()
+    }
+}
+
+fn signal_group(group: i32, signal: i32) {
+    if group > 0 {
+        // SAFETY: a negative pid asks kill(2) to signal that process group.
+        unsafe { libc::kill(-group, signal) };
+    }
+}
+
+async fn finish_group(mut child: tokio::process::Child, group: i32) {
+    signal_group(group, libc::SIGTERM);
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+    // The leader can exit while a descendant ignores TERM. KILL the group even when the
+    // leader was already reaped, so nothing it started is left behind.
+    signal_group(group, libc::SIGKILL);
+    if waited.is_err() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
+impl Drop for GroupChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else { return };
+        let group = self.group;
+        signal_group(group, libc::SIGTERM);
+        // A runtime task can be cancelled as its runtime shuts down. A short-lived OS thread
+        // makes dropped handles keep the same cleanup guarantee as explicit termination.
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if child.try_wait().ok().flatten().is_some() {
+                    signal_group(group, libc::SIGKILL);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            signal_group(group, libc::SIGKILL);
+            let _ = child.start_kill();
+            while child.try_wait().ok().flatten().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+    }
+}
+
 /// The last lines a child process wrote to stderr, for a readable error when it dies.
 #[derive(Clone)]
 pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
@@ -421,8 +558,15 @@ impl StderrTail {
         let tail = Self(Default::default());
         let lines = tail.0.clone();
         tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = reader.next_line().await {
+            let mut reader = tokio::io::BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                let Ok(n) = reader.read_until(b'\n', &mut buf).await else { break };
+                if n == 0 {
+                    break;
+                }
+                let l = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
                 tracing::debug!("{tag} stderr: {l}");
                 let mut t = lines.lock().unwrap();
                 t.push_back(l);
@@ -514,6 +658,78 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn protocol_lines_are_read_whole_and_overlong_ones_skipped() {
+        let lines = |text: &'static [u8]| ProtocolLines::new(tokio::io::BufReader::with_capacity(8, text));
+        // Lines longer than the reader's buffer, either line ending, a last one without any.
+        let mut l = lines(b"{\"a\":\"0123456789abcdef\"}\r\nsecond\n\nlast");
+        let mut got = vec![];
+        while let Some(line) = l.next_line().await.unwrap() {
+            got.push(line);
+        }
+        assert_eq!(got, ["{\"a\":\"0123456789abcdef\"}", "second", "", "last"]);
+        // Not UTF-8: read as well as it can be, and the stream goes on.
+        let mut l = lines(b"caf\xff\nnext\n");
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("caf\u{fffd}"));
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("next"));
+        assert_eq!(l.next_line().await.unwrap(), None);
+        // A line over the limit is passed over, and the one after it read.
+        let long = vec![b'x'; MAX_LINE + 10];
+        let text: Vec<u8> = [b"first\n".as_slice(), &long, b"\nafter\n"].concat();
+        let mut l = ProtocolLines::new(tokio::io::BufReader::new(std::io::Cursor::new(text)));
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("first"));
+        assert_eq!(l.next_line().await.unwrap().as_deref(), Some("after"));
+        assert_eq!(l.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn stderr_tail_keeps_draining_after_invalid_utf8() {
+        use std::process::Stdio;
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "printf '\\377\\nvalid\\n' >&2"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
+        child.wait().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(tail.exited("test").to_string().ends_with("valid"));
+    }
+
+    #[tokio::test]
+    async fn ending_or_dropping_a_group_kills_its_grandchild() {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        async fn tree() -> (GroupChild, i32) {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", "sh -c 'trap \"\" TERM; exec sleep 300' & echo $!; wait"]).stdout(Stdio::piped());
+            let mut child = spawn_group(&mut command).unwrap();
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).await.unwrap();
+            (child, line.trim().parse().unwrap())
+        }
+        async fn assert_gone(pid: i32) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                // SAFETY: signal 0 only checks whether this test's child still exists.
+                let gone = unsafe { libc::kill(pid, 0) } < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                if gone || tokio::time::Instant::now() >= deadline {
+                    assert!(gone, "grandchild {pid} survived its process group");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+
+        let (mut child, grandchild) = tree().await;
+        child.terminate().await;
+        assert_gone(grandchild).await;
+
+        let (child, grandchild) = tree().await;
+        drop(child);
+        assert_gone(grandchild).await;
+    }
 
     #[test]
     fn a_command_s_output_keeps_its_end() {

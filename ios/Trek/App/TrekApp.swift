@@ -63,6 +63,7 @@ enum MainTab: Hashable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppearanceKey.theme) private var appearance = ThemeChoice.system.rawValue
     @AppStorage(AppearanceKey.textSize) private var textSize = TextSizeChoice.system.rawValue
     @AppStorage(AppearanceKey.calm) private var calm = false
@@ -92,6 +93,11 @@ struct RootView: View {
             #endif
         }
         .animation(.smooth, value: model.mode)
+        // Back in front: iOS shut the connection while the app was away, and waiting out a
+        // retry (or a ping) before saying so would show stale threads as live.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.foregrounded() }
+        }
         .overlay(alignment: .top) {
             if let toast = model.toast {
                 ToastView(toast: toast)

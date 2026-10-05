@@ -171,6 +171,8 @@ pub struct ThreadView {
     /// Markdown documents by item id. Built when a row is first drawn, so opening a long thread
     /// doesn't parse all of it.
     md: HashMap<String, Markdown>,
+    /// How many times the transcript has been drawn (`Markdown::drawn`).
+    draws: u64,
     /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
     expanded: HashSet<String>,
     /// Masked fields for the question card's secret questions, in order, and the request they
@@ -249,6 +251,11 @@ enum Files {
 /// Files a confirmation lists before "and N more".
 const FILES_SHOWN: usize = 8;
 
+/// How many parsed markdown documents a transcript keeps at most: each is an entity with its
+/// text laid out, and a day's thread has thousands of answers. Scrolled far past, a document is
+/// dropped and parsed again when its row next comes into view.
+const MD_KEPT: usize = 400;
+
 struct Markdown {
     state: Entity<TextViewState>,
     /// The text the document holds. Text that extends it is appended (parsed incrementally, as
@@ -256,6 +263,9 @@ struct Markdown {
     text: String,
     /// Where the item was last seen, to find it again without a search.
     ix: usize,
+    /// The draw (`ThreadView::draws`) its row was last part of: the documents drawn longest
+    /// ago go first when there are too many (`MD_KEPT`).
+    drawn: u64,
     /// Parsing finishes in the background and streamed text fades in; this view is cached, so it
     /// re-renders when the document says so.
     _changed: Subscription,
@@ -330,6 +340,7 @@ impl ThreadView {
             revision: 0,
             count: 0,
             md: HashMap::new(),
+            draws: 0,
             expanded: HashSet::new(),
             secrets: (None, vec![]),
             plan_md: None,
@@ -382,6 +393,16 @@ impl ThreadView {
         };
         let end = shown.end;
         let ticking = ws.any_task_live_in(&self.scope);
+        // Text added to messages already streaming moves no row: the rows built for the last
+        // revision stand for this one (building them reads every item, and this runs for each
+        // batch of tokens).
+        if appended && !switched && end == self.end {
+            if let Some((key, rows)) = self.rows_cache.borrow_mut().as_mut() {
+                if key.0 == self.current && key.1 == self.revision && live.is_some_and(|l| l.items.len() == rows.item_row.len()) {
+                    key.1 = revision;
+                }
+            }
+        }
         // Only the documents already built need updating: they follow their item to where it moved
         // and to its new text (while streaming, a longer tail). Those whose item left the
         // transcript go (`None`).
@@ -476,17 +497,23 @@ impl ThreadView {
         }
         self.count = new_count;
         self.scroller.update(cx, |s, cx| {
-            if switched || new_count < old {
+            if switched {
                 s.reset(new_count, cx);
-                if switched {
-                    s.scroll_to_end(cx);
+                s.scroll_to_end(cx);
+            } else if new_count < old {
+                // Rows went from the end (a rewind, a group folded away): the rest stay where
+                // they are on screen. Starting the list over would jump a reader up in the
+                // history to its end, and have the next answer drag them along with it.
+                if !s.splice(new_count..old, 0, cx) {
+                    s.reset(new_count, cx);
                 }
             } else if new_count > old {
                 let _ = s.append(new_count - old, cx);
             }
-            // Streaming only ever changes the tail; remeasure the last couple of rows.
+            // Streaming only ever changes the tail; remeasure the last couple of rows (a few
+            // more where rows went: what's left at the end may have regrouped).
             if new_count > 0 {
-                let from = new_count.saturating_sub(2);
+                let from = new_count.saturating_sub(if new_count < old { 6 } else { 2 });
                 let _ = s.remeasure_items(from..new_count, cx);
             }
             if follow {
@@ -590,7 +617,9 @@ impl ThreadView {
 
     /// The markdown document for item `key` (at `ix`), built the first time its row is drawn.
     fn markdown(&mut self, key: &str, ix: usize, cx: &mut Context<Self>) -> Option<Entity<TextViewState>> {
-        if let Some(m) = self.md.get(key) {
+        let drawn = self.draws;
+        if let Some(m) = self.md.get_mut(key) {
+            m.drawn = drawn;
             return Some(m.state.clone());
         }
         let ws = self.workspace.read(cx);
@@ -602,7 +631,15 @@ impl ThreadView {
         };
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));
         let changed = cx.observe(&state, |_, _, cx| cx.notify());
-        self.md.insert(key.to_string(), Markdown { state: state.clone(), text, ix, _changed: changed });
+        self.md.insert(key.to_string(), Markdown { state: state.clone(), text, ix, drawn, _changed: changed });
+        if self.md.len() > MD_KEPT {
+            // Down to three quarters, so this isn't done for every row scrolled into view.
+            let mut by_age: Vec<(u64, String)> = self.md.iter().map(|(k, m)| (m.drawn, k.clone())).collect();
+            by_age.sort();
+            for (_, k) in by_age.into_iter().take(self.md.len() - MD_KEPT * 3 / 4) {
+                self.md.remove(&k);
+            }
+        }
         Some(state)
     }
 
@@ -2133,6 +2170,7 @@ impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("ThreadView");
+        self.draws += 1;
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);
         // Where the last row ends is noted as it's laid out below; until then (and when it's out
@@ -2154,8 +2192,8 @@ impl Render for ThreadView {
             model: t.and_then(|t| t.model.clone()),
             busy: ws.turn_running(&thread),
             last_end: ws.live.get(&thread).and_then(|l| l.items.iter().rposition(trek_core::rewind::ends_turn)),
-            in_repo: crate::workspace::in_repo(t.and_then(|t| t.cwd.as_deref())),
-            worktree_missing: t.is_some_and(crate::workspace::worktree_missing),
+            in_repo: crate::system::lately::in_repo(t.and_then(|t| t.cwd.as_deref())),
+            worktree_missing: t.and_then(|t| t.worktree.as_ref()).is_some_and(crate::system::lately::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
             column: ws.column(),

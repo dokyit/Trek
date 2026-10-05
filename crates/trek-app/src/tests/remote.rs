@@ -28,6 +28,17 @@ async fn ask_later<T>(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppCon
     }
 }
 
+#[test]
+fn tailscale_reach_requires_and_binds_its_address() {
+    let none = crate::remote::Addresses { lan: Some("192.168.1.2".parse().unwrap()), tailscale: None };
+    assert_eq!(crate::remote::remote_endpoint(&none, trek_core::settings::Reach::Tailscale, 7420).unwrap_err().kind(), std::io::ErrorKind::AddrNotAvailable);
+    let addresses = crate::remote::Addresses { lan: none.lan, tailscale: Some("100.64.1.2".parse().unwrap()) };
+    let (bind, advertise) = crate::remote::remote_endpoint(&addresses, trek_core::settings::Reach::Tailscale, 7420).unwrap();
+    assert_eq!((bind.to_string(), advertise.as_str()), ("100.64.1.2:7420".into(), "100.64.1.2:7420"));
+    let (bind, advertise) = crate::remote::remote_endpoint(&addresses, trek_core::settings::Reach::Wifi, 7420).unwrap();
+    assert_eq!((bind.to_string(), advertise.as_str()), ("0.0.0.0:7420".into(), "192.168.1.2:7420"));
+}
+
 fn send(id: &str, text: &str) -> impl FnOnce(tr::Reply<Option<tr::Open>>) -> tr::HostRequest {
     let req = tr::SendRequest { thread_id: id.to_string(), text: text.to_string(), mode: None, images: vec![] };
     move |reply| tr::HostRequest::Send { req, reply }
@@ -340,8 +351,26 @@ fn a_phone_changes_only_the_settings_it_may() {
         // A test notification needs notifications on (with them on it goes out to ntfy).
         let off = ask(&trek, cx, set(tr::SettingsChange { push: Some(false), push_test: true, ..Default::default() }));
         assert_eq!(off.unwrap_err().code, tr::ErrorCode::BadRequest);
+        assert!(trek.read(cx, |ws, _| ws.settings.mobile.push), "a failed test changes nothing");
         // What a phone can't touch, it can't even say: the change has no field for it.
         assert!(!trek.read(cx, |ws, _| ws.settings.permissions.full_access_unlocked));
+    });
+}
+
+#[test]
+fn another_phone_connecting_keeps_the_rows_already_sent() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| {
+            ws.start_test_remote();
+            ws.push_remote_changes(cx);
+        });
+        let before = trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent.clone());
+        assert!(!before.is_empty());
+        trek.update(cx, |ws, cx| ws.remote_notice(tr::ServerNotice::Connected { device_id: "second-phone".into() }, cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent.clone()), before);
     });
 }
 
@@ -482,6 +511,129 @@ async fn long_thread(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppCont
         ws.start_test_remote();
     });
     id
+}
+
+#[test]
+fn answers_are_matched_by_thread_and_request_id() {
+    run(async |cx| {
+        let trek = open(cx);
+        let a = trek.send(cx, "first thread");
+        trek.wait_done(cx, &a, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.new_thread(cx));
+        let b = trek.send(cx, "second thread");
+        trek.wait_done(cx, &b, RunState::Idle).await;
+        trek.update(cx, |ws, _| {
+            for id in [&a, &b] {
+                let live = ws.live.get_mut(id).unwrap();
+                live.permissions.push(crate::workspace::PendingPermission { request_id: "same-id".into(), title: "Run command".into(), detail: "make".into(), prompt: None, after_turn: false });
+                live.revision += 1;
+            }
+            ws.start_test_remote();
+        });
+        _ = ask(&trek, cx, transcript_req(&a, None, None)).unwrap();
+        _ = ask(&trek, cx, transcript_req(&b, None, None)).unwrap();
+        ask(&trek, cx, |reply| tr::HostRequest::Answer {
+            req: tr::AnswerRequest { thread_id: a.clone(), request_id: "same-id".into(), response: tr::AnswerResponse::Approval { decision: tr::Decision::Allow } },
+            reply,
+        })
+        .unwrap();
+        trek.read(cx, |ws, _| {
+            let answered = &ws.remote.as_ref().unwrap().answered;
+            assert_eq!(answered.get(&(a.clone(), "same-id".into())), Some(&tr::AnswerResponse::Approval { decision: tr::Decision::Allow }));
+            assert_eq!(answered.get(&(b.clone(), "same-id".into())), None);
+        });
+    });
+}
+
+#[test]
+fn oversized_transcript_text_is_clipped_at_char_boundaries() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = long_thread(&trek, cx, 1).await;
+        let text = format!("é{}TAIL", "\"".repeat(1_100_000));
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            *live.items.get_mut(0).unwrap() = trek_core::store::Item::User { text, images: vec![], at: None, resume: None, aside: false };
+            live.revision += 1;
+        });
+        let transcript = ask(&trek, cx, transcript_req(&id, None, None)).unwrap();
+        let item = transcript.items.iter().find(|i| i.id == "i0").unwrap();
+        let tr::ItemBody::User { text, .. } = &item.body else { panic!() };
+        assert!(text.contains("bytes omitted") && text.starts_with('é') && text.ends_with("TAIL"));
+        assert!(serde_json::to_vec(item).unwrap().len() < 2 << 20);
+    });
+}
+
+#[test]
+fn clipped_secret_questions_are_restored_before_they_are_answered() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let question = format!("Secret? {}", "q".repeat(2_200_000));
+        let secret_label = format!("token-{}", "x".repeat(700_000));
+        let public_label = format!("account-{}", "y".repeat(700_000));
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.permissions.push(crate::workspace::PendingPermission {
+                request_id: "secret".into(),
+                title: String::new(),
+                detail: String::new(),
+                prompt: Some(trek_agents::Prompt::Questions(vec![
+                    trek_agents::Question {
+                        question: question.clone(),
+                        header: "Credentials".into(),
+                        options: vec![(secret_label.clone(), "Use the saved token".into())],
+                        multi: false,
+                        secret: true,
+                    },
+                    trek_agents::Question {
+                        question: "Which account?".into(),
+                        header: "Account".into(),
+                        options: vec![(public_label.clone(), "Use this account".into())],
+                        multi: false,
+                        secret: false,
+                    },
+                ])),
+                after_turn: false,
+            });
+            live.revision += 1;
+            ws.start_test_remote();
+        });
+        let transcript = ask(&trek, cx, transcript_req(&id, None, None)).unwrap();
+        let item = transcript.items.iter().find(|i| i.id == "rsecret").unwrap();
+        let tr::ItemBody::Question { questions, .. } = &item.body else { panic!() };
+        let shown_question = questions[0].question.clone();
+        let shown_secret_label = questions[0].options[0].label.clone();
+        let shown_public_label = questions[1].options[0].label.clone();
+        assert!(shown_question.contains("bytes omitted") && shown_question != question);
+        assert!(shown_secret_label.contains("bytes omitted") && shown_secret_label != secret_label);
+        assert!(shown_public_label.contains("bytes omitted") && shown_public_label != public_label);
+        assert!(serde_json::to_vec(item).unwrap().len() < 2 << 20);
+        ask(&trek, cx, |reply| tr::HostRequest::Answer {
+            req: tr::AnswerRequest {
+                thread_id: id.clone(),
+                request_id: "secret".into(),
+                response: tr::AnswerResponse::Questions {
+                    answers: vec![
+                        tr::QA { question: shown_question.clone(), answer: shown_secret_label.clone() },
+                        tr::QA { question: "Which account?".into(), answer: shown_public_label.clone() },
+                    ],
+                },
+            },
+            reply,
+        })
+        .unwrap();
+        trek.read(cx, |ws, _| {
+            let live = &ws.live[&id];
+            assert!(live.items.iter().any(|item| matches!(item, trek_core::store::Item::User { text, aside: true, .. } if text == &format!("Account: {public_label}"))), "the option sent to the agent uses its original label");
+            assert!(!live.items.iter().any(|item| matches!(item, trek_core::store::Item::User { text, .. } if text.contains(&secret_label))), "the secret was not kept as a user message");
+            assert!(live.items.iter().any(|item| matches!(item, trek_core::store::Item::Notice { text } if text == "Private answer sent")));
+            let tr::AnswerResponse::Questions { answers } = &ws.remote.as_ref().unwrap().answered[&(id.clone(), "secret".into())] else { panic!() };
+            assert_eq!((answers[0].question.as_str(), answers[0].answer.as_str()), (shown_question.as_str(), shown_secret_label.as_str()));
+            assert_eq!(answers[1].answer, shown_public_label);
+        });
+    });
 }
 
 #[test]
@@ -734,3 +886,98 @@ fn timing_of_a_long_thread() {
     });
 }
 
+#[test]
+fn the_phone_allows_for_a_whole_session_only_where_the_mac_lets_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "ask permission first");
+        trek.wait_needs_you(cx, &id).await;
+        let request_id = trek.read(cx, |ws, _| ws.live[&id].permissions[0].request_id.clone());
+        let for_session = |reply| tr::HostRequest::Answer {
+            req: tr::AnswerRequest { thread_id: id.clone(), request_id: request_id.clone(), response: tr::AnswerResponse::Approval { decision: tr::Decision::AllowForSession } },
+            reply,
+        };
+        // Off (as it starts): refused, whatever the phone's own check was. The card stays, and
+        // nothing is remembered as answered.
+        let settings = ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap();
+        assert!(!settings.session_approvals);
+        let refused = ask(&trek, cx, for_session).unwrap_err();
+        assert!(refused.message.contains("off on this Mac"), "{refused:?}");
+        assert_eq!(trek.run_state(cx, &id), RunState::NeedsYou);
+        assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.len() == 1 && ws.remote.as_ref().is_none_or(|r| r.answered.is_empty())));
+        // Turned on at the Mac, the same answer goes through.
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.session_approvals = true;
+            ws.save_settings(cx);
+        });
+        assert!(ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap().session_approvals);
+        ask(&trek, cx, for_session).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+    });
+}
+
+#[test]
+fn a_long_answer_still_streaming_goes_less_often_and_whole_when_it_ends() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = long_thread(&trek, cx, 3).await;
+        ask(&trek, cx, transcript_req(&id, None, Some(10))).unwrap();
+        let seq = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().watched[&id].seq);
+        // An answer streams in: `more` is added to it and the tick run.
+        let grow = |trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, more: &str| {
+            trek.update(cx, |ws, cx| {
+                let l = ws.live.get_mut(&id).unwrap();
+                match l.streaming {
+                    Some(ix) => {
+                        if let Some(trek_core::store::Item::Assistant { text }) = l.items.get_mut(ix) {
+                            text.push_str(more)
+                        }
+                    }
+                    None => l.streaming = Some(l.items.push(trek_core::store::Item::Assistant { text: more.into() })),
+                }
+                l.revision += 1;
+                ws.push_remote_changes(cx);
+            })
+        };
+        // Short, it goes with every tick it grew in.
+        let start = seq(&trek, cx);
+        grow(&trek, cx, "The parser");
+        grow(&trek, cx, " reads flags");
+        assert_eq!(seq(&trek, cx), start + 2);
+        // Long (a megabyte), it's held back between sends: the ticks right after one send nothing.
+        grow(&trek, cx, &"x".repeat(1 << 20));
+        let long = seq(&trek, cx);
+        grow(&trek, cx, " and more");
+        grow(&trek, cx, " and more");
+        assert_eq!(seq(&trek, cx), long, "held back");
+        // It ends: the phone gets it as it ended, at once, though nothing more was added.
+        trek.update(cx, |ws, cx| {
+            let l = ws.live.get_mut(&id).unwrap();
+            l.streaming = None;
+            l.revision += 1;
+            ws.push_remote_changes(cx);
+        });
+        assert_eq!(seq(&trek, cx), long + 1);
+        let back = ask(&trek, cx, transcript_req(&id, Some(long), Some(10))).unwrap();
+        assert!(back.items.iter().any(|i| matches!(&i.body, tr::ItemBody::Assistant { text, streaming: false } if text.ends_with(" and more and more"))), "whole, as it ended");
+    });
+}
+
+#[test]
+fn thread_rows_are_built_only_when_something_of_the_threads_changed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let row = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent.get(&id).map(|r| r.title.clone()));
+        trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        assert_eq!(row(&trek, cx).as_deref(), Some(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()).as_str()));
+        // A change made the usual way is in the rows at the next tick.
+        trek.update(cx, |ws, cx| {
+            ws.rename(&id, "Renamed on the Mac".into(), cx);
+            ws.push_remote_changes(cx);
+        });
+        assert_eq!(row(&trek, cx).as_deref(), Some("Renamed on the Mac"));
+    });
+}

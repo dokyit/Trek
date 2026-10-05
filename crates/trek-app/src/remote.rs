@@ -23,7 +23,7 @@ use crate::workspace::{ForkAt, LiveThread, Route, Workspace, WorkspaceEvent};
 use gpui_kit::{AsyncApp, Context, Task, WeakEntity};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,15 +58,17 @@ pub struct Remote {
     pub devices: Vec<tr::DeviceInfo>,
     pub connected: HashSet<String>,
     /// Thread rows as last sent.
-    sent: HashMap<String, tr::ThreadSummary>,
-    /// How phones answered requests, by request id, so their cards close saying so.
-    answered: HashMap<String, tr::AnswerResponse>,
+    pub(crate) sent: HashMap<String, tr::ThreadSummary>,
+    /// How phones answered requests, by thread and request id, so their cards close saying so.
+    pub(crate) answered: HashMap<(String, String), tr::AnswerResponse>,
     /// Transcripts phones have open: followed every tick.
     pub(crate) watched: HashMap<String, Watched>,
     /// Transcripts no phone has open any more, as they were last sent: nothing is done for them
     /// each tick, and a phone opening one again carries on where they left off (seq, and what
     /// changed since).
     pub(crate) dormant: HashMap<String, Watched>,
+    /// What the thread rows were last built from (`push_remote_changes`).
+    rows_key: Option<(u64, u64, i64)>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -92,7 +94,22 @@ pub(crate) struct Watched {
     cwd: Option<PathBuf>,
     /// Turns' changed files are looked at again on the next tick (one was counted, or waits).
     recount: bool,
+    /// When the item streaming was last sent, and whether it has changed since but was held
+    /// back (`STREAM_STEP`): it goes on a later tick, whether or not more of it comes.
+    stream_sent: Option<std::time::Instant>,
+    held: bool,
 }
+
+/// An answer still streaming is sent whole each time it grows: every tick while it's shorter
+/// than this, and that much less often for each time it's longer (a megabyte: every four
+/// seconds). Sent every tick whatever its length, a long answer cost its length squared, in
+/// bytes to the phone and in work on this Mac's main thread.
+const STREAM_STEP: usize = 64 << 10;
+
+/// Thread rows are built and compared at least this often (the times they show move on), and
+/// otherwise only when something of the threads has changed (`Workspace::threads_gen`, a
+/// transcript's revision): with hundreds of threads and nothing happening, a tick does nothing.
+const ROWS_AT_LEAST_MS: i64 = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Sent {
@@ -117,6 +134,8 @@ impl Watched {
             streaming: None,
             cwd: None,
             recount: false,
+            stream_sent: None,
+            held: false,
         }
     }
 
@@ -162,6 +181,19 @@ impl Addresses {
                 });
         }
         out
+    }
+}
+
+pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<(SocketAddr, String)> {
+    match reach {
+        trek_core::settings::Reach::Tailscale => {
+            let ip = addresses.tailscale.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Tailscale isn't connected; choose Wi-Fi or connect Tailscale"))?;
+            Ok((SocketAddr::from((ip, port)), format!("{ip}:{port}")))
+        }
+        trek_core::settings::Reach::Wifi => {
+            let ip = addresses.lan.or(addresses.tailscale).unwrap_or(Ipv4Addr::LOCALHOST);
+            Ok((SocketAddr::from(([0, 0, 0, 0], port)), format!("{ip}:{port}")))
+        }
     }
 }
 
@@ -254,13 +286,9 @@ impl Workspace {
                     let host = host_info();
                     let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
                     let addresses = Addresses::find();
-                    let ip = match reach {
-                        trek_core::settings::Reach::Tailscale => addresses.tailscale.or(addresses.lan),
-                        trek_core::settings::Reach::Wifi => addresses.lan.or(addresses.tailscale),
-                    };
-                    let advertise = format!("{}:{port}", ip.map(|i| i.to_string()).unwrap_or_else(|| "127.0.0.1".into()));
+                    let (bind, advertise) = remote_endpoint(&addresses, reach, port)?;
                     let mut config = tr::ServerConfig::new(host);
-                    config.bind = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+                    config.bind = bind;
                     config.advertise = Some(advertise.clone());
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);
@@ -292,7 +320,7 @@ impl Workspace {
                     Ok((handle, requests, addresses, advertise)) if ws.settings.mobile.enabled => {
                         let tasks = vec![serve_requests(cx.weak_entity(), requests, cx), push_changes(cx.weak_entity(), cx), hear_notices(cx.weak_entity(), handle.notices(), cx)];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
@@ -318,7 +346,7 @@ impl Workspace {
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
         let connected = HashSet::from(["phone".to_string()]);
         let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), _tasks: vec![] });
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: vec![] });
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -399,6 +427,7 @@ impl Workspace {
                 if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                     t.last_seen_at = now_ms().max(t.updated_at);
                     let _ = self.store.save_thread(t);
+                    self.threads_gen += 1;
                     cx.notify();
                 }
                 let _ = reply.send(Ok(()));
@@ -566,13 +595,26 @@ impl Workspace {
         let Some(prompt) = pending else {
             return Err(tr::HostError::conflict("Already answered"));
         };
-        if let Some(remote) = self.remote.as_mut() {
-            remote.answered.insert(req.request_id.clone(), req.response.clone());
+        let phone_response = req.response.clone();
+        let mut response = req.response;
+        if let (tr::AnswerResponse::Questions { answers }, Some(trek_agents::Prompt::Questions(questions))) = (&mut response, &prompt) {
+            restore_phone_answers(answers, questions);
         }
-        match (req.response, prompt) {
+        if let Some(remote) = self.remote.as_mut() {
+            remote.answered.insert((id.clone(), req.request_id.clone()), phone_response);
+        }
+        match (response, prompt) {
             (tr::AnswerResponse::Approval { decision }, None) => {
                 let decision = match decision {
                     tr::Decision::Allow => trek_agents::Decision::Allow,
+                    // Anything that holds the phone's token can say this, whatever the phone's
+                    // own check (Face ID) was: only the Mac's setting lets it through.
+                    tr::Decision::AllowForSession if !self.settings.mobile.session_approvals => {
+                        if let Some(remote) = self.remote.as_mut() {
+                            remote.answered.remove(&(id.clone(), req.request_id.clone()));
+                        }
+                        return Err(tr::HostError::bad_request("Allowing for a whole session from the phone is off on this Mac (Settings › Phone). Allow just this once, or turn it on there."));
+                    }
                     tr::Decision::AllowForSession => trek_agents::Decision::AllowForSession,
                     tr::Decision::Deny => trek_agents::Decision::Deny,
                 };
@@ -736,7 +778,7 @@ impl Workspace {
             None => tr::Needs { kind: tr::NeedsKind::Approval, text: format!("{} {}", p.title, first_line(&p.detail)).trim().to_string() },
         });
         let needs = needs
-            .or_else(|| t.paused.as_ref().filter(|_| t.run_state == RunState::Idle).map(|_| tr::Needs { kind: tr::NeedsKind::Limit, text: "Paused at its usage limit".into() }))
+            .or_else(|| t.paused.as_ref().filter(|_| t.run_state == RunState::Idle).map(|p| tr::Needs { kind: tr::NeedsKind::Limit, text: if p.wrapped { "Wrapped up before its usage limit" } else { "Paused at its usage limit" }.into() }))
             .or_else(|| {
                 (t.run_state == RunState::Failed).then(|| {
                     let last_error = live.and_then(|l| l.items.iter().rev().find_map(|i| match i {
@@ -937,9 +979,10 @@ impl Workspace {
         let moved = revision != w.revision;
         // Requests come and go with a revision bump, mostly: looked at whenever they differ too.
         let asks = moved || live.permissions.len() != w.requests.len() || live.permissions.iter().zip(&w.requests).any(|(p, (r, ..))| p.request_id != *r);
-        if edited.is_none() && !asks && streaming == w.streaming && cwd == w.cwd && !w.recount {
+        if edited.is_none() && !asks && streaming == w.streaming && cwd == w.cwd && !w.recount && !w.held {
             return vec![];
         }
+        w.held = false;
         let mut out = vec![];
         // Shorter than sent (a rewind, a rewrite): the phone reads it again.
         if len < w.items.len() {
@@ -961,10 +1004,25 @@ impl Workspace {
         w.items.resize(len, unsent);
         let live = &self.live[id];
         for ix in floor.max(w.from)..len {
+            // A long answer still streaming waits its turn (`STREAM_STEP`); once it stops
+            // streaming it's no longer `streaming`, and goes as it ended.
+            if Some(ix) == streaming {
+                let size = match &live.items[ix] {
+                    Item::Assistant { text } | Item::Reasoning { text } => text.len(),
+                    _ => 0,
+                };
+                if w.stream_sent.is_some_and(|at| at.elapsed() < TICK * (size / STREAM_STEP) as u32) {
+                    w.held = true;
+                    continue;
+                }
+            }
             let body = item_body(live, cwd.as_deref(), ix);
             let h = hash(&body);
             if w.items[ix].hash == Some(h) {
                 continue;
+            }
+            if Some(ix) == streaming {
+                w.stream_sent = Some(std::time::Instant::now());
             }
             w.seq += 1;
             w.items[ix] = Sent { seq: w.seq, hash: Some(h) };
@@ -976,7 +1034,7 @@ impl Workspace {
             let open: HashSet<&str> = requests.iter().map(|(r, _)| r.as_str()).collect();
             for (rid, last, _) in w.requests.iter().filter(|(r, ..)| !open.contains(r.as_str())) {
                 w.seq += 1;
-                let answer = self.remote.as_mut().and_then(|r| r.answered.remove(rid));
+                let answer = self.remote.as_mut().and_then(|r| r.answered.remove(&(id.to_string(), rid.clone())));
                 out.push(item_event(id, format!("r{rid}"), w.seq, None, resolved(last.clone(), answer)));
             }
             w.requests.retain(|(r, ..)| open.contains(r.as_str()));
@@ -1172,21 +1230,25 @@ impl Workspace {
             return;
         }
         let now = now_ms();
-        let rows: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+        // Thread rows, when something of them can have changed (or it's been a while).
+        let key = (self.threads_gen, self.live.values().fold(0u64, |sum, l| sum.wrapping_add(l.revision)), now / ROWS_AT_LEAST_MS);
+        let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect());
         let Some(remote) = self.remote.as_mut() else { return };
-        // Thread rows.
-        let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        let gone: Vec<String> = remote.sent.keys().filter(|id| !ids.contains(id.as_str())).cloned().collect();
-        for id in gone {
-            remote.sent.remove(&id);
-            remote.watched.remove(&id);
-            remote.dormant.remove(&id);
-            remote.handle.push(tr::HostEvent::ThreadRemoved(id));
-        }
-        for row in rows {
-            if remote.sent.get(&row.id) != Some(&row) {
-                remote.sent.insert(row.id.clone(), row.clone());
-                remote.handle.push(tr::HostEvent::Thread(row));
+        if let Some(rows) = rows {
+            remote.rows_key = Some(key);
+            let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+            let gone: Vec<String> = remote.sent.keys().filter(|id| !ids.contains(id.as_str())).cloned().collect();
+            for id in gone {
+                remote.sent.remove(&id);
+                remote.watched.remove(&id);
+                remote.dormant.remove(&id);
+                remote.handle.push(tr::HostEvent::ThreadRemoved(id));
+            }
+            for row in rows {
+                if remote.sent.get(&row.id) != Some(&row) {
+                    remote.sent.insert(row.id.clone(), row.clone());
+                    remote.handle.push(tr::HostEvent::Thread(row));
+                }
             }
         }
         // Open transcripts.
@@ -1201,6 +1263,24 @@ impl Workspace {
             remote.watched.insert(id, w);
         }
     }
+
+    pub(crate) fn remote_notice(&mut self, notice: tr::ServerNotice, cx: &mut Context<Self>) {
+        let Some(remote) = self.remote.as_mut() else { return };
+        remote.devices = remote.handle.devices();
+        match notice {
+            tr::ServerNotice::Paired { name, .. } => {
+                remote.offer = None;
+                cx.emit(WorkspaceEvent::Toast { message: format!("{name} is paired with Trek"), undo: None });
+            }
+            tr::ServerNotice::Connected { device_id } => {
+                remote.connected.insert(device_id);
+            }
+            tr::ServerNotice::Disconnected { device_id } => {
+                remote.connected.remove(&device_id);
+            }
+        }
+        cx.notify();
+    }
 }
 
 /// Items and turns' changed files converted for the phone, by index.
@@ -1210,20 +1290,67 @@ struct Converted {
     changes: HashMap<usize, tr::ItemBody>,
 }
 
+const MAX_PHONE_ITEM_TEXT: usize = (2 << 20) - (16 << 10);
+
+fn clip_text(text: &str) -> String {
+    clip_text_to(text, MAX_PHONE_ITEM_TEXT)
+}
+
+/// Keep a string within its JSON budget: escaping quotes, slashes and control characters counts.
+fn clip_text_to(text: &str, limit: usize) -> String {
+    let encoded = |c: char| match c {
+        '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+        '\0'..='\u{1f}' => 6,
+        _ => c.len_utf8(),
+    };
+    let encoded_len = |value: &str| value.chars().map(&encoded).sum::<usize>();
+    if encoded_len(text) + 2 <= limit {
+        return text.to_string();
+    }
+    let mut omitted = text.len();
+    loop {
+        let marker = format!("\n\n[{omitted} bytes omitted]\n\n");
+        let available = limit.saturating_sub(encoded_len(&marker) + 2);
+        let (mut used, mut head) = (0, 0);
+        for (at, c) in text.char_indices() {
+            let len = encoded(c);
+            if used + len > available / 2 {
+                break;
+            }
+            used += len;
+            head = at + c.len_utf8();
+        }
+        let mut tail = text.len();
+        for (at, c) in text.char_indices().rev() {
+            let len = encoded(c);
+            if used + len > available || at < head {
+                break;
+            }
+            used += len;
+            tail = at;
+        }
+        let actual = tail - head;
+        if actual == omitted {
+            return format!("{}{}{}", &text[..head], marker, &text[tail..]);
+        }
+        omitted = actual;
+    }
+}
+
 /// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
 fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
     match &live.items[ix] {
-        Item::User { text, images, .. } => tr::ItemBody::User { text: text.clone(), images: images.len() as u32 },
-        Item::Assistant { text } => tr::ItemBody::Assistant { text: text.clone(), streaming: live.streaming == Some(ix) },
-        Item::Reasoning { text } => tr::ItemBody::Reasoning { text: text.clone() },
+        Item::User { text, images, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32 },
+        Item::Assistant { text } => tr::ItemBody::Assistant { text: clip_text(text), streaming: live.streaming == Some(ix) },
+        Item::Reasoning { text } => tr::ItemBody::Reasoning { text: clip_text(text) },
         Item::Tool { id: call, title, detail, output, status } => {
             let op = crate::activity::op(title, detail, cwd);
             let lines = live.lines.get(call).copied();
             tr::ItemBody::Tool {
                 call_id: call.clone(),
                 tool: tr::ToolKind::from_title(title),
-                title: if op.verb.is_empty() { title.clone() } else { op.verb },
-                detail: if op.text.is_empty() { detail.clone() } else { op.text },
+                title: clip_text_to(if op.verb.is_empty() { title } else { &op.verb }, 64 << 10),
+                detail: clip_text_to(if op.text.is_empty() { detail } else { &op.text }, 256 << 10),
                 status: match status {
                     ToolStatus::Running => tr::ToolStatus::Running,
                     ToolStatus::Done => tr::ToolStatus::Done,
@@ -1236,9 +1363,9 @@ fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr:
             }
         }
         Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd { took_secs: *took_secs },
-        Item::Notice { text } => tr::ItemBody::Notice { text: text.clone() },
-        Item::Error { text } => tr::ItemBody::Error { text: text.clone() },
-        Item::Limit { text, resets_at, .. } => tr::ItemBody::Limit { text: text.clone(), resets_at: *resets_at },
+        Item::Notice { text } => tr::ItemBody::Notice { text: clip_text(text) },
+        Item::Error { text } => tr::ItemBody::Error { text: clip_text(text) },
+        Item::Limit { text, resets_at, .. } => tr::ItemBody::Limit { text: clip_text(text), resets_at: *resets_at },
         Item::Handoff { from, to, from_name, to_name, .. } => tr::ItemBody::Handoff {
             from: from_name.clone().unwrap_or_else(|| AgentId::from_key(from).display_name()),
             to: to_name.clone().unwrap_or_else(|| AgentId::from_key(to).display_name()),
@@ -1252,27 +1379,69 @@ fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
         .iter()
         .map(|p| {
             let body = match &p.prompt {
-                None => tr::ItemBody::Approval { request_id: p.request_id.clone(), title: p.title.clone(), detail: p.detail.clone(), state: tr::ApprovalState::Pending },
+                None => tr::ItemBody::Approval {
+                    request_id: p.request_id.clone(),
+                    title: clip_text_to(&p.title, 64 << 10),
+                    detail: clip_text_to(&p.detail, MAX_PHONE_ITEM_TEXT - (64 << 10)),
+                    state: tr::ApprovalState::Pending,
+                },
                 Some(trek_agents::Prompt::Questions(qs)) => tr::ItemBody::Question {
                     request_id: p.request_id.clone(),
-                    questions: qs
-                        .iter()
-                        .map(|q| tr::Question {
-                            header: q.header.clone(),
-                            question: q.question.clone(),
-                            options: q.options.iter().map(|(label, description)| tr::QuestionOption { label: label.clone(), description: description.clone() }).collect(),
-                            multi: q.multi,
-                            secret: q.secret,
-                        })
-                        .collect(),
+                    questions: phone_questions(qs),
                     state: tr::QuestionState::Pending,
                     answers: None,
                 },
-                Some(trek_agents::Prompt::Plan(markdown)) => tr::ItemBody::Plan { request_id: p.request_id.clone(), markdown: markdown.clone(), state: tr::PlanState::Pending },
+                Some(trek_agents::Prompt::Plan(markdown)) => tr::ItemBody::Plan { request_id: p.request_id.clone(), markdown: clip_text(markdown), state: tr::PlanState::Pending },
             };
             (p.request_id.clone(), body)
         })
         .collect()
+}
+
+fn phone_questions(questions: &[trek_agents::Question]) -> Vec<tr::Question> {
+    let fields = questions.iter().map(|q| 2 + q.options.len() * 2).sum::<usize>().max(1);
+    // A resolved card also carries its answers; leave half of the body's budget for them.
+    let each = (MAX_PHONE_ITEM_TEXT / 2) / fields;
+    questions
+        .iter()
+        .map(|q| tr::Question {
+            header: clip_text_to(&q.header, each),
+            question: clip_text_to(&q.question, each),
+            options: q.options.iter().map(|(label, description)| tr::QuestionOption { label: clip_text_to(label, each), description: clip_text_to(description, each) }).collect(),
+            multi: q.multi,
+            secret: q.secret,
+        })
+        .collect()
+}
+
+fn phone_answers(answers: Vec<tr::QA>) -> Vec<tr::QA> {
+    let each = (MAX_PHONE_ITEM_TEXT / 2) / (answers.len() * 2).max(1);
+    answers.into_iter().map(|qa| tr::QA { question: clip_text_to(&qa.question, each), answer: clip_text_to(&qa.answer, each) }).collect()
+}
+
+/// Questions and option labels are identities in the phone's answer. Put clipped ones back
+/// before the workspace records secrets or hands the answer to the agent.
+fn restore_phone_answers(answers: &mut [tr::QA], questions: &[trek_agents::Question]) {
+    let shown = phone_questions(questions);
+    for (answer_ix, answer) in answers.iter_mut().enumerate() {
+        let question_ix = shown
+            .get(answer_ix)
+            .filter(|q| q.question == answer.question)
+            .map(|_| answer_ix)
+            .or_else(|| shown.iter().position(|q| q.question == answer.question));
+        let Some(question_ix) = question_ix else { continue };
+        let (shown, original) = (&shown[question_ix], &questions[question_ix]);
+        let restore = |part: &str| shown.options.iter().position(|o| o.label == part).and_then(|ix| original.options.get(ix)).map(|o| o.0.as_str());
+        if let Some(label) = restore(&answer.answer) {
+            answer.answer = label.to_string();
+        } else {
+            let parts: Vec<&str> = answer.answer.split(", ").collect();
+            if let Some(labels) = parts.iter().map(|part| restore(part)).collect::<Option<Vec<_>>>() {
+                answer.answer = labels.join(", ");
+            }
+        }
+        answer.question = original.question.clone();
+    }
 }
 
 /// An item upsert for the phones following thread `id`.
@@ -1339,7 +1508,7 @@ fn resolved(mut body: tr::ItemBody, answer: Option<tr::AnswerResponse>) -> tr::I
         }
         (tr::ItemBody::Question { state, answers, .. }, Some(tr::AnswerResponse::Questions { answers: given })) => {
             *state = tr::QuestionState::Answered;
-            *answers = Some(given);
+            *answers = Some(phone_answers(given));
         }
         (tr::ItemBody::Plan { state, .. }, Some(tr::AnswerResponse::Plan { approve, .. })) => {
             *state = if approve { tr::PlanState::Approved } else { tr::PlanState::Rejected }
@@ -1467,25 +1636,7 @@ fn hear_notices(ws: WeakEntity<Workspace>, mut notices: tokio::sync::broadcast::
     });
     cx.spawn(async move |_, cx: &mut AsyncApp| {
         while let Ok(notice) = rx.recv().await {
-            let alive = ws.update(cx, |ws, cx| {
-                let Some(remote) = ws.remote.as_mut() else { return };
-                remote.devices = remote.handle.devices();
-                match notice {
-                    tr::ServerNotice::Paired { name, .. } => {
-                        remote.offer = None;
-                        cx.emit(WorkspaceEvent::Toast { message: format!("{name} is paired with Trek"), undo: None });
-                    }
-                    tr::ServerNotice::Connected { device_id } => {
-                        remote.connected.insert(device_id);
-                        // A phone that just came reads everything afresh.
-                        remote.sent.clear();
-                    }
-                    tr::ServerNotice::Disconnected { device_id } => {
-                        remote.connected.remove(&device_id);
-                    }
-                }
-                cx.notify();
-            });
+            let alive = ws.update(cx, |ws, cx| ws.remote_notice(notice, cx));
             if alive.is_err() {
                 break;
             }

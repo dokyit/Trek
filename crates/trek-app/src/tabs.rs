@@ -55,7 +55,8 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
         _ => None,
     };
     let theme = cx.theme().clone();
-    let sub_needs: Vec<bool> = tabs.iter().map(|t| ws.sub_agent_needs_you(&t.id)).collect();
+    let needs = ws.waiting_on_sub_agents();
+    let sub_needs: Vec<bool> = tabs.iter().map(|t| needs.contains(&t.id)).collect();
     let items: Vec<(String, SharedString, trek_core::AgentId, RunState, bool, bool)> =
         tabs.iter().zip(sub_needs).map(|(t, sub)| (t.id.clone(), SharedString::from(t.title.clone()), t.agent.clone(), t.run_state, t.is_unseen(), sub)).collect();
     let count = items.len();

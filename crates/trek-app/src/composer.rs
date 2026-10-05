@@ -613,10 +613,12 @@ impl Composer {
             let clock = crate::time::reset_clock(at, now);
             if compact { clock } else { format!("{clock} (in {})", crate::time::countdown(at, now)) }
         };
-        let (title, detail) = match (pause.resets_at, pause.resume) {
-            (Some(at), true) => ("Usage limit reached".to_string(), format!("Resumes at {}", when(at + trek_core::limit::RESUME_GRACE_MS))),
-            (Some(at), false) => ("Usage limit reached".to_string(), format!("Resets {}", when(at))),
-            (None, _) => ("Usage limit reached".to_string(), "Reset time unknown".to_string()),
+        // Stopped ahead of the limit, as Trek asked, rather than by it.
+        let title = if pause.wrapped { "Wrapped up before the limit" } else { "Usage limit reached" }.to_string();
+        let detail = match (pause.resets_at, pause.resume) {
+            (Some(at), true) => format!("Resumes at {}", when(at + trek_core::limit::RESUME_GRACE_MS)),
+            (Some(at), false) => format!("Resets {}", when(at)),
+            (None, _) => "Reset time unknown".to_string(),
         };
         let action = |key: &'static str, label: &'static str, strong: bool| {
             div()
@@ -2357,11 +2359,11 @@ impl Render for Composer {
         let preparing = live.is_some_and(|l| l.preparing);
         // Its agent's CLI is being updated: messages wait for the new version.
         let updating = thread.as_ref().filter(|t| ws.agent_updating(&t.agent.key())).map(|t| t.agent.display_name());
-        let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && w.is_missing())?, t.id.clone())));
+        let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && crate::system::lately::worktree_missing(w))?, t.id.clone())));
         // Another thread edits the same folder right now: offer a worktree for the next one.
         let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).map(|t| ws.project_dir(t));
         // The way out is a worktree, for git projects.
-        let crowded_repo = crowded.clone().flatten().filter(|p| p.join(".git").exists());
+        let crowded_repo = crowded.clone().flatten().filter(|p| crate::system::lately::exists(&p.join(".git")));
 
         // Model pill + menu.
         let model_open = self.model_open;

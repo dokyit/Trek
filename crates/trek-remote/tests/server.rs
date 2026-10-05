@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
@@ -47,6 +48,7 @@ fn settings() -> MacSettings {
         auto_settle_days: 3,
         theme: Theme::System,
         full_access: false,
+        session_approvals: false,
     }
 }
 
@@ -514,6 +516,62 @@ async fn wrong_codes_burn_the_offer() {
 }
 
 #[tokio::test]
+async fn replacing_a_connection_does_not_report_the_device_disconnected() {
+    let (handle, _) = start().await;
+    let mut notices = handle.notices();
+    let (old, token) = pair(&handle, "dev-1").await;
+    assert!(matches!(notices.recv().await.unwrap(), ServerNotice::Paired { .. }));
+    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Connected { device_id: "dev-1".into() });
+
+    let new = hello(&handle, "dev-1", &token).await;
+    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Connected { device_id: "dev-1".into() });
+    drop(old);
+    assert!(tokio::time::timeout(Duration::from_millis(200), notices.recv()).await.is_err());
+    assert_eq!(handle.connected_devices(), ["dev-1"]);
+
+    drop(new);
+    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Disconnected { device_id: "dev-1".into() });
+}
+
+#[tokio::test]
+async fn unauthenticated_connections_are_capped() {
+    let (handle, _) = start_with(|config| config.auth_timeout = Duration::from_secs(5)).await;
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        held.push(TcpStream::connect(handle.local_addr()).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut refused = TcpStream::connect(handle.local_addr()).await.unwrap();
+    let mut byte = [0];
+    let read = tokio::time::timeout(Duration::from_secs(1), refused.read(&mut byte)).await.unwrap().unwrap();
+    assert_eq!(read, 0, "the seventeenth unauthenticated socket is closed");
+    assert_eq!(held.len(), 16);
+}
+
+#[tokio::test]
+async fn pairing_keeps_the_offer_when_devices_cannot_be_saved() {
+    let dir = std::env::temp_dir().join(format!("trek-remote-pair-save-{}", rand::random::<u64>()));
+    let path = dir.join("devices.json");
+    let (handle, _) = start_with(|config| config.devices_path = Some(path.clone())).await;
+    std::fs::create_dir_all(&path).unwrap();
+    let offer = handle.pairing_offer_with_code("K7Q2-9XMV");
+
+    let mut failed = connect(&handle).await;
+    send(&mut failed, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Phone"})).await;
+    let err = recv(&mut failed).await;
+    assert_eq!((err["code"].as_str(), handle.devices().len()), (Some("host_error"), 0));
+    closed(&mut failed).await;
+
+    std::fs::remove_dir(&path).unwrap();
+    let mut retry = connect(&handle).await;
+    send(&mut retry, json!({"type": "pair", "id": "2", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Phone"})).await;
+    assert_eq!(recv(&mut retry).await["type"], "paired", "the same offer still works");
+    assert_eq!(recv(&mut retry).await["type"], "snapshot");
+    drop(retry);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn subscriptions_route_items() {
     let (handle, _) = start().await;
     let (mut a, _) = pair(&handle, "dev-a").await;
@@ -769,6 +827,23 @@ async fn newer_requests_reach_the_host_over_the_wire() {
     ] {
         assert!(calls.iter().any(|c| c == expected), "{expected} not in {calls:?}");
     }
+}
+
+#[tokio::test]
+async fn a_connection_can_have_only_eight_queries_in_flight() {
+    let (handle, _) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    for n in 0..9 {
+        send(&mut c, json!({"type": "basecamp", "id": format!("q{n}"), "range": "all"})).await;
+    }
+    let limited = recv(&mut c).await;
+    assert_eq!((limited["re"].as_str(), limited["code"].as_str()), (Some("q8"), Some("rate_limited")));
+    let mut replies = Vec::new();
+    for _ in 0..8 {
+        replies.push(recv(&mut c).await["re"].as_str().unwrap().to_string());
+    }
+    replies.sort();
+    assert_eq!(replies, (0..8).map(|n| format!("q{n}")).collect::<Vec<_>>());
 }
 
 /// A slow read (usage asks every agent) doesn't hold up what the phone does next.

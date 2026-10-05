@@ -2,7 +2,9 @@
 //! Trek's own tool loop (read/edit/bash with the hand-holding gates) lands in phase 2.
 
 use crate::{AgentEvent, Billing, Command, SessionConfig, load_image};
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -20,6 +22,7 @@ fn request_error(status: reqwest::StatusCode, headers: &reqwest::header::HeaderM
 }
 
 const SYSTEM: &str = "You are Trek, a coding assistant. Be direct and concise. Use Markdown with fenced code blocks.";
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 
 pub async fn run(
     config: SessionConfig,
@@ -42,44 +45,102 @@ pub async fn run(
 
     // Anthropic: raw assistant content blocks are kept and replayed unchanged (append-only).
     let mut history: Vec<Value> = Vec::new();
+    let mut kept = VecDeque::new();
+    let mut shutdown = false;
 
-    while let Ok(cmd) = commands.recv().await {
+    loop {
+        let cmd = match kept.pop_front() {
+            Some(cmd) => cmd,
+            None => match commands.recv().await {
+                Ok(cmd) => cmd,
+                Err(_) => break,
+            },
+        };
         match cmd {
             Command::Prompt { text, images } => {
-                let (message, skipped) = user_message(provider.wire, &text, &images);
-                for e in skipped {
-                    events.send(AgentEvent::Notice(format!("Image left out: {e}"))).await?;
-                }
-                history.push(message);
-                let result = match provider.wire {
-                    Wire::Anthropic => anthropic_turn(&client, key.as_deref().unwrap_or_default(), &model, effort, &history, &events, &commands).await,
-                    _ => {
-                        let usage = REPORTS_USAGE.contains(&provider.id);
-                        openai_turn(&client, &config.agent, provider.base_url, key.as_deref(), provider.local, usage, &model, effort, &history, &events, &commands).await
+                let mut next = Some((text, images));
+                let mut error = None;
+                while let Some((text, images)) = next.take() {
+                    let (message, skipped) = user_message(provider.wire, &text, &images);
+                    for e in skipped {
+                        events.send(AgentEvent::Notice(format!("Image left out: {e}"))).await?;
                     }
-                };
-                match result {
-                    Ok(assistant) => {
-                        history.push(assistant);
-                        events.send(AgentEvent::TurnComplete { error: None }).await?;
-                    }
-                    Err(e) => {
-                        history.pop();
-                        if let Some(crate::limits::LimitError(limit)) = e.downcast_ref() {
-                            events.send(limit.clone().event()).await?;
+                    history.push(message);
+                    let result = match provider.wire {
+                        Wire::Anthropic => {
+                            anthropic_turn(&client, ANTHROPIC_MESSAGES_URL, key.as_deref().unwrap_or_default(), &model, effort, &history, &events, &commands, &mut kept, &mut shutdown).await
                         }
-                        events.send(AgentEvent::TurnComplete { error: Some(format!("{e:#}")) }).await?;
+                        _ => {
+                            let usage = REPORTS_USAGE.contains(&provider.id);
+                            openai_turn(
+                                &client,
+                                &config.agent,
+                                provider.base_url,
+                                key.as_deref(),
+                                provider.local,
+                                usage,
+                                &model,
+                                effort,
+                                &history,
+                                &events,
+                                &commands,
+                                &mut kept,
+                                &mut shutdown,
+                            )
+                            .await
+                        }
+                    };
+                    match result {
+                        Ok(assistant) => history.push(assistant),
+                        Err(e) => {
+                            history.pop();
+                            if let Some(crate::limits::LimitError(limit)) = e.downcast_ref() {
+                                events.send(limit.clone().event()).await?;
+                            }
+                            error.get_or_insert_with(|| format!("{e:#}"));
+                        }
                     }
+                    while let Some(cmd) = kept.pop_front() {
+                        match cmd {
+                            Command::Prompt { text, images } => {
+                                next = Some((text, images));
+                                break;
+                            }
+                            Command::SetModel { model: m, effort: e } => {
+                                model = m;
+                                effort = e;
+                            }
+                            Command::SetModes { effort: e, .. } => effort = e,
+                            Command::Shutdown => {
+                                shutdown = true;
+                                break;
+                            }
+                            Command::Answer { .. }
+                            | Command::Interrupt
+                            | Command::Respond { .. }
+                            | Command::SetHandHolding(_)
+                            | Command::ReadTask { .. }
+                            | Command::StopTask { .. } => {}
+                        }
+                    }
+                    if shutdown {
+                        break;
+                    }
+                }
+                events.send(AgentEvent::TurnComplete { error }).await?;
+                if shutdown {
+                    break;
                 }
             }
             Command::SetModel { model: m, effort: e } => {
                 model = m;
                 effort = e;
             }
+            Command::SetModes { effort: e, .. } => effort = e,
             Command::Answer { .. } => {}
             Command::Shutdown => break,
             // Nothing runs between turns.
-            Command::Interrupt | Command::Respond { .. } | Command::SetHandHolding(_) | Command::SetModes { .. } | Command::ReadTask { .. } | Command::StopTask { .. } => {}
+            Command::Interrupt | Command::Respond { .. } | Command::SetHandHolding(_) | Command::ReadTask { .. } | Command::StopTask { .. } => {}
         }
     }
     Ok(())
@@ -159,17 +220,58 @@ fn user_message(wire: Wire, text: &str, images: &[PathBuf]) -> (Value, Vec<Strin
 }
 
 /// Split an SSE byte stream into `data:` payloads.
-fn sse_events(buf: &mut String) -> Vec<String> {
+fn sse_events(buf: &mut Vec<u8>) -> Vec<String> {
     let mut out = Vec::new();
-    while let Some(pos) = buf.find("\n\n") {
-        let block: String = buf.drain(..pos + 2).collect();
-        for line in block.lines() {
-            if let Some(data) = line.strip_prefix("data:") {
-                out.push(data.trim().to_string());
-            }
+    loop {
+        let lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2));
+        let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| (i, 4));
+        let Some((pos, end)) = lf.into_iter().chain(crlf).min_by_key(|(i, _)| *i) else { break };
+        let block: Vec<u8> = buf.drain(..pos + end).collect();
+        let text = String::from_utf8_lossy(&block[..pos]);
+        let data = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:").map(|s| s.strip_prefix(' ').unwrap_or(s)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !data.is_empty() {
+            out.push(data);
         }
     }
     out
+}
+
+fn keep_command(cmd: Result<Command, async_channel::RecvError>, kept: &mut VecDeque<Command>, shutdown: &mut bool) -> Result<()> {
+    match cmd {
+        Ok(Command::Interrupt) => bail!("Interrupted"),
+        Ok(Command::Shutdown) | Err(_) => {
+            *shutdown = true;
+            bail!("Interrupted")
+        }
+        Ok(cmd) => {
+            kept.push_back(cmd);
+            Ok(())
+        }
+    }
+}
+
+async fn send_request(
+    req: reqwest::RequestBuilder,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+    timeout: Duration,
+) -> Result<reqwest::Response> {
+    let send = req.send();
+    tokio::pin!(send);
+    let sleep = tokio::time::sleep(timeout);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            response = &mut send => return Ok(response?),
+            _ = &mut sleep => bail!("Timed out waiting for response headers after {} seconds", timeout.as_secs()),
+            cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+        }
+    }
 }
 
 fn anthropic_body(model: &str, effort: Effort, history: &[Value]) -> Value {
@@ -204,23 +306,26 @@ fn anthropic_body(model: &str, effort: Effort, history: &[Value]) -> Value {
 
 async fn anthropic_turn(
     client: &reqwest::Client,
+    url: &str,
     key: &str,
     model: &str,
     effort: Effort,
     history: &[Value],
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
 ) -> Result<Value> {
     let body = anthropic_body(model, effort, history);
     let mut req = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(url)
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
         .json(&body);
     if body.get("fallbacks").is_some() {
         req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
     }
-    let resp = req.send().await?;
+    let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -232,18 +337,19 @@ async fn anthropic_turn(
         return Err(request_error(status, &headers, format!("Anthropic API {status}: {msg}")));
     }
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     // Rebuild the assistant content blocks so they can be replayed unchanged next turn.
     let mut blocks: Vec<Value> = Vec::new();
     let mut text = String::new();
     let mut stop_reason = None;
+    let mut terminal = false;
     let mut usage = TokenUsage::default();
     let mut long_writes = 0;
     loop {
         tokio::select! {
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break };
-                buf.push_str(&String::from_utf8_lossy(&chunk?));
+                buf.extend_from_slice(&chunk?);
                 for data in sse_events(&mut buf) {
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
                     anthropic_usage(&v, &mut usage, &mut long_writes);
@@ -269,17 +375,17 @@ async fn anthropic_turn(
                             }
                         }
                         Some("message_delta") => stop_reason = v["delta"]["stop_reason"].as_str().map(String::from),
+                        Some("message_stop") => terminal = true,
                         Some("error") => bail!("{}", v["error"]["message"].as_str().unwrap_or("stream error")),
                         _ => {}
                     }
                 }
             }
-            cmd = commands.recv() => {
-                if matches!(cmd, Ok(Command::Interrupt) | Ok(Command::Shutdown) | Err(_)) {
-                    bail!("Interrupted");
-                }
-            }
+            cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
         }
+    }
+    if !terminal {
+        bail!("The connection closed before the answer finished");
     }
     if !usage.is_empty() {
         let cost = trek_core::pricing::request(model, &AgentId::Direct("anthropic".into()), &usage, long_writes, false);
@@ -293,9 +399,8 @@ async fn anthropic_turn(
 }
 
 fn append(blocks: &mut [Value], index: usize, field: &str, s: &str) {
-    if let Some(b) = blocks.get_mut(index) {
-        let cur = b[field].as_str().unwrap_or_default().to_string();
-        b[field] = json!(cur + s);
+    if let Some(Value::String(text)) = blocks.get_mut(index).and_then(|b| b.get_mut(field)) {
+        text.push_str(s);
     }
 }
 
@@ -312,6 +417,8 @@ async fn openai_turn(
     history: &[Value],
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
 ) -> Result<Value> {
     let mut messages = vec![json!({ "role": "system", "content": SYSTEM })];
     messages.extend(history.iter().cloned());
@@ -327,7 +434,7 @@ async fn openai_turn(
     if let Some(k) = key {
         req = req.bearer_auth(k);
     }
-    let resp = req.send().await?;
+    let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let headers = resp.headers().clone();
@@ -336,18 +443,23 @@ async fn openai_turn(
         return Err(request_error(status, &headers, format!("{status}: {msg}")));
     }
     let mut stream = resp.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     let mut text = String::new();
     let mut usage = None;
+    let mut terminal = false;
     loop {
         tokio::select! {
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break };
-                buf.push_str(&String::from_utf8_lossy(&chunk?));
+                buf.extend_from_slice(&chunk?);
                 for data in sse_events(&mut buf) {
-                    if data == "[DONE]" { continue; }
+                    if data == "[DONE]" {
+                        terminal = true;
+                        continue;
+                    }
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
                     usage = openai_usage(&v).or(usage);
+                    terminal |= v["choices"].as_array().into_iter().flatten().any(|c| !c["finish_reason"].is_null());
                     let d = &v["choices"][0]["delta"];
                     if let Some(r) = d["reasoning_content"].as_str().or(d["reasoning"].as_str()) {
                         events.send(AgentEvent::ReasoningDelta(r.into())).await?;
@@ -358,12 +470,11 @@ async fn openai_turn(
                     }
                 }
             }
-            cmd = commands.recv() => {
-                if matches!(cmd, Ok(Command::Interrupt) | Ok(Command::Shutdown) | Err(_)) {
-                    bail!("Interrupted");
-                }
-            }
+            cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
         }
+    }
+    if !terminal {
+        bail!("The connection closed before the answer finished");
     }
     if let Some((tokens, reported)) = usage {
         // One request: its prompt's size sets its tier (Gemini's and xAI's long context).
@@ -381,6 +492,18 @@ async fn openai_turn(
 mod tests {
     use super::*;
 
+    async fn sse_server(body: &'static str) -> String {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        url
+    }
+
     #[test]
     fn a_429_is_a_limit_and_other_failures_are_not() {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -394,10 +517,105 @@ mod tests {
     }
 
     #[test]
-    fn sse_splits_complete_events_only() {
-        let mut buf = "data: {\"a\":1}\n\ndata: [DONE]\n\ndata: {\"b\"".to_string();
+    fn sse_splits_complete_events_with_either_line_ending() {
+        let mut buf = b"data: {\"a\":1}\n\ndata: [DONE]\r\n\r\ndata: {\"b\"".to_vec();
         assert_eq!(sse_events(&mut buf), vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]);
-        assert_eq!(buf, "data: {\"b\"");
+        assert_eq!(buf, b"data: {\"b\"");
+        buf.extend_from_slice(b":\"\xc3");
+        assert!(sse_events(&mut buf).is_empty());
+        buf.extend_from_slice(b"\xa9\"}\r\ndata: second line\r\n\r\n");
+        assert_eq!(sse_events(&mut buf), vec!["{\"b\":\"é\"}\nsecond line".to_string()]);
+    }
+
+    #[test]
+    fn appending_deltas_updates_the_existing_string() {
+        let mut blocks = vec![json!({"type":"text","text":"one"})];
+        append(&mut blocks, 0, "text", " two");
+        append(&mut blocks, 0, "text", " three");
+        assert_eq!(blocks[0]["text"], "one two three");
+    }
+
+    #[test]
+    fn streaming_keeps_non_control_commands_in_order() {
+        let mut kept = VecDeque::new();
+        let mut shutdown = false;
+        for command in [
+            Command::SetHandHolding(trek_core::HandHolding::Supervised),
+            Command::SetModel { model: "next".into(), effort: Effort::Medium },
+            Command::SetModes { plan: true, fast: Some("fast".into()), effort: Effort::High },
+            Command::Prompt { text: "steer".into(), images: vec![] },
+        ] {
+            keep_command(Ok(command), &mut kept, &mut shutdown).unwrap();
+        }
+        assert!(matches!(kept.pop_front(), Some(Command::SetHandHolding(trek_core::HandHolding::Supervised))));
+        assert!(matches!(kept.pop_front(), Some(Command::SetModel { model, .. }) if model == "next"));
+        assert!(matches!(kept.pop_front(), Some(Command::SetModes { effort: Effort::High, .. })));
+        assert!(matches!(kept.pop_front(), Some(Command::Prompt { text, .. }) if text == "steer"));
+        assert!(!shutdown && kept.is_empty());
+    }
+
+    #[tokio::test]
+    async fn response_headers_keep_commands_and_time_out() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        });
+        let (tx, rx) = async_channel::unbounded();
+        tx.send(Command::SetModes { plan: true, fast: None, effort: Effort::High }).await.unwrap();
+        tx.send(Command::Prompt { text: "steer".into(), images: vec![] }).await.unwrap();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        send_request(reqwest::Client::new().get(&url), &rx, &mut kept, &mut shutdown, Duration::from_secs(1)).await.unwrap();
+        assert!(matches!(kept.pop_front(), Some(Command::SetModes { effort: Effort::High, .. })));
+        assert!(matches!(kept.pop_front(), Some(Command::Prompt { text, .. }) if text == "steer"));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let e = send_request(reqwest::Client::new().get(&url), &rx, &mut kept, &mut shutdown, Duration::from_millis(20)).await.unwrap_err();
+        assert!(e.to_string().contains("Timed out waiting for response headers"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_requires_a_terminal_marker() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let complete = sse_server("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n").await;
+        let answer = openai_turn(&client, &AgentId::Direct("local".into()), &complete, None, true, false, "m", Effort::Off, &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap();
+        assert_eq!(answer["content"], "ok");
+
+        let incomplete = sse_server("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n").await;
+        let e = openai_turn(&client, &AgentId::Direct("local".into()), &incomplete, None, true, false, "m", Effort::Off, &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap_err();
+        assert!(e.to_string().contains("connection closed before the answer finished"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_requires_message_stop() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let complete = sse_server(
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+        )
+        .await;
+        let answer = anthropic_turn(&client, &complete, "key", "m", Effort::Off, &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap();
+        assert_eq!(answer["content"][0]["text"], "ok");
+
+        let incomplete = sse_server(
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+        )
+        .await;
+        let e = anthropic_turn(&client, &incomplete, "key", "m", Effort::Off, &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap_err();
+        assert!(e.to_string().contains("connection closed before the answer finished"), "{e:#}");
     }
 
     #[test]

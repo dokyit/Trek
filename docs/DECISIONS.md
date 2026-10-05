@@ -258,6 +258,23 @@ chats aren't paused: their panel shows the limit row, and the next message tries
 (a bar offers Resume at reset, Snooze until reset, Switch agent…); Settings → General can make it resume
 on its own. A scheduled resume holds no keep-awake: only the turn it starts does.
 
+**Wrapping up ahead of the limit.** A limit cuts an agent off wherever it is, mid-edit as likely as
+not. Where the agent says how full its plan's windows are, Trek gets in first: at 95 % of a 5-hour window
+or 98 % of a longer one (`limit::wrap_up_due`), a running turn is sent one message, as a steer
+(`limit::wrap_up_prompt`: finish the edit in hand, leave the code consistent, start nothing new, say
+what's done and what's left), and a note in the transcript says it went. The percentages come as
+`AgentEvent::LimitUsed`, from Claude Code's `rate_limit_event` (`unifiedWindows`) and Codex's
+`account/rateLimits/updated`, and from the usage Trek reads anyway (`wrap_up_where_due`): every two
+minutes instead of five while a turn runs on an agent with a window past 85 %, and Devin's quota (which
+only its terminal UI shows) while a Devin turn runs and it's filling up or unknown. A turn that then ends
+by itself pauses the thread until the reset, like one the limit stopped (`Pause::wrapped`; the bar says
+"Wrapped up before the limit"), so what's queued waits and the resume carries on from the agent's own
+note. One the user stops, or that fails, or that meets the limit anyway, goes the usual way. Sub-agents
+are told too, and their answer goes to the parent as it is. Agents that report no usage before the limit
+(OpenCode, Copilot, Grok, API keys) can't be told in time: they stop at the limit as before. Claude Code
+does its own wrap-up at the limit itself on a subscription; Trek's message goes before that and costs
+nothing extra. Settings → General turns it off (`wrap_up_near_limit`).
+
 **Handoff.** Switching a thread to another agent clears its session (and any rewind's way back into the
 old one) so the next session starts from `rewind::recap`, and puts an `Item::Handoff` divider in the
 transcript, naming each side's agent and model ("Claude Opus 5.5 → Codex Sol"; the default model is

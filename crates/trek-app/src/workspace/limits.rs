@@ -2,7 +2,7 @@
 //! messages that wait for the reset, resuming at the reset, snoozing until it, and the handoff
 //! to another agent.
 
-use super::{Workspace, WorkspaceEvent};
+use super::{Command, Workspace, WorkspaceEvent};
 use gpui_kit::{Context, Task};
 use std::path::Path;
 use std::rc::Rc;
@@ -48,6 +48,32 @@ pub(crate) struct Hit {
     pub message: String,
     pub resets_at: Option<i64>,
     pub scope: LimitScope,
+    /// Not the limit itself: the turn stopped ahead of it, as Trek asked (`Workspace::wrap_up`).
+    pub wrapped: bool,
+}
+
+/// How full one of a plan's usage windows is (0–100), and when it resets (unix ms).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Window {
+    pub scope: LimitScope,
+    pub percent: f32,
+    pub resets_at: Option<i64>,
+}
+
+/// The window a running turn was asked to wrap up ahead of.
+pub(crate) type WrapUp = Window;
+
+/// How full a window is when Trek starts re-reading an agent's usage more often for the turns
+/// running on it (`Workspace::usage_every`).
+const FILLING: f32 = 85.0;
+
+/// How often a working agent's usage is re-read while a window fills up.
+const FILLING_EVERY_MS: i64 = 2 * 60_000;
+
+/// Of `windows`, the one to wrap up for: close to its limit, and the last of those to reset
+/// (the thread waits for that one).
+fn due(windows: impl IntoIterator<Item = Window>) -> Option<Window> {
+    windows.into_iter().filter(|w| trek_core::limit::wrap_up_due(&w.scope, w.percent)).max_by_key(|w| w.resets_at)
 }
 
 /// A turn that resumes a thread after its usage limit: the message of the user's it sent (sent
@@ -119,6 +145,7 @@ impl Workspace {
         let auto = self.settings.general.on_usage_limit == OnUsageLimit::Resume || resuming.is_some();
         let mut fresh = Pause::new(hit.message, resets_at, hit.scope, now, auto);
         fresh.tries = tries;
+        fresh.wrapped = hit.wrapped;
         let mut pause = match thread.paused {
             Some(old) => old.renewed(fresh),
             None => fresh,
@@ -152,10 +179,111 @@ impl Workspace {
         // A resume that met the limit again moves on without a word: the bar and the card say it,
         // and the alert for the limit went when it was first hit.
         // A sub-agent's limit goes to its parent, as its failure (`task_turn_ended`), not to the user.
-        if resuming.is_none() && thread.parent_id.is_none() {
+        // A turn that wrapped up has its own alert, as any finished turn: its answer says where it stopped.
+        if resuming.is_none() && thread.parent_id.is_none() && !hit.wrapped {
             cx.emit(WorkspaceEvent::Attention { message: notice, thread: id.to_string() });
         }
         self.schedule_limits(cx);
+    }
+
+    /// `id`'s agent said how full its plan's windows are (`AgentEvent::LimitUsed`): the usage
+    /// Trek shows follows, and a turn running close to a limit is asked to wrap up.
+    pub(super) fn windows_used(&mut self, id: &str, windows: Vec<Window>, cx: &mut Context<Self>) {
+        let Some(agent) = self.thread(id).map(|t| t.agent.key()) else { return };
+        if let Some(status) = self.agent_status.get_mut(&agent) {
+            for w in &windows {
+                let length = match w.scope {
+                    LimitScope::Session => "5h",
+                    LimitScope::Weekly => "7d",
+                    _ => continue,
+                };
+                // The account's own window of that length, not a model's ("Weekly · Fable").
+                if let Some(l) = status.limits.iter_mut().find(|l| l.window == length && !l.label.contains('·') && !l.label.contains("(scoped)")) {
+                    l.percent = w.percent;
+                    l.resets_at = w.resets_at.or(l.resets_at);
+                }
+            }
+        }
+        if let Some(w) = due(windows) {
+            self.wrap_up(id, w, cx);
+        }
+    }
+
+    /// `agent`'s usage was just read (`refresh_usage`, `refresh_devin_usage`): the turns running
+    /// on it that a window close to its limit applies to are asked to wrap up.
+    pub(crate) fn wrap_up_where_due(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        let Some(limits) = self.agent_status.get(&agent.key()).map(|s| s.limits.clone()).filter(|l| !l.is_empty()) else { return };
+        let running: Vec<(String, Option<String>)> =
+            self.threads.iter().filter(|t| t.agent == *agent && self.turn_running(&t.id)).map(|t| (t.id.clone(), t.model.clone())).collect();
+        for (id, model) in running {
+            let applying = limits.iter().filter(|l| trek_agents::limits::applies(l, &LimitScope::Other, model.as_deref()));
+            if let Some(w) = due(applying.map(|l| Window { scope: trek_agents::limits::window_scope(l), percent: l.percent, resets_at: l.resets_at })) {
+                self.wrap_up(&id, w, cx);
+            }
+        }
+    }
+
+    /// Ask `id`'s running turn to wrap up: window `w` is nearly used up, and the limit would
+    /// cut the agent off wherever it happens to be. Once a turn; the message steers the turn
+    /// like one the user sent, and a note in the transcript says it went. A turn that then ends
+    /// by itself pauses the thread until the reset (`pause_wrapped`).
+    pub(super) fn wrap_up(&mut self, id: &str, w: Window, cx: &mut Context<Self>) {
+        let now = self.now();
+        if !self.settings.general.wrap_up_near_limit || !trek_core::limit::wrap_up_due(&w.scope, w.percent) || w.resets_at.is_some_and(|at| at <= now) {
+            return;
+        }
+        let Some(live) = self.live.get_mut(id) else { return };
+        if live.turn_started.is_none() || live.commands.is_none() || live.wrap_up.is_some() || live.limit.is_some() {
+            return;
+        }
+        let reset = w.resets_at.map(|at| crate::time::reset_clock(at, now));
+        let prompt = trek_core::limit::wrap_up_prompt(&w.scope, w.percent, reset.as_deref());
+        let note = match &reset {
+            Some(at) => format!("{} {}% used (resets {at}): asked the agent to wrap up", w.scope.label(), w.percent.floor() as u32),
+            None => format!("{} {}% used: asked the agent to wrap up", w.scope.label(), w.percent.floor() as u32),
+        };
+        live.wrap_up = Some(w);
+        live.streaming = None;
+        live.items.push(Item::Notice { text: note });
+        live.revision += 1;
+        self.dispatch(id, Command::Prompt { text: prompt, images: vec![] });
+        self.persist_soon(id, cx);
+        cx.notify();
+    }
+
+    /// `id`'s turn ended by itself after it was asked to wrap up ahead of `w`'s limit: the thread
+    /// pauses until the reset, like one the limit stopped (what's queued waits, and it resumes
+    /// or asks, as set). Not a sub-agent (its answer goes to its parent as it is) or a side
+    /// chat, and not without a reset still ahead to wait for.
+    pub(super) fn pause_wrapped(&mut self, id: &str, w: WrapUp, cx: &mut Context<Self>) -> bool {
+        let Some(t) = self.thread(id) else { return false };
+        if t.side_of.is_some() || t.parent_id.is_some() || !w.resets_at.is_some_and(|at| at > self.now()) {
+            return false;
+        }
+        let message = trek_core::limit::wrapped_message(&w.scope, w.percent);
+        self.pause_at_limit(id, Hit { message, resets_at: w.resets_at, scope: w.scope, wrapped: true }, cx);
+        true
+    }
+
+    /// Whether a turn is running on `agent` while one of its windows fills up (wrap-ups on).
+    fn filling(&self, agent: &AgentId) -> bool {
+        self.settings.general.wrap_up_near_limit
+            && self.agent_status.get(&agent.key()).is_some_and(|s| s.limits.iter().any(|l| (FILLING..100.0).contains(&l.percent)))
+            && self.threads.iter().any(|t| t.agent == *agent && self.turn_running(&t.id))
+    }
+
+    /// How long Claude Code's and Codex's usage is left unread (unix ms): five minutes, or two
+    /// while a turn runs on one whose window is filling up, so a wrap-up comes in time.
+    pub(super) fn usage_every(&self) -> i64 {
+        if self.filling(&AgentId::ClaudeCode) || self.filling(&AgentId::Codex) { FILLING_EVERY_MS } else { 5 * 60_000 }
+    }
+
+    /// Devin reports no usage as it works, and reading it costs a few seconds of its terminal
+    /// UI (`refresh_devin_usage`, at most every ten minutes): worth it only while a turn runs on
+    /// it and its quota is filling up, or isn't known yet.
+    pub(super) fn watches_devin_usage(&self) -> bool {
+        let devin = super::devin_agent();
+        self.filling(&devin) || (self.settings.general.wrap_up_near_limit && self.devin_status_at == 0 && self.threads.iter().any(|t| t.agent == devin && self.turn_running(&t.id)))
     }
 
     /// Fill in resets the agents' usage windows now know (after `refresh_usage`).

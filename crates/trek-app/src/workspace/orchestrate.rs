@@ -394,6 +394,7 @@ impl Workspace {
         self.store.save_thread(&child).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
         let id = child.id.clone();
         self.threads.push(child);
+        self.threads_gen += 1;
         self.live.entry(id.clone()).or_default().loaded = true;
         let since = self.now();
         self.delegations.insert(
@@ -760,7 +761,7 @@ impl Workspace {
     }
 
     /// A sub-agent that didn't stop when asked: end its session and its turn here.
-    fn end_task_now(&mut self, child: &str, cx: &mut Context<Self>) {
+    pub(super) fn end_task_now(&mut self, child: &str, cx: &mut Context<Self>) {
         if !self.task_state(child).live() {
             return;
         }
@@ -783,11 +784,17 @@ impl Workspace {
         }
         self.retire_ipc_session(child);
         self.persist_items(child, cx);
+        // Paused at its usage limit, it mustn't take the task back up at the reset.
+        let paused = self.pause(child).is_some();
         self.mutate_thread(child, cx, |t| {
             if matches!(t.run_state, RunState::Working | RunState::NeedsYou) {
                 t.run_state = RunState::Idle;
             }
+            t.paused = None;
         });
+        if paused {
+            self.schedule_limits(cx);
+        }
         self.finish_task(child, Outcome::Cancelled, cx);
     }
 
@@ -1182,6 +1189,7 @@ impl Workspace {
             }
             let _ = self.store.update_thread(&child.id, |t| t.archived_at = Some(now_ms()));
             self.threads.retain(|t| t.id != child.id);
+            self.threads_gen += 1;
         }
     }
 

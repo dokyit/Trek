@@ -52,9 +52,17 @@ struct BeaconDot: View {
                         .opacity(lit ? 0.9 : 0.1)
                 }
             }
-            .onAppear {
-                guard pulses, motion else { return }
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { lit = true }
+            // Started whenever it's to pulse, not only if it was when the row first showed: a
+            // thread that starts working with its row on screen had a dim dot that never moved.
+            .onChange(of: pulses && motion, initial: true) { _, on in
+                if on {
+                    lit = false
+                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { lit = true }
+                } else {
+                    var still = Transaction()
+                    still.disablesAnimations = true
+                    withTransaction(still) { lit = false }
+                }
             }
     }
 }

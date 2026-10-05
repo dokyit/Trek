@@ -53,6 +53,7 @@ impl Workspace {
                 ThemeChoice::Paper => tr::Theme::Paper,
             },
             full_access: s.permissions.full_access_unlocked,
+            session_approvals: m.session_approvals,
         }
     }
 
@@ -136,6 +137,9 @@ impl Workspace {
         if let Some(t) = theme {
             s.appearance.theme = t;
         }
+        if change.push_test && !s.mobile.push {
+            return Err(tr::HostError::bad_request("Turn on notifications to your phone first"));
+        }
         // Only these sections can have changed; the rest stays as the Mac has it.
         self.settings.general = s.general;
         self.settings.notifications = s.notifications;
@@ -147,9 +151,6 @@ impl Workspace {
         self.settings.appearance.theme = s.appearance.theme;
         self.save_settings(cx);
         if change.push_test {
-            if !self.settings.mobile.push {
-                return Err(tr::HostError::bad_request("Turn on notifications to your phone first"));
-            }
             self.test_push(cx);
         }
         if let Some(choice) = theme.filter(|_| !cfg!(test)) {

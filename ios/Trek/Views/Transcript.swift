@@ -373,8 +373,15 @@ private struct Shimmer: ViewModifier {
                     .allowsHitTesting(false)
                 }
             }
-            .onAppear {
-                withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { phase = 1 }
+            // From the start each time motion comes on: begun once at first sight, a shimmer
+            // that motion was off for then never ran.
+            .onChange(of: motion, initial: true) { _, on in
+                var still = Transaction()
+                still.disablesAnimations = true
+                withTransaction(still) { phase = -1 }
+                if on {
+                    withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { phase = 1 }
+                }
             }
     }
 }

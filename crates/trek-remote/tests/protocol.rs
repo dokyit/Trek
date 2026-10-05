@@ -633,7 +633,7 @@ fn the_newer_replies() {
         r#"{"type":"commands","re":"8","thread_id":"t","commands":[{"name":"permissions full","description":"No prompts and no sandbox","kind":"command","trek":true},{"name":"frontend-design","description":"","kind":"skill"}]}"#,
         r#"{"type":"settings","re":"9","default_agent":"claude-code","default_effort":"high","default_access":"auto-accept-edits","follow_up":"steer",
             "notifications":"banner","push":{"enabled":true,"when":"away","server":"https://ntfy.sh","topic":"trek-abc","topic_url":"https://ntfy.sh/trek-abc","subscribe_url":"ntfy://ntfy.sh/trek-abc"},
-            "auto_settle_days":3,"theme":"system","full_access":false}"#,
+            "auto_settle_days":3,"theme":"system","full_access":false,"session_approvals":false}"#,
     ];
     for line in cases {
         server_round_trip(line);

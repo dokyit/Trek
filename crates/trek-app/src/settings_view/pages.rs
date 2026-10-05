@@ -209,6 +209,12 @@ impl SettingsView {
                         ),
                         cx,
                     ),
+                    Self::row(
+                        "Wrap up before a usage limit",
+                        "When a working agent's limit is nearly used up, Trek asks it to finish the edit in hand and say what's left, so it isn't cut off mid-edit. The thread then pauses until the reset. For agents that report their usage: Claude Code, Codex and Devin.",
+                        self.switch("wrap-up-near-limit", s.general.wrap_up_near_limit, |s, v| s.general.wrap_up_near_limit = v),
+                        cx,
+                    ),
                 ],
                 cx,
             ),

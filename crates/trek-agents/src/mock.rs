@@ -157,6 +157,10 @@ enum Script {
     /// Say what Trek told the session (`SessionConfig::instructions`).
     Told,
     Limit(Duration),
+    /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
+    NearLimit(Duration),
+    /// Work on for a while, taking no notice of Stop (`mock:deaf`).
+    Deaf(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate { wait: bool },
     /// Start two sub-agents on the same task, and end the turn.
@@ -224,6 +228,8 @@ impl Script {
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write,
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
+                "nearlimit" if w.starts_with("mock:") => Script::NearLimit(duration_after(i).unwrap_or(Duration::from_secs(60))),
+                "deaf" if w.starts_with("mock:") => Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60))),
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
@@ -274,7 +280,8 @@ pub fn title(request: &str) -> String {
         Script::Write => "Add a note",
         Script::Recall => "What was said",
         Script::Told => "What Trek said",
-        Script::Limit(_) => "Refactor the parser",
+        Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
+        Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
         Script::Pair => "Get two opinions",
         Script::Server(_) => "Start the dev server",
@@ -645,6 +652,8 @@ impl Session {
                 self.say(&text).await?;
             }
             Script::Limit(after) => return self.limit(after).await,
+            Script::NearLimit(after) => return self.near_limit(after).await,
+            Script::Deaf(d) => return self.deaf(d).await,
             Script::Cost { plan } => return self.priced_turn(plan).await,
             Script::Restate => self.restate(text).await?,
             Script::Arena => self.arena(text).await?,
@@ -685,6 +694,61 @@ impl Session {
         let message = format!("You've hit your session limit · resets {at}");
         self.emit(AgentEvent::LimitReached { message: message.clone(), resets_at: Some(resets_at), scope: crate::LimitScope::Session }).await?;
         self.emit(AgentEvent::TurnComplete { error: Some(message) }).await
+    }
+
+    /// The 5-hour window 96% used partway through, resetting `after` from now. Like Claude Code
+    /// and Codex, the agent says so and works on. Told to wrap up (`limit::wrap_up_prompt`), it
+    /// stops where it is and says what's left; left alone, it finishes the job.
+    async fn near_limit(&mut self, after: Duration) -> Step {
+        let resets_at = trek_core::store::now_ms() + after.as_millis() as i64;
+        self.think("Picking up the parser refactor where it stood.").await?;
+        self.tool("Read", "src/parser.rs", "pub fn parse(input: &str) -> Result<Ast> { … }", 150).await?;
+        self.emit(AgentEvent::LimitUsed { scope: crate::LimitScope::Session, percent: 96.0, resets_at: Some(resets_at) }).await?;
+        // Long enough for a word about it to arrive, however the turn is paced.
+        self.hear(Duration::from_millis(1500)).await?;
+        let told = |t: &String| t.starts_with(trek_core::limit::WRAP_UP_TAG);
+        if self.steer.iter().any(told) {
+            self.steer.retain(|t| !told(t));
+            self.say("Stopping here, ahead of the limit. **Done:** `parse` returns an `Ast`. **Still to do:** its two callers in `src/cli.rs` still expect tokens. **Next:** switch them over, then run the parser tests.").await?;
+            return self.finish().await;
+        }
+        self.tool("Edit", "src/cli.rs", "Switched both callers to the new `Ast`.", 150).await?;
+        self.say("The parser refactor is finished: `parse` returns an `Ast` and both callers use it.").await?;
+        self.finish().await
+    }
+
+    /// Work on for `d` (real time), deaf to Stop: an agent hung in a tool, as far as Trek can
+    /// tell. Only the end of its session ends the turn early.
+    async fn deaf(&mut self, d: Duration) -> Step {
+        let id = self.id("tool");
+        self.tool_start(&id, "Run command", "./scripts/migrate.sh --all").await?;
+        let sleep = tokio::time::sleep(d);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => break,
+                cmd = self.commands.recv() => match cmd {
+                    Ok(Command::Interrupt) => {}
+                    other => self.handle_midturn(other)?,
+                },
+            }
+        }
+        self.emit(AgentEvent::ToolFinished { id, output: "migrated 12 tables".into(), ok: true }).await?;
+        self.say("The migration ran to the end.").await?;
+        self.finish().await
+    }
+
+    /// Wait up to `d` of real time for the next message sent mid-turn.
+    async fn hear(&mut self, d: Duration) -> Step {
+        let sleep = tokio::time::sleep(d);
+        tokio::pin!(sleep);
+        while self.steer.is_empty() {
+            tokio::select! {
+                _ = &mut sleep => break,
+                cmd = self.commands.recv() => self.handle_midturn(cmd)?,
+            }
+        }
+        Ok(())
     }
 
     /// The tokens a turn used, as agents report them as it ends: the conversation so far read
@@ -1619,6 +1683,7 @@ mod tests {
         assert_eq!(Script::parse("Error!", false), Script::Error);
         assert_eq!(Script::parse("mock:limit 5s", false), Script::Limit(Duration::from_secs(5)));
         assert_eq!(Script::parse("mock:limit", false), Script::Limit(Duration::from_secs(5)));
+        assert_eq!(Script::parse("mock:nearlimit 10m", false), Script::NearLimit(Duration::from_secs(600)));
         assert_eq!(Script::parse("the rate limit", false), Script::Answer, "bare `limit` is just a word");
         assert_eq!(Script::parse("mock:consult mock:long 2s", false), Script::Delegate { wait: true }, "the first keyword is the parent's");
         assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });

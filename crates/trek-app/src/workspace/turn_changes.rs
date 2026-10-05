@@ -36,7 +36,14 @@ struct Slot {
     shown: Option<Arc<TurnChanges>>,
     range: Option<TurnRange>,
     state: State,
+    /// What a waiting slot waited on when it was last asked (`waits_on`): nothing of that
+    /// changed, the answer hasn't either.
+    waited: Option<WaitsOn>,
 }
+
+/// What decides whether a turn's count still has to wait: the turn running after it, the git
+/// work under way, the messages that followed and the checkpoints taken or failed.
+type WaitsOn = (bool, bool, usize, usize, usize, usize);
 
 #[derive(Clone, Copy, PartialEq)]
 enum State {
@@ -92,20 +99,23 @@ impl Workspace {
             return None;
         }
         let key = (id.to_string(), live.items.id_at(end)?.to_string());
+        let waits_on: WaitsOn = (live.turn_started.is_some(), live.git_busy, live.git_jobs.len(), live.items.len(), live.checkpointed.len(), live.checkpoint_failed.len());
         let shown = match self.changes_cache.slots.get(&key) {
-            // Waiting is asked again each time: nothing is lost if what it waits on goes unsaid.
+            // Waiting is asked again each time what it waits on has moved (this runs as often as
+            // its row is drawn, and asking reads the disk and the database).
+            Some(Slot { shown, state: State::Waiting, waited, .. }) if *waited == Some(waits_on) => return shown.clone(),
             Some(Slot { shown, state: State::Stale | State::Waiting, .. }) => shown.clone(),
             Some(slot) => return slot.shown.clone(),
             None => None,
         };
         match self.plan(id, end) {
             Plan::Wait => {
-                self.changes_cache.slots.insert(key, Slot { shown: shown.clone(), range: None, state: State::Waiting });
+                self.changes_cache.slots.insert(key, Slot { shown: shown.clone(), range: None, state: State::Waiting, waited: Some(waits_on) });
                 shown
             }
             Plan::Tools => {
                 let changes = self.from_tools(id, end).map(Arc::new);
-                self.changes_cache.slots.insert(key, Slot { shown: changes.clone(), range: None, state: State::Ready { now: false } });
+                self.changes_cache.slots.insert(key, Slot { shown: changes.clone(), range: None, state: State::Ready { now: false }, waited: None });
                 changes
             }
             Plan::Git { repo, from, to } => {
@@ -113,7 +123,7 @@ impl Workspace {
                 let run = self.changes_cache.run;
                 let now = to.is_none();
                 let range = self.changes_cache.slots.get(&key).and_then(|s| s.range.clone());
-                self.changes_cache.slots.insert(key.clone(), Slot { shown: shown.clone(), range, state: State::Working { run, now } });
+                self.changes_cache.slots.insert(key.clone(), Slot { shown: shown.clone(), range, state: State::Working { run, now }, waited: None });
                 let task = cx.spawn(async move |this, cx| {
                     let counted = cx
                         .background_executor()
@@ -142,7 +152,7 @@ impl Workspace {
                             }
                         };
                         if let Some(slot) = ws.changes_cache.slots.get_mut(&key) {
-                            *slot = Slot { shown, range, state: State::Ready { now } };
+                            *slot = Slot { shown, range, state: State::Ready { now }, waited: None };
                         }
                         ws.remote_turn_changes_moved(&key.0);
                         cx.emit(WorkspaceEvent::TurnChanges { id: key.0.clone(), end: key.1.clone() });

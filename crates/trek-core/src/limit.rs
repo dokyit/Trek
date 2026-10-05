@@ -29,6 +29,15 @@ impl LimitScope {
             LimitScope::Other => "Usage limit".into(),
         }
     }
+
+    /// The same in running text: "5-hour limit", "weekly limit", "Opus limit", "usage limit".
+    pub fn words(&self) -> String {
+        match self {
+            LimitScope::Weekly => "weekly limit".into(),
+            LimitScope::Other => "usage limit".into(),
+            named => named.label(),
+        }
+    }
 }
 
 /// How long after a reset Trek waits before it resumes: the provider's clock and its own may
@@ -56,6 +65,40 @@ pub fn reset_ahead(resets_at: Option<i64>, now: i64, tries: u32) -> Option<i64> 
 
 /// What a resume sends when the user queued nothing of their own.
 pub const CONTINUE: &str = "Continue where you left off.";
+
+/// How full a 5-hour window is (percent) when Trek asks a running agent to wrap up: late enough
+/// that most of the window got used, early enough that an edit in hand can still be finished.
+pub const WRAP_UP_SESSION: f32 = 95.0;
+
+/// The same for the longer windows (weekly, a model's, a quota): a point of a week is a lot more
+/// work than a point of five hours.
+pub const WRAP_UP_LONG: f32 = 98.0;
+
+/// Whether a window in `scope` that is `percent` used is close enough to its limit to wrap up
+/// for. One already used up isn't: the agent's next request is the one that fails.
+pub fn wrap_up_due(scope: &LimitScope, percent: f32) -> bool {
+    let at = if *scope == LimitScope::Session { WRAP_UP_SESSION } else { WRAP_UP_LONG };
+    (at..100.0).contains(&percent)
+}
+
+/// How Trek's wrap-up message to an agent starts: what tells it from something the user typed.
+pub const WRAP_UP_TAG: &str = "[Trek: usage limit]";
+
+/// What Trek tells an agent whose usage window is nearly used up mid-turn (`reset`: when the
+/// window resets, in words): stop somewhere clean, rather than be cut off mid-edit.
+pub fn wrap_up_prompt(scope: &LimitScope, percent: f32, reset: Option<&str>) -> String {
+    let resets = reset.map(|r| format!(" (it resets {r})")).unwrap_or_default();
+    format!(
+        "{WRAP_UP_TAG} Your {} is {}% used{resets} and is about to cut this turn off. Wrap up now: finish the edit you're in the middle of, leave the code in a consistent state with nothing half-written, and start nothing new. Then end your turn with a short note: what's done, what's left, and the next step, so the work can be picked up from there once the limit resets.",
+        scope.words(),
+        percent.floor() as u32,
+    )
+}
+
+/// What the thread says of a turn that wrapped up ahead of its limit (`Pause::message`).
+pub fn wrapped_message(scope: &LimitScope, percent: f32) -> String {
+    format!("Wrapped up before the {} ({}% used)", scope.words(), percent.floor() as u32)
+}
 
 /// A message waiting for a limit to reset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +130,10 @@ pub struct Pause {
     /// aren't, and a reset that keeps being late is tried less often (`reset_ahead`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub tries: u32,
+    /// The agent stopped by itself, asked to ahead of the limit (`wrap_up_prompt`), rather than
+    /// being cut off at it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wrapped: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -95,7 +142,7 @@ fn is_zero(n: &u32) -> bool {
 
 impl Pause {
     pub fn new(message: String, resets_at: Option<i64>, scope: LimitScope, since: i64, resume: bool) -> Pause {
-        Pause { message, resets_at, scope, since, resume, queued: vec![], tries: 0 }
+        Pause { message, resets_at, scope, since, resume, queued: vec![], tries: 0, wrapped: false }
     }
 
     /// When the resume goes out: shortly after the reset. `None` without a reset time or a resume.
@@ -180,7 +227,26 @@ mod tests {
         p.queued.push(Queued { text: "go on".into(), images: vec![] });
         let again = p.clone().renewed(Pause::new("still limited".into(), Some(9_000), LimitScope::Weekly, 5, false));
         assert_eq!((again.resets_at, again.resume, again.scope.clone(), again.message.as_str()), (Some(9_000), true, LimitScope::Weekly, "still limited"));
+        // A thread that wrapped up and then met the limit itself is simply at its limit.
+        let wrapped = Pause { wrapped: true, ..p.clone() };
+        assert!(!wrapped.renewed(Pause::new("limit".into(), Some(9_000), LimitScope::Session, 5, false)).wrapped);
         assert_eq!(again.queued, p.queued);
+    }
+
+    #[test]
+    fn wrapping_up_starts_near_the_limit_and_not_at_it() {
+        assert!(!wrap_up_due(&LimitScope::Session, 94.9));
+        assert!(wrap_up_due(&LimitScope::Session, 95.0) && wrap_up_due(&LimitScope::Session, 99.0));
+        // Used up: the limit itself says so next.
+        assert!(!wrap_up_due(&LimitScope::Session, 100.0));
+        // A week's last points are worth more work than five hours' are.
+        assert!(!wrap_up_due(&LimitScope::Weekly, 97.0) && wrap_up_due(&LimitScope::Weekly, 98.0));
+        assert!(!wrap_up_due(&LimitScope::Model("Opus".into()), 96.0) && wrap_up_due(&LimitScope::Other, 98.5));
+        let prompt = wrap_up_prompt(&LimitScope::Session, 96.4, Some("7:40 PM"));
+        assert!(prompt.starts_with(WRAP_UP_TAG), "{prompt}");
+        assert!(prompt.contains("Your 5-hour limit is 96% used (it resets 7:40 PM) and is about to cut this turn off."), "{prompt}");
+        assert!(wrap_up_prompt(&LimitScope::Weekly, 98.0, None).contains("Your weekly limit is 98% used and is about to cut this turn off. Wrap up now"));
+        assert_eq!(wrapped_message(&LimitScope::Model("Opus".into()), 98.7), "Wrapped up before the Opus limit (98% used)");
     }
 
     #[test]
@@ -192,6 +258,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Pause>(&json).unwrap(), p);
         let minimal: Pause = serde_json::from_str(r#"{"message":"limit","since":3}"#).unwrap();
         assert_eq!((minimal.resets_at, minimal.scope, minimal.resume, minimal.queued.len()), (None, LimitScope::Other, false, 0));
+        assert!(!minimal.wrapped && !json.contains("wrapped"));
         assert_eq!(LimitScope::Model("Opus".into()).label(), "Opus limit");
     }
 }

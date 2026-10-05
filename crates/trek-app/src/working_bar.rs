@@ -381,8 +381,9 @@ impl WorkingBar {
         });
     }
 
-    /// How often the bar redraws now: briskly while a group folds, at
-    /// the hiker's rate while the window is in front, once a second (the clock) otherwise.
+    /// How often the bar redraws now: briskly while a group folds, at the hiker's rate while the
+    /// window is in front and half that behind another, once a second (the clock) while it
+    /// waits or holds still.
     fn rate(&self) -> Option<Duration> {
         let s = self.shown.as_ref()?;
         if s.header.as_ref().is_none_or(|h| h.started.is_none()) && s.folding.is_none() {
