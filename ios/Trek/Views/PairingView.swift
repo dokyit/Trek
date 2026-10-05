@@ -9,6 +9,8 @@ struct PairingView: View {
     @State private var manual = false
     @State private var address = ""
     @State private var code = ""
+    @State private var fingerprint = ""
+    @State private var confirmPlain = false
 
     var body: some View {
         ZStack {
@@ -45,6 +47,13 @@ struct PairingView: View {
                         .tint(Trek.foreground)
                         .controlSize(.extraLarge)
 
+                        if let error = model.pairingError {
+                            Label(error, systemImage: "exclamationmark.circle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(Trek.failed)
+                                .multilineTextAlignment(.leading)
+                        }
+
                         if manual {
                             manualForm.transition(.opacity.combined(with: .move(edge: .top)))
                         } else {
@@ -55,13 +64,6 @@ struct PairingView: View {
                             }
                             .buttonStyle(.glass)
                             .controlSize(.extraLarge)
-                        }
-
-                        if let error = model.pairingError {
-                            Label(error, systemImage: "exclamationmark.circle.fill")
-                                .font(.footnote)
-                                .foregroundStyle(Trek.failed)
-                                .multilineTextAlignment(.leading)
                         }
 
                         Button("Explore the demo") { model.startDemo() }
@@ -86,8 +88,15 @@ struct PairingView: View {
         .sheet(isPresented: $scanning) {
             ScannerSheet { link in
                 scanning = false
-                model.pair(address: link.address, code: link.code)
+                // Same confirmation as a deep link: name, address and fingerprint first.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.offer(link) }
             }
+        }
+        .alert("Unencrypted connection", isPresented: $confirmPlain) {
+            Button("Connect without encryption", role: .destructive) { pairTyped(.plain) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(Self.plainWarning)
         }
     }
 
@@ -129,23 +138,165 @@ struct PairingView: View {
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
                 .font(.body.monospaced())
+            Divider()
+            HStack(spacing: 8) {
+                TextField("Fingerprint, e.g. ABCD-1234", text: $fingerprint)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+                Image(systemName: "lock.fill").font(.footnote).foregroundStyle(Trek.muted)
+            }
+            Text(fingerprintHint)
+                .font(.caption)
+                .foregroundStyle(fingerprintInvalid ? Trek.failed : Trek.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Button {
-                var addr = address.trimmingCharacters(in: .whitespaces)
-                if !addr.contains(":") { addr += ":7420" }
-                model.pair(address: addr, code: code)
+                if let prefix = Fingerprint.typedPrefix(fingerprint) {
+                    pairTyped(.tls(.prefix(prefix)))
+                } else {
+                    confirmPlain = true
+                }
             } label: {
                 Text("Pair").fontWeight(.semibold).frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .tint(Trek.foreground)
             .controlSize(.large)
-            .disabled(address.isEmpty || code.count < 8)
+            .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty || code.count < 8 || fingerprintInvalid)
             .padding(.top, 4)
         }
         .padding(16)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 }
+
+extension PairingView {
+    static let plainWarning = "Without a fingerprint this iPhone can't check that it's really talking to your Mac, and everything you send and see, approvals included, crosses the network unencrypted. Only continue for an older Trek on a network you trust."
+
+    private var fingerprintInvalid: Bool {
+        !fingerprint.trimmingCharacters(in: .whitespaces).isEmpty && Fingerprint.typedPrefix(fingerprint) == nil
+    }
+
+    private var fingerprintHint: String {
+        fingerprintInvalid ? "8 characters, 0–9 and A–F, as your Mac shows it."
+            : "Shown beside the code on your Mac. It proves this is your Mac."
+    }
+
+    private func pairTyped(_ transport: Transport) {
+        var addr = address.trimmingCharacters(in: .whitespaces)
+        if !addr.contains(":") { addr += ":7420" }
+        model.pair(address: addr, code: code.trimmingCharacters(in: .whitespaces), transport: transport)
+    }
+}
+
+/// "Pair with Tobias's MacBook Pro?": a pairing link (deep link or QR code) never pairs on its
+/// own. The user sees which Mac, where, and its fingerprint (to compare with the Mac's screen)
+/// and confirms; a link without a fingerprint gets the "Unencrypted connection" warning instead.
+struct PairingConfirmSheet: View {
+    var link: PairingLink
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var height: CGFloat = 440
+
+    private var macName: String { link.name ?? "this Mac" }
+    private var replacing: String? {
+        guard let paired = PairedMac.load(), paired.hostId != link.hostId else { return nil }
+        return paired.hostName
+    }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "laptopcomputer.and.iphone")
+                .font(.system(size: 34, weight: .medium))
+                .foregroundStyle(Trek.foreground)
+                .padding(.top, 30)
+            VStack(spacing: 6) {
+                Text("Pair with \(macName)?")
+                    .font(.title2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text(link.address)
+                    .font(.subheadline.monospaced())
+                    .foregroundStyle(Trek.muted)
+            }
+
+            if let fp = link.fingerprint {
+                VStack(spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.fill").font(.subheadline).foregroundStyle(Trek.done)
+                        Text(Fingerprint.short(fp))
+                            .font(.system(.title2, design: .monospaced).weight(.semibold))
+                            .tracking(1)
+                    }
+                    Text("Check that your Mac shows this fingerprint beside the code.")
+                        .font(.footnote)
+                        .foregroundStyle(Trek.muted)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity)
+                .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Unencrypted connection", systemImage: "lock.open.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Trek.approval)
+                    Text(PairingView.plainWarning)
+                        .font(.footnote)
+                        .foregroundStyle(Trek.foreground.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Trek.approval.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Trek.approval.opacity(0.4), lineWidth: 1))
+            }
+
+            if let replacing {
+                Text("This replaces the pairing with \(replacing).")
+                    .font(.footnote)
+                    .foregroundStyle(Trek.muted)
+            }
+
+            VStack(spacing: 10) {
+                if link.fingerprint != nil {
+                    Button {
+                        model.pair(address: link.address, code: link.code, transport: link.transport)
+                    } label: {
+                        Text("Pair").fontWeight(.semibold).foregroundStyle(Trek.background).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(Trek.foreground)
+                    .controlSize(.extraLarge)
+                } else {
+                    Button {
+                        model.pair(address: link.address, code: link.code, transport: .plain)
+                    } label: {
+                        Text("Pair without encryption").fontWeight(.medium).foregroundStyle(Trek.approval).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.extraLarge)
+                }
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Cancel").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+                .controlSize(.extraLarge)
+            }
+            .padding(.top, 8)
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 12)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .presentationDetents([.height(height)])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Trek.background)
+    }
+}
+
 
 /// The camera, looking for a `trek://pair` QR code.
 struct ScannerSheet: View {

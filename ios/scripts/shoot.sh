@@ -1,13 +1,14 @@
 #!/bin/sh
 # Build Trek for the simulator, then launch it in demo mode and screenshot one screen.
 #   ios/scripts/shoot.sh <out.png> [launch args…]     e.g. shoot.sh /tmp/a.png -TrekOpen t-flaky
-# Env: SIM (default "iPhone 18 Pro"), BUILD=0 to skip the build, WAIT seconds before the shot (default 3),
-#      DEMO=0 to start unpaired (the pairing screen) instead of in demo mode.
+# Env: SIM (default "iPhone 18 Pro"), DD (derived data, default /tmp/trek-ios-dd), BUILD=0 to skip the build, WAIT seconds before the shot (default 3),
+#      DEMO=0 to start unpaired (the pairing screen) instead of in demo mode, DEMO=live to launch as
+#      is (keeping a paired Mac).
 set -eu
 cd "$(dirname "$0")/.."
 SIM="${SIM:-iPhone 18 Pro}"
 OUT="$1"; shift
-DD=/tmp/trek-ios-dd
+DD="${DD:-/tmp/trek-ios-dd}"
 if [ "${BUILD:-1}" = 1 ]; then
   xcodebuild -project Trek.xcodeproj -scheme Trek -destination "platform=iOS Simulator,name=$SIM" \
     -derivedDataPath "$DD" build -quiet
@@ -19,6 +20,8 @@ xcrun simctl install "$SIM" "$DD/Build/Products/Debug-iphonesimulator/Trek.app"
 xcrun simctl terminate "$SIM" dev.trek.TrekMobile 2>/dev/null || true
 if [ "${DEMO:-1}" = 1 ]; then
   xcrun simctl launch "$SIM" dev.trek.TrekMobile -TrekDemo YES "$@" >/dev/null
+elif [ "${DEMO}" = live ]; then
+  xcrun simctl launch "$SIM" dev.trek.TrekMobile "$@" >/dev/null
 else
   xcrun simctl launch "$SIM" dev.trek.TrekMobile -TrekReset YES "$@" >/dev/null
 fi

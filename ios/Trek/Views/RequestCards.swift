@@ -47,7 +47,10 @@ struct ApprovalCard: View {
     var request: ApprovalRequest
     var agentName: String
     var answer: (AnswerResponse) -> Void
-    @State private var confirmSession = false
+    @Environment(AppModel.self) private var model
+    @State private var expanded = false
+    @State private var confirming = false
+    @State private var detailHeight: CGFloat = 124
 
     /// "Run command" → "run a command": the request's title as the end of a sentence.
     static func phrase(_ title: String) -> String {
@@ -59,15 +62,30 @@ struct ApprovalCard: View {
         return "use \(title)"
     }
 
+    private var warning: String? { CommandRisk.warning(for: request.detail) }
+
+    /// Roughly how many lines the detail wraps to in the card (~40 monospaced characters a line).
+    private var estimatedLines: Int {
+        request.detail.split(separator: "\n", omittingEmptySubsequences: false)
+            .reduce(0) { $0 + max(1, Int((Double($1.count) / 40).rounded(.up))) }
+    }
+
+    private var isLong: Bool { estimatedLines > 7 }
+
     var body: some View {
         CardChrome(tint: Trek.approval, symbol: "hand.raised.fill", title: "\(agentName) wants to \(Self.phrase(request.title))") {
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(request.detail)
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundStyle(Trek.foreground)
-                    .padding(10)
+            detail
+
+            if let warning {
+                Label {
+                    Text("Looks destructive: \(warning). Read it all before allowing.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Trek.failed)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             HStack(spacing: 10) {
                 Button {
@@ -78,28 +96,89 @@ struct ApprovalCard: View {
                 .buttonStyle(.glass)
                 .controlSize(.large)
 
-                Button {
-                    answer(.approval(.allow))
-                } label: {
-                    Text("Allow").fontWeight(.semibold).frame(maxWidth: .infinity)
+                // A destructive-looking command gets no visual push towards Allow.
+                if warning == nil {
+                    Button {
+                        answer(.approval(.allow))
+                    } label: {
+                        Text("Allow").fontWeight(.semibold).frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(Trek.approval)
+                    .controlSize(.large)
+                } else {
+                    Button {
+                        answer(.approval(.allow))
+                    } label: {
+                        Text("Allow").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.large)
                 }
-                .buttonStyle(.glassProminent)
-                .tint(Trek.approval)
-                .controlSize(.large)
 
                 Menu {
-                    Button("Allow for this session", systemImage: "checkmark.seal") { confirmSession = true }
+                    Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 22, height: 22)
                 }
                 .buttonStyle(.glass)
                 .controlSize(.large)
+                .fixedSize()
+                .disabled(confirming)
+                .accessibilityLabel("More options")
             }
         }
-        .confirmationDialog("Allow similar requests for the rest of this session?", isPresented: $confirmSession, titleVisibility: .visible) {
-            Button("Allow for this session") { answer(.approval(.allowForSession)) }
-        } message: {
-            Text("The agent won't ask again for this kind of action until the session ends.")
+    }
+
+    /// The command or file in full: wrapped, monospaced, selectable. A long one starts folded to
+    /// about seven lines with "Show all", then scrolls inside the card.
+    @ViewBuilder
+    private var detail: some View {
+        let text = Text(request.detail)
+            .font(.system(.footnote, design: .monospaced))
+            .foregroundStyle(Trek.foreground)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .padding(10)
+        VStack(alignment: .leading, spacing: 6) {
+            Group {
+                if !isLong {
+                    text
+                } else {
+                    ScrollView {
+                        text.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { detailHeight = $0 }
+                    }
+                    .scrollDisabled(!expanded)
+                    .scrollIndicators(expanded ? .automatic : .hidden)
+                    .frame(height: expanded ? min(detailHeight, 300) : 124)
+                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: expanded ? 1 : 0.7),
+                                                 .init(color: .black.opacity(expanded ? 1 : 0.15), location: 1)],
+                                         startPoint: .top, endPoint: .bottom))
+                }
+            }
+            .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            if isLong {
+                Button(expanded ? "Show less" : "Show all \(estimatedLines) lines") {
+                    withAnimation(.snappy) { expanded.toggle() }
+                }
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Trek.approval)
+            }
+        }
+    }
+
+    /// "Allow for session" stops the agent asking for this kind of action, so it needs the
+    /// phone's owner: Face ID, Touch ID or the passcode before anything is sent.
+    private func allowForSession() {
+        confirming = true
+        Task {
+            let result = await DeviceOwner.confirm("Let \(agentName) \(Self.phrase(request.title)) without asking again this session.")
+            confirming = false
+            switch result {
+            case .success: answer(.approval(.allowForSession))
+            case .failure(let e): if let message = e.message { model.show(message, error: true) }
+            }
         }
     }
 }

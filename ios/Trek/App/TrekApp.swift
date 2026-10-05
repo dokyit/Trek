@@ -8,9 +8,25 @@ struct TrekApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
-                .task { model.boot(demo: Launch.demo) }
+                .task {
+                    model.boot(demo: Launch.demo)
+                    // Screenshots: show the confirmation for a link, as if it had been opened.
+                    if let s = Launch.link, let link = PairingLink(s) { model.offer(link) }
+                    #if DEBUG
+                    // Scripted live screenshots only (ios/scripts/live-screenshots.sh): pair
+                    // without the sheet. Debug builds, launch arguments: never from a link.
+                    if let s = Launch.pairNow, let link = PairingLink(s) {
+                        model.pair(address: link.address, code: link.code, transport: link.transport)
+                    }
+                    #endif
+                }
                 .onOpenURL { url in
-                    if let link = PairingLink(url.absoluteString) { model.pair(address: link.address, code: link.code) }
+                    // Never pairs by itself: the link waits in a confirmation sheet.
+                    if let link = PairingLink(url.absoluteString) {
+                        model.offer(link)
+                    } else if url.scheme == "trek" {
+                        model.show("That pairing link is incomplete or damaged. Scan the code on your Mac again.", error: true)
+                    }
                 }
         }
     }
@@ -24,10 +40,12 @@ enum Launch {
     static var sheet: String? { UserDefaults.standard.string(forKey: "TrekSheet") }
     static var appearance: String? { UserDefaults.standard.string(forKey: "TrekAppearance") }
     static var expandAll: Bool { UserDefaults.standard.bool(forKey: "TrekExpand") }
+    static var link: String? { UserDefaults.standard.string(forKey: "TrekLink") }
+    static var pairNow: String? { UserDefaults.standard.string(forKey: "TrekPair") }
 }
 
 enum MainTab: Hashable {
-    case sessions, settings, search
+    case threads, settings, search
 }
 
 struct RootView: View {
@@ -35,6 +53,7 @@ struct RootView: View {
     @AppStorage("appearance") private var appearance = "system"
 
     var body: some View {
+        @Bindable var model = model
         Group {
             if model.mode == .unpaired {
                 PairingView()
@@ -53,6 +72,9 @@ struct RootView: View {
             }
         }
         .tint(Trek.foreground)
+        .sheet(item: $model.pendingLink) { link in
+            PairingConfirmSheet(link: link)
+        }
         .preferredColorScheme(scheme)
     }
 
@@ -67,14 +89,22 @@ struct RootView: View {
 
 struct MainView: View {
     @Environment(AppModel.self) private var model
-    @State private var tab: MainTab = .sessions
+    @State private var tab: MainTab = .threads
     @State private var path: [String] = []
     @State private var showNew = false
 
+    /// No "New thread" while the Mac can't be trusted or has refused this iPhone.
+    private var canStartThreads: Bool {
+        switch model.connection {
+        case .identityChanged, .unauthorized: false
+        default: true
+        }
+    }
+
     var body: some View {
         TabView(selection: $tab) {
-            Tab("Sessions", systemImage: "bubble.left.and.text.bubble.right", value: MainTab.sessions) {
-                SessionsView(path: $path, showNew: $showNew)
+            Tab("Threads", systemImage: "bubble.left.and.text.bubble.right", value: MainTab.threads) {
+                ThreadsView(path: $path, showNew: $showNew)
             }
             .badge(model.needsYouCount)
             Tab("Settings", systemImage: "gearshape", value: MainTab.settings) {
@@ -85,12 +115,12 @@ struct MainView: View {
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
-        .modifier(NewSessionAccessoryModifier(enabled: tab == .sessions && path.isEmpty) {
-            NewSessionAccessory(working: model.workingCount, needsYou: model.needsYouCount) { showNew = true }
+        .modifier(NewThreadAccessoryModifier(enabled: tab == .threads && path.isEmpty && canStartThreads) {
+            NewThreadAccessory(working: model.workingCount, needsYou: model.needsYouCount) { showNew = true }
         })
         .sheet(isPresented: $showNew) {
             NewThreadSheet { tid in
-                tab = .sessions
+                tab = .threads
                 path = [tid]
             }
         }
@@ -106,8 +136,8 @@ struct MainView: View {
     }
 }
 
-/// Shows the accessory on the Sessions list only (iOS 26.1+); on 26.0 it stays on everywhere.
-struct NewSessionAccessoryModifier<Accessory: View>: ViewModifier {
+/// Shows the accessory on the Threads list only (iOS 26.1+); on 26.0 it stays on everywhere.
+struct NewThreadAccessoryModifier<Accessory: View>: ViewModifier {
     var enabled: Bool
     @ViewBuilder var accessory: () -> Accessory
 
@@ -120,8 +150,8 @@ struct NewSessionAccessoryModifier<Accessory: View>: ViewModifier {
     }
 }
 
-/// The glass pill above the tab bar: start a new session, and how many agents are at work.
-struct NewSessionAccessory: View {
+/// The glass pill above the tab bar: start a new thread, and how many agents are at work.
+struct NewThreadAccessory: View {
     var working: Int
     var needsYou: Int
     var action: () -> Void
@@ -133,7 +163,7 @@ struct NewSessionAccessory: View {
                 Image(systemName: "plus")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Trek.foreground)
-                Text("New session")
+                Text("New thread")
                     .font(.body.weight(.medium))
                     .foregroundStyle(Trek.foreground)
                 Spacer(minLength: 8)
@@ -156,6 +186,6 @@ struct NewSessionAccessory: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("New session. \(working) working, \(needsYou) need you.")
+        .accessibilityLabel("New thread. \(working) working, \(needsYou) need you.")
     }
 }

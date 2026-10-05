@@ -27,7 +27,7 @@ questions; glance across all agents; steer; then review diffs. Phase 1 follows t
 ┌──────────────────┐   WebSocket (JSON)    ┌──────────────────────────────────────────────┐
 │ TrekClient       │ ◄──────────────────► │ trek-remote::RemoteServer (tokio)            │
 │  URLSession WS   │   LAN / Tailscale     │   pairing + per-device tokens                │
-│ Store (Observ.)  │   phase 1b: TLS       │   fan-out of HostEvents to subscribed phones │
+│ Store (Observ.)  │   wss://, pinned cert │   fan-out of HostEvents to subscribed phones │
 │ Views            │   phase 2: E2E relay  │        │ RemoteHost trait (or ChannelHost)    │
 └──────────────────┘                       │        ▼                                     │
                                            │ trek-app Workspace / Store / sessions        │
@@ -42,11 +42,13 @@ questions; glance across all agents; steer; then review diffs. Phase 1 follows t
 - The phone reaches the Mac on the same Wi-Fi, or anywhere over Tailscale (the tailnet IP or MagicDNS
   name goes in the QR code when Tailscale is up). No port forwarding, no Trek servers.
 - Transport security, staged:
-  - **1a (now):** `ws://` with a per-device bearer token. Acceptable on a trusted LAN and on a
-    tailnet (WireGuard already encrypts it). The app shows "Unencrypted on this network" when the
-    host isn't a `100.x`/`.ts.net` address.
-  - **1b:** `wss://` with a self-signed certificate generated per Mac; its SHA-256 fingerprint is in
-    the QR code and the phone pins it (no CA involved). Same protocol, same tokens.
+  - **1a (done):** `ws://` with a per-device bearer token. Still served when the Mac runs without
+    TLS (`TREK_REMOTE_PLAIN=1` on the demo host, older builds); the phone only uses it after an
+    explicit "Unencrypted connection" warning (see below).
+  - **1b (now, default):** `wss://` with a self-signed certificate generated once per Mac
+    (`trek-remote/src/tls.rs`; kept as `identity.der`/`identity.key` beside the devices file, the
+    key mode 0600). Its SHA-256 fingerprint is in the QR code and the phone pins it; no CA is
+    involved. Same protocol, same tokens. Details in [TLS and pinning](#tls-and-pinning-phone-side).
   - **2:** Noise (XX, X25519 + ChaCha20-Poly1305) or iroh QUIC end to end, so the same bytes can go
     through a blind relay. The protocol below is the payload either way.
 
@@ -70,18 +72,65 @@ pipe, not the messages. LAN/Tailscale is what power users already run.
 
 1. Settings › Mobile › **Pair iPhone** shows a QR code and the same details as text.
    ```
-   trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c…
+   trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c…&fp=b1380087…
    ```
    `code` is 8 Crockford base32 characters (40 bits) shown as `XXXX-XXXX`: one use, valid 10
-   minutes, burned after 5 wrong attempts (from anyone). Phase 1b adds `fp=<sha256 of the cert>`.
-2. The phone scans it (or the user types host:port and the code), connects, and sends `pair` with
-   the code, its device id (a UUID kept in the Keychain) and its name ("Tobias's iPhone").
+   minutes, burned after 5 wrong attempts (from anyone). `fp` is the SHA-256 of the Mac's
+   certificate (DER), 64 lowercase hex characters; the Mac also shows its short form beside the
+   code: the first 8 hex characters, uppercased, as `ABCD-1234`. A link without `fp` comes from a
+   Mac serving plain `ws://`.
+2. The phone scans it (or opens it as a deep link, or the user types host:port, the code and the
+   short fingerprint). A link never pairs by itself: the phone first shows **"Pair with
+   <name>?"** with the address and the short fingerprint to compare against the Mac's screen.
+   On confirmation it connects over pinned TLS and sends `pair` with the code, its device id (a
+   UUID kept in the Keychain) and its name ("Tobias's iPhone").
 3. The Mac answers `paired` with a fresh **device token** (32 random bytes, base64url) and shows
    "Tobias's iPhone paired" with an Undo. The Mac stores only `sha256(token)`, the device's id,
    name, pairing time and last-seen time (`devices.json` in Trek's support folder).
-4. Every later connection starts with `hello {device_id, token}`. Tokens are compared in constant
-   time. Settings › Mobile lists devices with last seen and a **Revoke** button; revoking drops the
-   device's live connections at once.
+4. Every later connection starts with `hello {device_id, token}`, pinned to the same
+   certificate. Tokens are compared in constant time. Settings › Mobile lists devices with last
+   seen and a **Revoke** button; revoking drops the device's live connections at once.
+
+### TLS and pinning (phone side)
+
+What `ios/Trek/Net/TrekClient.swift` does, as built:
+
+- **Default is TLS.** The phone connects to `wss://<host:port>/` with a `URLSession` whose delegate
+  answers the server-trust challenge itself: first certificate of `SecTrustCopyCertificateChain`
+  → `SecCertificateCopyData` → CryptoKit SHA-256 → compare with the pin. Match: `.useCredential`
+  with `URLCredential(trust:)`. Anything else: `.cancelAuthenticationChallenge`. There is no CA or
+  host-name check; the fingerprint is the whole trust decision. `pair` and `hello` are only sent
+  once the socket is open, i.e. after the pin was checked, so a wrong server never sees the code or
+  the token.
+- **What is pinned.** From a QR code or link, the full `fp`. From typed pairing, the 8 hex
+  characters the user entered (`ABCD-1234`, case and dash ignored) match any certificate whose
+  fingerprint starts with them; the full fingerprint seen during that handshake is what gets kept.
+  **Limitation:** an 8-hex-character prefix is only 32 bits, and the fingerprint isn't secret
+  (anyone on the network can fetch the certificate), so an attacker in the path can grind a
+  certificate with the same prefix in minutes of GPU time. Typed pairing is therefore weaker than
+  scanning; prefer the QR code, and a longer short form (or a post-pairing check of the full
+  fingerprint on both screens) is an open question below.
+- **Storage.** The pin is stored with the paired Mac (address, device token, host name and id) as
+  one Keychain item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), and every later `hello`
+  connection is pinned to it.
+- **A changed certificate is never trusted silently.** If the Mac answers with another
+  certificate, the phone stops (no retries, no fallback to plain) and shows **"This Mac's identity
+  changed"** with the paired and the presented short fingerprints and a **Pair again** button.
+  Pairing against a wrong fingerprint fails with "That Mac's fingerprint is X, not Y. Nothing was
+  sent to it."
+- **Plain `ws://` only by explicit choice.** A link without `fp`, or typed pairing with the
+  fingerprint left empty, shows an **"Unencrypted connection"** warning first; only "Pair without
+  encryption" / "Connect without encryption" pairs over `ws://`, and the choice is stored with the
+  Mac. A TLS connection that fails its handshake (e.g. the Mac only speaks plain) is reported and
+  stopped; the phone never downgrades by itself. Records paired before TLS existed have no pin and
+  keep using `ws://`; Settings shows them as **Unencrypted** in amber, connected TLS Macs as
+  **Encrypted · pinned** with a lock and the short fingerprint.
+- **App Transport Security.** `NSAllowsArbitraryLoads` is gone. `NSAllowsLocalNetworking` covers
+  LAN and tailnet IP addresses, `.local` and bare host names. One exception domain, `ts.net`
+  (Tailscale MagicDNS) with `NSExceptionAllowsInsecureHTTPLoads`, because ATS rejects a
+  self-signed certificate on a fully qualified name even after the delegate accepted it (verified
+  with a `nip.io` name in the simulator); the pin still decides. Any other DNS name for the Mac
+  won't connect; use its IP address.
 
 ## Security model
 
@@ -99,8 +148,17 @@ header let a sandboxed agent upgrade itself):
   per device and revocable.
 - **Capabilities, not parity.** A phone can't raise a thread's hand-holding (no Full access from the
   phone), can't change settings, can't read arbitrary files, can't run shell commands. "Allow for
-  session" is offered but the app asks for Face ID first (phase 2 enforces it on the Mac side with a
-  signed step-up).
+  session" sits behind the approval card's ••• menu and the app requires the device owner first
+  (LocalAuthentication `.deviceOwnerAuthentication`: Face ID / Touch ID, falling back to the
+  passcode; no passcode set means it can't be sent). That is enforced on the phone only; phase 2
+  enforces it on the Mac side with a signed step-up.
+- **Approvals are read before they're allowed.** The card shows the whole command, wrapped and
+  monospaced (long ones fold at about seven lines with "Show all", then scroll). Commands that look
+  destructive (`rm -rf`, `git push --force`, `git reset --hard`, `sudo`, `curl … | sh`, `dd of=/dev/…`,
+  `DROP TABLE`… see `ios/Trek/Model/CommandRisk.swift`) get a red "Looks destructive: …" line and
+  Allow loses its prominent style, so Allow and Deny carry equal weight. A heuristic for the eye,
+  not a sandbox.
+- **Links don't act.** A `trek://pair` link (deep link or scanned) only opens a confirmation sheet.
 - **Never auto-answer.** The server has no timeouts on approvals; the desktop keeps its "requests
   wait indefinitely" rule. The phone and the Mac show the same request; whichever answers first
   wins and the other's card resolves (`item` update with `state != pending`).
@@ -294,19 +352,23 @@ integration checklist.
 
 SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party dependencies.
 
-- **Sessions** (home): large title, sections Pinned · Needs you · Working · Recent. Row: agent logo,
-  title, status pill (Trek status colours: working ember, approval amber, question indigo, plan
-  violet, done-unseen emerald, failed red) or relative time; second line: project monogram in its
-  hue, project name, branch, diff stat. Swipe to mark seen. Pull to refresh. Floating glass
-  "New session" pill with "N working" count; glass tab bar: Sessions · Settings · Search.
+- **Threads** (home; the Mac app's word, used throughout the phone UI): large title, sections
+  Pinned · Needs you · Working · Recent. Row: agent logo, title, status pill (Trek status colours:
+  working ember, approval amber, question indigo, plan violet, done-unseen emerald, failed red) or
+  relative time; second line: project monogram in its hue, project name, branch, diff stat. Swipe
+  to mark seen. Pull to refresh. Glass "New thread" pill (the tab view's bottom accessory) with
+  "N working" count above the glass tab bar: Threads · Settings · Search. The list uses the hard
+  scroll edge effect at the bottom, so rows pass cleanly under both bars instead of showing through.
 - **Thread**: transcript with Markdown assistant text, collapsed tool groups ("Thought 2 times · ran
   4 commands · edited 1 file"), expandable rows with file chips coloured by file type, approval /
   question / plan cards pinned at the bottom while pending, a "Working… 1m 12s" line. Floating glass
   composer: text, Steer/Queue toggle while working, send, stop.
-- **New session** sheet: "What are we building?", project chip, agent/model chip, worktree chip.
-- **Pairing**: scan QR (camera) or type host:port + code. **Demo mode** runs the whole app on
-  realistic sample data with no Mac.
-- **Settings**: paired Mac, connection state, follow-up default, demo mode, unpair.
+- **New thread** sheet: "What are we building?", project chip, agent/model chip, worktree chip.
+- **Pairing**: scan QR (camera) or type host:port + code + short fingerprint; links and scans go
+  through the "Pair with <Mac>?" confirmation. **Demo mode** runs the whole app on realistic
+  sample data with no Mac.
+- **Settings**: paired Mac, connection state, "Encrypted · pinned" / "Unencrypted", fingerprint,
+  follow-up default, demo mode, unpair.
 
 ### Implementation notes (v1 as built)
 
@@ -330,8 +392,8 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 | Phase | Mac | Phone | Exit |
 |---|---|---|---|
 | **1a. LAN remote** (this branch) | `trek-remote` crate, protocol v1, pairing, tests | App with demo mode, live client, all screens | Fake host ↔ simulator round trip |
-| **1b. Wire it up** | Implement `RemoteHost` in trek-app over Workspace/Store; Settings › Mobile (toggle, QR, devices); stable item seqs; TLS + pinning | QR scanner, reconnect/backoff, offline banner with queued sends | Approve a real Claude Code request from the phone |
-| **2. Away from the network** | iroh/Noise transport; Trek push + mailbox service; presence-aware alerts | APNs + Notification Service Extension with Approve/Deny/Reply; Live Activity; diff view; Face ID step-up | Approval round trip on cellular in seconds; nothing readable on Trek servers |
+| **1b. Wire it up** | Implement `RemoteHost` in trek-app over Workspace/Store; Settings › Mobile (toggle, QR, devices); stable item seqs; TLS (done in `trek-remote`) | QR scanner, reconnect/backoff, offline banner with queued sends; certificate pinning (done) | Approve a real Claude Code request from the phone |
+| **2. Away from the network** | iroh/Noise transport; Trek push + mailbox service; presence-aware alerts; Mac-side step-up for "Allow for session" | APNs + Notification Service Extension with Approve/Deny/Reply; Live Activity; diff view | Approval round trip on cellular in seconds; nothing readable on Trek servers |
 | **3. Always on** | `trek-hostd` LaunchAgent; multiple Macs | Multi-host inbox, widgets, Watch | Sessions survive quitting Trek |
 
 ## Out of scope (for now)
@@ -343,6 +405,9 @@ instead and queue).
 
 ## Open questions
 
+- Typed pairing's 8-hex fingerprint prefix (32 bits) can be ground by an active attacker who
+  fetched the Mac's certificate. Options: show 16+ hex characters beside the code, or show the full
+  fingerprint on both screens after pairing for comparison.
 - Whether vendor terms tolerate a third-party remote steering their CLIs (Happy, Omnara and Moshi do
   it openly; precedent, not permission).
 - Seq numbers: the store's `seq` is positional and rewinds truncate. The host should keep a
