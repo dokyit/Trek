@@ -237,16 +237,9 @@ impl Basecamp {
 
     fn header(&self, review_unread: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let now = chrono::Local::now();
-        let hello = basecamp::greeting(chrono::Timelike::hour(&now));
         let range = self.range;
         // All time says since when, once the recap knows.
-        let since = self.recap.as_deref().filter(|r| r.window.range == Range::All && range == Range::All).and_then(|r| r.first).map(local);
-        let greeting = match since {
-            Some(d) if d.year() == now.year() => format!("{hello} — on the trail since {}", d.format("%-d %B")),
-            Some(d) => format!("{hello} — on the trail since {}", d.format("%-d %B %Y")),
-            None => format!("{hello}, {}", now.format("%A %-d %B")),
-        };
+        let greeting = greeting_line(range, self.recap.as_deref());
         let this = cx.entity().downgrade();
         h_flex()
             .w_full()
@@ -317,11 +310,7 @@ impl Basecamp {
     /// The recap: what the trek came to in sentences, the profile, the tiles.
     fn trek(&self, recap: &Recap, p: f32, tiles_per_row: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let title = match recap.window.range {
-            Range::Today => "Today's trek",
-            Range::Week => "This week's trek",
-            Range::All => "Your trek so far",
-        };
+        let title = trek_title(recap.window.range);
         let updated = if self.computing { "Updating…".to_string() } else { format!("Updated {}", crate::time::clock(recap.now)) };
         v_flex()
             .child(
@@ -390,79 +379,40 @@ impl Basecamp {
     fn tiles(&self, recap: &Recap, p: f32, per_row: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let mut tiles: Vec<AnyElement> = vec![];
         let figure = |text: String| div().text_size(px(17.)).font_medium().min_w_0().truncate().child(tween(&text, p));
-        if let Some(best) = recap.best_model() {
-            let reported = if recap.tokens_complete() { "" } else { "reported " };
-            let note = match recap.token_share(best) {
-                Some(100) => format!("All the {reported}tokens · {}", basecamp::count(best.turns, "turn", "turns")),
-                Some(share) => format!("{share}% of {reported}tokens · {}", basecamp::count(best.turns, "turn", "turns")),
-                None if best.turns == recap.turns => format!("Every turn ({})", recap.turns),
-                None => format!("{} of {} turns", best.turns, recap.turns),
+        let mut tiles: Vec<AnyElement> = vec![];
+        for t in tile_data(recap, ws) {
+            let shown = match t.kind {
+                TileKind::BestModel => {
+                    let agent = t.agent.clone().unwrap_or(AgentId::ClaudeCode);
+                    h_flex().gap(px(8.)).min_w_0().child(ui::agent_logo(&agent, px(16.), cx)).child(figure(t.figure)).into_any_element()
+                }
+                TileKind::WorkedMostOn => {
+                    let look = t.project.as_ref().and_then(|(id, _)| ws.project(id)).map(|p| ws.project_look(&p.path)).unwrap_or_default();
+                    let name = t.project.as_ref().map(|(_, n)| n.clone()).unwrap_or_default();
+                    h_flex().gap(px(8.)).min_w_0().child(ui::project_badge(&name, &look, cx)).child(figure(t.figure)).into_any_element()
+                }
+                TileKind::Tokens => {
+                    let spark = Sparkline::of(recap, p, cx);
+                    h_flex()
+                        .gap(px(12.))
+                        .child(figure(t.figure))
+                        .child(div().flex_1().min_w(px(24.)).h(px(18.)).child(canvas(|_, _, _| {}, move |b, _, window, _| spark.paint(b, window)).size_full()))
+                        .into_any_element()
+                }
+                TileKind::AgentTime => figure(t.figure).into_any_element(),
+                TileKind::PlanLeft => {
+                    let left = t.left.unwrap_or_default();
+                    let agent = t.agent.clone().unwrap_or(AgentId::ClaudeCode);
+                    let color = if left <= 10. { palette::red(cx) } else if left <= 30. { palette::amber(cx) } else { theme.foreground.opacity(0.85) };
+                    v_flex()
+                        .gap(px(8.))
+                        .child(h_flex().gap(px(8.)).child(ui::agent_logo(&agent, px(16.), cx)).child(figure(t.figure)))
+                        .child(div().h(px(4.)).w_full().rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(color).w(relative(left / 100. * p))))
+                        .into_any_element()
+                }
             };
-            tiles.push(tile(
-                "Your best model",
-                h_flex().gap(px(8.)).min_w_0().child(ui::agent_logo(&best.agent, px(16.), cx)).child(figure(basecamp::model_label(&best.agent, best.model.as_deref()))),
-                note,
-                cx,
-            ));
-        }
-        if let Some(top) = recap.projects.first() {
-            let look = ws.project(&top.id).map(|p| ws.project_look(&p.path)).unwrap_or_default();
-            let mut note = basecamp::count(top.prompts, "prompt", "prompts");
-            if top.tokens > 0 {
-                note.push_str(&format!(" · {} tokens", fmt_tokens(top.tokens)));
-            }
-            tiles.push(tile(
-                "You worked most on",
-                h_flex().gap(px(8.)).min_w_0().child(ui::project_badge(&top.name, &look, cx)).child(figure(top.name.clone())),
-                note,
-                cx,
-            ));
-        }
-        let total = recap.tokens.total();
-        if total > 0 {
-            let note = tokens_note(recap, during(recap.window.range));
-            let spark = Sparkline::of(recap, p, cx);
-            tiles.push(tile(
-                "You used",
-                h_flex()
-                    .gap(px(12.))
-                    .child(figure(format!("{} tokens", fmt_tokens(total))))
-                    .child(div().flex_1().min_w(px(24.)).h(px(18.)).child(canvas(|_, _, _| {}, move |b, _, window, _| spark.paint(b, window)).size_full())),
-                note,
-                cx,
-            ));
-        }
-        if recap.agent_secs > 0 || recap.failed > 0 {
-            // Said of the range, so a failure from before it still waiting for review (on the
-            // left) doesn't contradict it.
-            let when = during(recap.window.range);
-            let note = match recap.failed {
-                0 => format!("Nothing failed {when}"),
-                n => format!("{} failed {when}", basecamp::count(n, "turn", "turns")),
-            };
-            tiles.push(tile("Your agents worked for", figure(basecamp::duration(recap.agent_secs)), note, cx));
-        }
-        // Plan limits, for each agent that reports them: the one closest to running out.
-        let mut agents: Vec<(&String, &trek_agents::AgentStatus)> = ws.agent_status.iter().filter(|(_, s)| !s.limits.is_empty()).collect();
-        agents.sort_by_key(|(k, _)| k.as_str());
-        for (key, status) in agents {
-            let Some(limit) = status.limits.iter().max_by(|a, b| a.percent.total_cmp(&b.percent)) else { continue };
-            let agent = AgentId::from_key(key);
-            let left = (100. - limit.percent).clamp(0., 100.);
-            let label = format!("Left on {}", status.plan.clone().unwrap_or_else(|| agent.display_name()));
-            let resets = limit.resets_at.map(crate::time::until).map(|u| format!(" · resets {u}")).unwrap_or_default();
-            let color = if left <= 10. { palette::red(cx) } else if left <= 30. { palette::amber(cx) } else { theme.foreground.opacity(0.85) };
-            tiles.push(tile(
-                label,
-                v_flex()
-                    .gap(px(8.))
-                    .child(h_flex().gap(px(8.)).child(ui::agent_logo(&agent, px(16.), cx)).child(figure(format!("{left:.0}%"))))
-                    .child(div().h(px(4.)).w_full().rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(color).w(relative(left / 100. * p)))),
-                format!("{}{resets}", limit.label),
-                cx,
-            ));
+            tiles.push(tile(t.label, shown, t.note, cx));
         }
         let line = theme.foreground.opacity(0.07);
         let rows: Vec<AnyElement> = tiles
@@ -489,10 +439,7 @@ impl Basecamp {
     /// Nothing on the trail in this range yet.
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let invitation = match self.range {
-            Range::All => "Nothing on the trail yet — start a thread.".to_string(),
-            range => format!("Nothing on the trail yet {} — start a thread.", during(range)),
-        };
+        let invitation = invitation(self.range);
         let data = Profile::flat(self.recap.as_deref(), cx);
         v_flex()
             .id("basecamp-empty")
@@ -568,6 +515,117 @@ impl Render for Basecamp {
                     .child(self.header(unread, cx))
                     .child(columns),
             )
+    }
+}
+
+/// What a stat tile shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TileKind {
+    BestModel,
+    WorkedMostOn,
+    Tokens,
+    /// Agent time, with failed turns in its note.
+    AgentTime,
+    PlanLeft,
+}
+
+/// A tile's words, and what's drawn beside its figure: Basecamp's and the phone's.
+#[derive(Debug, Clone)]
+pub(crate) struct TileData {
+    pub kind: TileKind,
+    pub label: String,
+    pub figure: String,
+    pub note: String,
+    /// The logo beside the figure.
+    pub agent: Option<AgentId>,
+    /// The project badge beside it (id, name).
+    pub project: Option<(String, String)>,
+    /// How much of a plan is left, 0–100.
+    pub left: Option<f32>,
+    pub resets_at: Option<i64>,
+}
+
+/// The tiles under the profile, in order: the best model, the project worked on most, the
+/// tokens, the agents' time, then what's left of each plan that reports limits.
+pub(crate) fn tile_data(recap: &Recap, ws: &Workspace) -> Vec<TileData> {
+    let mut tiles = vec![];
+    let tile = |kind, label: &str, figure: String, note: String| TileData { kind, label: label.to_string(), figure, note, agent: None, project: None, left: None, resets_at: None };
+    if let Some(best) = recap.best_model() {
+        let reported = if recap.tokens_complete() { "" } else { "reported " };
+        let note = match recap.token_share(best) {
+            Some(100) => format!("All the {reported}tokens · {}", basecamp::count(best.turns, "turn", "turns")),
+            Some(share) => format!("{share}% of {reported}tokens · {}", basecamp::count(best.turns, "turn", "turns")),
+            None if best.turns == recap.turns => format!("Every turn ({})", recap.turns),
+            None => format!("{} of {} turns", best.turns, recap.turns),
+        };
+        tiles.push(TileData { agent: Some(best.agent.clone()), ..tile(TileKind::BestModel, "Your best model", basecamp::model_label(&best.agent, best.model.as_deref()), note) });
+    }
+    if let Some(top) = recap.projects.first() {
+        let mut note = basecamp::count(top.prompts, "prompt", "prompts");
+        if top.tokens > 0 {
+            note.push_str(&format!(" · {} tokens", fmt_tokens(top.tokens)));
+        }
+        tiles.push(TileData { project: Some((top.id.clone(), top.name.clone())), ..tile(TileKind::WorkedMostOn, "You worked most on", top.name.clone(), note) });
+    }
+    let total = recap.tokens.total();
+    if total > 0 {
+        tiles.push(tile(TileKind::Tokens, "You used", format!("{} tokens", fmt_tokens(total)), tokens_note(recap, during(recap.window.range))));
+    }
+    if recap.agent_secs > 0 || recap.failed > 0 {
+        // Said of the range, so a failure from before it still waiting for review (on the
+        // left) doesn't contradict it.
+        let when = during(recap.window.range);
+        let note = match recap.failed {
+            0 => format!("Nothing failed {when}"),
+            n => format!("{} failed {when}", basecamp::count(n, "turn", "turns")),
+        };
+        tiles.push(tile(TileKind::AgentTime, "Your agents worked for", basecamp::duration(recap.agent_secs), note));
+    }
+    // Plan limits, for each agent that reports them: the one closest to running out.
+    let mut agents: Vec<(&String, &trek_agents::AgentStatus)> = ws.agent_status.iter().filter(|(_, s)| !s.limits.is_empty()).collect();
+    agents.sort_by_key(|(k, _)| k.as_str());
+    for (key, status) in agents {
+        let Some(limit) = status.limits.iter().max_by(|a, b| a.percent.total_cmp(&b.percent)) else { continue };
+        let agent = AgentId::from_key(key);
+        let left = (100. - limit.percent).clamp(0., 100.);
+        let label = format!("Left on {}", status.plan.clone().unwrap_or_else(|| agent.display_name()));
+        let resets = limit.resets_at.map(crate::time::until).map(|u| format!(" · resets {u}")).unwrap_or_default();
+        tiles.push(TileData {
+            agent: Some(agent),
+            left: Some(left),
+            resets_at: limit.resets_at,
+            ..tile(TileKind::PlanLeft, &label, format!("{left:.0}%"), format!("{}{resets}", limit.label))
+        });
+    }
+    tiles
+}
+
+/// The line beside "Basecamp": a greeting with the date, or for all time, since when.
+pub(crate) fn greeting_line(range: Range, recap: Option<&Recap>) -> String {
+    let now = chrono::Local::now();
+    let hello = basecamp::greeting(chrono::Timelike::hour(&now));
+    let since = recap.filter(|r| r.window.range == Range::All && range == Range::All).and_then(|r| r.first).map(local);
+    match since {
+        Some(d) if d.year() == now.year() => format!("{hello} — on the trail since {}", d.format("%-d %B")),
+        Some(d) => format!("{hello} — on the trail since {}", d.format("%-d %B %Y")),
+        None => format!("{hello}, {}", now.format("%A %-d %B")),
+    }
+}
+
+/// "Today's trek", "This week's trek", "Your trek so far".
+pub(crate) fn trek_title(range: Range) -> &'static str {
+    match range {
+        Range::Today => "Today's trek",
+        Range::Week => "This week's trek",
+        Range::All => "Your trek so far",
+    }
+}
+
+/// What the empty recap invites to.
+pub(crate) fn invitation(range: Range) -> String {
+    match range {
+        Range::All => "Nothing on the trail yet — start a thread.".to_string(),
+        range => format!("Nothing on the trail yet {} — start a thread.", during(range)),
     }
 }
 
@@ -750,7 +808,7 @@ fn narrative(spans: &[Span], p: f32, workspace: &Entity<Workspace>, cx: &App) ->
 
 
 /// The line over the profile: the hovered stretch's numbers, else where the summit was.
-fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
+pub(crate) fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
     match hovered.and_then(|i| recap.buckets.get(i).map(|b| (i, b))) {
         Some((i, b)) => {
             let mut parts = vec![stretch_label(recap, i)];
@@ -818,7 +876,7 @@ const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
 /// The range as a sentence ends with it: "Nothing failed today", "… so far".
-fn during(range: Range) -> &'static str {
+pub(crate) fn during(range: Range) -> &'static str {
     match range {
         Range::Today => "today",
         Range::Week => "this week",
@@ -844,7 +902,7 @@ fn day(start: i64) -> String {
 
 /// A stretch of the profile, for the line above it: "2–3 PM", "Tue 3–6 PM", "Sep 14", "week of
 /// Sep 8", "Sep 8 – Oct 5".
-fn stretch_label(recap: &Recap, i: usize) -> String {
+pub(crate) fn stretch_label(recap: &Recap, i: usize) -> String {
     let w = &recap.window;
     let start = w.start + i as i64 * w.bucket_ms;
     if w.bucket_ms >= 2 * 7 * DAY {
@@ -866,7 +924,7 @@ fn stretch_label(recap: &Recap, i: usize) -> String {
 }
 
 /// Where the summit was: "at 2 PM", "on Tuesday", "on Sep 14", "the week of Sep 8".
-fn summit_label(recap: &Recap, i: usize) -> String {
+pub(crate) fn summit_label(recap: &Recap, i: usize) -> String {
     let w = &recap.window;
     let start = w.start + i as i64 * w.bucket_ms;
     if w.bucket_ms >= 2 * 7 * DAY {
@@ -884,7 +942,7 @@ fn summit_label(recap: &Recap, i: usize) -> String {
 
 /// The profile's axis labels, as fractions of its width: the hours of a day, the days of a few,
 /// else five dates spread across it ("Sep 14", or "Sep 2025" when it reaches back past this year).
-fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
+pub(crate) fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
     let span = (w.end - w.start).max(1) as f32;
     if w.bucket_ms < 3 * HOUR {
         return [(6, "6 AM"), (12, "Noon"), (18, "6 PM")].iter().map(|(h, l)| ((*h as f32 * HOUR as f32) / span, l.to_string())).collect();

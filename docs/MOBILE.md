@@ -145,8 +145,12 @@ header let a sandboxed agent upgrade itself):
 - **Off by default**; an explicit toggle, with the listening address shown.
 - **Pairing codes** are short-lived, single-use and attempt-limited; tokens are random, stored hashed,
   per device and revocable.
-- **Capabilities, not parity.** A phone can't raise a thread's hand-holding (no Full access from the
-  phone), can't change settings, can't read arbitrary files, can't run shell commands. "Allow for
+- **Capabilities, not a remote shell.** A phone can't reach Full access unless the Mac has unlocked
+  it (`settings.permissions.full_access_unlocked`), whichever way it asks (`set_prefs`, `new_thread`,
+  `/permissions full`, `/access`, the default for new threads). It changes only an allowlist of
+  settings (never the unlock, API keys or the phone server), reads only changed files' diffs (not
+  arbitrary files), runs no shell commands, and git work that would lose something (uncommitted
+  changes, unmerged commits) is refused until the phone says `force`. "Allow for
   session" sits behind the approval card's ••• menu and the app requires the device owner first
   (LocalAuthentication `.deviceOwnerAuthentication`: Face ID / Touch ID, falling back to the
   passcode; no passcode set means it can't be sent). That is enforced on the phone only; phase 2
@@ -227,8 +231,38 @@ token), `pairing_failed` (wrong, used or expired code), `rate_limited`, then the
 - `project.hue`: degrees 0–359 (the desktop's project colour, chosen or derived from the name);
   `monogram`: the two-letter badge.
 - `agent.key`: Trek's `AgentId::key()` (`claude-code`, `codex`, `opencode`, `droid`, `acp:cursor`,
-  `direct:openai`…).
+  `direct:openai`…). `agent.logo` (rows, `agents[]`, everywhere an agent is named): the Mac's logo
+  key, its `assets/logos/{dark,light}/<logo>.png` (`claude-code`, `codex`, `opencode`, `droid`,
+  `cursor`, `gemini`, `openai`, `anthropic`…); absent: a neutral glyph.
 - `activity`: what a working thread is doing now ("Editing src/auth.rs"), else null.
+- `agents[].default_model`: the model the Mac's model menu starts on for that agent (Opus 5.5 for
+  Claude Code, else the first). Switching a thread's agent (`set_prefs {agent}`) moves it to that
+  model, and its effort to the nearest the model takes.
+
+Thread details, each optional and left out when there's nothing to say (older Macs send none):
+
+```json
+{"effort":"xhigh","effort_label":"Extra high","access":"auto","plan":false,
+ "context":{"used":171000,"window":200000,"percent":85},
+ "cost":{"label":"≈ $1.84 at API prices","billing":"plan","plan":"Claude Max","detail":"Included in your Claude Max plan"},
+ "sub_agents":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"model":"Sol","title":"Review the theme tokens","state":"running","since":1791020300000},
+               {"agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"title":"Find hard-coded colours","state":"running","since":1791020355000}],
+ "background":["pnpm dev"],
+ "branch":"trek/dark-settings","worktree":true,"base":"main",
+ "git":{"changed":5,"ahead":1,"behind":2,"default_branch":"main"}}
+```
+
+- `context` and `cost` are the composer's context ring and the cost line under it, as the
+  thread's session last reported them: present once the thread has been opened (on the Mac or by
+  a phone's `subscribe`). `cost.label` is worded exactly as the Mac's: `$1.24` (billed per token),
+  `≈ $1.24 at API prices` (a plan covers it), `12.3K tokens · price unknown`, `202K tokens · free`;
+  `billing` is `plan` · `metered` · `local`, `detail` the Mac's tooltip.
+- `sub_agents`: what the sidebar card's pill and tooltip count: Trek's sub-agents (with their
+  `model`) and the agent's own (no `model`), `state` `running` · `needs_you` · `done` · `failed` ·
+  `stopped`, `since` when it started (ms, to the second). `background`: the rest of what the agent
+  runs in the background, by title.
+- `base`: for a worktree thread, the branch it merges into (`branch` is the worktree's own).
+- `git`: the folder's state as the Mac last read it (it reads it again on `git_status`).
 
 Live changes:
 
@@ -284,7 +318,16 @@ higher seq), `at` (ms or null) and `kind`:
 {"id":"b3","seq":12,"at":null,"kind":"error","text":"Interrupted"}
 {"id":"b4","seq":13,"at":null,"kind":"limit","text":"5-hour limit reached","resets_at":1791030000000}
 {"id":"b5","seq":14,"at":null,"kind":"handoff","from":"Claude Opus 5.5","to":"Codex GPT-6"}
+{"id":"c10","seq":15,"at":1791020400000,"kind":"changes","files":[
+   {"path":"README.md","status":"modified","added":31,"removed":54},
+   {"path":"docs/quick-start.md","status":"renamed","from":"docs/getting-started.md","added":4,"removed":2},
+   {"path":"docs/img/docker.png","status":"deleted","added":0,"removed":0,"binary":true}],"added":35,"removed":56}
 ```
+
+- `changes`: the files a turn changed, right after its `turn_end` (`c<n>` follows `i<n>`), with
+  totals. `status`: `added` · `modified` · `deleted` · `renamed` (with `from`); `binary` files have
+  no line counts. It may arrive a moment after the turn end (worked out from the turn's
+  checkpoints), and may be replaced as the Mac learns more.
 
 - `tool`: `command` · `read` · `edit` · `search` · `web` · `agent` · `other` (from the row title,
   like the desktop's `tool_kind`). `status`: `running` · `done` · `failed` · `denied`. `output` is
@@ -311,11 +354,126 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
 
 - `send.mode`: `steer` (inject into the running turn) · `queue` (deliver after it). On an idle thread
   both just start a turn. The Mac's own follow-up setting applies when omitted.
+- Trek's own commands work in `send` as typed on the Mac (`/permissions edits`, `/usage`, `/context`,
+  `/cost`, `/model`, `/consult sol high: …`, `/restate …`); the Mac's reply arrives as a `notice`
+  item. Full access needs the Mac's unlock however it's asked for (the notice says so). `/new` and
+  `/clear` don't move the Mac's window: the ack asks the phone to open its new-thread sheet,
+  `{"type":"ack","re":"9","open":{"screen":"new_thread","project_id":"p1"}}`. A thread can start
+  (`new_thread`) with `/consult` or `/restate`; the other commands are for a thread under way.
 - `new_thread` acks with `{"type":"ack","re":"10","thread_id":"01J…"}`; the thread then arrives as a
   `thread` message. `model` null = the project's or agent's default. `worktree` is a request; a
   project that isn't a git repo runs locally.
 - `decision`: `allow` · `allow_for_session` · `deny`.
 - `ping` → `{"type":"pong","re":"15"}`. The Mac also sends WebSocket pings every 20 s.
+
+### Everything else the Mac has (phone → Mac, answered with a reply of its own)
+
+Reads (`usage`, `basecamp`, `notes`, `note`, `git_status`, `git_diff`, `git_branches`, `commands`,
+`settings`) may be answered out of order with what the phone sends after them; actions keep their
+order. A Mac too old for one answers `bad_request` ("Unknown message type").
+
+**Usage**, as the Mac's Usage popover shows it (asking refreshes it as opening the popover does: the
+agents at most every 30 s, Devin every 10 min; the Mac waits up to 15 s for them, and `loading`
+says one hadn't answered yet):
+
+```json
+{"type":"usage","id":"1"}
+{"type":"usage","re":"1","providers":[{"agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"plan":"Claude Max",
+  "limits":[{"label":"5-hour limit","percent":42.0,"resets_at":1791030000000,"window":"5h"},{"label":"Weekly · Opus","percent":64.0,"resets_at":1791370000000,"window":"7d"}]}]}
+```
+
+**Basecamp**, worked out off the main thread as the Mac's is, worded as it words it:
+
+```json
+{"type":"basecamp","id":"2","range":"today"}
+{"type":"basecamp","re":"2","range":"today","greeting":"Good evening, Monday 5 October","title":"Today's trek","updated_at":1791020400000,
+ "review":[{"thread_id":"t","title":"Fix the flaky test","status":"needs_you","label":"Approval","agent":{…},"project":{…},"additions":4,"deletions":1,"updated_at":…,"unseen":true}],
+ "narrative":[{"kind":"text","text":"You sent "},{"kind":"strong","text":"18 prompts"},{"kind":"text","text":" across "},…,
+              {"kind":"project","text":"trek-api","project":{…}},{"kind":"model","text":"Claude Opus 5.5","agent":{…}}],
+ "summary":{"prompts":18,"threads":4,"turns":20,"agent_secs":3720,"agent_time":"1h 2m","tokens":182000,"failed":1,
+            "top_project":{"project":{…},"prompts":12,"tokens":90000},"best_model":{"agent":{…},"label":"Claude Opus 5.5","tokens":140000,"turns":9,"share":77}},
+ "profile":{"buckets":[{"value":12.5,"label":"2–3 PM","line":"2–3 PM · 4 prompts · 12m of agent time","prompts":4,"agent_secs":750,"tokens":3000},…],
+            "summit":14,"now":20,"now_at":0.86,"line":"Summit at 2 PM","total":"18 prompts","ticks":[{"at":0.25,"label":"6 AM"},…]},
+ "tiles":[{"kind":"best_model","label":"Your best model","figure":"Claude Opus 5.5","note":"77% of tokens · 9 turns","agent":{…}},
+          {"kind":"tokens","label":"You used","figure":"182K tokens","note":"≈ $1.28 at API prices today","sparkline":[0.0,0.1,…,1.0]},
+          {"kind":"plan_left","label":"Left on Claude Max","figure":"36%","note":"Weekly · Opus · resets in 4d","agent":{…},"percent":36.0,"resets_at":…}]}
+```
+
+`range`: `today` · `week` · `all`. `empty: true` with `invitation` when nothing happened in the
+range. Bucket `value` is agent minutes when turns were timed, else prompts; `line` is what the Mac
+shows over a hovered stretch. Tile kinds: `best_model` · `worked_most_on` · `tokens` (with
+`sparkline`, tokens so far 0–1 a stretch) · `agent_time` (failed turns in its note) · `plan_left`
+(one per agent reporting limits, `percent` left).
+
+**Notes**, the Mac's markdown files (`notes/` in Trek's data folder; deleting moves one to
+`notes/Deleted/`). The Mac's Notes screen reads them again when a phone changes one.
+
+```json
+{"type":"notes","id":"3"}                         → {"type":"notes","re":"3","notes":[{"id":"0192…","title":"Groceries","preview":"milk bread","modified":1791020400000}]}
+{"type":"note","id":"4","note_id":"0192…"}        → {"type":"note","re":"4","note":{"id":"0192…","title":"Groceries","body":"Groceries\n- milk","modified":1791020400000}}
+{"type":"create_note","id":"5","body":"Groceries"} → note
+{"type":"save_note","id":"6","note_id":"0192…","body":"…","modified":1791020400000} → note (conflict: it changed on the Mac since)
+{"type":"delete_note","id":"7","note_id":"0192…"} → ack
+```
+
+**Git** for a thread's folder (its worktree, for one in a worktree) or a project, as the Mac's Git
+panel does it; git runs off the Mac's main thread.
+
+```json
+{"type":"git_status","id":"8","thread_id":"t"}    (or "project_id":"p1")
+{"type":"git_status","re":"8","is_repo":true,"branch":"trek/fix","default_branch":"main","ahead":2,"behind":0,"has_upstream":false,
+ "files":[{"path":"src/a.rs","status":"modified","added":12,"removed":3},{"path":"tests/new.rs","status":"untracked","added":18,"removed":0}],
+ "worktree":{"branch":"trek/fix","base":"main","uncommitted":1,"merge_blocked":"1 file isn't committed yet. Commit or revert it first.","unmerged":2},
+ "can_switch":false,"switch_blocked":"This thread works in a worktree: trek/fix stays checked out there. Merge it into main instead."}
+{"type":"git_diff","id":"9","thread_id":"t","path":"src/a.rs"}   → {"type":"git_diff","re":"9","path":"src/a.rs","diff":"diff --git …","truncated":false}
+{"type":"git_commit","id":"10","thread_id":"t","message":"Fix the race"}   → ack (commits everything, as the panel does)
+{"type":"git_push","id":"11","thread_id":"t"}                               → ack
+{"type":"git_branches","id":"12","project_id":"p1"}  → {"type":"git_branches","re":"12","current":"main","default_branch":"main","branches":["main","dev"]}
+{"type":"git_switch","id":"13","project_id":"p1","branch":"dev"}            → ack
+{"type":"worktree_merge","id":"14","thread_id":"t"}                         → ack, or conflict saying why (the Mac's words)
+{"type":"worktree_remove","id":"15","thread_id":"t","delete_branch":false,"force":false} → ack, or conflict saying what would be lost
+```
+
+- A diff is only served for one of the folder's changed files, cut at 256 KiB (`truncated`).
+- `git_switch` takes a local branch only, and is refused (`conflict`) in a worktree thread or while
+  a thread works in that folder (`can_switch`/`switch_blocked` say so beforehand).
+- `worktree_remove` without `force` is refused when it would lose uncommitted changes, or (with
+  `delete_branch`) commits the base doesn't have: the message is the Mac's confirmation text ("1
+  uncommitted change in the worktree would be lost. trek/fix has 2 commits that main doesn't
+  have."). Sending it again with `force` is the user agreeing; no more uncommitted changes go than
+  were counted then. The thread carries on in the project folder, as on the Mac.
+- `worktree_merge` merges into the base in the project folder (and settles the thread when the
+  Mac's settings say so); blocked merges answer `conflict` with the reason.
+
+**Slash commands**, as the composer's `/` picker lists them for the thread: Trek's own first
+(`trek: true`), then the agent's commands, skills and agents in its folder.
+
+```json
+{"type":"commands","id":"16","thread_id":"t"}
+{"type":"commands","re":"16","thread_id":"t","commands":[{"name":"permissions full","description":"No prompts and no sandbox","kind":"command","trek":true},
+  {"name":"compact","description":"…","kind":"command"},{"name":"frontend-design","description":"…","kind":"skill"}]}
+```
+
+**Settings** the phone may see and change (an allowlist; one value the Mac won't take refuses the
+whole change):
+
+```json
+{"type":"settings","id":"17"}
+{"type":"settings","re":"17","default_agent":"claude-code","default_effort":"high","default_access":"auto-accept-edits","follow_up":"steer",
+ "notifications":"banner_and_sound","push":{"enabled":true,"when":"away","server":"https://ntfy.sh","topic":"trek-…",
+ "topic_url":"https://ntfy.sh/trek-…","subscribe_url":"ntfy://ntfy.sh/trek-…"},"auto_settle_days":3,"theme":"system","full_access":false}
+{"type":"set_settings","id":"18","default_agent":"codex","default_model":"gpt-6","default_effort":"high","default_access":"auto",
+ "follow_up":"queue","notifications":"banner","push":true,"push_when":"always","push_server":"https://ntfy.example.com",
+ "new_push_topic":true,"auto_settle_days":7,"theme":"paper"}       → settings, as they are now
+```
+
+- `default_model: ""` goes back to the agent's default; `default_access: "full-access"` needs the
+  Mac's unlock. `full_access` is read-only. Turning `push` on makes a topic the first time.
+- ntfy: `topic_url` opens the topic in ntfy's web app. `subscribe_url` (`ntfy://<host>/<topic>`,
+  `?secure=false` for an `http://` server) is ntfy's subscribe link, documented for its Android
+  app only; the iOS app (Philipp Heckel's, checked against its source as of 2026-06) registers no
+  URL scheme or universal links, so no link can subscribe it. On an iPhone: copy the topic, then
+  in ntfy tap +, paste it (and pick "Use another server" for one that isn't ntfy.sh).
 
 ### Errors
 
@@ -339,8 +497,16 @@ pub trait RemoteHost: Send + Sync + 'static {
     fn answer(&self, req: AnswerRequest) -> impl Future<Output = HostResult<()>> + Send;
     fn interrupt(&self, thread_id: &str) -> impl Future<Output = HostResult<()>> + Send;
     fn mark_seen(&self, thread_id: &str) -> impl Future<Output = HostResult<()>> + Send;
+    // Defaults answer "This Mac can't …" (bad_request):
+    fn set_prefs, thread_action, usage, basecamp, notes, note, create_note, save_note, delete_note,
+       git_status, git_diff, git_commit, git_push, git_branches, git_switch, worktree_merge,
+       worktree_remove, commands, settings, set_settings
 }
 ```
+
+(`send` returns `Option<Open>`: a screen the phone opens, for `/new`.) A new message type needs
+its name in `server.rs`'s `CLIENT_TYPES` too: anything not listed there is refused as unknown
+before it's parsed (`tests/server.rs` sends every one over the wire).
 
 and pushes changes through `RemoteHandle::push(HostEvent::{Snapshot, Thread, ThreadRemoved, Item,
 TranscriptReset})`. `ChannelHost` turns every trait call into a `HostRequest` with a oneshot reply on
@@ -397,8 +563,8 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 
 ## Out of scope (for now)
 
-Editing files or browsing the tree from the phone; terminals; side-by-side diffs; image/file
-attachments from the phone; changing hand-holding, settings or accounts remotely; cloud execution;
+Editing files or browsing the tree from the phone; terminals; side-by-side diffs; file attachments
+from the phone; unlocking Full access, API keys, accounts and the phone server remotely; cloud execution;
 Android (later: Kotlin on the same protocol); waking a sleeping Mac (show "Mac asleep since 14:02"
 instead and queue).
 
@@ -422,9 +588,23 @@ instead and queue).
   re-sent with state `resolved`.
 - **Changes** go out every 250 ms while a phone is connected: thread rows that changed (and
   removals), and the items of transcripts a phone has open.
-- **Refused:** Trek's own slash commands (`/permissions`, `/new`, `/consult`…), from `send`,
-  `new_thread` and plan feedback alike. A thread started from the phone doesn't move the Mac's
-  screen or open a tab.
+- **Trek's own slash commands** run from the phone as typed on the Mac (`remote/commands.rs`):
+  `/permissions` and its aliases through `set_hand_holding`, which keeps Full access behind the
+  unlock; `/consult` and `/restate` rewritten as the composer does; `/new` and `/clear` answered
+  with `open` for the phone's sheet. A thread started from the phone doesn't move the Mac's screen
+  or open a tab.
+- **Rows** carry the composer's context ring and cost line (once the thread is loaded), the effort
+  label, sub-agents and background work (as the sidebar card counts them), the worktree's base and
+  the folder's git state. Times come from `Instant`s through a fixed anchor, so an unchanged row
+  isn't sent again every tick.
+- **Usage** (`remote/usage.rs`), **Basecamp** (`remote/basecamp.rs`, sharing `basecamp.rs`'s
+  wording: `greeting_line`, `tile_data`, `profile_line`…), **notes** (`remote/notes.rs`, bumping
+  `Workspace::notes_epoch` so the Notes screen reloads), **git** (`remote/git.rs`, the Git panel's
+  `snapshot`/`git` and `trek_core::worktree`'s review, merge and removal, the confirmations'
+  wording from `worktree_ui::losses`), **settings** (`remote/settings.rs`).
+- **Changed files per turn** go out as `changes` items from one function, `turn_changes`, which
+  answers `None` until the Mac works them out (`Workspace::turn_changes`, another branch: marked
+  `TODO(merge)`).
 - `cargo run -p trek-remote --example probe -- '<trek://pair link>' [--thread <id> [--send "…"]
   [--answer allow|deny]]` is a phone in a terminal, for testing a running Trek. It sends only to a
   thread named explicitly: a message reaches a real agent in that thread's folder.

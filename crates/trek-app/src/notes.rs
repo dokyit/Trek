@@ -64,6 +64,8 @@ pub struct NotesView {
     colors_open: bool,
     /// The note's text changed and isn't saved yet.
     dirty: bool,
+    /// The workspace's `notes_epoch` the list was read at.
+    epoch: u64,
     _save: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -82,7 +84,7 @@ impl NotesView {
             async {}
         })
         .detach();
-        let subscriptions = vec![cx.subscribe_in(&editor, window, |this, state, event: &InputEvent, window, cx| match event {
+        let mut subscriptions = vec![cx.subscribe_in(&editor, window, |this, state, event: &InputEvent, window, cx| match event {
             InputEvent::Change => {
                 let body = state.read(cx).value().to_string();
                 this.changed(body, cx);
@@ -93,6 +95,15 @@ impl NotesView {
             }
             _ => {}
         })];
+        // A phone changed the notes: read them again.
+        subscriptions.push(cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
+            let epoch = ws.read(cx).notes_epoch;
+            if epoch != this.epoch {
+                this.epoch = epoch;
+                this.reload(window, cx);
+            }
+        }));
+        let epoch = workspace.read(cx).notes_epoch;
         let mut this = Self {
             workspace,
             notes: notes::list_in(&notes::notes_dir()),
@@ -101,6 +112,7 @@ impl NotesView {
             mode: Mode::Split,
             colors_open: false,
             dirty: false,
+            epoch,
             _save: None,
             _subscriptions: subscriptions,
         };
@@ -133,6 +145,28 @@ impl NotesView {
             s.set_selected_range(body.len()..body.len(), cx);
         });
         self.dirty = false;
+        cx.notify();
+    }
+
+    /// Read the notes again (a phone changed them). What's being typed here wins: a note with
+    /// unsaved changes keeps them, and is saved over the phone's as it would have been.
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dirty {
+            return;
+        }
+        self.notes = notes::list_in(&notes::notes_dir());
+        match self.current.clone().filter(|id| self.notes.iter().any(|n| &n.id == id)).or_else(|| self.notes.first().map(|n| n.id.clone())) {
+            Some(id) => {
+                let body = self.notes.iter().find(|n| n.id == id).map(|n| n.body.clone()).unwrap_or_default();
+                if self.current.as_deref() != Some(id.as_str()) || self.editor.read(cx).value() != body.as_str() {
+                    self.open(&id, window, cx);
+                }
+            }
+            None => {
+                self.current = None;
+                self.editor.update(cx, |s, cx| s.set_value("", window, cx));
+            }
+        }
         cx.notify();
     }
 

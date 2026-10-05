@@ -79,7 +79,6 @@ impl Workspace {
     ///
     /// For the phone bridge: call `load_turn_changes` first, then read this once
     /// `WorkspaceEvent::TurnChanges` names the turn.
-    #[allow(dead_code)] // for the phone bridge
     pub fn turn_changes(&self, thread_id: &str, turn_end_item_index: usize) -> Option<TurnChanges> {
         let end = self.live.get(thread_id)?.items.id_at(turn_end_item_index)?;
         self.changes_cache.slots.get(&(thread_id.to_string(), end.to_string()))?.shown.as_deref().cloned()

@@ -69,6 +69,30 @@ final class AppModel {
     /// How the live connection is carried, for the Settings indicator.
     var transport: Transport?
 
+    // What the Mac has besides threads, as last read (each `load…` asks again).
+
+    /// Plan usage, as the Mac's Usage popover shows it.
+    var usage: Usage?
+    var usageLoading = false
+    /// Basecamp's recap, by range.
+    var basecamp: [BasecampRange: Basecamp] = [:]
+    var basecampLoading: Set<BasecampRange> = []
+    /// Notes, newest first, and the ones opened whole, by id.
+    var notes: [NoteSummary] = []
+    var openNotes: [String: Note] = [:]
+    /// Git status and branches, by thread or project.
+    var gitStatus: [GitTarget: GitStatus] = [:]
+    var gitBranches: [GitTarget: GitBranches] = [:]
+    /// Git work under way (commit, push, switch, merge, remove), by target: views show a spinner.
+    var gitBusy: Set<GitTarget> = []
+    /// Each thread's slash commands, as the Mac's `/` picker lists them.
+    var commands: [String: [CommandInfo]] = [:]
+    /// The Mac's settings the phone may change.
+    var macSettings: MacSettings?
+    /// The Mac asked the phone to open its new-thread sheet (`/new` sent to a thread), in this
+    /// project ("" for none). The view that shows the sheet sets it back to nil.
+    var newThreadPrompt: String?
+
     var followUpMode: SendMode {
         didSet { UserDefaults.standard.set(followUpMode.rawValue, forKey: "followUpMode") }
     }
@@ -211,6 +235,17 @@ final class AppModel {
         host = nil
         transport = nil
         connection = .idle
+        usage = nil
+        basecamp = [:]
+        basecampLoading = []
+        notes = []
+        openNotes = [:]
+        gitStatus = [:]
+        gitBranches = [:]
+        gitBusy = []
+        commands = [:]
+        macSettings = nil
+        newThreadPrompt = nil
     }
 
     // MARK: Incoming
@@ -243,7 +278,10 @@ final class AppModel {
             seqs[tid] = max(seqs[tid] ?? 0, item.seq)
         case .transcriptReset(let tid):
             if subscribed.contains(tid) { request(.subscribe(threadId: tid, afterSeq: nil)) }
-        case .ack(let re, _), .pong(let re):
+        case .ack(let re, _, _), .pong(let re):
+            reply(re, message)
+        case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
+             .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _):
             reply(re, message)
         case .error(let re, let code, let text):
             if let re, replies[re] != nil { reply(re, message) } else if code != .unauthorized { show(text, error: true) }
@@ -302,7 +340,10 @@ final class AppModel {
     }
 
     func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = []) {
-        act(.send(threadId: tid, text: text, mode: mode, images: images))
+        act(.send(threadId: tid, text: text, mode: mode, images: images)) { [weak self] reply in
+            // `/new`: the Mac leaves its own screen be and asks the phone to open its sheet.
+            if case .ack(_, _, let open?) = reply, open.screen == "new_thread" { self?.newThreadPrompt = open.projectId ?? "" }
+        }
     }
 
     /// Change a thread's agent, model, effort, access or plan mode. The row changes here at once;
@@ -358,7 +399,7 @@ final class AppModel {
                    opened: @escaping (String) -> Void) {
         act(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree,
                        effort: effort, access: access, plan: plan, images: images)) { reply in
-            if case .ack(_, let tid?) = reply { opened(tid) }
+            if case .ack(_, let tid?, _) = reply { opened(tid) }
         }
     }
 
@@ -369,6 +410,216 @@ final class AppModel {
             var done = false
             request(.ping) { _ in if !done { done = true; c.resume() } }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { if !done { done = true; c.resume() } }
+        }
+    }
+
+    // MARK: Usage and Basecamp
+
+    /// Ask for plan usage (the Mac asks its agents, at most every 30 seconds).
+    func loadUsage() {
+        usageLoading = true
+        request(.usage) { [weak self] reply in
+            guard let self else { return }
+            self.usageLoading = false
+            switch reply {
+            case .usage(_, let u):
+                self.usage = u
+                // Some agent was still answering: ask again shortly for the rest.
+                if u.loading == true { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.loadUsage() } }
+            case .error(_, _, let text): self.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    func loadBasecamp(_ range: BasecampRange) {
+        basecampLoading.insert(range)
+        request(.basecamp(range)) { [weak self] reply in
+            guard let self else { return }
+            self.basecampLoading.remove(range)
+            switch reply {
+            case .basecamp(_, let b): withAnimation(.snappy) { self.basecamp[range] = b }
+            case .error(_, _, let text): self.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    // MARK: Notes
+
+    func loadNotes() {
+        request(.notes) { [weak self] reply in
+            if case .notes(_, let list) = reply { withAnimation(.snappy) { self?.notes = list } }
+        }
+    }
+
+    /// Read a note whole; `done` gets it.
+    func openNote(_ id: String, done: ((Note) -> Void)? = nil) {
+        request(.note(id: id)) { [weak self] reply in
+            switch reply {
+            case .note(_, let n):
+                self?.openNotes[id] = n
+                done?(n)
+            case .error(_, _, let text): self?.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    func createNote(_ body: String = "", done: ((Note) -> Void)? = nil) {
+        request(.createNote(body: body)) { [weak self] reply in
+            switch reply {
+            case .note(_, let n):
+                self?.openNotes[n.id] = n
+                self?.loadNotes()
+                done?(n)
+            case .error(_, _, let text): self?.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    /// Save a note's text. If it changed on the Mac since it was opened, the Mac refuses
+    /// (`conflict`, shown as a toast) and `conflict` runs: open it again to see the Mac's version.
+    func saveNote(_ id: String, body: String, done: ((Note) -> Void)? = nil, conflict: (() -> Void)? = nil) {
+        let modified = openNotes[id]?.modified
+        request(.saveNote(id: id, body: body, modified: modified)) { [weak self] reply in
+            switch reply {
+            case .note(_, let n):
+                self?.openNotes[id] = n
+                if let i = self?.notes.firstIndex(where: { $0.id == id }) {
+                    self?.notes[i].title = n.title
+                    self?.notes[i].modified = n.modified
+                }
+                done?(n)
+            case .error(_, let code, let text):
+                self?.show(text, error: true)
+                if code == .conflict { conflict?() }
+            default: break
+            }
+        }
+    }
+
+    /// Delete a note: the Mac keeps it in the notes folder's Deleted.
+    func deleteNote(_ id: String) {
+        let before = notes
+        withAnimation(.snappy) { notes.removeAll { $0.id == id } }
+        openNotes[id] = nil
+        request(.deleteNote(id: id)) { [weak self] reply in
+            if case .error(_, _, let text) = reply {
+                self?.show(text, error: true)
+                self?.notes = before
+            }
+        }
+    }
+
+    // MARK: Git
+
+    func loadGitStatus(_ target: GitTarget) {
+        request(.gitStatus(target)) { [weak self] reply in
+            switch reply {
+            case .gitStatus(_, let s): withAnimation(.snappy) { self?.gitStatus[target] = s }
+            case .error(_, _, let text): self?.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    /// One changed file's diff; `done` gets it.
+    func gitDiff(_ target: GitTarget, path: String, done: @escaping (GitDiff) -> Void) {
+        request(.gitDiff(target, path: path)) { [weak self] reply in
+            switch reply {
+            case .gitDiff(_, let d): done(d)
+            case .error(_, _, let text): self?.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    func loadBranches(_ target: GitTarget) {
+        request(.gitBranches(target)) { [weak self] reply in
+            switch reply {
+            case .gitBranches(_, let b): self?.gitBranches[target] = b
+            case .error(_, _, let text): self?.show(text, error: true)
+            default: break
+            }
+        }
+    }
+
+    /// Commit every change (in a worktree thread, the worktree's).
+    func commit(_ target: GitTarget, message: String) {
+        git(target, .gitCommit(target, message: message), done: "Committed")
+    }
+
+    func push(_ target: GitTarget) {
+        git(target, .gitPush(target), done: "Pushed")
+    }
+
+    /// Check out another branch (refused in a worktree thread, or while a thread works there).
+    func switchBranch(_ target: GitTarget, to branch: String) {
+        git(target, .gitSwitch(target, branch: branch), done: "On \(branch)") { [weak self] in self?.loadBranches(target) }
+    }
+
+    /// Merge a worktree thread's branch into its base on the Mac.
+    func mergeWorktree(_ tid: String) {
+        git(.thread(tid), .worktreeMerge(threadId: tid), done: "Merged")
+    }
+
+    /// Remove a worktree thread's worktree. When something would be lost the Mac says what and
+    /// nothing happens: `confirm` gets its words; call again with `force` once the user agrees.
+    func removeWorktree(_ tid: String, deleteBranch: Bool = false, force: Bool = false, confirm: @escaping (String) -> Void) {
+        let target = GitTarget.thread(tid)
+        gitBusy.insert(target)
+        request(.worktreeRemove(threadId: tid, deleteBranch: deleteBranch, force: force)) { [weak self] reply in
+            guard let self else { return }
+            self.gitBusy.remove(target)
+            switch reply {
+            case .error(_, .conflict, let text) where !force: confirm(text)
+            case .error(_, _, let text): self.show(text, error: true)
+            default:
+                self.show("Removed the worktree")
+                self.loadGitStatus(target)
+            }
+        }
+    }
+
+    private func git(_ target: GitTarget, _ message: ClientMessage, done: String, then: (() -> Void)? = nil) {
+        gitBusy.insert(target)
+        request(message) { [weak self] reply in
+            guard let self else { return }
+            self.gitBusy.remove(target)
+            if case .error(_, _, let text) = reply { self.show(text, error: true) } else { self.show(done); then?() }
+            self.loadGitStatus(target)
+        }
+    }
+
+    // MARK: Commands and settings
+
+    func loadCommands(_ tid: String) {
+        request(.commands(threadId: tid)) { [weak self] reply in
+            if case .commands(_, _, let list) = reply { self?.commands[tid] = list }
+        }
+    }
+
+    func loadSettings() {
+        request(.settings) { [weak self] reply in
+            if case .settings(_, let s) = reply { self?.macSettings = s }
+        }
+    }
+
+    /// Change the Mac's settings. Shown at once; the Mac's answer replaces it (or puts it back,
+    /// saying why, when it refuses).
+    func changeSettings(_ change: SettingsChange) {
+        let before = macSettings
+        if let s = macSettings { macSettings = change.applied(to: s) }
+        request(.setSettings(change)) { [weak self] reply in
+            switch reply {
+            case .settings(_, let s): self?.macSettings = s
+            case .error(_, _, let text):
+                self?.show(text, error: true)
+                self?.macSettings = before
+            default: break
+            }
         }
     }
 

@@ -13,6 +13,8 @@ final class MockHost: Backend {
     private var subscribed: Set<String> = []
     private var timer: Timer?
     private var tick = 0
+    private var notes = DemoMac.notes()
+    private var settings = DemoMac.settings()
     private let host = HostInfo(id: "demo-mac", name: "Tobias’s MacBook Pro", version: "0.3.2")
 
     let projects: [ProjectSummary] = [
@@ -25,16 +27,16 @@ final class MockHost: Backend {
     var agents: [AgentOption] = [
         AgentOption(key: "claude-code", name: "Claude Code", defaultModel: "claude-opus-5-5", models: [
             ModelOption(id: "claude-opus-5-5", label: "Opus 5.5"), ModelOption(id: "claude-sonnet-5-5", label: "Sonnet 5.5"),
-            ModelOption(id: "claude-haiku-4-5", label: "Haiku 4.5")]),
+            ModelOption(id: "claude-haiku-4-5", label: "Haiku 4.5")], logo: "claude-code"),
         AgentOption(key: "codex", name: "Codex", defaultModel: "gpt-6-astra", models: [
             ModelOption(id: "gpt-6-astra", label: "GPT-6 Astra"), ModelOption(id: "gpt-5.6-sol", label: "GPT-5.6 Sol"),
-            ModelOption(id: "gpt-5.6-luna", label: "GPT-5.6 Luna")]),
+            ModelOption(id: "gpt-5.6-luna", label: "GPT-5.6 Luna")], logo: "codex"),
         AgentOption(key: "opencode", name: "OpenCode", defaultModel: "kimi-k3", models: [
-            ModelOption(id: "kimi-k3", label: "Kimi K3"), ModelOption(id: "glm-5", label: "GLM 5")]),
+            ModelOption(id: "kimi-k3", label: "Kimi K3"), ModelOption(id: "glm-5", label: "GLM 5")], logo: "opencode"),
         AgentOption(key: "acp:cursor", name: "Cursor", defaultModel: "composer-2", models: [
-            ModelOption(id: "composer-2", label: "Composer 2")]),
+            ModelOption(id: "composer-2", label: "Composer 2")], logo: "cursor"),
         AgentOption(key: "acp:gemini", name: "Gemini CLI", defaultModel: "gemini-3-pro", models: [
-            ModelOption(id: "gemini-3-pro", label: "Gemini 3 Pro")]),
+            ModelOption(id: "gemini-3-pro", label: "Gemini 3 Pro")], logo: "gemini"),
     ]
 
     static func project(_ id: String, _ name: String, hue: Int, branch: String) -> ProjectSummary {
@@ -67,6 +69,8 @@ final class MockHost: Backend {
             var t = t
             t.effort = t.effort ?? "high"
             t.access = t.access ?? .autoAcceptEdits
+            // What the Mac's rows carry besides: context, cost, sub-agents, git.
+            DemoMac.details(&t)
             return t
         }
         deliver(.welcome(re: "auth", host: host), after: 0.15)
@@ -106,6 +110,18 @@ final class MockHost: Backend {
             append(tid, .error("Interrupted"))
             update(tid) { $0.runState = .idle; $0.activity = nil; $0.workingSince = nil }
         case .send(let tid, let text, _, let images):
+            // Trek's own commands: `/new` opens the phone's sheet, the rest get the Mac's answer.
+            let command = text.hasPrefix("/") ? text.dropFirst().split(separator: " ").first.map(String.init) : nil
+            if command == "new" || command == "clear" {
+                deliver(.ack(re: id, threadId: nil, open: OpenScreen(screen: "new_thread", projectId: thread(tid)?.project?.id)))
+                return
+            }
+            if let command, let answer = DemoMac.reply(to: command) {
+                ack(id)
+                append(tid, .user(text: text, images: 0))
+                append(tid, .notice(answer))
+                return
+            }
             ack(id)
             append(tid, .user(text: text, images: images.count))
             update(tid) { $0.runState = .working; $0.needs = nil; $0.workingSince = Self.now; $0.activity = "Thinking"; $0.section = $0.pinned ? .pinned : .working }
@@ -157,7 +173,91 @@ final class MockHost: Backend {
             respond(in: tid, to: text)
         case .answer(let tid, let rid, let response):
             answer(tid, rid, response, id: id)
+        case .usage:
+            deliver(.usage(re: id, DemoMac.usage()), after: 0.4)
+        case .basecamp(let range):
+            deliver(.basecamp(re: id, DemoMac.basecamp(range, threads: threads, projects: projects)), after: 0.3)
+        case .notes:
+            deliver(.notes(re: id, notes.sorted { $0.modified > $1.modified }.map(DemoMac.summary)))
+        case .note(let nid):
+            if let n = notes.first(where: { $0.id == nid }) { deliver(.note(re: id, n)) } else { refuse(id, .notFound, "No such note") }
+        case .createNote(let body):
+            let n = Note(id: "n-\(UUID().uuidString.prefix(8))", title: DemoMac.title(of: body), body: body, modified: Self.now)
+            notes.append(n)
+            deliver(.note(re: id, n))
+        case .saveNote(let nid, let body, let modified):
+            guard let i = notes.firstIndex(where: { $0.id == nid }) else { return refuse(id, .notFound, "No such note") }
+            if let modified, modified != notes[i].modified {
+                return refuse(id, .conflict, "This note changed on the Mac since you opened it. Open it again to see the change.")
+            }
+            notes[i].body = body
+            notes[i].title = DemoMac.title(of: body)
+            notes[i].modified = Self.now
+            deliver(.note(re: id, notes[i]))
+        case .deleteNote(let nid):
+            notes.removeAll { $0.id == nid }
+            ack(id)
+        case .gitStatus(let target):
+            deliver(.gitStatus(re: id, DemoMac.gitStatus(thread: gitThread(target))), after: 0.2)
+        case .gitDiff(_, let path):
+            deliver(.gitDiff(re: id, DemoMac.diff(path)), after: 0.2)
+        case .gitBranches:
+            deliver(.gitBranches(re: id, DemoMac.branches))
+        case .gitCommit(_, let message):
+            if message.trimmingCharacters(in: .whitespaces).isEmpty { refuse(id, .badRequest, "Write a commit message first.") } else { ack(id, after: 0.6) }
+        case .gitPush:
+            ack(id, after: 0.8)
+        case .gitSwitch(let target, let branch):
+            let t = gitThread(target)
+            if t?.worktree == true {
+                refuse(id, .conflict, "This thread works in a worktree: its branch stays checked out there.")
+            } else if t?.runState == .working {
+                refuse(id, .conflict, "A thread is working in this folder: switch once it's done.")
+            } else {
+                if let t { update(t.id) { $0.branch = branch } }
+                ack(id, after: 0.3)
+            }
+        case .worktreeMerge(let tid):
+            if thread(tid)?.worktree == true {
+                refuse(id, .conflict, "2 files aren't committed yet. Commit or revert them first.")
+            } else {
+                refuse(id, .badRequest, "This thread has no worktree.")
+            }
+        case .worktreeRemove(let tid, let deleteBranch, let force):
+            guard thread(tid)?.worktree == true else { return refuse(id, .badRequest, "This thread has no worktree.") }
+            if !force {
+                let branch = thread(tid)?.branch ?? "its branch"
+                let lose = deleteBranch ? "\(branch) has 2 commits that main doesn't have." : "\(branch) keeps its 2 commits that main doesn't have."
+                return refuse(id, .conflict, "2 uncommitted changes in the worktree would be lost. \(lose)")
+            }
+            ack(id, after: 0.5)
+            update(tid) { $0.worktree = false; $0.base = nil; $0.branch = "main" }
+            append(tid, .notice("Its worktree was removed. The thread runs in the project folder now, in a new agent session."))
+        case .commands(let tid):
+            deliver(.commands(re: id, threadId: tid, DemoMac.commands()))
+        case .settings:
+            deliver(.settings(re: id, settings))
+        case .setSettings(let change):
+            if change.defaultAccess == .fullAccess && settings.fullAccess != true {
+                return refuse(id, .badRequest, "Full access is locked on this Mac: unlock it in Trek's Permissions settings first.")
+            }
+            settings = change.applied(to: settings)
+            if change.push == true && settings.push.topic.isEmpty || change.newPushTopic {
+                settings.push.topic = "trek-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))"
+            }
+            (settings.push.topicUrl, settings.push.subscribeUrl) = DemoMac.ntfyLinks(server: settings.push.server, topic: settings.push.topic)
+            deliver(.settings(re: id, settings))
         }
+    }
+
+    private func thread(_ tid: String) -> ThreadSummary? { threads.first { $0.id == tid } }
+
+    private func gitThread(_ target: GitTarget) -> ThreadSummary? {
+        if case .thread(let tid) = target { thread(tid) } else { nil }
+    }
+
+    private func refuse(_ id: String?, _ code: ErrorCode, _ message: String) {
+        deliver(.error(re: id, code: code, message: message), after: 0.2)
     }
 
     // MARK: Behaviour
@@ -281,7 +381,7 @@ final class MockHost: Backend {
         DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.onMessage?(m) }
     }
 
-    private func ack(_ id: String?) { deliver(.ack(re: id, threadId: nil)) }
+    private func ack(_ id: String?, after: Double = 0.03) { deliver(.ack(re: id, threadId: nil), after: after) }
 
     private func nextSeq(_ tid: String) -> Int64 {
         let n = (seq[tid] ?? 0) + 1
@@ -467,6 +567,11 @@ final class MockHost: Backend {
         add(id, tool(.read, "Read", "src/jobs/worktree_gc.rs"))
         add(id, .assistant(text: "It removes worktrees whose branch was **merged** into the default branch more than 7 days ago, and never touches one with uncommitted changes.", streaming: false))
         add(id, .turnEnd(tookSecs: 18))
+
+        // The files finished turns changed, after their ends.
+        for tid in ["t-tailscale", "t-vite", "t-release"] {
+            if let c = DemoMac.changes(for: tid) { add(tid, .changes(c)) }
+        }
 
         for tid in ["t-tokio", "t-onboarding"] {
             add(tid, .user(text: threads.first { $0.id == tid }!.title, images: 0), at: now - 30 * 60 * m)
