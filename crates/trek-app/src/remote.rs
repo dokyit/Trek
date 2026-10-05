@@ -317,6 +317,12 @@ impl Workspace {
                 self.interrupt(&thread_id, cx);
                 let _ = reply.send(Ok(()));
             }
+            tr::HostRequest::SetPrefs { req, reply } => {
+                let _ = reply.send(self.remote_set_prefs(req, cx));
+            }
+            tr::HostRequest::ThreadAction { req, reply } => {
+                let _ = reply.send(self.remote_thread_action(req, cx));
+            }
             tr::HostRequest::MarkSeen { thread_id, reply } => {
                 if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                     t.last_seen_at = now_ms().max(t.updated_at);
@@ -343,8 +349,61 @@ impl Workspace {
                 tr::SendMode::Queue => trek_core::settings::FollowUp::Queue,
             };
         }
-        self.send_to(&req.thread_id, req.text, vec![], cx);
+        let images = save_uploads(&req.images)?;
+        self.send_to(&req.thread_id, req.text, images, cx);
         self.settings.general.follow_up = before;
+        Ok(())
+    }
+
+    /// A thread's agent, model, effort, access or plan mode, changed as its composer would.
+    fn remote_set_prefs(&mut self, req: tr::PrefsRequest, cx: &mut Context<Self>) -> tr::HostResult<()> {
+        if self.thread(&req.thread_id).is_none() {
+            return Err(tr::HostError::not_found("No such thread"));
+        }
+        let scope = crate::workspace::Scope::Thread(req.thread_id.clone());
+        let mut prefs = self.prefs_in(&scope);
+        if let Some(key) = &req.agent {
+            let agent = AgentId::from_key(key);
+            if !self.ready_agents().contains(&agent) {
+                return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
+            }
+            if agent != prefs.agent {
+                prefs.agent = agent;
+                prefs.model = None;
+            }
+        }
+        if let Some(model) = &req.model {
+            let known = self.models_for(&prefs.agent);
+            if !known.is_empty() && !known.iter().any(|m| &m.id == model) {
+                return Err(tr::HostError::not_found(format!("{model} isn't one of {}'s models", prefs.agent.display_name())));
+            }
+            prefs.model = Some(model.clone());
+        }
+        if let Some(effort) = &req.effort {
+            prefs.effort = trek_core::Effort::parse(effort).ok_or_else(|| tr::HostError::bad_request(format!("No effort called {effort}")))?;
+        }
+        if let Some(access) = req.access {
+            prefs.hand_holding = hand_holding(access, &self.settings)?;
+        }
+        if let Some(plan) = req.plan {
+            prefs.plan = plan;
+        }
+        self.set_prefs_in(&scope, prefs, cx);
+        Ok(())
+    }
+
+    fn remote_thread_action(&mut self, req: tr::ThreadActionRequest, cx: &mut Context<Self>) -> tr::HostResult<()> {
+        let Some(t) = self.thread(&req.thread_id).cloned() else { return Err(tr::HostError::not_found("No such thread")) };
+        let id = t.id.as_str();
+        match req.action {
+            tr::ThreadAction::Pin if t.pinned_at.is_none() => self.toggle_pin(id, cx),
+            tr::ThreadAction::Unpin if t.pinned_at.is_some() => self.toggle_pin(id, cx),
+            tr::ThreadAction::Pin | tr::ThreadAction::Unpin => {}
+            tr::ThreadAction::Settle => self.settle(id, cx),
+            tr::ThreadAction::Unsettle => self.unsettle(id, cx),
+            tr::ThreadAction::Archive => self.archive(id, cx),
+            tr::ThreadAction::Rename { title } => self.rename(id, title, cx),
+        }
         Ok(())
     }
 
@@ -360,13 +419,23 @@ impl Workspace {
         if !self.ready_agents().contains(&agent) {
             return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
         }
+        let images = save_uploads(&req.images)?;
+        let hand_holding = req.access.map(|a| hand_holding(a, &self.settings)).transpose()?;
+        let effort = req.effort.as_deref().map(|e| trek_core::Effort::parse(e).ok_or_else(|| tr::HostError::bad_request(format!("No effort called {e}")))).transpose()?;
         // Started the way the Mac's composer starts one, without taking over the Mac's screen.
         let (route, prefs, tabs) = (self.route.clone(), self.draft_prefs.clone(), self.tabs.clone());
         self.route = Route::Draft { project };
         self.draft_prefs.agent = agent;
         self.draft_prefs.model = req.model.clone();
         self.draft_prefs.worktree = req.worktree;
-        self.send(req.text, vec![], cx);
+        self.draft_prefs.plan = req.plan;
+        if let Some(h) = hand_holding {
+            self.draft_prefs.hand_holding = h;
+        }
+        if let Some(e) = effort {
+            self.draft_prefs.effort = e;
+        }
+        self.send(req.text, images, cx);
         let started = match &self.route {
             Route::Thread(id) => Some(id.clone()),
             _ => None,
@@ -484,6 +553,14 @@ impl Workspace {
             updated_at: t.updated_at,
             additions: t.additions.max(0) as u32,
             deletions: t.deletions.max(0) as u32,
+            effort: Some(t.effort.as_str().to_string()),
+            access: Some(match t.hand_holding {
+                trek_core::HandHolding::Supervised => tr::Access::Supervised,
+                trek_core::HandHolding::AutoAcceptEdits => tr::Access::AutoAcceptEdits,
+                trek_core::HandHolding::Auto => tr::Access::Auto,
+                trek_core::HandHolding::FullAccess => tr::Access::FullAccess,
+            }),
+            plan: live.is_some_and(|l| l.plan),
         }
     }
 
@@ -527,11 +604,15 @@ impl Workspace {
             .ready_agents()
             .into_iter()
             .map(|agent| {
-                let models: Vec<tr::ModelOption> = self.models_for(&agent).into_iter().map(|m| tr::ModelOption { id: m.id, label: m.name }).collect();
+                let models: Vec<tr::ModelOption> = self
+                    .models_for(&agent)
+                    .into_iter()
+                    .map(|m| tr::ModelOption { id: m.id, label: m.name, efforts: m.efforts.iter().map(|e| e.as_str().to_string()).collect() })
+                    .collect();
                 tr::AgentOption { key: agent.key(), name: agent.display_name(), default_model: models.first().map(|m| m.id.clone()), models }
             })
             .collect();
-        tr::Snapshot { threads, projects, agents }
+        tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked }
     }
 
     /// `id`'s transcript as the phone shows it: its items by index, then its open requests.
@@ -754,6 +835,41 @@ fn hash(body: &tr::ItemBody) -> u64 {
 
 fn first_line(s: &str) -> String {
     s.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().chars().take(140).collect()
+}
+
+/// The access level a phone asked for, if this Mac allows it: Full access only once it's been
+/// unlocked in the Mac's settings.
+fn hand_holding(access: tr::Access, settings: &trek_core::settings::Settings) -> tr::HostResult<trek_core::HandHolding> {
+    Ok(match access {
+        tr::Access::Supervised => trek_core::HandHolding::Supervised,
+        tr::Access::AutoAcceptEdits => trek_core::HandHolding::AutoAcceptEdits,
+        tr::Access::Auto => trek_core::HandHolding::Auto,
+        tr::Access::FullAccess if settings.permissions.full_access_unlocked => trek_core::HandHolding::FullAccess,
+        tr::Access::FullAccess => return Err(tr::HostError::bad_request("Full access is locked on this Mac: unlock it in Trek's Permissions settings first.")),
+    })
+}
+
+/// Photos from the phone, saved with the composer's snapshots for the agent to read.
+fn save_uploads(images: &[tr::ImageUpload]) -> tr::HostResult<Vec<PathBuf>> {
+    if images.is_empty() {
+        return Ok(vec![]);
+    }
+    let dir = trek_core::paths::data_dir().join("snapshots");
+    std::fs::create_dir_all(&dir).map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
+    let stamp = chrono::Local::now().format("%Y-%m-%d at %H.%M.%S");
+    images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            let (bytes, ext) = img.decode().map_err(|e| tr::HostError::bad_request(format!("That photo couldn't be read: {e}")))?;
+            if bytes.len() > 10 << 20 {
+                return Err(tr::HostError::bad_request("That photo is too big (10 MB at most)"));
+            }
+            let path = dir.join(format!("iPhone {stamp} {}.{ext}", i + 1));
+            std::fs::write(&path, bytes).map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
+            Ok(path)
+        })
+        .collect()
 }
 
 /// One of Trek's own slash commands, which only the Mac runs.

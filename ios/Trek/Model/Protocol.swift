@@ -68,6 +68,71 @@ nonisolated enum SendMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How much a thread's agent may do without asking: the Mac's hand-holding levels.
+nonisolated enum Access: String, LenientEnum, CaseIterable, Identifiable {
+    case supervised, autoAcceptEdits = "auto-accept-edits", auto, fullAccess = "full-access"
+    static var fallback: Access { .autoAcceptEdits }
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .supervised: "Supervised"
+        case .autoAcceptEdits: "Auto-accept edits"
+        case .auto: "Auto"
+        case .fullAccess: "Full access"
+        }
+    }
+    var help: String {
+        switch self {
+        case .supervised: "Asks before every edit and command"
+        case .autoAcceptEdits: "Applies file edits; asks before commands"
+        case .auto: "Works on its own; checks before risky actions"
+        case .fullAccess: "No prompts and no sandbox"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .supervised: "hand.raised"
+        case .autoAcceptEdits: "pencil.line"
+        case .auto: "wand.and.sparkles"
+        case .fullAccess: "exclamationmark.shield"
+        }
+    }
+}
+
+/// Efforts as the Mac names them (`xhigh` → "Extra high").
+nonisolated enum Effort {
+    static func label(_ raw: String) -> String {
+        switch raw {
+        case "xhigh": "Extra high"
+        default: raw.prefix(1).uppercased() + raw.dropFirst()
+        }
+    }
+}
+
+/// A photo for the agent, as the wire carries it.
+nonisolated struct ImageUpload: Hashable {
+    var mime: String
+    /// Base64.
+    var data: String
+    var json: [String: Any] { ["mime": mime, "data": data] }
+}
+
+/// Pin, settle, archive or rename a thread.
+nonisolated enum ThreadAction: Hashable {
+    case pin, unpin, settle, unsettle, archive
+    case rename(String)
+    var json: [String: Any] {
+        switch self {
+        case .pin: ["kind": "pin"]
+        case .unpin: ["kind": "unpin"]
+        case .settle: ["kind": "settle"]
+        case .unsettle: ["kind": "unsettle"]
+        case .archive: ["kind": "archive"]
+        case .rename(let title): ["kind": "rename", "title": title]
+        }
+    }
+}
+
 nonisolated enum Decision: String, Codable {
     case allow, allowForSession = "allow_for_session", deny
 }
@@ -114,6 +179,10 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     var updatedAt: Int64
     var additions: Int
     var deletions: Int
+    /// Its effort, access and plan mode, as the Mac's composer shows them (absent from older Macs).
+    var effort: String? = nil
+    var access: Access? = nil
+    var plan: Bool? = nil
 }
 
 nonisolated struct ProjectSummary: Codable, Identifiable, Hashable {
@@ -130,6 +199,8 @@ nonisolated struct ProjectSummary: Codable, Identifiable, Hashable {
 nonisolated struct ModelOption: Codable, Identifiable, Hashable {
     var id: String
     var label: String
+    /// The efforts it takes, lowest first.
+    var efforts: [String]? = nil
 }
 
 nonisolated struct AgentOption: Codable, Identifiable, Hashable {
@@ -298,6 +369,8 @@ nonisolated struct Snapshot: Decodable {
     var threads: [ThreadSummary]
     var projects: [ProjectSummary]
     var agents: [AgentOption]
+    /// The Mac lets threads run with Full access.
+    var fullAccess: Bool? = nil
 }
 
 nonisolated enum ErrorCode: String, LenientEnum {
@@ -401,8 +474,11 @@ nonisolated enum ClientMessage {
     case hello(deviceId: String, token: String)
     case subscribe(threadId: String, afterSeq: Int64?)
     case unsubscribe(threadId: String)
-    case send(threadId: String, text: String, mode: SendMode?)
-    case newThread(projectId: String, agent: String, model: String?, text: String, worktree: Bool)
+    case send(threadId: String, text: String, mode: SendMode?, images: [ImageUpload])
+    case newThread(projectId: String, agent: String, model: String?, text: String, worktree: Bool,
+                   effort: String?, access: Access?, plan: Bool, images: [ImageUpload])
+    case setPrefs(threadId: String, agent: String?, model: String?, effort: String?, access: Access?, plan: Bool?)
+    case threadAction(threadId: String, action: ThreadAction)
     case answer(threadId: String, requestId: String, response: AnswerResponse)
     case interrupt(threadId: String)
     case markSeen(threadId: String)
@@ -424,11 +500,25 @@ nonisolated enum ClientMessage {
             o = ["type": "subscribe", "thread_id": threadId, "after_seq": afterSeq.map { $0 as Any } ?? NSNull()]
         case .unsubscribe(let threadId):
             o = ["type": "unsubscribe", "thread_id": threadId]
-        case .send(let threadId, let text, let mode):
+        case .send(let threadId, let text, let mode, let images):
             o = ["type": "send", "thread_id": threadId, "text": text, "mode": mode?.rawValue ?? NSNull()]
-        case .newThread(let projectId, let agent, let model, let text, let worktree):
+            if !images.isEmpty { o["images"] = images.map(\.json) }
+        case .newThread(let projectId, let agent, let model, let text, let worktree, let effort, let access, let plan, let images):
             o = ["type": "new_thread", "project_id": projectId, "agent": agent, "model": model ?? NSNull(),
                  "text": text, "worktree": worktree]
+            if let effort { o["effort"] = effort }
+            if let access { o["access"] = access.rawValue }
+            if plan { o["plan"] = true }
+            if !images.isEmpty { o["images"] = images.map(\.json) }
+        case .setPrefs(let threadId, let agent, let model, let effort, let access, let plan):
+            o = ["type": "set_prefs", "thread_id": threadId]
+            if let agent { o["agent"] = agent }
+            if let model { o["model"] = model }
+            if let effort { o["effort"] = effort }
+            if let access { o["access"] = access.rawValue }
+            if let plan { o["plan"] = plan }
+        case .threadAction(let threadId, let action):
+            o = ["type": "thread_action", "thread_id": threadId, "action": action.json]
         case .answer(let threadId, let requestId, let response):
             o = ["type": "answer", "thread_id": threadId, "request_id": requestId, "response": response.json]
         case .interrupt(let threadId):

@@ -4,7 +4,11 @@ struct ThreadView: View {
     var threadID: String
     @Environment(AppModel.self) private var model
     @State private var draft = ""
+    @State private var photos: [PickedPhoto] = []
     @State private var mode: SendMode = .steer
+    @State private var renaming = false
+    @State private var newTitle = ""
+    @State private var archiving = false
     @State private var groupOpen: [String: Bool] = [:]
 
     private var thread: ThreadSummary? { model.thread(threadID) }
@@ -45,7 +49,8 @@ struct ThreadView: View {
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                Composer(text: $draft, mode: $mode, placeholder: "Message \(thread?.agent.name ?? "the agent")",
+                if let t = thread { ThreadSettingsBar(thread: t) }
+                Composer(text: $draft, mode: $mode, photos: $photos, placeholder: "Message \(thread?.agent.name ?? "the agent")",
                          working: working, send: send, stop: { model.interrupt(threadID) })
             }
             .padding(.horizontal, 14)
@@ -67,14 +72,46 @@ struct ThreadView: View {
                             if t.additions + t.deletions > 0 { Label("+\(t.additions) −\(t.deletions)", systemImage: "plus.forwardslash.minus") }
                         }
                     }
+                    if let t = thread {
+                        Section {
+                            if t.pinned {
+                                Button("Unpin", systemImage: "pin.slash") { model.threadAction(threadID, .unpin) }
+                            } else {
+                                Button("Pin", systemImage: "pin") { model.threadAction(threadID, .pin, done: "Pinned") }
+                            }
+                            if t.section == .settled {
+                                Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(threadID, .unsettle) }
+                            } else {
+                                Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
+                            }
+                            Button("Rename…", systemImage: "pencil") {
+                                newTitle = t.title
+                                renaming = true
+                            }
+                        }
+                    }
                     Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = thread?.title }
                     if working {
                         Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(threadID) }
                     }
+                    Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
                 } label: {
                     Image(systemName: "ellipsis")
                 }
             }
+        }
+        .alert("Rename thread", isPresented: $renaming) {
+            TextField("Title", text: $newTitle)
+            Button("Rename") {
+                let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty { model.threadAction(threadID, .rename(title)) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog("Archive this thread?", isPresented: $archiving, titleVisibility: .visible) {
+            Button("Archive", role: .destructive) { model.threadAction(threadID, .archive, done: "Archived") }
+        } message: {
+            Text("It leaves your threads on the Mac too.")
         }
         .onAppear {
             mode = model.followUpMode
@@ -151,8 +188,10 @@ struct ThreadView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        model.send(text, to: threadID, mode: thread?.runState == .working ? mode : nil)
+        guard !text.isEmpty || !photos.isEmpty else { return }
+        let uploads = photos.compactMap(\.upload)
+        model.send(text.isEmpty ? "Here's a photo." : text, to: threadID, mode: thread?.runState == .working ? mode : nil, images: uploads)
         draft = ""
+        photos = []
     }
 }

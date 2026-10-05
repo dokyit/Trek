@@ -57,6 +57,8 @@ final class AppModel {
     var threads: [ThreadSummary] = []
     var projects: [ProjectSummary] = []
     var agents: [AgentOption] = []
+    /// The Mac lets threads run with Full access (unlocked in its Permissions settings).
+    var fullAccessAllowed = false
     var transcripts: [String: [TItem]] = [:]
     var loadedTranscripts: Set<String> = []
     var toast: Toast?
@@ -222,6 +224,7 @@ final class AppModel {
                 threads = s.threads
                 projects = s.projects
                 agents = s.agents
+                fullAccessAllowed = s.fullAccess ?? false
             }
         case .thread(let t):
             withAnimation(.snappy) {
@@ -298,8 +301,48 @@ final class AppModel {
         backend?.send(.markSeen(threadId: tid), id: nil)
     }
 
-    func send(_ text: String, to tid: String, mode: SendMode?) {
-        act(.send(threadId: tid, text: text, mode: mode))
+    func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = []) {
+        act(.send(threadId: tid, text: text, mode: mode, images: images))
+    }
+
+    /// Change a thread's agent, model, effort, access or plan mode. The row changes here at once;
+    /// the Mac's own row follows (and puts it back if it refused).
+    func setPrefs(_ tid: String, agent: String? = nil, model: String? = nil, effort: String? = nil, access: Access? = nil, plan: Bool? = nil) {
+        let before = thread(tid)
+        if let i = threads.firstIndex(where: { $0.id == tid }) {
+            if let agent, let a = agents.first(where: { $0.key == agent }) {
+                threads[i].agent = AgentRef(key: a.key, name: a.name)
+                threads[i].model = a.defaultModel
+                threads[i].modelLabel = a.models.first { $0.id == a.defaultModel }?.label
+            }
+            if let model {
+                threads[i].model = model
+                threads[i].modelLabel = agents.first { $0.key == threads[i].agent.key }?.models.first { $0.id == model }?.label ?? model
+            }
+            if let effort { threads[i].effort = effort }
+            if let access { threads[i].access = access }
+            if let plan { threads[i].plan = plan }
+        }
+        request(.setPrefs(threadId: tid, agent: agent, model: model, effort: effort, access: access, plan: plan)) { [weak self] reply in
+            // Refused: say why, and put the row back as the Mac has it.
+            guard case .error(_, _, let text) = reply, let self else { return }
+            self.show(text, error: true)
+            if let before, let i = self.threads.firstIndex(where: { $0.id == tid }) { self.threads[i] = before }
+        }
+    }
+
+    func threadAction(_ tid: String, _ action: ThreadAction, done: String? = nil) {
+        act(.threadAction(threadId: tid, action: action)) { [weak self] _ in
+            if let done { self?.show(done) }
+        }
+    }
+
+    /// The models `agentKey` offers, and the efforts `modelId` takes.
+    func models(of agentKey: String) -> [ModelOption] { agents.first { $0.key == agentKey }?.models ?? [] }
+    func efforts(agent agentKey: String, model modelId: String?) -> [String] {
+        let models = models(of: agentKey)
+        let id = modelId ?? agents.first { $0.key == agentKey }?.defaultModel
+        return models.first { $0.id == id }?.efforts ?? []
     }
 
     func interrupt(_ tid: String) {
@@ -311,8 +354,10 @@ final class AppModel {
     }
 
     func newThread(project: String, agent: String, model: String?, text: String, worktree: Bool,
+                   effort: String? = nil, access: Access? = nil, plan: Bool = false, images: [ImageUpload] = [],
                    opened: @escaping (String) -> Void) {
-        act(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree)) { reply in
+        act(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree,
+                       effort: effort, access: access, plan: plan, images: images)) { reply in
             if case .ack(_, let tid?) = reply { opened(tid) }
         }
     }

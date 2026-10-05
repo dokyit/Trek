@@ -63,6 +63,7 @@ async fn main() {
     let send_text = args.iter().position(|a| a == "--send").and_then(|i| args.get(i + 1)).cloned();
     let thread = args.iter().position(|a| a == "--thread").and_then(|i| args.get(i + 1)).cloned();
     let answer = args.iter().position(|a| a == "--answer").and_then(|i| args.get(i + 1)).cloned();
+    let effort = args.iter().position(|a| a == "--effort").and_then(|i| args.get(i + 1)).cloned();
     assert!(send_text.is_none() || thread.is_some(), "--send needs --thread <id>");
     let secs: u64 = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(15);
     let host = param(&url, "host").expect("host=");
@@ -98,6 +99,9 @@ async fn main() {
                 if let (false, Some(id)) = (subscribed, thread.clone()) {
                     subscribed = true;
                     ws.send(send(json!({"type": "subscribe", "id": "2", "thread_id": id}))).await.unwrap();
+                    if let Some(e) = &effort {
+                        ws.send(send(json!({"type": "set_prefs", "id": "5", "thread_id": id, "effort": e}))).await.unwrap();
+                    }
                     if let Some(text) = &send_text {
                         ws.send(send(json!({"type": "send", "id": "3", "thread_id": id, "text": text}))).await.unwrap();
                     }

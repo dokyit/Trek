@@ -42,8 +42,13 @@ pub struct WorkingBar {
     scope: Scope,
     /// What's on screen, to skip re-rendering on workspace changes that don't touch the bar.
     shown: Option<Shown>,
-    /// The window is frontmost (or `TREK_FORCE_ACTIVE`): the animation runs at full rate.
+    /// The window is frontmost (or `TREK_FORCE_ACTIVE`): the animation runs at full rate; behind
+    /// another app it runs at half (it's still on show).
     active: bool,
+    /// The hiker's own clock: seconds walked, and when it last took a step. It moves only while
+    /// the bar animates, so after a pause the hiker carries on from where it stood instead of
+    /// jumping to where the turn's clock would put it.
+    walk: std::cell::Cell<(f32, Option<Instant>)>,
     /// When each call on show arrived, while it slides in.
     arrived: HashMap<String, Instant>,
     /// The live group's rows that have settled (done, and in), drawn by a cached view of their
@@ -67,7 +72,7 @@ struct Shown {
     group: Option<Group>,
     /// A group that just ended, folding away until the instant given.
     folding: Option<(Group, Instant)>,
-    /// No motion: reduced motion, or the window isn't in front.
+    /// No motion: reduced motion.
     still: bool,
     /// The transcript column's widest (`Workspace::column`).
     width: Pixels,
@@ -235,6 +240,7 @@ impl WorkingBar {
             scope,
             shown: None,
             active: window.is_window_active() || crate::mascot::force_active(),
+            walk: std::cell::Cell::new((0., None)),
             arrived: HashMap::new(),
             settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0, width: px(0.), open: None }),
             settled_len: 0,
@@ -250,7 +256,7 @@ impl WorkingBar {
         let id = ws.thread_id_in(&self.scope)?;
         let live = ws.live.get(id)?;
         let thread = ws.thread(id)?;
-        let still = !ws.motion(cx) || !self.active;
+        let still = !ws.motion(cx);
         // The header shows while the thread works and isn't waiting on the user (its cards take
         // this spot then), and while it waits on its sub-agents.
         let waited = ws.waiting_on(id);
@@ -391,9 +397,25 @@ impl WorkingBar {
             // transcript too (it grows into the space). Rows slide in on the hiker's frames:
             // calls come often, and a fade that short reads the same at either rate.
             Duration::from_millis(33)
-        } else {
+        } else if self.active {
             Duration::from_millis(1000 / crate::mascot::FPS)
+        } else {
+            Duration::from_millis(2000 / crate::mascot::FPS)
         })
+    }
+
+    /// Advance the hiker's clock by the time since its last step, at most a few frames' worth: a
+    /// bar that stopped drawing (hidden, another thread on screen) picks up where it left off.
+    fn step_walk(&self, still: bool) -> f32 {
+        let (walked, last) = self.walk.get();
+        let now = Instant::now();
+        if still {
+            self.walk.set((walked, None));
+            return walked;
+        }
+        let dt = last.map_or(0., |l| now.duration_since(l).as_secs_f32().min(0.2));
+        self.walk.set((walked + dt, Some(now)));
+        walked + dt
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
@@ -773,7 +795,7 @@ impl Render for WorkingBar {
                     .when(h.agents > 0, |el| el.child(div().flex_none().text_color(muted).child(agents_out(h.agents))))
                     .into_any_element(),
             };
-            let trail = if h.waiting.is_some() { crate::mascot::waiting(clock, still, cx) } else { crate::mascot::trail(clock, still, cx) };
+            let trail = if h.waiting.is_some() { crate::mascot::waiting(clock, still, cx) } else { crate::mascot::trail(self.step_walk(still), still, cx) };
             h_flex()
                 .id("working-bar")
                 .test_support()

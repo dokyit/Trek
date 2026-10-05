@@ -67,7 +67,8 @@ impl ServerConfig {
             devices_path: None,
             auth_timeout: Duration::from_secs(10),
             pairing_ttl: Duration::from_secs(10 * 60),
-            max_message: 1 << 20,
+            // Photos come base64 in `send`: a few of a megabyte each.
+            max_message: 8 << 20,
             ping_interval: Duration::from_secs(20),
             tls: None,
         }
@@ -515,8 +516,20 @@ impl BadMessage {
     }
 }
 
-const CLIENT_TYPES: &[&str] =
-    &["pair", "hello", "subscribe", "unsubscribe", "send", "new_thread", "answer", "interrupt", "mark_seen", "ping"];
+const CLIENT_TYPES: &[&str] = &[
+    "pair",
+    "hello",
+    "subscribe",
+    "unsubscribe",
+    "send",
+    "new_thread",
+    "answer",
+    "interrupt",
+    "mark_seen",
+    "set_prefs",
+    "thread_action",
+    "ping",
+];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
 fn parse_client(text: &str) -> (Option<String>, Result<ClientMessage, BadMessage>) {
@@ -616,6 +629,8 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -
         ClientMessage::Answer(req) => host.answer(req).await.map(|()| None),
         ClientMessage::Interrupt { thread_id } => host.interrupt(&thread_id).await.map(|()| None),
         ClientMessage::MarkSeen { thread_id } => host.mark_seen(&thread_id).await.map(|()| None),
+        ClientMessage::SetPrefs(req) => host.set_prefs(req).await.map(|()| None),
+        ClientMessage::ThreadAction(req) => host.thread_action(req).await.map(|()| None),
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {
@@ -675,7 +690,9 @@ impl Session {
             | ClientMessage::NewThread(_)
             | ClientMessage::Answer(_)
             | ClientMessage::Interrupt { .. }
-            | ClientMessage::MarkSeen { .. }) => {
+            | ClientMessage::MarkSeen { .. }
+            | ClientMessage::SetPrefs(_)
+            | ClientMessage::ThreadAction(_)) => {
                 let _ = jobs.send(Job::Call { re, msg });
                 Vec::new()
             }

@@ -430,15 +430,25 @@ impl Sidebar {
                                 cx,
                             )),
                     )
+                    // Its sub-agents at work: one logo per agent with how many, in a pill of their
+                    // own, apart from the thread's own agent beside it. (Overlapped logos of the
+                    // same agent read as a smudge, and a ring the sidebar's colour shows under glass.)
                     .when(!kids.is_empty(), |el| {
-                        let ring = if selected { theme.list_active } else { theme.sidebar };
                         el.child(
                             h_flex()
                                 .id(SharedString::from(format!("card-kids-{}", t.id)))
                                 .test_support()
                                 .flex_none()
-                                .children(kids.iter().take(3).enumerate().map(|(i, (a, _))| {
-                                    div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(4.)).bg(ring).child(ui::agent_logo(a, px(12.), cx))
+                                .h(px(18.))
+                                .px(px(5.))
+                                .gap(px(5.))
+                                .rounded_full()
+                                .bg(theme.foreground.opacity(0.07))
+                                .children(kid_groups(&kids).into_iter().take(3).map(|(agent, n)| {
+                                    h_flex()
+                                        .gap(px(2.))
+                                        .child(ui::agent_logo(&agent, px(12.), cx))
+                                        .when(n > 1, |el| el.child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(n.to_string())))
                                 })),
                         )
                     })
@@ -1020,6 +1030,18 @@ impl Sidebar {
             })
             .into_any_element()
     }
+}
+
+/// A card's sub-agents by agent, in the order they first appear, with how many of each.
+fn kid_groups(kids: &[(trek_core::AgentId, String)]) -> Vec<(trek_core::AgentId, usize)> {
+    let mut out: Vec<(trek_core::AgentId, usize)> = vec![];
+    for (agent, _) in kids {
+        match out.iter_mut().find(|(a, _)| a == agent) {
+            Some((_, n)) => *n += 1,
+            None => out.push((agent.clone(), 1)),
+        }
+    }
+    out
 }
 
 /// A card's tooltip while it has work out: its sub-agents, then what runs in the background.

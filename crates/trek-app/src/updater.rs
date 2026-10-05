@@ -36,6 +36,8 @@ pub enum UpdateAction {
     Check,
     Download,
     Restart,
+    /// A restart waiting on agents: go now, stopping them.
+    RestartNow,
 }
 
 impl UpdateAction {
@@ -44,6 +46,7 @@ impl UpdateAction {
             UpdateAction::Check => "Check now",
             UpdateAction::Download => "Download",
             UpdateAction::Restart => "Restart to update",
+            UpdateAction::RestartNow => "Restart now",
         }
     }
 }
@@ -263,7 +266,9 @@ pub fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<
             UpdateView { busy: true, progress: Some(*progress), ..view(format!("Downloading Trek {version} · {:.0}%", progress * 100.), None) }
         }
         UpdateStatus::Ready { version, .. } => view(format!("Trek {version} is ready. Restart now, or it installs when you quit."), Some(UpdateAction::Restart)),
-        UpdateStatus::RestartPending { version, .. } => view(format!("Trek restarts into {version} when your agents finish."), None),
+        UpdateStatus::RestartPending { version, .. } => {
+            view(format!("Trek restarts into {version} when your agents finish their turns. Restart now stops them."), Some(UpdateAction::RestartNow))
+        }
         UpdateStatus::Failed(e) => view(e.clone(), Some(UpdateAction::Check)),
     }
 }
@@ -302,7 +307,7 @@ mod tests {
         assert_eq!(action(UpdateStatus::Available { version: "0.2.1".into() }), Some(UpdateAction::Download));
         assert_eq!(action(UpdateStatus::Downloading { version: "0.2.1".into(), progress: 0.5 }), None);
         assert_eq!(action(UpdateStatus::Ready { version: "0.2.1".into(), staged: staged.clone() }), Some(UpdateAction::Restart));
-        assert_eq!(action(UpdateStatus::RestartPending { version: "0.2.1".into(), staged }), None);
+        assert_eq!(action(UpdateStatus::RestartPending { version: "0.2.1".into(), staged }), Some(UpdateAction::RestartNow), "waiting never leaves you stuck");
         assert_eq!(action(UpdateStatus::Failed("Couldn't check for updates: offline".into())), Some(UpdateAction::Check));
         let downloading = describe_update(&UpdateStatus::Downloading { version: "0.2.1".into(), progress: 0.42 }, true, None);
         assert_eq!((downloading.line.as_str(), downloading.busy, downloading.progress), ("Downloading Trek 0.2.1 · 42%", true, Some(0.42)));

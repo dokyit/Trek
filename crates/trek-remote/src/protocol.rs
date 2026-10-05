@@ -92,6 +92,10 @@ pub enum ClientMessage {
     Interrupt { thread_id: String },
     /// The user has seen the thread.
     MarkSeen { thread_id: String },
+    /// Change a thread's agent, model, effort, access or plan mode (as the Mac's composer does).
+    SetPrefs(PrefsRequest),
+    /// Pin, settle or archive a thread, or rename it.
+    ThreadAction(ThreadActionRequest),
     /// Application-level ping (answered with `pong`).
     Ping,
 }
@@ -109,6 +113,8 @@ impl ClientMessage {
             Self::Answer(_) => "answer",
             Self::Interrupt { .. } => "interrupt",
             Self::MarkSeen { .. } => "mark_seen",
+            Self::SetPrefs(_) => "set_prefs",
+            Self::ThreadAction(_) => "thread_action",
             Self::Ping => "ping",
         }
     }
@@ -122,6 +128,83 @@ pub struct SendRequest {
     /// Steer the running turn or queue after it; `None` = the Mac's follow-up setting.
     #[serde(default)]
     pub mode: Option<SendMode>,
+    /// Photos attached to the message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageUpload>,
+}
+
+/// A photo sent from the phone: JPEG or PNG, base64. The Mac saves it with its snapshots and
+/// attaches it as the composer's photos are. Phones keep each one under about a megabyte.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUpload {
+    /// `image/jpeg` or `image/png`.
+    pub mime: String,
+    pub data: String,
+}
+
+impl ImageUpload {
+    /// The image's bytes, and the file extension it takes, if it really is a JPEG or a PNG.
+    pub fn decode(&self) -> Result<(Vec<u8>, &'static str), String> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(self.data.trim()).map_err(|e| format!("not base64: {e}"))?;
+        // What the bytes are, not what the phone says: only photos are kept.
+        let ext = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "jpg"
+        } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            "png"
+        } else {
+            return Err("not a JPEG or PNG".into());
+        };
+        Ok((bytes, ext))
+    }
+}
+
+/// How much a thread's agent may do without asking (the Mac's hand-holding levels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    Supervised,
+    AutoAcceptEdits,
+    Auto,
+    FullAccess,
+}
+
+/// `set_prefs`: what to change about a thread; `None` leaves it as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PrefsRequest {
+    pub thread_id: String,
+    /// Another agent (its key): the thread carries on with it from a recap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `low`, `medium`, `high`, `xhigh`, `max`… as the model offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+}
+
+/// `thread_action`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadActionRequest {
+    pub thread_id: String,
+    pub action: ThreadAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ThreadAction {
+    Pin,
+    Unpin,
+    /// Done with it: out of the inbox.
+    Settle,
+    /// Back into the inbox.
+    Unsettle,
+    Archive,
+    Rename { title: String },
 }
 
 /// How a follow-up reaches a working thread. On an idle thread both just start a turn.
@@ -147,6 +230,14 @@ pub struct NewThreadRequest {
     /// Run in a new worktree (a request: a project that isn't a git repo runs locally).
     #[serde(default)]
     pub worktree: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageUpload>,
 }
 
 /// `answer`: respond to a pending approval, question or plan.
@@ -293,6 +384,9 @@ pub struct Snapshot {
     pub projects: Vec<ProjectSummary>,
     #[serde(default)]
     pub agents: Vec<AgentOption>,
+    /// The Mac lets threads run with Full access (it's unlocked in its settings).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_access: bool,
 }
 
 /// One thread's row.
@@ -332,6 +426,13 @@ pub struct ThreadSummary {
     pub additions: u32,
     #[serde(default)]
     pub deletions: u32,
+    /// The thread's effort, access and plan mode, as its composer shows them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
 }
 
 /// A project, as referenced from a thread row.
@@ -388,6 +489,9 @@ pub struct AgentOption {
 pub struct ModelOption {
     pub id: String,
     pub label: String,
+    /// The efforts it takes (`low`, `medium`, `high`…), lowest first; empty when it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
 }
 
 /// Why a thread waits on the user.

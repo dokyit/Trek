@@ -538,6 +538,12 @@ impl Turns {
             if let Some((call, _)) = self.background.started.remove(task) {
                 self.background.monitors.remove(&call);
             }
+            // Over, whether or not a new live set follows: a task that's still listed after its
+            // notification would show (and hold an update) as running for good.
+            if self.background.live.iter().any(|(t, ..)| t == task) {
+                self.background.live.retain(|(t, ..)| t != task);
+                out.push(AgentEvent::Background(self.background.list()));
+            }
         }
         // The limit message gets the reset and window Claude reported for it, if it did.
         for ev in out.iter_mut() {
@@ -1859,5 +1865,21 @@ mod tests {
         let ev = step(json!({"type":"system","subtype":"task_notification","task_id":"brc5","tool_use_id":"toolu_m","status":"completed","summary":"Monitor \"tick counter\" stream ended"}));
         assert!(!ev.iter().any(|e| matches!(e, AgentEvent::ToolFinished { .. })), "{ev:?}");
         assert!(turns.background.started.is_empty() && turns.background.monitors.is_empty(), "nothing kept once they're over");
+    }
+
+    #[test]
+    fn a_task_that_reports_its_end_leaves_the_set_without_a_new_one() {
+        let mut turns = Turns::default();
+        let mut step = |v: Value| turns.step(&v, &mut Default::default(), &mut Default::default());
+        let changed = |tasks: Value| json!({"type":"system","subtype":"background_tasks_changed","tasks":tasks});
+        step(changed(json!([{"task_id":"ag1","task_type":"local_agent","description":"Turn-end card"},{"task_id":"sh1","task_type":"local_bash","description":"wait loop"}])));
+        step(json!({"type":"system","subtype":"task_started","task_id":"ag1","tool_use_id":"toolu_a","description":"Turn-end card","is_backgrounded":true,"task_type":"local_agent"}));
+        // Its notification comes, and no new set after it.
+        let ev = step(json!({"type":"system","subtype":"task_notification","task_id":"ag1","tool_use_id":"toolu_a","status":"completed","summary":"done"}));
+        let left: Vec<String> = ev.iter().find_map(|e| match e {
+            AgentEvent::Background(list) => Some(list.iter().map(|t| t.id.clone()).collect()),
+            _ => None,
+        }).expect("the set again");
+        assert_eq!(left, ["sh1"], "the finished agent is gone; the shell still runs");
     }
 }
