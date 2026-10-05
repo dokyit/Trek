@@ -309,12 +309,10 @@ impl ThreadView {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(false, cx)),
-            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
-                if let WorkspaceEvent::Transcript { id, appended } = event
-                    && this.current.as_ref() == Some(id)
-                {
-                    this.sync(*appended, cx);
-                }
+            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| match event {
+                WorkspaceEvent::Transcript { id, appended } if this.current.as_ref() == Some(id) => this.sync(*appended, cx),
+                WorkspaceEvent::TurnChanges { id, end } if this.current.as_ref() == Some(id) => this.changes_in(end, cx),
+                _ => {}
             }),
             cx.observe(&scroller, |_, _, cx| cx.notify()),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -528,6 +526,18 @@ impl ThreadView {
             cx.background_executor().timer(wait).await;
         });
         self._ticker = Some((shimmer, task));
+    }
+
+    /// What the turn ending at item `end` (by id) changed is in, or may have moved: its footer's
+    /// row is measured again, with or without its card.
+    fn changes_in(&mut self, end: &str, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let Some(ix) = self.current.as_ref().and_then(|id| ws.live.get(id)).and_then(|l| l.items.position(end)) else { return };
+        let rows = self.rows(cx);
+        if let Some(row) = rows.row_of(ix).filter(|r| matches!(rows.rows.get(*r), Some(Row::TurnEnd { ix: i }) if *i == ix)) {
+            self.scroller.update(cx, |s, cx| _ = s.remeasure_items(row..row + 1, cx));
+        }
+        cx.notify();
     }
 
     /// Opened sub-agent rows showing what their sub-agent is doing: (row, key, lines shown).
@@ -753,6 +763,12 @@ impl ThreadView {
         let children: Vec<AnyElement> = match &row {
             Row::ToolGroup { open: true, tools, .. } => tools.iter().map(|t| Self::render_row(t.clone(), row_ix, None, view, at, cx)).collect(),
             _ => vec![],
+        };
+        // What a finished turn changed, worked out (off the main thread) the first time its
+        // footer is drawn.
+        let changes = match &row {
+            Row::TurnEnd { ix } => at.workspace.update(cx, |ws, cx| ws.load_turn_changes(&at.thread, *ix, cx)),
+            _ => None,
         };
         let cx: &App = cx;
         let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).cloned() else {
@@ -1084,8 +1100,60 @@ impl ThreadView {
                             ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::CorrectRestatement { scope, thread }));
                         }))
                 });
+                let card = changes.map(|c| {
+                    let end = live.and_then(|l| l.items.id_at(ix)).unwrap_or_default().to_string();
+                    let prefix = format!("changes:{end}:");
+                    let folded: HashSet<String> = view.upgrade().map(|v| v.read(cx).expanded.iter().filter_map(|k| k.strip_prefix(&prefix)).map(str::to_string).collect()).unwrap_or_default();
+                    let fold = {
+                        let (view, prefix) = (view.clone(), prefix.clone());
+                        move |dirs: Vec<String>, fold: Option<bool>, cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                for dir in dirs {
+                                    let key = format!("{prefix}{dir}");
+                                    let folded = this.expanded.contains(&key);
+                                    match fold.unwrap_or(!folded) {
+                                        true => this.expanded.insert(key),
+                                        false => this.expanded.remove(&key),
+                                    };
+                                }
+                                this.expanded_gen += 1;
+                                this.scroller.update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
+                                cx.notify();
+                            });
+                        }
+                    };
+                    let fold = std::rc::Rc::new(fold);
+                    let dirs: Vec<String> = crate::changes_card::folders(&c).into_iter().map(|(d, _)| d).collect();
+                    let (fold1, fold2) = (fold.clone(), fold);
+                    // The diff shows in the Git tool, which only the main window has.
+                    let view_diff = (c.counted == trek_core::changes::Counted::Checkpoints && at.scope == Scope::Main).then(|| {
+                        let (ws, thread, end) = (at.workspace.clone(), at.thread.clone(), end.clone());
+                        std::rc::Rc::new(move |path: Option<String>, _: &mut Window, cx: &mut App| {
+                            let (thread, end) = (thread.clone(), end.clone());
+                            ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::ShowTurnDiff { thread, end, path }));
+                        }) as std::rc::Rc<dyn Fn(Option<String>, &mut Window, &mut App)>
+                    });
+                    let root = c.root.clone();
+                    let actions = crate::changes_card::Actions {
+                        toggle_dir: std::rc::Rc::new(move |dir: &str, cx: &mut App| fold1(vec![dir.to_string()], None, cx)),
+                        fold_all: std::rc::Rc::new(move |fold: bool, cx: &mut App| fold2(dirs.clone(), Some(fold), cx)),
+                        view_diff,
+                        reveal: std::rc::Rc::new(move |f: &trek_core::changes::FileChange, _: &mut Window, cx: &mut App| {
+                            let path = root.join(&f.path);
+                            match path.exists() {
+                                true => cx.reveal_path(&path),
+                                false => {
+                                    if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
+                                        cx.open_with_system(dir);
+                                    }
+                                }
+                            }
+                        }),
+                    };
+                    crate::changes_card::card(ix, &c, &folded, actions, cx)
+                });
                 column(
-                    v_flex().children(confirm).child(
+                    v_flex().children(card).children(confirm).child(
                         h_flex()
                             .group("turn-end")
                             .pt(px(2.))
@@ -2224,6 +2292,35 @@ impl ThreadView {
         let mut docs: Vec<_> = self.md.iter().filter_map(|(key, m)| Some((l.items.position(key)?, m.state.clone()))).collect();
         docs.sort_by_key(|(ix, _)| *ix);
         docs
+    }
+
+    /// The turns' changes as their cards list them, in order: "changes (2): +3 −1", then
+    /// "  NOTES.md new +3 −0" per file. Only what has been worked out (cards drawn).
+    pub(crate) fn describe_changes(&self, cx: &App) -> Vec<String> {
+        let ws = self.workspace.read(cx);
+        let thread = self.current.clone().unwrap_or_default();
+        let Some(live) = ws.live.get(&thread) else { return vec![] };
+        let mut out = vec![];
+        for (ix, item) in live.items.iter().enumerate() {
+            let (Item::TurnEnd { .. }, Some(c)) = (item, ws.turn_changes(&thread, ix)) else { continue };
+            let (a, r) = c.totals();
+            out.push(format!("changes ({}): +{a} −{r}", c.files.len()));
+            for f in &c.files {
+                let status = match &f.status {
+                    trek_core::changes::FileStatus::Added => "new".to_string(),
+                    trek_core::changes::FileStatus::Modified => "changed".to_string(),
+                    trek_core::changes::FileStatus::Deleted => "deleted".to_string(),
+                    trek_core::changes::FileStatus::Renamed { from } => format!("from {from}"),
+                };
+                let lines = match (f.binary, f.lines_known) {
+                    (true, _) => "binary".to_string(),
+                    (false, true) => format!("+{} −{}", f.added, f.removed),
+                    (false, false) => "?".to_string(),
+                };
+                out.push(format!("  {} {status} {lines}", f.path));
+            }
+        }
+        out
     }
 
     /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines

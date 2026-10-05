@@ -268,3 +268,11 @@ Keyboard Shortcuts · Updates · Advanced · About.
 - **Phone** (Settings › Phone): Trek on your iPhone. Off by default; on, Trek serves paired phones
   over TLS pinned to this Mac's certificate, on Wi-Fi or Tailscale. Pairing is a QR code, or the code
   and the Mac's 16-character fingerprint typed in. See docs/MOBILE.md.
+- **Changed files** (under a finished turn's answer): "CHANGED FILES (n) · +a / −r", Collapse all and
+  View diff, then the files by folder, each with its type's badge, a new / deleted / renamed tag and its
+  lines. Counted between the git checkpoints around the turn (the latest turn: against the files as
+  they are), so changes commands made count too; outside git, from the agent's edit tools, and it says
+  so. View diff (or a file) opens the turn's diff in the Git tool. No card when a turn changed nothing.
+  `Workspace::turn_changes` gives the same to the phone. With **Ask agents for a recap** (Settings ›
+  General, on by default) agents that changed things start their last answer with Done / Still to do /
+  Found; advising sub-agents and side chats aren't asked.

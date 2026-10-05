@@ -1,10 +1,11 @@
 //! Source control: branch, changed files with stats, a diff viewer, commit and push. For a thread
 //! in a worktree it reviews what the thread changed against its base (its commits and what isn't
 //! committed yet), and takes the work further: revert a file, commit, push, open a pull request,
-//! merge into the base, remove the worktree.
+//! merge into the base, remove the worktree. It also shows what one turn of a thread changed
+//! (`show_turn`, from the card under the turn's answer): between the checkpoints around it.
 
 use crate::palette;
-use crate::workspace::Workspace;
+use crate::workspace::{TurnRange, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
@@ -171,6 +172,39 @@ struct Target {
     wt: Worktree,
 }
 
+/// One turn's changes, shown in place of the working tree's (`GitPanel::show_turn`).
+#[derive(Clone, Debug)]
+struct TurnView {
+    thread: String,
+    range: TurnRange,
+    files: Vec<FileChange>,
+    /// Where renamed files were, by where they are now.
+    renamed: HashMap<String, String>,
+}
+
+/// A turn's files in the shape the file list draws, in the order its card lists them.
+fn turn_files(changes: &trek_core::changes::TurnChanges) -> (Vec<FileChange>, HashMap<String, String>) {
+    use trek_core::changes::FileStatus;
+    let mut renamed = HashMap::new();
+    let files = crate::changes_card::folders(changes)
+        .into_iter()
+        .flat_map(|(_, files)| files)
+        .map(|f| {
+            let status = match &f.status {
+                FileStatus::Added => "A",
+                FileStatus::Modified => "M",
+                FileStatus::Deleted => "D",
+                FileStatus::Renamed { from } => {
+                    renamed.insert(f.path.clone(), from.clone());
+                    "R"
+                }
+            };
+            FileChange { path: f.path.clone(), status: status.into(), additions: f.added as i64, deletions: f.removed as i64 }
+        })
+        .collect();
+    (files, renamed)
+}
+
 /// What a worktree thread changed, and what can be done with it.
 #[derive(Clone, Debug)]
 struct ReviewState {
@@ -201,16 +235,22 @@ pub struct GitPanel {
     _task: Option<Task<()>>,
     /// Reading the selected file's diff; a newer selection replaces it.
     _diff: Option<Task<()>>,
+    /// A turn's changes on show instead of the working tree's, until closed or another thread
+    /// comes on screen.
+    turn: Option<TurnView>,
 }
 
 impl GitPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let sub = cx.observe(&workspace, |this, ws, cx| {
-            let (cwd, turns, target, preparing) = {
+            let (cwd, turns, target, preparing, thread) = {
                 let ws = ws.read(cx);
-                (ws.current_cwd(), ws.turns_finished, Self::target_in(ws), Self::preparing_in(ws))
+                (ws.current_cwd(), ws.turns_finished, Self::target_in(ws), Self::preparing_in(ws), ws.current_thread().map(|t| t.id.clone()))
             };
+            if this.turn.as_ref().is_some_and(|t| Some(&t.thread) != thread.as_ref()) {
+                this.close_turn(cx);
+            }
             if cwd != this.cwd || turns != this.turns_seen || target != this.target || preparing != this.preparing {
                 this.turns_seen = turns;
                 this.refresh(cx);
@@ -233,9 +273,56 @@ impl GitPanel {
             _subscriptions: vec![sub],
             _task: None,
             _diff: None,
+            turn: None,
         };
         this.refresh(cx);
         this
+    }
+
+    /// Show what the turn ending at `end` (by item id) of `thread` changed, `path`'s diff open
+    /// (else the first file's). A turn that wasn't counted from git has no diff to show: the
+    /// working tree's changes show, `path` among them if it's there.
+    pub fn show_turn(&mut self, thread: String, end: String, path: Option<String>, cx: &mut Context<Self>) {
+        let Some((range, changes)) = self.workspace.read(cx).turn_range(&thread, &end) else {
+            self.close_turn(cx);
+            if let Some(p) = path.filter(|p| self.snap.files.iter().any(|f| &f.path == p)) {
+                self.select(p, cx);
+            }
+            return;
+        };
+        let (files, renamed) = turn_files(&changes);
+        let first = path.filter(|p| files.iter().any(|f| &f.path == p)).or_else(|| files.first().map(|f| f.path.clone()));
+        self.turn = Some(TurnView { thread, range, files, renamed });
+        self.selected = None;
+        self.diff.clear();
+        if let Some(p) = first {
+            self.select(p, cx);
+        }
+        cx.notify();
+    }
+
+    /// Back to the working tree's changes.
+    fn close_turn(&mut self, cx: &mut Context<Self>) {
+        if self.turn.take().is_some() {
+            self.selected = None;
+            self.diff.clear();
+            self._diff = None;
+            cx.notify();
+        }
+    }
+
+    /// The files listed: the turn's on show, else the working tree's.
+    fn files(&self) -> &[FileChange] {
+        match &self.turn {
+            Some(t) => &t.files,
+            None => &self.snap.files,
+        }
+    }
+
+    /// The turn on show (its files) and the file selected, for tests.
+    #[cfg(test)]
+    pub(crate) fn turn_shown(&self) -> Option<(Vec<String>, Option<String>)> {
+        self.turn.as_ref().map(|t| (t.files.iter().map(|f| f.path.clone()).collect(), self.selected.clone()))
     }
 
     fn target_in(ws: &Workspace) -> Option<Target> {
@@ -332,6 +419,11 @@ impl GitPanel {
 
     /// The file list changed: keep the selection if its file is still there.
     fn files_changed(&mut self, cx: &mut Context<Self>) {
+        // A turn's files don't change with the working tree's.
+        if self.turn.is_some() {
+            cx.notify();
+            return;
+        }
         if self.selected.as_ref().is_some_and(|s| !self.snap.files.iter().any(|f| &f.path == s)) {
             self.selected = None;
             self.diff.clear();
@@ -357,6 +449,10 @@ impl GitPanel {
     }
 
     fn select(&mut self, path: String, cx: &mut Context<Self>) {
+        if let Some(turn) = self.turn.clone() {
+            self.select_in_turn(turn, path, cx);
+            return;
+        }
         let (Some(cwd), Some(file)) = (self.cwd.clone(), self.snap.files.iter().find(|f| f.path == path).cloned()) else { return };
         // A worktree's diff is against where it left its base: its commits show too.
         let against_base = self.target.clone().zip(self.merge_base()).zip(self.change(&path));
@@ -375,6 +471,37 @@ impl GitPanel {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.selected.as_deref() == Some(path.as_str()) && this.target == target {
+                    this.diff = lines;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// `select` for a turn on show: the file's diff between the turn's snapshots.
+    fn select_in_turn(&mut self, turn: TurnView, path: String, cx: &mut Context<Self>) {
+        if !turn.files.iter().any(|f| f.path == path) {
+            return;
+        }
+        self.selected = Some(path.clone());
+        let old = turn.renamed.get(&path).cloned();
+        let range = turn.range.clone();
+        let p = path.clone();
+        self._diff = Some(cx.spawn(async move |this, cx| {
+            let lines = cx
+                .background_executor()
+                .spawn(async move {
+                    let repo = trek_core::checkpoint::Repo::find(&range.repo).ok_or_else(|| anyhow::anyhow!("not a git repository any more"));
+                    match repo.and_then(|r| r.diff_patch(&range.from, &range.to, &p, old.as_deref())) {
+                        Ok(text) if text.lines().any(|l| l.starts_with("Binary files ")) => vec![(LineKind::Ctx, "Binary file".to_string())],
+                        Ok(text) => diff_lines(&text),
+                        Err(e) => vec![(LineKind::Ctx, format!("Couldn't read the diff: {e:#}"))],
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.selected.as_deref() == Some(path.as_str()) && this.turn.as_ref().is_some_and(|t| t.range == turn.range) {
                     this.diff = lines;
                     cx.notify();
                 }
@@ -613,10 +740,10 @@ impl GitPanel {
     fn file_list(&self, summary: String, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let total_add: i64 = self.snap.files.iter().map(|f| f.additions).sum();
-        let total_del: i64 = self.snap.files.iter().map(|f| f.deletions).sum();
+        let total_add: i64 = self.files().iter().map(|f| f.additions).sum();
+        let total_del: i64 = self.files().iter().map(|f| f.deletions).sum();
         let selected = self.selected.clone();
-        let revertible = self.target.is_some();
+        let revertible = self.target.is_some() && self.turn.is_none();
         v_flex()
             .id("git-files")
             .max_h(px(260.))
@@ -633,7 +760,7 @@ impl GitPanel {
                     .child(div().text_color(palette::emerald(cx)).child(format!("+{total_add}")))
                     .child(div().pl_1().text_color(palette::red(cx)).child(format!("−{total_del}"))),
             )
-            .children(self.snap.files.iter().map(|f| {
+            .children(self.files().iter().map(|f| {
                 let color = match f.status.as_str() {
                     "??" | "A" => palette::emerald(cx),
                     "D" => palette::red(cx),
@@ -682,7 +809,7 @@ impl GitPanel {
 
     fn diff_view(&self, empty: &'static str, cx: &mut Context<Self>) -> AnyElement {
         if self.selected.is_none() {
-            return super::empty(if self.snap.files.is_empty() { empty } else { "Select a file to view its diff." }, cx).into_any_element();
+            return super::empty(if self.files().is_empty() { empty } else { "Select a file to view its diff." }, cx).into_any_element();
         }
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
@@ -709,6 +836,33 @@ impl GitPanel {
         })
         .size_full();
         div().id("git-diff-view").test_support().size_full().child(list).into_any_element()
+    }
+
+    /// A turn's changes: its files and their diffs, and the way back to the working tree's.
+    fn render_turn(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let n = self.files().len();
+        let header = h_flex()
+            .px_3()
+            .h(px(40.))
+            .gap_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_sm()
+            .child(Icon::new(crate::assets::Lucide::FileDiff).small().text_color(muted))
+            .child(div().min_w_0().truncate().font_medium().child("Changes in this turn"))
+            .child(div().flex_1())
+            .child(Button::new("git-turn-close").small().ghost().icon(IconName::ArrowLeft).label("Working tree").on_click(cx.listener(|this, _, _, cx| this.close_turn(cx))));
+        let summary = if n == 1 { "1 file changed".to_string() } else { format!("{n} files changed") };
+        v_flex()
+            .id("git-turn")
+            .test_support()
+            .size_full()
+            .child(header)
+            .child(self.file_list(summary, cx))
+            .child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(self.diff_view("This turn changed no files.", cx)))
+            .into_any_element()
     }
 
     /// A worktree thread whose folder is gone.
@@ -895,6 +1049,9 @@ impl Render for GitPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
+        if self.turn.is_some() {
+            return self.render_turn(cx);
+        }
         if self.cwd.is_none() {
             return super::empty("Open a project to see its changes.", cx).into_any_element();
         }

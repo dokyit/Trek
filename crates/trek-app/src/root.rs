@@ -119,8 +119,12 @@ impl TrekWindow {
                     }
                 }
                 WorkspaceEvent::CorrectRestatement { .. } => {}
+                WorkspaceEvent::ShowTurnDiff { thread, end, path } => {
+                    let (thread, end, path) = (thread.clone(), end.clone(), path.clone());
+                    this.right_panel.update(cx, |p, cx| p.show_turn_diff(thread, end, path, window, cx));
+                }
                 // The transcript views and the background strip redraw themselves.
-                WorkspaceEvent::Transcript { .. } | WorkspaceEvent::Background { .. } => {}
+                WorkspaceEvent::Transcript { .. } | WorkspaceEvent::Background { .. } | WorkspaceEvent::TurnChanges { .. } => {}
             }),
             cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
