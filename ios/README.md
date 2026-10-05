@@ -102,3 +102,16 @@ Activities, diff view and attachments are phase 2, as is enforcing the "Allow fo
 on the Mac (today the phone requires Face ID or the passcode before it sends it; the Mac takes the
 phone's word). Typed pairing pins only an 8-hex-character prefix of the fingerprint (see the
 limitation in `docs/MOBILE.md`); scanning pins the whole thing. See `docs/MOBILE.md`.
+
+## On your iPhone
+
+- **Over USB, free Apple ID:** `ios/scripts/install-device.sh` builds with your Personal Team and
+  installs on the plugged-in iPhone. It runs for 7 days; run it again to renew.
+- **TestFlight (keeps a build 90 days, updates over the air):** needs the paid Apple Developer
+  Program on the Apple ID in Xcode. Once enrolled:
+  1. Xcode › Settings › Accounts: select your Apple ID so Xcode picks up the paid team.
+  2. App Store Connect › My Apps › + › New App: platform iOS, any free name (e.g. "Trek Agents"),
+     bundle id `dev.trek.TrekMobile` (register it when asked), SKU anything.
+  3. `ios/scripts/testflight.sh` archives, signs and uploads a build (numbered by date and time).
+  4. In App Store Connect › TestFlight, add yourself as an internal tester; install the TestFlight
+     app on the iPhone and accept the invite. Later builds arrive there.
