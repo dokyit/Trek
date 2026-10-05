@@ -2025,7 +2025,7 @@ impl Composer {
             Route::Draft { project } => project.clone(),
             _ => None,
         };
-        let label = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Choose project".into());
+        let label = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "No project".into());
         // The project's colour on its folder, as on its badge in the sidebar.
         let tint = project.as_ref().and_then(|p| ws.project_tint_at(p, cx));
         let projects: Vec<(String, std::path::PathBuf)> = ws
@@ -2048,7 +2048,17 @@ impl Composer {
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
             )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                let mut menu = menu.min_w(px(280.)).max_h(px(360.)).scrollable(true).label("Projects");
+                let ws = ws_entity.clone();
+                // A thread of its own, in no project: a folder of its own to work in.
+                let mut menu = menu
+                    .min_w(px(280.))
+                    .max_h(px(360.))
+                    .scrollable(true)
+                    .item(PopupMenuItem::new("No project").checked(project.is_none()).on_click(move |_, _, cx| {
+                        ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx))
+                    }))
+                    .separator()
+                    .label("Projects");
                 for (name, path) in projects.clone() {
                     let ws = ws_entity.clone();
                     let checked = project.as_ref() == Some(&path);
@@ -2455,12 +2465,14 @@ impl Render for Composer {
         .top_0()
         .left_0()
         .size_full();
+        // Under liquid glass the card is a frosted pane too, a touch firmer than the panel it sits on.
+        let glass = self.workspace.read(cx).glass().is_some();
         let card = v_flex()
             .relative()
             .child(measure)
             .w_full()
             .rounded(px(16.))
-            .bg(theme.secondary)
+            .bg(if glass { theme.secondary.opacity(0.78) } else { theme.secondary })
             .border_1()
             .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else { theme.input })
             // Context row (threads): checkout, branch, activity.

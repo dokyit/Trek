@@ -6,6 +6,56 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::AgentId;
 
+/// Liquid glass on `window`: blur what's behind it when `on`, opaque otherwise. `applied` is what
+/// was last asked of the window, so it's only told when that changes. The window's root paints
+/// the theme's background under everything; under glass it paints nothing, after this frame (it's
+/// drawing this one).
+pub fn apply_glass(window: &mut Window, on: bool, applied: &mut Option<bool>, cx: &mut App) {
+    if *applied == Some(on) {
+        return;
+    }
+    *applied = Some(on);
+    window.set_background_appearance(if on { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque });
+    window.defer(cx, move |window, cx| {
+        if let Some(Some(root)) = window.root::<gpui_kit::component::Root>() {
+            root.update(cx, |root, cx| {
+                root.style().background = on.then(|| gpui_kit::transparent_black().into());
+                cx.notify();
+            });
+        }
+    });
+}
+
+/// The chrome behind the sidebar and title bar: the theme's sidebar colour, or under glass that
+/// colour let `tint` of the way through.
+pub fn chrome_bg(glass: Option<f32>, cx: &App) -> Hsla {
+    let side = cx.theme().sidebar;
+    match glass {
+        Some(t) => side.opacity(t),
+        None => side,
+    }
+}
+
+/// An inset panel's fill (the transcript, the tools panel): the theme's background, or under glass
+/// more of it than the chrome keeps, never under 82%: what's read there stays readable over any
+/// desktop, and the panels read as frosted panes on the glass.
+pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
+    let bg = cx.theme().background;
+    match glass {
+        Some(t) => bg.opacity((t + 0.25).clamp(0.82, 0.95)),
+        None => bg,
+    }
+}
+
+/// An inset panel's edge: under glass a faint rim of light, as glass catches it.
+pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match glass {
+        Some(_) => theme.foreground.opacity(if theme.mode.is_dark() { 0.1 } else { 0.14 }),
+        None => theme.sidebar_border,
+    }
+}
+
 /// Square ghost icon button with a tooltip.
 pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tooltip: &'static str) -> Button {
     Button::new(id).ghost().small().icon(icon).tooltip(tooltip)

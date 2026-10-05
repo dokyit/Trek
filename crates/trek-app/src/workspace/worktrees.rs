@@ -13,14 +13,19 @@ use trek_core::RunState;
 
 impl Workspace {
     /// The project folder `t` belongs to: for a thread in a worktree, the main checkout.
+    /// A thread without a project (in a folder of its own) has none.
     pub fn project_dir(&self, t: &Thread) -> Option<PathBuf> {
-        t.project_id.as_deref().and_then(|p| self.project(p)).map(|p| p.path.clone()).or_else(|| t.cwd.as_deref().map(trek_core::store::project_root))
+        t.project_id
+            .as_deref()
+            .and_then(|p| self.project(p))
+            .map(|p| p.path.clone())
+            .or_else(|| t.cwd.as_deref().filter(|c| !trek_core::paths::is_chat_dir(c)).map(trek_core::store::project_root))
     }
 
     /// Where a new thread started from `t` is composed: its folder, or its project's for a thread
     /// in a worktree (the next thread gets a worktree of its own, or none).
     pub fn draft_folder(&self, t: &Thread) -> Option<PathBuf> {
-        if t.worktree.is_some() { self.project_dir(t) } else { t.cwd.clone() }
+        if t.worktree.is_some() { self.project_dir(t) } else { t.cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)) }
     }
 
     /// The other listed threads working in `id`'s worktree (a fork stays in its thread's).

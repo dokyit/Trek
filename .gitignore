@@ -6,3 +6,6 @@ dist/
 # Private notes and research (kept local, not published)
 reports/
 research_notes/
+
+# Local agent state (worktrees made by Claude Code sessions)
+.claude/

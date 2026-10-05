@@ -312,6 +312,16 @@ impl MarkdownPlugin for PathChips {
         let resolved = data.resolved.clone();
         let tooltip = data.resolved.as_ref().map(|p| trek_core::paths::tildify(p)).unwrap_or_else(|| data.raw.clone());
         let id = SharedString::from(format!("path-{}", data.raw));
+        // Files wear their type's colour, folders the project's (others' folders stay neutral).
+        let tint = if dir {
+            match self.folder.filter(|_| in_folder(&data.raw, self.cwd.as_deref())) {
+                Some(c) => crate::file_icon::tint_of(c, cx),
+                None => crate::file_icon::tint("", cx),
+            }
+        } else {
+            crate::file_icon::tint(path_part(trimmed), cx)
+        };
+        let hover = Hsla { a: (tint.fill.a * 1.8).min(1.), ..tint.fill };
         let chip = h_flex()
             .id(id)
             .test_support()
@@ -320,16 +330,16 @@ impl MarkdownPlugin for PathChips {
             .gap(px(4.))
             .rounded(px(5.))
             .border_1()
-            .border_color(theme.foreground.opacity(0.13))
-            .bg(theme.foreground.opacity(0.045))
+            .border_color(tint.edge)
+            .bg(tint.fill)
             .text_size(size)
             .font_family(theme.mono_font_family.clone())
-            .text_color(theme.foreground.opacity(0.9))
+            .text_color(tint.ink)
             .child(if dir { Icon::new(IconName::Folder).size(size).text_color(folder).into_any_element() } else { crate::file_icon::badge(path_part(trimmed), size, cx) })
             .child(label)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
             .when_some(resolved, |el, path| {
-                el.cursor_pointer().hover(|s| s.bg(cx.theme().foreground.opacity(0.09))).on_click(move |_, _, cx| {
+                el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| {
                     if path.is_dir() {
                         cx.open_with_system(&path)
                     } else {
@@ -428,6 +438,22 @@ mod tests {
         let t = themes["themes"].as_array().unwrap().iter().find(|t| t["name"] == name).expect(name);
         let color = |k: &str| -> Hsla { rgb(u32::from_str_radix(t["colors"][k].as_str().unwrap().trim_start_matches('#'), 16).unwrap()).into() };
         Colors { dark: t["mode"] == "dark", background: color("background"), foreground: color("foreground"), muted: color("muted.foreground") }
+    }
+
+    #[test]
+    fn file_chips_read_in_their_colours_in_both_themes() {
+        const AA: f32 = 4.5;
+        for name in ["Trek Night", "Trek Paper"] {
+            let t = theme(name);
+            let bg = over(t.background, [0.; 3]);
+            for path in ["a.rs", "a.ts", "a.js", "a.py", "a.go", "a.swift", "a.kt", "a.java", "a.rb", "a.md", "a.json", "a.toml", "a.yml", "a.html", "a.css", "a.sh", "a.sql", "a.png"] {
+                let Some(fill) = crate::file_icon::file_type(path).fill else { continue };
+                let tint = crate::file_icon::tint_in(rgb(fill).into(), t.dark);
+                let chip = over(tint.fill, bg);
+                let ratio = contrast(over(tint.ink, chip), chip);
+                assert!(ratio >= AA, "{path} in {name}: {ratio:.2}");
+            }
+        }
     }
 
     #[test]

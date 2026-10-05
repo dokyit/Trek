@@ -141,7 +141,7 @@ fn inline_groups(children: &[Node]) -> Vec<InlineGroup<'_>> {
     let mut ix = 0;
     while ix < children.len() {
         if let Some((false, name)) = inline_html_tag(&children[ix])
-            && let Some(mark) = inline_html_mark(&name)
+            && let Some(mark) = inline_html_mark(&name, html_source(&children[ix]))
             && let Some(close) = matching_close_tag(children, ix, &name)
         {
             groups.push(InlineGroup::Marked(mark, &children[ix + 1..close]));
@@ -174,13 +174,72 @@ fn inline_html_tag(node: &Node) -> Option<(bool, String)> {
     (!name.is_empty()).then_some((closing, name))
 }
 
-fn inline_html_mark(name: &str) -> Option<TextMark> {
+fn inline_html_mark(name: &str, tag: &str) -> Option<TextMark> {
     Some(match name {
         "strong" | "b" => TextMark::default().bold(),
         "em" | "i" => TextMark::default().italic(),
         "u" => TextMark::default().underline(),
         "s" | "del" | "strike" => TextMark::default().strikethrough(),
+        // Trek: coloured text and highlights, as notes write them:
+        // `<span style="color: #e5484d">`, `<font color="red">`, `<mark style="background: …">`.
+        "span" | "font" => {
+            let color = tag_attr(tag, "color").or_else(|| tag_style(tag, "color")).and_then(|v| super::html::parse_mark_color(&v));
+            let background = tag_style(tag, "background-color").or_else(|| tag_style(tag, "background")).and_then(|v| super::html::parse_mark_color(&v));
+            if color.is_none() && background.is_none() {
+                return None;
+            }
+            TextMark { color, highlight: background, ..Default::default() }
+        }
+        "mark" => {
+            let background = tag_attr(tag, "color")
+                .or_else(|| tag_style(tag, "background-color"))
+                .or_else(|| tag_style(tag, "background"))
+                .and_then(|v| super::html::parse_mark_color(&v))
+                .unwrap_or_else(|| gpui::hsla(50. / 360., 0.95, 0.6, 0.35));
+            TextMark { highlight: Some(background), color: tag_style(tag, "color").and_then(|v| super::html::parse_mark_color(&v)), ..Default::default() }
+        }
         _ => return None,
+    })
+}
+
+/// The raw text of an inline HTML node (`<span …>`).
+fn html_source(node: &Node) -> &str {
+    match node {
+        Node::Html(html) => &html.value,
+        _ => "",
+    }
+}
+
+/// An attribute's value in a raw tag: `color` in `<font color="red">`.
+fn tag_attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(name).map(|i| i + from) {
+        let before = lower[..at].chars().last();
+        let rest = lower[at + name.len()..].trim_start();
+        if before.is_some_and(char::is_whitespace) && rest.starts_with('=') {
+            let value = rest[1..].trim_start();
+            let start = tag.len() - value.len();
+            let (quote, body) = match value.chars().next() {
+                Some(q @ ('"' | '\'')) => (Some(q), &tag[start + 1..]),
+                _ => (None, &tag[start..]),
+            };
+            let end = match quote {
+                Some(q) => body.find(q)?,
+                None => body.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(body.len()),
+            };
+            return Some(body[..end].trim().to_string());
+        }
+        from = at + name.len();
+    }
+    None
+}
+
+/// A property in a raw tag's `style`: `color` in `<span style="color: red">`.
+fn tag_style(tag: &str, property: &str) -> Option<String> {
+    tag_attr(tag, "style")?.split(';').find_map(|decl| {
+        let (key, value) = decl.split_once(':')?;
+        (key.trim().eq_ignore_ascii_case(property)).then(|| value.trim().to_string())
     })
 }
 

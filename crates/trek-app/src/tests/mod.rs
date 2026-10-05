@@ -19,6 +19,7 @@ mod readability;
 mod render;
 mod rewind;
 mod screens;
+mod tabs;
 mod windows;
 mod worktrees;
 

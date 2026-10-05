@@ -90,6 +90,42 @@ fn set_dock_badge(count: usize) {
     DOCK_BADGE.with(|b| b.set(count));
 }
 
+/// macOS's Reduce Transparency is on (Accessibility › Display): liquid glass stays off. Asked at
+/// most once a second, as it's read on every frame.
+#[cfg(target_os = "macos")]
+pub fn reduce_transparency() -> bool {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    thread_local!(static ASKED: Cell<Option<(Instant, bool)>> = const { Cell::new(None) });
+    ASKED.with(|a| match a.get() {
+        Some((at, on)) if at.elapsed() < Duration::from_secs(1) => on,
+        _ => {
+            let on = objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency();
+            a.set(Some((Instant::now(), on)));
+            on
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reduce_transparency() -> bool {
+    false
+}
+
+/// Move `path` to the Trash, where the user can still get it back.
+#[cfg(all(target_os = "macos", not(test)))]
+pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))
+}
+
+/// Tests' folders are their own: gone for good, not into the user's Trash.
+#[cfg(any(not(target_os = "macos"), test))]
+pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::remove_dir_all(path).map_err(Into::into)
+}
+
 /// Whether Trek is the frontmost app (a relaunch after an update comes back to the front only then).
 #[cfg(target_os = "macos")]
 pub fn app_is_active() -> bool {

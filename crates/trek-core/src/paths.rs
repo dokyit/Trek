@@ -58,6 +58,29 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Where threads without a project run: each in a folder of its own under here, so an agent has
+/// somewhere to work that isn't the user's home or one of their projects. `~/Trek/Chats`: easy to
+/// find, and no space in the path for an agent's shell commands to trip on. Under the data folder
+/// when that's been moved (tests, `TREK_DATA_DIR`), so a trial run leaves nothing in the home folder.
+pub fn chats_dir() -> PathBuf {
+    let moved = isolated_dir().is_some() || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
+    if moved { data_dir().join("chats") } else { home().join("Trek").join("Chats") }
+}
+
+/// A new folder for a thread without a project: a git repository of its own, so Trek's file
+/// checkpoints (and rewinding a turn) work there as in a project.
+pub fn new_chat_dir() -> std::io::Result<PathBuf> {
+    let dir = chats_dir().join(chrono::Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string());
+    std::fs::create_dir_all(&dir)?;
+    let _ = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    Ok(dir)
+}
+
+/// `path` is (in) a folder for a thread without a project.
+pub fn is_chat_dir(path: &std::path::Path) -> bool {
+    path.starts_with(chats_dir())
+}
+
 pub fn settings_file() -> PathBuf {
     data_dir().join("settings.toml")
 }

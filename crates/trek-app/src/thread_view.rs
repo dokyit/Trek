@@ -1206,17 +1206,22 @@ impl ThreadView {
                             .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
                             .child(icon.small().text_color(theme.muted_foreground))
                             .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(label))
-                            .when_some(file, |el, f| el.child(crate::file_icon::badge(&f, px(13.), cx)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .when(code, |el| el.font_family(theme.mono_font_family.clone()))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(detail),
-                            )
+                            // A file read or changed sits in a chip of its type's colour.
+                            .map(|el| match file {
+                                Some(f) => el.child(
+                                    div().flex_1().min_w_0().flex().child(crate::file_icon::chip(("tool-file", ix), &f, detail.clone(), px(11.5), cx)),
+                                ),
+                                None => el.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .when(code, |el| el.font_family(theme.mono_font_family.clone()))
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(detail),
+                                ),
+                            })
                             .when_some(lines, |el, (a, r)| el.child(crate::working_bar::lines_chip(a, r, cx)))
                             .child(status_el),
                     )
