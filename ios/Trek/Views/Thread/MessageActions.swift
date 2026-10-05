@@ -37,7 +37,8 @@ private struct RowIcon: View {
 struct TurnActions: View {
     /// The turn's `turn_end` item.
     var end: String
-    var secs: Int
+    /// How long it worked (nil for a turn that stopped with an error, a limit or an interruption).
+    var secs: Int?
     var at: Int64?
     var latest: Bool
     /// A turn is running: undo and retry wait for it.
@@ -49,11 +50,13 @@ struct TurnActions: View {
     var body: some View {
         HStack(spacing: 0) {
             RowIconButton(systemImage: "doc.on.doc", label: "Copy response") { act(.copyResponse(end: end)) }
-            Text([at.map { When.clock($0) }, When.duration(secs)].compactMap { $0 }.joined(separator: " · "))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(Trek.muted.opacity(0.85))
-                .fixedSize()
-                .accessibilityLabel("Finished\(at.map { " at \(When.clock($0))" } ?? ""), worked for \(When.duration(secs))")
+            if at != nil || secs != nil {
+                Text([at.map { When.clock($0) }, secs.map { When.duration($0) }].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Trek.muted.opacity(0.85))
+                    .fixedSize()
+                    .accessibilityLabel("Finished\(at.map { " at \(When.clock($0))" } ?? "")\(secs.map { ", worked for \(When.duration($0))" } ?? "")")
+            }
             Rectangle().fill(Trek.border).frame(height: 0.5).padding(.horizontal, 10)
             if latest {
                 RowIconButton(systemImage: "arrow.uturn.backward", label: "Undo this turn", disabled: busy) { act(.undo(end: end)) }

@@ -64,6 +64,31 @@ nonisolated struct Block: Identifiable, Equatable {
                      version: run.reduce(Int64.min) { max($0, $1.seq) }, count: run.count)
     }
 
+    /// The blocks that end a turn, as the Mac sees them: its `turn_end`, else (a turn that failed,
+    /// hit a limit or was interrupted) the error, limit or notice it stopped with. `open`: the last
+    /// turn is still running, so it hasn't ended.
+    static func turnEnds(_ blocks: [Block], open: Bool) -> [String] {
+        var ends: [String] = []
+        var ended = false, worked = false
+        var stop: String?
+        func close() {
+            if !ended, let stop { ends.append(stop) }
+            ended = false; worked = false; stop = nil
+        }
+        for b in blocks {
+            switch b.kind {
+            case .user: close()
+            case .turnEnd: ends.append(b.id); ended = true
+            case .group, .assistant, .resolved: worked = true; stop = nil
+            case .error, .limit: stop = b.id
+            case .notice: if worked { stop = b.id }
+            case .changes, .handoff: break
+            }
+        }
+        if !open { close() }
+        return ends
+    }
+
     static func folds(_ item: TItem) -> Bool {
         switch item.body {
         case .reasoning, .tool: true

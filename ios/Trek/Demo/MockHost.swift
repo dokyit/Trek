@@ -108,8 +108,9 @@ final class MockHost: Backend {
                 // The last `limit` items, and every request still pending.
                 var list = all
                 var more = false
-                if let limit, all.count > limit {
-                    list = all.dropLast(limit).filter(\.isPendingRequest) + all.suffix(limit)
+                // Turns' changed files (`c…`) come with their ends and don't count.
+                if let limit, let cut = Self.cut(all, keeping: limit) {
+                    list = all[..<cut].filter(\.isPendingRequest) + all[cut...]
                     more = true
                 }
                 deliverWire(WireMessage(type: "transcript", re: id, threadId: tid, reset: true, seq: current, items: list, more: more),
@@ -286,6 +287,20 @@ final class MockHost: Backend {
         if case .thread(let tid) = target { thread(tid) } else { nil }
     }
 
+    /// Where to cut so `limit` items that aren't changed files are kept; nil when they all fit.
+    private static func cut(_ all: [TItem], keeping limit: Int) -> Int? {
+        var kept = 0
+        var i = all.count
+        while i > 0 {
+            if !all[i - 1].id.hasPrefix("c") {
+                if kept == limit { return i }
+                kept += 1
+            }
+            i -= 1
+        }
+        return nil
+    }
+
     /// Undo, retry, rewind or fork, as the Mac does them: undo, retry and rewind cut the
     /// transcript back (to before the turn's message) and tell subscribers to load it again.
     private func turnAction(_ tid: String, _ itemID: String, _ action: TurnAction, model: String?, restoreFiles: Bool, id: String?) {
@@ -294,7 +309,7 @@ final class MockHost: Backend {
             return refuse(id, .notFound, "That message isn't in this thread any more.")
         }
         if action != .fork, thread(tid)?.runState == .working {
-            return refuse(id, .conflict, "Stop the running turn first.")
+            return refuse(id, .badRequest, "Stop the running turn to \(action.rawValue).")
         }
         let isMessage = if case .user = all[i].body { true } else { false }
         switch action {
@@ -318,7 +333,11 @@ final class MockHost: Backend {
             items[newID] = all.prefix(end).filter { !$0.isPendingRequest }
             seq[newID] = seq[tid]
             counters[newID] = counters[tid]
-            deliver(.ack(re: id, threadId: newID))
+            if isMessage, case .user(let text, _) = all[i].body {
+                deliver(.ack(re: id, threadId: newID, text: text))
+            } else {
+                deliver(.ack(re: id, threadId: newID))
+            }
             deliver(.thread(t))
         case .rewind:
             guard case .user(let text, _) = all[i].body else { return refuse(id, .badRequest, "Rewind from one of your messages.") }
@@ -331,7 +350,7 @@ final class MockHost: Backend {
                 return refuse(id, .badRequest, "This turn didn't start from a message of yours.")
             }
             cut(tid, at: start)
-            ack(id)
+            if action == .undo { deliver(.ack(re: id, threadId: nil, text: text)) } else { ack(id) }
             rewound(tid, restoreFiles: restoreFiles)
             if action == .retry {
                 if let model {

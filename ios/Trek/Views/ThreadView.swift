@@ -10,7 +10,10 @@ struct ThreadView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        // One identity per thread: when a thread replaces another in the path (a fork, a
+        // notification), the screen is made anew, subscribes, and starts with its own composer.
         ThreadScreen(store: model.store(threadID))
+            .id(threadID)
     }
 }
 
@@ -89,6 +92,7 @@ private struct ThreadScreen: View {
             }
             .onAppear {
                 composer.mode = model.followUpMode
+                if let draft = model.takeDraft(threadID) { composer.draft = draft }
                 model.subscribe(threadID)
                 switch Launch.sheet {
                 case "git": showingGit = true
@@ -189,11 +193,9 @@ private struct Confirmation: Identifiable {
 
     var message: String {
         switch action {
-        case .undo: "Takes back your message and everything after it. Restoring files also puts back the files the agent changed since."
-        case .retry: "Takes back the answer and sends your message again. Restoring files also puts back the files the agent changed since."
-        case .rewind:
-            edit ? "Goes back to before this message and puts it in the composer to change and send again. Restoring files also puts back the files the agent changed since."
-                : "Goes back to before this message; it waits in the composer. Restoring files also puts back the files the agent changed since."
+        case .undo: "Your message and everything after it go; the message waits in the composer."
+        case .retry: "The answer goes, and your message is sent again."
+        case .rewind: edit ? "Back to before this message, to change it and send it again." : "Back to before this message; it waits in the composer."
         case .fork: ""
         }
     }
@@ -241,7 +243,8 @@ private struct TranscriptList: View, Equatable {
         let blocks = store.blocks
         // The latest group, turn and message: open, and with their actions out.
         let lastGroup = blocks.last(where: \.isGroup)?.id
-        let lastTurn = blocks.last(where: \.isTurnEnd)?.id
+        let ends = Set(Block.turnEnds(blocks, open: working))
+        let lastTurn = blocks.last { ends.contains($0.id) }?.id
         let lastUser = blocks.last(where: \.isUser)?.id
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
@@ -255,6 +258,7 @@ private struct TranscriptList: View, Equatable {
                     BlockRow(block: block, threadID: store.id, projectName: projectName,
                              expanded: open,
                              folded: folded[block.id] ?? [],
+                             endsTurn: ends.contains(block.id),
                              latest: block.id == lastTurn || block.id == lastUser,
                              busy: working, retryModels: retryModels,
                              toggle: { groupOpen[block.id] = !open },
@@ -368,6 +372,8 @@ private struct BlockRow: View, Equatable {
     var projectName: String
     var expanded: Bool
     var folded: Set<String>
+    /// An error, limit or notice a turn stopped with: the turn's actions go under it.
+    var endsTurn: Bool
     /// The latest turn or message: its actions are out.
     var latest: Bool
     /// A turn is running: the actions that need the Mac idle are off.
@@ -379,12 +385,24 @@ private struct BlockRow: View, Equatable {
 
     nonisolated static func == (a: BlockRow, b: BlockRow) -> Bool {
         MainActor.assumeIsolated {
-            a.block == b.block && a.expanded == b.expanded && a.folded == b.folded && a.latest == b.latest
+            a.block == b.block && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn && a.latest == b.latest
                 && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels
         }
     }
 
     var body: some View {
+        if endsTurn, !block.isTurnEnd {
+            VStack(alignment: .leading, spacing: 6) {
+                content
+                TurnActions(end: block.itemID, secs: nil, at: nil, latest: latest, busy: busy, models: retryModels, act: act)
+            }
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch block.kind {
         case .user(let text, let images, let at):
             VStack(alignment: .trailing, spacing: 4) {

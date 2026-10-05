@@ -271,8 +271,18 @@ final class AppModel {
                 fullAccessAllowed = s.fullAccess ?? false
             }
         case .thread(let t):
-            withAnimation(.snappy) {
-                if let i = threads.firstIndex(where: { $0.id == t.id }) { threads[i] = t } else { threads.insert(t, at: 0) }
+            if let i = threads.firstIndex(where: { $0.id == t.id }) {
+                let old = threads[i]
+                guard old != t else { break }
+                // A working thread's row changes several times a second (its activity): only a
+                // move between sections is animated, not every update in place.
+                if old.section != t.section || old.runState != t.runState || (old.needs == nil) != (t.needs == nil) {
+                    withAnimation(.snappy) { threads[i] = t }
+                } else {
+                    threads[i] = t
+                }
+            } else {
+                withAnimation(.snappy) { threads.insert(t, at: 0) }
             }
         case .threadRemoved(let id):
             threads.removeAll { $0.id == id }
@@ -425,6 +435,11 @@ final class AppModel {
 
     // MARK: Turn actions
 
+    /// Text for a thread's composer when it opens (a fork from a message).
+    @ObservationIgnored private var drafts: [String: String] = [:]
+
+    func takeDraft(_ tid: String) -> String? { drafts.removeValue(forKey: tid) }
+
     /// Undo, retry or fork a turn (from its `turn_end` item), or rewind or fork from a message
     /// (its `user` item). A fork opens the new thread; a rewind puts the message in `compose`.
     func turnAction(_ tid: String, item: String, _ action: TurnAction, model: String? = nil, restoreFiles: Bool = true,
@@ -433,10 +448,13 @@ final class AppModel {
             guard case .ack(_, let newThread, _, let text) = reply else { return }
             switch action {
             case .fork:
-                if let newThread { self?.openRequest = newThread } else { self?.show("Forked") }
-            case .rewind:
+                guard let self, let newThread else { self?.show("Forked"); return }
+                // Forked from a message: it waits in the new thread's composer.
+                if let text { self.drafts[newThread] = text }
+                self.openRequest = newThread
+            case .rewind, .undo:
                 if let text { compose?(text) }
-            case .undo, .retry:
+            case .retry:
                 break
             }
         }
@@ -799,16 +817,26 @@ struct PairedMac: Codable {
         transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .plain
     }
 
+    /// The Keychain read once: views ask for it as they draw (the Settings tab, the connection
+    /// banner), and a Keychain query on every redraw made them slow to appear.
+    private static var cached: PairedMac??
+
     static func load() -> PairedMac? {
-        guard let data = Keychain.read("paired-mac") else { return nil }
-        return try? JSONDecoder().decode(PairedMac.self, from: data)
+        if let cached { return cached }
+        let paired = Keychain.read("paired-mac").flatMap { try? JSONDecoder().decode(PairedMac.self, from: $0) }
+        cached = .some(paired)
+        return paired
     }
 
     func save() {
         if let data = try? JSONEncoder().encode(self) { Keychain.write("paired-mac", data) }
+        Self.cached = .some(self)
     }
 
-    static func clear() { Keychain.delete("paired-mac") }
+    static func clear() {
+        Keychain.delete("paired-mac")
+        cached = .some(nil)
+    }
 }
 
 enum Device {
