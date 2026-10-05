@@ -225,12 +225,16 @@ private struct TranscriptList: View, Equatable {
     /// The user has scrolled since the thread opened (before that, the view is settling at the bottom).
     @State private var scrolled = false
     @State private var nearTop = false
+    /// Far enough above the latest that the jump-down button is out.
+    @State private var awayFromBottom = false
 
-    private struct TopEdge: Equatable {
+    private struct ScrollEdges: Equatable {
         /// Within a couple of screens of the top.
-        var near: Bool
+        var nearTop: Bool
         /// What's loaded doesn't fill the screen.
         var short: Bool
+        /// More than a screen above the latest.
+        var awayFromBottom: Bool
     }
 
     nonisolated static func == (a: TranscriptList, b: TranscriptList) -> Bool {
@@ -246,6 +250,7 @@ private struct TranscriptList: View, Equatable {
         let ends = Set(Block.turnEnds(blocks, open: working))
         let lastTurn = blocks.last { ends.contains($0.id) }?.id
         let lastUser = blocks.last(where: \.isUser)?.id
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 if !store.loaded {
@@ -285,12 +290,39 @@ private struct TranscriptList: View, Equatable {
             scrolled = true
             if nearTop { model.loadEarlier(store.id) }
         }
-        .onScrollGeometryChange(for: TopEdge.self) { geo in
-            TopEdge(near: geo.contentOffset.y + geo.contentInsets.top < 1400,
-                    short: geo.contentSize.height < geo.containerSize.height)
+        .onScrollGeometryChange(for: ScrollEdges.self) { geo in
+            ScrollEdges(nearTop: geo.contentOffset.y + geo.contentInsets.top < 1400,
+                        short: geo.contentSize.height < geo.containerSize.height,
+                        awayFromBottom: geo.contentSize.height + geo.contentInsets.bottom
+                            - geo.contentOffset.y - geo.containerSize.height > 520)
         } action: { _, edge in
-            nearTop = edge.near
-            if edge.short || (edge.near && scrolled) { model.loadEarlier(store.id) }
+            nearTop = edge.nearTop
+            if edge.awayFromBottom != awayFromBottom { awayFromBottom = edge.awayFromBottom }
+            if edge.short || (edge.nearTop && scrolled) { model.loadEarlier(store.id) }
+        }
+        // Jump back to the latest when the transcript has been left behind.
+        .overlay(alignment: .bottomTrailing) {
+            Group {
+                if awayFromBottom {
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) { proxy.scrollTo("end", anchor: .bottom) }
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Trek.foreground.opacity(0.85))
+                            .frame(width: 38, height: 38)
+                            .background(Trek.surface, in: Circle())
+                            .overlay(Circle().strokeBorder(Trek.border, lineWidth: 0.75))
+                            .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Jump to the latest")
+                    .padding(.trailing, 14)
+                    .padding(.bottom, 12)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy(duration: 0.2), value: awayFromBottom)
         }
         .confirmationDialog(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                             titleVisibility: .visible, presenting: confirming) { c in
@@ -299,6 +331,7 @@ private struct TranscriptList: View, Equatable {
             Button("Cancel", role: .cancel) {}
         } message: { c in
             Text(c.message)
+        }
         }
     }
 
