@@ -6,7 +6,7 @@
 //! behind others still draws.
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|first`,
-//! `send <prompt>`, `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled`
+//! `send <prompt>`, `project <folder>` (added, and a draft in it), `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled`
 //! (fold or open settled history), `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools`,
 //! `range today|week|all` (Basecamp's), `wait <ms>`, `shot <name>`.
 
@@ -101,6 +101,11 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) {
         }
         ("route", other) if other.starts_with("thread:") => ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx),
         ("send", text) => ws.send(text.to_string(), vec![], cx),
+        ("project", path) => {
+            let path = std::path::PathBuf::from(path);
+            ws.add_project(path.clone(), cx);
+            ws.navigate(Route::Draft { project: Some(path) }, cx);
+        }
         ("push", "on") => ws.set_push(true, cx),
         ("push", "test") => ws.test_push(cx),
         ("push", "alert") => {
