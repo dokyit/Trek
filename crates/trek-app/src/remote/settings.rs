@@ -146,6 +146,12 @@ impl Workspace {
         self.settings.inbox.auto_settle_days = s.inbox.auto_settle_days;
         self.settings.appearance.theme = s.appearance.theme;
         self.save_settings(cx);
+        if change.push_test {
+            if !self.settings.mobile.push {
+                return Err(tr::HostError::bad_request("Turn on notifications to your phone first"));
+            }
+            self.test_push(cx);
+        }
         if let Some(choice) = theme.filter(|_| !cfg!(test)) {
             cx.defer(move |cx| crate::apply_theme(choice, None, cx));
         }

@@ -337,6 +337,9 @@ fn a_phone_changes_only_the_settings_it_may() {
         let topic = trek.read(cx, |ws, _| ws.settings.mobile.push_topic.clone());
         let fresh = ask(&trek, cx, set(tr::SettingsChange { new_push_topic: true, ..Default::default() })).unwrap();
         assert_ne!(fresh.push.topic, topic);
+        // A test notification needs notifications on (with them on it goes out to ntfy).
+        let off = ask(&trek, cx, set(tr::SettingsChange { push: Some(false), push_test: true, ..Default::default() }));
+        assert_eq!(off.unwrap_err().code, tr::ErrorCode::BadRequest);
         // What a phone can't touch, it can't even say: the change has no field for it.
         assert!(!trek.read(cx, |ws, _| ws.settings.permissions.full_access_unlocked));
     });

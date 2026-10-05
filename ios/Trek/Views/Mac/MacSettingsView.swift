@@ -175,7 +175,6 @@ private struct AccessPicker: View {
 /// the ntfy app. ntfy's iOS app opens no subscribe link, so the topic is copied and pasted.
 struct PhoneNotificationsSection: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openURL) private var openURL
     @State private var server = ""
     @State private var confirmNewTopic = false
 
@@ -238,10 +237,10 @@ struct PhoneNotificationsSection: View {
                     UIPasteboard.general.string = push.topic
                     model.show("Topic copied")
                 }
-                Button("Open ntfy", systemImage: "arrow.up.forward.app") {
-                    // ntfy's subscribe link, in case the app ever takes it; today its iOS app
-                    // registers no URL scheme, and nothing happens.
-                    if let url = URL(string: push.subscribeUrl ?? "ntfy://") { openURL(url) { _ in } }
+                Button("Send a test", systemImage: "bell.badge") {
+                    model.changeSettings(SettingsChange(pushTest: true)) {
+                        model.show("Sent. It should arrive through ntfy in a moment.")
+                    }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     step(1, "Copy the topic.")

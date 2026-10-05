@@ -303,7 +303,7 @@ struct IdentityChangedCard: View {
             }
             .labeledContentStyle(FingerprintLabelStyle())
             Button(action: pairAgain) {
-                Text("Pair again").fontWeight(.semibold).frame(maxWidth: .infinity)
+                Text("Pair again").fontWeight(.semibold).foregroundStyle(Trek.background).frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .tint(Trek.foreground)

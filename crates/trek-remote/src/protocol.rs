@@ -378,6 +378,9 @@ pub struct SettingsChange {
     /// Make a new random topic (the old one stops getting notes).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_push_topic: bool,
+    /// Send a test notification, once the rest is changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub push_test: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_settle_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -371,6 +371,8 @@ nonisolated struct SettingsChange: Hashable {
     var pushServer: String? = nil
     /// Make a new random topic (the old one stops getting notes).
     var newPushTopic = false
+    /// Send a test notification, once the rest is changed.
+    var pushTest = false
     var autoSettleDays: Int? = nil
     var theme: MacTheme? = nil
 
@@ -386,6 +388,7 @@ nonisolated struct SettingsChange: Hashable {
         if let pushWhen { o["push_when"] = pushWhen.rawValue }
         if let pushServer { o["push_server"] = pushServer }
         if newPushTopic { o["new_push_topic"] = true }
+        if pushTest { o["push_test"] = true }
         if let autoSettleDays { o["auto_settle_days"] = autoSettleDays }
         if let theme { o["theme"] = theme.rawValue }
         return o

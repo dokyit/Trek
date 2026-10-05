@@ -480,7 +480,7 @@ final class AppModel {
     }
 
     /// Save a note's text. If it changed on the Mac since it was opened, the Mac refuses
-    /// (`conflict`, shown as a toast) and `conflict` runs: open it again to see the Mac's version.
+    /// and `conflict` runs (or, without one, the Mac's message shows as a toast).
     func saveNote(_ id: String, body: String, done: ((Note) -> Void)? = nil, conflict: (() -> Void)? = nil) {
         let modified = openNotes[id]?.modified
         request(.saveNote(id: id, body: body, modified: modified)) { [weak self] reply in
@@ -493,8 +493,7 @@ final class AppModel {
                 }
                 done?(n)
             case .error(_, let code, let text):
-                self?.show(text, error: true)
-                if code == .conflict { conflict?() }
+                if code == .conflict, let conflict { conflict() } else { self?.show(text, error: true) }
             default: break
             }
         }
@@ -609,12 +608,14 @@ final class AppModel {
 
     /// Change the Mac's settings. Shown at once; the Mac's answer replaces it (or puts it back,
     /// saying why, when it refuses).
-    func changeSettings(_ change: SettingsChange) {
+    func changeSettings(_ change: SettingsChange, done: (() -> Void)? = nil) {
         let before = macSettings
         if let s = macSettings { macSettings = change.applied(to: s) }
         request(.setSettings(change)) { [weak self] reply in
             switch reply {
-            case .settings(_, let s): self?.macSettings = s
+            case .settings(_, let s):
+                self?.macSettings = s
+                done?()
             case .error(_, _, let text):
                 self?.show(text, error: true)
                 self?.macSettings = before

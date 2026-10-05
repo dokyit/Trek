@@ -469,6 +469,8 @@ whole change):
 
 - `default_model: ""` goes back to the agent's default; `default_access: "full-access"` needs the
   Mac's unlock. `full_access` is read-only. Turning `push` on makes a topic the first time.
+- `push_test: true` sends a test notification once the rest is changed (refused while `push` is
+  off): what the phone's "Send a test" does.
 - ntfy: `topic_url` opens the topic in ntfy's web app. `subscribe_url` (`ntfy://<host>/<topic>`,
   `?secure=false` for an `http://` server) is ntfy's subscribe link, documented for its Android
   app only; the iOS app (Philipp Heckel's, checked against its source as of 2026-06) registers no

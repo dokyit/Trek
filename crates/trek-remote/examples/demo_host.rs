@@ -909,6 +909,9 @@ impl RemoteHost for DemoHost {
         if let Some(server) = change.push_server {
             s.push.server = server;
         }
+        if change.push_test {
+            println!("demo: a test notification would go to {}/{}", s.push.server, s.push.topic);
+        }
         if change.new_push_topic {
             s.push.topic = format!("trek-demo{}", now_ms());
         }
