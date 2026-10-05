@@ -25,6 +25,11 @@ struct SettingsView: View {
                         }
                     }
                     .padding(.vertical, 4)
+                    NavigationLink {
+                        MacSettingsView()
+                    } label: {
+                        Label("Mac settings", systemImage: "slider.horizontal.3")
+                    }
                     if model.mode == .live, let paired = PairedMac.load() {
                         LabeledContent("Address", value: paired.address)
                         SecurityRow(transport: model.transport ?? paired.transport)
@@ -54,6 +59,8 @@ struct SettingsView: View {
                     Text("Steer adds your message to the running turn at its next step. Queue waits until the turn ends. You can switch per message from the composer.")
                 }
 
+                PhoneNotificationsSection()
+
                 AppearanceSection()
 
                 Section {
@@ -78,6 +85,8 @@ struct SettingsView: View {
             .scrollContentBackground(.hidden)
             .background(Trek.background)
             .navigationTitle("Settings")
+            .task { model.loadSettings() }
+            .onChange(of: model.connection) { if model.connection == .connected { model.loadSettings() } }
             .confirmationDialog("Unpair this iPhone?", isPresented: $confirmUnpair, titleVisibility: .visible) {
                 Button("Unpair", role: .destructive) { model.leave() }
             } message: {

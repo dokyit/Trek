@@ -42,7 +42,10 @@ struct TrekApp: App {
 enum Launch {
     static var demo: Bool { UserDefaults.standard.bool(forKey: "TrekDemo") }
     static var open: String? { UserDefaults.standard.string(forKey: "TrekOpen") }
+    /// `basecamp`, `notes`, `settings` or `search`.
     static var tab: String? { UserDefaults.standard.string(forKey: "TrekTab") }
+    /// A note to open on the Notes tab.
+    static var note: String? { UserDefaults.standard.string(forKey: "TrekNote") }
     static var sheet: String? { UserDefaults.standard.string(forKey: "TrekSheet") }
     static var appearance: String? { UserDefaults.standard.string(forKey: "TrekAppearance") }
     /// A text size for screenshots: `small`, `large`, `xxLarge`…
@@ -53,7 +56,7 @@ enum Launch {
 }
 
 enum MainTab: Hashable {
-    case threads, settings, search
+    case threads, basecamp, notes, settings, search
 }
 
 struct RootView: View {
@@ -122,6 +125,8 @@ struct MainView: View {
     @Environment(AppModel.self) private var model
     @State private var tab: MainTab = .threads
     @State private var path: [String] = []
+    @State private var basecampPath: [BasecampRoute] = []
+    @State private var notesPath: [String] = []
     @State private var showNew = false
 
     /// No "New thread" while the Mac can't be trusted or has refused this iPhone.
@@ -138,6 +143,12 @@ struct MainView: View {
                 ThreadsView(path: $path, showNew: $showNew)
             }
             .badge(model.needsYouCount)
+            Tab("Basecamp", systemImage: "mountain.2", value: MainTab.basecamp) {
+                BasecampView(path: $basecampPath, showNew: $showNew)
+            }
+            Tab("Notes", systemImage: "note.text", value: MainTab.notes) {
+                NotesView(path: $notesPath)
+            }
             Tab("Settings", systemImage: "gearshape", value: MainTab.settings) {
                 SettingsView()
             }
@@ -149,7 +160,7 @@ struct MainView: View {
         // The accessory stays on every tab. Shown on Threads alone, it left the bar to shrink to
         // its tabs on the others, and the bar resizing under the moving selection sent the
         // selection through Search on its way from Threads to Settings.
-        .modifier(NewThreadAccessoryModifier(enabled: path.isEmpty && canStartThreads) {
+        .modifier(NewThreadAccessoryModifier(enabled: !inside && canStartThreads) {
             NewThreadAccessory(working: model.workingCount, needsYou: model.needsYouCount) { showNew = true }
         })
         .sheet(isPresented: $showNew) {
@@ -160,11 +171,17 @@ struct MainView: View {
         }
         .onAppear {
             switch Launch.tab {
+            case "basecamp": tab = .basecamp
+            case "notes": tab = .notes
             case "settings": tab = .settings
             case "search": tab = .search
             default: break
             }
             if let open = Launch.open { path = [open] }
+            if let note = Launch.note {
+                tab = .notes
+                notesPath = [note]
+            }
             if Launch.sheet == "new" { showNew = true }
             openRequested()
         }
@@ -173,6 +190,16 @@ struct MainView: View {
 }
 
 extension MainView {
+    /// In a thread or a note (the tab bar hides there, and the pill with it).
+    fileprivate var inside: Bool {
+        switch tab {
+        case .threads: !path.isEmpty
+        case .basecamp: basecampPath.contains { if case .thread = $0 { true } else { false } }
+        case .notes: !notesPath.isEmpty
+        case .settings, .search: false
+        }
+    }
+
     /// Bring up the thread a notification asked for.
     fileprivate func openRequested() {
         guard let id = model.openRequest else { return }

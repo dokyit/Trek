@@ -188,8 +188,16 @@ enum DemoMac {
         return line.map { String($0.prefix(80)) } ?? "Untitled"
     }
 
+    /// A line without its markdown, as the Mac's list shows it (`trek_core::notes::plain`).
+    static func plain(_ line: String) -> String {
+        line.replacing(/^\s*(#+\s*|>\s?|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/, with: "")
+            .replacing(/<[^>]*>/, with: "")
+            .replacing(/[*_~`]/, with: "")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
     static func summary(_ n: Note) -> NoteSummary {
-        let preview = n.body.split(separator: "\n").dropFirst().map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(3).joined(separator: " ")
+        let preview = n.body.split(separator: "\n").map { plain(String($0)) }.filter { !$0.isEmpty }.dropFirst().prefix(3).joined(separator: " ")
         return NoteSummary(id: n.id, title: n.title, preview: preview, modified: n.modified)
     }
 
