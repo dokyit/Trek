@@ -153,6 +153,9 @@ nonisolated struct ProjectRef: Codable, Hashable {
 nonisolated struct AgentRef: Codable, Hashable {
     var key: String
     var name: String
+    /// The Mac's logo for it: `claude-code`, `codex`, `opencode`, `gemini`, `openai`… (its
+    /// `assets/logos/{dark,light}/<logo>.png`); nil draws a neutral glyph.
+    var logo: String? = nil
 }
 
 nonisolated struct Needs: Codable, Hashable {
@@ -183,6 +186,72 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     var effort: String? = nil
     var access: Access? = nil
     var plan: Bool? = nil
+    /// The effort as the Mac labels it ("Extra high").
+    var effortLabel: String? = nil
+    /// How full its context window is (the composer's ring), once the thread has been opened.
+    var context: ContextUse? = nil
+    /// What it cost, as the line under the Mac's composer says it, once the thread has been opened.
+    var cost: Cost? = nil
+    /// Its sub-agents at work: Trek's, and its agent's own.
+    var subAgents: [SubAgent]? = nil
+    /// What its agent runs in the background (dev servers, watchers), by title.
+    var background: [String]? = nil
+    /// In a worktree: the branch it started from and merges into (`branch` is the worktree's).
+    var base: String? = nil
+    /// Its folder's git state, as last read.
+    var git: GitSummary? = nil
+}
+
+nonisolated struct ContextUse: Codable, Hashable {
+    var used: Int64
+    var window: Int64
+    /// 0–100.
+    var percent: Int
+}
+
+nonisolated enum Billing: String, LenientEnum {
+    /// A subscription covers it: the figure is what it would cost at API prices.
+    case plan
+    /// Billed per token.
+    case metered
+    /// A model on the Mac: nothing is billed.
+    case local
+    case unknown
+    static var fallback: Billing { .unknown }
+}
+
+nonisolated struct Cost: Codable, Hashable {
+    /// "$1.24", "≈ $1.24 at API prices", "12.3K tokens · price unknown", "202K tokens · free".
+    var label: String
+    var billing: Billing? = nil
+    /// "Claude Max" when billed through a plan.
+    var plan: String? = nil
+    /// "Included in your Claude Max plan".
+    var detail: String? = nil
+}
+
+nonisolated enum SubAgentState: String, LenientEnum {
+    case running, needsYou = "needs_you", done, failed, stopped
+    static var fallback: SubAgentState { .running }
+}
+
+nonisolated struct SubAgent: Codable, Hashable {
+    /// Whose logo it wears.
+    var agent: AgentRef
+    /// "Sol" for one Trek runs; nil for the agent's own.
+    var model: String? = nil
+    var title: String
+    var state: SubAgentState
+    /// When it started (ms): it's been at work for now minus this.
+    var since: Int64? = nil
+}
+
+nonisolated struct GitSummary: Codable, Hashable {
+    /// Files with changes not committed.
+    var changed: Int = 0
+    var ahead: Int = 0
+    var behind: Int = 0
+    var defaultBranch: String? = nil
 }
 
 nonisolated struct ProjectSummary: Codable, Identifiable, Hashable {
@@ -208,7 +277,10 @@ nonisolated struct AgentOption: Codable, Identifiable, Hashable {
     var name: String
     var defaultModel: String?
     var models: [ModelOption]
+    /// As `AgentRef.logo`.
+    var logo: String? = nil
     var id: String { key }
+    var ref: AgentRef { AgentRef(key: key, name: name, logo: logo) }
 }
 
 nonisolated struct QuestionOption: Codable, Hashable {
@@ -275,7 +347,37 @@ nonisolated enum ItemBody: Hashable {
     case error(String)
     case limit(text: String, resetsAt: Int64?)
     case handoff(from: String, to: String)
+    /// The files a turn changed, after its `turnEnd`.
+    case changes(TurnChanges)
     case unknown(String)
+}
+
+nonisolated enum FileStatus: String, LenientEnum {
+    case added, modified, deleted, renamed
+    /// New and not added to git yet (git status only; a turn's changes say `added`).
+    case untracked
+    static var fallback: FileStatus { .modified }
+}
+
+/// A changed file: in a turn's changes, or in a folder's git status.
+nonisolated struct ChangedFile: Codable, Hashable, Identifiable {
+    var path: String
+    var status: FileStatus
+    /// A renamed file's old path.
+    var from: String? = nil
+    var added: Int = 0
+    var removed: Int = 0
+    /// No line counts: it isn't text.
+    var binary: Bool? = nil
+    var id: String { path }
+    var name: String { (path as NSString).lastPathComponent }
+}
+
+/// What a turn changed, with its totals.
+nonisolated struct TurnChanges: Hashable {
+    var files: [ChangedFile]
+    var added: Int
+    var removed: Int
 }
 
 nonisolated struct TItem: Identifiable, Hashable, Decodable {
@@ -317,6 +419,7 @@ nonisolated struct TItem: Identifiable, Hashable, Decodable {
         var resetsAt: Int64?
         var from: String?
         var to: String?
+        var files: [ChangedFile]?
     }
 
     init(from decoder: Decoder) throws {
@@ -348,6 +451,10 @@ nonisolated struct TItem: Identifiable, Hashable, Decodable {
         case "error": body = .error(text)
         case "limit": body = .limit(text: text, resetsAt: r.resetsAt)
         case "handoff": body = .handoff(from: r.from ?? "", to: r.to ?? "")
+        case "changes":
+            let files = r.files ?? []
+            body = .changes(TurnChanges(files: files, added: r.added ?? files.reduce(0) { $0 + $1.added },
+                                        removed: r.removed ?? files.reduce(0) { $0 + $1.removed }))
         default: body = .unknown(r.kind)
         }
     }
@@ -389,9 +496,19 @@ nonisolated enum ServerMessage {
     case transcript(re: String?, threadId: String, reset: Bool, seq: Int64, items: [TItem])
     case item(threadId: String, item: TItem)
     case transcriptReset(String)
-    case ack(re: String?, threadId: String?)
+    /// `open`: the phone carries on by itself (`/new` sent to a thread opens the new-thread sheet).
+    case ack(re: String?, threadId: String?, open: OpenScreen? = nil)
     case pong(re: String?)
     case error(re: String?, code: ErrorCode, message: String)
+    case usage(re: String?, Usage)
+    case basecamp(re: String?, Basecamp)
+    case notes(re: String?, [NoteSummary])
+    case note(re: String?, Note)
+    case gitStatus(re: String?, GitStatus)
+    case gitDiff(re: String?, GitDiff)
+    case gitBranches(re: String?, GitBranches)
+    case commands(re: String?, threadId: String, [CommandInfo])
+    case settings(re: String?, MacSettings)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -410,6 +527,11 @@ nonisolated enum ServerMessage {
         var item: TItem?
         var code: ErrorCode?
         var message: String?
+        var fullAccess: Bool?
+        var open: OpenScreen?
+        var notes: [NoteSummary]?
+        var note: Note?
+        var commands: [CommandInfo]?
     }
 
     static let decoder: JSONDecoder = {
@@ -428,7 +550,8 @@ nonisolated enum ServerMessage {
             guard let host = r.host else { throw ProtocolError.missing("welcome") }
             return .welcome(re: r.re, host: host)
         case "snapshot":
-            return .snapshot(Snapshot(threads: r.threads ?? [], projects: r.projects ?? [], agents: r.agents ?? []))
+            return .snapshot(Snapshot(threads: r.threads ?? [], projects: r.projects ?? [], agents: r.agents ?? [],
+                                      fullAccess: r.fullAccess))
         case "thread":
             guard let t = r.thread else { throw ProtocolError.missing("thread") }
             return .thread(t)
@@ -439,9 +562,21 @@ nonisolated enum ServerMessage {
             guard let item = r.item, let tid = r.threadId else { throw ProtocolError.missing("item") }
             return .item(threadId: tid, item: item)
         case "transcript_reset": return .transcriptReset(r.threadId ?? "")
-        case "ack": return .ack(re: r.re, threadId: r.threadId)
+        case "ack": return .ack(re: r.re, threadId: r.threadId, open: r.open)
         case "pong": return .pong(re: r.re)
         case "error": return .error(re: r.re, code: r.code ?? .unknown, message: r.message ?? "")
+        // Replies that are a value whole: decoded from the message itself.
+        case "usage": return .usage(re: r.re, try decoder.decode(Usage.self, from: data))
+        case "basecamp": return .basecamp(re: r.re, try decoder.decode(Basecamp.self, from: data))
+        case "notes": return .notes(re: r.re, r.notes ?? [])
+        case "note":
+            guard let note = r.note else { throw ProtocolError.missing("note") }
+            return .note(re: r.re, note)
+        case "git_status": return .gitStatus(re: r.re, try decoder.decode(GitStatus.self, from: data))
+        case "git_diff": return .gitDiff(re: r.re, try decoder.decode(GitDiff.self, from: data))
+        case "git_branches": return .gitBranches(re: r.re, try decoder.decode(GitBranches.self, from: data))
+        case "commands": return .commands(re: r.re, threadId: r.threadId ?? "", r.commands ?? [])
+        case "settings": return .settings(re: r.re, try decoder.decode(MacSettings.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -482,6 +617,26 @@ nonisolated enum ClientMessage {
     case answer(threadId: String, requestId: String, response: AnswerResponse)
     case interrupt(threadId: String)
     case markSeen(threadId: String)
+    case usage
+    case basecamp(BasecampRange)
+    case notes
+    case note(id: String)
+    case createNote(body: String)
+    /// `modified`: the note's `modified` as the phone read it (the Mac refuses if it changed since).
+    case saveNote(id: String, body: String, modified: Int64?)
+    case deleteNote(id: String)
+    case gitStatus(GitTarget)
+    case gitDiff(GitTarget, path: String)
+    case gitCommit(GitTarget, message: String)
+    case gitPush(GitTarget)
+    case gitBranches(GitTarget)
+    case gitSwitch(GitTarget, branch: String)
+    case worktreeMerge(threadId: String)
+    /// Without `force` the Mac refuses (`conflict`, saying what) when work would be lost.
+    case worktreeRemove(threadId: String, deleteBranch: Bool, force: Bool)
+    case commands(threadId: String)
+    case settings
+    case setSettings(SettingsChange)
     case ping
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
@@ -525,6 +680,45 @@ nonisolated enum ClientMessage {
             o = ["type": "interrupt", "thread_id": threadId]
         case .markSeen(let threadId):
             o = ["type": "mark_seen", "thread_id": threadId]
+        case .usage:
+            o = ["type": "usage"]
+        case .basecamp(let range):
+            o = ["type": "basecamp", "range": range.rawValue]
+        case .notes:
+            o = ["type": "notes"]
+        case .note(let id):
+            o = ["type": "note", "note_id": id]
+        case .createNote(let body):
+            o = ["type": "create_note", "body": body]
+        case .saveNote(let id, let body, let modified):
+            o = ["type": "save_note", "note_id": id, "body": body]
+            if let modified { o["modified"] = modified }
+        case .deleteNote(let id):
+            o = ["type": "delete_note", "note_id": id]
+        case .gitStatus(let target):
+            o = target.json.merging(["type": "git_status"]) { $1 }
+        case .gitDiff(let target, let path):
+            o = target.json.merging(["type": "git_diff", "path": path]) { $1 }
+        case .gitCommit(let target, let message):
+            o = target.json.merging(["type": "git_commit", "message": message]) { $1 }
+        case .gitPush(let target):
+            o = target.json.merging(["type": "git_push"]) { $1 }
+        case .gitBranches(let target):
+            o = target.json.merging(["type": "git_branches"]) { $1 }
+        case .gitSwitch(let target, let branch):
+            o = target.json.merging(["type": "git_switch", "branch": branch]) { $1 }
+        case .worktreeMerge(let threadId):
+            o = ["type": "worktree_merge", "thread_id": threadId]
+        case .worktreeRemove(let threadId, let deleteBranch, let force):
+            o = ["type": "worktree_remove", "thread_id": threadId]
+            if deleteBranch { o["delete_branch"] = true }
+            if force { o["force"] = true }
+        case .commands(let threadId):
+            o = ["type": "commands", "thread_id": threadId]
+        case .settings:
+            o = ["type": "settings"]
+        case .setSettings(let change):
+            o = change.json.merging(["type": "set_settings"]) { $1 }
         case .ping:
             o = ["type": "ping"]
         }

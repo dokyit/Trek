@@ -48,7 +48,7 @@ enum Block: Identifiable {
             case .error(let s): out.append(.error(item, s))
             case .limit(let s, let at): out.append(.limit(item, s, at))
             case .handoff(let a, let b): out.append(.handoff(item, a, b))
-            case .reasoning, .tool, .unknown: break
+            case .reasoning, .tool, .changes, .unknown: break
             }
         }
         flush()
