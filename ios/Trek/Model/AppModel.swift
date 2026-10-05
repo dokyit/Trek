@@ -286,6 +286,7 @@ final class AppModel {
             }
         case .threadRemoved(let id):
             threads.removeAll { $0.id == id }
+            if let host = cacheHost ?? currentCacheHost { TranscriptCache.remove(host: host, thread: id) }
         case .transcript(let re, let tid, let reset, let seq, let items, let more):
             if let s = stores[tid] {
                 s.applyReply(reset: reset, seq: seq, items: items, more: more)
