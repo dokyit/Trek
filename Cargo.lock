@@ -8729,7 +8729,7 @@ dependencies = [
 
 [[package]]
 name = "trek-agents"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8750,7 +8750,7 @@ dependencies = [
 
 [[package]]
 name = "trek-app"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8783,7 +8783,7 @@ dependencies = [
 
 [[package]]
 name = "trek-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8809,7 +8809,7 @@ dependencies = [
 
 [[package]]
 name = "trek-ipc"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "serde_json",
@@ -8817,7 +8817,7 @@ dependencies = [
 
 [[package]]
 name = "trek-mcp"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
