@@ -175,6 +175,10 @@ pub struct ThreadView {
     draws: u64,
     /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
     expanded: HashSet<String>,
+    /// What a thread off screen kept: documents, expansion, scroll. Cycling back to it restores
+    /// this instead of parsing and measuring again. `stash_order` is oldest first, capped.
+    stashed: HashMap<String, Stashed>,
+    stash_order: std::collections::VecDeque<String>,
     /// Masked fields for the question card's secret questions, in order, and the request they
     /// were last shown for (a new card starts them empty).
     secrets: (Option<String>, Vec<Entity<InputState>>),
@@ -255,6 +259,22 @@ const FILES_SHOWN: usize = 8;
 /// text laid out, and a day's thread has thousands of answers. Scrolled far past, a document is
 /// dropped and parsed again when its row next comes into view.
 const MD_KEPT: usize = 400;
+
+/// The most threads whose view state is parked at once.
+const STASH_KEPT: usize = 12;
+
+/// What a thread's view is parked with while another is on screen.
+struct Stashed {
+    md: HashMap<String, Markdown>,
+    expanded: HashSet<String>,
+    expanded_gen: u64,
+    count: usize,
+    revision: u64,
+    end: Option<usize>,
+    scroller: Entity<MessageScrollerState>,
+    rows_cache: Option<((Option<String>, u64, u64, Option<usize>), std::rc::Rc<Rows>)>,
+    activity_lines: HashMap<String, usize>,
+}
 
 struct Markdown {
     state: Entity<TextViewState>,
@@ -342,6 +362,8 @@ impl ThreadView {
             md: HashMap::new(),
             draws: 0,
             expanded: HashSet::new(),
+            stashed: HashMap::new(),
+            stash_order: Default::default(),
             secrets: (None, vec![]),
             plan_md: None,
             rows_cache: Default::default(),
@@ -368,14 +390,79 @@ impl ThreadView {
         self.active && !self.workspace.read(cx).settings.appearance.reduce_motion
     }
 
+    /// Park the thread leaving the screen: its parsed documents, expansion, measured rows and
+    /// scroll position go into `stashed` (the few most recent), so cycling back doesn't rebuild.
+    fn park(&mut self, cx: &mut Context<Self>) {
+        let Some(old) = self.current.clone() else { return };
+        if self.workspace.read(cx).thread(&old).is_none() {
+            return;
+        }
+        self.stash_order.retain(|id| *id != old);
+        self.stashed.insert(
+            old.clone(),
+            Stashed {
+                md: std::mem::take(&mut self.md),
+                expanded: std::mem::take(&mut self.expanded),
+                expanded_gen: self.expanded_gen,
+                count: self.count,
+                revision: self.revision,
+                end: self.end,
+                scroller: self.scroller.clone(),
+                rows_cache: self.rows_cache.borrow_mut().take(),
+                activity_lines: std::mem::take(&mut self.activity_lines),
+            },
+        );
+        self.stash_order.push_back(old);
+        while self.stash_order.len() > STASH_KEPT {
+            if let Some(evict) = self.stash_order.pop_front() {
+                self.stashed.remove(&evict);
+            }
+        }
+        self.watch_scroller(cx);
+    }
+
+    /// Scroll activity on the current scroller repaints this view (the jump-to-latest tail).
+    fn watch_scroller(&mut self, cx: &mut Context<Self>) {
+        self.scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        let scroller = self.scroller.clone();
+        self._subscriptions.push(cx.observe(&scroller, |_, _, cx| cx.notify()));
+    }
+
+    /// Bring back what `id` was parked with. False when it was never parked (or was evicted).
+    fn restore(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.stashed.remove(id) else { return false };
+        self.stash_order.retain(|t| t != id);
+        self.md = s.md;
+        self.expanded = s.expanded;
+        self.expanded_gen = s.expanded_gen;
+        self.count = s.count;
+        self.revision = s.revision;
+        self.end = s.end;
+        self.scroller = s.scroller;
+        *self.rows_cache.borrow_mut() = s.rows_cache;
+        self.activity_lines = s.activity_lines;
+        self.shown = None;
+        let scroller = self.scroller.clone();
+        self._subscriptions.push(cx.observe(&scroller, |_, _, cx| cx.notify()));
+        true
+    }
+
     /// Bring row state in line with the workspace transcript without rebuilding everything.
     /// `appended`: only text was added to the messages already streaming. Their documents redraw
     /// this view once the new text is parsed, so it doesn't redraw before that (it would show the
     /// same text again).
     fn sync(&mut self, appended: bool, cx: &mut Context<Self>) {
-        let ws = self.workspace.read(cx);
-        let id = ws.thread_id_in(&self.scope).map(str::to_string);
+        let id = self.workspace.read(cx).thread_id_in(&self.scope).map(str::to_string);
         let switched = id != self.current;
+        // What the thread leaving the screen was parked with comes out of the way first, so a
+        // restored thread's documents diff and re-measure like a thread still on screen.
+        let mut restored = false;
+        if switched {
+            self.park(cx);
+            restored = id.as_ref().is_some_and(|id| self.restore(id, cx));
+        }
+        let switched = switched && !restored;
+        let ws = self.workspace.read(cx);
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let revision = live.map_or(0, |l| l.revision);
         let opened = live.and_then(|l| l.opened.clone());
@@ -439,6 +526,10 @@ impl ThreadView {
             self.revision = 0;
             self.flash = None;
             self.scroller.update(cx, |s, cx| s.reset(0, cx));
+        } else if restored {
+            self.current = id;
+            self.confirm = None;
+            self.flash = None;
         }
         let quiet = appended && !switched && self.shown.as_ref().is_some_and(|s| Shown { revision, ..s.clone() } == shown);
         // A sub-agent that moved on may have changed its row's height (its answer's preview).

@@ -888,6 +888,8 @@ pub struct Workspace {
     /// Bumped when a phone changes a note: the Notes screen reads them again.
     pub notes_epoch: u64,
     pub git_info: HashMap<PathBuf, GitInfo>,
+    /// When each folder's git info was last asked for (refresh_git throttles to it).
+    git_fetched: HashMap<PathBuf, Instant>,
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
@@ -1141,6 +1143,7 @@ impl Workspace {
             turns_finished: 0,
             notes_epoch: 0,
             git_info: HashMap::new(),
+            git_fetched: HashMap::new(),
             agent_status: HashMap::new(),
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
@@ -1599,11 +1602,16 @@ impl Workspace {
 
     pub fn refresh_git(&mut self, cx: &mut Context<Self>) {
         if let Some(cwd) = self.current_cwd() {
+            // Tab/project cycling lands here: a folder read moments ago doesn't need another.
+            if self.git_fetched.get(&cwd).is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+                return;
+            }
             self.refresh_git_at(cwd, cx);
         }
     }
 
     pub fn refresh_git_at(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        self.git_fetched.insert(cwd.clone(), Instant::now());
         let task = cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
@@ -1644,7 +1652,10 @@ impl Workspace {
         if let Route::Thread(id) = &route {
             let id = id.clone();
             self.open_tab(&id);
-            self.mutate_thread(&id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
+            // Seen already: skip the store write and the redraw it would schedule.
+            if self.thread(&id).is_some_and(|t| t.is_unseen()) {
+                self.mutate_thread(&id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
+            }
             self.ensure_loaded(&id, cx);
         }
         if let Route::Draft { project: Some(p) } = &route {

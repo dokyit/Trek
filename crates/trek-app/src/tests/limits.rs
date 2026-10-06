@@ -891,3 +891,44 @@ fn a_stopped_or_failed_turn_asked_to_wrap_up_does_not_pause() {
         assert!(pause(&trek, cx, &id).is_none());
     });
 }
+
+#[test]
+fn a_reset_that_passed_while_parked_is_banked_in_usage_and_applies() {
+    run(async |cx| {
+        let trek = open(cx);
+        // The mock agent reports limits, so the Usage card lists it.
+        trek.update(cx, |ws, _| {
+            ws.agents.push(trek_core::detect::DetectedAgent {
+                agent: mock(),
+                name: "Mock agent".into(),
+                path: None,
+                version: None,
+                availability: trek_core::detect::Availability::Ready,
+                models: vec!["mock-swift".into()],
+                install_hint: None,
+            });
+        });
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Its reset came and went while it stayed parked (the "Ask" setting doesn't resume).
+        let now = trek.read(cx, |ws, _| ws.now());
+        trek.update(cx, |ws, cx| {
+            ws.store
+                .update_thread(&id, |t| t.paused = Some(Pause::new("hit the limit".into(), Some(now - 60_000), LimitScope::Session, now - 120_000, false)))
+                .unwrap();
+            ws.reload(cx);
+            ws.agent_status.insert(mock().key(), usage(now, &[("5-hour limit", "5h", 96.0, 3_600_000)]).unwrap());
+        });
+        assert_eq!(trek.read(cx, |ws, _| ws.banked_resets(&mock())), vec![id.clone()], "the spent-nowhere reset is banked");
+
+        // The Usage card offers it; applying it resumes the thread at once.
+        trek.click(cx, "usage");
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("banked-{}", mock().key())));
+        assert!(trek.visible(cx, format!("banked-apply-{}", mock().key())), "the apply affordance is drawn");
+        trek.update(cx, |ws, cx| ws.apply_banked(&mock(), cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(pause(&trek, cx, &id).is_none(), "the pause is spent");
+        assert_eq!(said(&trek, cx, &id).last().map(String::as_str), Some(CONTINUE));
+    });
+}

@@ -34,6 +34,9 @@ pub struct Sidebar {
     /// The live groups (quiet threads by project) that are open: apart from `open_projects`,
     /// which opens the settled ones.
     open_live_projects: HashSet<String>,
+    /// Live and settled project groups the user folded away (session state, like the open sets).
+    collapsed_live: HashSet<String>,
+    collapsed_settled: HashSet<String>,
     filter_open: bool,
     usage_open: bool,
     updater_open: bool,
@@ -106,6 +109,8 @@ impl Sidebar {
             active: window.is_window_active(),
             open_projects: Default::default(),
             open_live_projects: Default::default(),
+            collapsed_live: Default::default(),
+            collapsed_settled: Default::default(),
             filter_open: false,
             // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
@@ -606,10 +611,11 @@ impl Sidebar {
     /// (a count), and a "new thread here" button on hover; wrapped in the project menu.
     fn group_header(
         &self,
-        prefix: &str,
+        prefix: &'static str,
         pid: &str,
         name: String,
         extra: Option<AnyElement>,
+        fold: Option<bool>,
         paths: &HashMap<String, std::path::PathBuf>,
         looks: &HashMap<String, crate::ui::ProjectLook>,
         cx: &mut Context<Self>,
@@ -630,15 +636,41 @@ impl Sidebar {
             .rounded(px(8.))
             .text_sm()
             .text_color(theme.muted_foreground)
-            .map(|el| {
-                if pid.is_empty() {
-                    el.child(no_project_badge(cx))
-                } else {
-                    el.child(ui::project_badge(&name, &looks.get(pid).cloned().unwrap_or_default(), cx))
-                }
-            })
-            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-            .when_some(extra, |el, extra| el.child(extra))
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("{prefix}-fold-{pid}")))
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .cursor_pointer()
+                    .map(|el| {
+                        if pid.is_empty() {
+                            el.child(no_project_badge(cx))
+                        } else {
+                            el.child(ui::project_badge(&name, &looks.get(pid).cloned().unwrap_or_default(), cx))
+                        }
+                    })
+                    .child(div().min_w_0().truncate().child(name.clone()))
+                    .when_some(extra, |el, extra| el.child(extra))
+                    .when_some(fold, |el, folded| {
+                        el.child(
+                            Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
+                    .when(fold.is_some(), |el| {
+                        let pid = pid.to_string();
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            let set = if prefix == "live" { &mut this.collapsed_live } else { &mut this.collapsed_settled };
+                            if !set.remove(&pid) {
+                                set.insert(pid.clone());
+                            }
+                            cx.notify();
+                        }))
+                    }),
+            )
             .when_some(here, |el, project| {
                 let tip = if project.is_none() { "New thread without a project" } else { "New thread here" };
                 el.child(
@@ -1105,6 +1137,42 @@ impl Sidebar {
                             .child(bar(l.percent, cx))
                             .when(!resets.is_empty(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(format!("Resets {resets}"))))
                     }))
+                    // Resets that landed while threads stayed parked: spend them on the waiters.
+                    .when({
+                        let banked = ws.banked_resets(&agent);
+                        !banked.is_empty()
+                    }, |el| {
+                        let banked = ws.banked_resets(&agent);
+                        let n = banked.len();
+                        let agent = agent.clone();
+                        el.child(
+                            h_flex()
+                                .id(SharedString::from(format!("banked-{}", agent.key())))
+                                .test_support()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .text_color(palette::emerald(cx))
+                                        .child(format!("{n} banked reset{}", if n == 1 { "" } else { "s" })),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("banked-apply-{}", agent.key())))
+                                        .test_support()
+                                        .text_xs()
+                                        .text_color(palette::ember(cx))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme.foreground))
+                                        .child("Apply")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.workspace.update(cx, |ws, cx| ws.apply_banked(&agent, cx))
+                                        })),
+                                ),
+                        )
+                    })
             }))
             .into_any_element()
     }
@@ -1264,15 +1332,6 @@ impl Render for Sidebar {
         let live_count = live.len();
         // Pinned or snoozed threads showing mean the live run isn't really empty.
         let named_sections_busy = sections.iter().any(|(s, v)| matches!(s, Section::Pinned | Section::Snoozed) && !v.is_empty());
-        // What needs eyes on it keeps its card; the rest group by project as compact lines, so a
-        // project with many live threads doesn't fill the sidebar.
-        let (attention, quiet): (Vec<Thread>, Vec<Thread>) = live.into_iter().partition(|t| {
-            t.needs_you()
-                || t.run_state == RunState::Working
-                || self.graph.needs.contains(&t.id)
-                || self.graph.waiting.contains(&t.id)
-        });
-        let mut attention = Some(attention);
         for (section, threads) in sections {
             match section {
                 Section::Settled => settled = threads,
@@ -1282,34 +1341,69 @@ impl Render for Sidebar {
                         list = list.child(self.card(t, &project_of(t), selected.as_deref() == Some(&t.id), cx));
                     }
                 }
-                Section::Inbox | Section::Working => {
-                    for t in attention.take().iter().flatten() {
-                        list = list.child(self.card(t, &project_of(t), selected.as_deref() == Some(&t.id), cx));
-                    }
-                }
+                Section::Inbox | Section::Working => {}
             }
         }
-        // The quiet live threads, grouped by project like the settled ones: every unread row and
-        // the open one stay out, topped up to three; the rest wait behind "Show N more".
+        // Every live thread sits under its project: what needs eyes draws as a card, the quiet
+        // rest as compact lines capped at three (every unread row and the open one stay out).
+        // A folded group keeps its badges — needs-you, working, unread — on the header.
         {
-            let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
-            for t in quiet {
+            let mut groups: Vec<(String, String, Vec<Thread>, Vec<Thread>)> = Vec::new();
+            for t in live {
                 let pid = t.project_id.clone().unwrap_or_default();
-                match groups.iter_mut().find(|g| g.0 == pid) {
-                    Some(g) => g.2.push(t),
-                    None => groups.push((pid, project_of(&t), vec![t])),
+                let ix = groups.iter().position(|g| g.0 == pid).unwrap_or_else(|| {
+                    groups.push((pid, project_of(&t), vec![], vec![]));
+                    groups.len() - 1
+                });
+                let g = &mut groups[ix];
+                if t.needs_you() || t.run_state == RunState::Working || self.graph.needs.contains(&t.id) || self.graph.waiting.contains(&t.id) {
+                    g.2.push(t);
+                } else {
+                    g.3.push(t);
                 }
             }
-            // Groups with something unread first, then by their newest activity.
+            // Groups with something that needs you first, then unread, then their newest activity.
             groups.sort_by(|a, b| {
-                let unseen = |g: &(String, String, Vec<Thread>)| g.2.iter().any(|t| t.is_unseen());
-                let newest = |g: &(String, String, Vec<Thread>)| g.2.iter().map(|t| t.updated_at).max().unwrap_or(0);
-                unseen(b).cmp(&unseen(a)).then(newest(b).cmp(&newest(a))).then_with(|| a.1.cmp(&b.1))
+                let attention = |g: &(String, String, Vec<Thread>, Vec<Thread>)| !g.2.is_empty();
+                let unseen = |g: &(String, String, Vec<Thread>, Vec<Thread>)| g.2.iter().chain(g.3.iter()).any(|t| t.is_unseen());
+                let newest = |g: &(String, String, Vec<Thread>, Vec<Thread>)| g.2.iter().chain(g.3.iter()).map(|t| t.updated_at).max().unwrap_or(0);
+                attention(b)
+                    .cmp(&attention(a))
+                    .then(unseen(b).cmp(&unseen(a)))
+                    .then(newest(b).cmp(&newest(a)))
+                    .then_with(|| a.1.cmp(&b.1))
             });
-            for (pid, name, mut items) in groups {
+            for (pid, name, cards, mut items) in groups {
                 items.sort_by(|a, b| b.is_unseen().cmp(&a.is_unseen()).then(b.updated_at.cmp(&a.updated_at)));
-                let unread = items.iter().filter(|t| t.is_unseen()).count();
+                let unread = cards.iter().chain(items.iter()).filter(|t| t.is_unseen()).count();
+                let needs = cards.iter().filter(|t| t.needs_you() || self.graph.needs.contains(&t.id)).count();
+                let working = cards.iter().filter(|t| t.run_state == RunState::Working || self.graph.waiting.contains(&t.id)).count();
+                let folded = self.collapsed_live.contains(&pid) && !searching;
                 let open = self.open_live_projects.contains(&pid);
+                let extra = if folded {
+                    h_flex()
+                        .gap_2()
+                        .when(needs > 0, |el| el.child(div().text_xs().text_color(palette::red(cx)).child(needs.to_string())))
+                        .when(working > 0, |el| el.child(div().text_xs().text_color(palette::sky(cx)).child(working.to_string())))
+                        .when(unread > 0, |el| el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("{unread} new"))))
+                        .child(div().text_xs().child((cards.len() + items.len()).to_string()))
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .gap_2()
+                        .when(unread > 0, |el| {
+                            el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("{unread} new")))
+                        })
+                        .child(div().text_xs().child((cards.len() + items.len()).to_string()))
+                        .into_any_element()
+                };
+                list = list.child(self.group_header("live", &pid, name.clone(), Some(extra), Some(folded), &paths, &looks, cx));
+                if folded {
+                    continue;
+                }
+                for t in &cards {
+                    list = list.child(self.card(t, &name, selected.as_deref() == Some(&t.id), cx));
+                }
                 let shown: HashSet<&str> = if open || searching {
                     items.iter().map(|t| t.id.as_str()).collect()
                 } else {
@@ -1326,13 +1420,6 @@ impl Render for Sidebar {
                     }
                     shown
                 };
-                let extra = h_flex()
-                    .gap_2()
-                    .when(unread > 0, |el| {
-                        el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("{unread} new")))
-                    })
-                    .child(div().text_xs().child(items.len().to_string()));
-                list = list.child(self.group_header("live", &pid, name, Some(extra.into_any_element()), &paths, &looks, cx));
                 for t in items.iter().filter(|t| shown.contains(t.id.as_str())) {
                     list = list.child(self.live_line(t, selected.as_deref() == Some(&t.id), cx));
                 }
@@ -1441,11 +1528,12 @@ impl Render for Sidebar {
                     let open = self.open_projects.contains(&pid);
                     let shown = if open || searching { items.len() } else { items.len().min(5) };
                     let pid2 = pid.clone();
-                    history = history.child(self.group_header("settled", &pid, name.clone(), None, &paths, &looks, cx));
-                    for t in items.iter().take(shown) {
+                    let folded = self.collapsed_settled.contains(&pid) && !searching;
+                    history = history.child(self.group_header("settled", &pid, name.clone(), None, Some(folded), &paths, &looks, cx));
+                    for t in items.iter().take(if folded { 0 } else { shown }) {
                         history = history.child(self.line(t, selected.as_deref() == Some(&t.id), cx));
                     }
-                    if items.len() > 5 && !searching {
+                    if items.len() > 5 && !searching && !folded {
                         history = history.child(
                             div()
                                 .id(SharedString::from(format!("more-{pid}")))

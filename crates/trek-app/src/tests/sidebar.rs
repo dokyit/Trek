@@ -125,3 +125,58 @@ fn opening_a_live_group_doesnt_open_the_settled_one() {
         assert_eq!(shown, 5, "the settled group still caps at five");
     });
 }
+
+#[test]
+fn folding_a_group_hides_its_rows_but_keeps_its_badges() {
+    run(async |cx| {
+        let trek = open(cx);
+        let ids: Vec<String> = (0..4).map(|i| quiet(&trek, cx, &format!("Quiet {i}"), i as i64 * 60_000)).collect();
+        let asking = quiet(&trek, cx, "Asking", 10_000);
+        trek.update(cx, |ws, cx| {
+            ws.store.update_thread(&asking, |t| t.run_state = RunState::NeedsYou).unwrap();
+            ws.store.update_thread(&ids[3], |t| t.last_seen_at = t.updated_at - 1).unwrap();
+            ws.reload(cx);
+        });
+        let pid = project_of(&trek, cx, &asking);
+        trek.render(cx);
+        // The card sits inside its project's group now, with the quiet lines after it.
+        assert!(trek.visible(cx, format!("card-{asking}")));
+        assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
+        trek.click(cx, format!("live-fold-{pid}"));
+        trek.render(cx);
+        // Folded: every row away, the header still there with its needs-you badge.
+        for id in ids.iter().chain([&asking]) {
+            assert!(!trek.visible(cx, format!("live-line-{id}")) && !trek.visible(cx, format!("card-{id}")));
+        }
+        assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
+        trek.click(cx, format!("live-fold-{pid}"));
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("card-{asking}")));
+        assert!(trek.visible(cx, format!("live-line-{}", ids[0])));
+    });
+}
+
+#[test]
+fn a_second_project_gets_its_own_group() {
+    run(async |cx| {
+        let trek = open(cx);
+        let here = quiet(&trek, cx, "In this project", 0);
+        let elsewhere = trek.update(cx, |ws, cx| {
+            let other = super::harness::new_project("elsewhere");
+            ws.store.ensure_project(&other).unwrap();
+            let mut t = ws.store.create_thread(Some(&other), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            t.title = "Elsewhere".into();
+            t.last_seen_at = t.updated_at;
+            ws.store.save_thread(&t).unwrap();
+            ws.reload(cx);
+            t.id
+        });
+        trek.render(cx);
+        for id in [&here, &elsewhere] {
+            assert!(trek.visible(cx, format!("live-line-{id}")));
+        }
+        let (p1, p2) = (project_of(&trek, cx, &here), project_of(&trek, cx, &elsewhere));
+        assert_ne!(p1, p2);
+        assert!(trek.visible(cx, format!("live-proj-head-{p1}")) && trek.visible(cx, format!("live-proj-head-{p2}")));
+    });
+}

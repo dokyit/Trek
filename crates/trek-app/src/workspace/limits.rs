@@ -322,6 +322,24 @@ impl Workspace {
         self.schedule_limits(cx);
     }
 
+    /// Threads on `agent` still parked though their limit already reset: the window's reset came
+    /// and went unspent ("banked") — the Usage card offers to apply it.
+    pub fn banked_resets(&self, agent: &AgentId) -> Vec<String> {
+        let now = self.now();
+        self.threads
+            .iter()
+            .filter(|t| t.agent == *agent && t.paused.as_ref().is_some_and(|p| p.is_over(now)))
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
+    /// Spend `agent`'s banked resets: every thread waiting on one resumes now.
+    pub fn apply_banked(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        for id in self.banked_resets(agent) {
+            self.end_pause(&id, true, cx);
+        }
+    }
+
     /// "Resume at reset": send "continue" (or what's queued) shortly after the limit resets.
     pub fn resume_at_reset(&mut self, id: &str, cx: &mut Context<Self>) {
         self.update_pause(id, cx, |p| p.resume = true);

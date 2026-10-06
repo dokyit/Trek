@@ -409,3 +409,47 @@ fn long_threads_build_markdown_only_for_what_is_drawn() {
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.
 }
+
+/// Times a tab switch: two long threads, cycled back and forth, each switch drawn. Run with
+/// `cargo test -p trek-app [--release] -- --ignored --nocapture tab_switch_cost`.
+#[test]
+#[ignore = "benchmark; prints numbers"]
+fn tab_switch_cost() {
+    run(async |cx| {
+        let trek = open_with(cx, |_| {});
+        let ids = trek.update(cx, |ws, cx| {
+            (0..2)
+                .map(|_| {
+                    let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+                    store_items(&ws.store, &t.id, transcript(200));
+                    t.id
+                })
+                .collect::<Vec<_>>()
+        });
+        trek.update(cx, |ws, cx| {
+            ws.reload(cx);
+            for id in &ids {
+                ws.navigate(Route::Thread(id.clone()), cx);
+            }
+        });
+        trek.render(cx);
+        for warm in 0..3 {
+            for id in &ids {
+                trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+                trek.render(cx);
+            }
+            let _ = warm;
+        }
+        super::take_renders();
+        for round in 0..6 {
+            let id = ids[round % 2].clone();
+            let start = Instant::now();
+            trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+            trek.render(cx);
+            let took = start.elapsed();
+            let renders = super::take_renders();
+            let docs = cx.read(|cx| trek.root.read(cx).thread_view.read(cx).markdown_states());
+            println!("switch {round}: {took:?} to next frame, {docs} markdown docs, renders {renders:?}");
+        }
+    });
+}
