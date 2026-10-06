@@ -21,6 +21,7 @@ mod remote;
 mod render;
 mod rewind;
 mod screens;
+mod sidebar;
 mod tabs;
 mod windows;
 mod worktrees;

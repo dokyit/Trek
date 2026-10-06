@@ -80,7 +80,7 @@ fn snoozes_end_in_the_morning_and_wake_back_into_the_inbox() {
         trek.render(cx);
         assert!(super::take_renders().get("Sidebar").is_some_and(|n| *n > 0), "the sidebar redrew");
         assert_eq!(section_of(&trek, cx, &id), Some(Section::Inbox));
-        assert!(trek.visible(cx, format!("card-{id}")));
+        assert!(trek.visible(cx, format!("live-line-{id}")));
         trek.update(cx, |ws, cx| ws.tidy_inbox(wake_at + 2 * DAY, cx));
         assert_eq!(section_of(&trek, cx, &id), Some(Section::Inbox));
         trek.update(cx, |ws, cx| ws.tidy_inbox(wake_at + 3 * DAY + 1, cx));
@@ -112,12 +112,16 @@ fn threads_settle_after_days_unless_told_never_to() {
         trek.update(cx, |ws, cx| ws.mark_unread(&unread, cx));
         edit(&trek, cx, &failed, |t| t.run_state = RunState::Failed);
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-{stale}")));
+        // It's a quiet line, past its project group's cap until the group opens.
+        let pid = trek.read(cx, |ws, _| ws.thread(&stale).unwrap().project_id.clone().unwrap());
+        trek.click(cx, format!("live-more-{pid}"));
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("live-line-{stale}")));
 
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
         trek.render(cx);
         assert_eq!(section_of(&trek, cx, &stale), Some(Section::Settled));
-        assert!(!trek.visible(cx, format!("card-{stale}")), "folded away with the settled history");
+        assert!(!trek.visible(cx, format!("live-line-{stale}")), "folded away with the settled history");
         for (id, why) in [(&kept, "never settle"), (&recent, "too recent"), (&unread, "unread"), (&failed, "needs the user")] {
             assert_eq!(section_of(&trek, cx, id), Some(Section::Inbox), "{why}");
         }

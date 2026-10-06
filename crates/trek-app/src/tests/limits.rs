@@ -67,7 +67,7 @@ fn events(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
 }
 
 fn paused_status(id: &str) -> ElementId {
-    ElementId::Name(SharedString::from(format!("paused-{id}")))
+    ElementId::Name(SharedString::from(format!("live-line-paused-{id}")))
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn a_limit_pauses_the_thread_with_one_row_and_a_bar() {
             assert!(trek.visible(cx, el), "{el}");
         }
         assert!(!trek.visible(cx, "limit-cancel"));
-        assert!(trek.visible(cx, paused_status(&id)), "the sidebar card says it's paused");
+        assert!(trek.visible(cx, paused_status(&id)), "the sidebar line says it's paused");
         // Kept with the thread.
         assert_eq!(trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().paused), Some(p));
         // "Switch agent…" opens the model picker.

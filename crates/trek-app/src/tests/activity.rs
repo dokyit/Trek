@@ -154,7 +154,7 @@ fn titles_animate_in_only_when_they_change() {
         let trek = open(cx);
         with_motion(&trek, cx);
         let id = trek.quiet_thread(cx);
-        let card = format!("card-title-{id}");
+        let card = format!("live-line-title-{id}");
         trek.render(cx);
         assert!(trek.read(cx, |ws, _| ws.title_reveal(&id).is_none()), "a thread opening isn't a change");
         assert!(!trek.visible(cx, card.clone()));
@@ -190,7 +190,7 @@ fn reduced_motion_titles_change_at_once() {
         trek.update(cx, |ws, cx| ws.rename(&id, "Straight in".into(), cx));
         trek.render(cx);
         assert!(trek.read(cx, |ws, _| ws.title_reveal(&id).is_none()));
-        assert!(!trek.visible(cx, format!("card-title-{id}")));
+        assert!(!trek.visible(cx, format!("live-line-title-{id}")));
     });
 }
 

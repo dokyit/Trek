@@ -280,7 +280,7 @@ fn forking_copies_the_conversation_and_leaves_the_original_alone() {
         // "Fork thread" from the sidebar's menu: all of it.
         set_composer(&trek, cx, "");
         trek.render(cx);
-        trek.window(cx, |window, cx| window.right_click(format!("card-{id}"), cx));
+        trek.window(cx, |window, cx| window.right_click(format!("live-line-{id}"), cx));
         cx.run_until_parked();
         // After "Open in new window".
         trek.window(cx, |window, cx| window.within("popup-menu").click(1usize, cx));

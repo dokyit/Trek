@@ -76,7 +76,7 @@ fn an_answer_with_a_server_left_running_is_done_not_working() {
         assert!(seen.borrow().iter().any(|m| m.starts_with("Finished: ")), "{:?}", seen.borrow());
         // Its card says so, quietly; the strip above the composer shows it with its last line.
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-background-{id}")));
+        assert!(trek.visible(cx, format!("live-line-at-work-{id}")));
         trek.wait(cx, "the server's output", |ws| ws.live.values().any(|l| l.background.iter().any(|b| b.last_line().is_some_and(|l| l.contains("localhost"))))).await;
         trek.render(cx);
         assert!(trek.visible(cx, "background-strip"));
@@ -91,7 +91,7 @@ fn an_answer_with_a_server_left_running_is_done_not_working() {
         let t = id.clone();
         trek.wait(cx, "the server to stop", move |ws| ws.live[&t].background.is_empty()).await;
         trek.render(cx);
-        assert!(!trek.visible(cx, "background-strip") && !trek.visible(cx, format!("card-background-{id}")));
+        assert!(!trek.visible(cx, "background-strip") && !trek.visible(cx, format!("live-line-at-work-{id}")));
         assert_eq!(trek.run_state(cx, &id), RunState::Idle);
     });
 }
@@ -200,7 +200,7 @@ fn several_background_tasks_fold_into_one_row_until_opened() {
         assert!(rows[1].starts_with("cargo watch -x test — "), "{rows:?}");
         assert!(trek.visible(cx, ("bg-task", 1usize)));
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-background-{id}")));
+        assert!(trek.visible(cx, format!("live-line-at-work-{id}")));
     });
 }
 
@@ -894,7 +894,7 @@ fn a_background_server_doesn_t_redraw_the_sidebar() {
         let t = id.clone();
         trek.wait(cx, "the server's output", move |ws| ws.live[&t].background.iter().any(|b| b.output.is_some())).await;
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-background-{id}")));
+        assert!(trek.visible(cx, format!("live-line-at-work-{id}")));
         cx.run_until_parked();
         super::take_renders();
         // The strip reads the server's output and moves its clock on (the test platform draws

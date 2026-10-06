@@ -86,10 +86,10 @@ fn a_new_thread_can_run_in_a_worktree_of_its_own() {
         // Saved with the thread.
         assert_eq!(trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().worktree), Some(wt.clone()));
 
-        // The branch shows on its card, in the title bar and in its own window; the composer
+        // The branch shows on its line, in the title bar and in its own window; the composer
         // says where it runs.
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-branch-{id}")));
+        assert!(trek.visible(cx, format!("live-line-branch-{id}")));
         assert!(trek.visible(cx, "title-branch"));
         assert!(trek.visible(cx, "env-worktree"));
         let own = trek.open_thread_window(cx, &id);

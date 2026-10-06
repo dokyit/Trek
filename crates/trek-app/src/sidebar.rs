@@ -31,6 +31,9 @@ pub struct Sidebar {
     /// The window is frontmost; spinners hold still when it isn't.
     active: bool,
     open_projects: HashSet<String>,
+    /// The live groups (quiet threads by project) that are open: apart from `open_projects`,
+    /// which opens the settled ones.
+    open_live_projects: HashSet<String>,
     filter_open: bool,
     usage_open: bool,
     updater_open: bool,
@@ -102,6 +105,7 @@ impl Sidebar {
             renaming: None,
             active: window.is_window_active(),
             open_projects: Default::default(),
+            open_live_projects: Default::default(),
             filter_open: false,
             // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
@@ -525,6 +529,7 @@ impl Sidebar {
             .child(div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(time::relative(t.updated_at)));
         let row = v_flex()
             .id(SharedString::from(format!("line-{}", t.id)))
+            .test_support()
             .mx_2()
             .pl(px(30.))
             .pr_3()
@@ -538,6 +543,119 @@ impl Sidebar {
             .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
+    }
+
+    /// A live thread that needs no attention, at a line's height: its title (medium and dotted
+    /// emerald while unread), its worktree, a sky dot while its own or its sub-agents' work still
+    /// runs, and its age — "Paused" instead while it sits at a usage limit.
+    fn live_line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let id = t.id.clone();
+        let hit = self.content_hit(t, cx);
+        let (kids, background) = self.at_work(t, cx);
+        let tip = card_tip(&kids, &background).map(SharedString::from);
+        let unseen = t.is_unseen();
+        let paused = t.paused.is_some() && t.run_state == RunState::Idle;
+        let at_work = !kids.is_empty() || !background.is_empty();
+        let title = h_flex()
+            .h(px(30.))
+            .gap_2()
+            .child(
+                div().flex_1().min_w_0().when(unseen && !selected, |el| el.font_medium()).child(ui::title_text(
+                    SharedString::from(format!("live-line-title-{}", t.id)),
+                    &t.title,
+                    ws.title_reveal(&t.id),
+                    if !selected && !unseen { theme.foreground.opacity(0.78) } else { theme.foreground },
+                    cx,
+                )),
+            )
+            .when_some(t.worktree.as_ref(), |el, wt| {
+                el.child(crate::worktree_ui::branch_chip(SharedString::from(format!("live-line-branch-{}", t.id)), wt, cx))
+            })
+            .when(unseen, |el| {
+                el.child(div().id(SharedString::from(format!("live-line-unseen-{}", t.id))).test_support().flex_none().size(px(6.)).rounded_full().bg(palette::emerald(cx)))
+            })
+            .when(at_work, |el| {
+                el.child(div().id(SharedString::from(format!("live-line-at-work-{}", t.id))).test_support().flex_none().size(px(6.)).rounded_full().bg(palette::sky(cx)))
+            })
+            .child(if paused {
+                div().id(SharedString::from(format!("live-line-paused-{}", t.id))).test_support().text_xs().text_color(palette::amber(cx)).child("Paused").into_any_element()
+            } else {
+                div().text_xs().text_color(theme.muted_foreground.opacity(0.8)).child(time::relative(t.updated_at)).into_any_element()
+            });
+        let row = v_flex()
+            .id(SharedString::from(format!("live-line-{}", t.id)))
+            .test_support()
+            .mx_2()
+            .pl(px(30.))
+            .pr_3()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .text_sm()
+            .when(selected, |el| el.bg(theme.list_active))
+            .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .child(title)
+            .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.))))
+            .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
+        self.with_menu(row, t, cx).into_any_element()
+    }
+
+    /// A project group's header (live quiet threads and settled history): badge, name, `extra`
+    /// (a count), and a "new thread here" button on hover; wrapped in the project menu.
+    fn group_header(
+        &self,
+        prefix: &str,
+        pid: &str,
+        name: String,
+        extra: Option<AnyElement>,
+        paths: &HashMap<String, std::path::PathBuf>,
+        looks: &HashMap<String, crate::ui::ProjectLook>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        // A new thread in this project (or in none, for "No project"), from its header.
+        let here = if pid.is_empty() { Some(None) } else { paths.get(pid).cloned().map(Some) };
+        let header = h_flex()
+            .id(SharedString::from(format!("{prefix}-proj-head-{pid}")))
+            .test_support()
+            .group("proj-head")
+            .mx_2()
+            .pl_3()
+            .pr_1()
+            .h(px(30.))
+            .mt_1()
+            .gap_2()
+            .rounded(px(8.))
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .map(|el| {
+                if pid.is_empty() {
+                    el.child(no_project_badge(cx))
+                } else {
+                    el.child(ui::project_badge(&name, &looks.get(pid).cloned().unwrap_or_default(), cx))
+                }
+            })
+            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+            .when_some(extra, |el, extra| el.child(extra))
+            .when_some(here, |el, project| {
+                let tip = if project.is_none() { "New thread without a project" } else { "New thread here" };
+                el.child(
+                    div().invisible().group_hover("proj-head", |s| s.visible()).child(
+                        ui::icon_button(SharedString::from(format!("{prefix}-proj-new-{pid}")), crate::assets::Lucide::SquarePen, tip).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                let project = project.clone();
+                                this.workspace.update(cx, |ws, cx| ws.navigate(Route::Draft { project }, cx))
+                            },
+                        )),
+                    ),
+                )
+            });
+        match paths.get(pid) {
+            Some(path) => self.with_project_menu(header, pid.to_string(), name, path.clone()).into_any_element(),
+            None => header.into_any_element(),
+        }
     }
 
     /// Right-click menu for a thread (T3's set): pin, settle, snooze, rename, copy, project, archive, delete.
@@ -1144,7 +1262,17 @@ impl Render for Sidebar {
             live_order(of(Section::Inbox), of(Section::Working))
         };
         let live_count = live.len();
-        let mut live = Some(live);
+        // Pinned or snoozed threads showing mean the live run isn't really empty.
+        let named_sections_busy = sections.iter().any(|(s, v)| matches!(s, Section::Pinned | Section::Snoozed) && !v.is_empty());
+        // What needs eyes on it keeps its card; the rest group by project as compact lines, so a
+        // project with many live threads doesn't fill the sidebar.
+        let (attention, quiet): (Vec<Thread>, Vec<Thread>) = live.into_iter().partition(|t| {
+            t.needs_you()
+                || t.run_state == RunState::Working
+                || self.graph.needs.contains(&t.id)
+                || self.graph.waiting.contains(&t.id)
+        });
+        let mut attention = Some(attention);
         for (section, threads) in sections {
             match section {
                 Section::Settled => settled = threads,
@@ -1155,13 +1283,105 @@ impl Render for Sidebar {
                     }
                 }
                 Section::Inbox | Section::Working => {
-                    for t in live.take().iter().flatten() {
+                    for t in attention.take().iter().flatten() {
                         list = list.child(self.card(t, &project_of(t), selected.as_deref() == Some(&t.id), cx));
                     }
                 }
             }
         }
-        if live_count == 0 && !searching {
+        // The quiet live threads, grouped by project like the settled ones: every unread row and
+        // the open one stay out, topped up to three; the rest wait behind "Show N more".
+        {
+            let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
+            for t in quiet {
+                let pid = t.project_id.clone().unwrap_or_default();
+                match groups.iter_mut().find(|g| g.0 == pid) {
+                    Some(g) => g.2.push(t),
+                    None => groups.push((pid, project_of(&t), vec![t])),
+                }
+            }
+            // Groups with something unread first, then by their newest activity.
+            groups.sort_by(|a, b| {
+                let unseen = |g: &(String, String, Vec<Thread>)| g.2.iter().any(|t| t.is_unseen());
+                let newest = |g: &(String, String, Vec<Thread>)| g.2.iter().map(|t| t.updated_at).max().unwrap_or(0);
+                unseen(b).cmp(&unseen(a)).then(newest(b).cmp(&newest(a))).then_with(|| a.1.cmp(&b.1))
+            });
+            for (pid, name, mut items) in groups {
+                items.sort_by(|a, b| b.is_unseen().cmp(&a.is_unseen()).then(b.updated_at.cmp(&a.updated_at)));
+                let unread = items.iter().filter(|t| t.is_unseen()).count();
+                let open = self.open_live_projects.contains(&pid);
+                let shown: HashSet<&str> = if open || searching {
+                    items.iter().map(|t| t.id.as_str()).collect()
+                } else {
+                    let mut shown: HashSet<&str> = items
+                        .iter()
+                        .filter(|t| t.is_unseen() || selected.as_deref() == Some(t.id.as_str()))
+                        .map(|t| t.id.as_str())
+                        .collect();
+                    for t in &items {
+                        if shown.len() >= 3 {
+                            break;
+                        }
+                        shown.insert(t.id.as_str());
+                    }
+                    shown
+                };
+                let extra = h_flex()
+                    .gap_2()
+                    .when(unread > 0, |el| {
+                        el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("{unread} new")))
+                    })
+                    .child(div().text_xs().child(items.len().to_string()));
+                list = list.child(self.group_header("live", &pid, name, Some(extra.into_any_element()), &paths, &looks, cx));
+                for t in items.iter().filter(|t| shown.contains(t.id.as_str())) {
+                    list = list.child(self.live_line(t, selected.as_deref() == Some(&t.id), cx));
+                }
+                if !open && !searching && items.len() > shown.len() {
+                    let pid2 = pid.clone();
+                    list = list.child(
+                        div()
+                            .id(SharedString::from(format!("live-more-{pid}")))
+                            .test_support()
+                            .mx_2()
+                            .pl(px(30.))
+                            .h(px(28.))
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(format!("Show {} more", items.len() - shown.len()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_live_projects.insert(pid2.clone());
+                                cx.notify();
+                            })),
+                    );
+                } else if open && items.len() > 3 && !searching {
+                    let pid2 = pid.clone();
+                    list = list.child(
+                        div()
+                            .id(SharedString::from(format!("live-less-{pid}")))
+                            .test_support()
+                            .mx_2()
+                            .pl(px(30.))
+                            .h(px(28.))
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("Show less")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_live_projects.remove(&pid2);
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+        }
+        if live_count == 0 && !searching && !named_sections_busy {
             list = list.child(
                 v_flex()
                     .mx_4()
@@ -1221,45 +1441,7 @@ impl Render for Sidebar {
                     let open = self.open_projects.contains(&pid);
                     let shown = if open || searching { items.len() } else { items.len().min(5) };
                     let pid2 = pid.clone();
-                    // A new thread in this project (or in none, for "No project"), from its header.
-                    let here = if pid.is_empty() { Some(None) } else { paths.get(&pid).cloned().map(Some) };
-                    let header = h_flex()
-                        .id(SharedString::from(format!("proj-head-{pid}")))
-                        .group("proj-head")
-                        .mx_2()
-                        .pl_3()
-                        .pr_1()
-                        .h(px(30.))
-                        .mt_1()
-                        .gap_2()
-                        .rounded(px(8.))
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .map(|el| {
-                            if pid.is_empty() {
-                                el.child(no_project_badge(cx))
-                            } else {
-                                el.child(ui::project_badge(&name, &looks.get(&pid).cloned().unwrap_or_default(), cx))
-                            }
-                        })
-                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                        .when_some(here, |el, project| {
-                            let tip = if project.is_none() { "New thread without a project" } else { "New thread here" };
-                            el.child(
-                                div().invisible().group_hover("proj-head", |s| s.visible()).child(
-                                    ui::icon_button(SharedString::from(format!("proj-new-{pid}")), crate::assets::Lucide::SquarePen, tip).on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            let project = project.clone();
-                                            this.workspace.update(cx, |ws, cx| ws.navigate(Route::Draft { project }, cx))
-                                        },
-                                    )),
-                                ),
-                            )
-                        });
-                    history = match paths.get(&pid) {
-                        Some(path) => history.child(self.with_project_menu(header, pid.clone(), name.clone(), path.clone())),
-                        None => history.child(header),
-                    };
+                    history = history.child(self.group_header("settled", &pid, name.clone(), None, &paths, &looks, cx));
                     for t in items.iter().take(shown) {
                         history = history.child(self.line(t, selected.as_deref() == Some(&t.id), cx));
                     }
