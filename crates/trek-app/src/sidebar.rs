@@ -482,6 +482,15 @@ impl Sidebar {
             .when(!background.is_empty(), |el| el.child(self.background_line(&t.id, background.len(), cx)))
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-2.))))
             .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+            // Hover prefetch: the transcript is already loaded by the time a click lands.
+            .on_hover({
+                let id = id.clone();
+                cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        let _ = this.workspace.update(cx, |ws, cx| ws.ensure_loaded(&id, cx));
+                    }
+                })
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }
@@ -546,6 +555,15 @@ impl Sidebar {
             .child(title)
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.))))
             .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+            // Hover prefetch: the transcript is already loaded by the time a click lands.
+            .on_hover({
+                let id = id.clone();
+                cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        let _ = this.workspace.update(cx, |ws, cx| ws.ensure_loaded(&id, cx));
+                    }
+                })
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }
@@ -603,6 +621,15 @@ impl Sidebar {
             .child(title)
             .when_some(hit.clone(), |el, h| el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.))))
             .when_some(tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)))
+            // Hover prefetch: the transcript is already loaded by the time a click lands.
+            .on_hover({
+                let id = id.clone();
+                cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        let _ = this.workspace.update(cx, |ws, cx| ws.ensure_loaded(&id, cx));
+                    }
+                })
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
     }
@@ -1137,40 +1164,66 @@ impl Sidebar {
                             .child(bar(l.percent, cx))
                             .when(!resets.is_empty(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(format!("Resets {resets}"))))
                     }))
-                    // Resets that landed while threads stayed parked: spend them on the waiters.
-                    .when({
-                        let banked = ws.banked_resets(&agent);
-                        !banked.is_empty()
-                    }, |el| {
-                        let banked = ws.banked_resets(&agent);
-                        let n = banked.len();
-                        let agent = agent.clone();
+                    // Granted, unspent rate-limit resets (Codex's "Usage limit resets").
+                    .when(!u.resets.is_empty(), |el| {
+                        let n = u.resets.len();
                         el.child(
-                            h_flex()
-                                .id(SharedString::from(format!("banked-{}", agent.key())))
+                            v_flex()
+                                .id(SharedString::from(format!("resets-{}", agent.key())))
                                 .test_support()
-                                .gap_2()
+                                .gap(px(8.))
+                                .p(px(10.))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_xs()
-                                        .text_color(palette::emerald(cx))
-                                        .child(format!("{n} banked reset{}", if n == 1 { "" } else { "s" })),
+                                    h_flex()
+                                        .child(div().flex_1().text_xs().font_medium().child("Usage limit resets"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_medium()
+                                                .text_color(palette::emerald(cx))
+                                                .child(format!("{n} available")),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("banked-apply-{}", agent.key())))
-                                        .test_support()
-                                        .text_xs()
-                                        .text_color(palette::ember(cx))
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme.foreground))
-                                        .child("Apply")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.workspace.update(cx, |ws, cx| ws.apply_banked(&agent, cx))
-                                        })),
-                                ),
+                                .children(u.resets.iter().map(|r| {
+                                    let expiry = r.expires_at.map(|e| format!("Expires {}", time::until(e))).unwrap_or_default();
+                                    let (ws, rid, title) = (self.workspace.clone(), r.id.clone(), r.title.clone());
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap(px(2.))
+                                                .child(div().text_xs().truncate().child(r.title.clone()))
+                                                .when(!expiry.is_empty(), |e| {
+                                                    e.child(div().text_xs().text_color(theme.muted_foreground).child(expiry))
+                                                }),
+                                        )
+                                        .child(
+                                            gpui_kit::component::button::Button::new(SharedString::from(format!("use-reset-{}", r.id)))
+                                                .outline()
+                                                .small()
+                                                .label("Use reset")
+                                                .on_click(move |_, window, cx| {
+                                                    let (ws, rid, title) = (ws.clone(), rid.clone(), title.clone());
+                                                    window.open_alert_dialog(cx, move |alert, _, _| {
+                                                        let (ws, rid) = (ws.clone(), rid.clone());
+                                                        alert
+                                                            .title(format!("Use “{title}”?"))
+                                                            .description("Your rate limits reset right away. The credit is spent and can't be returned.")
+                                                            .confirm()
+                                                            .ok_text("Use reset")
+                                                            .on_ok(move |_, _, cx| {
+                                                                let _ = ws.update(cx, |ws, cx| ws.use_reset_credit(rid.clone(), cx));
+                                                                true
+                                                            })
+                                                    });
+                                                }),
+                                        )
+                                })),
                         )
                     })
             }))

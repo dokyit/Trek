@@ -417,7 +417,7 @@ fn ms(d: Duration) -> f64 {
 fn tab_switch_cost() {
     run(async |cx| {
         let trek = open_with(cx, |_| {});
-        let ids = trek.update(cx, |ws, cx| {
+        let ids = trek.update(cx, |ws, _cx| {
             (0..2)
                 .map(|_| {
                     let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");

@@ -17,6 +17,17 @@ use trek_core::{Effort, detect};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A granted, redeemable rate-limit reset ("Use reset" in Codex's Usage).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ResetCredit {
+    pub id: String,
+    /// e.g. "Full reset (Weekly + 5 hr)".
+    pub title: String,
+    pub description: Option<String>,
+    /// Unix ms when the credit lapses.
+    pub expires_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageLimit {
     /// "5-hour limit", "Weekly limit", "Weekly · Fable", ...
@@ -57,6 +68,8 @@ pub struct AgentStatus {
     pub billing: Option<crate::Billing>,
     /// Something the plan reports besides its limits (Devin's on-demand balance), as it said it.
     pub note: Option<String>,
+    /// Granted but unspent rate-limit resets (Codex "Usage limit resets").
+    pub resets: Vec<ResetCredit>,
     /// Partial failures (some data may still be present).
     pub error: Option<String>,
 }
@@ -305,7 +318,10 @@ pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
     }
     if status.logged_in {
         match call(&mut rpc, &mut lines, &mut backlog, deadline, "account/rateLimits/read", Value::Null).await {
-            Ok(r) => status.limits = codex_limits(&r),
+            Ok(r) => {
+                status.limits = codex_limits(&r);
+                status.resets = codex_reset_credits(&r);
+            }
             // API-key accounts have no plan limits.
             Err(e) if status.plan.is_some() => status.add_error(format!("rate limits: {e:#}")),
             Err(_) => {}
@@ -323,6 +339,43 @@ pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
     }
     let _ = child.start_kill();
     Ok(status)
+}
+
+/// Spend one granted reset credit; Usage refreshes right after via the caller.
+pub async fn codex_consume_reset(cwd: &Path, credit_id: &str) -> Result<()> {
+    let mut backlog = Vec::new();
+    let (mut child, mut rpc, mut lines, _) =
+        tokio::time::timeout(TIMEOUT, start_app_server(cwd, &[], &mut backlog)).await.context("codex app-server timed out")??;
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    call(
+        &mut rpc,
+        &mut lines,
+        &mut backlog,
+        deadline,
+        "account/rateLimitResetCredit/consume",
+        json!({ "creditId": credit_id, "idempotencyKey": trek_core::transcript::new_id() }),
+    )
+    .await?;
+    let _ = child.start_kill();
+    Ok(())
+}
+
+fn codex_reset_credits(r: &Value) -> Vec<ResetCredit> {
+    r["rateLimitResetCredits"]["credits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["status"].as_str() == Some("available"))
+        .filter_map(|c| {
+            let id = c["id"].as_str()?;
+            Some(ResetCredit {
+                id: id.to_string(),
+                title: c["title"].as_str().unwrap_or("Usage limit reset").to_string(),
+                description: c["description"].as_str().map(String::from),
+                expires_at: c["expiresAt"].as_i64().map(|t| t * 1000),
+            })
+        })
+        .collect()
 }
 
 async fn call(
@@ -815,6 +868,21 @@ mod tests {
                 "unnamed":{"limitId":"unnamed","limitName":null,"primary":{"usedPercent":50,"windowDurationMins":300,"resetsAt":1}}
             }
         })
+    }
+
+    #[test]
+    fn codex_reset_credits_are_read() {
+        let r = json!({"rateLimitResetCredits":{"availableCount":2,"credits":[
+            {"id":"RateLimitResetCredit_a","resetType":"codexRateLimits","status":"available","grantedAt":1790109912,"expiresAt":1792701912,"title":"Full reset (Weekly + 5 hr)","description":"free reset"},
+            {"id":"RateLimitResetCredit_b","status":"used","title":"Full reset (Weekly + 5 hr)","expiresAt":1792701912},
+            {"status":"available","title":"no id is dropped"}
+        ]}});
+        let c = codex_reset_credits(&r);
+        assert_eq!(c.len(), 1, "only the available, identified credit survives");
+        assert_eq!((c[0].id.as_str(), c[0].title.as_str()), ("RateLimitResetCredit_a", "Full reset (Weekly + 5 hr)"));
+        assert_eq!(c[0].expires_at, Some(1792701912000));
+        assert_eq!(c[0].description.as_deref(), Some("free reset"));
+        assert!(codex_reset_credits(&json!({})).is_empty(), "other providers carry no reset credits");
     }
 
     #[test]

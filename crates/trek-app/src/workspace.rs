@@ -4701,6 +4701,24 @@ impl Workspace {
     /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
     /// no prompt is sent. Throttled to once every 30 seconds. Devin is asked on its own
     /// (`refresh_devin_usage`).
+    /// Spend one granted rate-limit reset (Usage › "Use reset"), then re-read the plan.
+    pub fn use_reset_credit(&mut self, credit_id: String, cx: &mut Context<Self>) {
+        let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
+        cx.spawn(async move |this, cx| {
+            let res = trek_agents::codex_consume_reset(&cwd, &credit_id).await;
+            let _ = this.update(cx, |this, cx| match res {
+                Ok(()) => {
+                    // Let the provider settle, then re-read so the bars jump to 0%.
+                    this.usage_loading = false;
+                    this.refresh_usage(cx);
+                    cx.emit(WorkspaceEvent::Toast { message: "Usage limits reset".into(), undo: None });
+                }
+                Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
+            });
+        })
+        .detach();
+    }
+
     pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
         if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 || trek_core::paths::isolated() {
             return;
