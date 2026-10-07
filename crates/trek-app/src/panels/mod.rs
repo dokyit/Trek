@@ -2,6 +2,7 @@
 
 mod browser;
 pub mod explorer;
+pub mod ide_search;
 pub(crate) mod git;
 mod side_chat;
 mod simhid;

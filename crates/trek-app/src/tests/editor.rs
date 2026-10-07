@@ -120,6 +120,31 @@ fn cmd_k_in_the_ide_finds_files() {
 }
 
 #[test]
+fn cmd_shift_f_searches_the_folder() {
+    run(async |cx| {
+        let trek = open(cx);
+        std::fs::write(trek.project.join("searchable.txt"), "the quick brown fox\n").unwrap();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| ws.toggle_ide(cx));
+        trek.press(cx, "cmd-shift-f");
+        trek.render(cx);
+        trek.type_live(cx, "quick brown");
+        // The scan runs on a worker thread — poll for the hit row.
+        let mut found = false;
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            cx.run_until_parked();
+            trek.render(cx);
+            if trek.visible(cx, ("ide-search-hit", 0usize)) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "a hit row should render for the match");
+    });
+}
+
+#[test]
 fn clicking_a_file_in_the_explorer_opens_it_in_the_editor() {
     run(async |cx| {
         let trek = open(cx);

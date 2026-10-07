@@ -18,6 +18,7 @@ pub use verification::ago;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use trek_agents::{AcpInfo, AgentEvent, AgentStatus, Billing, Command, Decision, McpServer, SessionConfig, SlashCommand};
@@ -924,6 +925,8 @@ pub struct Workspace {
     pub ide: bool,
     /// The folder the IDE's file tree is rooted at (`None` → the welcome screen).
     pub ide_root: Option<PathBuf>,
+    /// Live language servers, keyed `root|language` — spawned lazily as files open.
+    lsp_servers: HashMap<String, Arc<crate::lsp_client::Client>>,
     ide_prev_route: Option<Route>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
@@ -1169,6 +1172,7 @@ impl Workspace {
             main_window: None,
             ide: false,
             ide_root: None,
+            lsp_servers: HashMap::new(),
             ide_prev_route: None,
             thread_windows: HashMap::new(),
             pending_compose: None,
@@ -2372,6 +2376,25 @@ impl Workspace {
             }
         });
         self.keep(task);
+    }
+
+    /// The language server for a file's grammar, spawning it on first use. Rooted at the IDE
+    /// folder (or the file's git root when opened outside one).
+    pub fn lsp_for(&mut self, path: &Path, lang: &str) -> Option<Arc<crate::lsp_client::Client>> {
+        if cfg!(test) {
+            return None;
+        }
+        let root = self.ide_root.clone().unwrap_or_else(|| trek_core::store::project_root(path));
+        let (_, _, language_id) = crate::lsp_client::spec(lang)?;
+        let key = format!("{}|{language_id}", root.display());
+        match self.lsp_servers.get(&key) {
+            Some(c) => Some(c.clone()),
+            None => {
+                let c = crate::lsp_client::Client::start(root, lang)?;
+                self.lsp_servers.insert(key, c.clone());
+                Some(c)
+            }
+        }
     }
 
     /// A file opened in the editor — remember it for the welcome screen.

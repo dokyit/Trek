@@ -38,6 +38,10 @@ pub struct TrekWindow {
     active_editor: usize,
     /// The file tree on the left in IDE mode.
     ide_files: Entity<crate::panels::explorer::ExplorerPanel>,
+    /// Project search (⌘⇧F) — the sidebar's other page in IDE mode.
+    ide_search: Entity<crate::panels::ide_search::IdeSearch>,
+    /// Which page the IDE sidebar shows.
+    ide_nav_files: bool,
     title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
     pub(crate) palette: Entity<CommandPalette>,
@@ -74,6 +78,7 @@ impl TrekWindow {
         let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
         let notes = cx.new(|cx| crate::notes::NotesView::new(workspace.clone(), window, cx));
         let ide_files = cx.new(|cx| crate::panels::explorer::ExplorerPanel::for_ide(workspace.clone(), cx));
+        let ide_search = cx.new(|cx| crate::panels::ide_search::IdeSearch::new(workspace.clone(), window, cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
             let mut p = RightPanel::new(workspace.clone());
@@ -229,6 +234,8 @@ impl TrekWindow {
             editors: Vec::new(),
             active_editor: 0,
             ide_files,
+            ide_search,
+            ide_nav_files: true,
             title,
             onboarding,
             palette,
@@ -1026,6 +1033,13 @@ impl Render for TrekWindow {
                     this.workspace.update(cx, |ws, cx| ws.toggle_ide(cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &crate::ToggleIdeSearch, window, cx| {
+                if this.workspace.read(cx).ide && this.workspace.read(cx).main_window == Some(window.window_handle()) {
+                    this.ide_nav_files = false;
+                    this.ide_search.update(cx, |s, cx| s.focus(window, cx));
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
             .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
             .on_action(cx.listener(|this, _: &crate::OpenNotes, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))))
@@ -1057,8 +1071,41 @@ impl Render for TrekWindow {
                     .min_h_0()
                     .when(!collapsed && !in_settings, |el| {
                         if ide {
-                            // The file tree takes the sidebar column.
-                            el.child(self.ide_files.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
+                            // Files or Search — the switcher on top swaps the column.
+                            let files_nav = self.ide_nav_files;
+                            el.child(
+                                v_flex()
+                                    .w(px(SIDEBAR_WIDTH))
+                                    .h_full()
+                                    .flex_none()
+                                    .child(
+                                        h_flex()
+                                            .px_2()
+                                            .pt_2()
+                                            .pb_1()
+                                            .gap_1()
+                                            .child(
+                                                crate::ui::icon_button("ide-nav-files", IconName::Folder, "Files")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.ide_nav_files = true;
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                crate::ui::icon_button("ide-nav-search", IconName::Search, "Search in folder (⌘⇧F)")
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.ide_nav_files = false;
+                                                        this.ide_search.update(cx, |s, cx| s.focus(window, cx));
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                                    .child(if files_nav {
+                                        self.ide_files.clone().cached(StyleRefinement::default().w_full().flex_1().min_h_0()).into_any_element()
+                                    } else {
+                                        self.ide_search.clone().cached(StyleRefinement::default().w_full().flex_1().min_h_0()).into_any_element()
+                                    }),
+                            )
                         } else {
                             el.child(self.sidebar.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
                         }
