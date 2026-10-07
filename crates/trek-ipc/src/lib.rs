@@ -223,7 +223,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                     "title": { "type": "string", "description": "A few words naming the task, shown to the user, e.g. \"Review the cache design\"." },
                     "prompt": { "type": "string", "description": "The complete task for the sub-agent." },
                     "agent": { "type": "string", "description": "Agent key from list_models, e.g. \"codex\" or \"claude-code\". Defaults to this thread's agent." },
-                    "model": { "type": "string", "description": "Model id or name from list_models. Defaults to the agent's default model." },
+                    "model": { "type": "string", "description": "Model id or name from list_models. Defaults to this thread's model (the agent's own default when the sub-agent is another agent)." },
                     "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort; clamped to what the model supports. Defaults to this thread's effort." },
                     "mode": { "type": "string", "enum": ["advise", "implement"], "description": "advise: read-only review or research (default). implement: may change files." },
                     "wait": { "type": "boolean", "description": "Wait for the result (true) or return at once and be woken with it (false, the default)." },

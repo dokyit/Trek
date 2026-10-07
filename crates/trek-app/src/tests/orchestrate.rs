@@ -188,6 +188,25 @@ fn delegate_task_checks_what_it_is_asked() {
 }
 
 #[test]
+fn a_sub_agent_inherits_its_parents_model() {
+    run(async |cx| {
+        let trek = open(cx);
+        // A thread on a chosen model: "Mock Deep", not the mock agent's first.
+        let id = trek.update(cx, |ws, cx| {
+            let t = ws.store.create_thread(Some(&trek.project), mock(), Some("mock-deep".into()), Effort::Medium, HandHolding::Auto).expect("thread");
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        });
+        // delegate_task with no model runs the caller's model, not the agent's default.
+        let child = trek.update(cx, |ws, cx| ws.delegate(&id, &json!({ "title": "x", "prompt": "y" }), cx)).unwrap();
+        let t = trek.read(cx, |ws, _| ws.thread(&child).cloned()).unwrap();
+        assert_eq!(t.model.as_deref(), Some("mock-deep"), "no model asked for: the parent's");
+        wait_task(&trek, cx, &child, TaskState::Done).await;
+    });
+}
+
+#[test]
 fn an_advising_sub_agent_is_never_allowed_to_act() {
     run(async |cx| {
         let trek = open(cx);

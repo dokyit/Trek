@@ -361,6 +361,12 @@ impl Workspace {
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
         let models = self.models_for(&agent);
         let model = match text("model") {
+            // No model picked: the caller's own when the sub-agent is the same agent (a thread on
+            // SWE-2 delegates to SWE-2), else the agent's default.
+            None if agent == parent.agent => parent
+                .model
+                .clone()
+                .or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone())),
             None => crate::composer::default_model(&models).map(|m| m.id.clone()),
             Some(m) => Some(
                 models
