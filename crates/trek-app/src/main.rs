@@ -13,6 +13,7 @@ mod composer;
 mod cost;
 mod deep_link;
 mod dictate;
+mod lsp_client;
 mod editor;
 mod file_icon;
 mod integrations;
@@ -79,7 +80,8 @@ actions!(
         NextTab,
         PreviousTab,
         OpenNotes,
-        ToggleIde
+        ToggleIde,
+        ToggleIdeSearch
     ]
 );
 
@@ -191,6 +193,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
         KeyBinding::new("cmd-shift-j", OpenNotes, None),
         KeyBinding::new("cmd-shift-e", ToggleIde, None),
+        KeyBinding::new("cmd-shift-f", ToggleIdeSearch, Some("TrekWindow")),
         // Only thread windows close with ⌘W; the main window stays put.
         KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
         // In the main window ⌘W closes the tab in front; the window stays put.
