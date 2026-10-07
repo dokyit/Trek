@@ -1310,7 +1310,7 @@ impl ThreadView {
                 .into_any_element()
             }
             (Row::Assistant { ix, .. }, _) => match md {
-                Some(md) => column(div().py_2().child(div().id(("answer-text", ix)).test_support().child(crate::md::view(&md, at.cwd.clone(), at.folder, text_size, cx).motion(crate::md::streaming()))))
+                Some(md) => column(div().py_2().child(div().id(("answer-text", ix)).test_support().child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, cx).motion(crate::md::streaming()))))
                     .id(("answer", ix))
                     .test_support()
                     .into_any_element(),

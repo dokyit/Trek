@@ -577,7 +577,7 @@ impl Render for NotesView {
         let preview = div().id("note-preview").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(32.)).py(px(22.)).child(if body.trim().is_empty() {
             div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
         } else {
-            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, None, None, size, cx).into_any_element()
+            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, None, None, size, false, cx).into_any_element()
         });
         let main = match self.mode {
             Mode::Write => write.into_any_element(),

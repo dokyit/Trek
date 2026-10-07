@@ -14,6 +14,7 @@
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
 //! | `mock:prose`                 | a long answer using all of markdown: headings, bold, lists,  |
 //! |                              | a table, code, paths and a link (for reviewing typography)   |
+//! | `mock:visualization`         | prose with a data visualization and UI treatment comparison  |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `mock:history` [n]           | a long history in one go, at once: `n` rounds (default 100,   |
@@ -148,6 +149,8 @@ enum Script {
     Stream(Duration),
     /// A long answer with every kind of block, for reviewing how answers read.
     Prose,
+    /// An answer with native visualization blocks.
+    Visualization,
     Explore(Duration),
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
@@ -223,6 +226,7 @@ impl Script {
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "prose" if w.starts_with("mock:") => Script::Prose,
+                "visualization" if w.starts_with("mock:") => Script::Visualization,
                 "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "history" if w.starts_with("mock:") => Script::History(words.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(100).clamp(1, MAX_HISTORY)),
                 // The one script that changes files: only when asked for by its full name.
@@ -274,6 +278,7 @@ pub fn title(request: &str) -> String {
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
+        Script::Visualization => "Compare release health dashboards",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
@@ -635,6 +640,7 @@ impl Session {
                 // At reading pace, so the answer can be watched (and captured) as it grows.
                 self.say_at(PROSE, 45).await?;
             }
+            Script::Visualization => self.say(VISUALIZATION).await?,
             Script::Explore(total) => self.explore(total).await?,
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write => self.write().await?,
@@ -1644,6 +1650,22 @@ const PROSE_THOUGHT: &str = "**Mapping the startup path**\n\nThe flags are parse
 
 const PROSE: &str = "## How the app starts\n\nStartup lives in `src/main.rs`. It does three things, in order: it **parses the flags**, it **loads the settings**, and only then does it **open the window**, so a bad config fails before anything is drawn.\n\n### Flags and settings\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`. Unknown flags are an error, not a warning.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults in `src/settings.rs`.\n  - Paths in it may start with `~/`.\n  - A setting that fails to parse names its line.\n- The **window** is created last, from `src/app.rs`.\n\n### What each setting does\n\n| Setting | Default | What it does |\n| --- | --- | --- |\n| `theme` | `night` | Night or Paper |\n| `font_size` | `14.5` | Transcript text, in points |\n| `telemetry` | `false` | Never sent unless you turn it on |\n\n## The entry point\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\n> The order matters: a window opened before the settings load would flash the default theme.\n\n1. Read `src/cli.rs` first: it is short.\n2. Then `src/settings.rs`, which is where most changes land.\n3. Finally `src/app.rs`, for the window itself.\n\nThe folder `src/` holds all of it. For the config format itself, see [the TOML spec](https://toml.io).";
 
+const VISUALIZATION: &str = r#"## Release health at a glance
+
+The API is stable through the week, while the worker queue is the one clear hotspot on Thursday. That makes queue saturation the best first investigation—not a broad rollback.
+
+```trek-viz
+{"version":1,"title":"Release health by service","summary":"Incidents per service and weekday; the worker queue peaks on Thursday.","type":"heatmap","x_labels":["Mon","Tue","Wed","Thu","Fri"],"y_labels":["API","Web","Workers","Database"],"values":[[1,0,1,1,0],[0,1,0,1,1],[1,2,2,7,3],[0,0,1,1,0]]}
+```
+
+Here are two compact treatments for the same release status. The first favors fast scanning; the second adds the next action and is better when the dashboard must guide a decision.
+
+```trek-viz
+{"version":1,"title":"Release status treatments","summary":"A side-by-side comparison of a scan-first card and an action-oriented card.","type":"mockup","nodes":[{"kind":"row","children":[{"kind":"card","text":"Scan first","children":[{"kind":"badge","text":"Healthy","tone":"positive"},{"kind":"metric","text":"Success rate","value":"99.94%","tone":"positive"},{"kind":"text","text":"3 services reporting"}]},{"kind":"card","text":"Action oriented","children":[{"kind":"badge","text":"Watch workers","tone":"warning"},{"kind":"metric","text":"Queue depth","value":"1,284","tone":"warning"},{"kind":"button","text":"Inspect worker queue","tone":"accent"}]}]}]}
+```
+
+I’d ship the action-oriented treatment for an operational view and keep the scan-first version for an executive summary."#;
+
 const PLAN: &str = "## Require a session on every route\n\n1. Add `require_session` middleware in `src/auth.rs`.\n2. Wrap the router in `src/routes.rs` with it, keeping `/health` public.\n3. Return `401` with a JSON body when the session is missing or expired.\n4. Add tests for an authenticated and an anonymous request.\n\nNo database changes.";
 
 const LS_OUTPUT: &str = "total 48\ndrwxr-xr-x  8 me  staff   256 Oct  2 09:14 .\n-rw-r--r--  1 me  staff  1184 Oct  2 09:14 Cargo.toml\n-rw-r--r--  1 me  staff   912 Oct  2 09:14 README.md\ndrwxr-xr-x  5 me  staff   160 Oct  2 09:14 src\ndrwxr-xr-x  3 me  staff    96 Oct  2 09:14 tests";
@@ -1671,6 +1693,8 @@ mod tests {
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("mock:prose", false), Script::Prose);
+        assert_eq!(Script::parse("mock:visualization", false), Script::Visualization);
+        assert_eq!(Script::parse("show a visualization", false), Script::Answer, "only by its full name");
         assert_eq!(Script::parse("mock:history", false), Script::History(100));
         assert_eq!(Script::parse("mock:history 500", false), Script::History(500));
         assert_eq!(Script::parse("mock:history 999999", false), Script::History(MAX_HISTORY));
@@ -1730,15 +1754,31 @@ mod tests {
         assert_eq!(title("mock:long 5s"), "Run the full test suite");
         assert_eq!(title("ask a question"), "Choose a database");
         assert_eq!(title("mock:write"), "Add a note");
+        assert_eq!(title("mock:visualization"), "Compare release health dashboards");
         assert_eq!(title("write it down"), "How the app starts", "only `mock:write` writes");
     }
 
     #[test]
     fn tokens_rebuild_the_text() {
-        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, "short", "ünïcödé words stream fine"] {
+        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, VISUALIZATION, "short", "ünïcödé words stream fine"] {
             assert_eq!(tokens(text).concat(), text);
             assert!(tokens(text).iter().all(|t| !t.is_empty()));
         }
+    }
+
+    #[test]
+    fn visualization_script_streams_two_valid_native_blocks() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Supervised, false);
+            m.prompt("mock:visualization").await;
+            let events = m.turn().await;
+            assert_eq!(text(&events), VISUALIZATION);
+            let blocks = VISUALIZATION.split("```trek-viz\n").skip(1).map(|tail| tail.split_once("\n```").expect("closed visualization fence").0).collect::<Vec<_>>();
+            assert_eq!(blocks.len(), 2);
+            for block in blocks {
+                trek_core::visualization::parse(block).expect("mock emits a valid visualization");
+            }
+        });
     }
 
     struct Live {

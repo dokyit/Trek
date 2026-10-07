@@ -24,6 +24,7 @@ pub mod transcript;
 pub mod types;
 pub mod update;
 pub mod verification;
+pub mod visualization;
 pub mod worktree;
 
 pub use types::*;

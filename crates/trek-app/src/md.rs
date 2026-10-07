@@ -169,18 +169,24 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
 /// A markdown view of an agent's answer in `cwd`, set at `size`, with Trek's style and path
 /// chips. `folder`: the tint of folder icons in the chips (the project's colour).
 pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, false, cx)
+}
+
+/// `view`, with Trek's native visualization blocks enabled. Assistant answers use this; tool
+/// output, reasoning and secondary previews keep treating the same fence as ordinary code.
+pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, true, cx)
 }
 
 /// `view`, for the agent's reasoning: the same markdown, a step quieter.
 pub fn thought(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Muted, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Muted, false, cx)
 }
 
 /// `view` of `text` with its state kept by the window under `id`, for answers shown outside the
-/// transcript (the side chat).
-pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, cx)
+/// transcript (the side chat, which gets visualization blocks; notes, which don't).
+pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, visualizations: bool, cx: &App) -> TextView {
+    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations, cx)
 }
 
 /// Text streaming in fades in, as it arrives.
@@ -188,12 +194,26 @@ pub fn streaming() -> TextViewMotion {
     TextViewMotion::default().with_stream_fade(Duration::from_millis(280)).with_stream_fade_stagger(Duration::from_millis(10)).with_stream_fade_easing(Easing::EaseOut)
 }
 
-fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, cx: &App) -> TextView {
-    view.selectable(true)
+fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: bool, cx: &App) -> TextView {
+    let link_cwd = cwd.clone();
+    let view = view.selectable(true)
         .style(style(size, tone, cx))
         .text_size(size)
         .line_height(relative(LINE_HEIGHT))
         .plugin(PathChips { cwd, folder })
+        .on_link_click(move |url, _, window, cx| {
+            // A link to a file or folder on disk opens it with the system; a scheme (https:,
+            // mailto:) stays a URL; anything else can't open — open_url's -50 says so bluntly.
+            if let Some(path) = link_path(url, link_cwd.as_deref()) {
+                cx.open_with_system(&path);
+            } else if is_url(url) {
+                cx.open_url(url);
+            } else {
+                gpui_kit::component::WindowExt::push_notification(window, format!("No file or URL at {url}"), cx);
+            }
+        });
+    let view = if visualizations { view.plugin(crate::visualization::VisualizationPlugin) } else { view };
+    view
         .code_block_actions(|block, _, cx| {
             // Language label and a copy button in the block's corner.
             let code = block.code().to_string();
@@ -226,6 +246,29 @@ struct PathRef {
     raw: String,
     /// Resolved on disk, when it exists.
     resolved: Option<PathBuf>,
+}
+
+/// The file a link points at on disk, if it does: absolute and `~` paths as written, `file://`
+/// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
+fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let raw = url.strip_prefix("file://").unwrap_or(url);
+    let path = if let Some(rest) = raw.strip_prefix("~/") {
+        trek_core::paths::home().join(rest)
+    } else if raw.starts_with('/') {
+        PathBuf::from(raw)
+    } else if raw.contains(':') {
+        return None;
+    } else {
+        cwd?.join(raw)
+    };
+    path.exists().then_some(path)
+}
+
+/// `url` has a scheme — https:, mailto:, vscode: — so the system can open it.
+fn is_url(s: &str) -> bool {
+    let Some((scheme, _)) = s.split_once(':') else { return false };
+    scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// Inline code that names a file or folder.
@@ -356,7 +399,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 #[cfg(test)]
 mod tests {
-    use super::{COLUMN, Ink, LINE_HEIGHT, Metrics, Tone, column, in_folder, looks_like_path, path_part};
+    use super::{COLUMN, Ink, LINE_HEIGHT, Metrics, Tone, column, in_folder, is_url, link_path, looks_like_path, path_part};
     use std::path::Path;
     use gpui_kit::{Hsla, px, rgb};
 
@@ -525,4 +568,22 @@ mod tests {
         assert_eq!(path_part(" README.md "), "README.md");
         assert_eq!(crate::file_icon::icon_name(path_part("src/main.rs:42")), crate::file_icon::icon_name("main.rs"));
     }
+
+    #[test]
+    fn a_link_to_a_file_on_disk_beats_a_url() {
+        let dir = std::env::temp_dir().join(format!("trek-md-links-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shot.png");
+        std::fs::write(&file, b"x").unwrap();
+        let abs = file.to_string_lossy().to_string();
+        assert_eq!(link_path(&abs, Some(&dir)).as_deref(), Some(file.as_path()));
+        assert_eq!(link_path("shot.png", Some(&dir)).as_deref(), Some(file.as_path()));
+        assert_eq!(link_path("file:///tmp", None).as_deref(), Some(Path::new("/tmp")));
+        assert!(link_path("https://example.com", Some(&dir)).is_none());
+        assert!(link_path("mailto:a@b.co", Some(&dir)).is_none());
+        assert!(link_path("nope.txt", Some(&dir)).is_none());
+        assert!(is_url("https://x.y") && is_url("mailto:a@b") && is_url("file:///x"));
+        assert!(!is_url("/tmp/x") && !is_url("a b") && !is_url("x"));
+    }
 }
+

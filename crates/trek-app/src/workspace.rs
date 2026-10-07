@@ -2760,12 +2760,12 @@ impl Workspace {
         (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast, self.session_notes(Some(cwd), cwd, true))
     }
 
-    /// What a new session is told besides its messages (`SessionConfig::instructions`): the
-    /// project's notes, and the recap Trek asks for at the end of work while that's on and the
-    /// session `recaps` (it can change things).
+    /// What a new session is told besides its messages (`SessionConfig::instructions`): Trek's
+    /// native visualization capability, the project's notes, and the recap Trek asks for at the
+    /// end of work while that's on and the session `recaps` (it can change things).
     pub(crate) fn session_notes(&self, project: Option<&std::path::Path>, cwd: &std::path::Path, recaps: bool) -> Option<String> {
         let recap = (recaps && self.settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
-        let notes: Vec<String> = self.project_notes(project, cwd).into_iter().chain(recap).collect();
+        let notes: Vec<String> = std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string()).chain(self.project_notes(project, cwd)).chain(recap).collect();
         (!notes.is_empty()).then(|| notes.join("\n\n"))
     }
 

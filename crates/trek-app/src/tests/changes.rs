@@ -239,22 +239,28 @@ fn agents_are_asked_for_a_recap_unless_it_doesnt_fit() {
         let side = trek.update(cx, |ws, cx| ws.create_side_chat(cx)).expect("side chat");
         trek.update(cx, |ws, cx| ws.send_to(&side, "mock:told".into(), vec![], cx));
         trek.wait_done(cx, &side, RunState::Idle).await;
-        assert_eq!(trek.answers(cx, &side), "Trek told me nothing.");
+        let told = trek.answers(cx, &side);
+        assert!(told.contains(trek_core::visualization::AGENT_INSTRUCTIONS), "{told}");
+        assert!(!told.contains(trek_core::changes::RECAP), "{told}");
         // Nor is a sub-agent that only advises.
         trek.update(cx, |ws, cx| ws.navigate(crate::workspace::Route::Draft { project: Some(trek.project.clone()) }, cx));
         let parent = trek.send(cx, "mock:consult mock:told");
         trek.wait_done(cx, &parent, RunState::Idle).await;
         let child = trek.read(cx, |ws, _| ws.children(&parent).first().map(|t| t.id.clone())).expect("a sub-agent");
-        assert_eq!(trek.answers(cx, &child), "Trek told me nothing.");
+        let told = trek.answers(cx, &child);
+        assert!(told.contains(trek_core::visualization::AGENT_INSTRUCTIONS), "{told}");
+        assert!(!told.contains(trek_core::changes::RECAP), "{told}");
     });
 }
 
 #[test]
-fn with_the_recap_off_agents_arent_asked() {
+fn with_the_recap_off_agents_arent_asked_for_a_recap() {
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.ask_recap = false);
         let id = trek.send(cx, "mock:told");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert_eq!(trek.answers(cx, &id), "Trek told me nothing.");
+        let told = trek.answers(cx, &id);
+        assert!(told.contains(trek_core::visualization::AGENT_INSTRUCTIONS), "{told}");
+        assert!(!told.contains(trek_core::changes::RECAP), "{told}");
     });
 }
