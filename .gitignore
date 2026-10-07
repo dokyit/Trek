@@ -1,4 +1,5 @@
-target/
+target
+target.nosync/
 .ref/
 .DS_Store
 dist/
