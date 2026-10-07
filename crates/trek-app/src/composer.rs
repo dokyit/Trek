@@ -3,6 +3,7 @@
 //! On a new thread it floats over the background hero with Capy-style context chips above it.
 
 use crate::attachments::{self, Attaching, Outbox};
+use crate::dictate;
 use crate::palette;
 use crate::ui::{self, Pill};
 use crate::workspace::{PanelTool, Prefs, Route, Scope, Workspace, WorkspaceEvent};
@@ -82,6 +83,8 @@ pub struct Composer {
     /// Ask the agent to restate the next message in its own words before it does anything
     /// (`trek_core::restate`). Clears once that message is sent.
     restate: bool,
+    /// A dictation take in flight: recording while `recording()`, transcribing after.
+    dictation: Option<dictate::Dictation>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -283,6 +286,7 @@ impl Composer {
             consult_effort: None,
             consult_judge: false,
             restate: false,
+            dictation: None,
             _subscriptions: subscriptions,
         };
         // TREK_REVIEW_COMPOSER=restate (Restate first on) or arena (the Consult menu open on an
@@ -798,6 +802,86 @@ impl Composer {
             let needs_break = cursor > 0 && !value[..cursor].ends_with('\n');
             let text = if needs_break { format!("\n{text}") } else { text.to_string() };
             s.insert(text, window, cx);
+        });
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The mic button: start a take, or stop the one in flight and transcribe it into the text.
+    pub(crate) fn dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = self.dictation.as_mut() {
+            if !d.recording() {
+                return;
+            }
+            let (tx, rx) = async_channel::bounded(1);
+            d.finish(tx);
+            cx.notify();
+            self.await_dictation(rx, window, cx);
+            return;
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        dictate::ensure_permission(tx);
+        cx.spawn_in(window, async move |this, cx| {
+            let allowed = rx.recv().await.unwrap_or_else(|_| Err("Dictation ended.".into()));
+            let _ = this.update_in(cx, |c, _, cx| {
+                match allowed {
+                    Ok(()) => match dictate::start() {
+                        Ok(d) => c.dictation = Some(d),
+                        Err(e) => c.toast(e, cx),
+                    },
+                    Err(e) => c.toast(e, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Speech reply lands in the composer: the take's text at the cursor, or the failure.
+    fn await_dictation(&mut self, rx: async_channel::Receiver<Result<String, String>>, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let text = rx.recv().await.unwrap_or_else(|_| Err("Dictation ended.".into()));
+            let _ = this.update_in(cx, |c, window, cx| {
+                c.dictation = None;
+                match text {
+                    Ok(text) if !text.trim().is_empty() => c.insert_dictated(&text, window, cx),
+                    Ok(_) => c.toast("Nothing heard.".into(), cx),
+                    Err(e) => c.toast(e, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Transcribe an audio file as if it were a dictated take — the shots harness's
+    /// `dictate-file` verb, exercising Speech and the insert path without the mic.
+    #[cfg(feature = "shots")]
+    pub(crate) fn dictate_file(&mut self, file: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let (tx, rx) = async_channel::bounded(1);
+        match dictate::transcribe_file(file, tx) {
+            Ok(d) => {
+                self.dictation = Some(d);
+                cx.notify();
+                self.await_dictation(rx, window, cx);
+            }
+            Err(e) => self.toast(e, cx),
+        }
+    }
+
+    /// A note for the user (dictation problems, mostly) up as a workspace toast.
+    fn toast(&self, message: String, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+    }
+
+    /// What the mic heard, at the cursor — space-separated from the text it lands in.
+    fn insert_dictated(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| {
+            let value = s.value().to_string();
+            let cursor = s.cursor().min(value.len());
+            let left = cursor > 0 && !value[..cursor].ends_with(char::is_whitespace);
+            let right = cursor < value.len() && !value[cursor..].starts_with(char::is_whitespace);
+            s.insert(format!("{}{}{}", if left { " " } else { "" }, text.trim(), if right { " " } else { "" }), window, cx);
         });
         self.focus(window, cx);
         cx.notify();
@@ -2445,6 +2529,33 @@ impl Render for Composer {
                 .into_any_element()
         };
 
+        // The mic takes dictation when the bundle can ask for it (see dictate::available).
+        let dictating = self.dictation.as_ref();
+        let mic = dictate::available().then(|| {
+            let recording = dictating.is_some_and(|d| d.recording());
+            let transcribing = dictating.is_some_and(|d| !d.recording());
+            square("dictate")
+                .test_support()
+                .cursor_pointer()
+                .when(recording, |el| el.bg(palette::red(cx)))
+                .tooltip({
+                    let tip = if recording { "Stop and transcribe" } else if transcribing { "Transcribing…" } else { "Dictate" };
+                    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+                })
+                .child(if transcribing {
+                    gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
+                } else {
+                    Icon::new(if recording { crate::assets::Lucide::Square } else { crate::assets::Lucide::Mic })
+                        .small()
+                        .text_color(if recording { theme.background } else { theme.muted_foreground })
+                        .into_any_element()
+                })
+                .when(!transcribing, |el| {
+                    el.on_click(cx.listener(|this, _, window, cx| this.dictate(window, cx)))
+                })
+                .into_any_element()
+        });
+
         // Record the card's width; crossing the compact threshold re-renders the pills.
         let width_cell = self.width.clone();
         let me = cx.entity().downgrade();
@@ -2554,6 +2665,7 @@ impl Render for Composer {
                     })
                     .child(div().flex_1().min_w(px(4.)))
                     .when_some(context, |el, (used, window)| el.child(self.context_ring(used, window, cx)))
+                    .children(mic)
                     .child(send),
             );
 

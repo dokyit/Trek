@@ -57,6 +57,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Trek records the mic so Speech can transcribe what you dictate into the composer.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Trek transcribes what you dictate into the composer.</string>
   $RELEASE_KEY
 </dict></plist>
 PLIST

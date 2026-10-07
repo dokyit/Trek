@@ -281,6 +281,25 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    if verb == "dictate" || verb == "dictate-file" {
+        // Voice input without a pointer: `dictate` runs the mic button's real path (permission
+        // prompts included); `dictate-file <path>` skips the mic and transcribes the file.
+        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
+                anyhow::bail!("{verb}: no Trek window");
+            };
+            let composer = trek.read(cx).composer.clone();
+            if verb == "dictate" {
+                composer.update(cx, |c, cx| c.dictate(window, cx));
+            } else {
+                composer.update(cx, |c, cx| c.dictate_file(PathBuf::from(arg), window, cx));
+            }
+            Ok(())
+        })??;
+        return Ok(());
+    }
     ws.update(cx, |ws, cx| -> anyhow::Result<()> {
         match (verb, arg) {
             ("route", "draft") => ws.new_thread(cx),
