@@ -1,4 +1,4 @@
-//! Explorer: the project's file tree with a read-only preview.
+//! Explorer: the project's file tree. A file opens in the in-app editor; a folder expands.
 
 use crate::workspace::Workspace;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -30,7 +30,6 @@ pub struct ExplorerPanel {
     root: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
     selected: Option<PathBuf>,
-    preview: Option<Vec<String>>,
     _subscription: Subscription,
 }
 
@@ -44,35 +43,10 @@ impl ExplorerPanel {
                 this.root = root;
                 this.expanded.clear();
                 this.selected = None;
-                this.preview = None;
                 cx.notify();
             }
         });
-        Self { workspace, root, expanded: HashSet::new(), selected: None, preview: None, _subscription: sub }
-    }
-
-    fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.selected = Some(path.clone());
-        self.preview = None;
-        cx.spawn(async move |this, cx| {
-            let lines = cx
-                .background_executor()
-                .spawn(async move {
-                    match std::fs::read(&path) {
-                        Ok(bytes) if bytes.len() > 2_000_000 => vec!["File is too large to preview.".to_string()],
-                        Ok(bytes) if bytes.iter().take(8000).any(|b| *b == 0) => vec!["Binary file.".to_string()],
-                        Ok(bytes) => String::from_utf8_lossy(&bytes).lines().map(|l| l.replace('\t', "    ")).collect(),
-                        Err(e) => vec![format!("Couldn't read: {e}")],
-                    }
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.preview = Some(lines);
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        Self { workspace, root, expanded: HashSet::new(), selected: None, _subscription: sub }
     }
 
     fn rows(&self, dir: &Path, depth: usize, out: &mut Vec<(PathBuf, bool, usize)>) {
@@ -103,6 +77,7 @@ impl Render for ExplorerPanel {
             let p = path.clone();
             h_flex()
                 .id(SharedString::from(path.display().to_string()))
+                .test_support()
                 .mx_1()
                 .pl(px(8. + depth as f32 * 14.))
                 .pr_2()
@@ -131,61 +106,14 @@ impl Render for ExplorerPanel {
                         }
                         cx.notify();
                     } else {
-                        this.open(p.clone(), cx);
+                        // A file opens in the in-app editor; it highlights here while open.
+                        this.selected = Some(p.clone());
+                        this.workspace.update(cx, |ws, cx| ws.open_editor(p.clone(), None, cx));
+                        cx.notify();
                     }
                 }))
         }));
 
-        let preview = self.selected.clone().filter(|p| p.is_file()).map(|path| {
-            let lines = self.preview.clone().unwrap_or_default();
-            let mono = theme.mono_font_family.clone();
-            let rel = path.strip_prefix(&root).map(|p| p.display().to_string()).unwrap_or_default();
-            let width = lines.len().to_string().len();
-            v_flex()
-                .h(relative(0.55))
-                .border_t_1()
-                .border_color(theme.border)
-                .child(
-                    h_flex()
-                        .px_3()
-                        .h(px(34.))
-                        .gap_2()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(div().flex_1().truncate().child(rel))
-                        .child(crate::ui::icon_button("explorer-edit", crate::assets::Lucide::FilePen, "Edit in Trek").on_click({
-                            let ws = self.workspace.clone();
-                            let path = path.clone();
-                            move |_, _, cx| {
-                                ws.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx));
-                            }
-                        }))
-                        .child(crate::ui::icon_button("explorer-open", IconName::ExternalLink, "Open in default app").on_click({
-                            let path = path.clone();
-                            move |_, _, cx| cx.open_with_system(&path)
-                        })),
-                )
-                .child(
-                    uniform_list("explorer-preview", lines.len(), move |range, _, cx| {
-                        let theme = cx.theme();
-                        range
-                            .map(|i| {
-                                h_flex()
-                                    .h(px(19.))
-                                    .px_3()
-                                    .gap_3()
-                                    .whitespace_nowrap()
-                                    .font_family(mono.clone())
-                                    .text_size(px(12.))
-                                    .child(div().text_color(theme.muted_foreground.opacity(0.6)).child(format!("{:>width$}", i + 1)))
-                                    .child(lines[i].clone())
-                            })
-                            .collect()
-                    })
-                    .flex_1(),
-                )
-        });
-
-        v_flex().size_full().child(tree).children(preview).into_any_element()
+        v_flex().size_full().child(tree).into_any_element()
     }
 }

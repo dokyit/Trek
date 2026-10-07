@@ -1,7 +1,7 @@
 //! The in-app editor: a project file opens editable, marks dirty on change, and saves back.
 
 use super::harness::{open, run};
-use crate::workspace::Route;
+use crate::workspace::{PanelTool, Route};
 
 #[test]
 fn a_file_opens_in_the_editor_marks_dirty_and_saves() {
@@ -55,6 +55,30 @@ fn a_deep_link_opens_the_editor_on_the_line() {
         // trek://edit?path=…&line=3 — as the editor extension sends it.
         let url = format!("trek://edit?path={}&line=3", file.display());
         cx.update(|cx| crate::deep_link::open(&url, cx));
+        trek.render(cx);
+
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Editor { path } if path == file
+        ));
+    });
+}
+
+#[test]
+fn clicking_a_file_in_the_explorer_opens_it_in_the_editor() {
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("clicked.rs");
+        std::fs::write(&file, "fn clicked() {}\n").unwrap();
+
+        // The Explorer tool shows the file tree.
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx)));
+        trek.render(cx);
+
+        trek.render(cx);
+        assert!(trek.visible(cx, file.display().to_string()), "the file row should show");
+        trek.click(cx, file.display().to_string());
         trek.render(cx);
 
         assert!(matches!(

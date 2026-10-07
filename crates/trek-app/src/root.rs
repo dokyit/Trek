@@ -99,7 +99,10 @@ impl TrekWindow {
                     this.right_panel.update(cx, |p, cx| p.run_command(command, cwd, window, cx));
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
-                WorkspaceEvent::OpenEditor { path, line } => this.open_editor(path.clone(), *line, window, cx),
+                WorkspaceEvent::OpenEditor { path, line } if this.workspace.read(cx).main_window == Some(window.window_handle()) => {
+                    this.open_editor(path.clone(), *line, window, cx);
+                }
+                WorkspaceEvent::OpenEditor { .. } => {}
                 WorkspaceEvent::AttachImage(path) => {
                     let path = path.clone();
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
