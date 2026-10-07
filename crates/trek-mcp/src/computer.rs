@@ -25,6 +25,7 @@ use crate::util::{self, MAX_IMAGE_SIDE, TempFile, fmt_num};
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -33,8 +34,8 @@ unsafe extern "C" {
 }
 
 const ACCESSIBILITY_ERROR: &str = "Accessibility permission is missing, so trek-mcp cannot control the mouse or keyboard. \
-Grant it to the app that launched the agent (Trek, or your terminal) in System Settings ▸ Privacy & Security ▸ Accessibility, \
-then restart the agent session.";
+macOS may be showing a permission prompt for trek-mcp now — allow it in System Settings ▸ Privacy & Security ▸ Accessibility and try again \
+(no restart needed). If nothing asked, grant it to the app that launched the agent (Trek, or your terminal) in that same list.";
 
 const SCREEN_RECORDING_ERROR: &str = "Screen Recording permission is missing, so trek-mcp cannot capture the screen. \
 Grant it to the app that launched the agent (Trek, or your terminal) in System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording, \
@@ -46,6 +47,23 @@ full-screen screenshot (origin top-left); trek-mcp converts them to screen point
 to verify the result. Prefer `key` shortcuts and `open_app` over hunting for UI when possible. Trek's own windows \
 are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app \
 you mean forward first).";
+
+/// Once per run, ask macOS to prompt for Accessibility: the silent check alone never adds
+/// trek-mcp to the list, and a bundled helper can't be picked in the pane by hand.
+fn prompt_accessibility() {
+    use core_foundation::boolean::CFBoolean;
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let options = CFDictionary::from_CFType_pairs(&[(
+        CFString::from_static_string("AXTrustedCheckOptionPrompt"),
+        CFBoolean::true_value(),
+    )]);
+    unsafe {
+        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef());
+    }
+}
 
 /// Maps full-screen screenshot pixels to logical screen points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -600,6 +618,7 @@ delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup
 
     fn call(&mut self, name: &str, args: &Value) -> ToolResult {
         if needs_accessibility(name) && !(self.trusted)() {
+            prompt_accessibility();
             return Err(ACCESSIBILITY_ERROR.into());
         }
         match name {
