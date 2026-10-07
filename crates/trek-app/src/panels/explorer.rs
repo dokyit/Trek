@@ -7,13 +7,16 @@ use gpui_kit::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const HIDDEN: &[&str] = &[".git", ".DS_Store"];
+const HIDDEN: &[&str] = &[".git", ".DS_Store", "target"];
 
 fn children(dir: &Path) -> Vec<(PathBuf, bool)> {
     let mut v: Vec<(PathBuf, bool)> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
-                .filter(|e| !HIDDEN.contains(&e.file_name().to_string_lossy().as_ref()))
+                .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                !HIDDEN.contains(&n.as_str()) && !n.ends_with(".nosync")
+            })
                 .map(|e| {
                     let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                     (e.path(), is_dir)
@@ -28,6 +31,7 @@ fn children(dir: &Path) -> Vec<(PathBuf, bool)> {
 pub struct ExplorerPanel {
     workspace: Entity<Workspace>,
     root: Option<PathBuf>,
+    empty_hint: &'static str,
     expanded: HashSet<PathBuf>,
     selected: Option<PathBuf>,
     _subscription: Subscription,
@@ -36,9 +40,19 @@ pub struct ExplorerPanel {
 
 impl ExplorerPanel {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let root = workspace.read(cx).current_cwd();
-        let sub = cx.observe(&workspace, |this, ws, cx| {
-            let root = ws.read(cx).current_cwd();
+        Self::from(workspace, |ws| ws.current_cwd(), "Open a project to browse its files.", cx)
+    }
+
+    /// The IDE's tree: roots at `ide_root` instead of the route's folder, so it stays put while
+    /// the chat column on the right moves between drafts and threads.
+    pub fn for_ide(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+        Self::from(workspace, |ws| ws.ide_root.clone(), "Open a folder — or a file — to start.", cx)
+    }
+
+    fn from(workspace: Entity<Workspace>, root: impl Fn(&Workspace) -> Option<PathBuf> + 'static, empty_hint: &'static str, cx: &mut Context<Self>) -> Self {
+        let initial = root(&workspace.read(cx));
+        let sub = cx.observe(&workspace, move |this, ws, cx| {
+            let root = root(&ws.read(cx));
             if root != this.root {
                 this.root = root;
                 this.expanded.clear();
@@ -46,7 +60,7 @@ impl ExplorerPanel {
                 cx.notify();
             }
         });
-        Self { workspace, root, expanded: HashSet::new(), selected: None, _subscription: sub }
+        Self { workspace, root: initial, empty_hint, expanded: HashSet::new(), selected: None, _subscription: sub }
     }
 
     fn rows(&self, dir: &Path, depth: usize, out: &mut Vec<(PathBuf, bool, usize)>) {
@@ -65,7 +79,7 @@ impl Render for ExplorerPanel {
         let _ = &self.workspace;
         let theme = cx.theme().clone();
         let Some(root) = self.root.clone() else {
-            return super::empty("Open a project to browse its files.", cx).into_any_element();
+            return super::empty(self.empty_hint, cx).into_any_element();
         };
         let mut rows = Vec::new();
         self.rows(&root, 0, &mut rows);

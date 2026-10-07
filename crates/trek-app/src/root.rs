@@ -12,6 +12,7 @@ use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, TitleBar, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -31,8 +32,10 @@ pub struct TrekWindow {
     pub(crate) working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
     pub(crate) background_strip: Entity<crate::background_strip::BackgroundStrip>,
-    /// The file open in the in-app editor, when the route is `Route::Editor` (or IDE mode).
-    editor: Option<Entity<crate::editor::EditorView>>,
+    /// Open editor tabs — in IDE mode they sit over the editor; a lone `Route::Editor` shows
+    /// the active one.
+    editors: Vec<Entity<crate::editor::EditorView>>,
+    active_editor: usize,
     /// The file tree on the left in IDE mode.
     ide_files: Entity<crate::panels::explorer::ExplorerPanel>,
     title: Entity<WindowTitle>,
@@ -70,7 +73,7 @@ impl TrekWindow {
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
         let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
         let notes = cx.new(|cx| crate::notes::NotesView::new(workspace.clone(), window, cx));
-        let ide_files = cx.new(|cx| crate::panels::explorer::ExplorerPanel::new(workspace.clone(), cx));
+        let ide_files = cx.new(|cx| crate::panels::explorer::ExplorerPanel::for_ide(workspace.clone(), cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
             let mut p = RightPanel::new(workspace.clone());
@@ -196,7 +199,7 @@ impl TrekWindow {
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
                 Route::Editor { .. } => {
-                    if let Some(ev) = &this.editor {
+                    if let Some(ev) = this.editor() {
                         ev.update(cx, |e, cx| e.focus(window, cx));
                     }
                 }
@@ -223,7 +226,8 @@ impl TrekWindow {
             right_panel,
             working_bar,
             background_strip,
-            editor: None,
+            editors: Vec::new(),
+            active_editor: 0,
             ide_files,
             title,
             onboarding,
@@ -243,20 +247,197 @@ impl TrekWindow {
         div().absolute().size_0().track_focus(&self.focus)
     }
 
-    #[cfg(test)]
+    /// The active editor tab's view.
     pub fn editor(&self) -> Option<Entity<crate::editor::EditorView>> {
-        self.editor.clone()
+        self.editors.get(self.active_editor).cloned()
     }
 
-    /// Open a file in the in-app editor, optionally on a line. Deep links
-    /// (`trek://edit?path=…&line=…`) and the Explorer's edit button land here.
+    /// Open a file in the in-app editor, optionally on a line — a tab in IDE mode, the
+    /// center surface otherwise. Deep links (`trek://edit?path=…&line=…`) and file-tree
+    /// clicks land here.
     pub fn open_editor(&mut self, path: std::path::PathBuf, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(&self.editor, Some(ev) if ev.read(cx).path == path) {
-            self.editor = Some(cx.new(|cx| crate::editor::EditorView::new(self.workspace.clone(), path.clone(), window, cx)));
+        let ix = self.editors.iter().position(|e| e.read(cx).path == path).unwrap_or_else(|| {
+            self.editors.push(cx.new(|cx| crate::editor::EditorView::new(self.workspace.clone(), path.clone(), window, cx)));
+            self.editors.len() - 1
+        });
+        self.active_editor = ix;
+        self.workspace.update(cx, |ws, cx| {
+            ws.ide_file_seen(&path);
+            if !ws.ide {
+                ws.navigate(Route::Editor { path }, cx);
+            }
+        });
+        if let Some(line) = line {
+            self.editors[ix].update(cx, |e, cx| e.goto_line(line, window, cx));
         }
-        self.workspace.update(cx, |ws, cx| ws.navigate(Route::Editor { path }, cx));
-        if let (Some(ev), Some(line)) = (&self.editor, line) {
-            ev.update(cx, |e, cx| e.goto_line(line, window, cx));
+        cx.notify();
+    }
+
+    /// The IDE's tab row: one chip per open file — name, dirty dot, close ×.
+    fn ide_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let active = self.active_editor;
+        h_flex()
+            .id("ide-tabs")
+            .w_full()
+            .h(px(34.))
+            .flex_none()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .overflow_x_scroll()
+            .children(self.editors.iter().enumerate().map(|(ix, ev)| {
+                let e = ev.read(cx);
+                let name = e.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let on = ix == active;
+                let theme = theme.clone();
+                h_flex()
+                    .id(("ide-tab", ix))
+                    .test_support()
+                    .h_full()
+                    .px_3()
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_xs()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .when(on, |el| el.bg(theme.list_active))
+                    .when(!on, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover)))
+                    .child(crate::file_icon::badge(&name, px(13.), cx))
+                    .child(name.clone())
+                    .when(e.dirty, |el| el.child(div().size(px(5.)).rounded_full().bg(theme.warning)))
+                    .child(
+                        crate::ui::icon_button(("ide-tab-close", ix), IconName::Close, "Close")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.editors.remove(ix.min(this.editors.len().saturating_sub(1)));
+                                if this.active_editor >= this.editors.len() {
+                                    this.active_editor = this.editors.len().saturating_sub(1);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.active_editor = ix;
+                        cx.notify();
+                    }))
+            }))
+    }
+
+    /// The IDE's start screen, Cursor-style: what to do, then recent folders and loose files.
+    fn ide_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let folders: Vec<String> = ws
+            .settings
+            .ide
+            .recent_folders
+            .iter()
+            .chain(ws.settings.user_projects.iter())
+            .cloned()
+            .fold(Vec::new(), |mut v, f| {
+                if !v.contains(&f) {
+                    v.push(f);
+                }
+                v
+            });
+        let files: Vec<String> = ws.settings.ide.recent_files.iter().take(8).cloned().collect();
+        let mut list = v_flex().w(px(340.)).gap_1();
+        if !folders.is_empty() {
+            list = list.child(
+                div().pt_4().pb_1().text_xs().text_color(theme.muted_foreground).child("Recent folders"),
+            );
+            for f in folders.iter().take(6) {
+                let p = std::path::PathBuf::from(f);
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
+                list = list.child(
+                    h_flex()
+                        .id(SharedString::from(format!("ide-recent-folder-{f}")))
+                        .test_support()
+                        .w_full()
+                        .px_2()
+                        .h(px(30.))
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(crate::file_icon::folder(&name, false, px(15.), cx))
+                        .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(&p)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| ws.set_ide_root(p.clone(), cx));
+                        })),
+                );
+            }
+        }
+        if !files.is_empty() {
+            list = list.child(
+                div().pt_3().pb_1().text_xs().text_color(theme.muted_foreground).child("Recent files"),
+            );
+            for f in files.iter() {
+                let p = std::path::PathBuf::from(f);
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
+                list = list.child(
+                    h_flex()
+                        .id(SharedString::from(format!("ide-recent-file-{f}")))
+                        .test_support()
+                        .w_full()
+                        .px_2()
+                        .h(px(30.))
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(crate::file_icon::badge(&name, px(15.), cx))
+                        .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(&p)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_editor(p.clone(), None, window, cx);
+                        })),
+                );
+            }
+        }
+
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .child(crate::brand::logo_mark(px(52.)))
+            .child(
+                v_flex().items_center().gap_1()
+                    .child(div().text_lg().font_medium().child("Trek Code"))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child("A folder, a file, and the agents already signed in.")),
+            )
+            .child(
+                h_flex().gap_3().child(
+                    Button::new("ide-open-folder")
+                        .outline()
+                        .icon(IconName::FolderOpen)
+                        .label("Open folder")
+                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_folder(cx)))),
+                )
+                .child(
+                    Button::new("ide-open-file")
+                        .outline()
+                        .icon(IconName::File)
+                        .label("Open file")
+                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_file(cx)))),
+                ),
+            )
+            .child(list)
+    }
+
+    /// The active editor tab closes (⌘W in IDE mode).
+    fn close_editor(&mut self, cx: &mut Context<Self>) {
+        if self.editors.is_empty() {
+            return;
+        }
+        self.editors.remove(self.active_editor);
+        if self.active_editor >= self.editors.len() {
+            self.active_editor = self.editors.len().saturating_sub(1);
         }
         cx.notify();
     }
@@ -286,7 +467,14 @@ impl Render for WindowTitle {
         let theme = cx.theme().clone();
         let thread = ws.current_thread().cloned();
         let project_name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let (project, title, folder): (Option<String>, String, Option<std::path::PathBuf>) = match &ws.route {
+        let (project, title, folder): (Option<String>, String, Option<std::path::PathBuf>) = if ws.ide {
+            (
+                Some("Trek Code".into()),
+                ws.ide_root.as_ref().map(|r| r.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| r.display().to_string())).unwrap_or_else(|| "Welcome".into()),
+                ws.ide_root.clone(),
+            )
+        } else {
+            match &ws.route {
             Route::Thread(_) => match &thread {
                 // A thread without a project has a folder of its own, but no project to name.
                 Some(t) => (t.cwd.as_deref().filter(|c| !trek_core::paths::is_chat_dir(c)).map(project_name), t.title.clone(), t.cwd.clone()),
@@ -302,6 +490,7 @@ impl Render for WindowTitle {
                 (project.as_deref().map(project_name), name.into(), project)
             }
             Route::Onboarding => (None, String::new(), None),
+            }
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
         let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
@@ -601,8 +790,7 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
 
 /// "Run" menu: the project's actions, each opening in a terminal tab in `dir`.
 fn run_button(actions: Vec<trek_core::settings::ProjectAction>, dir: std::path::PathBuf, project_id: Option<String>, ws: Entity<Workspace>) -> impl IntoElement {
-    use gpui_kit::component::button::{Button, ButtonVariants as _};
-    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+        use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     use gpui_kit::component::Sizable as _;
     Button::new("run-actions").ghost().small().icon(crate::assets::Lucide::Play).tooltip("Run a project action").dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
         menu = menu.min_w(px(220.));
@@ -706,19 +894,16 @@ impl Render for TrekWindow {
         let fill = || StyleRefinement::default().size_full();
         let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
         let content = if ide {
-            // IDE: the file tree takes the sidebar; the editor fills the rest. Chat's route
-            // parks in `ide_prev_route` until the toggle flips back.
-            match &self.editor {
-                Some(ev) => v_flex().size_full().min_w_0().child(ev.clone().cached(fill())).into_any_element(),
-                None => v_flex()
+            // IDE: file tree in the sidebar, editor tabs over the editor, chat column on the
+            // right. The chat route stays live — that column is the same draft the user was on.
+            match self.editor() {
+                Some(ev) => v_flex()
                     .size_full()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(Icon::new(crate::assets::Lucide::CodeXml).size(px(32.)).text_color(cx.theme().muted_foreground.opacity(0.5)))
-                    .child(div().text_sm().child("Pick a file on the left — it opens here."))
+                    .min_w_0()
+                    .child(self.ide_tab_strip(cx))
+                    .child(div().flex_1().min_h_0().child(ev.cached(fill())))
                     .into_any_element(),
+                None => self.ide_welcome(cx).into_any_element(),
             }
         } else {
             match route {
@@ -726,10 +911,12 @@ impl Render for TrekWindow {
             Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
             Route::Notes => self.notes.clone().into_any_element(),
             Route::Editor { path } => {
-                if !matches!(&self.editor, Some(ev) if ev.read(cx).path == *path) {
-                    self.editor = Some(cx.new(|cx| crate::editor::EditorView::new(self.workspace.clone(), path.clone(), window, cx)));
-                }
-                let ev = self.editor.clone().expect("just created");
+                let ix = self.editors.iter().position(|e| e.read(cx).path == *path).unwrap_or_else(|| {
+                    self.editors.push(cx.new(|cx| crate::editor::EditorView::new(self.workspace.clone(), path.clone(), window, cx)));
+                    self.editors.len() - 1
+                });
+                self.active_editor = ix;
+                let ev = self.editors[ix].clone();
                 v_flex()
                     .size_full()
                     .min_w_0()
@@ -843,6 +1030,10 @@ impl Render for TrekWindow {
             .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
             .on_action(cx.listener(|this, _: &crate::OpenNotes, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))))
             .on_action(cx.listener(|this, _: &crate::CloseTab, _, cx| {
+                if this.workspace.read(cx).ide && !this.editors.is_empty() {
+                    this.close_editor(cx);
+                    return;
+                }
                 this.workspace.update(cx, |ws, cx| {
                     if let Route::Thread(id) = ws.route.clone() {
                         ws.close_tab(&id, cx);
@@ -894,6 +1085,23 @@ impl Render for TrekWindow {
                                     .child(content),
                             ),
                     )
+                    .when(ide, |el| {
+                        // The agent column: the same composer (same providers/pills) over the
+                        // live transcript — the route never left chat, so it just works.
+                        el.child(
+                            v_flex()
+                                .w(px(380.))
+                                .h_full()
+                                .flex_none()
+                                .border_l_1()
+                                .border_color(crate::ui::panel_border(glass, cx))
+                                .bg(crate::ui::panel_bg(glass, cx))
+                                .child(div().flex_1().min_h_0().child(self.thread_view.clone().cached(fill())))
+                                .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
+                                .child(Composer::element(&self.composer, &mut self.composer_changed, cx))
+                                .child(div().h(px(4.)).flex_none()),
+                        )
+                    })
                     .when(right_open && !in_settings, |el| {
                         let theme = cx.theme().clone();
                         // Grab strip on the panel's left edge: drag to resize, double-click to reset.

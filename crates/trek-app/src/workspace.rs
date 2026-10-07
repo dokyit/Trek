@@ -18,7 +18,7 @@ pub use verification::ago;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use trek_agents::{AcpInfo, AgentEvent, AgentStatus, Billing, Command, Decision, McpServer, SessionConfig, SlashCommand};
 use trek_core::catalog::{self, ModelInfo};
@@ -920,8 +920,10 @@ pub struct Workspace {
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
     pub main_window: Option<AnyWindowHandle>,
-    /// IDE mode: the whole window is files + editor; the chat route parks in `ide_prev_route`.
+    /// IDE mode: the window is files + editor + the chat column on the right.
     pub ide: bool,
+    /// The folder the IDE's file tree is rooted at (`None` → the welcome screen).
+    pub ide_root: Option<PathBuf>,
     ide_prev_route: Option<Route>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
@@ -1166,6 +1168,7 @@ impl Workspace {
             overlay_open: false,
             main_window: None,
             ide: false,
+            ide_root: None,
             ide_prev_route: None,
             thread_windows: HashMap::new(),
             pending_compose: None,
@@ -2308,17 +2311,73 @@ impl Workspace {
         .detach();
     }
 
-    /// The IDE toggle: chat ⇄ code. Whatever was on screen parks in `ide_prev_route` and
-    /// comes back on the way out.
+    /// The IDE toggle: chat ⇄ code. The chat route stays live (it renders as the IDE's right
+    /// column), so toggling out is instant — nothing to restore. Entering from a lone
+    /// `Route::Editor` adopts that file as an IDE tab and steps back to the chat it came from.
     pub fn toggle_ide(&mut self, cx: &mut Context<Self>) {
         self.ide = !self.ide;
         if self.ide {
+            // No folder picked yet? Root the tree at whatever the chat is working on.
+            if self.ide_root.is_none() {
+                self.ide_root = self.current_cwd();
+            }
             self.ide_prev_route = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding | Route::Editor { .. }));
-        } else if matches!(self.route, Route::Editor { .. }) {
-            let back = self.ide_prev_route.take().unwrap_or(Route::Draft { project: None });
-            self.navigate(back, cx);
+            if matches!(self.route, Route::Editor { .. }) {
+                let back = self.ide_prev_route.clone().unwrap_or(Route::Draft { project: self.ide_root.clone() });
+                self.navigate(back, cx);
+            }
         }
         cx.notify();
+    }
+
+    /// Pick the folder the IDE's file tree roots at.
+    pub fn set_ide_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.ide_root = Some(path.clone());
+        self.settings.ide.remember_folder(&path.display().to_string());
+        let _ = self.settings.save();
+        cx.notify();
+    }
+
+    /// "Open Folder…" on the IDE's welcome screen.
+    pub fn open_ide_folder(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Folder".into()),
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = this.update(cx, |this, cx| this.set_ide_root(path, cx));
+                }
+            }
+        });
+        self.keep(task);
+    }
+
+    /// "Open File…" on the welcome screen: a loose file, not part of a folder.
+    pub fn open_ide_file(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open File".into()),
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = this.update(cx, |this, cx| this.open_editor(path, None, cx));
+                }
+            }
+        });
+        self.keep(task);
+    }
+
+    /// A file opened in the editor — remember it for the welcome screen.
+    pub fn ide_file_seen(&mut self, path: &Path) {
+        self.settings.ide.remember_file(&path.display().to_string());
+        let _ = self.settings.save();
     }
 
     /// Open `path` in the main window's editor; `line` puts the caret there (Explorer,

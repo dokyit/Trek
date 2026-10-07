@@ -29,6 +29,8 @@ pub struct Settings {
     pub projects: std::collections::BTreeMap<String, ProjectPrefs>,
     /// Projects removed from Trek (paths); adding the folder again brings one back.
     pub hidden_projects: Vec<String>,
+    /// IDE mode: folders and loose files it opened recently.
+    pub ide: Ide,
     /// Trek on your iPhone (Settings › Phone).
     pub mobile: Mobile,
 }
@@ -272,6 +274,7 @@ impl Default for Settings {
             layout: Layout::default(),
             projects: Default::default(),
             hidden_projects: vec![],
+            ide: Ide::default(),
             mobile: Mobile::default(),
         }
     }
@@ -677,5 +680,29 @@ mod tests {
         s.updates.feed_url = "http://127.0.0.1:8765/{channel}.json".into();
         s.migrate();
         assert_eq!(s.updates.feed_url, "http://127.0.0.1:8765/{channel}.json");
+    }
+}
+
+/// IDE mode's recent picks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ide {
+    /// Folders opened as the IDE's workspace, most recent first.
+    pub recent_folders: Vec<String>,
+    /// Loose files opened in the editor (from a folder or on their own), most recent first.
+    pub recent_files: Vec<String>,
+}
+
+impl Ide {
+    pub fn remember_folder(&mut self, path: &str) {
+        self.recent_folders.retain(|f| f != path);
+        self.recent_folders.insert(0, path.to_string());
+        self.recent_folders.truncate(15);
+    }
+
+    pub fn remember_file(&mut self, path: &str) {
+        self.recent_files.retain(|f| f != path);
+        self.recent_files.insert(0, path.to_string());
+        self.recent_files.truncate(15);
     }
 }

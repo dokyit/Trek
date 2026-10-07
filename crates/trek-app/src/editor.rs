@@ -28,7 +28,7 @@ pub struct EditorView {
     state: Entity<EditorState>,
     /// Text as last loaded or saved — `value() != saved` means dirty.
     saved: String,
-    dirty: bool,
+    pub(crate) dirty: bool,
     /// Why the file didn't load (too big, unreadable, gone). The view is read-only then.
     problem: Option<String>,
     _sub: Subscription,

@@ -48,10 +48,14 @@ enum Action {
     Settle(String),
     Fork(String),
     CheckForUpdates,
+    /// Go to file — the IDE's ⌘P.
+    OpenFile(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Group {
+    /// Go-to-file matches in IDE mode.
+    Files,
     Threads,
     Projects,
     Commands,
@@ -62,6 +66,7 @@ impl Group {
         match self {
             Group::Threads if searching => "Threads",
             Group::Threads => "Recent threads",
+            Group::Files => "Files",
             Group::Projects => "Projects",
             Group::Commands => "Commands",
         }
@@ -76,10 +81,10 @@ enum Glyph {
 }
 
 #[derive(Clone)]
-struct Entry {
+pub(crate) struct Entry {
     group: Group,
     glyph: Glyph,
-    label: SharedString,
+    pub(crate) label: SharedString,
     /// Matched words in the label (thread titles).
     label_ranges: Vec<Range<usize>>,
     /// A second line: the matching excerpt of a message.
@@ -221,6 +226,9 @@ fn rank<T>(query: &str, candidates: Vec<(T, String, String)>) -> Vec<T> {
 }
 
 pub struct CommandPalette {
+    /// The IDE's go-to-file index, rebuilt when the palette opens on a different root.
+    file_index: Vec<String>,
+    file_root: Option<PathBuf>,
     workspace: Entity<Workspace>,
     right_panel: Entity<RightPanel>,
     basecamp: Entity<crate::basecamp::Basecamp>,
@@ -263,6 +271,8 @@ impl CommandPalette {
             workspace,
             right_panel,
             basecamp,
+            file_index: vec![],
+            file_root: None,
             input,
             open: false,
             query: String::new(),
@@ -296,6 +306,12 @@ impl CommandPalette {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // IDE mode's go-to-file: index the IDE root the first time the palette opens on it.
+        let root = self.workspace.read(cx).ide.then(|| self.workspace.read(cx).ide_root.clone()).flatten();
+        if root != self.file_root {
+            self.file_root = root.clone();
+            self.file_index = root.map(|r| crate::mentions::index_files(&r)).unwrap_or_default();
+        }
         self.open = true;
         self.restore = window.focused(cx);
         self.selected = 0;
@@ -380,7 +396,7 @@ impl CommandPalette {
         cx.notify();
     }
 
-    fn entries(&self, cx: &App) -> Vec<Entry> {
+    pub(crate) fn entries(&self, cx: &App) -> Vec<Entry> {
         let ws = self.workspace.read(cx);
         let q = self.query.trim();
         let searching = !q.is_empty();
@@ -395,6 +411,21 @@ impl CommandPalette {
         let commands: Vec<Entry> = commands.into_iter().take(if searching { COMMANDS } else { n }).collect();
         if named {
             out.extend(commands.iter().cloned());
+        }
+
+        // ⌘P in the IDE is go-to-file first.
+        if searching && ws.ide {
+            if let Some(root) = &self.file_root {
+                for rel in crate::mentions::match_files(&self.file_index, q, 12).into_iter().filter(|f| !f.ends_with('/')) {
+                    let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                    let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+                    let mut e = Entry::new(Group::Files, Glyph::Icon(Icon::new(IconName::File)), name, Action::OpenFile(root.join(&rel)));
+                    if let Some(d) = dir {
+                        e = e.hint(path_tail(&d, FOLDER_HINT));
+                    }
+                    out.push(e);
+                }
+            }
         }
 
         if searching {
@@ -583,6 +614,7 @@ impl CommandPalette {
             }),
             Action::Settle(id) => ws.update(cx, |ws, cx| ws.settle(&id, cx)),
             Action::Fork(id) => ws.update(cx, |ws, cx| _ = ws.fork_thread(&id, crate::workspace::ForkAt::End, &crate::workspace::Scope::Main, cx)),
+            Action::OpenFile(path) => ws.update(cx, |ws, cx| ws.open_editor(path, None, cx)),
             Action::CheckForUpdates => ws.update(cx, |ws, cx| {
                 ws.check_for_updates(true, cx);
                 ws.navigate(Route::Settings(SettingsPage::Updates), cx);

@@ -78,21 +78,44 @@ fn the_ide_toggle_parks_the_chat_and_brings_it_back() {
         trek.render(cx);
         assert!(trek.read(cx, |ws, _| ws.ide), "the toggle turns IDE mode on");
 
-        // The file tree is the left column; clicking a file opens the editor right there.
+        // The file tree is the left column; clicking a file opens an editor tab while the
+        // chat route stays put — it renders as the IDE's right column.
         trek.click(cx, file.display().to_string());
         trek.render(cx);
         assert!(
-            trek.read(cx, |ws, _| ws.ide && matches!(ws.route, Route::Editor { .. })),
-            "a file click in IDE mode still opens the editor"
+            trek.read(cx, |ws, _| ws.ide && matches!(ws.route, Route::Draft { .. })),
+            "a file click in IDE mode leaves the chat route alone"
         );
+        let open = trek.root.read_with(cx, |r, cx| r.editor().map(|e| e.read(cx).path.clone()));
+        assert_eq!(open.as_deref(), Some(file.as_path()), "the file is an open editor tab");
 
-        // Toggling back puts the chat exactly where it was.
+        // Toggling back shows the same chat — it never went anywhere.
         trek.update(cx, |ws, cx| ws.toggle_ide(cx));
         trek.render(cx);
         assert_eq!(
             trek.read(cx, |ws, _| (ws.ide, ws.route.clone())),
             (false, Route::Draft { project: Some(project) })
         );
+    });
+}
+
+#[test]
+fn cmd_k_in_the_ide_finds_files() {
+    run(async |cx| {
+        let trek = open(cx);
+        std::fs::write(trek.project.join("a-needle-file.rs"), "fn x() {}\n").unwrap();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| ws.toggle_ide(cx));
+        trek.render(cx);
+
+        trek.press(cx, "cmd-k");
+        trek.render(cx);
+        trek.type_live(cx, "needle");
+        trek.render(cx);
+
+        let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
+        let labels: Vec<String> = palette.read_with(cx, |p, cx| p.entries(cx).iter().map(|e| e.label.to_string()).collect());
+        assert!(labels.iter().any(|l| l == "a-needle-file.rs"), "file rows lead the IDE palette, got {labels:?}");
     });
 }
 
