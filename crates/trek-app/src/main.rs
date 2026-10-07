@@ -11,7 +11,9 @@ mod changes_card;
 mod command_palette;
 mod composer;
 mod cost;
+mod deep_link;
 mod dictate;
+mod editor;
 mod file_icon;
 mod integrations;
 mod ipc;
@@ -201,7 +203,15 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,trek=info".into()))
         .init();
 
+    // `trek://` links (editors, browsers) arrive as bare strings with no App context;
+    // they wait on a channel until the app's update loop picks them up.
+    let (links_tx, links_rx) = async_channel::unbounded::<String>();
     let app = gpui_kit::application().with_assets(assets::Assets);
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = links_tx.try_send(url);
+        }
+    });
     // Clicking the Dock icon with every window closed brings the main window back.
     app.on_reopen(|cx| {
         if cx.has_global::<workspace::GlobalWorkspace>() {
@@ -214,6 +224,7 @@ fn main() {
 
         cx.bind_keys(key_bindings());
         cx.bind_keys(notes::key_bindings());
+        cx.bind_keys(editor::key_bindings());
         app_actions(cx);
         cx.set_menus(menus());
 
@@ -228,6 +239,7 @@ fn main() {
             trek_core::paths::isolate(dir);
         }
         let ws = workspace::init(cx);
+        ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         tray::init(ws.clone(), cx);
         let theme = ws.read(cx).settings.appearance.theme;
         apply_theme(theme, None, cx);

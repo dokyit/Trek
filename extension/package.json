@@ -1,0 +1,30 @@
+{
+  "name": "trek",
+  "displayName": "Trek",
+  "description": "Jump between your editor and Trek: open the file you're looking at in Trek's editor, or send a selection to a new Trek thread.",
+  "version": "0.1.0",
+  "publisher": "trek",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "trek.openInTrek", "title": "Open in Trek", "category": "Trek" },
+      { "command": "trek.askAboutSelection", "title": "Ask Trek about selection", "category": "Trek" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "command": "trek.openInTrek", "group": "trek" },
+        { "command": "trek.askAboutSelection", "group": "trek", "when": "editorHasSelection" }
+      ],
+      "editor/title": [
+        { "command": "trek.openInTrek", "group": "navigation" }
+      ]
+    },
+    "keybindings": [
+      { "command": "trek.openInTrek", "key": "ctrl+alt+t", "mac": "ctrl+alt+t" }
+    ]
+  }
+}

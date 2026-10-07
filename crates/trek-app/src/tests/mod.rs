@@ -9,6 +9,7 @@ mod background;
 mod basecamp;
 mod changes;
 mod cost;
+mod editor;
 mod flows;
 mod harness;
 mod inbox;

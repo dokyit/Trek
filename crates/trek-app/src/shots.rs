@@ -300,6 +300,24 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         })??;
         return Ok(());
     }
+    if verb == "editor" {
+        // The editor surface without a pointer: `editor <abs-path> [line]` opens it there.
+        let (path, line) = match arg.rsplit_once(' ') {
+            Some((p, n)) if n.parse::<u32>().is_ok() => (p, n.parse().ok()),
+            _ => (arg, None),
+        };
+        let path = PathBuf::from(path);
+        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
+                anyhow::bail!("editor: no Trek window");
+            };
+            trek.update(cx, |t, cx| t.open_editor(path, line, window, cx));
+            Ok(())
+        })??;
+        return Ok(());
+    }
     ws.update(cx, |ws, cx| -> anyhow::Result<()> {
         match (verb, arg) {
             ("route", "draft") => ws.new_thread(cx),

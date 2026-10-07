@@ -153,6 +153,13 @@ impl Render for ExplorerPanel {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(div().flex_1().truncate().child(rel))
+                        .child(crate::ui::icon_button("explorer-edit", crate::assets::Lucide::FilePen, "Edit in Trek").on_click({
+                            let ws = self.workspace.clone();
+                            let path = path.clone();
+                            move |_, _, cx| {
+                                ws.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx));
+                            }
+                        }))
                         .child(crate::ui::icon_button("explorer-open", IconName::ExternalLink, "Open in default app").on_click({
                             let path = path.clone();
                             move |_, _, cx| cx.open_with_system(&path)

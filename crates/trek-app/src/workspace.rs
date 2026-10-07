@@ -16,7 +16,7 @@ pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::TurnRange;
 pub use verification::ago;
 
-use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Task};
+use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -43,6 +43,8 @@ pub enum Route {
     Basecamp,
     /// Notes: things jotted down, in markdown.
     Notes,
+    /// A file open in the in-app editor.
+    Editor { path: PathBuf },
     Onboarding,
 }
 
@@ -731,6 +733,8 @@ pub enum WorkspaceEvent {
     RunInTerminal { command: String, cwd: Option<PathBuf> },
     /// Insert text at the composer's cursor (e.g. an element picked in the browser).
     InsertIntoComposer(String),
+    /// Open `path` in the in-app editor, at `line` when given (Explorer, `trek://edit`).
+    OpenEditor { path: PathBuf, line: Option<u32> },
     /// Attach an image to the composer (e.g. a browser screenshot).
     AttachImage(std::path::PathBuf),
     /// Follow-ups held for a turn that stopped or failed go back into the composer showing `thread`.
@@ -1928,6 +1932,7 @@ impl Workspace {
         let gone = match &self.route {
             Route::Thread(t) => ids.contains(t),
             Route::Draft { project: Some(p) } => trek_core::store::project_root(p) == project.path,
+            Route::Editor { path } => path.starts_with(&project.path),
             _ => false,
         };
         if gone || matches!(self.route, Route::Settings(_)) {
@@ -2287,11 +2292,29 @@ impl Workspace {
         self.backdrop().is_some() || self.glass().is_some()
     }
 
+    /// `trek://` links ride a channel out of the platform's open-URL callback, which has no
+    /// App context — they drain here on the workspace's lifetime.
+    pub fn hear_deep_links(&mut self, rx: async_channel::Receiver<String>, cx: &mut Context<Self>) {
+        cx.spawn(async move |_, cx: &mut AsyncApp| {
+            while let Ok(url) = rx.recv().await {
+                let _ = cx.update(|cx| crate::deep_link::open(&url, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Open `path` in the main window's editor; `line` puts the caret there (Explorer,
+    /// `trek://edit` deep links).
+    pub fn open_editor(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::OpenEditor { path, line });
+    }
+
     /// Working directory for whatever is on screen: the thread's folder or the draft's project.
     pub fn current_cwd(&self) -> Option<PathBuf> {
         match &self.route {
             Route::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
             Route::Draft { project } => project.clone(),
+            Route::Editor { path } => path.parent().map(|d| d.to_path_buf()),
             _ => None,
         }
     }

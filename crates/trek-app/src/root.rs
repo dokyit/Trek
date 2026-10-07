@@ -31,6 +31,8 @@ pub struct TrekWindow {
     pub(crate) working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
     pub(crate) background_strip: Entity<crate::background_strip::BackgroundStrip>,
+    /// The file open in the in-app editor, when the route is `Route::Editor`.
+    editor: Option<Entity<crate::editor::EditorView>>,
     title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
     pub(crate) palette: Entity<CommandPalette>,
@@ -97,6 +99,7 @@ impl TrekWindow {
                     this.right_panel.update(cx, |p, cx| p.run_command(command, cwd, window, cx));
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
+                WorkspaceEvent::OpenEditor { path, line } => this.open_editor(path.clone(), *line, window, cx),
                 WorkspaceEvent::AttachImage(path) => {
                     let path = path.clone();
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
@@ -186,6 +189,11 @@ impl TrekWindow {
                 Route::Thread(_) | Route::Draft { .. } => this.composer.update(cx, |c, cx| c.focus(window, cx)),
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
+                Route::Editor { .. } => {
+                    if let Some(ev) = &this.editor {
+                        ev.update(cx, |e, cx| e.focus(window, cx));
+                    }
+                }
                 Route::Settings(_) | Route::Onboarding => this.focus.focus(window, cx),
             }
             let pending = ws.update(cx, |ws, _| ws.pending_compose.take());
@@ -209,6 +217,7 @@ impl TrekWindow {
             right_panel,
             working_bar,
             background_strip,
+            editor: None,
             title,
             onboarding,
             palette,
@@ -225,6 +234,24 @@ impl TrekWindow {
     /// (clicking the transcript leaves the composer focused).
     fn focus_anchor(&self) -> Div {
         div().absolute().size_0().track_focus(&self.focus)
+    }
+
+    #[cfg(test)]
+    pub fn editor(&self) -> Option<Entity<crate::editor::EditorView>> {
+        self.editor.clone()
+    }
+
+    /// Open a file in the in-app editor, optionally on a line. Deep links
+    /// (`trek://edit?path=…&line=…`) and the Explorer's edit button land here.
+    pub fn open_editor(&mut self, path: std::path::PathBuf, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(&self.editor, Some(ev) if ev.read(cx).path == path) {
+            self.editor = Some(cx.new(|cx| crate::editor::EditorView::new(self.workspace.clone(), path.clone(), window, cx)));
+        }
+        self.workspace.update(cx, |ws, cx| ws.navigate(Route::Editor { path }, cx));
+        if let (Some(ev), Some(line)) = (&self.editor, line) {
+            ev.update(cx, |e, cx| e.goto_line(line, window, cx));
+        }
+        cx.notify();
     }
 }
 
@@ -262,6 +289,11 @@ impl Render for WindowTitle {
             Route::Settings(_) => (None, "Settings".into(), None),
             Route::Basecamp => (None, "Basecamp".into(), None),
             Route::Notes => (None, "Notes".into(), None),
+            Route::Editor { path } => {
+                let project = path.parent().map(|d| trek_core::store::project_root(d));
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                (project.as_deref().map(project_name), name.into(), project)
+            }
             Route::Onboarding => (None, String::new(), None),
         };
         let settle_id = thread.as_ref().filter(|t| t.settled_at.is_none()).map(|t| t.id.clone());
@@ -660,6 +692,18 @@ impl Render for TrekWindow {
             Route::Settings(_) => self.settings.clone().into_any_element(),
             Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
             Route::Notes => self.notes.clone().into_any_element(),
+            Route::Editor { path } => {
+                if !matches!(&self.editor, Some(ev) if ev.read(cx).path == *path) {
+                    self.editor = Some(cx.new(|cx| crate::editor::EditorView::new(self.workspace.clone(), path.clone(), window, cx)));
+                }
+                let ev = self.editor.clone().expect("just created");
+                v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .children(tabs)
+                    .child(div().flex_1().min_h_0().child(ev.cached(fill())))
+                    .into_any_element()
+            }
             Route::Draft { .. } => v_flex()
                 .size_full()
                 .min_w_0()
