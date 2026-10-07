@@ -1159,7 +1159,7 @@ impl Sidebar {
                                 h_flex()
                                     .text_xs()
                                     .child(div().flex_1().child(l.label.clone()))
-                                    .child(div().text_color(theme.muted_foreground).child(format!("{:.0}%", l.percent))),
+                                    .child(div().text_color(theme.muted_foreground).child(format!("{:.0}% left", (100. - l.percent).clamp(0., 100.)))),
                             )
                             .child(bar(l.percent, cx))
                             .when(!resets.is_empty(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(format!("Resets {resets}"))))
