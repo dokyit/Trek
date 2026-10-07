@@ -6,9 +6,11 @@
 
 use crate::palette;
 use crate::workspace::{TurnRange, Workspace};
+use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -241,6 +243,8 @@ pub struct GitPanel {
     loading: bool,
     selected: Option<String>,
     diff: Vec<(LineKind, String)>,
+    /// The diff pane's scroll position (both axes); a new selection starts at the top left.
+    diff_scroll: UniformListScrollHandle,
     message: Entity<InputState>,
     busy: Option<&'static str>,
     turns_seen: u64,
@@ -281,6 +285,7 @@ impl GitPanel {
             loading: false,
             selected: None,
             diff: vec![],
+            diff_scroll: UniformListScrollHandle::new(),
             message,
             busy: None,
             turns_seen: 0,
@@ -292,6 +297,12 @@ impl GitPanel {
         };
         this.refresh(cx);
         this
+    }
+
+    /// The diff pane's scroll offset, for tests.
+    #[cfg(test)]
+    pub(crate) fn diff_offset(&self) -> Point<Pixels> {
+        self.diff_scroll.offset()
     }
 
     /// Show what the turn ending at `end` (by item id) of `thread` changed, `path`'s diff open
@@ -473,6 +484,7 @@ impl GitPanel {
         let against_base = self.target.clone().zip(self.merge_base()).zip(self.change(&path));
         let target = self.target.clone();
         self.selected = Some(path.clone());
+        self.diff_scroll.set_offset(point(px(0.), px(0.)));
         // Only the newest selection's diff lands: an older one still being read is dropped.
         self._diff = Some(cx.spawn(async move |this, cx| {
             let lines = cx
@@ -500,6 +512,7 @@ impl GitPanel {
             return;
         }
         self.selected = Some(path.clone());
+        self.diff_scroll.set_offset(point(px(0.), px(0.)));
         let old = turn.renamed.get(&path).cloned();
         let range = turn.range.clone();
         let p = path.clone();
@@ -831,6 +844,9 @@ impl GitPanel {
         let diff_lines = self.diff.clone();
         let add_bg = palette::emerald(cx).opacity(0.12);
         let del_bg = palette::red(cx).opacity(0.12);
+        // The list measures one item for the content width: the longest line, so a sideways
+        // swipe can reach past the viewport's edge rather than clip the line there.
+        let widest = diff_lines.iter().map(|(_, t)| t.chars().count()).enumerate().max_by_key(|&(_, n)| n).map(|(i, _)| i);
         let list = uniform_list("git-diff", diff_lines.len(), move |range, _, cx| {
             let theme = cx.theme();
             range
@@ -849,8 +865,18 @@ impl GitPanel {
                 })
                 .collect()
         })
-        .size_full();
-        div().id("git-diff-view").test_support().size_full().child(list).into_any_element()
+        .size_full()
+        .track_scroll(&self.diff_scroll)
+        .with_width_from_item(widest)
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained);
+        div()
+            .id("git-diff-view")
+            .test_support()
+            .size_full()
+            .child(list)
+            .vertical_scrollbar(&self.diff_scroll)
+            .horizontal_scrollbar(&self.diff_scroll)
+            .into_any_element()
     }
 
     /// A turn's changes: its files and their diffs, and the way back to the working tree's.

@@ -5,8 +5,8 @@
 use super::harness::{Trek, open, run};
 use crate::workspace::{PanelTool, Route, Scope};
 use crate::worktree_ui::{Leave, confirm_leave};
-use gpui_kit::TestAppContext;
 use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{Point, ScrollDelta, TestAppContext, point, px};
 use std::path::Path;
 use trek_core::RunState;
 use trek_core::settings::ProjectAction;
@@ -639,5 +639,40 @@ fn a_fork_sharing_a_worktree_leaves_without_it() {
         trek.window(cx, |window, cx| confirm_leave(ws, tid, Leave::Archive, window, cx));
         dialog_open(&trek, cx);
         assert!(trek.visible(cx, "wt-keep"));
+    });
+}
+
+#[test]
+fn the_git_tools_diff_scrolls_sideways_to_reach_long_lines() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        // A line far wider than the panel, committed, then changed so it shows in the diff.
+        let wide = "wide ".repeat(160);
+        std::fs::write(trek.project.join("wide.md"), format!("- {wide}\n")).unwrap();
+        std::fs::write(trek.project.join("NOTES.md"), "short\n").unwrap();
+        git(&trek.project, &["add", "-A"]).unwrap();
+        git(&trek.project, &["commit", "-qm", "files"]).unwrap();
+        std::fs::write(trek.project.join("wide.md"), format!("- {wide}\n- tail\n")).unwrap();
+        std::fs::write(trek.project.join("NOTES.md"), "short\nmore\n").unwrap();
+
+        open_git(&trek, cx);
+        trek.click(cx, "gf-wide.md");
+        trek.render(cx);
+        assert!(trek.visible(cx, "git-diff-view"), "the selected file's diff");
+
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        let before = cx.read(|cx| panel.read(cx).git_diff_offset(cx)).unwrap_or_default();
+        // A trackpad's sideways swipe moves the diff content, not just the panel.
+        trek.window(cx, |window, cx| {
+            window.scroll("git-diff-view", ScrollDelta::Pixels(point(px(-240.), px(0.))), cx);
+        });
+        let after = cx.read(|cx| panel.read(cx).git_diff_offset(cx)).unwrap_or_default();
+        assert!(after.x != before.x, "a sideways swipe moved the diff: {before:?} → {after:?}");
+        // A new selection starts the next file's diff back at the top left.
+        trek.click(cx, "gf-NOTES.md");
+        trek.render(cx);
+        let reset = cx.read(|cx| panel.read(cx).git_diff_offset(cx)).unwrap_or_default();
+        assert_eq!(reset, Point::default(), "selecting another file resets the diff's scroll");
     });
 }

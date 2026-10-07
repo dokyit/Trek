@@ -181,6 +181,15 @@ impl RightPanel {
         }
     }
 
+    /// The Git tool's diff scroll offset, while it's the tab on show.
+    #[cfg(test)]
+    pub(crate) fn git_diff_offset(&self, cx: &App) -> Option<Point<Pixels>> {
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Git(g)) => Some(g.read(cx).diff_offset()),
+            _ => None,
+        }
+    }
+
     fn close(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
             Some(View::Browser(b)) => b.update(cx, |b, cx| b.set_visible(false, cx)),
