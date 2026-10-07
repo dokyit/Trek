@@ -920,6 +920,9 @@ pub struct Workspace {
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
     pub main_window: Option<AnyWindowHandle>,
+    /// IDE mode: the whole window is files + editor; the chat route parks in `ide_prev_route`.
+    pub ide: bool,
+    ide_prev_route: Option<Route>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
     /// A message for the main window's composer while that window is being reopened: a window
@@ -1162,6 +1165,8 @@ impl Workspace {
             tidied_at: 0,
             overlay_open: false,
             main_window: None,
+            ide: false,
+            ide_prev_route: None,
             thread_windows: HashMap::new(),
             pending_compose: None,
             mock_agent: trek_agents::mock::enabled(),
@@ -2301,6 +2306,19 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// The IDE toggle: chat ⇄ code. Whatever was on screen parks in `ide_prev_route` and
+    /// comes back on the way out.
+    pub fn toggle_ide(&mut self, cx: &mut Context<Self>) {
+        self.ide = !self.ide;
+        if self.ide {
+            self.ide_prev_route = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding | Route::Editor { .. }));
+        } else if matches!(self.route, Route::Editor { .. }) {
+            let back = self.ide_prev_route.take().unwrap_or(Route::Draft { project: None });
+            self.navigate(back, cx);
+        }
+        cx.notify();
     }
 
     /// Open `path` in the main window's editor; `line` puts the caret there (Explorer,

@@ -65,6 +65,38 @@ fn a_deep_link_opens_the_editor_on_the_line() {
 }
 
 #[test]
+fn the_ide_toggle_parks_the_chat_and_brings_it_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("from-ide.rs");
+        std::fs::write(&file, "fn ide() {}\n").unwrap();
+
+        // Chat is on this draft when the IDE takes over.
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
+        trek.update(cx, |ws, cx| ws.toggle_ide(cx));
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, _| ws.ide), "the toggle turns IDE mode on");
+
+        // The file tree is the left column; clicking a file opens the editor right there.
+        trek.click(cx, file.display().to_string());
+        trek.render(cx);
+        assert!(
+            trek.read(cx, |ws, _| ws.ide && matches!(ws.route, Route::Editor { .. })),
+            "a file click in IDE mode still opens the editor"
+        );
+
+        // Toggling back puts the chat exactly where it was.
+        trek.update(cx, |ws, cx| ws.toggle_ide(cx));
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| (ws.ide, ws.route.clone())),
+            (false, Route::Draft { project: Some(project) })
+        );
+    });
+}
+
+#[test]
 fn clicking_a_file_in_the_explorer_opens_it_in_the_editor() {
     run(async |cx| {
         let trek = open(cx);

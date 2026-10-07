@@ -320,6 +320,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     ws.update(cx, |ws, cx| -> anyhow::Result<()> {
         match (verb, arg) {
+            ("ide", _) => ws.toggle_ide(cx),
             ("route", "draft") => ws.new_thread(cx),
             ("route", "no-project") => ws.navigate(Route::Draft { project: None }, cx),
             ("route", "basecamp") => ws.navigate(Route::Basecamp, cx),

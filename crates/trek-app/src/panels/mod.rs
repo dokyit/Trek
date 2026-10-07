@@ -1,7 +1,7 @@
 //! Right panel (Synara-style): tabs of tools — Terminal, Browser, Simulator, Explorer, Side chat, Git.
 
 mod browser;
-mod explorer;
+pub mod explorer;
 pub(crate) mod git;
 mod side_chat;
 mod simhid;

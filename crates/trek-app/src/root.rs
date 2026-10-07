@@ -12,7 +12,7 @@ use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, StyledExt as _, TitleBar, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, TitleBar, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -31,8 +31,10 @@ pub struct TrekWindow {
     pub(crate) working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
     pub(crate) background_strip: Entity<crate::background_strip::BackgroundStrip>,
-    /// The file open in the in-app editor, when the route is `Route::Editor`.
+    /// The file open in the in-app editor, when the route is `Route::Editor` (or IDE mode).
     editor: Option<Entity<crate::editor::EditorView>>,
+    /// The file tree on the left in IDE mode.
+    ide_files: Entity<crate::panels::explorer::ExplorerPanel>,
     title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
     pub(crate) palette: Entity<CommandPalette>,
@@ -68,6 +70,7 @@ impl TrekWindow {
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
         let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
         let notes = cx.new(|cx| crate::notes::NotesView::new(workspace.clone(), window, cx));
+        let ide_files = cx.new(|cx| crate::panels::explorer::ExplorerPanel::new(workspace.clone(), cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
             let mut p = RightPanel::new(workspace.clone());
@@ -221,6 +224,7 @@ impl TrekWindow {
             working_bar,
             background_strip,
             editor: None,
+            ide_files,
             title,
             onboarding,
             palette,
@@ -373,6 +377,15 @@ impl Render for WindowTitle {
                         crate::ui::icon_button("pop-out", crate::assets::Lucide::SquareArrowOutUpRight, "Open in new window (⌘⇧↩)")
                             .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenInNewWindow), cx)),
                     )
+                })
+                .child({
+                    let ide = self.workspace.read(cx).ide;
+                    crate::ui::icon_button(
+                        "toggle-ide",
+                        Icon::new(if ide { crate::assets::Lucide::MessageSquare } else { crate::assets::Lucide::CodeXml }),
+                        if ide { "Back to chat (⌘⇧E)" } else { "Code (⌘⇧E)" },
+                    )
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ToggleIde), cx))
                 })
                 .child(
                     crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)")
@@ -678,6 +691,7 @@ impl Render for TrekWindow {
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        let ide = self.workspace.read(cx).ide;
         let (right_open, wanted_width) = {
             let p = self.right_panel.read(cx);
             (p.open, p.width)
@@ -691,7 +705,23 @@ impl Render for TrekWindow {
         // drawn. Each re-renders when it's notified.
         let fill = || StyleRefinement::default().size_full();
         let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
-        let content = match route {
+        let content = if ide {
+            // IDE: the file tree takes the sidebar; the editor fills the rest. Chat's route
+            // parks in `ide_prev_route` until the toggle flips back.
+            match &self.editor {
+                Some(ev) => v_flex().size_full().min_w_0().child(ev.clone().cached(fill())).into_any_element(),
+                None => v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(crate::assets::Lucide::CodeXml).size(px(32.)).text_color(cx.theme().muted_foreground.opacity(0.5)))
+                    .child(div().text_sm().child("Pick a file on the left — it opens here."))
+                    .into_any_element(),
+            }
+        } else {
+            match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
             Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
             Route::Notes => self.notes.clone().into_any_element(),
@@ -738,6 +768,7 @@ impl Render for TrekWindow {
                 .child(crate::background_strip::cached(&self.background_strip, cx))
                 .child(Composer::element(&self.composer, &mut self.composer_changed, cx))
                 .into_any_element(),
+            }
         };
         v_flex()
             .id("trek-window")
@@ -803,6 +834,11 @@ impl Render for TrekWindow {
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx))))
+            .on_action(cx.listener(|this, _: &crate::ToggleIde, window, cx| {
+                if this.workspace.read(cx).main_window == Some(window.window_handle()) {
+                    this.workspace.update(cx, |ws, cx| ws.toggle_ide(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
             .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
             .on_action(cx.listener(|this, _: &crate::OpenNotes, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))))
@@ -829,7 +865,12 @@ impl Render for TrekWindow {
                     .flex_1()
                     .min_h_0()
                     .when(!collapsed && !in_settings, |el| {
-                        el.child(self.sidebar.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
+                        if ide {
+                            // The file tree takes the sidebar column.
+                            el.child(self.ide_files.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
+                        } else {
+                            el.child(self.sidebar.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
+                        }
                     })
                     .when(in_settings, |el| el.child(self.settings_nav.clone()))
                     .child(

@@ -45,7 +45,7 @@ auto_download = false
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator"}
 BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "appearance", "first"}
-CONTROL_VERBS = {"range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor"}
+CONTROL_VERBS = {"range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide"}
 
 
 class CliError(RuntimeError):

@@ -78,7 +78,8 @@ actions!(
         CloseTab,
         NextTab,
         PreviousTab,
-        OpenNotes
+        OpenNotes,
+        ToggleIde
     ]
 );
 
@@ -189,6 +190,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-h", OpenBasecamp, None),
         KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
         KeyBinding::new("cmd-shift-j", OpenNotes, None),
+        KeyBinding::new("cmd-shift-e", ToggleIde, None),
         // Only thread windows close with ⌘W; the main window stays put.
         KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
         // In the main window ⌘W closes the tab in front; the window stays put.
@@ -207,6 +209,14 @@ fn main() {
     // they wait on a channel until the app's update loop picks them up.
     let (links_tx, links_rx) = async_channel::unbounded::<String>();
     let app = gpui_kit::application().with_assets(assets::Assets);
+    #[cfg(all(feature = "shots", target_os = "macos"))]
+    if std::env::var_os("TREK_SHOT_DIR").is_some() {
+        // Capture runs are invisible: no Dock tile, no recent-apps entry.
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            objc2_app_kit::NSApplication::sharedApplication(mtm)
+                .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+        }
+    }
     app.on_open_urls(move |urls| {
         for url in urls {
             let _ = links_tx.try_send(url);
