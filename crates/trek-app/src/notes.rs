@@ -145,7 +145,7 @@ impl NotesView {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Jot something down… Markdown works: **bold**, *italic*, - lists, - [ ] to-dos")
+                .placeholder("Jot something down… Markdown works")
                 // Return is ours: it carries a list on (see `newline`); ⇧Return is a plain new line.
                 .submit_on_enter(true)
         });

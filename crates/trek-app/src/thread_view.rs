@@ -196,6 +196,10 @@ pub struct ThreadView {
     /// Where the transcript's last row ends on screen, as last laid out (`None` when it's out of
     /// view): the working bar sits just under it when the transcript doesn't reach the bar.
     pub tail: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
+    /// The view's height, as last laid out (zero before the first): the footer cards size against
+    /// it, not the window's — chrome and the composer take their share first. The whole view, not
+    /// the transcript: a taller card shrinks the transcript, so that measure would chase itself.
+    room: std::rc::Rc<std::cell::Cell<Pixels>>,
     expanded_gen: u64,
     /// The last `Workspace::reveal` request handled.
     revealed: u64,
@@ -370,6 +374,7 @@ impl ThreadView {
             end: None,
             opened: None,
             tail: Default::default(),
+            room: Default::default(),
             expanded_gen: 0,
             revealed: 0,
             flash: None,
@@ -958,6 +963,7 @@ impl ThreadView {
             let (v1, v2, item) = (view.clone(), view.clone(), item.to_string());
             Popover::new(id)
                 .anchor(anchor)
+                .offset(px(4.))
                 .appearance(false)
                 .open(open)
                 .on_open_change(move |open, _, cx| {
@@ -986,9 +992,12 @@ impl ThreadView {
                 }
             };
             let off = busy || start.is_none();
+            // These open below the row: above it is the answer they act on. A row near the
+            // window's bottom has no room there, so the popover flips above the trigger rather
+            // than clamping back over it.
             let undo = confirm_popover(
                 ("undo-pop", ix),
-                Anchor::BottomLeft,
+                Anchor::TopLeft,
                 Ask::Undo,
                 &end,
                 ask == Some(Ask::Undo),
@@ -997,7 +1006,7 @@ impl ThreadView {
             let retry_with = ask.as_ref().and_then(|a| if let Ask::Retry(m) = a { Some(m.clone()) } else { None });
             let retry = confirm_popover(
                 ("retry-pop", ix),
-                Anchor::BottomLeft,
+                Anchor::TopLeft,
                 Ask::Retry(retry_with.clone().flatten()),
                 &end,
                 retry_with.is_some(),
@@ -1230,29 +1239,23 @@ impl ThreadView {
                 });
                 let card = changes.map(|c| {
                     let end = live.and_then(|l| l.items.id_at(ix)).unwrap_or_default().to_string();
-                    let prefix = format!("changes:{end}:");
-                    let folded: HashSet<String> = view.upgrade().map(|v| v.read(cx).expanded.iter().filter_map(|k| k.strip_prefix(&prefix)).map(str::to_string).collect()).unwrap_or_default();
-                    let fold = {
-                        let (view, prefix) = (view.clone(), prefix.clone());
-                        move |dirs: Vec<String>, fold: Option<bool>, cx: &mut App| {
+                    // The card's "Show N more" is an expanded key like the rows'.
+                    let more_key = format!("changes:{end}:more");
+                    let shown_all = view.upgrade().is_some_and(|v| v.read(cx).expanded.contains(&more_key));
+                    let show_more = {
+                        let (view, more_key) = (view.clone(), more_key.clone());
+                        std::rc::Rc::new(move |all: bool, cx: &mut App| {
                             let _ = view.update(cx, |this, cx| {
-                                for dir in dirs {
-                                    let key = format!("{prefix}{dir}");
-                                    let folded = this.expanded.contains(&key);
-                                    match fold.unwrap_or(!folded) {
-                                        true => this.expanded.insert(key),
-                                        false => this.expanded.remove(&key),
-                                    };
-                                }
+                                match all {
+                                    true => this.expanded.insert(more_key.clone()),
+                                    false => this.expanded.remove(&more_key),
+                                };
                                 this.expanded_gen += 1;
                                 this.scroller.update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
                                 cx.notify();
                             });
-                        }
+                        }) as std::rc::Rc<dyn Fn(bool, &mut App)>
                     };
-                    let fold = std::rc::Rc::new(fold);
-                    let dirs: Vec<String> = crate::changes_card::folders(&c).into_iter().map(|(d, _)| d).collect();
-                    let (fold1, fold2) = (fold.clone(), fold);
                     // The diff shows in the Git tool, which only the main window has.
                     let view_diff = (c.counted == trek_core::changes::Counted::Checkpoints && at.scope == Scope::Main).then(|| {
                         let (ws, thread, end) = (at.workspace.clone(), at.thread.clone(), end.clone());
@@ -1261,10 +1264,16 @@ impl ThreadView {
                             ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::ShowTurnDiff { thread, end, path }));
                         }) as std::rc::Rc<dyn Fn(Option<String>, &mut Window, &mut App)>
                     });
+                    // Undo asks the same confirmation the turn-end controls do; its popover
+                    // opens on the row's undo button.
+                    let undo = (!at.busy && live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some())).then(|| {
+                        let (view, end) = (view.clone(), end.clone());
+                        std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| this.open_confirm(Ask::Undo, end.clone(), cx));
+                        }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                    });
                     let root = c.root.clone();
                     let actions = crate::changes_card::Actions {
-                        toggle_dir: std::rc::Rc::new(move |dir: &str, cx: &mut App| fold1(vec![dir.to_string()], None, cx)),
-                        fold_all: std::rc::Rc::new(move |fold: bool, cx: &mut App| fold2(dirs.clone(), Some(fold), cx)),
                         view_diff,
                         reveal: std::rc::Rc::new(move |f: &trek_core::changes::FileChange, _: &mut Window, cx: &mut App| {
                             let path = root.join(&f.path);
@@ -1277,8 +1286,10 @@ impl ThreadView {
                                 }
                             }
                         }),
+                        undo,
+                        show_more,
                     };
-                    crate::changes_card::card(ix, &c, &folded, actions, cx)
+                    crate::changes_card::card(ix, &c, shown_all, actions, cx)
                 });
                 column(
                     v_flex().children(card).children(confirm).child(
@@ -1952,10 +1963,15 @@ impl ThreadView {
                         .child(div().text_xs().text_color(theme.muted_foreground).child("Private: Trek sends it to the agent without showing or saving it."))
                 })
         }));
+        // Tall enough that a few questions show their options whole; a longer card scrolls.
+        // The room is the transcript's (last layout; the list's top padding comes off), not the
+        // window's: chrome and the composer already took theirs. Before the first layout, guess.
+        let room = self.room.get() - px(20.);
+        let tall = (if room > px(0.) { room } else { window.viewport_size().height * 0.6 }).max(px(240.)).min(px(640.));
         v_flex()
             .w_full()
             .max_w(width)
-            .max_h(px(420.))
+            .max_h(tall)
             .gap(px(12.))
             .p(px(14.))
             .rounded(px(14.))
@@ -1963,7 +1979,7 @@ impl ThreadView {
             .border_color(theme.foreground.opacity(0.12))
             .bg(theme.secondary)
             .child(h_flex().gap_2().text_sm().child(Icon::new(crate::assets::Lucide::MessageSquare).small().text_color(theme.muted_foreground)).child(div().font_semibold().child(format!("{agent} has a question"))))
-            .child(div().id("question-scroll").flex_1().min_h_0().overflow_y_scroll().child(body))
+            .child(div().id("question-scroll").test_support().flex_1().min_h_0().overflow_y_scroll().child(body))
             .child(
                 h_flex()
                     .gap_2()
@@ -2268,8 +2284,12 @@ impl Render for ThreadView {
         // of view, or a card sits under it) there's no tail.
         let tail = self.tail.clone();
         let forget = canvas(move |_, _, _| tail.set(None), |_, _, _, _| {}).absolute().size_0();
+        let room = {
+            let room = self.room.clone();
+            canvas(move |b, _, _| room.set(b.size.height), |_, _, _, _| {}).absolute().inset_0()
+        };
         let (Some(thread), false) = (self.current.clone(), rows.rows.is_empty()) else {
-            return v_flex().size_full().child(forget).child(self.empty_state(cx)).children(footer);
+            return v_flex().size_full().relative().child(forget).child(room).child(self.empty_state(cx)).children(footer);
         };
         let tail = (footer.is_none()).then(|| self.tail.clone());
         let last = rows.rows.len() - 1;
@@ -2299,7 +2319,9 @@ impl Render for ThreadView {
         let jump = self.jump_to_latest(window, cx);
         v_flex()
             .size_full()
+            .relative()
             .child(forget)
+            .child(room)
             .child(
                 div().relative().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {

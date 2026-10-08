@@ -503,12 +503,30 @@ impl SettingsView {
         // Updates to install come first; otherwise the setting waits under the agents.
         let first = self.workspace.read(cx).agent_updates.pending() > 0 && self.workspace.read(cx).settings.updates.check_agents;
         let updates = self.agent_updates_section(first, cx);
+        // Nothing installed: the guidance still shows, under it the CLIs a scan can install.
+        let none = rows.is_empty();
+        let empty = Self::note(
+            if detecting {
+                "Looking for agents on this Mac…"
+            } else {
+                "No agents found. Install an agent's CLI — Claude Code, Codex or another — and press Scan again; it joins with the login it already has."
+            },
+            cx,
+        );
         if first {
             out.extend(updates);
-            out.push(Self::heading("Installed", cx));
-            out.push(ui::group(rows, cx));
+            if none {
+                out.push(empty);
+            } else {
+                out.push(Self::heading("Installed", cx));
+                out.push(ui::group(rows, cx));
+            }
         } else {
-            out.push(ui::group(rows, cx));
+            if none {
+                out.push(empty);
+            } else {
+                out.push(ui::group(rows, cx));
+            }
             out.extend(updates);
         }
         if !missing.is_empty() {
@@ -782,22 +800,52 @@ impl SettingsView {
             SettingsPage::ApiKeys => out.extend(self.api_keys_page(cx)),
             SettingsPage::LocalModels => {
                 let ws = self.workspace.read(cx);
+                let detecting = ws.detecting;
                 let locals: Vec<_> = ws.agents.iter().filter(|a| matches!(a.agent, AgentId::Direct(_))).cloned().collect();
-                let rows = locals
-                    .into_iter()
-                    .map(|a| {
-                        let (status, detail) = match a.availability {
-                            Availability::Ready if a.models.is_empty() => {
-                                (Self::status_dot(palette::amber(cx), "No models"), "Running. Pull a model, e.g. ollama pull qwen3-coder".to_string())
-                            }
-                            Availability::Ready => (Self::status_dot(palette::emerald(cx), "Ready"), a.models.join(", ")),
-                            _ => (Self::status_dot(muted.opacity(0.5), "Not running"), String::new()),
-                        };
-                        let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child(a.name.clone()));
-                        Self::row(title, detail, status, cx)
-                    })
-                    .collect();
-                out.push(ui::group(rows, cx));
+                // Nothing up yet: say how servers get here, under it the ones found offline.
+                let up = locals.iter().any(|a| a.availability == Availability::Ready);
+                if !up {
+                    out.push(Self::note(
+                        if detecting {
+                            "Looking for model servers…"
+                        } else {
+                            "No model servers running. Ollama, LM Studio, and llama.cpp or MLX show up here on their own once they're running on their usual ports — there's nothing to set up."
+                        },
+                        cx,
+                    ));
+                }
+                if !locals.is_empty() {
+                    let rows = locals
+                        .into_iter()
+                        .map(|a| {
+                            let (status, detail) = match a.availability {
+                                Availability::Ready if a.models.is_empty() => {
+                                    (Self::status_dot(palette::amber(cx), "No models"), "Running. Pull a model, e.g. ollama pull qwen3-coder".to_string())
+                                }
+                                Availability::Ready => (Self::status_dot(palette::emerald(cx), "Ready"), a.models.join(", ")),
+                                _ => (Self::status_dot(muted.opacity(0.5), "Not running"), String::new()),
+                            };
+                            let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child(a.name.clone()));
+                            Self::row(title, detail, status, cx)
+                        })
+                        .collect();
+                    out.push(ui::group(rows, cx));
+                }
+                if !up {
+                    out.push(
+                        h_flex()
+                            .child(
+                                Button::new("rescan-local")
+                                    .small()
+                                    .outline()
+                                    .loading(detecting)
+                                    .icon(IconName::RefreshCw)
+                                    .label("Scan again")
+                                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.detect_agents(cx)))),
+                            )
+                            .into_any_element(),
+                    );
+                }
             }
             SettingsPage::Permissions => out.extend(self.permissions_page(&s, cx)),
             SettingsPage::Import => {

@@ -1,28 +1,29 @@
 //! The card under a finished turn's answer when the turn changed files
-//! (`Workspace::load_turn_changes`): "CHANGED FILES (2) · +28 / −6" with Collapse all and View
-//! diff, then the files grouped by folder, each in its type's colour with the lines it gained and
-//! lost. Drawn with the theme's foreground at low opacities, like the rest of the transcript, so
-//! it sits right on Night, Paper and glass alike.
+//! (`Workspace::load_turn_changes`): "Edited N files" with the lines it added and removed in
+//! all, then a flat row per file — its folder muted, its name brighter, its own counts on the
+//! right — Undo (the turn-end confirmation) and Review (the turn's diff in the Git tool) on the
+//! header, and a "Show N more" row past the first few. Drawn with the theme's foreground at low
+//! opacities, like the rest of the transcript, so it sits right on Night, Paper and glass alike.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashSet;
 use std::rc::Rc;
 use trek_core::changes::{Counted, FileChange, FileStatus, TurnChanges};
 
 /// What the card's controls do.
 pub struct Actions {
-    /// Fold or unfold one folder.
-    pub toggle_dir: Rc<dyn Fn(&str, &mut App)>,
-    /// Fold every folder (`true`), or unfold them all.
-    pub fold_all: Rc<dyn Fn(bool, &mut App)>,
     /// Show the turn's diff in the Git tool, a file's open; `None` when there's none to show
-    /// (counted without git, or no Git tool in this window).
+    /// (counted without git, or no Git tool in this window). Review shows it all.
     pub view_diff: Option<Rc<dyn Fn(Option<String>, &mut Window, &mut App)>>,
     /// A file clicked when there's no diff to show: show it in Finder.
     pub reveal: Rc<dyn Fn(&FileChange, &mut Window, &mut App)>,
+    /// Undo the turn; asks the same confirmation the turn-end controls do. `None` when the turn
+    /// can't be taken back (one the agent started itself, or a turn still running).
+    pub undo: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// The list passed its cap: show the rest (`true`) or the first `SHOWN` again.
+    pub show_more: Rc<dyn Fn(bool, &mut App)>,
 }
 
 /// A folder of the card and its files, in order.
@@ -40,84 +41,81 @@ pub fn folders(changes: &TurnChanges) -> Vec<(String, Vec<&FileChange>)> {
     out
 }
 
-/// The card for the turn ending at transcript item `ix`; `folded`: the folders folded.
-pub fn card(ix: usize, changes: &TurnChanges, folded: &HashSet<String>, actions: Actions, cx: &App) -> AnyElement {
+/// Files listed before a "Show N more" row offers the rest.
+const SHOWN: usize = 8;
+
+/// The card for the turn ending at transcript item `ix`; `shown_all`: more than `SHOWN` files,
+/// opened out.
+pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let line = theme.foreground.opacity(0.07);
     let (green, red) = (crate::palette::emerald(cx), crate::palette::red(cx));
     let (added, removed) = changes.totals();
-    let groups = folders(changes);
-    let all_folded = groups.iter().all(|(d, _)| folded.contains(d));
-    let fold_all = actions.fold_all.clone();
+    let n = changes.files.len();
     let head = h_flex()
         .id(("changes-head", ix))
         .test_support()
-        .gap(px(6.))
-        .pl(px(12.))
-        .pr(px(6.))
-        .h(px(34.))
-        .text_size(px(11.))
-        .font_medium()
-        .text_color(muted)
-        .child(format!("CHANGED FILES ({})", changes.files.len()))
+        .gap(px(8.))
+        .pl(px(14.))
+        .pr(px(8.))
+        .py(px(8.))
+        .text_size(px(12.5))
+        .child(
+            div()
+                .font_semibold()
+                .text_color(theme.foreground.opacity(0.92))
+                .child(format!("Edited {n} {}", if n == 1 { "file" } else { "files" })),
+        )
         .when(added > 0 || removed > 0, |el| {
-            el.child("·").child(
+            el.child(
                 h_flex()
-                    .gap(px(4.))
+                    .gap(px(6.))
                     .font_family(theme.mono_font_family.clone())
+                    .text_xs()
                     .child(div().text_color(green).child(format!("+{added}")))
-                    .child("/")
                     .child(div().text_color(red).child(format!("−{removed}"))),
             )
         })
         .child(div().flex_1())
-        .child(
-            Button::new(("changes-fold", ix))
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(if all_folded { crate::assets::Lucide::ChevronsUpDown } else { crate::assets::Lucide::ChevronsDownUp }).text_color(muted))
-                .label(if all_folded { "Expand all" } else { "Collapse all" })
-                .on_click(move |_, _, cx| fold_all(!all_folded, cx)),
-        )
+        .when_some(actions.undo.clone(), |el, undo| {
+            el.child(
+                Button::new(("changes-undo", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(crate::assets::Lucide::Undo2).text_color(muted))
+                    .label("Undo")
+                    .on_click(move |_, window, cx| undo(window, cx)),
+            )
+        })
         .when_some(actions.view_diff.clone(), |el, view| {
-            el.child(Button::new(("changes-diff", ix)).ghost().xsmall().icon(Icon::new(crate::assets::Lucide::FileDiff).text_color(muted)).label("View diff").on_click(move |_, window, cx| view(None, window, cx)))
+            el.child(Button::new(("changes-review", ix)).small().outline().label("Review").on_click(move |_, window, cx| view(None, window, cx)))
         });
-    let root = changes.root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
-    let mut rows: Vec<AnyElement> = vec![];
-    for (g, (dir, files)) in groups.iter().enumerate() {
-        let open = !folded.contains(dir);
-        let toggle = actions.toggle_dir.clone();
-        let key = dir.clone();
+    let files = if shown_all { &changes.files[..] } else { &changes.files[..n.min(SHOWN)] };
+    let mut rows: Vec<AnyElement> = files.iter().enumerate().map(|(i, f)| file_row(ix, i, f, &actions, cx)).collect();
+    if n > SHOWN {
+        let show_more = actions.show_more.clone();
         rows.push(
-            h_flex()
-                .id(SharedString::from(format!("changes-dir-{ix}-{g}")))
+            div()
+                .id(("changes-more", ix))
                 .test_support()
-                .gap(px(6.))
                 .px(px(8.))
-                .h(px(26.))
+                .h(px(28.))
                 .rounded(px(6.))
+                .flex()
+                .items_center()
                 .text_xs()
                 .text_color(muted)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.foreground.opacity(0.04)))
-                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted.opacity(0.8)))
-                .child(crate::file_icon::folder(if dir.is_empty() { &root } else { dir }, open, px(14.), cx))
-                .child(div().min_w_0().truncate().child(if dir.is_empty() { root.clone() } else { trek_core::paths::tildify(std::path::Path::new(dir)) }))
-                .when(!open, |el| el.child(div().flex_none().text_color(muted.opacity(0.7)).child(format!("{}", files.len()))))
-                .on_click(move |_, _, cx| toggle(&key, cx))
+                .hover(|s| s.bg(theme.foreground.opacity(0.04)).text_color(theme.foreground))
+                .child(if shown_all { "Show less".to_string() } else { format!("Show {} more", n - SHOWN) })
+                .on_click(move |_, _, cx| show_more(!shown_all, cx))
                 .into_any_element(),
         );
-        if open {
-            for f in files {
-                let i = changes.files.iter().position(|c| std::ptr::eq(c, *f)).unwrap_or(0);
-                rows.push(file_row(ix, i, f, changes.counted, &actions, cx));
-            }
-        }
     }
     let note = (changes.counted == Counted::EditTools).then(|| {
         div()
-            .px(px(12.))
+            .px(px(14.))
             .py(px(6.))
             .border_t_1()
             .border_color(line)
@@ -133,38 +131,40 @@ pub fn card(ix: usize, changes: &TurnChanges, folded: &HashSet<String>, actions:
         .mb(px(8.))
         .rounded(px(10.))
         .border_1()
-        .border_color(theme.foreground.opacity(0.1))
-        .bg(theme.foreground.opacity(0.025))
+        .border_color(theme.foreground.opacity(0.08))
+        .bg(theme.secondary)
         .overflow_hidden()
         .child(head)
-        .child(v_flex().py(px(4.)).px(px(4.)).border_t_1().border_color(line).children(rows))
+        .child(v_flex().py(px(4.)).px(px(6.)).border_t_1().border_color(line).children(rows))
         .children(note)
         .into_any_element()
 }
 
-/// One file under its folder: its type's badge, its name (struck through when deleted), a tag
-/// for a new, deleted or renamed one, and its lines on the right.
-fn file_row(ix: usize, i: usize, f: &FileChange, counted: Counted, actions: &Actions, cx: &App) -> AnyElement {
+/// One changed file: its status letter as the Git tool marks it, its folder muted, its name
+/// struck through when deleted, its lines on the right.
+fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let (green, red) = (crate::palette::emerald(cx), crate::palette::red(cx));
-    let name = f.path.rsplit_once('/').map_or(f.path.as_str(), |(_, n)| n).to_string();
-    let deleted = f.status == FileStatus::Deleted;
-    let tag = |text: &str, color: Hsla| div().flex_none().px(px(5.)).rounded(px(4.)).text_size(px(10.5)).text_color(color).bg(color.opacity(0.12)).child(text.to_string());
-    let tag = match &f.status {
-        FileStatus::Added if counted == Counted::Checkpoints => Some(tag("new", green)),
-        FileStatus::Deleted => Some(tag("deleted", red)),
-        FileStatus::Renamed { from } => Some(tag(&format!("from {}", from.rsplit_once('/').map_or(from.as_str(), |(_, n)| n)), muted)),
-        _ => None,
+    let (dir, name) = match f.path.rsplit_once('/') {
+        Some((d, n)) => (format!("{d}/"), n.to_string()),
+        None => (String::new(), f.path.clone()),
     };
-    let mono = theme.mono_font_family.clone();
+    // The same letters and colours panels/git.rs gives a worktree row ("U" there is a git
+    // status the turn's counting never yields).
+    let (letter, tint) = match &f.status {
+        FileStatus::Added => ("A", green),
+        FileStatus::Modified => ("M", crate::palette::amber(cx)),
+        FileStatus::Deleted => ("D", red),
+        FileStatus::Renamed { .. } => ("R", crate::palette::amber(cx)),
+    };
+    let deleted = f.status == FileStatus::Deleted;
     let lines = if f.binary {
         div().text_color(muted).child("binary").into_any_element()
     } else if f.lines_known {
         h_flex()
-            .gap(px(4.))
+            .gap(px(6.))
             .child(div().text_color(if f.added > 0 { green } else { muted.opacity(0.6) }).child(format!("+{}", f.added)))
-            .child(div().text_color(muted.opacity(0.6)).child("/"))
             .child(div().text_color(if f.removed > 0 { red } else { muted.opacity(0.6) }).child(format!("−{}", f.removed)))
             .into_any_element()
     } else {
@@ -179,10 +179,9 @@ fn file_row(ix: usize, i: usize, f: &FileChange, counted: Counted, actions: &Act
     h_flex()
         .id(SharedString::from(format!("changed-{ix}-{i}")))
         .test_support()
-        .gap(px(8.))
-        .pl(px(30.))
-        .pr(px(8.))
-        .h(px(26.))
+        .gap(px(4.))
+        .px(px(8.))
+        .h(px(28.))
         .rounded(px(6.))
         .text_size(px(12.5))
         .cursor_pointer()
@@ -192,18 +191,27 @@ fn file_row(ix: usize, i: usize, f: &FileChange, counted: Counted, actions: &Act
             Some(view) => view(Some(file.path.clone()), window, cx),
             None => reveal(&file, window, cx),
         })
-        .child(crate::file_icon::badge(&f.path, px(14.), cx))
+        .child(div().w(px(12.)).flex_none().text_xs().font_semibold().text_color(tint).child(letter))
+        // The path takes what the counts don't: the folder ellipsizes first, then the name.
         .child(
-            div()
+            h_flex()
+                .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_color(if deleted { muted } else { theme.foreground.opacity(0.92) })
-                .when(deleted, |el| el.line_through())
-                .child(name),
+                .gap(px(4.))
+                .when(!dir.is_empty(), |el| {
+                    el.child(div().min_w_0().truncate().text_color(muted).child(dir))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(if deleted { muted } else { theme.foreground.opacity(0.92) })
+                        .font_medium()
+                        .when(deleted, |el| el.line_through())
+                        .child(name),
+                ),
         )
-        .children(tag)
-        .child(div().flex_1())
-        .child(div().flex_none().font_family(mono).text_xs().child(lines))
+        .child(div().flex_none().font_family(theme.mono_font_family.clone()).text_xs().child(lines))
         .into_any_element()
 }
 

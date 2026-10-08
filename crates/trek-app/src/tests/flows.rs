@@ -319,6 +319,22 @@ fn raising_hand_holding_approves_what_the_new_level_covers() {
     });
 }
 
+/// The card shows every option whole when it can: the mock's two questions (five options, the
+/// last with a description) fit without clipping at the card's edge.
+#[test]
+fn a_question_card_shows_every_option_whole() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "ask me a question");
+        trek.wait_needs_you(cx, &id).await;
+        let rid = trek.request(cx, &id);
+        trek.render(cx);
+        let area = trek.bounds(cx, "question-scroll").expect("the options' scroll area");
+        let last = trek.bounds(cx, format!("q-{rid}-1-2")).expect("the last option");
+        assert!(last.bottom() <= area.bottom(), "the last option ({last:?}) isn't clipped by the card ({area:?})");
+    });
+}
+
 #[test]
 fn question_cards_take_picks_typed_answers_or_a_skip() {
     run(async |cx| {

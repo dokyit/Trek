@@ -349,7 +349,8 @@ impl TrekWindow {
                 v
             });
         let files: Vec<String> = ws.settings.ide.recent_files.iter().take(8).cloned().collect();
-        let mut list = v_flex().w(px(340.)).gap_1();
+        // Capped at 340 but shrinks with the column: a narrower welcome must not clip rows.
+        let mut list = v_flex().w_full().max_w(px(340.)).gap_1();
         if !folders.is_empty() {
             list = list.child(
                 div().pt_4().pb_1().text_xs().text_color(theme.muted_foreground).child("Recent folders"),
@@ -371,7 +372,7 @@ impl TrekWindow {
                         .hover(|s| s.bg(theme.list_hover))
                         .child(crate::file_icon::folder(&name, false, px(15.), cx))
                         .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
-                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(&p)))
+                        .child(div().min_w_0().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(&p)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace.update(cx, |ws, cx| ws.set_ide_root(p.clone(), cx));
                         })),
@@ -399,7 +400,7 @@ impl TrekWindow {
                         .hover(|s| s.bg(theme.list_hover))
                         .child(crate::file_icon::badge(&name, px(15.), cx))
                         .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
-                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(&p)))
+                        .child(div().min_w_0().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(&p)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor(p.clone(), None, window, cx);
                         })),
@@ -407,34 +408,44 @@ impl TrekWindow {
             }
         }
 
-        v_flex()
+        // The composer sits in the agent column, not over this one. What bites is a welcome
+        // taller or wider than its column: scroll, and let the centered content shrink.
+        div()
+            .id("ide-welcome")
             .size_full()
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .child(crate::brand::logo_mark(px(52.)))
+            .overflow_y_scroll()
             .child(
-                v_flex().items_center().gap_1()
-                    .child(div().text_lg().font_medium().child("Trek Code"))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child("A folder, a file, and the agents already signed in.")),
+                v_flex()
+                    .w_full()
+                    .min_h(relative(1.))
+                    .items_center()
+                    .justify_center()
+                    .py(px(40.))
+                    .gap_4()
+                    .child(crate::brand::logo_mark(px(52.)))
+                    .child(
+                        v_flex().items_center().gap_1()
+                            .child(div().text_lg().font_medium().child("Trek Code"))
+                            .child(div().text_sm().text_color(theme.muted_foreground).child("A folder, a file, and the agents already signed in.")),
+                    )
+                    .child(
+                        h_flex().gap_3().justify_center().flex_wrap().child(
+                            Button::new("ide-open-folder")
+                                .outline()
+                                .icon(IconName::FolderOpen)
+                                .label("Open folder")
+                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_folder(cx)))),
+                        )
+                        .child(
+                            Button::new("ide-open-file")
+                                .outline()
+                                .icon(IconName::File)
+                                .label("Open file")
+                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_file(cx)))),
+                        ),
+                    )
+                    .child(list),
             )
-            .child(
-                h_flex().gap_3().child(
-                    Button::new("ide-open-folder")
-                        .outline()
-                        .icon(IconName::FolderOpen)
-                        .label("Open folder")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_folder(cx)))),
-                )
-                .child(
-                    Button::new("ide-open-file")
-                        .outline()
-                        .icon(IconName::File)
-                        .label("Open file")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_file(cx)))),
-                ),
-            )
-            .child(list)
     }
 
     /// The active editor tab closes (⌘W in IDE mode).

@@ -45,10 +45,10 @@ pub struct WorkingBar {
     /// The window is frontmost (or `TREK_FORCE_ACTIVE`): the animation runs at full rate; behind
     /// another app it runs at half (it's still on show).
     active: bool,
-    /// The hiker's own clock: seconds walked, and when it last took a step. It moves only while
-    /// the bar animates, so after a pause the hiker carries on from where it stood instead of
-    /// jumping to where the turn's clock would put it.
-    walk: std::cell::Cell<(f32, Option<Instant>)>,
+    /// The hiker's own clock (`Walk`). It moves only while the bar animates, so after a pause the
+    /// hiker carries on from where it stood instead of jumping to where the turn's clock would
+    /// put it.
+    walk: Cell<Walk>,
     /// When each call on show arrived, while it slides in.
     arrived: HashMap<String, Instant>,
     /// The live group's rows that have settled (done, and in), drawn by a cached view of their
@@ -60,6 +60,26 @@ pub struct WorkingBar {
     /// The ticker and the frame interval it runs at.
     _ticker: Option<(Duration, Task<()>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The hiker's own clock: `gait`, the seconds it has walked (its legs' cadence), and `phase`,
+/// how far through its lap it stands, 0 to 1 — a lap is [`crate::mascot::LAP`] working,
+/// [`crate::mascot::PACE`] waiting on sub-agents, and the phase advances a step's fraction of
+/// whichever is current, so a change between them moves the hiker's pace, never its place.
+/// `last`: when it last took a step.
+#[derive(Clone, Copy)]
+struct Walk {
+    gait: f32,
+    phase: f32,
+    last: Option<Instant>,
+}
+
+impl Walk {
+    /// A `dt` step on: the legs a step later, the place a `dt`-of-a-lap on.
+    fn step(&mut self, dt: f32, lap: Duration) {
+        self.gait += dt;
+        self.phase = (self.phase + dt / lap.as_secs_f32()) % 1.;
+    }
 }
 
 /// The bar's inputs besides the clock.
@@ -240,7 +260,7 @@ impl WorkingBar {
             scope,
             shown: None,
             active: window.is_window_active() || crate::mascot::force_active(),
-            walk: std::cell::Cell::new((0., None)),
+            walk: Cell::new(Walk { gait: 0., phase: 0., last: None }),
             arrived: HashMap::new(),
             settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0, width: px(0.), open: None }),
             settled_len: 0,
@@ -383,15 +403,13 @@ impl WorkingBar {
 
     /// How often the bar redraws now: briskly while a group folds, at the hiker's rate while the
     /// window is in front and half that behind another, once a second (the clock) while it
-    /// waits or holds still.
+    /// holds still.
     fn rate(&self) -> Option<Duration> {
         let s = self.shown.as_ref()?;
         if s.header.as_ref().is_none_or(|h| h.started.is_none()) && s.folding.is_none() {
             return None;
         }
-        // Waiting is calm: the clock ticks and the hiker looks about, once a second.
-        let waiting = s.header.as_ref().is_some_and(|h| h.waiting.is_some());
-        Some(if s.still || (waiting && s.folding.is_none()) {
+        Some(if s.still {
             Duration::from_secs(1)
         } else if s.folding.is_some() {
             // 30 a second: smooth enough for a quarter second of motion, and each one redraws the
@@ -407,16 +425,19 @@ impl WorkingBar {
 
     /// Advance the hiker's clock by the time since its last step, at most a few frames' worth: a
     /// bar that stopped drawing (hidden, another thread on screen) picks up where it left off.
-    fn step_walk(&self, still: bool) -> f32 {
-        let (walked, last) = self.walk.get();
-        let now = Instant::now();
+    /// `lap` is the mode's — [`crate::mascot::LAP`] working, [`crate::mascot::PACE`] waiting.
+    fn step_walk(&self, still: bool, lap: Duration) -> Walk {
+        let mut walk = self.walk.get();
         if still {
-            self.walk.set((walked, None));
-            return walked;
+            walk.last = None;
+            self.walk.set(walk);
+            return walk;
         }
-        let dt = last.map_or(0., |l| now.duration_since(l).as_secs_f32().min(0.2));
-        self.walk.set((walked + dt, Some(now)));
-        walked + dt
+        let dt = walk.last.map_or(0., |l| l.elapsed().as_secs_f32().min(0.2));
+        walk.step(dt, lap);
+        walk.last = Some(Instant::now());
+        self.walk.set(walk);
+        walk
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
@@ -796,7 +817,12 @@ impl Render for WorkingBar {
                     .when(h.agents > 0, |el| el.child(div().flex_none().text_color(muted).child(agents_out(h.agents))))
                     .into_any_element(),
             };
-            let trail = if h.waiting.is_some() { crate::mascot::waiting(clock, still, cx) } else { crate::mascot::trail(self.step_walk(still), still, cx) };
+            // Working or waiting on its sub-agents, the hiker walks the whole trail on the bar's
+            // own clock: it paces while it waits (`mascot::PACE`), strolls while it works — and a
+            // change between them moves its pace, never its place.
+            let lap = if h.waiting.is_some() { crate::mascot::PACE } else { crate::mascot::LAP };
+            let walk = self.step_walk(still, lap);
+            let trail = crate::mascot::trail(walk.phase, walk.gait, still, cx);
             h_flex()
                 .id("working-bar")
                 .test_support()
@@ -977,7 +1003,7 @@ impl WorkingBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, activity, band_centre, ease_out, lift, mix, steady, trail_word};
+    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, Walk, activity, band_centre, ease_out, lift, mix, steady, trail_word};
     use gpui_kit::{Hsla, px};
     use std::time::{Duration, Instant};
 
@@ -1043,6 +1069,37 @@ mod tests {
         assert_eq!(trail_word("t1", Some(Duration::from_millis(16_100))), word);
         assert_eq!(trail_word("t1", None), trail_word("t1", Some(Duration::ZERO)));
         assert!(!word.contains("working"), "no generic \"working\"");
+    }
+
+    #[test]
+    fn a_new_pace_moves_the_hiker_s_speed_never_its_place() {
+        // Working to waiting and back mid-lap, at awkward points: the hiker carries on from where
+        // it stood — a new mode changes how fast its phase moves, never where it is. (Feeding the
+        // same seconds into a different lap teleported it: 8s in is the right end of a working
+        // lap, the left end of a wait's.)
+        let frame = Duration::from_millis(62).as_secs_f32();
+        for switch_at in [0.06, 0.25, 0.51, 0.75, 0.98] {
+            let mut walk = Walk { gait: 0., phase: 0., last: None };
+            while walk.phase < switch_at {
+                walk.step(frame, crate::mascot::LAP);
+            }
+            let at = |w: Walk| crate::mascot::hike(w.phase, w.gait);
+            let before = at(walk);
+            let mut strolled = walk;
+            strolled.step(frame, crate::mascot::LAP);
+            walk.step(frame, crate::mascot::PACE);
+            let waiting = at(walk);
+            walk.step(frame, crate::mascot::LAP);
+            let working = at(walk);
+            for (a, b) in [(before, waiting), (waiting, working)] {
+                assert!((b.0 - a.0).abs() < 0.05 && a.2 == b.2, "at {switch_at}, {a:?} -> {b:?}: it carries on");
+            }
+            // Mid-crossing, where it's striding: the same step lands the legs on the same pose
+            // whichever lap is current — the gait has its own clock.
+            if matches!(switch_at, 0.25 | 0.75) {
+                assert_eq!(waiting.1, at(strolled).1, "at {switch_at}: the legs don't notice a wait");
+            }
+        }
     }
 
     #[test]
