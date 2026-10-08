@@ -1263,6 +1263,9 @@ impl Render for BrowserPanel {
         let failed = tab.is_some_and(|t| t.failed.is_some());
         let ember = crate::palette::ember(cx);
         let active_view = tab.map(|t| t.view.clone());
+        // The native view only draws once the first page paints; until then, a hint fills the
+        // void. Hidden while a menu is open (or the panel is) is suppression, not empty.
+        let blank = tab.is_none_or(|t| !t.ready);
 
         let strip = h_flex()
             .h(px(36.))
@@ -1369,7 +1372,15 @@ impl Render for BrowserPanel {
             .child(strip)
             .child(toolbar)
             .children(picking_hint)
-            .child(div().flex_1().min_h_0().bg(theme.background).children(active_view))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(theme.background)
+                    .when(blank, |el| el.child(super::empty("Search or enter an address", cx).absolute().top_0().left_0()))
+                    .children(active_view),
+            )
             .into_any_element()
     }
 }

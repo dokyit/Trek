@@ -102,6 +102,8 @@ impl EditorView {
                 .language(lang.clone())
                 .line_number(true)
                 .searchable(true)
+                // Code scrolls sideways: a wrap mid-identifier reads as two lines that aren't.
+                .soft_wrap(false)
                 .tab_size(TabSize { tab_size: 4, hard_tabs: false });
             s.set_value(text.clone(), window, cx);
             if problem.is_some() {

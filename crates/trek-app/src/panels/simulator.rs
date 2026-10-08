@@ -1581,7 +1581,14 @@ impl SimulatorPanel {
 
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.listed {
-            return v_flex().size_full().items_center().justify_center().child(Spinner::new().small()).into_any_element();
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(Spinner::new().small())
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Looking for simulators…"))
+                .into_any_element();
         }
         if let Some(e) = &self.list_error {
             let text = format!("Couldn't list simulators. {e}");

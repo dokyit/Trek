@@ -179,8 +179,11 @@ impl RenderOnce for Popup {
             return root;
         }
 
-        let positioner =
-            Positioner::corner(anchor, position.get()).tracked_corner_position(position);
+        // The trigger's bounds let the popup flip to the trigger's other side
+        // when the anchored side has no room, instead of clamping over it.
+        let positioner = Positioner::corner(anchor, position.get())
+            .tracked_corner_position(position)
+            .flip(trigger_bounds.clone());
         let positioner = if let Some(callback) = self.on_position {
             positioner.on_position(move |position| callback(position, trigger_bounds.get()))
         } else {

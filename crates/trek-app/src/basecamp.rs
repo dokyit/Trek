@@ -245,25 +245,36 @@ impl Basecamp {
             .w_full()
             .gap(px(12.))
             .items_end()
-            .child(div().text_size(px(24.)).font_semibold().line_height(px(30.)).child("Basecamp"))
-            .child(div().pb(px(4.)).text_size(px(13.5)).text_color(theme.muted_foreground).child(greeting))
+            // Too narrow (the tools panel open): the greeting truncates, then the controls wrap
+            // below; narrower still, "Mark all read" wraps under the segmented control, which
+            // never clips.
+            .flex_wrap()
+            .child(div().flex_none().text_size(px(24.)).font_semibold().line_height(px(30.)).child("Basecamp"))
+            .child(div().pb(px(4.)).min_w(px(140.)).truncate().text_size(px(13.5)).text_color(theme.muted_foreground).child(greeting))
             .child(div().flex_1())
-            .child(ui::segmented(
-                "basecamp-range",
-                [Range::Today, Range::Week, Range::All].map(|r| (r, r.label())).to_vec(),
-                range,
-                move |r, _, cx| {
-                    let _ = this.update(cx, |this, cx| this.set_range(r, cx));
-                },
-                cx,
-            ))
             .child(
-                Button::new("basecamp-mark-read")
-                    .outline()
-                    .small()
-                    .label("Mark all read")
-                    .disabled(!review_unread)
-                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.mark_all_read(cx)))),
+                h_flex()
+                    .min_w_0()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap(px(12.))
+                    .child(ui::segmented(
+                        "basecamp-range",
+                        [Range::Today, Range::Week, Range::All].map(|r| (r, r.label())).to_vec(),
+                        range,
+                        move |r, _, cx| {
+                            let _ = this.update(cx, |this, cx| this.set_range(r, cx));
+                        },
+                        cx,
+                    ))
+                    .child(
+                        Button::new("basecamp-mark-read")
+                            .outline()
+                            .small()
+                            .label("Mark all read")
+                            .disabled(!review_unread)
+                            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.mark_all_read(cx)))),
+                    ),
             )
             .into_any_element()
     }

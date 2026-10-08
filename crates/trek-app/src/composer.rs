@@ -208,7 +208,7 @@ impl Composer {
     pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder("Ask, build, / for commands, @ for files")
+            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder("Ask or build · / commands · @ files")
         });
         let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models"));
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));

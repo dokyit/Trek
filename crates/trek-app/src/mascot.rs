@@ -63,7 +63,10 @@ pub fn word(seed: &str, secs: u64) -> &'static str {
 }
 
 /// The hiker's walk: one lap there and back in `LAP`.
-const LAP: Duration = Duration::from_secs(16);
+pub(crate) const LAP: Duration = Duration::from_secs(16);
+/// Waiting for others to come back, it paces the same trail on a shorter lap: restless where
+/// the working walk is steady.
+pub(crate) const PACE: Duration = Duration::from_secs(8);
 /// One sprite pixel, in points. 1.5pt is 3 device pixels on Retina, so edges stay crisp.
 const PX: f32 = 1.5;
 const SPRITE_W: usize = 14;
@@ -125,46 +128,38 @@ pub fn force_active() -> bool {
     *FORCE
 }
 
-/// Frames per second for the working animation. Pixel art reads fine at this rate, and each frame
-/// still redraws the window (the other views come from GPUI's cache), so 15 instead of 60 is a
-/// quarter of the CPU.
+/// Frames per second for the working animation. Pixel art reads fine at this rate; each frame
+/// still redraws the window (the other views come from GPUI's cache), so 16 rather than 60 is
+/// about a quarter of the frames — and the bar ticks at half this behind another window.
 pub const FPS: u64 = 16;
 
-/// Steps a second while walking: half the frame rate, so each pose holds exactly two frames
-/// (7 a second at 15 frames held some poses two frames and some three: a limp).
+/// Steps a second while walking: a pose about every other frame at [`FPS`] in front — one a
+/// frame behind another window, a few through a fold's quick ones. The pose comes off the walk
+/// clock rather than the frame count, so the gait stays even at every rate.
 const STEPS: f32 = 8.;
 
-/// A dotted trail the width of its parent with the hiker walking it. `clock` is seconds walked
-/// (the bar's own clock, which pauses rather than skipping); the caller re-renders at [`FPS`]
-/// while it wants motion (see `WorkingBar`).
-pub fn trail(clock: f32, still: bool, cx: &App) -> AnyElement {
+/// A dotted trail the width of its parent with the hiker walking it. `phase` is how far through
+/// its lap there and back it is, 0 to 1 — the caller's clock advances it a lap per [`LAP`]
+/// working, [`PACE`] while it waits on others, so a change between the two moves the hiker's
+/// pace, never its place; `gait` is the seconds it has walked, for its legs. `still`, it stands
+/// near the left end. The caller re-renders at [`FPS`] while it wants motion (see `WorkingBar`).
+pub fn trail(phase: f32, gait: f32, still: bool, cx: &App) -> AnyElement {
     let dots = cx.theme().foreground.opacity(0.16);
-    let (pos, frame, right) = if still {
-        (0.06, 1, true)
-    } else {
-        let lap = LAP.as_secs_f32();
-        let t = (clock % lap) / lap;
-        // Triangle wave: walk right for half the lap, back left for the other half.
-        let (raw, right) = if t < 0.5 { (t * 2., true) } else { (2. - t * 2., false) };
-        // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
-        let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
-        let speed = (std::f32::consts::PI * raw).sin();
-        let frame = if speed < 0.15 { 1 } else { (clock * STEPS) as usize % 4 };
-        (pos, frame, right)
-    };
+    let (pos, frame, right) = if still { (0.06, 1, true) } else { hike(phase, gait) };
     div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full()).into_any_element()
 }
 
-/// How often the hiker, waiting, looks the other way.
-const LOOK_EVERY: f32 = 3.;
-
-/// The trail with the hiker standing at a fork, waiting for others to come back: it looks one way
-/// down the trail, then the other, every few seconds. Drawn at a second's pace (`clock` in
-/// seconds since the wait began); `still`, it faces ahead.
-pub fn waiting(clock: f32, still: bool, cx: &App) -> AnyElement {
-    let dots = cx.theme().foreground.opacity(0.16);
-    let right = still || (clock / LOOK_EVERY) as u64 % 2 == 0;
-    div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, 0.12, 1, right, dots, window)).size_full()).into_any_element()
+/// Where a `phase` (0 to 1) of the way through a lap there and back leaves the hiker: its place
+/// on the trail (0 to 1), its walk frame (`gait` seconds in), and which way it faces.
+pub(crate) fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
+    let t = phase % 1.;
+    // Triangle wave: walk right for half the lap, back left for the other half.
+    let (raw, right) = if t < 0.5 { (t * 2., true) } else { (2. - t * 2., false) };
+    // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
+    let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
+    let speed = (std::f32::consts::PI * raw).sin();
+    let frame = if speed < 0.15 { 1 } else { (gait * STEPS) as usize % 4 };
+    (pos, frame, right)
 }
 
 fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
@@ -238,6 +233,38 @@ mod tests {
         // Deterministic: a redraw shows the same word.
         assert_eq!(word("thread-a", 123), word("thread-a", 123));
     }
+    #[test]
+    fn the_hike_crosses_the_trail_there_and_back() {
+        // Working or pacing while it waits, the hiker goes end to end and back a lap.
+        for lap in [super::LAP, super::PACE] {
+            let secs = lap.as_secs_f32();
+            // `clock` seconds into the lap, having walked all of them.
+            let at = |clock: f32| super::hike((clock / secs) % 1., clock);
+            // The ends of the trail at the lap's ends: left at the start, right halfway, home at
+            // a whole lap — standing at each.
+            let (pos, frame, right) = at(0.);
+            assert!(pos.abs() < 1e-4 && right && frame == 1, "standing at the left end, facing out");
+            let (pos, frame, right) = at(secs * 0.5);
+            assert!((pos - 1.).abs() < 1e-4 && !right && frame == 1, "standing at the right end, turned round");
+            let (pos, frame, right) = at(secs);
+            assert!(pos.abs() < 1e-4 && right && frame == 1, "back where it started");
+            // In between it's on the trail in one of the four stride poses.
+            for i in 0..400 {
+                let (pos, frame, _) = at(i as f32 * secs / 400.);
+                assert!((0. ..=1.).contains(&pos) && frame < 4, "on the trail, in stride");
+            }
+            // And lap after lap the same walk comes round.
+            for i in 0..50 {
+                let clock = i as f32 * secs / 50.;
+                let (a, b) = (at(clock), at(clock + secs));
+                assert!((a.0 - b.0).abs() < 1e-4 && a.2 == b.2, "lap {i}: same place, same way");
+                assert!((a.1 + 4 - b.1) % 4 <= 1 || (b.1 + 4 - a.1) % 4 <= 1, "lap {i}: legs within a pose");
+            }
+        }
+        // The wait's pace is a visibly different lap, not the working walk again.
+        assert!(super::PACE < super::LAP);
+    }
+
     #[test]
     fn sprite_rows_are_even() {
         for row in super::TOP.iter().chain(super::LEGS.iter().flatten()) {

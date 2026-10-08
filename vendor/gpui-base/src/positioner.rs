@@ -29,11 +29,13 @@ pub enum Align {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Strategy {
     /// Place `anchor`'s corner of the popup at `position`, then clamp into the
-    /// viewport. This reproduces GPUI's `anchored` corner behavior and does not
-    /// flip to the opposite side.
+    /// viewport. This reproduces GPUI's `anchored` corner behavior; with `flip`
+    /// (the trigger's bounds) a popup that doesn't fit on the anchored side
+    /// flips to the trigger's other side instead of clamping back over it.
     Corner {
         anchor: Anchor,
         position: Point<Pixels>,
+        flip: Option<Bounds<Pixels>>,
     },
     /// Place the popup on `placement`'s side of the trigger, flipping to the
     /// opposite side when it does not fit, then clamp into the viewport.
@@ -63,6 +65,7 @@ pub struct ResolvedPosition {
 pub struct Positioner {
     strategy: Strategy,
     corner_position: Option<Rc<Cell<Point<Pixels>>>>,
+    flip_bounds: Option<Rc<Cell<Bounds<Pixels>>>>,
     on_position: Option<Box<dyn Fn(ResolvedPosition)>>,
     margin: Pixels,
     occlude: bool,
@@ -85,6 +88,7 @@ impl Positioner {
                 offset: px(0.),
             },
             corner_position: None,
+            flip_bounds: None,
             on_position: None,
             margin: px(4.),
             occlude: false,
@@ -99,8 +103,13 @@ impl Positioner {
     /// changing the requested anchor.
     pub fn corner(anchor: Anchor, position: Point<Pixels>) -> Self {
         Self {
-            strategy: Strategy::Corner { anchor, position },
+            strategy: Strategy::Corner {
+                anchor,
+                position,
+                flip: None,
+            },
             corner_position: None,
+            flip_bounds: None,
             on_position: None,
             margin: px(4.),
             occlude: false,
@@ -154,6 +163,14 @@ impl Positioner {
     // Read after trigger prepaint so an open popup follows a moving trigger.
     pub(crate) fn tracked_corner_position(mut self, position: Rc<Cell<Point<Pixels>>>) -> Self {
         self.corner_position = Some(position);
+        self
+    }
+
+    /// The trigger the corner position was measured from, tracked like the
+    /// position: a corner-anchored popup that doesn't fit on the anchored side
+    /// flips to the trigger's other side rather than clamping back over it.
+    pub(crate) fn flip(mut self, trigger: Rc<Cell<Bounds<Pixels>>>) -> Self {
+        self.flip_bounds = Some(trigger);
         self
     }
 
@@ -215,14 +232,20 @@ fn resolve(
     margin: Edges<Pixels>,
 ) -> ResolvedPosition {
     match strategy {
-        Strategy::Corner { anchor, position } => ResolvedPosition {
-            bounds: clamp(
-                Bounds::from_anchor_and_size(anchor, position, popup_size),
-                viewport_size,
-                margin,
-            ),
-            placement: None,
-        },
+        Strategy::Corner {
+            anchor,
+            position,
+            flip,
+        } => {
+            let mut bounds = Bounds::from_anchor_and_size(anchor, position, popup_size);
+            if let Some(trigger) = flip {
+                bounds = flip_off_trigger(anchor, bounds, position, trigger, popup_size, viewport_size, margin);
+            }
+            ResolvedPosition {
+                bounds: clamp(bounds, viewport_size, margin),
+                placement: None,
+            }
+        }
         Strategy::Side {
             trigger_bounds,
             placement,
@@ -298,6 +321,73 @@ fn side_origin(
         Placement::Left => point(trigger_bounds.left() - popup_size.width - offset, aligned_y),
         Placement::Right => point(trigger_bounds.right() + offset, aligned_y),
     }
+}
+
+/// A corner-anchored popup that doesn't fit on its side of the trigger flips to
+/// the other side — same gap, mirrored — when that side has room, or has more:
+/// clamping alone would drag the popup back over the trigger.
+fn flip_off_trigger(
+    anchor: Anchor,
+    mut bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    trigger: Bounds<Pixels>,
+    popup_size: Size<Pixels>,
+    viewport_size: Size<Pixels>,
+    margin: Edges<Pixels>,
+) -> Bounds<Pixels> {
+    let right_limit = (viewport_size.width - margin.right).max(margin.left);
+    let bottom_limit = (viewport_size.height - margin.bottom).max(margin.top);
+    match anchor {
+        // Below the trigger: flip above it, its top edge less the same gap.
+        Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => {
+            if bounds.bottom() <= bottom_limit {
+                return bounds;
+            }
+            let gap = position.y - trigger.bottom();
+            let flipped = trigger.top() - gap - popup_size.height;
+            let (below, above) = (bottom_limit - position.y, trigger.top() - gap - margin.top);
+            if flipped >= margin.top || above >= below {
+                bounds.origin.y = flipped;
+            }
+        }
+        // Above the trigger: flip below it, its bottom edge plus the same gap.
+        Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => {
+            if bounds.top() >= margin.top {
+                return bounds;
+            }
+            let gap = trigger.top() - position.y;
+            let flipped = trigger.bottom() + gap;
+            let (above, below) = (position.y - margin.top, bottom_limit - flipped);
+            if flipped + popup_size.height <= bottom_limit || below >= above {
+                bounds.origin.y = flipped;
+            }
+        }
+        // Right of the trigger: flip to its left, its left edge less the same gap.
+        Anchor::LeftCenter => {
+            if bounds.right() <= right_limit {
+                return bounds;
+            }
+            let gap = position.x - trigger.right();
+            let flipped = trigger.left() - gap - popup_size.width;
+            let (right, left) = (right_limit - position.x, trigger.left() - gap - margin.left);
+            if flipped >= margin.left || left >= right {
+                bounds.origin.x = flipped;
+            }
+        }
+        // Left of the trigger: flip to its right, its right edge plus the same gap.
+        Anchor::RightCenter => {
+            if bounds.left() >= margin.left {
+                return bounds;
+            }
+            let gap = trigger.left() - position.x;
+            let flipped = trigger.right() + gap;
+            let (left, right) = (position.x - margin.left, right_limit - flipped);
+            if flipped + popup_size.width <= right_limit || right >= left {
+                bounds.origin.x = flipped;
+            }
+        }
+    }
+    bounds
 }
 
 fn clamp(
@@ -398,6 +488,11 @@ impl Element for Positioner {
             (&mut strategy, &self.corner_position)
         {
             *position = tracked.get();
+        }
+        if let (Strategy::Corner { flip, .. }, Some(tracked)) =
+            (&mut strategy, &self.flip_bounds)
+        {
+            *flip = Some(tracked.get());
         }
         let position = resolve(
             strategy,
@@ -563,6 +658,7 @@ mod tests {
             Strategy::Corner {
                 anchor: Anchor::TopLeft,
                 position: point(px(100.), px(100.)),
+                flip: None,
             },
             Size::new(px(40.), px(30.)),
             viewport(),
@@ -574,11 +670,12 @@ mod tests {
     }
 
     #[test]
-    fn corner_positioning_clamps_but_does_not_flip() {
+    fn corner_positioning_clamps_but_does_not_flip_without_a_trigger() {
         let position = resolve(
             Strategy::Corner {
                 anchor: Anchor::TopLeft,
                 position: point(px(480.), px(390.)),
+                flip: None,
             },
             Size::new(px(40.), px(30.)),
             viewport(),
@@ -588,6 +685,34 @@ mod tests {
         assert_eq!(position.placement, None);
         assert_eq!(position.bounds.right(), viewport().width - MARGIN);
         assert_eq!(position.bounds.bottom(), viewport().height - MARGIN);
+    }
+
+    #[test]
+    fn a_corner_popup_over_a_row_at_the_windows_bottom_flips_above_it() {
+        // A trigger row near the window's bottom edge, the popup anchored to
+        // open below it as usual: no room there, so it flips above the row
+        // rather than clamping back over it.
+        let row = trigger(40., 356., 120., 20.);
+        let popup = |h: f32| {
+            resolve(
+                Strategy::Corner {
+                    anchor: Anchor::TopLeft,
+                    position: row.bottom_left() + point(px(0.), px(4.)),
+                    flip: Some(row),
+                },
+                Size::new(px(160.), px(h)),
+                viewport(),
+                Edges::all(MARGIN),
+            )
+        };
+
+        let flipped = popup(80.);
+        assert!(flipped.bounds.bottom() <= row.top(), "{:?} covers {row:?}", flipped.bounds);
+        assert_eq!(flipped.bounds.bottom(), row.top() - px(4.));
+
+        // When it does fit below, it opens there as before.
+        let fits = popup(12.);
+        assert_eq!(fits.bounds.top(), row.bottom() + px(4.));
     }
 
     #[test]
@@ -656,6 +781,7 @@ mod tests {
         let corner = Strategy::Corner {
             anchor: Anchor::TopRight,
             position: point(viewport().width - px(10.), px(100.)),
+            flip: None,
         };
         let margin = Edges::all(MARGIN);
         let inset = px(20.);

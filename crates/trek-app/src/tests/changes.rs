@@ -101,8 +101,8 @@ fn outside_git_the_agents_edits_are_counted() {
         let end = ends(&trek, cx, &id)[0];
         let counted = trek.read(cx, |ws, _| ws.turn_changes(&id, end).map(|c| c.counted));
         assert_eq!(counted, Some(trek_core::changes::Counted::EditTools));
-        // No diff to show: no View diff.
-        assert!(trek.visible(cx, ("turn-changes", end)) && !trek.visible(cx, ("changes-diff", end)));
+        // No diff to show: no Review.
+        assert!(trek.visible(cx, ("turn-changes", end)) && !trek.visible(cx, ("changes-review", end)));
     });
 }
 
@@ -127,7 +127,7 @@ fn a_rewind_counts_the_latest_turn_again() {
 }
 
 #[test]
-fn collapse_all_folds_the_folders_and_view_diff_opens_the_turns_diff() {
+fn review_opens_the_turns_diff_and_a_row_opens_its_file() {
     run(async |cx| {
         let trek = open(cx);
         make_repo(&trek, cx);
@@ -139,38 +139,89 @@ fn collapse_all_folds_the_folders_and_view_diff_opens_the_turns_diff() {
         trek.wait_done(cx, &id, RunState::Idle).await;
         settled(&trek, cx, &id).await;
         let end = ends(&trek, cx, &id)[0];
-        // The project's own files, then src/.
-        let dir = |n: usize| SharedString::from(format!("changes-dir-{end}-{n}"));
-        assert!(trek.visible(cx, dir(0)) && trek.visible(cx, dir(1)) && trek.visible(cx, row(end, 0)) && trek.visible(cx, row(end, 1)));
+        assert!(trek.visible(cx, row(end, 0)) && trek.visible(cx, row(end, 1)));
 
-        trek.click(cx, ("changes-fold", end));
-        trek.render(cx);
-        assert!(trek.visible(cx, dir(0)) && trek.visible(cx, dir(1)), "the folders stay");
-        assert!(!trek.visible(cx, row(end, 0)) && !trek.visible(cx, row(end, 1)), "their files fold away");
-        trek.click(cx, ("changes-fold", end));
-        trek.render(cx);
-        assert!(trek.visible(cx, row(end, 0)) && trek.visible(cx, row(end, 1)), "and come back");
-        // One folder at a time, too.
-        trek.click(cx, dir(1));
-        trek.render(cx);
-        assert!(trek.visible(cx, row(end, 0)) && !trek.visible(cx, row(end, 1)));
-
-        // View diff: the Git tool shows the turn's files, the first one's diff open; a file's row
+        // Review: the Git tool shows the turn's files, the first one's diff open; a file's row
         // opens its own.
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.click(cx, ("changes-diff", end));
+        trek.click(cx, ("changes-review", end));
         trek.render(cx);
         let shown = cx.read(|cx| panel.read(cx).git_turn(cx));
         assert_eq!(shown, Some((vec!["README.md".to_string(), "src/gen.rs".to_string()], Some("README.md".to_string()))));
         assert!(trek.visible(cx, "git-turn"));
-        trek.click(cx, row(end, 0));
+        trek.click(cx, row(end, 1));
         trek.render(cx);
         let shown = cx.read(|cx| panel.read(cx).git_turn(cx));
-        assert_eq!(shown.and_then(|(_, selected)| selected), Some("README.md".to_string()));
+        assert_eq!(shown.and_then(|(_, selected)| selected), Some("src/gen.rs".to_string()));
         // Back to the working tree.
         trek.click(cx, "git-turn-close");
         trek.render(cx);
         assert_eq!(cx.read(|cx| panel.read(cx).git_turn(cx)), None);
+    });
+}
+
+#[test]
+fn a_card_shows_eight_files_then_offers_the_rest() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        let id = trek.send(cx, "mock:long 2s");
+        trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
+        std::fs::create_dir_all(trek.project.join("src")).unwrap();
+        for i in 0..10 {
+            std::fs::write(trek.project.join(format!("src/f{i:02}.rs")), "fn x() {}\n").unwrap();
+        }
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        settled(&trek, cx, &id).await;
+        let end = ends(&trek, cx, &id)[0];
+        assert!(trek.visible(cx, row(end, 0)) && trek.visible(cx, row(end, 7)) && !trek.visible(cx, row(end, 8)));
+        trek.click(cx, ("changes-more", end));
+        trek.render(cx);
+        assert!(trek.visible(cx, row(end, 8)) && trek.visible(cx, row(end, 9)), "the rest show");
+        trek.click(cx, ("changes-more", end));
+        trek.render(cx);
+        assert!(!trek.visible(cx, row(end, 8)), "and fold away again");
+    });
+}
+
+#[test]
+fn the_cards_undo_asks_the_same_confirmation() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        let id = trek.send(cx, "mock:write");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        settled(&trek, cx, &id).await;
+        let end = ends(&trek, cx, &id)[0];
+        trek.click(cx, ("changes-undo", end));
+        trek.render(cx);
+        assert!(trek.visible(cx, "confirm-card"), "the card's Undo opens the turn's confirmation");
+        // The confirmation opens below the turn-end row, not over the answer above it.
+        let pop = trek.bounds(cx, "confirm-card").expect("the confirmation");
+        let row = trek.bounds(cx, ("undo-turn", end)).expect("the undo button");
+        assert!(pop.top() >= row.bottom(), "the popover ({pop:?}) must not rise over the row ({row:?})");
+        trek.click(cx, "confirm-cancel");
+        trek.render(cx);
+
+        // A turn with many files ends on a row at the transcript's foot — as near the window's
+        // bottom as a row gets. Its confirmation lists those files: too tall for the room below,
+        // so it flips over the row rather than clamping back over it.
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 2s".into(), vec![], cx));
+        trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
+        std::fs::create_dir_all(trek.project.join("src")).unwrap();
+        for i in 0..10 {
+            std::fs::write(trek.project.join(format!("src/f{i:02}.rs")), "fn x() {}\n").unwrap();
+        }
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        settled(&trek, cx, &id).await;
+        let end = *ends(&trek, cx, &id).last().unwrap();
+        trek.click(cx, ("changes-undo", end));
+        trek.render(cx);
+        trek.render(cx);
+        let pop = trek.bounds(cx, "confirm-card").expect("the confirmation");
+        let row = trek.bounds(cx, ("undo-turn", end)).expect("the undo button");
+        assert!(pop.bottom() <= row.top(), "the popover ({pop:?}) must not cover the row ({row:?})");
+        trek.click(cx, "confirm-cancel");
     });
 }
 
