@@ -396,7 +396,7 @@ fn an_update_waiting_on_a_dev_server_doesnt_hold_back_trek_restarting() {
         cx.executor().advance_clock(crate::workspace::RESTART_GRACE);
         cx.run_until_parked();
         let status = trek.read(cx, |ws, _| ws.updater.status.clone());
-        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains(super::harness::INSTALL_BLOCKED)), "{status:?}");
         assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty()), "the server was still running");
     });
 }
