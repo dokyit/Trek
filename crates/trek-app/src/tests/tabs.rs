@@ -161,17 +161,17 @@ fn notes_undo_and_redo_typing_and_formatting() {
         assert!(trek.visible(cx, "note-undo") && trek.visible(cx, "note-redo"));
         // A formatting command, from the toolbar: one step.
         trek.render(cx);
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.click(cx, "note-bold");
         assert_eq!(saved(cx), "**milk**");
         // ⌘Z takes it back, then the typing; ⇧⌘Z puts them back.
-        trek.press(cx, "cmd-z");
+        trek.press(cx, "secondary-z");
         assert_eq!(saved(cx), "milk");
-        trek.press(cx, "cmd-z");
+        trek.press(cx, "secondary-z");
         assert_eq!(saved(cx), "");
-        trek.press(cx, "cmd-shift-z");
+        trek.press(cx, "secondary-shift-z");
         assert_eq!(saved(cx), "milk");
-        trek.press(cx, "cmd-shift-z");
+        trek.press(cx, "secondary-shift-z");
         assert_eq!(saved(cx), "**milk**");
         // The toolbar's buttons do the same.
         trek.click(cx, "note-undo");
