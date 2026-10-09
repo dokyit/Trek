@@ -70,18 +70,40 @@ pub fn find(project: &Path) -> Option<Found> {
 
 /// An executable in the skill's `scripts/` or `bin/`, as run from the project folder.
 fn bundled_cli(dir: &Path, project: &Path) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt as _;
     ["scripts", "bin"].iter().find_map(|sub| {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join(sub))
             .ok()?
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+            .filter(|p| p.metadata().is_ok_and(|m| is_executable(p, &m)))
             .collect();
         files.sort();
         let file = files.into_iter().next()?;
-        Some(format!("./{}", file.strip_prefix(project).unwrap_or(&file).display()))
+        let relative = file.strip_prefix(project).unwrap_or(&file);
+        // Forward slashes on every platform: shells on Windows take them too.
+        let parts: Vec<_> = relative.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+        Some(format!("./{}", parts.join("/")))
     })
+}
+
+/// Whether `path` (a regular file with this `metadata`) is a program: it has an execute bit.
+#[cfg(unix)]
+fn is_executable(_: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Whether `path` (a regular file with this `metadata`) is a program: Windows has no execute bit,
+/// so it's the extension, one of `%PATHEXT%` (case-insensitively).
+#[cfg(windows)]
+fn is_executable(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    const FALLBACK: &str = ".exe;.cmd;.bat;.com;.ps1";
+    if !metadata.is_file() {
+        return false;
+    }
+    let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) else { return false };
+    let pathext = std::env::var("PATHEXT").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| FALLBACK.to_string());
+    pathext.split(';').filter_map(|e| e.trim().strip_prefix('.')).any(|e| e.eq_ignore_ascii_case(&ext))
 }
 
 /// When a skill's folder last changed, as far as Trek can tell.
@@ -484,15 +506,17 @@ mod tests {
         let named = skill(&p, ".claude/skills", "verify-app", "name: verify-app\ndescription: Check the app.");
         std::fs::create_dir_all(named.join("scripts")).unwrap();
         std::fs::write(named.join("scripts/notes.txt"), "not a program").unwrap();
-        let app = named.join("scripts/app");
+        // Windows has no execute bit: a program is a file with a program's extension.
+        let (app, cli) = if cfg!(windows) { (named.join("scripts/app.cmd"), "app.cmd") } else { (named.join("scripts/app"), "app") };
         std::fs::write(&app, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&app, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         skill(&p, ".claude/skills", "verification-before-completion", "name: verification-before-completion\ndescription: Check before you say done.");
         assert_eq!(find(&p), None, "a name alone isn't a verification skill");
         std::fs::create_dir_all(named.join("references/features")).unwrap();
         std::fs::write(named.join("references/features/README.md"), "# Features\n").unwrap();
         let found = find(&p).unwrap();
-        assert_eq!((found.name.as_str(), found.cli.as_deref()), ("verify-app", Some("./.claude/skills/verify-app/scripts/app")));
+        assert_eq!((found.name.as_str(), found.cli.as_deref()), ("verify-app", Some(format!("./.claude/skills/verify-app/scripts/{cli}").as_str())));
         // One marked in its front matter wins, with the CLI it names.
         let marked = skill(&p, ".agents/skills", "control", "name: control\ndescription: \"Drive it.\"\nmetadata:\n  trek: verification\n  cli: ./tools/app --json");
         let found = find(&p).unwrap();
