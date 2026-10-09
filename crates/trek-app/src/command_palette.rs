@@ -1,5 +1,9 @@
 //! ⌘K: one field over threads (titles first, then what was said in them), projects and commands.
-//! Choosing a message match opens its thread scrolled to that message.
+//! Choosing a message match opens its thread scrolled to that message. With the field empty it's a
+//! switcher: the latest threads first, each with its project and age, ⌘1–⌘9 opening them.
+//!
+//! ⌘P in the editor opens the same palette on the IDE folder's files only (Quick Open); `>`
+//! there lists the commands.
 
 use crate::panels::RightPanel;
 use crate::ui;
@@ -14,9 +18,10 @@ use trek_core::settings::ThemeChoice;
 use trek_core::store::SearchHit;
 use trek_core::{AgentId, HandHolding};
 
-const WIDTH: f32 = 560.;
-/// Rows per group: recent threads (empty field), title and message matches, projects, commands.
-const RECENT: usize = 6;
+const WIDTH: f32 = 600.;
+/// Rows per group: recent threads (empty field, one per ⌘1–⌘9), title and message matches,
+/// projects, commands.
+const RECENT: usize = 9;
 const TITLE_HITS: usize = 6;
 const MESSAGE_HITS: usize = 8;
 const PROJECTS: usize = 6;
@@ -50,6 +55,19 @@ enum Action {
     CheckForUpdates,
     /// Go to file — the IDE's ⌘P.
     OpenFile(PathBuf),
+    /// Agents ⇄ Editor.
+    SwitchMode(crate::workspace::Mode),
+    /// The editor's layout toggles, as their shortcuts do.
+    Dispatch(IdeCommand),
+}
+
+/// The editor's commands that are window actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdeCommand {
+    PrimaryBar,
+    AiBar,
+    Panel,
+    NewChat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +110,18 @@ pub(crate) struct Entry {
     /// Quiet text on the right: a shortcut, a project, a folder.
     hint: Option<SharedString>,
     checked: bool,
+    /// A thread's project on the right: name, look, and the worktree branch it runs on.
+    project: Option<(String, ui::ProjectLook, Option<String>)>,
+    /// How long ago a thread last changed, after its title.
+    age: Option<SharedString>,
+    /// ⌘<n> opens it (the recent threads).
+    pub(crate) jump: Option<usize>,
     action: Action,
 }
 
 impl Entry {
     fn new(group: Group, glyph: Glyph, label: impl Into<SharedString>, action: Action) -> Self {
-        Entry { group, glyph, label: label.into(), label_ranges: vec![], snippet: None, hint: None, checked: false, action }
+        Entry { group, glyph, label: label.into(), label_ranges: vec![], snippet: None, hint: None, checked: false, project: None, age: None, jump: None, action }
     }
 
     fn hint(mut self, hint: impl Into<SharedString>) -> Self {
@@ -158,9 +182,10 @@ pub fn score(query: &str, label: &str, keywords: &str) -> Option<u32> {
 }
 
 /// Where row `selected` sits among the list's children, which include a label before each
-/// group's first row. Moving onto a group's first row brings its label into view too, so that
-/// row reports the label's place.
-fn scroll_target(groups: &[Group], selected: usize) -> Option<usize> {
+/// group's first row. Moving up onto a group's first row (or onto the very first) brings its label
+/// into view too, so that row reports the label's place; moving down, the row itself is the
+/// target (the label sits above it, so the row would stay below the fold).
+fn scroll_target(groups: &[Group], selected: usize, upward: bool) -> Option<usize> {
     let mut labels = 0;
     for (i, g) in groups.iter().enumerate() {
         let first_of_group = i == 0 || groups[i - 1] != *g;
@@ -168,7 +193,7 @@ fn scroll_target(groups: &[Group], selected: usize) -> Option<usize> {
             labels += 1;
         }
         if i == selected {
-            return Some(if first_of_group { i + labels - 1 } else { i + labels });
+            return Some(if first_of_group && (upward || i == 0) { i + labels - 1 } else { i + labels });
         }
     }
     None
@@ -177,6 +202,55 @@ fn scroll_target(groups: &[Group], selected: usize) -> Option<usize> {
 /// Whether `query` names one of `commands`: it starts the label or one of its words.
 fn commands_named<T>(query: &str, commands: &[(T, String, String)]) -> bool {
     query.chars().count() >= 2 && commands.iter().any(|(_, label, keywords)| score(query, label, keywords).is_some_and(|s| s >= 800))
+}
+
+/// How long ago `ms` was, as of `now` (both unix ms), for a switcher row: "now", "3m", "2h",
+/// "Yesterday", "4d", then the date ("Sep 12"). Hours hold across midnight for a few hours.
+pub(crate) fn age(ms: i64, now: i64) -> String {
+    let s = ((now - ms) / 1000).max(0);
+    let day = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).date_naive());
+    let days = match (day(ms), day(now)) {
+        (Some(then), Some(today)) => (today - then).num_days(),
+        _ => s / 86_400,
+    };
+    match s {
+        0..=59 => "now".into(),
+        60..=3_599 => format!("{}m", s / 60),
+        _ if days == 0 || s < 6 * 3_600 => format!("{}h", s / 3_600),
+        _ if days == 1 => "Yesterday".into(),
+        _ if days < 7 => format!("{days}d"),
+        _ => chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%b %-d").to_string()).unwrap_or_default(),
+    }
+}
+
+/// The footer's keys and what they do; ⌘1–9 only while the recent threads are listed.
+fn footer_keys(jump: bool) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![("↑↓", "Navigate"), ("↵", "Open")];
+    if jump {
+        keys.push(("⌘1–9", "Jump"));
+    }
+    keys.push(("Esc", "Close"));
+    keys
+}
+
+/// A key as the footer and the rows show it: small, in a hairline box.
+fn keycap(text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .h(px(18.))
+        .min_w(px(18.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(theme.foreground.opacity(0.1))
+        .bg(theme.foreground.opacity(0.03))
+        .text_size(px(11.))
+        .text_color(theme.muted_foreground)
+        .child(text.into())
 }
 
 /// Characters of a folder shown as a hint, at most.
@@ -226,9 +300,13 @@ fn rank<T>(query: &str, candidates: Vec<(T, String, String)>) -> Vec<T> {
 }
 
 pub struct CommandPalette {
-    /// The IDE's go-to-file index, rebuilt when the palette opens on a different root.
+    /// The IDE's go-to-file index, rebuilt (off the main thread) when the palette opens on a
+    /// different root.
     file_index: Vec<String>,
     file_root: Option<PathBuf>,
+    _index: Option<Task<()>>,
+    /// Quick Open (⌘P in the editor): files only, `>` for commands.
+    pub files_only: bool,
     workspace: Entity<Workspace>,
     right_panel: Entity<RightPanel>,
     basecamp: Entity<crate::basecamp::Basecamp>,
@@ -273,6 +351,8 @@ impl CommandPalette {
             basecamp,
             file_index: vec![],
             file_root: None,
+            _index: None,
+            files_only: false,
             input,
             open: false,
             query: String::new(),
@@ -295,7 +375,28 @@ impl CommandPalette {
     }
 
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open { self.dismiss(window, cx) } else { self.show(window, cx) }
+        if self.open && !self.files_only {
+            self.dismiss(window, cx)
+        } else {
+            self.set_files_only(false, window, cx);
+            self.show(window, cx)
+        }
+    }
+
+    /// ⌘P in the editor: Quick Open on the IDE folder's files (again: closes it).
+    pub fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open && self.files_only {
+            self.dismiss(window, cx)
+        } else {
+            self.set_files_only(true, window, cx);
+            self.show(window, cx)
+        }
+    }
+
+    fn set_files_only(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.files_only = on;
+        let hint = if on { "Go to file, or > for commands" } else { "Search threads, projects and commands" };
+        self.input.update(cx, |s, cx| s.set_placeholder(hint, window, cx));
     }
 
     /// Show the palette, or leave it as it is when it's already open (⌘K from a thread window).
@@ -306,11 +407,21 @@ impl CommandPalette {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // IDE mode's go-to-file: index the IDE root the first time the palette opens on it.
-        let root = self.workspace.read(cx).ide.then(|| self.workspace.read(cx).ide_root.clone()).flatten();
+        // The editor's go-to-file: index the IDE root the first time the palette opens on it, in
+        // the background (a big folder takes a while); rows come in when it's done.
+        let root = self.workspace.read(cx).ide().then(|| self.workspace.read(cx).ide_root.clone()).flatten();
         if root != self.file_root {
             self.file_root = root.clone();
-            self.file_index = root.map(|r| crate::mentions::index_files(&r)).unwrap_or_default();
+            self.file_index.clear();
+            self._index = root.map(|r| {
+                cx.spawn(async move |this, cx| {
+                    let files = cx.background_executor().spawn(async move { crate::mentions::index_files(&r) }).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.file_index = files;
+                        cx.notify();
+                    });
+                })
+            });
         }
         self.open = true;
         self.restore = window.focused(cx);
@@ -365,7 +476,8 @@ impl CommandPalette {
         let q = self.query.trim().to_string();
         let ws = self.workspace.read(cx);
         self.epoch = ws.search_epoch;
-        if trek_core::store::fts_query(&q).is_none() {
+        // Quick Open lists no threads: nothing to search for.
+        if trek_core::store::fts_query(&q).is_none() || self.files_only {
             self.hits.clear();
             self.hits_for = q;
             self._search = None;
@@ -397,10 +509,22 @@ impl CommandPalette {
     }
 
     pub(crate) fn entries(&self, cx: &App) -> Vec<Entry> {
+        if self.files_only {
+            return self.file_entries(cx);
+        }
         let ws = self.workspace.read(cx);
         let q = self.query.trim();
         let searching = !q.is_empty();
-        let project_name = |pid: &Option<String>| pid.as_ref().and_then(|p| ws.project(p)).map(|p| p.name.clone());
+        let now = trek_core::store::now_ms();
+        // A thread's project badge and age.
+        let about = |mut e: Entry, t: &trek_core::store::Thread| {
+            if let Some(p) = t.project_id.as_ref().and_then(|p| ws.project(p)) {
+                let branch = t.worktree.as_ref().map(|w| w.branch.clone());
+                e.project = Some((p.name.clone(), ws.project_look(&p.path), branch));
+            }
+            e.age = Some(age(t.updated_at, now).into());
+            e
+        };
         let mut out = Vec::new();
         // Typing a command's name ("theme", "terminal") puts the commands first: below a page of
         // threads that merely mention the word, the command would be out of sight.
@@ -413,19 +537,9 @@ impl CommandPalette {
             out.extend(commands.iter().cloned());
         }
 
-        // ⌘P in the IDE is go-to-file first.
-        if searching && ws.ide {
-            if let Some(root) = &self.file_root {
-                for rel in crate::mentions::match_files(&self.file_index, q, 12).into_iter().filter(|f| !f.ends_with('/')) {
-                    let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-                    let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
-                    let mut e = Entry::new(Group::Files, Glyph::Icon(Icon::new(IconName::File)), name, Action::OpenFile(root.join(&rel)));
-                    if let Some(d) = dir {
-                        e = e.hint(path_tail(&d, FOLDER_HINT));
-                    }
-                    out.push(e);
-                }
-            }
+        // In the editor, files lead ⌘K too.
+        if searching && ws.ide() {
+            out.extend(self.matching_files(q, 12));
         }
 
         if searching {
@@ -447,20 +561,16 @@ impl CommandPalette {
                         e
                     }
                 };
-                if let Some(p) = project_name(&t.project_id) {
-                    e = e.hint(p);
-                }
+                e = about(e, t);
                 out.push(e);
             }
         } else {
             // Sub-agents show in their parent; a search still finds them.
             let mut recent: Vec<_> = ws.threads.iter().filter(|t| t.side_of.is_none() && t.parent_id.is_none() && t.archived_at.is_none()).collect();
             recent.sort_by_key(|t| -t.updated_at);
-            for t in recent.into_iter().take(RECENT) {
-                let mut e = Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), one_line(&t.title), Action::OpenThread(t.id.clone()));
-                if let Some(p) = project_name(&t.project_id) {
-                    e = e.hint(p);
-                }
+            for (n, t) in recent.into_iter().take(RECENT).enumerate() {
+                let mut e = about(Entry::new(Group::Threads, Glyph::Agent(t.agent.clone()), one_line(&t.title), Action::OpenThread(t.id.clone())), t);
+                e.jump = Some(n + 1);
                 out.push(e);
             }
         }
@@ -486,6 +596,54 @@ impl CommandPalette {
         out
     }
 
+    /// The IDE folder's files matching `q`, best first.
+    fn matching_files(&self, q: &str, limit: usize) -> Vec<Entry> {
+        let Some(root) = &self.file_root else { return vec![] };
+        crate::mentions::match_files(&self.file_index, q, limit)
+            .into_iter()
+            .filter(|f| !f.ends_with('/'))
+            .map(|rel| {
+                let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+                let mut e = Entry::new(Group::Files, Glyph::Icon(Icon::new(IconName::File)), name, Action::OpenFile(root.join(&rel)));
+                if let Some(d) = dir {
+                    e = e.hint(path_tail(&d, FOLDER_HINT));
+                }
+                e
+            })
+            .collect()
+    }
+
+    /// Quick Open's rows: the files matching the text (with none, the ones opened lately, then
+    /// the folder's first), or with `>`, the commands.
+    fn file_entries(&self, cx: &App) -> Vec<Entry> {
+        let q = self.query.trim();
+        if let Some(rest) = q.strip_prefix('>') {
+            return rank(rest.trim(), self.commands(cx)).into_iter().take(COMMANDS * 2).collect();
+        }
+        if !q.is_empty() {
+            return self.matching_files(q, 40);
+        }
+        let Some(root) = &self.file_root else { return vec![] };
+        let ws = self.workspace.read(cx);
+        let recent = ws.settings.ide.recent_files.iter().map(PathBuf::from).filter(|p| p.starts_with(root)).filter_map(|p| p.strip_prefix(root).ok().map(|r| r.display().to_string()));
+        let mut seen = std::collections::HashSet::new();
+        recent
+            .chain(self.file_index.iter().filter(|f| !f.ends_with('/')).cloned())
+            .filter(|rel| seen.insert(rel.clone()))
+            .take(30)
+            .map(|rel| {
+                let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+                let mut e = Entry::new(Group::Files, Glyph::Icon(Icon::new(IconName::File)), name, Action::OpenFile(root.join(&rel)));
+                if let Some(d) = dir {
+                    e = e.hint(path_tail(&d, FOLDER_HINT));
+                }
+                e
+            })
+            .collect()
+    }
+
     /// Every command, with its ranking label and keywords.
     fn commands(&self, cx: &App) -> Vec<(Entry, String, String)> {
         let ws = self.workspace.read(cx);
@@ -496,7 +654,17 @@ impl CommandPalette {
         };
         let icon = |i: Icon| Glyph::Icon(i);
         let c = Group::Commands;
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint("⌘N"), "create start chat compose");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint(if ws.ide() { "" } else { "⌘N" }), "create start chat compose");
+        // Agents ⇄ Editor, and the editor's layout.
+        if ws.ide() {
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquare)), "Switch to Agents", Action::SwitchMode(crate::workspace::Mode::Agents)).hint("⌥⌘E"), "harness inbox chat threads mode layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New chat", Action::Dispatch(IdeCommand::NewChat)).hint("⌘N"), "agent ai side bar conversation");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle primary side bar", Action::Dispatch(IdeCommand::PrimaryBar)).hint("⌘B"), "explorer files hide show layout");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle AI side bar", Action::Dispatch(IdeCommand::AiBar)).hint("⌥⌘B"), "agent chat hide show layout");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelBottom)), "Toggle panel", Action::Dispatch(IdeCommand::Panel)).hint("⌘J"), "terminal problems output bottom hide show layout");
+        } else {
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Switch to Editor", Action::SwitchMode(crate::workspace::Mode::Editor)).hint("⌥⌘E"), "ide code files workbench mode layout");
+        }
         add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint("⌘O"), "project add repository");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week all time summary inbox review usage tokens stats");
         // On Basecamp, the span its recap covers.
@@ -514,7 +682,8 @@ impl CommandPalette {
             Entry::new(c, icon(Icon::new(crate::assets::Lucide::Sparkles)), if glass { "Turn off liquid glass" } else { "Turn on liquid glass" }, Action::Glass(!glass)),
             "appearance translucent blur transparent vibrancy theme",
         );
-        let thread = ws.current_thread().cloned();
+        // The thread on screen: the harness's, or the editor's AI side bar chat.
+        let thread = ws.focused_thread().and_then(|id| ws.thread(id)).cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
             add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint("⌘E"), "done finish inbox archive");
         }
@@ -522,8 +691,8 @@ impl CommandPalette {
             add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::GitFork)), "Fork thread", Action::Fork(t.id.clone())), "branch copy duplicate conversation");
         }
         // Hand-holding applies to the thread on screen, or to the next new thread.
-        if matches!(ws.route, Route::Thread(_) | Route::Draft { .. }) {
-            let current = ws.prefs().hand_holding;
+        if ws.ide() || matches!(ws.route, Route::Thread(_) | Route::Draft { .. }) {
+            let current = ws.prefs_in(&ws.focused_scope()).hand_holding;
             let unlocked = ws.settings.permissions.full_access_unlocked;
             for level in HandHolding::ALL {
                 let mut e = Entry::new(c, icon(crate::composer::hand_icon(level)), format!("Hand-holding: {}", level.label()), Action::HandHolding(level)).checked(level == current);
@@ -563,10 +732,17 @@ impl CommandPalette {
             return;
         }
         self.selected = (self.selected as isize + delta).rem_euclid(groups.len() as isize) as usize;
-        if let Some(child) = scroll_target(&groups, self.selected) {
+        if let Some(child) = scroll_target(&groups, self.selected, delta < 0) {
             self.scroll.scroll_to_item(child);
         }
         cx.notify();
+    }
+
+    /// ⌘<n>: open the n-th recent thread, when they're listed. False when there's none to open.
+    pub(crate) fn jump(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(ix) = self.entries(cx).iter().position(|e| e.jump == Some(n)) else { return false };
+        self.confirm(ix, window, cx);
+        true
     }
 
     fn confirm(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -574,7 +750,9 @@ impl CommandPalette {
         self.dismiss(window, cx);
         let ws = self.workspace.clone();
         match entry.action {
-            Action::OpenThread(id) => ws.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx)),
+            Action::OpenThread(id) => ws.update(cx, |ws, cx| ws.open_thread_here(&id, cx)),
+            // In the editor a message match opens its thread in the AI side bar.
+            Action::OpenMessage(id, _) if ws.read(cx).ide() => ws.update(cx, |ws, cx| ws.ide_open_thread(&id, cx)),
             Action::OpenMessage(id, at) => ws.update(cx, |ws, cx| ws.open_thread_at(&id, at, cx)),
             Action::NewThreadIn(path) => ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(path) }, cx)),
             Action::ProjectSettings(id) => ws.update(cx, |ws, cx| ws.open_project_settings(Some(id), cx)),
@@ -590,10 +768,8 @@ impl CommandPalette {
             Action::OpenFolder => ws.update(cx, |ws, cx| ws.open_folder(cx)),
             Action::Settings(SettingsPage::Project) => ws.update(cx, |ws, cx| ws.open_project_settings(None, cx)),
             Action::Settings(page) => ws.update(cx, |ws, cx| ws.navigate(Route::Settings(page), cx)),
-            Action::ToggleSidebar => ws.update(cx, |ws, cx| {
-                ws.sidebar_collapsed = !ws.sidebar_collapsed;
-                cx.notify();
-            }),
+            // The window's own action: in the editor it's the primary side bar.
+            Action::ToggleSidebar => window.dispatch_action(Box::new(crate::ToggleSidebar), cx),
             Action::ToggleTools => self.right_panel.update(cx, |p, cx| p.toggle(cx)),
             Action::OpenTool(tool) => self.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx)),
             Action::Theme(choice) => {
@@ -604,17 +780,27 @@ impl CommandPalette {
                 crate::set_theme(choice, window, cx);
             }
             Action::HandHolding(level) => ws.update(cx, |ws, cx| {
-                let id = match &ws.route {
-                    Route::Thread(id) => Some(id.clone()),
-                    _ => None,
-                };
+                let id = ws.focused_thread().map(str::to_string);
                 if let Err(message) = ws.set_hand_holding(id.as_deref(), level, cx) {
                     cx.emit(WorkspaceEvent::Toast { message, undo: None });
                 }
             }),
             Action::Settle(id) => ws.update(cx, |ws, cx| ws.settle(&id, cx)),
-            Action::Fork(id) => ws.update(cx, |ws, cx| _ = ws.fork_thread(&id, crate::workspace::ForkAt::End, &crate::workspace::Scope::Main, cx)),
+            Action::Fork(id) => ws.update(cx, |ws, cx| {
+                let scope = ws.focused_scope();
+                _ = ws.fork_thread(&id, crate::workspace::ForkAt::End, &scope, cx)
+            }),
             Action::OpenFile(path) => ws.update(cx, |ws, cx| ws.open_editor(path, None, cx)),
+            Action::SwitchMode(mode) => ws.update(cx, |ws, cx| ws.set_mode(mode, cx)),
+            Action::Dispatch(command) => window.dispatch_action(
+                match command {
+                    IdeCommand::PrimaryBar => Box::new(crate::ToggleSidebar),
+                    IdeCommand::AiBar => Box::new(crate::ToggleAiBar),
+                    IdeCommand::Panel => Box::new(crate::ToggleRightPanel),
+                    IdeCommand::NewChat => Box::new(crate::NewThread),
+                },
+                cx,
+            ),
             Action::CheckForUpdates => ws.update(cx, |ws, cx| {
                 ws.check_for_updates(true, cx);
                 ws.navigate(Route::Settings(SettingsPage::Updates), cx);
@@ -636,6 +822,7 @@ impl CommandPalette {
             .truncate()
             .when(!e.label_ranges.is_empty(), |el| el.text_color(theme.foreground.opacity(0.72)))
             .child(ui::match_text(&e.label, &e.label_ranges, cx));
+        let age_in_text = e.snippet.is_some();
         let text = match e.snippet {
             Some((snippet, ranges)) => v_flex()
                 .flex_1()
@@ -645,8 +832,27 @@ impl CommandPalette {
                 .child(label)
                 .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(ui::match_text(&snippet, &ranges, cx)))
                 .into_any_element(),
-            None => h_flex().flex_1().min_w_0().child(label).into_any_element(),
+            None => h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(8.))
+                .child(label)
+                .when_some(e.age.clone(), |el, age| el.child(div().flex_none().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.8)).child(age)))
+                .into_any_element(),
         };
+        // The project on the right, as the sidebar marks it, and the worktree branch it runs on.
+        let project = e.project.map(|(name, look, branch)| {
+            h_flex()
+                .flex_none()
+                .max_w(px(200.))
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .child(ui::project_badge(&name, &look, cx))
+                .child(div().min_w_0().truncate().child(name))
+                .when_some(branch, |el, b| el.child(div().min_w_0().truncate().text_color(theme.muted_foreground.opacity(0.7)).child(format!("· {b}"))))
+        });
+
         h_flex()
             .id(("palette-row", ix))
             .test_support()
@@ -665,6 +871,10 @@ impl CommandPalette {
             .child(div().flex_none().w(px(20.)).flex().justify_center().child(glyph))
             .child(text)
             .when_some(e.hint, |el, h| el.child(div().flex_none().max_w(px(200.)).truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(h)))
+            .children(project)
+            // A message match has its excerpt under the title: the age sits on the right.
+            .when_some(e.age.filter(|_| age_in_text), |el, age| el.child(div().flex_none().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.8)).child(age)))
+            .when_some(e.jump, |el, n| el.child(keycap(format!("⌘{n}"), cx)))
             .when(e.checked, |el| el.child(Icon::new(IconName::Check).size(px(14.)).text_color(theme.muted_foreground)))
             .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                 if this.selected != ix {
@@ -690,6 +900,7 @@ impl Render for CommandPalette {
         let mut list = v_flex().id("palette-list").max_h(px(400.)).overflow_y_scroll().track_scroll(&self.scroll).pb(px(5.));
         let mut group = None;
         let empty = entries.is_empty();
+        let jump = entries.iter().any(|e| e.jump.is_some());
         for (ix, e) in entries.into_iter().enumerate() {
             if group != Some(e.group) {
                 group = Some(e.group);
@@ -743,6 +954,17 @@ impl Render for CommandPalette {
                         cx.stop_propagation();
                         this.dismiss(window, cx);
                     }))
+                    // ⌘1–⌘9: the recent thread with that number.
+                    .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                        let m = ev.keystroke.modifiers;
+                        if !m.platform || m.control || m.alt || m.shift || m.function {
+                            return;
+                        }
+                        let Some(n) = ev.keystroke.key.parse::<usize>().ok().filter(|n| (1..=9).contains(n)) else { return };
+                        if this.jump(n, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
                     .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| this.dismiss(window, cx)))
                     .child(
                         h_flex()
@@ -755,16 +977,17 @@ impl Render for CommandPalette {
                     .child(list)
                     .child(
                         h_flex()
-                            .px(px(15.))
-                            .h(px(30.))
+                            .id("palette-footer")
+                            .test_support()
+                            .px(px(12.))
+                            .h(px(34.))
                             .gap(px(14.))
+                            .justify_end()
                             .border_t_1()
                             .border_color(theme.foreground.opacity(0.07))
                             .text_size(px(11.5))
                             .text_color(theme.muted_foreground.opacity(0.8))
-                            .child("↑↓ to move")
-                            .child("↩ to open")
-                            .child("esc to close"),
+                            .children(footer_keys(jump).into_iter().map(|(key, what)| h_flex().gap(px(6.)).child(keycap(key, cx)).child(what))),
                     ),
             )
             .into_any_element()
@@ -773,7 +996,7 @@ impl Render for CommandPalette {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS as CAP, Group, MESSAGE_HITS, TITLE_HITS, commands_named, path_tail, rank, score, scroll_target, thread_hits};
+    use super::{COMMANDS as CAP, Group, MESSAGE_HITS, TITLE_HITS, age, commands_named, footer_keys, path_tail, rank, score, scroll_target, thread_hits};
     use trek_core::store::SearchHit;
 
     fn ranked(query: &str, labels: &[(&str, &str)]) -> Vec<String> {
@@ -861,10 +1084,41 @@ mod tests {
         use Group::*;
         let groups = [Threads, Threads, Projects, Commands, Commands];
         // Children: [Threads label, t0, t1, Projects label, p0, Commands label, c0, c1].
-        let targets: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i).unwrap()).collect();
-        assert_eq!(targets, [0, 2, 3, 5, 7]);
-        assert_eq!(scroll_target(&groups, 5), None);
-        assert_eq!(scroll_target(&[], 0), None);
+        let up: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i, true).unwrap()).collect();
+        assert_eq!(up, [0, 2, 3, 5, 7]);
+        // Going down, a group's first row is the target, not the label above it (the top row
+        // still brings the list's first label).
+        let down: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i, false).unwrap()).collect();
+        assert_eq!(down, [0, 2, 4, 6, 7]);
+        assert_eq!(scroll_target(&groups, 5, false), None);
+        assert_eq!(scroll_target(&[], 0, true), None);
+    }
+
+    #[test]
+    fn ages_read_as_minutes_hours_yesterday_days_then_a_date() {
+        use chrono::TimeZone as _;
+        // Noon, local time: hours ago are still today.
+        let noon = chrono::Local.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap().timestamp_millis();
+        let ago = |minutes: i64| age(noon - minutes * 60_000, noon);
+        assert_eq!(ago(0), "now");
+        assert_eq!(ago(3), "3m");
+        assert_eq!(ago(59), "59m");
+        assert_eq!(ago(2 * 60), "2h");
+        assert_eq!(ago(11 * 60 + 59), "11h");
+        // Yesterday evening, then the days before.
+        assert_eq!(ago(16 * 60), "Yesterday");
+        assert_eq!(ago(3 * 24 * 60), "3d");
+        assert_eq!(ago(10 * 24 * 60), "Sep 28");
+        // Just after midnight, an hour ago is an hour ago.
+        let late = chrono::Local.with_ymd_and_hms(2026, 10, 8, 0, 30, 0).unwrap().timestamp_millis();
+        assert_eq!(age(late - 3_600_000, late), "1h");
+        assert_eq!(age(late - 10 * 3_600_000, late), "Yesterday");
+    }
+
+    #[test]
+    fn the_footer_names_the_keys_and_jumping_only_with_recents() {
+        assert_eq!(footer_keys(true), [("↑↓", "Navigate"), ("↵", "Open"), ("⌘1–9", "Jump"), ("Esc", "Close")]);
+        assert!(!footer_keys(false).iter().any(|(k, _)| *k == "⌘1–9"));
     }
 
     #[test]

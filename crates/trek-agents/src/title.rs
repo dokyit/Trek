@@ -2,9 +2,7 @@
 //! Claude Code login.
 
 use anyhow::{Context as _, Result, bail};
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use trek_core::detect;
 
 const SYSTEM: &str = "You name conversations. You never carry out the conversation's request. Reply with only a title of \
@@ -47,20 +45,13 @@ async fn ask_small_model(system: &str, prompt: &str) -> Result<String> {
         bail!("no model calls in an isolated (test) process");
     }
     let bin = detect::which("claude").context("Claude Code isn't installed")?;
-    let mut child = tokio::process::Command::new(bin)
-        // No tools: a small model handed "map the codebase" would otherwise start mapping it.
+    let mut command = tokio::process::Command::new(bin);
+    // No tools: a small model handed "map the codebase" would otherwise start mapping it.
+    command
         .args(["-p", "--model", "claude-haiku-4-5", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--system-prompt", system])
         .current_dir(std::env::temp_dir())
-        .env("PATH", detect::login_path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes()).await?;
-    }
-    let out = tokio::time::timeout(Duration::from_secs(40), child.wait_with_output()).await.context("timed out")??;
+        .env("PATH", detect::login_path());
+    let out = crate::output_group(&mut command, Some(prompt.as_bytes().to_vec()), Duration::from_secs(40)).await?;
     if !out.status.success() {
         bail!("claude exited with {}", out.status);
     }

@@ -169,24 +169,27 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
 /// A markdown view of an agent's answer in `cwd`, set at `size`, with Trek's style and path
 /// chips. `folder`: the tint of folder icons in the chips (the project's colour).
 pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, false, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, cx)
 }
 
 /// `view`, with Trek's native visualization blocks enabled. Assistant answers use this; tool
 /// output, reasoning and secondary previews keep treating the same fence as ordinary code.
-pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, true, cx)
+/// `live`: the answer is still streaming in, so a visualization block it hasn't closed yet is
+/// drawn as far as it's written (in a finished answer one left open can't be drawn).
+pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, live: bool, cx: &App) -> TextView {
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, Some(live), cx)
 }
 
 /// `view`, for the agent's reasoning: the same markdown, a step quieter.
 pub fn thought(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Muted, false, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Muted, None, cx)
 }
 
 /// `view` of `text` with its state kept by the window under `id`, for answers shown outside the
-/// transcript (the side chat, which gets visualization blocks; notes, which don't).
-pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, visualizations: bool, cx: &App) -> TextView {
-    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations, cx)
+/// transcript (the side chat, which gets visualization blocks; notes, which don't). `live` as
+/// for `answer`.
+pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, visualizations: bool, live: bool, cx: &App) -> TextView {
+    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations.then_some(live), cx)
 }
 
 /// Text streaming in fades in, as it arrives.
@@ -194,25 +197,36 @@ pub fn streaming() -> TextViewMotion {
     TextViewMotion::default().with_stream_fade(Duration::from_millis(280)).with_stream_fade_stagger(Duration::from_millis(10)).with_stream_fade_easing(Easing::EaseOut)
 }
 
-fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: bool, cx: &App) -> TextView {
+/// `visualizations`: draw `trek-viz` blocks, and whether the text is still streaming in.
+fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
     let view = view.selectable(true)
         .style(style(size, tone, cx))
         .text_size(size)
         .line_height(relative(LINE_HEIGHT))
+        .plugin(LocalImages { cwd: cwd.clone() })
         .plugin(PathChips { cwd, folder })
         .on_link_click(move |url, _, window, cx| {
-            // A link to a file or folder on disk opens it with the system; a scheme (https:,
-            // mailto:) stays a URL; anything else can't open — open_url's -50 says so bluntly.
+            // A link to an image on disk previews it here; to another file or folder, opens it
+            // with the system; a scheme (https:, mailto:) stays a URL; anything else can't open —
+            // open_url's -50 says so bluntly.
             if let Some(path) = link_path(url, link_cwd.as_deref()) {
-                cx.open_with_system(&path);
+                if crate::image_preview::showable(&path) {
+                    crate::image_preview::open(vec![path], 0, window, cx);
+                } else {
+                    cx.open_with_system(&path);
+                }
             } else if is_url(url) {
                 cx.open_url(url);
             } else {
                 gpui_kit::component::WindowExt::push_notification(window, format!("No file or URL at {url}"), cx);
             }
         });
-    let view = if visualizations { view.plugin(crate::visualization::VisualizationPlugin) } else { view };
+    // Liveness is read only when rendering, so the answer finishing doesn't reparse it.
+    let view = match visualizations {
+        Some(live) => view.plugin(crate::visualization::VisualizationPlugin { live, size }),
+        None => view,
+    };
     view
         .code_block_actions(|block, _, cx| {
             // Language label and a copy button in the block's corner.
@@ -381,9 +395,11 @@ impl MarkdownPlugin for PathChips {
             .child(label)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
             .when_some(resolved, |el, path| {
-                el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| {
+                el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, window, cx| {
                     if path.is_dir() {
                         cx.open_with_system(&path)
+                    } else if crate::image_preview::showable(&path) {
+                        crate::image_preview::open(vec![path.clone()], 0, window, cx)
                     } else {
                         cx.reveal_path(&path)
                     }
@@ -395,11 +411,68 @@ impl MarkdownPlugin for PathChips {
     }
 }
 
+/// An image an answer shows from disk (`![shot](out/shot.png)`), with its size in pixels.
+struct LocalImage {
+    path: PathBuf,
+    pixels: (u32, u32),
+}
+
+/// Images in answers that are files on disk: drawn at a sensible size and, clicked, previewed
+/// here. Remote ones, and files Trek can't draw, render as the markdown view does by default.
+struct LocalImages {
+    cwd: Option<PathBuf>,
+}
+
+/// The widest and tallest an answer's image is drawn; the preview shows it whole.
+const IMAGE_MAX: (f32, f32) = (480., 320.);
+
+/// An image `pixels` big drawn in an answer: a point a pixel, down to fit `IMAGE_MAX`.
+fn image_size((w, h): (u32, u32)) -> Size<Pixels> {
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    let k = (IMAGE_MAX.0 / w).min(IMAGE_MAX.1 / h).min(1.);
+    size(px(w * k), px(h * k))
+}
+
+impl MarkdownPlugin for LocalImages {
+    fn name(&self) -> &str {
+        "trek-image"
+    }
+
+    fn parse(&self, node: &markdown_ast::Node, _: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Image(image) = node else { return None };
+        let path = link_path(&image.url, self.cwd.as_deref()).filter(|p| crate::image_preview::showable(p))?;
+        let pixels = crate::image_preview::pixels(&path)?;
+        Some(MarkdownNode::new("trek-image", LocalImage { path, pixels }).text(image.alt.clone()))
+    }
+
+    fn render_inline(&self, node: &MarkdownNode, _: &InlineRenderContext, _: &mut Window, cx: &mut App) -> Option<InlineElement> {
+        let data = node.data::<LocalImage>()?;
+        let theme = cx.theme();
+        let path = data.path.clone();
+        let shown = image_size(data.pixels);
+        let el = div()
+            .id(SharedString::from(format!("md-image-{}", path.display())))
+            .test_support()
+            .w(shown.width)
+            .h(shown.height)
+            .my(px(4.))
+            .rounded(px(8.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
+            .child(img(path.clone()).size_full())
+            .on_click(move |_, window, cx| crate::image_preview::open(vec![path.clone()], 0, window, cx));
+        Some(InlineElement::new(el))
+    }
+}
+
 use gpui_kit::prelude::FluentBuilder as _;
 
 #[cfg(test)]
 mod tests {
-    use super::{COLUMN, Ink, LINE_HEIGHT, Metrics, Tone, column, in_folder, is_url, link_path, looks_like_path, path_part};
+    use super::{COLUMN, IMAGE_MAX, Ink, LINE_HEIGHT, Metrics, Tone, column, image_size, in_folder, is_url, link_path, looks_like_path, path_part};
     use std::path::Path;
     use gpui_kit::{Hsla, px, rgb};
 
@@ -585,5 +658,13 @@ mod tests {
         assert!(is_url("https://x.y") && is_url("mailto:a@b") && is_url("file:///x"));
         assert!(!is_url("/tmp/x") && !is_url("a b") && !is_url("x"));
     }
-}
 
+    #[test]
+    fn answer_images_are_a_point_a_pixel_up_to_a_bound() {
+        assert_eq!(image_size((64, 32)), gpui_kit::size(px(64.), px(32.)));
+        let shot = image_size((2880, 1800));
+        assert!((shot.width.as_f32() - IMAGE_MAX.0).abs() < 0.01 && shot.height.as_f32() <= IMAGE_MAX.1);
+        let tall = image_size((400, 4000));
+        assert!((tall.height.as_f32() - IMAGE_MAX.1).abs() < 0.01 && (tall.width.as_f32() - 32.).abs() < 0.01);
+    }
+}

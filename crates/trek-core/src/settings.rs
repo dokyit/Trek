@@ -18,6 +18,8 @@ pub struct Settings {
     pub api_providers: Vec<String>,
     /// Custom OpenAI-compatible endpoints.
     pub custom_endpoints: Vec<CustomEndpoint>,
+    /// ACP agents the user added: from the ACP Registry, or a command of their own.
+    pub added_agents: Vec<crate::registry::AddedAgent>,
     /// Folders the user added explicitly (always shown as projects).
     pub user_projects: Vec<String>,
     /// Installed agents the user switched off (`AgentId::key()`).
@@ -33,6 +35,69 @@ pub struct Settings {
     pub ide: Ide,
     /// Trek on your iPhone (Settings › Phone).
     pub mobile: Mobile,
+    /// What `load` couldn't read, and whether `save` may write the file.
+    #[serde(skip)]
+    pub guard: SaveGuard,
+}
+
+/// Kept alongside loaded settings: values from the file this build couldn't read (written back
+/// unchanged on save), and whether saving is refused because the file couldn't be read at all.
+/// Never part of a comparison.
+#[derive(Debug, Clone, Default)]
+pub struct SaveGuard {
+    /// Why saves are refused, if they are.
+    blocked: Option<String>,
+    /// Values dropped on load: their path, the file's raw value, and what the default in their
+    /// place serialized as when loaded.
+    kept: Vec<(Vec<String>, toml::Value, Option<toml::Value>)>,
+}
+
+impl PartialEq for SaveGuard {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl SaveGuard {
+    /// Refuse every save from now on, for `why`.
+    pub fn block(&mut self, why: impl Into<String>) {
+        self.blocked = Some(why.into());
+    }
+
+    pub fn blocked(&self) -> Option<&str> {
+        self.blocked.as_deref()
+    }
+}
+
+/// What went wrong reading the settings file, for a toast at launch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadProblem {
+    /// A copy of the file as it was, if one could be made.
+    pub backup: Option<std::path::PathBuf>,
+    /// Settings that couldn't be read (dotted paths): back at their defaults, and their values
+    /// written back unchanged unless the user changes them.
+    pub dropped: Vec<String>,
+    /// The file isn't TOML at all: Trek runs on defaults and won't save over it.
+    pub unreadable: bool,
+    pub error: String,
+}
+
+impl LoadProblem {
+    pub fn message(&self) -> String {
+        let copy = self.backup.as_ref().map(|b| format!(" A copy is at {}.", crate::paths::tildify(b))).unwrap_or_default();
+        if self.unreadable {
+            format!(
+                "settings.toml couldn't be read ({}). Trek is using its defaults and won't save changes until the file is fixed or removed and Trek restarted.{copy}",
+                self.error.lines().next().unwrap_or("not TOML").trim()
+            )
+        } else {
+            let mut names = self.dropped.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
+            if self.dropped.len() > 4 {
+                names.push_str(&format!(" and {} more", self.dropped.len() - 4));
+            }
+            format!("Some settings couldn't be read and use their defaults for now: {names}. They're kept in the file unless you change them.{copy}")
+        }
+    }
 }
 
 /// The phone server: off until the user turns it on.
@@ -236,22 +301,198 @@ pub struct Tools {
     pub orchestration: bool,
     /// Extra MCP servers passed to every session.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Give agents the Figma desktop app's Dev Mode MCP server (`FIGMA_DESKTOP_URL`), as
+    /// `figma-desktop`. It answers only while Figma is open with the server turned on.
+    pub figma_desktop: bool,
 }
 
 impl Default for Tools {
     fn default() -> Self {
-        Self { computer_use: true, simulator: true, orchestration: true, mcp_servers: vec![] }
+        Self { computer_use: false, simulator: true, orchestration: true, mcp_servers: vec![], figma_desktop: false }
     }
 }
 
+/// The Figma desktop app's MCP server (Dev Mode): local, no login.
+pub const FIGMA_DESKTOP_URL: &str = "http://127.0.0.1:3845/mcp";
+/// The name Trek gives it in a session.
+pub const FIGMA_DESKTOP_SERVER: &str = "figma-desktop";
+
+/// One of the user's MCP servers: a command Trek starts (stdio), or a remote server at `url`
+/// (streamable HTTP). Servers saved before HTTP was supported have only `command` and `args`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Sent with every request to `url`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<McpHeader>,
+    /// The environment `command` is started with (tokens, mostly): names here, values in the
+    /// Keychain (`secrets::mcp_env`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<McpEnvVar>,
     #[serde(default)]
     pub enabled: bool,
+}
+
+impl McpServerConfig {
+    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
+        Self { name: name.into(), command: command.into(), args, url: None, headers: vec![], env: vec![], enabled: true }
+    }
+
+    pub fn http(name: impl Into<String>, url: impl Into<String>, headers: Vec<McpHeader>) -> Self {
+        Self { name: name.into(), command: String::new(), args: vec![], url: Some(url.into()), headers, env: vec![], enabled: true }
+    }
+
+    /// What the add row was given, read as a server: an `http(s)://` URL is a remote server,
+    /// anything else a command line, split as a shell would, with any `KEY=value` before the
+    /// command as its environment. `None` when there's nothing to run or it doesn't split (an
+    /// open quote). Values are inline; `stash_secrets` moves them to the Keychain.
+    pub fn parse(name: &str, line: &str) -> Option<Self> {
+        let (name, line) = (name.trim(), line.trim());
+        if name.is_empty() || line.is_empty() {
+            return None;
+        }
+        if is_mcp_url(line) {
+            return Some(Self::http(name, line, vec![]));
+        }
+        let mut words = crate::mcp::split_words(line).ok()?.into_iter().peekable();
+        // `env A=1 cmd` says the same as `A=1 cmd`.
+        if words.peek().is_some_and(|w| w == "env") {
+            words.next();
+        }
+        let mut env = vec![];
+        while let Some((k, v)) = words.peek().and_then(|w| crate::mcp::assignment(w)) {
+            env.push(McpEnvVar { name: k.to_string(), value: v.to_string(), secret: false });
+            words.next();
+        }
+        let command = words.next()?;
+        Some(Self { env, ..Self::stdio(name, command, words.collect()) })
+    }
+
+    pub fn is_http(&self) -> bool {
+        self.url.is_some()
+    }
+
+    /// The command line, or the URL: what the server's row shows.
+    pub fn summary(&self) -> String {
+        match &self.url {
+            Some(url) => url.clone(),
+            None => std::iter::once(self.command.as_str()).chain(self.args.iter().map(String::as_str)).map(crate::mcp::quote).collect::<Vec<_>>().join(" "),
+        }
+    }
+
+    /// What the add row shows when the server is edited: the URL, or the command line with its
+    /// environment in front, a value kept in the Keychain as `KEPT` (left as it is, it stays).
+    pub fn command_line(&self) -> String {
+        let env = self.env.iter().map(|e| format!("{}={}", e.name, if e.secret { KEPT.to_string() } else { crate::mcp::quote(&e.value) }));
+        env.chain(std::iter::once(self.summary())).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Move every env and header value given inline to the Keychain, leaving its name here.
+    /// `was` is the server's name before an edit: an env value left as `KEPT` is the one saved
+    /// under it, and a renamed server's saved values move to the new name.
+    pub fn stash_secrets(&mut self, was: Option<&str>) -> anyhow::Result<()> {
+        let name = self.name.clone();
+        let renamed = was.filter(|w| *w != name);
+        for e in &mut self.env {
+            if e.value == KEPT {
+                e.value = was.and_then(|w| secrets::mcp_env(w, &e.name)).ok_or_else(|| anyhow::anyhow!("{} has no saved value to keep, so type it in", e.name))?;
+                e.secret = false;
+            } else if e.secret {
+                if let Some(v) = renamed.and_then(|w| secrets::mcp_env(w, &e.name)) {
+                    secrets::set_mcp_env(&name, &e.name, &v)?;
+                }
+                continue;
+            }
+            if !e.value.is_empty() {
+                secrets::set_mcp_env(&name, &e.name, &e.value)?;
+                (e.value, e.secret) = (String::new(), true);
+            }
+        }
+        for h in &mut self.headers {
+            if h.secret {
+                if let Some(v) = renamed.and_then(|w| secrets::mcp_header(w, &h.name)) {
+                    secrets::set_mcp_header(&name, &h.name, &v)?;
+                }
+            } else if !h.value.is_empty() {
+                secrets::set_mcp_header(&name, &h.name, &h.value)?;
+                (h.value, h.secret) = (String::new(), true);
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete what this server keeps in the Keychain (it's been removed), but for what `kept`
+    /// (the server it was edited into) still uses.
+    pub fn forget_secrets(&self, kept: Option<&McpServerConfig>) {
+        let same = kept.filter(|k| k.name == self.name);
+        for h in self.headers.iter().filter(|h| h.secret) {
+            if !same.is_some_and(|k| k.headers.iter().any(|n| n.secret && n.name.eq_ignore_ascii_case(&h.name))) {
+                let _ = secrets::delete_mcp_header(&self.name, &h.name);
+            }
+        }
+        for e in self.env.iter().filter(|e| e.secret) {
+            if !same.is_some_and(|k| k.env.iter().any(|n| n.secret && n.name == e.name)) {
+                let _ = secrets::delete_mcp_env(&self.name, &e.name);
+            }
+        }
+    }
+
+    /// Its environment with the values read back from the Keychain; one whose value is gone
+    /// isn't set.
+    pub fn resolved_env(&self) -> Vec<(String, String)> {
+        self.env.iter().filter_map(|e| Some((e.name.clone(), if e.secret { secrets::mcp_env(&self.name, &e.name)? } else { e.value.clone() }))).collect()
+    }
+
+    /// Its headers, the same way.
+    pub fn resolved_headers(&self) -> Vec<(String, String)> {
+        self.headers.iter().filter_map(|h| Some((h.name.clone(), if h.secret { secrets::mcp_header(&self.name, &h.name)? } else { h.value.clone() }))).collect()
+    }
+}
+
+/// Stands for a value kept in the Keychain when a server's command line is shown for editing.
+pub const KEPT: &str = "…";
+
+/// An environment variable a stdio MCP server is started with. A `secret` one keeps its value
+/// in the Keychain (`secrets::mcp_env`), never in the settings file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpEnvVar {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+/// A line the user gave as an MCP server that is a remote server's address.
+pub fn is_mcp_url(line: &str) -> bool {
+    let l = line.trim();
+    (l.starts_with("https://") || l.starts_with("http://")) && !l.contains(char::is_whitespace) && l.len() > "https://".len()
+}
+
+/// A header sent to a remote MCP server. A `secret` one (a token) keeps its value in the
+/// Keychain (`secrets::mcp_header`), never in the settings file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpHeader {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+impl McpHeader {
+    /// `Name: value`, as typed in Settings (`Authorization: Bearer …`).
+    pub fn parse(line: &str) -> Option<(String, String)> {
+        let (name, value) = line.split_once(':')?;
+        let (name, value) = (name.trim(), value.trim());
+        (!name.is_empty() && !value.is_empty() && !name.contains(char::is_whitespace)).then(|| (name.to_string(), value.to_string()))
+    }
 }
 
 impl Default for Settings {
@@ -267,6 +508,7 @@ impl Default for Settings {
             onboarding: Onboarding::default(),
             api_providers: vec![],
             custom_endpoints: vec![],
+            added_agents: vec![],
             user_projects: vec![],
             disabled_agents: vec![],
             tools: Tools::default(),
@@ -276,6 +518,7 @@ impl Default for Settings {
             hidden_projects: vec![],
             ide: Ide::default(),
             mobile: Mobile::default(),
+            guard: SaveGuard::default(),
         }
     }
 }
@@ -364,7 +607,8 @@ pub struct Appearance {
     pub reduce_motion: bool,
     /// Scales every animation duration (0 = instant, 1 = designed timing).
     pub motion_scale: f32,
-    /// `builtin:<name>` or an absolute path to a copied image; `None` = no image.
+    /// `builtin:<name>` or an absolute path to a copied image; `None` = no image (the default:
+    /// art is opt-in, in Settings › Appearance).
     pub background: Option<String>,
     pub background_placement: BackgroundPlacement,
     /// How strongly the image is darkened/lightened under content, 0.0–0.9.
@@ -373,6 +617,21 @@ pub struct Appearance {
     pub glass: bool,
     /// How much of the theme's colour the glass keeps, 0.2 (clear) to 0.95 (frosted).
     pub glass_tint: f32,
+    /// The Dock icon: the cairn on Trek orange, or one of its alternatives.
+    pub app_icon: AppIcon,
+}
+
+/// The app icons Trek can show in the Dock (`assets/brand/trek_icon.py`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppIcon {
+    /// Porcelain stones on a Trek-orange tile: the icon in the app bundle.
+    #[default]
+    Ember,
+    /// Trek-orange stones on the Night theme's charcoal.
+    Night,
+    /// Frosted glass stones over a sunset.
+    Glass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,11 +679,12 @@ impl Default for Appearance {
             code_font_size: 12.5,
             reduce_motion: false,
             motion_scale: 1.0,
-            background: Some("builtin:dawn".into()),
+            background: None,
             background_placement: BackgroundPlacement::NewThread,
             background_dim: 0.35,
             glass: false,
             glass_tint: 0.6,
+            app_icon: AppIcon::Ember,
         }
     }
 }
@@ -547,10 +807,61 @@ pub struct CustomEndpoint {
 
 impl Settings {
     pub fn load() -> Settings {
-        let mut s: Settings = std::fs::read_to_string(crate::paths::settings_file())
-            .ok()
-            .and_then(|s| toml::from_str(&s).map_err(|e| tracing::warn!("settings parse error: {e}")).ok())
-            .unwrap_or_default();
+        Self::load_checked().0
+    }
+
+    /// The settings file, read as well as it can be: a value this build can't read (a typo, or a
+    /// choice a newer Trek added) falls back to its default alone, and a file that isn't TOML at
+    /// all leaves every setting at its default with saving refused, so it's never written over.
+    /// Either way a copy of the file is kept, and the problem returned for the user to see.
+    pub fn load_checked() -> (Settings, Option<LoadProblem>) {
+        let path = crate::paths::settings_file();
+        let text = match std::fs::read(&path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => return (Self::migrated(Settings::default()), None),
+        };
+        let (s, problem) = Self::parse(&text);
+        let problem = problem.map(|mut p| {
+            tracing::warn!("settings: {}; dropped: {:?}", p.error, p.dropped);
+            p.backup = back_up(&path, &text);
+            p
+        });
+        (Self::migrated(s), problem)
+    }
+
+    /// `text` as settings, salvaging what can be read (see `load_checked`). No copy is made.
+    pub fn parse(text: &str) -> (Settings, Option<LoadProblem>) {
+        let table = match toml::from_str::<toml::Table>(text) {
+            Ok(t) => t,
+            Err(e) => {
+                let mut s = Settings::default();
+                // Whoever wrote a settings file got past onboarding.
+                s.onboarding.completed = !text.trim().is_empty();
+                s.guard.block("settings.toml couldn't be read");
+                return (s, Some(LoadProblem { backup: None, dropped: vec![], unreadable: true, error: e.to_string() }));
+            }
+        };
+        let error = match toml::Value::Table(table.clone()).try_into::<Settings>() {
+            Ok(s) => return (s, None),
+            Err(e) => e.to_string(),
+        };
+        let mut kept = toml::Table::new();
+        let mut dropped = vec![];
+        salvage::<Settings>(&table, &mut vec![], &mut kept, &mut dropped);
+        let mut s = toml::Value::Table(kept).try_into::<Settings>().unwrap_or_else(|_| {
+            dropped = table.keys().map(|k| vec![k.clone()]).collect();
+            Settings::default()
+        });
+        let defaults = toml::Value::try_from(&s).ok();
+        s.guard.kept = dropped
+            .iter()
+            .filter_map(|p| Some((p.clone(), value_at(&toml::Value::Table(table.clone()), p)?.clone(), defaults.as_ref().and_then(|d| value_at(d, p)).cloned())))
+            .collect();
+        let dropped = dropped.iter().map(|p| p.join(".")).collect();
+        (s, Some(LoadProblem { backup: None, dropped, unreadable: false, error }))
+    }
+
+    fn migrated(mut s: Settings) -> Settings {
         s.migrate();
         s
     }
@@ -570,22 +881,100 @@ impl Settings {
         }
     }
 
+    /// The file's text for these settings: values `load` couldn't read go back in unless the
+    /// setting was changed since.
+    pub fn to_toml(&self) -> anyhow::Result<String> {
+        if self.guard.kept.is_empty() {
+            return Ok(toml::to_string_pretty(self)?);
+        }
+        let mut value = toml::Value::try_from(self)?;
+        for (path, raw, default) in &self.guard.kept {
+            if value_at(&value, path) == default.as_ref() {
+                set_at(&mut value, path, raw.clone());
+            }
+        }
+        Ok(toml::to_string_pretty(&value)?)
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        if let Some(why) = self.guard.blocked() {
+            anyhow::bail!("not saved: {why}");
+        }
         // A temp file of each save's own: two saves at once (two Treks, or tests side by side)
         // mustn't rename each other's half-written file into place.
         static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = crate::paths::settings_file();
         let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = path.with_extension(format!("toml.{}-{n}.tmp", std::process::id()));
-        let saved = std::fs::write(&tmp, toml::to_string_pretty(self)?).and_then(|_| std::fs::rename(&tmp, path));
+        let text = self.to_toml()?;
+        // On disk before the rename: after a power cut, an empty file would read as defaults.
+        let saved = std::fs::File::create(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all()))
+            .and_then(|_| std::fs::rename(&tmp, &path));
         if saved.is_err() {
             let _ = std::fs::remove_file(&tmp);
+        } else if let Some(dir) = path.parent().and_then(|d| std::fs::File::open(d).ok()) {
+            let _ = dir.sync_all();
         }
         Ok(saved?)
     }
 }
 
-/// API keys in the macOS Keychain (or platform secret store).
+/// Copy `text` (the file at `path`) to `settings.toml.bad-<time>` beside it, unless the latest
+/// copy already holds it.
+fn back_up(path: &std::path::Path, text: &str) -> Option<std::path::PathBuf> {
+    let dir = path.parent()?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let prefix = format!("{name}.bad-");
+    let latest = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|f| f.to_string_lossy().starts_with(&prefix))).max();
+    if let Some(latest) = latest.filter(|l| std::fs::read_to_string(l).is_ok_and(|t| t == text)) {
+        return Some(latest);
+    }
+    let copy = dir.join(format!("{prefix}{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+    std::fs::write(&copy, text).ok().map(|_| copy)
+}
+
+/// Keep from `node` (the table at `path` of the file) into `kept` every value `T` reads on its
+/// own; a table that doesn't is gone through key by key. What's left out goes in `dropped`.
+fn salvage<T: serde::de::DeserializeOwned>(node: &toml::Table, path: &mut Vec<String>, kept: &mut toml::Table, dropped: &mut Vec<Vec<String>>) {
+    for (k, v) in node {
+        path.push(k.clone());
+        let mut probe = toml::Value::Table(toml::Table::new());
+        set_at(&mut probe, path, v.clone());
+        if probe.try_into::<T>().is_ok() {
+            let mut root = toml::Value::Table(std::mem::take(kept));
+            set_at(&mut root, path, v.clone());
+            if let toml::Value::Table(t) = root {
+                *kept = t;
+            }
+        } else if let toml::Value::Table(t) = v {
+            salvage::<T>(t, path, kept, dropped);
+        } else {
+            dropped.push(path.clone());
+        }
+        path.pop();
+    }
+}
+
+fn value_at<'a>(v: &'a toml::Value, path: &[String]) -> Option<&'a toml::Value> {
+    path.iter().try_fold(v, |v, k| v.as_table()?.get(k))
+}
+
+/// Put `value` at `path` in `root`, making the tables on the way.
+fn set_at(root: &mut toml::Value, path: &[String], value: toml::Value) {
+    let Some((last, parents)) = path.split_last() else { return };
+    let mut node = root;
+    for k in parents {
+        let Some(t) = node.as_table_mut() else { return };
+        node = t.entry(k.clone()).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    }
+    if let Some(t) = node.as_table_mut() {
+        t.insert(last.clone(), value);
+    }
+}
+
+/// API keys and MCP server tokens in the macOS Keychain (or platform secret store).
 pub mod secrets {
     const SERVICE: &str = "dev.trek.Trek";
 
@@ -593,6 +982,74 @@ pub mod secrets {
         anyhow::ensure!(!crate::paths::isolated(), "the Keychain is off in this process");
         keyring::Entry::new(SERVICE, provider)?.set_password(key)?;
         Ok(())
+    }
+
+    /// The Keychain account for header `header` of MCP server `server` (its own namespace, so
+    /// it can't collide with a provider's API key).
+    fn mcp_account(server: &str, header: &str) -> String {
+        format!("mcp-header:{server}:{}", header.to_ascii_lowercase())
+    }
+
+    /// The same for its environment variable `var` (names are case-sensitive there).
+    fn mcp_env_account(server: &str, var: &str) -> String {
+        format!("mcp-env:{server}:{var}")
+    }
+
+    /// In an isolated process (tests) MCP server tokens are kept in memory instead, so adding,
+    /// editing and removing a server goes the whole way without reaching the user's Keychain.
+    static MEMORY: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    fn memory() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<String, String>> {
+        MEMORY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_mcp(account: &str, value: &str) -> anyhow::Result<()> {
+        if crate::paths::isolated() {
+            memory().insert(account.to_string(), value.to_string());
+            return Ok(());
+        }
+        keyring::Entry::new(SERVICE, account)?.set_password(value)?;
+        Ok(())
+    }
+
+    fn get_mcp(account: &str) -> Option<String> {
+        if crate::paths::isolated() {
+            return memory().get(account).cloned();
+        }
+        keyring::Entry::new(SERVICE, account).ok()?.get_password().ok()
+    }
+
+    fn delete_mcp(account: &str) -> anyhow::Result<()> {
+        if crate::paths::isolated() {
+            memory().remove(account);
+            return Ok(());
+        }
+        keyring::Entry::new(SERVICE, account)?.delete_credential()?;
+        Ok(())
+    }
+
+    pub fn set_mcp_header(server: &str, header: &str, value: &str) -> anyhow::Result<()> {
+        set_mcp(&mcp_account(server, header), value)
+    }
+
+    pub fn mcp_header(server: &str, header: &str) -> Option<String> {
+        get_mcp(&mcp_account(server, header))
+    }
+
+    pub fn delete_mcp_header(server: &str, header: &str) -> anyhow::Result<()> {
+        delete_mcp(&mcp_account(server, header))
+    }
+
+    pub fn set_mcp_env(server: &str, var: &str, value: &str) -> anyhow::Result<()> {
+        set_mcp(&mcp_env_account(server, var), value)
+    }
+
+    pub fn mcp_env(server: &str, var: &str) -> Option<String> {
+        get_mcp(&mcp_env_account(server, var))
+    }
+
+    pub fn delete_mcp_env(server: &str, var: &str) -> anyhow::Result<()> {
+        delete_mcp(&mcp_env_account(server, var))
     }
 
     pub fn api_key(provider: &str) -> Option<String> {
@@ -628,6 +1085,93 @@ mod tests {
         let partial: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
         assert_eq!(partial.general.hand_holding, HandHolding::Auto);
         assert_eq!(partial.inbox.auto_settle_days, 3);
+    }
+
+    #[test]
+    fn mcp_servers_from_before_http_load_unchanged_and_http_ones_round_trip() {
+        // A settings file written before remote servers existed.
+        let old = "[tools]\ncomputer_use = true\n\n[[tools.mcp_servers]]\nname = \"github\"\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\nenabled = true\n";
+        let s: Settings = toml::from_str(old).unwrap();
+        assert!(s.tools.computer_use && !s.tools.figma_desktop, "the Figma desktop server is opt-in");
+        let gh = &s.tools.mcp_servers[0];
+        assert_eq!(*gh, McpServerConfig::stdio("github", "npx", vec!["-y".into(), "@modelcontextprotocol/server-github".into()]));
+        assert!(!gh.is_http());
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert_eq!(toml::to_string(gh).unwrap(), "name = \"github\"\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-github\"]\nenabled = true\n", "a stdio server saves as it did");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+
+        let mut s = Settings::default();
+        s.tools.figma_desktop = true;
+        s.tools.mcp_servers.push(McpServerConfig::http(
+            "linear",
+            "https://mcp.linear.app/mcp",
+            vec![McpHeader { name: "Authorization".into(), value: String::new(), secret: true }, McpHeader { name: "X-Team".into(), value: "core".into(), secret: false }],
+        ));
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(!toml::to_string(&s.tools.mcp_servers[0]).unwrap().contains("command"), "an HTTP server has no command");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn an_mcp_servers_tokens_go_to_the_keychain_and_follow_it() {
+        // Values typed in are moved out of the settings file; only the names are saved.
+        let mut gh = McpServerConfig::parse("gh-keys", "GITHUB_TOKEN=ghp_1 LOG=debug npx -y @modelcontextprotocol/server-github").unwrap();
+        gh.headers.push(McpHeader { name: "X-Key".into(), value: "k".into(), secret: false });
+        gh.stash_secrets(None).unwrap();
+        assert!(gh.env.iter().all(|e| e.secret && e.value.is_empty()) && gh.headers[0].secret);
+        let saved = toml::to_string(&gh).unwrap();
+        assert!(!saved.contains("ghp_1") && saved.contains("GITHUB_TOKEN"), "{saved}");
+        assert_eq!(toml::from_str::<McpServerConfig>(&saved).unwrap(), gh);
+        assert_eq!(gh.resolved_env(), [("GITHUB_TOKEN".to_string(), "ghp_1".to_string()), ("LOG".into(), "debug".into())]);
+
+        // Edited and renamed: a value left as it was moves with it, a new one replaces it, and
+        // what the old name kept is let go of.
+        let mut edited = McpServerConfig::parse("gh-keys-2", &gh.command_line().replace("LOG=…", "LOG=info")).unwrap();
+        edited.headers = gh.headers.clone();
+        edited.stash_secrets(Some("gh-keys")).unwrap();
+        gh.forget_secrets(Some(&edited));
+        assert_eq!(edited.resolved_env(), [("GITHUB_TOKEN".to_string(), "ghp_1".to_string()), ("LOG".into(), "info".into())]);
+        assert_eq!(edited.resolved_headers(), [("X-Key".to_string(), "k".to_string())]);
+        assert!(gh.resolved_env().is_empty() && gh.resolved_headers().is_empty());
+        // A kept value with nothing saved behind it is an error, not an empty token.
+        assert!(McpServerConfig::parse("new", "A=… run").unwrap().stash_secrets(Some("nothing")).is_err());
+
+        // Edited in place: what it still uses stays.
+        let mut again = McpServerConfig::parse("gh-keys-2", &edited.command_line()).unwrap();
+        again.stash_secrets(Some("gh-keys-2")).unwrap();
+        edited.forget_secrets(Some(&again));
+        assert_eq!(again.resolved_env().len(), 2);
+        again.forget_secrets(None);
+        assert!(again.resolved_env().is_empty(), "removed, its tokens go too");
+    }
+
+    #[test]
+    fn the_add_row_tells_a_url_from_a_command() {
+        let http = McpServerConfig::parse("linear", " https://mcp.linear.app/mcp ").unwrap();
+        assert_eq!(http.url.as_deref(), Some("https://mcp.linear.app/mcp"));
+        assert_eq!(http.summary(), "https://mcp.linear.app/mcp");
+        assert!(McpServerConfig::parse("figma", "http://127.0.0.1:3845/mcp").unwrap().is_http());
+        let stdio = McpServerConfig::parse("gh", "npx -y @modelcontextprotocol/server-github").unwrap();
+        assert_eq!((stdio.command.as_str(), stdio.args.len(), stdio.is_http()), ("npx", 2, false));
+        assert_eq!(stdio.summary(), "npx -y @modelcontextprotocol/server-github");
+        assert_eq!(McpServerConfig::parse("", "npx srv"), None, "a server needs a name");
+        assert_eq!(McpServerConfig::parse("x", "  "), None);
+        assert!(!is_mcp_url("https://"), "a scheme alone isn't an address");
+        assert!(!is_mcp_url("httpie get"), "a command that starts like a scheme is a command");
+        assert_eq!(McpHeader::parse("Authorization: Bearer abc:def"), Some(("Authorization".into(), "Bearer abc:def".into())));
+        assert_eq!(McpHeader::parse("Bearer abc"), None);
+        assert_eq!(McpHeader::parse("X Y: z"), None);
+    }
+
+    #[test]
+    fn background_art_is_opt_in_and_a_chosen_one_is_kept() {
+        assert_eq!(Settings::default().appearance.background, None, "a new install has a plain new-thread screen");
+        // A settings file that names the art (saved before it was opt-in, or chosen) keeps it.
+        let s: Settings = toml::from_str("[appearance]\nbackground = \"builtin:dawn\"\n").unwrap();
+        assert_eq!(s.appearance.background.as_deref(), Some("builtin:dawn"));
+        // None survives a save and a load (TOML leaves it out; the default fills it back in).
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&Settings::default()).unwrap()).unwrap();
+        assert_eq!(back.appearance.background, None);
     }
 
     #[test]
@@ -670,6 +1214,74 @@ mod tests {
     }
 
     #[test]
+    fn computer_use_is_opt_in_and_a_choice_to_have_it_stays() {
+        assert!(!Settings::default().tools.computer_use);
+        let s: Settings = toml::from_str("[tools]\nsimulator = true\n").unwrap();
+        assert!(!s.tools.computer_use);
+        let s: Settings = toml::from_str("[tools]\ncomputer_use = true\n").unwrap();
+        assert!(s.tools.computer_use);
+    }
+
+    #[test]
+    fn one_bad_value_falls_back_alone_and_is_written_back() {
+        let text = "[general]\nsend_with_cmd_enter = true\n\n[appearance]\ntheme = \"aurora\"\nui_font_size = 16.0\n\n[onboarding]\ncompleted = true\n";
+        let (s, problem) = Settings::parse(text);
+        let problem = problem.expect("a problem");
+        assert!(!problem.unreadable);
+        assert_eq!(problem.dropped, ["appearance.theme"]);
+        assert!(problem.message().contains("appearance.theme"));
+        // Everything else survives.
+        assert!(s.general.send_with_cmd_enter && s.onboarding.completed);
+        assert_eq!(s.appearance.ui_font_size, 16.0);
+        assert_eq!(s.appearance.theme, ThemeChoice::System);
+        assert!(s.guard.blocked().is_none());
+        // The newer value goes back in the file while the user leaves the theme alone…
+        let back: toml::Table = toml::from_str(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back["appearance"]["theme"].as_str(), Some("aurora"));
+        // …and gives way once they pick one.
+        let mut s = s;
+        s.appearance.theme = ThemeChoice::Paper;
+        let back: toml::Table = toml::from_str(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back["appearance"]["theme"].as_str(), Some("paper"));
+    }
+
+    #[test]
+    fn bad_values_in_nested_tables_and_maps_fall_back_alone() {
+        let text = "[projects.\"/code/app\"]\nicon = \"lucide:rocket\"\nrun_in = \"cloud\"\n\n[mobile]\nport = \"x\"\nenabled = true\nreach = \"tailscale\"\n";
+        let (s, problem) = Settings::parse(text);
+        let mut dropped = problem.unwrap().dropped;
+        dropped.sort();
+        assert_eq!(dropped, ["mobile.port", "projects./code/app.run_in"]);
+        assert_eq!(s.projects["/code/app"].icon.as_deref(), Some("lucide:rocket"));
+        assert_eq!(s.projects["/code/app"].run_in, RunIn::Local);
+        assert!(s.mobile.enabled);
+        assert_eq!((s.mobile.port, s.mobile.reach), (7420, Reach::Tailscale));
+    }
+
+    #[test]
+    fn a_file_that_isnt_toml_is_never_saved_over() {
+        let (s, problem) = Settings::parse("[general\nsend_with_cmd_enter = true\n");
+        let problem = problem.unwrap();
+        assert!(problem.unreadable);
+        assert!(problem.message().contains("won't save"));
+        assert!(s.onboarding.completed, "someone who has a settings file has been through onboarding");
+        assert!(s.save().is_err());
+        assert_eq!(Settings::parse("").1, None);
+    }
+
+    #[test]
+    fn a_problem_keeps_one_copy_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("trek-settings-bad-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        let first = back_up(&path, "bad = [").unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "bad = [");
+        assert!(first.file_name().unwrap().to_string_lossy().starts_with("settings.toml.bad-"));
+        assert_eq!(back_up(&path, "bad = [").unwrap(), first, "the same text isn't copied twice");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn old_update_feed_moves_to_the_published_one() {
         let mut s: Settings =
             toml::from_str("[updates]\nchannel = \"beta\"\nfeed_url = \"https://github.com/trek-app/trek/releases/latest/download/{channel}.json\"\n").unwrap();
@@ -683,14 +1295,47 @@ mod tests {
     }
 }
 
-/// IDE mode's recent picks.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The editor (Trek IDE): recent picks, the workbench's layout, and how it follows the agents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ide {
     /// Folders opened as the IDE's workspace, most recent first.
     pub recent_folders: Vec<String>,
     /// Loose files opened in the editor (from a folder or on their own), most recent first.
     pub recent_files: Vec<String>,
+    pub layout: IdeLayout,
+    /// Going back to Agents opens the AI side bar's chat there.
+    pub follow_active_chat: bool,
+}
+
+impl Default for Ide {
+    fn default() -> Self {
+        Self { recent_folders: vec![], recent_files: vec![], layout: IdeLayout::default(), follow_active_chat: true }
+    }
+}
+
+/// The workbench's regions as the user left them: sizes in points, and which are shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdeLayout {
+    pub primary_width: f32,
+    pub ai_width: f32,
+    pub panel_height: f32,
+    pub primary_open: bool,
+    pub ai_open: bool,
+    pub panel_open: bool,
+}
+
+impl IdeLayout {
+    pub const PRIMARY: std::ops::RangeInclusive<f32> = 180.0..=480.0;
+    pub const AI: std::ops::RangeInclusive<f32> = 320.0..=720.0;
+    pub const MIN_PANEL: f32 = 120.;
+}
+
+impl Default for IdeLayout {
+    fn default() -> Self {
+        Self { primary_width: 260., ai_width: 400., panel_height: 240., primary_open: true, ai_open: true, panel_open: false }
+    }
 }
 
 impl Ide {

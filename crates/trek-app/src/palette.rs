@@ -41,16 +41,37 @@ pub fn link(cx: &App) -> Hsla {
     pick(cx, LINK)
 }
 
-/// Sunrise gradient stops used by the logo and the effort meter.
-pub const SUNRISE: [u32; 3] = [0xFF4D2E, 0xFF8A3D, 0xFFC56B];
+/// Categorical hues for chart series, in a fixed order that keeps neighbours apart for
+/// colour-blind readers (checked for adjacent-pair ΔE ≥ 8 under deutan/protan/tritan
+/// simulation). Paper's emerald and amber are a step lighter than their text colours: these
+/// are marks, never text.
+const SERIES: [(u32, u32); 6] = [(0x5AA9FF, 0x2B6CC4), (0xFF7A3D, 0xE85D1F), (0x3FCF8E, 0x1F9D63), (0x8B8CFF, 0x5B5BD6), (0xFFB020, 0xB07800), (0xF472B6, 0xDB2777)];
 
-pub fn sunrise_at(t: f32) -> Hsla {
-    let t = t.clamp(0.0, 1.0);
-    let (a, b, u) = if t < 0.55 { (SUNRISE[0], SUNRISE[1], t / 0.55) } else { (SUNRISE[1], SUNRISE[2], (t - 0.55) / 0.45) };
-    let ch = |c: u32, s: u32| ((c >> s) & 0xFF) as f32;
-    let mix = |s: u32| ch(a, s) + (ch(b, s) - ch(a, s)) * u;
-    let v = ((mix(16) as u32) << 16) | ((mix(8) as u32) << 8) | mix(0) as u32;
-    rgb(v).into()
+/// Series `ix`'s mark colour (the order repeats past six; the schema allows no more).
+pub fn series(ix: usize, cx: &App) -> Hsla {
+    pick(cx, SERIES[ix % SERIES.len()])
+}
+
+/// A thread at work (its turn running, or waiting on its sub-agents): ember, in every mode.
+pub fn working(cx: &App) -> Hsla {
+    ember(cx)
+}
+/// A thread waiting on the user (an approval, a question, a plan): amber, in every mode.
+pub fn needs_you(cx: &App) -> Hsla {
+    amber(cx)
+}
+/// A thread whose turn failed: red, in every mode.
+pub fn failed(cx: &App) -> Hsla {
+    red(cx)
+}
+/// A thread's run-state colour, the same in the sidebar, the tabs and the IDE; `None` when idle.
+pub fn run_state(state: trek_core::RunState, cx: &App) -> Option<Hsla> {
+    match state {
+        trek_core::RunState::Working => Some(working(cx)),
+        trek_core::RunState::NeedsYou => Some(needs_you(cx)),
+        trek_core::RunState::Failed => Some(failed(cx)),
+        trek_core::RunState::Idle => None,
+    }
 }
 
 #[cfg(test)]

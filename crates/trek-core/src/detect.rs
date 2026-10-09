@@ -28,19 +28,18 @@ pub struct DetectedAgent {
     pub install_hint: Option<String>,
 }
 
+/// How long the login shell gets to say its PATH: a slow or stuck rc file mustn't hold up every
+/// agent start (and the UI thread waiting on it).
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// PATH as a login shell sees it. Apps launched from Finder get a minimal PATH,
-/// so ask the user's shell once.
+/// so ask the user's shell once (giving up after a few seconds: `$PATH` and the usual folders).
 pub fn login_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let from_shell = std::process::Command::new(shell)
-            .args(["-ilc", "printf %s \"$PATH\""])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
+        let from_shell = shell_output(std::process::Command::new(shell).args(["-ilc", "printf %s \"$PATH\""]), LOGIN_SHELL_TIMEOUT)
+            .and_then(|o| String::from_utf8(o).ok())
             .map(|s| s.lines().last().unwrap_or_default().to_string())
             .filter(|s| !s.is_empty());
         let home = crate::paths::home();
@@ -60,6 +59,34 @@ pub fn login_path() -> &'static str {
     })
 }
 
+/// `command`'s stdout, if it's done within `timeout`; otherwise it (and what it started) is killed.
+fn shell_output(command: &mut std::process::Command, timeout: Duration) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command, 0);
+    let mut child = command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
+    // Done once stdout closes: the shell has exited, or handed it to nothing still running.
+    let out = rx.recv_timeout(timeout).ok();
+    if out.is_none() {
+        tracing::warn!("the login shell didn't say its PATH within {timeout:?}; using Trek's own");
+        #[cfg(target_os = "macos")]
+        // SAFETY: a negative pid signals the process group the shell leads.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL)
+        };
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    out
+}
+
 pub fn which(binary: &str) -> Option<PathBuf> {
     login_path()
         .split(':')
@@ -74,6 +101,7 @@ pub(crate) async fn version_of(path: &Path) -> Option<String> {
             .arg("--version")
             .env("PATH", login_path())
             .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -118,6 +146,7 @@ async fn codex_logged_in(path: &Path) -> bool {
             .args(["login", "status"])
             .env("PATH", login_path())
             .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
             .output(),
     )
     .await;
@@ -179,8 +208,24 @@ pub async fn detect_all() -> Vec<DetectedAgent> {
 
     let mut all = vec![claude, codex, opencode, droid];
     all.extend(acp);
+    all.extend(crate::catalog::added_agents().iter().map(added_agent));
     all.extend(local);
     all
+}
+
+/// Whether an agent the user added can start. Never runs it: its program is only looked for
+/// (`--version` means nothing to an arbitrary command, and `npx` would fetch the package).
+pub fn added_agent(a: &crate::registry::AddedAgent) -> DetectedAgent {
+    let path = a.resolve();
+    DetectedAgent {
+        agent: AgentId::Acp(a.id.clone()),
+        name: a.name.clone(),
+        availability: if path.is_some() { Availability::Ready } else { Availability::NotInstalled },
+        install_hint: path.is_none().then(|| a.missing()),
+        path,
+        version: a.version.clone(),
+        models: vec![],
+    }
 }
 
 /// API providers with a key in the environment (keys saved in Trek are checked separately).
@@ -190,4 +235,19 @@ pub fn env_api_keys() -> Vec<&'static str> {
         .filter(|p| p.env_key.is_some_and(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())))
         .map(|p| p.id)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slow_login_shell_is_given_up_on() {
+        let started = std::time::Instant::now();
+        let out = shell_output(std::process::Command::new("/bin/sh").args(["-c", "sleep 30; echo late"]), Duration::from_millis(200));
+        assert_eq!(out, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let out = shell_output(std::process::Command::new("/bin/sh").args(["-c", "printf %s /usr/bin"]), Duration::from_secs(5));
+        assert_eq!(out.as_deref(), Some(&b"/usr/bin"[..]));
+    }
 }

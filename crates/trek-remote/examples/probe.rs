@@ -51,7 +51,7 @@ impl ServerCertVerifier for Pinned {
     }
 }
 
-fn param<'a>(url: &'a str, key: &str) -> Option<String> {
+fn param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     query.split('&').find_map(|kv| kv.strip_prefix(&format!("{key}="))).map(|v| v.replace("%3A", ":").replace("%2D", "-"))
 }

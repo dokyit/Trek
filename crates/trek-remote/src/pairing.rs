@@ -1,11 +1,15 @@
 //! Pairing codes, device tokens and the registry of paired devices.
 //!
 //! - A pairing code is 8 Crockford base32 characters (40 bits) shown as `XXXX-XXXX`: one use,
-//!   short-lived, burned after [`MAX_PAIRING_ATTEMPTS`] wrong attempts from anyone.
+//!   short-lived. Each address that types a wrong one waits before its next try, longer each
+//!   time ([`backoff`]); the code is burned after [`MAX_PAIRING_ATTEMPTS`] wrong attempts from
+//!   everyone together, a safety net no single device can reach quickly.
 //! - A device token is 32 random bytes, base64url without padding. Only its SHA-256 is stored, and
 //!   tokens are compared in constant time.
 
+use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -19,8 +23,15 @@ use subtle::ConstantTimeEq;
 pub const CODE_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Characters in a pairing code (without the dash).
 pub const CODE_LEN: usize = 8;
-/// Wrong attempts (from anyone) before a pairing code is burned.
-pub const MAX_PAIRING_ATTEMPTS: u32 = 5;
+/// Wrong attempts (from everyone together) before a pairing code is burned. Each address backs
+/// off on its own first ([`backoff`]): one device reaches about ten in a code's ten minutes.
+pub const MAX_PAIRING_ATTEMPTS: u32 = 100;
+/// The longest an address waits between wrong attempts.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// An address's wrong attempts are forgotten after this long without one.
+const FORGET_AFTER: Duration = Duration::from_secs(15 * 60);
+/// Addresses with wrong attempts remembered, at most.
+const MAX_TRACKED: usize = 1024;
 
 /// Longest device id / device name accepted from a phone.
 pub(crate) const MAX_DEVICE_FIELD: usize = 128;
@@ -78,6 +89,27 @@ pub enum PairingError {
     Wrong,
     #[error("Too many wrong attempts; show a new pairing code")]
     Burned,
+    /// This address typed a wrong code moments ago; it may try again in this many seconds.
+    #[error("Too many wrong attempts from this device; try again in {0} s")]
+    Backoff(u64),
+}
+
+/// How long an address waits after its `wrong`th wrong attempt: 1 s, doubling, up to
+/// [`MAX_BACKOFF`].
+pub fn backoff(wrong: u32) -> Duration {
+    Duration::from_secs(1u64 << wrong.saturating_sub(1).min(16)).min(MAX_BACKOFF)
+}
+
+/// Who an attempt or a connection counts against: the address, an IPv6 one by its /64 (one
+/// device has many of those), an IPv4-mapped one as IPv4.
+pub(crate) fn source(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6((u128::from(v6) & !((1u128 << 64) - 1)).into()),
+        },
+        v4 => v4,
+    }
 }
 
 /// A pairing code being shown on the Mac.
@@ -101,10 +133,21 @@ struct ActiveCode {
     wrong: u32,
 }
 
-/// The one active pairing code (single use, expiring, attempt-limited).
+/// An address's wrong attempts.
+#[derive(Debug, Clone, Copy)]
+struct Strikes {
+    wrong: u32,
+    /// No attempt from it counts before this.
+    until: Instant,
+    last: Instant,
+}
+
+/// The one active pairing code (single use, expiring, attempt-limited), and the addresses
+/// backing off after wrong ones (kept across codes).
 #[derive(Debug, Default)]
 pub struct Pairing {
     active: Option<ActiveCode>,
+    strikes: HashMap<IpAddr, Strikes>,
 }
 
 impl Pairing {
@@ -124,27 +167,35 @@ impl Pairing {
         self.active.as_ref().is_some_and(|a| a.expires > Instant::now())
     }
 
-    /// Redeem a typed code. Success consumes the code; a wrong code counts against the attempt
-    /// budget and the code is burned when it runs out.
-    pub fn redeem(&mut self, input: &str) -> Result<(), PairingError> {
-        self.check_at(input, Instant::now())?;
+    /// Redeem a code typed at `from`. Success consumes the code; a wrong code makes `from` wait
+    /// before its next try and counts against the code's budget, burning it when that runs out.
+    pub fn redeem(&mut self, input: &str, from: IpAddr) -> Result<(), PairingError> {
+        self.check_at(input, from, Instant::now())?;
         self.cancel();
         Ok(())
     }
 
-    pub(crate) fn check(&mut self, input: &str) -> Result<(), PairingError> {
-        self.check_at(input, Instant::now())
+    pub(crate) fn check(&mut self, input: &str, from: IpAddr) -> Result<(), PairingError> {
+        self.check_at(input, from, Instant::now())
     }
 
-    pub(crate) fn check_at(&mut self, input: &str, now: Instant) -> Result<(), PairingError> {
+    pub(crate) fn check_at(&mut self, input: &str, from: IpAddr, now: Instant) -> Result<(), PairingError> {
         let active = self.active.as_mut().ok_or(PairingError::NoOffer)?;
         if now >= active.expires {
             self.active = None;
             return Err(PairingError::Expired);
         }
+        let from = source(from);
+        self.strikes.retain(|_, s| now.saturating_duration_since(s.last) < FORGET_AFTER);
+        if let Some(s) = self.strikes.get(&from).filter(|s| now < s.until) {
+            // Not even compared: waiting is the point.
+            let wait = s.until - now;
+            return Err(PairingError::Backoff(wait.as_secs() + u64::from(wait.subsec_nanos() > 0)));
+        }
         let matches = normalize_code(input)
             .is_some_and(|typed| bool::from(typed.as_bytes().ct_eq(active.normalized.as_bytes())));
         if matches {
+            self.strikes.remove(&from);
             return Ok(());
         }
         active.wrong += 1;
@@ -152,6 +203,14 @@ impl Pairing {
             self.active = None;
             return Err(PairingError::Burned);
         }
+        if self.strikes.len() >= MAX_TRACKED && !self.strikes.contains_key(&from) {
+            let oldest = self.strikes.iter().min_by_key(|(_, s)| s.last).map(|(ip, _)| *ip);
+            oldest.map(|ip| self.strikes.remove(&ip));
+        }
+        let s = self.strikes.entry(from).or_insert(Strikes { wrong: 0, until: now, last: now });
+        s.wrong += 1;
+        s.until = now + backoff(s.wrong);
+        s.last = now;
         Err(PairingError::Wrong)
     }
 }
@@ -404,13 +463,17 @@ mod tests {
         assert_eq!(normalize_code("K7Q2-9XM€"), None);
     }
 
+    fn ip(n: u8) -> IpAddr {
+        IpAddr::from([192, 168, 1, n])
+    }
+
     #[test]
     fn a_code_works_once() {
         let mut p = Pairing::default();
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
         assert!(p.is_active());
-        assert_eq!(p.redeem("k7q2 9xmv"), Ok(()));
-        assert_eq!(p.redeem("K7Q2-9XMV"), Err(PairingError::NoOffer));
+        assert_eq!(p.redeem("k7q2 9xmv", ip(1)), Ok(()));
+        assert_eq!(p.redeem("K7Q2-9XMV", ip(1)), Err(PairingError::NoOffer));
         assert!(!p.is_active());
     }
 
@@ -418,32 +481,81 @@ mod tests {
     fn a_code_expires() {
         let mut p = Pairing::default();
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        assert_eq!(p.check_at("K7Q2-9XMV", Instant::now() + Duration::from_secs(61)), Err(PairingError::Expired));
-        assert_eq!(p.redeem("K7Q2-9XMV"), Err(PairingError::NoOffer));
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(1), Instant::now() + Duration::from_secs(61)), Err(PairingError::Expired));
+        assert_eq!(p.redeem("K7Q2-9XMV", ip(1)), Err(PairingError::NoOffer));
     }
 
     #[test]
-    fn wrong_attempts_burn_the_code() {
+    fn wrong_attempts_back_off_per_address() {
         let mut p = Pairing::default();
-        p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        for _ in 0..MAX_PAIRING_ATTEMPTS - 1 {
-            assert_eq!(p.redeem("AAAA-AAAA"), Err(PairingError::Wrong));
-        }
-        // Garbage counts too.
-        assert_eq!(p.redeem("nope"), Err(PairingError::Burned));
-        assert_eq!(p.redeem("K7Q2-9XMV"), Err(PairingError::NoOffer));
+        p.activate("K7Q2-9XMV", Duration::from_secs(600)).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0), Err(PairingError::Wrong));
+        // Even the right code waits, uncompared.
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(66), t0), Err(PairingError::Backoff(1)));
+        // Garbage counts too; each wrong one doubles the wait.
+        assert_eq!(p.check_at("nope", ip(66), t0 + Duration::from_secs(1)), Err(PairingError::Wrong));
+        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(2)), Err(PairingError::Backoff(1)));
+        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(3)), Err(PairingError::Wrong));
+        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(4)), Err(PairingError::Backoff(3)));
+        // Another phone isn't held up by it.
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(7), t0 + Duration::from_secs(4)), Ok(()));
+        assert_eq!(backoff(1), Duration::from_secs(1));
+        assert_eq!(backoff(4), Duration::from_secs(8));
+        assert_eq!(backoff(40), MAX_BACKOFF);
     }
 
     #[test]
-    fn a_new_offer_resets_attempts() {
+    fn backoff_outlasts_a_new_code_and_is_forgotten_later() {
+        let mut p = Pairing::default();
+        p.activate("K7Q2-9XMV", Duration::from_secs(3600)).unwrap();
+        let t0 = Instant::now();
+        for at in [0, 1, 3] {
+            assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(at)), Err(PairingError::Wrong));
+        }
+        p.activate("K7Q2-9XMV", Duration::from_secs(3600)).unwrap();
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(66), t0 + Duration::from_secs(4)), Err(PairingError::Backoff(3)));
+        // Once it's been quiet a while, the next wrong code waits a second again.
+        let later = t0 + Duration::from_secs(3) + FORGET_AFTER;
+        assert_eq!(p.check_at("AAAA-AAAA", ip(66), later), Err(PairingError::Wrong));
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(66), later), Err(PairingError::Backoff(1)));
+    }
+
+    #[test]
+    fn many_addresses_together_burn_the_code() {
         let mut p = Pairing::default();
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        for _ in 0..MAX_PAIRING_ATTEMPTS - 1 {
-            let _ = p.redeem("AAAA-AAAA");
+        let now = Instant::now();
+        for n in 0..MAX_PAIRING_ATTEMPTS - 1 {
+            let from = IpAddr::from([10, 0, (n / 256) as u8, (n % 256) as u8]);
+            assert_eq!(p.check_at("AAAA-AAAA", from, now), Err(PairingError::Wrong));
+        }
+        assert_eq!(p.check_at("AAAA-AAAA", ip(1), now), Err(PairingError::Burned));
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(2), now), Err(PairingError::NoOffer));
+    }
+
+    #[test]
+    fn a_new_offer_resets_the_code_s_attempts() {
+        let mut p = Pairing::default();
+        p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
+        let now = Instant::now();
+        for n in 0..MAX_PAIRING_ATTEMPTS - 1 {
+            let _ = p.check_at("AAAA-AAAA", IpAddr::from([10, 0, 0, n as u8]), now);
         }
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        assert_eq!(p.redeem("AAAA-AAAA"), Err(PairingError::Wrong));
-        assert_eq!(p.redeem("K7Q2-9XMV"), Ok(()));
+        assert_eq!(p.check_at("AAAA-AAAA", ip(1), now), Err(PairingError::Wrong));
+        assert_eq!(p.check_at("K7Q2-9XMV", ip(2), now), Ok(()));
+    }
+
+    #[test]
+    fn an_ipv6_device_is_one_source() {
+        let a: IpAddr = "fd00:1:2:3:aaaa::1".parse().unwrap();
+        let b: IpAddr = "fd00:1:2:3:bbbb::2".parse().unwrap();
+        let other: IpAddr = "fd00:1:2:4::1".parse().unwrap();
+        assert_eq!(source(a), source(b));
+        assert_ne!(source(a), source(other));
+        assert_eq!(source("::ffff:192.168.1.5".parse().unwrap()), ip(5));
+        assert_eq!(source(ip(5)), ip(5));
     }
 
     #[test]

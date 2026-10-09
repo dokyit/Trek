@@ -180,3 +180,117 @@ fn a_second_project_gets_its_own_group() {
         assert!(trek.visible(cx, format!("live-proj-head-{p1}")) && trek.visible(cx, format!("live-proj-head-{p2}")));
     });
 }
+
+#[test]
+fn a_later_turn_doesnt_retitle_a_thread_whose_first_turn_was_cut_off() {
+    run(async |cx| {
+        let trek = super::harness::open_with(cx, |s| s.general.auto_title = true);
+        // A first turn Trek quit in the middle of: no `TurnEnd`, and the title still the first message.
+        let first = "We need permission to migrate";
+        let id = trek.update(cx, |ws, cx| {
+            let mut t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            t.title = trek_core::import_title(first);
+            ws.store.save_thread(&t).expect("save");
+            super::harness::store_items(
+                &ws.store,
+                &t.id,
+                vec![
+                    trek_core::store::Item::User { text: first.into(), images: vec![], at: Some(now_ms()), resume: None, aside: false },
+                    trek_core::store::Item::Notice { text: trek_core::store::INTERRUPTED_BY_QUIT.into() },
+                ],
+            );
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        });
+        let before = trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone());
+        assert_eq!(trek.send(cx, "mock:long 1ms"), id);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()), before, "the second prompt doesn't name the thread");
+    });
+}
+
+#[test]
+fn a_titled_thread_keeps_its_title_after_more_turns() {
+    run(async |cx| {
+        let trek = super::harness::open_with(cx, |s| s.general.auto_title = true);
+        let id = trek.send(cx, "mock:permission please");
+        trek.wait_needs_you(cx, &id).await;
+        let request = trek.request(cx, &id);
+        trek.update(cx, |ws, cx| ws.respond(&id, &request, trek_agents::Decision::Allow, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let titled = trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone());
+        assert_eq!(titled, "Apply the schema migrations", "the first turn names it");
+        trek.send(cx, "explain the startup");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()), titled);
+    });
+}
+
+/// Where `id`'s row is drawn, whichever kind of row it has.
+fn row_y(trek: &Trek, cx: &mut TestAppContext, id: &str) -> Option<gpui_kit::Pixels> {
+    trek.bounds(cx, format!("card-{id}")).or_else(|| trek.bounds(cx, format!("live-line-{id}"))).map(|b| b.origin.y)
+}
+
+fn move_pointer(trek: &Trek, cx: &mut TestAppContext, at: gpui_kit::Point<gpui_kit::Pixels>) {
+    trek.window(cx, |window, cx| {
+        window.dispatch_event(gpui_kit::PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position: at, pressed_button: None, modifiers: Default::default() }), cx)
+    });
+    cx.run_until_parked();
+}
+
+#[test]
+fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
+    run(async |cx| {
+        let trek = open(cx);
+        let quiet_ids: Vec<String> = (0..3).map(|i| quiet(&trek, cx, &format!("Quiet {i}"), (i as i64 + 1) * 60_000)).collect();
+        // The oldest thread asks: it's on top, the quiet three below it.
+        let asking = quiet(&trek, cx, "Asking", 30 * 60_000);
+        trek.update(cx, |ws, cx| {
+            ws.store.update_thread(&asking, |t| t.run_state = RunState::NeedsYou).unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        let before: Vec<_> = [&asking].into_iter().chain(&quiet_ids).map(|id| row_y(&trek, cx, id).expect("a row")).collect();
+        assert!(before.windows(2).all(|w| w[0] < w[1]), "what asks comes first: {before:?}");
+
+        // The pointer rests on the sidebar; meanwhile the question is answered elsewhere, and
+        // another thread starts asking.
+        let at = trek.bounds(cx, format!("card-{}", quiet_ids[0])).or_else(|| trek.bounds(cx, format!("live-line-{}", quiet_ids[0]))).unwrap().center();
+        move_pointer(&trek, cx, at);
+        let newcomer = quiet(&trek, cx, "Newcomer", 5_000);
+        trek.update(cx, |ws, cx| {
+            ws.store.update_thread(&asking, |t| t.run_state = RunState::Idle).unwrap();
+            ws.store.update_thread(&newcomer, |t| t.run_state = RunState::NeedsYou).unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        let held: Vec<_> = [&asking].into_iter().chain(&quiet_ids).map(|id| row_y(&trek, cx, id).expect("still a row")).collect();
+        assert_eq!(held, before, "no row moves under the pointer");
+        assert!(row_y(&trek, cx, &newcomer).is_none(), "the newcomer waits for the pointer to leave");
+        assert!(trek.visible(cx, format!("live-line-{asking}")), "the answered thread draws as a quiet line, in its place");
+
+        // The pointer leaves for the transcript: the list catches up.
+        move_pointer(&trek, cx, gpui_kit::point(gpui_kit::px(900.), gpui_kit::px(400.)));
+        trek.render(cx);
+        let newcomer_y = row_y(&trek, cx, &newcomer).expect("the newcomer shows");
+        assert!(newcomer_y <= before[0], "and comes first");
+        assert!(row_y(&trek, cx, &asking).is_none(), "the answered thread, oldest of four quiet ones, folds behind Show more");
+    });
+}
+
+#[test]
+fn a_thread_waiting_on_you_is_a_line_high_and_says_what_it_waits_for() {
+    run(async |cx| {
+        let trek = open(cx);
+        let plain = quiet(&trek, cx, "Plain", 60_000);
+        let id = trek.send(cx, "mock:permission please");
+        trek.wait_needs_you(cx, &id).await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(plain.clone()), cx));
+        trek.render(cx);
+        let (row, line) = (trek.bounds(cx, format!("card-{id}")).expect("its row"), trek.bounds(cx, format!("live-line-{plain}")).expect("a quiet line"));
+        assert_eq!(row.size.height, line.size.height, "the same height as a quiet line");
+        assert!(trek.visible(cx, format!("card-needs-{id}")));
+        assert_eq!(trek.read(cx, |ws, _| crate::sidebar::needs_label(ws, &id)), "Needs approval");
+    });
+}

@@ -3,19 +3,28 @@
 //! mock agent standing in for real ones. `harness` has the setup; tests are grouped by area.
 
 mod activity;
+mod add_agent;
 mod agent_updates;
 mod alerts;
 mod background;
 mod basecamp;
+mod branches;
 mod changes;
+mod composer;
+mod connections;
 mod cost;
 mod editor;
 mod flows;
+mod hardening;
 mod harness;
+mod ide;
 mod inbox;
 mod lifecycle;
 mod limits;
+mod mcp;
 mod orchestrate;
+mod palette;
+mod preview;
 mod pstack;
 mod readability;
 mod remote;
@@ -24,6 +33,8 @@ mod rewind;
 mod screens;
 mod sidebar;
 mod tabs;
+mod upkeep;
+mod visualization;
 mod windows;
 mod worktrees;
 

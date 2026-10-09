@@ -9,6 +9,7 @@ mod claude;
 mod codex;
 mod direct;
 pub mod limits;
+pub mod mcp_check;
 pub mod mock;
 mod opencode;
 mod status;
@@ -47,7 +48,7 @@ pub struct SessionConfig {
     pub recap: Option<String>,
     /// Fast mode: Claude `fastMode`, or the Codex service tier to use.
     pub fast: Option<String>,
-    /// Extra MCP servers (stdio) to attach to the session, on top of the agent's own config.
+    /// Extra MCP servers to attach to the session, on top of the agent's own config.
     pub mcp_servers: Vec<McpServer>,
     /// What Trek tells the agent about the project (its verification skill): Claude Code gets it
     /// as part of its system prompt (`notes_in_system_prompt`), other agents with the session's
@@ -58,28 +59,59 @@ pub struct SessionConfig {
     pub read_dirs: Vec<PathBuf>,
 }
 
-/// A stdio MCP server Trek adds to a session.
-#[derive(Debug, Clone)]
+/// An MCP server Trek adds to a session.
+#[derive(Debug, Clone, PartialEq)]
 pub struct McpServer {
     pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
+    pub transport: McpTransport,
     /// How long one of its tool calls may take, where the agent caps that itself (Codex: a
     /// minute unless told). Trek's sub-agent tools can wait on a sub-agent for many minutes.
     pub tool_timeout_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpTransport {
+    /// A command the agent starts and talks to over its stdio.
+    Stdio { command: String, args: Vec<String>, env: Vec<(String, String)> },
+    /// A server already running at `url` (streamable HTTP), sent `headers` with each request.
+    Http { url: String, headers: Vec<(String, String)> },
+}
+
 impl McpServer {
-    /// `{command, args, env}` — the shape both Claude's `mcpServers` and Codex's `mcp_servers` use.
+    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>, env: Vec<(String, String)>) -> Self {
+        Self { name: name.into(), transport: McpTransport::Stdio { command: command.into(), args, env }, tool_timeout_secs: None }
+    }
+
+    pub fn http(name: impl Into<String>, url: impl Into<String>, headers: Vec<(String, String)>) -> Self {
+        Self { name: name.into(), transport: McpTransport::Http { url: url.into(), headers }, tool_timeout_secs: None }
+    }
+
+    /// The environment a stdio server is started with (none for a remote one).
+    pub fn env(&self) -> &[(String, String)] {
+        match &self.transport {
+            McpTransport::Stdio { env, .. } => env,
+            McpTransport::Http { .. } => &[],
+        }
+    }
+
+    pub fn is_http(&self) -> bool {
+        matches!(self.transport, McpTransport::Http { .. })
+    }
+
+    /// `{command, args, env}` or `{type: "http", url, headers}`: the shape Claude's `mcpServers`
+    /// takes (Codex's differs for HTTP, see `codex::codex_mcp_servers`).
     pub(crate) fn to_json(&self) -> serde_json::Value {
-        let env: serde_json::Map<String, serde_json::Value> =
-            self.env.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
-        serde_json::json!({ "command": self.command, "args": self.args, "env": env })
+        let map = |pairs: &[(String, String)]| -> serde_json::Map<String, serde_json::Value> {
+            pairs.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect()
+        };
+        match &self.transport {
+            McpTransport::Stdio { command, args, env } => serde_json::json!({ "command": command, "args": args, "env": map(env) }),
+            McpTransport::Http { url, headers } => serde_json::json!({ "type": "http", "url": url, "headers": map(headers) }),
+        }
     }
 }
 
-/// `{name: {command, args, env}, ...}` for a set of servers.
+/// `{name: {…}, ...}` for a set of servers.
 pub(crate) fn mcp_servers_json(servers: &[McpServer]) -> serde_json::Value {
     serde_json::Value::Object(servers.iter().map(|s| (s.name.clone(), s.to_json())).collect())
 }
@@ -240,6 +272,42 @@ pub enum AgentEvent {
 pub struct SessionHandle {
     pub commands: async_channel::Sender<Command>,
     pub events: async_channel::Receiver<AgentEvent>,
+    /// What the session's agent processes write to stderr (the IDE's Output panel shows it).
+    pub log: SessionLog,
+}
+
+/// The last lines a session's agent processes wrote to stderr, oldest first.
+#[derive(Clone, Default, Debug)]
+pub struct SessionLog(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+/// Lines a `SessionLog` keeps.
+const SESSION_LOG_LINES: usize = 2000;
+
+impl SessionLog {
+    pub fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn push(&self, line: String) {
+        let mut l = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        l.push_back(line);
+        while l.len() > SESSION_LOG_LINES {
+            l.pop_front();
+        }
+    }
+}
+
+tokio::task_local! {
+    /// The log of the session whose task is running: the processes it starts write there.
+    static SESSION_LOG: SessionLog;
 }
 
 /// Whether `agent` can resume its session partway (`SessionConfig::resume_at`) and fork it, so a
@@ -328,8 +396,9 @@ pub fn start(config: SessionConfig) -> SessionHandle {
         }
         _ => cmd_rx,
     };
+    let log = SessionLog::default();
     supervise(
-        async move {
+        SESSION_LOG.scope(log.clone(), async move {
             match &config.agent {
                 AgentId::ClaudeCode => claude::run(config, cmd_rx, events).await,
                 AgentId::Codex => codex::run(config, cmd_rx, events).await,
@@ -337,10 +406,10 @@ pub fn start(config: SessionConfig) -> SessionHandle {
                 AgentId::Direct(_) => direct::run(config, cmd_rx, events).await,
                 AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, events).await,
             }
-        },
+        }),
         ev_tx,
     );
-    SessionHandle { commands: cmd_tx, events: ev_rx }
+    SessionHandle { commands: cmd_tx, events: ev_rx, log }
 }
 
 /// Run a session, then report how it ended: its error, if any, and `Exited`. A session that
@@ -476,11 +545,43 @@ pub(crate) struct GroupChild {
     group: i32,
 }
 
+/// Start `command` in a process group of its own, tracked by `trek_core::procs` until it's ended.
 pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
     command.process_group(0);
     let child = command.spawn()?;
     let group = child.id().unwrap_or_default() as i32;
+    trek_core::procs::register(group);
     Ok(GroupChild { child: Some(child), group })
+}
+
+/// Run `command` in a group of its own, with `input` (if any) on its stdin, and collect its
+/// output. The group, and whatever it started, is ended once the command exits or `limit` passes.
+pub(crate) async fn output_group(command: &mut tokio::process::Command, input: Option<Vec<u8>>, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = spawn_group(command)?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+        });
+    }
+    fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) -> tokio::task::JoinHandle<Vec<u8>> {
+        tokio::spawn(async move {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out).await;
+            }
+            out
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let status = tokio::time::timeout(limit, child.wait()).await;
+    child.terminate().await;
+    let status = status.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"))??;
+    // The group is gone, so the pipes are closed (or soon will be).
+    let collect = |task: tokio::task::JoinHandle<Vec<u8>>| async move { tokio::time::timeout(std::time::Duration::from_secs(2), task).await.ok().and_then(Result::ok).unwrap_or_default() };
+    Ok(std::process::Output { status, stdout: collect(stdout).await, stderr: collect(stderr).await })
 }
 
 impl GroupChild {
@@ -519,7 +620,24 @@ async fn finish_group(mut child: tokio::process::Child, group: i32) {
     signal_group(group, libc::SIGKILL);
     if waited.is_err() {
         let _ = child.start_kill();
-        let _ = child.wait().await;
+        let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
+    }
+    trek_core::procs::unregister(group);
+}
+
+/// How long to wait for a KILLed leader to be reaped: one stuck in uninterruptible I/O can
+/// outlive KILL for a while, and isn't waited on forever.
+const REAP_AFTER_KILL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait up to `limit` for `child` to exit. True once it has, or can't be waited on (ECHILD).
+fn reaped(child: &mut tokio::process::Child, limit: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if std::time::Instant::now() >= deadline => return false,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
     }
 }
 
@@ -531,19 +649,13 @@ impl Drop for GroupChild {
         // A runtime task can be cancelled as its runtime shuts down. A short-lived OS thread
         // makes dropped handles keep the same cleanup guarantee as explicit termination.
         std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while std::time::Instant::now() < deadline {
-                if child.try_wait().ok().flatten().is_some() {
-                    signal_group(group, libc::SIGKILL);
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            let exited = reaped(&mut child, std::time::Duration::from_secs(2));
             signal_group(group, libc::SIGKILL);
-            let _ = child.start_kill();
-            while child.try_wait().ok().flatten().is_none() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            if !exited {
+                let _ = child.start_kill();
+                reaped(&mut child, REAP_AFTER_KILL);
             }
+            trek_core::procs::unregister(group);
         });
     }
 }
@@ -557,34 +669,88 @@ impl StderrTail {
         use tokio::io::AsyncBufReadExt as _;
         let tail = Self(Default::default());
         let lines = tail.0.clone();
+        // The session that started the process keeps all it says, for the Output panel.
+        let session = SESSION_LOG.try_with(SessionLog::clone).ok();
         tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stderr);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                let Ok(n) = reader.read_until(b'\n', &mut buf).await else { break };
-                if n == 0 {
-                    break;
-                }
-                let l = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
+            let mut split = StderrLines::default();
+            let keep = |l: String| {
                 tracing::debug!("{tag} stderr: {l}");
-                let mut t = lines.lock().unwrap();
+                if let Some(s) = &session {
+                    s.push(l.clone());
+                }
+                let mut t = lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 t.push_back(l);
                 if t.len() > 20 {
                     t.pop_front();
                 }
+            };
+            loop {
+                let chunk = match reader.fill_buf().await {
+                    Ok(c) if !c.is_empty() => c,
+                    _ => break,
+                };
+                let n = chunk.len();
+                split.push(chunk, keep);
+                reader.consume(n);
+            }
+            if let Some(l) = split.finish() {
+                keep(l);
             }
         });
         tail
     }
 
+    /// The lines kept, oldest first.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect()
+    }
+
     /// "`name` exited: <last non-empty stderr line>".
     pub(crate) fn exited(&self, name: &str) -> anyhow::Error {
-        let tail = self.0.lock().unwrap();
+        let tail = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match tail.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()) {
             Some(l) => anyhow::anyhow!("{name} exited: {l}"),
             None => anyhow::anyhow!("{name} exited unexpectedly"),
         }
+    }
+}
+
+/// The most of one stderr line kept; the rest of it is read and dropped.
+const STDERR_LINE: usize = 8 * 1024;
+
+/// Stderr split into lines as a terminal shows them: a `\r` not before `\n` starts the line over
+/// (progress output), and a line keeps at most `STDERR_LINE` bytes.
+#[derive(Default)]
+struct StderrLines {
+    line: Vec<u8>,
+    cr: bool,
+}
+
+impl StderrLines {
+    fn push(&mut self, bytes: &[u8], mut line: impl FnMut(String)) {
+        for &b in bytes {
+            match b {
+                b'\n' => {
+                    self.cr = false;
+                    line(String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned());
+                }
+                b'\r' => self.cr = true,
+                _ => {
+                    if std::mem::take(&mut self.cr) {
+                        self.line.clear();
+                    }
+                    if self.line.len() < STDERR_LINE {
+                        self.line.push(b);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The last line, when it didn't end in `\n`.
+    fn finish(self) -> Option<String> {
+        (!self.line.is_empty()).then(|| String::from_utf8_lossy(&self.line).into_owned())
     }
 }
 
@@ -698,6 +864,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sessions_processes_write_their_stderr_to_its_log() {
+        use std::process::Stdio;
+        let log = SessionLog::default();
+        SESSION_LOG
+            .scope(log.clone(), async {
+                let mut child = tokio::process::Command::new("sh").args(["-c", "echo 'warning: slow' >&2; echo done >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+                let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
+                child.wait().await.unwrap();
+            })
+            .await;
+        for _ in 0..100 {
+            if log.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(log.lines(), ["warning: slow", "done"]);
+        // Outside a session nothing is kept but the tail.
+        let mut child = tokio::process::Command::new("sh").args(["-c", "echo stray >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+        let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
+        child.wait().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(log.len(), 2);
+    }
+
+    #[tokio::test]
     async fn ending_or_dropping_a_group_kills_its_grandchild() {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -729,6 +921,57 @@ mod tests {
         let (child, grandchild) = tree().await;
         drop(child);
         assert_gone(grandchild).await;
+    }
+
+    #[test]
+    fn stderr_lines_are_capped_and_progress_starts_over() {
+        let mut split = StderrLines::default();
+        let mut got = vec![];
+        let long = vec![b'x'; STDERR_LINE * 3];
+        split.push(b"one\r\ntwo\n10%\r50%\r", |l| got.push(l));
+        split.push(b"100%\n", |l| got.push(l));
+        split.push(&long, |l| got.push(l));
+        split.push(b"\nlast", |l| got.push(l));
+        assert_eq!(&got[..3], ["one", "two", "100%"]);
+        assert_eq!(got[3].len(), STDERR_LINE);
+        assert_eq!(split.finish().as_deref(), Some("last"));
+    }
+
+    #[tokio::test]
+    async fn groups_are_tracked_until_ended() {
+        let sleeper = || {
+            let mut command = tokio::process::Command::new("sleep");
+            command.arg("30");
+            spawn_group(&mut command).unwrap()
+        };
+        let mut child = sleeper();
+        let group = child.group;
+        assert!(trek_core::procs::live().contains(&group));
+        child.terminate().await;
+        assert!(!trek_core::procs::live().contains(&group));
+
+        let child = sleeper();
+        let group = child.group;
+        drop(child);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while trek_core::procs::live().contains(&group) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
+    }
+
+    #[tokio::test]
+    async fn a_command_s_output_is_collected_and_a_slow_one_ended() {
+        let mut cat = tokio::process::Command::new("cat");
+        let out = output_group(&mut cat, Some(b"hi".to_vec()), std::time::Duration::from_secs(5)).await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"hi");
+        let mut slow = tokio::process::Command::new("sh");
+        slow.args(["-c", "sleep 30 & wait"]);
+        let started = std::time::Instant::now();
+        let err = output_group(&mut slow, None, std::time::Duration::from_millis(200)).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "the group was ended, not waited out");
     }
 
     #[test]

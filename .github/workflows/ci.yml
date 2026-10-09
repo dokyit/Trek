@@ -30,6 +30,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -51,5 +53,11 @@ jobs:
       - name: Scripts parse
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
 
+      # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
       - name: Test
-        run: cargo test --locked -p trek-core -p trek-agents -p trek-app -p trek-mcp
+        run: cargo test --workspace --locked
+
+      # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
+      # `-D warnings` above doesn't turn them into errors).
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious

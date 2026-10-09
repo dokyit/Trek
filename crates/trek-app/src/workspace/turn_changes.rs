@@ -1,24 +1,29 @@
 //! What each finished turn changed (`trek_core::changes::TurnChanges`), for the card under its
 //! answer (`changes_card`) and the phone. Counted from the git checkpoints Trek takes as turns
-//! start, so changes made through shell commands count as much as the agent's edits: a turn runs
-//! from its own checkpoint to the next turn's, or to the files as they are now for the latest.
-//! In a folder outside git (or a turn no checkpoints bracket) it's counted from the agent's edit
-//! tools instead.
+//! start and as they end, so changes made through shell commands count as much as the agent's
+//! edits, and what the user or another thread changes after a turn ended doesn't: a turn runs
+//! from its own first checkpoint to its last. Turns from before Trek took the second run to the
+//! next turn's checkpoint. In a folder outside git (or a turn no checkpoints bracket) it's
+//! counted from the agent's edit tools instead.
+//!
+//! What a rewind puts back is worked out the same way (`TurnSpans`): the files the turns it
+//! takes back changed, and no others.
 //!
 //! The git work runs off the main thread, once per turn: results are kept by (thread, turn) and
-//! worked out again only when they may have moved: the latest turn's when another finishes or
-//! files are put back, all of a thread's on a rewind.
+//! worked out again only when they may have moved: a turn's while its end checkpoint is being
+//! taken, all of a thread's on a rewind.
 
 use super::{Workspace, WorkspaceEvent, in_repo, worktree_missing};
 use crate::activity::{ToolKind, tool_kind};
 use gpui_kit::Context;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use trek_core::changes::{Counted, End, FileChange, FileStatus, TurnChanges, turn_bounds};
 use trek_core::checkpoint::Repo;
-use trek_core::rewind::ends_turn;
-use trek_core::store::{Item, ToolStatus};
+use trek_core::rewind::{ends_turn, turn_start};
+use trek_core::store::{Item, Store, ToolStatus};
 
 /// The two snapshots a turn's changes were counted between, for its diff in the Git tool.
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +134,10 @@ impl Workspace {
                         .background_executor()
                         .spawn(async move {
                             let r = Repo::find(&repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display()))?;
+                            // Counted from the agent's edits instead (the error's fallback).
+                            if !r.same_branch(&from, to.as_deref()) {
+                                anyhow::bail!("another branch was checked out since the turn began");
+                            }
                             let to = match to {
                                 Some(sha) => sha,
                                 None => r.tree_now()?,
@@ -192,39 +201,80 @@ impl Workspace {
         if worktree_missing(thread) || !in_repo(thread.cwd.as_deref()) {
             return Plan::Tools;
         }
+        let checkpoint = |pos: usize| {
+            let item = live.items.id_at(pos)?;
+            live.checkpointed.contains(item).then(|| self.store.checkpoint(id, item).ok().flatten()).flatten()
+        };
+        let failed = |pos: usize| live.items.id_at(pos).is_some_and(|i| live.checkpoint_failed.contains_key(i));
+        let git_work = live.git_busy || !live.git_jobs.is_empty();
+        // The turn's own checkpoints: as its first message went, and as it ended.
+        if let Some(from) = turn_start(&live.items, end).and_then(checkpoint) {
+            match checkpoint(end) {
+                Some(to) if to.repo == from.repo => return Plan::Git { repo: from.repo, from: from.sha, to: Some(to.sha) },
+                Some(_) => return Plan::Tools,
+                // Still being taken.
+                None if git_work && !failed(end) => return Plan::Wait,
+                None => {}
+            }
+        }
+        // A turn from before Trek checkpointed turns' ends: up to the next turn's checkpoint.
         let Some((start, until)) = turn_bounds(&live.items, end) else {
             // A turn the agent took by itself is running after it: once that's over, there's
             // no telling them apart.
             return if live.turn_started.is_some() && !live.items[end + 1..].iter().any(|i| matches!(i, Item::User { aside: false, .. })) { Plan::Wait } else { Plan::Tools };
         };
-        let checkpoint = |pos: usize| {
-            let item = live.items.id_at(pos)?;
-            live.checkpointed.contains(item).then(|| self.store.checkpoint(id, item).ok().flatten()).flatten()
-        };
         let Some(from) = checkpoint(start) else { return Plan::Tools };
         let to = match until {
             // A turn the agent took by itself is changing the files now.
             End::Now if live.turn_started.is_some() => return Plan::Wait,
-            End::Now => None,
+            // Nothing ends it: the files as they are now hold what came after it too (the
+            // user's edits, other threads'), so its agent's edits are what can be told.
+            End::Now => return Plan::Tools,
             End::Message(pos) => match checkpoint(pos) {
-                Some(c) if c.repo == from.repo => Some(c.sha),
+                Some(c) if c.repo == from.repo => c.sha,
                 Some(_) => return Plan::Tools,
                 None => {
-                    let failed = live.items.id_at(pos).is_some_and(|i| live.checkpoint_failed.contains_key(i));
-                    if !failed && (live.git_busy || !live.git_jobs.is_empty()) {
+                    if !failed(pos) && git_work {
                         return Plan::Wait;
                     }
                     return Plan::Tools;
                 }
             },
         };
-        Plan::Git { repo: from.repo, from: from.sha, to }
+        Plan::Git { repo: from.repo, from: from.sha, to: Some(to) }
+    }
+
+    /// The stretches of `id`'s transcript from item `from` on that turns ran over (see
+    /// `stretches`), with a turn whose end checkpoint is still being taken counted as having it.
+    pub(super) fn turn_stretches(&self, id: &str, from: usize) -> Vec<Stretch> {
+        let Some(live) = self.live.get(id) else { return vec![] };
+        let taking: HashSet<&str> = live.git_jobs.iter().chain(live.git_running.as_ref()).filter_map(|j| if let super::GitJob::Checkpoint { item, .. } = j { Some(item.as_str()) } else { None }).collect();
+        stretches(&live.items, from, |pos| live.items.id_at(pos).is_some_and(|i| live.checkpointed.contains(i) || taking.contains(i)))
+    }
+
+    /// What a rewind to message `pos` of `id` puts back: the files the turns from there on
+    /// changed (`TurnSpans`).
+    pub(super) fn turn_spans(&self, id: &str, pos: usize) -> TurnSpans {
+        let Some(live) = self.live.get(id) else { return TurnSpans::default() };
+        let cwd = self.thread(id).and_then(|t| t.cwd.clone()).unwrap_or_default();
+        let spans = self
+            .turn_stretches(id, pos)
+            .into_iter()
+            .map(|s| Span {
+                from: live.items.id_at(s.start).unwrap_or_default().to_string(),
+                to: s.end.and_then(|e| live.items.id_at(e)).map(str::to_string),
+                tools: edited_paths(&live.items[s.items.clone()]),
+            })
+            .collect();
+        TurnSpans { spans, cwd }
     }
 
     /// The turns of `id` whose changes may have moved are worked out again when next asked
     /// for: the latest turn's (counted against the files as they are) and any waiting, or with
     /// `all` every one (a rewind; turns it took away are dropped). Views showing them hear of it.
-    pub(super) fn forget_turn_changes(&mut self, id: &str, all: bool, cx: &mut Context<Self>) {
+    pub(crate) fn forget_turn_changes(&mut self, id: &str, all: bool, cx: &mut Context<Self>) {
+        // The same goes for what an open review of them has pending.
+        self.review_moved(id, cx);
         let live = self.live.get(id);
         let mut moved = vec![];
         self.changes_cache.slots.retain(|(thread, end), slot| {
@@ -268,6 +318,118 @@ fn inside(path: &str, cwd: Option<&Path>) -> String {
         Some(r) => r.display().to_string(),
         None => path.to_string(),
     }
+}
+
+/// One turn's stretch of a transcript: from the message that started it (`start`) to the
+/// checkpoint taken as it ended (`end`: `None` when none was, or the turn didn't start from one),
+/// over `items`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Stretch {
+    pub start: usize,
+    pub end: Option<usize>,
+    pub items: Range<usize>,
+}
+
+/// The turns run from item `from` on, as stretches. `checkpointed` says which items have a
+/// checkpoint: a message that starts a turn has one taken as it went, and the last item of a
+/// turn one taken as it ended. What lies between a turn's end and the next turn's start (the
+/// user at work, other threads) is in no stretch. A turn from before Trek took end checkpoints,
+/// or one still running, has no `end`.
+pub(crate) fn stretches(items: &[Item], from: usize, checkpointed: impl Fn(usize) -> bool) -> Vec<Stretch> {
+    let mut out = vec![];
+    // The stretch under way: where it started, and whether that was at a checkpoint.
+    let mut open: Option<(usize, bool)> = None;
+    for i in from.min(items.len())..items.len() {
+        let user = matches!(items[i], Item::User { aside: false, .. });
+        if user && turn_start(items, i + 1) == Some(i) {
+            if let Some((o, _)) = open.take() {
+                out.push(Stretch { start: o, end: None, items: o..i });
+            }
+            open = Some((i, checkpointed(i)));
+        } else if !user && checkpointed(i) {
+            if let Some((o, started)) = open.take() {
+                out.push(Stretch { start: o, end: started.then_some(i), items: o..i + 1 });
+            }
+        }
+    }
+    if let Some((o, _)) = open {
+        out.push(Stretch { start: o, end: None, items: o..items.len() });
+    }
+    out
+}
+
+/// The files the agent's edit tools named in `items` (not failed or denied), as it gave them:
+/// absolute, or relative to the thread's folder.
+pub(crate) fn edited_paths(items: &[Item]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for item in items {
+        let Item::Tool { title, detail, status, .. } = item else { continue };
+        if matches!(status, ToolStatus::Failed | ToolStatus::Denied) || (tool_kind(title) != ToolKind::Edit && title != "Delete") {
+            continue;
+        }
+        for p in detail.split(", ").map(str::trim).filter(|p| !p.is_empty()) {
+            if !out.iter().any(|o| o == p) {
+                out.push(p.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// What a rewind puts back: for each turn it takes back, the checkpoints it ran between (by item),
+/// or where there aren't two, the files its agent's edit tools named. Resolved off the main
+/// thread (`paths`), where the checkpoint of a turn that just ended is in by then.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnSpans {
+    spans: Vec<Span>,
+    /// The thread's folder, which edit tools' relative paths are under.
+    cwd: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Span {
+    from: String,
+    to: Option<String>,
+    tools: Vec<String>,
+}
+
+impl TurnSpans {
+    /// The files the turns changed, relative to `repo`'s top folder. Blocks on git and the store.
+    pub fn paths(&self, store: &Store, thread: &str, repo: &Repo) -> anyhow::Result<HashSet<String>> {
+        let mut pairs = vec![];
+        let mut out = HashSet::new();
+        for span in &self.spans {
+            let ends = (store.checkpoint(thread, &span.from)?, match &span.to {
+                Some(to) => store.checkpoint(thread, to)?,
+                None => None,
+            });
+            match ends {
+                (Some(from), Some(to)) if same_repo(&from.repo, &repo.top) && same_repo(&to.repo, &repo.top) => pairs.push((from.sha, to.sha)),
+                _ => out.extend(span.tools.iter().filter_map(|p| in_repo_path(p, &self.cwd, &repo.top))),
+            }
+        }
+        out.extend(repo.paths_changed(&pairs)?);
+        Ok(out)
+    }
+}
+
+/// `path` (as an agent's tool gave it: absolute, or relative to `cwd`) relative to the
+/// repository's top folder `top`; `None` outside it, where there's nothing to put back.
+fn in_repo_path(path: &str, cwd: &Path, top: &Path) -> Option<String> {
+    let path = cwd.join(path);
+    // Agents and git may name the same folder through a link (`/var`, `/private/var`): the
+    // deepest folder above the file that's there says where it really is.
+    let rel = path.strip_prefix(top).ok().map(Path::to_path_buf).or_else(|| {
+        let (dir, rest) = path.ancestors().skip(1).find_map(|a| Some((std::fs::canonicalize(a).ok()?, path.strip_prefix(a).ok()?.to_path_buf())))?;
+        dir.join(rest).strip_prefix(top).ok().map(Path::to_path_buf)
+    })?;
+    let rel = rel.to_string_lossy().to_string();
+    (!rel.is_empty()).then_some(rel)
+}
+
+/// Whether `a` and `b` name the same folder (one may be given through a link: `/var`, `/private/var`).
+fn same_repo(a: &Path, b: &Path) -> bool {
+    a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b)
 }
 
 /// The files the turn ending at `end` changed through the agent's edit tools, with the lines
@@ -314,6 +476,47 @@ mod tests {
 
     fn tool(id: &str, title: &str, detail: &str, status: ToolStatus) -> Item {
         Item::Tool { id: id.into(), title: title.into(), detail: detail.into(), output: String::new(), status }
+    }
+
+    #[test]
+    fn turns_run_from_their_first_checkpoint_to_their_last() {
+        let user = |t: &str| Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false };
+        let end = || Item::TurnEnd { at: 1, took_secs: 1 };
+        let items = vec![
+            user("a"),
+            tool("e1", "Edit", "a.rs", ToolStatus::Done),
+            Item::Assistant { text: "ok".into() },
+            end(),
+            // An older turn: no checkpoint as it ended.
+            user("b"),
+            Item::Assistant { text: "ok".into() },
+            end(),
+            user("c"),
+            // Sent while c ran: it steered that turn.
+            user("steer"),
+            end(),
+            // Its checkpoint failed.
+            user("d"),
+            Item::Error { text: "no".into() },
+            // Still running.
+            user("e"),
+            tool("e2", "Edit", "e.rs", ToolStatus::Running),
+        ];
+        let checkpointed = [0, 3, 4, 7, 9, 11, 12];
+        let got = stretches(&items, 0, |i| checkpointed.contains(&i));
+        assert_eq!(
+            got,
+            [
+                Stretch { start: 0, end: Some(3), items: 0..4 },
+                Stretch { start: 4, end: None, items: 4..7 },
+                Stretch { start: 7, end: Some(9), items: 7..10 },
+                Stretch { start: 10, end: None, items: 10..12 },
+                Stretch { start: 12, end: None, items: 12..14 },
+            ],
+            "what lies between a turn's end and the next one's start is in none"
+        );
+        assert_eq!(stretches(&items, 7, |i| checkpointed.contains(&i))[0], Stretch { start: 7, end: Some(9), items: 7..10 }, "from a message on");
+        assert_eq!(edited_paths(&items[12..14]), ["e.rs"]);
     }
 
     #[test]

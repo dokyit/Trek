@@ -1,91 +1,62 @@
-//! Brand elements: the logo mark, the animated trail draw, and the status beacon.
+//! Brand elements: the cairn mark, and the cairn stacking itself on the welcome screens.
 
-use crate::palette;
-use crate::trail_path::{BEACON, TRAIL};
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use std::time::Duration;
 
-/// The gradient switchback mark (static image).
+/// The mark's width over its height (`assets/brand/trek-mark.svg`).
+const ASPECT: f32 = 580. / 540.;
+
+/// The cairn mark (static image; `assets/brand/trek-mark.svg`).
 pub fn logo_mark(size: Pixels) -> impl IntoElement {
-    img("brand/mark.png").w(size).h(size * (110. / 128.))
+    img("brand/mark.png").w(size).h(size / ASPECT)
 }
 
-/// Paint the switchback ribbon into `bounds`, drawn up to `progress` (0..1), plus the summit
-/// beacon scaled by `beacon` (0..1, may overshoot for the ignite bounce).
-pub fn paint_trail(bounds: Bounds<Pixels>, progress: f32, beacon: f32, dark: bool, window: &mut Window) {
-    let side = bounds.size.width.min(bounds.size.height);
-    let origin = point(
-        bounds.origin.x + (bounds.size.width - side) / 2.,
-        bounds.origin.y + (bounds.size.height - side) / 2.,
-    );
-    let at = |x: f32, y: f32| point(origin.x + side * x, origin.y + side * y);
-    let n = TRAIL.len() - 1;
-    let visible = (progress.clamp(0.0, 1.0) * n as f32).ceil() as usize;
-    for i in 0..visible.min(n) {
-        let (x0, y0, w0) = TRAIL[i];
-        let (x1, y1, _) = TRAIL[i + 1];
-        // Partial last segment so the head of the trail moves smoothly.
-        let seg_t = if i + 1 == visible { (progress * n as f32 - i as f32).clamp(0.0, 1.0) } else { 1.0 };
-        let (ex, ey) = (x0 + (x1 - x0) * seg_t, y0 + (y1 - y0) * seg_t);
-        let color = palette::sunrise_at(i as f32 / n as f32);
-        let mut path = PathBuilder::stroke(side * w0);
-        path.move_to(at(x0, y0));
-        path.line_to(at(ex, ey));
-        if let Ok(p) = path.build() {
-            window.paint_path(p, color);
+/// The mark's stones, bottom first, in its own box (0..1 across, 0..1 down): centre, width,
+/// height, then top and side colours. From `assets/brand/trek_icon.py`.
+const STONES: [(f32, f32, f32, f32, u32, u32); 4] = [
+    (0.4828, 0.7889, 0.8621, 0.3111, 0xE8541E, 0x9E2F0C),
+    (0.5241, 0.5333, 0.6138, 0.2556, 0xFF6A2B, 0xB23C12),
+    (0.4621, 0.3111, 0.4000, 0.2148, 0xFF8A4C, 0xC24A18),
+    (0.5034, 0.1333, 0.2069, 0.1519, 0xFFB062, 0xD5621F),
+];
+
+/// Paint the stones into `bounds` (the mark's proportions, centred). Stone `i` is drawn
+/// `drops[i]` of the way down to its place (0 = above the box, 1 = resting), and not at all at 0.
+fn paint_cairn(bounds: Bounds<Pixels>, drops: [f32; 4], window: &mut Window) {
+    let w = bounds.size.width.min(bounds.size.height * ASPECT);
+    let h = w / ASPECT;
+    let origin = point(bounds.origin.x + (bounds.size.width - w) / 2., bounds.origin.y + (bounds.size.height - h) / 2.);
+    for ((cx, cy, sw, sh, top, side), k) in STONES.into_iter().zip(drops) {
+        if k <= 0.0 {
+            continue;
         }
-        // Round joins and caps.
-        let r = side * w0 / 2.;
-        let c = at(x0, y0);
-        window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), color).corner_radii(r));
-        if i + 1 == visible {
-            let c = at(ex, ey);
-            window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), color).corner_radii(r));
-        }
-    }
-    if beacon > 0.0 {
-        let c = at(BEACON.0, BEACON.1);
-        let glow: Hsla = rgb(0xFFC56B).into();
-        // Soft bloom: many faint rings read as a smooth glow.
-        for i in 0..14 {
-            let k = 1.4 + i as f32 * 0.22;
-            let alpha = 0.075 * (1.0 - i as f32 / 14.0);
-            let r = side * 0.053 * k * beacon.min(1.0);
-            window.paint_quad(
-                fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), glow.opacity(alpha * beacon.min(1.0)))
-                    .corner_radii(r),
-            );
-        }
-        let r = side * 0.053 * beacon;
-        // Cream core reads on dark; on light backgrounds use the ember core.
-        let core = if dark { rgb(0xFFF1D6) } else { rgb(0xFF6A2B) };
-        window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), core).corner_radii(r));
+        let (sw, sh) = (w * sw, h * sh);
+        let thick = sh * 0.26;
+        let face = sh - thick;
+        // Falls from a stone's height above its place.
+        let lift = h * 0.25 * (1.0 - k);
+        let centre = point(origin.x + w * cx, origin.y + h * cy - lift);
+        let alpha = k.clamp(0.0, 1.0);
+        let stone = |dy: Pixels| Bounds::new(point(centre.x - sw / 2., centre.y - face / 2. + dy), size(sw, face));
+        window.paint_quad(fill(stone(thick / 2.), Hsla::from(rgb(side)).opacity(alpha)).corner_radii(face / 2.));
+        window.paint_quad(fill(stone(-thick / 2.), Hsla::from(rgb(top)).opacity(alpha)).corner_radii(face / 2.));
     }
 }
 
-/// The signature "trail draw": the ribbon draws itself, then the beacon ignites.
-/// `generation` replays it when changed.
-pub fn trail_draw(id: impl Into<ElementId>, size_px: Pixels, reduce_motion: bool) -> impl IntoElement {
-    let draw = Duration::from_millis(900);
-    let ignite = Duration::from_millis(420);
-    div().size(size_px).with_animations(
-        id,
-        vec![
-            Animation::new(draw).with_easing(ease_in_out),
-            Animation::new(ignite).with_easing(back_out),
-        ],
-        move |el, step, t| {
-            let (progress, beacon) = if reduce_motion {
-                (1.0, 1.0)
-            } else if step == 0 {
-                (t, 0.0)
-            } else {
-                (1.0, t)
-            };
-            el.child(canvas(|_, _, _| {}, move |bounds, _, window, cx| paint_trail(bounds, progress, beacon, cx.theme().mode.is_dark(), window)).size_full())
-        },
-    )
+/// The welcome screens' signature: the cairn stacks itself, bottom stone first.
+pub fn cairn_draw(id: impl Into<ElementId>, size_px: Pixels, reduce_motion: bool) -> impl IntoElement {
+    let total = Duration::from_millis(1100);
+    div().w(size_px).h(size_px / ASPECT).with_animation(id, Animation::new(total), move |el, t| {
+        let drops: [f32; 4] = std::array::from_fn(|i| {
+            if reduce_motion {
+                return 1.0;
+            }
+            // Each stone takes 40% of the run, starting 20% after the one below.
+            let local = ((t - i as f32 * 0.2) / 0.4).clamp(0.0, 1.0);
+            if local == 0.0 { 0.0 } else { back_out(local) }
+        });
+        el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| paint_cairn(bounds, drops, window)).size_full())
+    })
 }
 
 /// Ease-out with a small overshoot, for the beacon "ignite".

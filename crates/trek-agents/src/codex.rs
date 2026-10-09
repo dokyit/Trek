@@ -355,12 +355,21 @@ fn mcp_title(item: &Value) -> String {
     }
 }
 
-/// `mcp_servers` for Codex's config: the shared shape, with a tool timeout where a server needs
-/// longer than Codex's default minute.
+/// `mcp_servers` for Codex's config: the shared shape for stdio servers, `url` and
+/// `http_headers` for remote ones, with a tool timeout where a server needs longer than Codex's
+/// default minute.
 fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
     let mut out = mcp_servers_json(servers);
     for s in servers {
-        if let (Some(secs), Some(entry)) = (s.tool_timeout_secs, out.get_mut(&s.name)) {
+        let Some(entry) = out.get_mut(&s.name) else { continue };
+        if let crate::McpTransport::Http { url, headers } = &s.transport {
+            let headers: serde_json::Map<String, Value> = headers.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            *entry = json!({ "url": url });
+            if !headers.is_empty() {
+                entry["http_headers"] = Value::Object(headers);
+            }
+        }
+        if let Some(secs) = s.tool_timeout_secs {
             entry["tool_timeout_sec"] = json!(secs);
         }
     }
@@ -1598,10 +1607,28 @@ mod tests {
 
     #[test]
     fn slow_mcp_tools_get_a_longer_timeout() {
-        let server = |name: &str, timeout| crate::McpServer { name: name.into(), command: "trek-mcp".into(), args: vec![], env: vec![], tool_timeout_secs: timeout };
+        let server = |name: &str, timeout| crate::McpServer { tool_timeout_secs: timeout, ..crate::McpServer::stdio(name, "trek-mcp", vec![], vec![]) };
         let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
         assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
         assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
+    }
+
+    #[test]
+    fn remote_mcp_servers_use_codexs_url_keys() {
+        let out = codex_mcp_servers(&[
+            crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]),
+            crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
+            // A command's environment (its tokens) goes in `env`, as Codex's config has it.
+            crate::McpServer::stdio("fs", "npx", vec!["srv".into()], vec![("GITHUB_TOKEN".into(), "ghp_1".into())]),
+        ]);
+        assert_eq!(
+            out,
+            json!({
+                "figma-desktop": {"url":"http://127.0.0.1:3845/mcp"},
+                "linear": {"url":"https://mcp.linear.app/mcp","http_headers":{"Authorization":"Bearer t"}},
+                "fs": {"command":"npx","args":["srv"],"env":{"GITHUB_TOKEN":"ghp_1"}},
+            })
+        );
     }
 
     #[test]

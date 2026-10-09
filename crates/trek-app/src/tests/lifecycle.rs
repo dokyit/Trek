@@ -118,6 +118,8 @@ fn threads_settle_after_days_unless_told_never_to() {
         trek.render(cx);
         assert!(trek.visible(cx, format!("live-line-{stale}")));
 
+        // Away from the sidebar, which holds its rows still while the pointer is on it.
+        trek.window(cx, |window, cx| window.dispatch_event(gpui_kit::PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position: gpui_kit::point(gpui_kit::px(900.), gpui_kit::px(400.)), pressed_button: None, modifiers: Default::default() }), cx));
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
         trek.render(cx);
         assert_eq!(section_of(&trek, cx, &stale), Some(Section::Settled));

@@ -179,9 +179,9 @@ pub struct ThreadView {
     /// this instead of parsing and measuring again. `stash_order` is oldest first, capped.
     stashed: HashMap<String, Stashed>,
     stash_order: std::collections::VecDeque<String>,
-    /// Masked fields for the question card's secret questions, in order, and the request they
-    /// were last shown for (a new card starts them empty).
-    secrets: (Option<String>, Vec<Entity<InputState>>),
+    /// Masked fields for the question card's secret questions, in order, each with what it
+    /// listens to, and the request they were last shown for (a new card starts them empty).
+    secrets: (Option<String>, Vec<(Entity<InputState>, Subscription)>),
     /// Rendered plan for the plan card on screen (request id, markdown, redraw when it's parsed).
     plan_md: Option<(String, Entity<TextViewState>, Subscription)>,
     /// Rows built for (thread, transcript revision, expansion state, where the transcript stops);
@@ -221,6 +221,8 @@ pub struct ThreadView {
     /// Lines each opened sub-agent's live activity showed when last measured, by its row's key:
     /// its row is measured again when that changes.
     activity_lines: HashMap<String, usize>,
+    /// Repaints on scroll activity of the scroller on screen; replaced when another one is.
+    _scroller_sub: Subscription,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -348,7 +350,8 @@ impl ThreadView {
                 WorkspaceEvent::TurnChanges { id, end } if this.current.as_ref() == Some(id) => this.changes_in(end, cx),
                 _ => {}
             }),
-            cx.observe(&scroller, |_, _, cx| cx.notify()),
+            // A visualization in an answer settled to a new height: measure the rows again.
+            cx.observe_global::<crate::visualization::Relayout>(|this, cx| this.scroller.update(cx, |s, cx| s.remeasure(cx))),
             cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active() || crate::mascot::force_active();
                 if this.flash.is_some() {
@@ -356,6 +359,7 @@ impl ThreadView {
                 }
             }),
         ];
+        let scroller_sub = cx.observe(&scroller, |_, _, cx| cx.notify());
         let mut this = Self {
             workspace,
             scope,
@@ -385,6 +389,7 @@ impl ThreadView {
             confirm: None,
             _ticker: None,
             activity_lines: HashMap::new(),
+            _scroller_sub: scroller_sub,
             _subscriptions: subscriptions,
         };
         this.sync(false, cx);
@@ -392,7 +397,7 @@ impl ThreadView {
     }
 
     fn animate(&self, _: &Window, cx: &App) -> bool {
-        self.active && !self.workspace.read(cx).settings.appearance.reduce_motion
+        self.active && self.workspace.read(cx).motion(cx)
     }
 
     /// Park the thread leaving the screen: its parsed documents, expansion, measured rows and
@@ -429,8 +434,7 @@ impl ThreadView {
     /// Scroll activity on the current scroller repaints this view (the jump-to-latest tail).
     fn watch_scroller(&mut self, cx: &mut Context<Self>) {
         self.scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
-        let scroller = self.scroller.clone();
-        self._subscriptions.push(cx.observe(&scroller, |_, _, cx| cx.notify()));
+        self._scroller_sub = cx.observe(&self.scroller, |_, _, cx| cx.notify());
     }
 
     /// Bring back what `id` was parked with. False when it was never parked (or was evicted).
@@ -447,8 +451,7 @@ impl ThreadView {
         *self.rows_cache.borrow_mut() = s.rows_cache;
         self.activity_lines = s.activity_lines;
         self.shown = None;
-        let scroller = self.scroller.clone();
-        self._subscriptions.push(cx.observe(&scroller, |_, _, cx| cx.notify()));
+        self._scroller_sub = cx.observe(&self.scroller, |_, _, cx| cx.notify());
         true
     }
 
@@ -640,7 +643,7 @@ impl ThreadView {
             let Ok(moving) = this.update(cx, |this, cx| {
                 cx.notify();
                 this.remeasure_activity(cx);
-                this.active && !this.workspace.read(cx).settings.appearance.reduce_motion
+                this.active && this.workspace.read(cx).motion(cx)
             }) else {
                 break;
             };
@@ -1051,6 +1054,8 @@ impl ThreadView {
                 // A message sent with consultants shows as written, with who it consults under it.
                 let (said, consult) = orch::split_consult(&full);
                 let (said, restated) = trek_core::restate::split_restate(said);
+                // What the editor's AI side bar added to it (its context chips, Ask mode) stays off.
+                let said = crate::ide::ai::context::split(said).said;
                 let consulting = consult.map(|c| {
                     let ws = at.workspace.read(cx);
                     let name = |k: &orch::Consultant| {
@@ -1124,19 +1129,26 @@ impl ThreadView {
                 column(div().w_full().child(
                     v_flex().id(("user-msg", ix)).test_support().w_full().group("user-msg").items_end().pt_4().gap(px(4.))
                     .when(!images.is_empty(), |el| {
+                        // A click previews them here, from that one.
+                        let all: Vec<std::path::PathBuf> = images.iter().map(std::path::PathBuf::from).collect();
                         el.child(h_flex().gap_2().flex_wrap().justify_end().children(images.into_iter().enumerate().map(|(i, p)| {
+                            let all = all.clone();
                             let path = std::path::PathBuf::from(&p);
+                            // In its own proportions: an image left to size itself here draws at
+                            // its full size, cropped to its corner.
                             div()
                                 .id(("user-img", ix * 100 + i))
+                                .test_support()
                                 .h(px(120.))
-                                .max_w(px(220.))
+                                .w(crate::image_preview::tile_width(&path, px(120.), px(64.), px(220.)))
                                 .rounded(px(12.))
                                 .overflow_hidden()
                                 .border_1()
                                 .border_color(theme.border)
                                 .cursor_pointer()
-                                .child(img(path.clone()).h_full().object_fit(ObjectFit::Contain))
-                                .on_click(move |_, _, cx| cx.open_with_system(&path))
+                                .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
+                                .child(img(path).size_full().object_fit(ObjectFit::Cover))
+                                .on_click(move |_, window, cx| crate::image_preview::open(all.clone(), i, window, cx))
                         })))
                     })
                     .when(has_text, |el| el.child(
@@ -1321,7 +1333,7 @@ impl ThreadView {
                 .into_any_element()
             }
             (Row::Assistant { ix, .. }, _) => match md {
-                Some(md) => column(div().py_2().child(div().id(("answer-text", ix)).test_support().child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, cx).motion(crate::md::streaming()))))
+                Some(md) => column(div().py_2().child(div().id(("answer-text", ix)).test_support().child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, at.streaming == Some(ix), cx).motion(crate::md::streaming()))))
                     .id(("answer", ix))
                     .test_support()
                     .into_any_element(),
@@ -1684,21 +1696,16 @@ impl ThreadView {
             _ => ws.turn_start_item(&thread, &anchor),
         };
         let Some(message) = message else { return };
-        let checkpoint = ws.restorable_checkpoint(&thread, &message);
+        // What restoring puts back: the files the turns taken back changed, and no others.
+        let checkpoint = ws.rewind_files(&thread, &message);
         let files = match &checkpoint {
             Some(_) => Files::Checking,
             None => Files::Unavailable(ws.no_checkpoint(&thread, &message).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain()),
         };
-        let check = checkpoint.as_ref().map(|c| {
-            let (repo, sha) = (c.repo.clone(), c.sha.clone());
+        let restore = checkpoint.is_some();
+        let check = checkpoint.map(|files| {
             cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let r = trek_core::checkpoint::Repo::find(&repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display()))?;
-                        r.changes_since(&sha)
-                    })
-                    .await;
+                let result = cx.background_executor().spawn(async move { files.changes() }).await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(c) = this.confirm.as_mut() {
                         c.files = match result {
@@ -1710,7 +1717,7 @@ impl ThreadView {
                 });
             })
         });
-        self.confirm = Some(Confirm { ask, anchor, message, files, restore: checkpoint.is_some(), _check: check });
+        self.confirm = Some(Confirm { ask, anchor, message, files, restore, _check: check });
         cx.notify();
     }
 
@@ -1783,7 +1790,7 @@ impl ThreadView {
         let note = |text: String| div().text_size(px(12.5)).line_height(relative(1.45)).text_color(muted).child(text).into_any_element();
         let files: AnyElement = match &c.files {
             Files::Checking => h_flex().gap(px(8.)).text_size(px(12.5)).text_color(muted).child(Spinner::new().xsmall()).child("Checking which files changed…").into_any_element(),
-            Files::Changes(changes) if changes.is_empty() => note("The files are as they were then.".into()),
+            Files::Changes(changes) if changes.is_empty() => note("Nothing to put back: the files these turns changed are as they were.".into()),
             Files::Changes(changes) => v_flex()
                 .gap(px(6.))
                 .child(crate::ui::check_row("restore-files", "Also restore files", restore, false, cx).on_click(toggle).test_support())
@@ -1798,6 +1805,7 @@ impl ThreadView {
                                 Change::Added => "delete",
                                 Change::Deleted => "bring back",
                                 Change::Nested => "left as is",
+                                Change::Kept => "left as is (newer, not in checkpoints)",
                             };
                             h_flex()
                                 .gap(px(8.))
@@ -1845,7 +1853,7 @@ impl ThreadView {
             .enumerate()
             .map(|(i, q)| {
                 let picked = picks.get(&(request_id.to_string(), i)).filter(|v| !v.is_empty()).map(|v| v.join(", "));
-                let typed = q.secret.then(|| fields.next()).flatten().map(|f| f.read(cx).value().trim().to_string()).filter(|v| !v.is_empty());
+                let typed = q.secret.then(|| fields.next()).flatten().map(|(f, _)| f.read(cx).value().trim().to_string()).filter(|v| !v.is_empty());
                 typed.or(picked).map(|a| (q.question.clone(), a))
             })
             .collect()
@@ -1859,17 +1867,17 @@ impl ThreadView {
         }
         while self.secrets.1.len() < questions.iter().filter(|q| q.secret).count() {
             let field = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Type it here"));
-            self._subscriptions.push(cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| match event {
+            let sub = cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
                 InputEvent::Change => cx.notify(),
                 _ => {}
-            }));
-            self.secrets.1.push(field);
+            });
+            self.secrets.1.push((field, sub));
         }
     }
 
     fn clear_secrets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for f in &self.secrets.1 {
+        for (f, _) in &self.secrets.1 {
             f.update(cx, |s, cx| s.set_value("", window, cx));
         }
     }
@@ -1890,7 +1898,7 @@ impl ThreadView {
     /// The agent asked something only a person can answer: multiple-choice questions, or a secret.
     fn question_card(&mut self, id: String, request_id: String, questions: Vec<trek_agents::Question>, agent: String, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.secret_fields(&request_id, &questions, window, cx);
-        let mut fields = self.secrets.1.clone().into_iter();
+        let mut fields = self.secrets.1.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>().into_iter();
         let theme = cx.theme().clone();
         let ember = palette::ember(cx);
         let complete = self.card_answers(&request_id, &questions, cx).is_some();
@@ -2141,24 +2149,24 @@ impl ThreadView {
 }
 
 /// What a sub-agent row shows.
-struct SubAgentRow {
+pub(crate) struct SubAgentRow {
     /// Whose logo it wears: the agent running it.
-    agent: Option<trek_core::AgentId>,
+    pub(crate) agent: Option<trek_core::AgentId>,
     /// "Sol: Review the cache design"
-    label: String,
+    pub(crate) label: String,
     /// Where it stands, and what it's doing or why it failed.
-    detail: String,
-    state: TaskState,
-    elapsed: Option<std::time::Duration>,
+    pub(crate) detail: String,
+    pub(crate) state: TaskState,
+    pub(crate) elapsed: Option<std::time::Duration>,
     /// The thread it runs in, for one Trek runs.
-    child: Option<String>,
+    pub(crate) child: Option<String>,
     /// What it's doing, while it works: its latest calls, as the working bar shows its parent's.
-    activity: Option<crate::working_bar::Group>,
+    pub(crate) activity: Option<crate::working_bar::Group>,
 }
 
 impl SubAgentRow {
     /// The row for transcript item `row_id` of `thread` (whose agent is `agent`).
-    fn read(ws: &Workspace, thread: &str, agent: &trek_core::AgentId, row_id: &str, detail: &str, output: &str, status: ToolStatus) -> SubAgentRow {
+    pub(crate) fn read(ws: &Workspace, thread: &str, agent: &trek_core::AgentId, row_id: &str, detail: &str, output: &str, status: ToolStatus) -> SubAgentRow {
         let by_status = match status {
             ToolStatus::Running => TaskState::Running,
             ToolStatus::Done => TaskState::Done,
@@ -2271,6 +2279,8 @@ struct RowContext {
     clock: f32,
     /// How to tell a turn ran the project's verification CLI, when it has one.
     verify_probe: Option<trek_core::verification::Probe>,
+    /// The answer still streaming in, by item index.
+    streaming: Option<usize>,
 }
 
 impl Render for ThreadView {
@@ -2296,6 +2306,7 @@ impl Render for ThreadView {
         let view = cx.entity().downgrade();
         let ws = self.workspace.read(cx);
         let t = ws.thread(&thread);
+        let streaming = ws.live.get(&thread).and_then(|l| l.streaming);
         let at = RowContext {
             workspace: self.workspace.clone(),
             scope: self.scope.clone(),
@@ -2314,6 +2325,7 @@ impl Render for ThreadView {
             pulse: self.animate(window, cx) && self._ticker.is_some(),
             clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,
             verify_probe: t.and_then(|t| ws.verify_probe(t)),
+            streaming,
         };
         let flash = self.flash;
         let jump = self.jump_to_latest(window, cx);
@@ -2417,7 +2429,18 @@ impl ThreadView {
 
     /// The question card's masked field for its `n`th secret question.
     pub(crate) fn secret_field(&self, n: usize) -> Entity<InputState> {
-        self.secrets.1[n].clone()
+        self.secrets.1[n].0.clone()
+    }
+
+    /// Subscriptions this view holds besides its scroller's and its secret fields' own: the same
+    /// however many threads it has shown.
+    pub(crate) fn subscription_count(&self) -> usize {
+        self._subscriptions.len()
+    }
+
+    /// The scroller on screen, to check what observes it.
+    pub(crate) fn scroller(&self) -> Entity<MessageScrollerState> {
+        self.scroller.clone()
     }
 
     /// The open confirmation's files: "checking", "changes: <paths>", "unavailable" or

@@ -142,11 +142,9 @@ impl Workspace {
     /// `id`'s file checkpoints go with its worktree. They were all taken in it (a thread never
     /// moves into one), and their refs live in the repository the project folder shares with it.
     fn forget_worktree_checkpoints(&mut self, id: &str, project: PathBuf, cx: &mut Context<Self>) {
-        let items: Vec<String> = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
-        if !items.is_empty() {
-            self.live.entry(id.to_string()).or_default().git_jobs.push_back(GitJob::Forget { repo: project, items });
-            self.run_git(id, cx);
-        }
+        // All of them, and what would undo its last restore.
+        self.live.entry(id.to_string()).or_default().git_jobs.push_back(GitJob::ForgetAll { repo: project });
+        self.run_git(id, cx);
     }
 
     /// Merge the thread's branch into its base in the project folder. A merge settles the thread

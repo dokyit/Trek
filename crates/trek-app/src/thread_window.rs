@@ -63,6 +63,8 @@ pub struct ThreadWindow {
     composer: Entity<Composer>,
     working_bar: Entity<WorkingBar>,
     background_strip: Entity<crate::background_strip::BackgroundStrip>,
+    /// Attachments up close, over everything else in the window.
+    preview: Entity<crate::image_preview::ImagePreview>,
     /// The composer changed since the last frame (see `Composer::element`).
     composer_changed: bool,
     /// The window title as last set (the thread's title).
@@ -81,6 +83,7 @@ impl ThreadWindow {
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), scope.clone(), window, cx));
         let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), scope.clone(), window, cx));
         let composer = cx.new(|cx| Composer::new(workspace.clone(), scope, window, cx));
+        let preview = cx.new(|cx| crate::image_preview::ImagePreview::new(window, cx));
         let title = workspace.read(cx).thread(&id).map(|t| t.title.clone()).unwrap_or_default();
         window.set_window_title(&title);
         let handle = window.window_handle();
@@ -124,10 +127,11 @@ impl ThreadWindow {
         let c = composer.clone();
         window.defer(cx, move |window, cx| c.update(cx, |c, cx| c.focus(window, cx)));
         let _hidden_frames = crate::system::hidden_frames(window, cx);
-        Self { workspace, id, thread_view, composer, working_bar, background_strip, composer_changed: true, title, glass_applied: None, _hidden_frames, _subscriptions: subscriptions }
+        Self { workspace, id, thread_view, composer, working_bar, background_strip, preview, composer_changed: true, title, glass_applied: None, _hidden_frames, _subscriptions: subscriptions }
     }
 
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `narrow`: the window is too narrow for the project's name and the Open button's label.
+    fn title_bar(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let theme = cx.theme().clone();
         let thread = ws.thread(&self.id).cloned();
@@ -158,10 +162,12 @@ impl ThreadWindow {
                         .pl_1()
                         .gap_2()
                         .text_sm()
+                        .overflow_hidden()
                         .when_some(name, |el, p| {
-                            el.child(crate::ui::project_badge(&p, &look, cx))
-                                .child(div().flex_none().text_color(theme.muted_foreground).child(p))
-                                .child(div().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
+                            el.child(div().flex_none().child(crate::ui::project_badge(&p, &look, cx))).when(!narrow, |el| {
+                                el.child(div().flex_shrink_1().min_w(px(24.)).truncate().text_color(theme.muted_foreground).child(p))
+                                    .child(div().flex_none().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
+                            })
                         })
                         .child(div().min_w_0().font_medium().child(crate::ui::title_text(
                             "window-title",
@@ -172,7 +178,7 @@ impl ThreadWindow {
                         )))
                         .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
-                .when_some(folder, |el, dir| el.child(crate::root::open_in_button(dir)))
+                .when_some(folder, |el, dir| el.child(crate::root::open_in_button(dir, narrow)))
                 .when_some(settle_id, |el, id| {
                     el.child(crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
                         let id = id.clone();
@@ -193,6 +199,7 @@ impl Render for ThreadWindow {
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::root::place_toasts(self.composer.read(cx).height().max(px(120.)) + px(16.), cx);
         if self.workspace.read(cx).title_reveal(&self.id).is_some() {
             window.request_animation_frame();
         }
@@ -219,10 +226,8 @@ impl Render for ThreadWindow {
             }))
             .on_action(cx.listener(|this, _: &TakeSnapshot, _, cx| this.composer.update(cx, |c, cx| c.snapshot_default(cx))))
             .on_action(cx.listener(|this, _: &NewThread, _, cx| {
-                // A new thread in this thread's project, composed in the main window.
-                let ws = this.workspace.read(cx);
-                let project = ws.thread(&this.id).and_then(|t| ws.draft_folder(t));
-                this.show_in_main(Route::Draft { project }, cx)
+                // A new thread, in no project as ⌘N is in the main window, composed there.
+                this.show_in_main(Route::Draft { project: None }, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_in_main(Route::Settings(SettingsPage::General), cx)))
             .on_action(cx.listener(|this, _: &OpenPalette, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenPalette))))
@@ -243,7 +248,7 @@ impl Render for ThreadWindow {
                     .child(img(crate::ui::background_source(&spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
                     .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
             })
-            .child(self.title_bar(cx))
+            .child(self.title_bar(window.viewport_size().width < px(640.), cx))
             .child(
                 div().flex_1().min_h_0().px_2().pb_2().child(
                     v_flex()
@@ -262,5 +267,6 @@ impl Render for ThreadWindow {
                         .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
                 ),
             )
+            .child(self.preview.clone())
     }
 }

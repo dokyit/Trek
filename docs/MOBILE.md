@@ -36,7 +36,7 @@ questions; glance across all agents; steer; then review diffs. Phase 1 follows t
 ### Phase 1: direct connection (LAN or Tailscale)
 
 - Trek runs a WebSocket server (`trek-remote`) inside the app process, **off by default**, turned on
-  in Settings › Mobile. It binds `0.0.0.0:7420` (configurable; "Tailscale only" binds the `100.x`
+  in Settings › Mobile. It binds the address it advertises, port 7420 (configurable; "Tailscale only" binds the `100.x`
   address). Sessions live as long as Trek does; the UI says so.
 - The phone reaches the Mac on the same Wi-Fi, or anywhere over Tailscale (the tailnet IP or MagicDNS
   name goes in the QR code when Tailscale is up). No port forwarding, no Trek servers.
@@ -74,7 +74,9 @@ pipe, not the messages. LAN/Tailscale is what power users already run.
    trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c…&fp=b1380087…
    ```
    `code` is 8 Crockford base32 characters (40 bits) shown as `XXXX-XXXX`: one use, valid 10
-   minutes, burned after 5 wrong attempts (from anyone). `fp` is the SHA-256 of the Mac's
+   minutes. After a wrong code, that address (an IPv6 one by its /64) waits 1 s before its next
+   try, doubling with each wrong one up to 5 minutes (forgotten after 15 quiet minutes), so one
+   device can't lock others out; 100 wrong attempts from everyone together burn the code. `fp` is the SHA-256 of the Mac's
    certificate (DER), 64 lowercase hex characters; the Mac also shows its short form beside the
    code: the first 16 hex characters, uppercased, as `ABCD-1234-EF56-7890`. A link without `fp` comes from a
    Mac serving plain `ws://`.
@@ -138,7 +140,9 @@ header let a sandboxed agent upgrade itself):
 
 - **Every connection authenticates cryptographically.** Nothing is trusted for being local. An
   unauthenticated socket may send only `pair` or `hello`; anything else closes it. A connection that
-  hasn't authenticated within 10 seconds is closed.
+  hasn't authenticated within 10 seconds is closed. At most 16 connections may be unauthenticated
+  at once, 4 from any one address; before authenticating a connection may send 4 KiB (an upgrade
+  request of up to 8 KiB aside), and more closes it.
 - **Browsers are refused**: an upgrade request carrying an `Origin` header is rejected (403), so a web
   page (or an agent's browser) can't drive the server through the user's network position.
 - **Off by default**; an explicit toggle, with the listening address shown.
@@ -164,7 +168,8 @@ header let a sandboxed agent upgrade itself):
 - **Never auto-answer.** The server has no timeouts on approvals; the desktop keeps its "requests
   wait indefinitely" rule. The phone and the Mac show the same request; whichever answers first
   wins and the other's card resolves (`item` update with `state != pending`).
-- Message size capped at 1 MiB; one connection per device (a new one replaces the old).
+- Messages from an authenticated phone are capped at 8 MiB (photos come base64 in `send`); one
+  connection per device (a new one replaces the old).
 - **Updater first**: before the server ships enabled, the updater must refuse unsigned manifests
   (see the report: a phone that can steer the Mac makes a compromised update remote code execution).
 
@@ -514,6 +519,8 @@ whole change):
 
 - `default_model: ""` goes back to the agent's default; `default_access: "full-access"` needs the
   Mac's unlock. `full_access` and `session_approvals` are read-only: the Mac alone decides whether threads may run with Full access, and whether a phone may answer a request with `allow_for_session` (off by default; refused then with `bad_request`, and the phone hides the option). Trek can't check from the Mac who is holding the phone, so anything that outlasts one request is the Mac's to grant. Turning `push` on makes a topic the first time.
+- `push_server` must be an `https://` address (the Mac's own settings may still name an `http://`
+  one).
 - `push_test: true` sends a test notification once the rest is changed (refused while `push` is
   off): what the phone's "Send a test" does.
 - ntfy: `topic_url` opens the topic in ntfy's web app. `subscribe_url` (`ntfy://<host>/<topic>`,
@@ -597,8 +604,9 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 - Before authentication, malformed JSON or any type other than `pair`/`hello` gets `unauthorized`
   and a close; a `pair`/`hello` with bad fields gets `bad_request` and a close. After it, bad input
   gets `bad_request` and the connection stays open.
-- The protocol version is checked before the code, so a version mismatch doesn't spend one of the 5
-  pairing attempts. `rate_limited` is reserved; burned or expired codes answer `pairing_failed`.
+- The protocol version is checked before the code, so a version mismatch doesn't count as a wrong
+  attempt. `rate_limited` is reserved; burned or expired codes, and an address still backing off,
+  answer `pairing_failed` (the message says how long to wait).
 - Actions are always acked (without `re` when they carried no `id`); `unsubscribe` only with an `id`.
 - Each connection runs its host calls one at a time in the order sent, off the socket loop, so a
   slow host never stalls pings or pushes and a `send` then `interrupt` can't be reordered.
@@ -606,8 +614,8 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
   those with a higher seq). A connection that falls behind on events gets a fresh `snapshot` and a
   `transcript_reset` for each subscribed thread. A phone silent for three ping intervals is dropped.
 - `devices.json` is written with mode 0600; an unreadable one is moved aside and phones pair again.
-- The Mac must set `advertise` (LAN or tailnet address) for the QR code; the bind address
-  `0.0.0.0` is no use to a phone.
+- The Mac must set `advertise` (LAN or tailnet address) for the QR code, and binds that same
+  address; the library's default bind address `0.0.0.0` is no use to a phone.
 
 ## Phases and milestones
 
@@ -634,9 +642,11 @@ instead and queue).
 ## The Mac side as built (Trek 0.3.4)
 
 - **Settings › Phone** turns the server on (off by default; `[mobile]` in settings.toml: `enabled`,
-  `port` 7420, `reach` wifi or tailscale). It binds `0.0.0.0:<port>` with TLS from
-  `mobile/identity.{der,key}` in Trek's data folder (the key 0600), keeps paired devices in
-  `mobile/devices.json`, and advertises the Wi-Fi or Tailscale address in the pairing code. The page
+  `port` 7420, `reach` wifi or tailscale). It advertises the Wi-Fi or Tailscale address in the
+  pairing code and binds only that address, with TLS from `mobile/identity.{der,key}` in Trek's
+  data folder (the key 0600), and keeps paired devices in `mobile/devices.json`. The Tailscale
+  address is the one `tailscale ip -4` names, else a 100.64/10 address on a `utun` tunnel (that
+  range alone is also carrier-grade NAT). The page
   shows the QR code, the code and the 16-character fingerprint, and the paired phones with Unpair.
 - **Requests** (`crates/trek-app/src/remote.rs`) come through `ChannelHost` and are answered on the
   main thread from the workspace. Transcript items are numbered by index (`i<n>`), requests as

@@ -114,9 +114,11 @@ impl Workspace {
         }
         if let Some(server) = &change.push_server {
             let server = server.trim().trim_end_matches('/');
-            let ok = (server.starts_with("https://") || server.starts_with("http://")) && server.len() <= 200 && !server.chars().any(|c| c.is_whitespace() || c.is_control());
+            // Only https: what goes there says what the agents are doing.
+            let host = server.get(..8).filter(|scheme| scheme.eq_ignore_ascii_case("https://")).map(|_| &server[8..]);
+            let ok = host.is_some_and(|h| !h.is_empty()) && server.len() <= 200 && !server.chars().any(|c| c.is_whitespace() || c.is_control());
             if !ok {
-                return Err(tr::HostError::bad_request("The ntfy server is a web address: https://ntfy.sh, or your own"));
+                return Err(tr::HostError::bad_request("The ntfy server must be an https:// address: https://ntfy.sh, or your own"));
             }
             s.mobile.push_server = server.to_string();
         }

@@ -90,7 +90,9 @@ impl AgentStatus {
 /// Status of the user's Claude Code login. Sends no prompt.
 pub async fn claude_status(cwd: &Path) -> Result<AgentStatus> {
     let bin = detect::which("claude").context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
-    let mut child = tokio::process::Command::new(bin)
+    // In a group of its own: the MCP servers it starts go with it.
+    let mut command = tokio::process::Command::new(bin);
+    command
         .args([
             "-p",
             "--input-format",
@@ -105,10 +107,8 @@ pub async fn claude_status(cwd: &Path) -> Result<AgentStatus> {
         .env("PATH", detect::login_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("failed to start claude")?;
+        .stderr(Stdio::piped());
+    let mut child = crate::spawn_group(&mut command).context("failed to start claude")?;
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut stderr = child.stderr.take().unwrap();
@@ -164,7 +164,7 @@ pub async fn claude_status(cwd: &Path) -> Result<AgentStatus> {
             }
         }
     }
-    let _ = child.start_kill();
+    child.terminate().await;
 
     let null = Value::Null;
     let init = responses.get("i1").unwrap_or(&null);
@@ -337,7 +337,7 @@ pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
         Ok(Err(e)) => status.add_error(format!("models: {e:#}")),
         Err(_) => status.add_error("models: timed out"),
     }
-    let _ = child.start_kill();
+    child.terminate().await;
     Ok(status)
 }
 
@@ -356,7 +356,7 @@ pub async fn codex_consume_reset(cwd: &Path, credit_id: &str) -> Result<()> {
         json!({ "creditId": credit_id, "idempotencyKey": trek_core::transcript::new_id() }),
     )
     .await?;
-    let _ = child.start_kill();
+    child.terminate().await;
     Ok(())
 }
 
@@ -521,12 +521,9 @@ pub(crate) fn capitalize(s: &str) -> String {
 /// plan's name is kept, and none of it is logged.
 pub async fn devin_status() -> Result<AgentStatus> {
     let bin = detect::which("devin").context("Devin isn't installed (curl -fsSL https://cli.devin.ai/install.sh | bash)")?;
-    let out = tokio::time::timeout(
-        TIMEOUT,
-        tokio::process::Command::new(&bin).args(["auth", "status"]).env("PATH", detect::login_path()).stdin(Stdio::null()).kill_on_drop(true).output(),
-    )
-    .await
-    .context("devin auth status timed out")??;
+    let out = crate::output_group(tokio::process::Command::new(&bin).args(["auth", "status"]).env("PATH", detect::login_path()), None, TIMEOUT)
+        .await
+        .context("devin auth status failed")?;
     let mut status = devin_account(&String::from_utf8_lossy(&out.stdout));
     if !status.logged_in {
         return Ok(status);
@@ -725,15 +722,16 @@ fn devin_reset(text: &str, now: chrono::DateTime<chrono::FixedOffset>) -> Option
         for part in rest.split_whitespace() {
             let (n, unit) = part.split_at(part.find(|c: char| !c.is_ascii_digit())?);
             let n: i64 = n.parse().ok()?;
-            secs += n * match unit {
+            let unit = match unit {
                 "d" => 86_400,
                 "h" => 3_600,
                 "m" => 60,
                 "s" => 1,
                 _ => return None,
             };
+            secs = secs.checked_add(n.checked_mul(unit)?)?;
         }
-        return Some(now.timestamp_millis() + secs * 1000);
+        return now.timestamp_millis().checked_add(secs.checked_mul(1000)?);
     }
     let (when, zone) = match text.split_once(" (") {
         Some((w, z)) => (w.trim(), Some(z.trim_end_matches(')').trim())),
@@ -746,8 +744,9 @@ fn devin_reset(text: &str, now: chrono::DateTime<chrono::FixedOffset>) -> Option
                 0
             } else {
                 let sign = if z.starts_with('-') { -1 } else { 1 };
-                let (h, m) = z[1..].split_once(':').unwrap_or((&z[1..], "0"));
-                sign * (h.parse::<i32>().ok()? * 3_600 + m.parse::<i32>().ok()? * 60)
+                let z = z.get(1..)?;
+                let (h, m) = z.split_once(':').unwrap_or((z, "0"));
+                sign * h.parse::<i32>().ok()?.checked_mul(3_600)?.checked_add(m.parse::<i32>().ok()?.checked_mul(60)?)?
             }
         }
         None => now.offset().local_minus_utc(),
@@ -1016,6 +1015,11 @@ mod tests {
         assert_eq!(devin_reset("Jan 2, 9:30 AM (UTC+5:30)", now), Some(at("2027-01-02T09:30:00+05:30").timestamp_millis()), "next year");
         assert_eq!(devin_reset("Dec 31, 11:00 PM (UTC)", now), Some(at("2026-12-31T23:00:00+00:00").timestamp_millis()));
         assert_eq!(devin_reset("soon", now), None);
+        // Absurd numbers and a zone with a multi-byte sign: no time, no panic.
+        assert_eq!(devin_reset("in 9999999999999999d", now), None);
+        assert_eq!(devin_reset("in 9223372036854775807s", now), None);
+        assert_eq!(devin_reset("Jan 2, 9:30 AM (UTC\u{2212}5)", now), None);
+        assert_eq!(devin_reset("Jan 2, 9:30 AM (UTC+99999999)", now), None);
     }
 
     /// Against the installed Devin CLI (signed in): its plan and quota. Sends no prompt.

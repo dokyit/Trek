@@ -35,8 +35,39 @@ fn tailscale_reach_requires_and_binds_its_address() {
     let addresses = crate::remote::Addresses { lan: none.lan, tailscale: Some("100.64.1.2".parse().unwrap()) };
     let (bind, advertise) = crate::remote::remote_endpoint(&addresses, trek_core::settings::Reach::Tailscale, 7420).unwrap();
     assert_eq!((bind.to_string(), advertise.as_str()), ("100.64.1.2:7420".into(), "100.64.1.2:7420"));
-    let (bind, advertise) = crate::remote::remote_endpoint(&addresses, trek_core::settings::Reach::Wifi, 7420).unwrap();
-    assert_eq!((bind.to_string(), advertise.as_str()), ("0.0.0.0:7420".into(), "192.168.1.2:7420"));
+}
+
+#[test]
+fn the_server_listens_only_where_phones_are_told_to_dial() {
+    use crate::remote::{Addresses, remote_endpoint};
+    let wifi = |addresses: &Addresses| {
+        let (bind, advertise) = remote_endpoint(addresses, trek_core::settings::Reach::Wifi, 7420).unwrap();
+        assert_eq!(bind.to_string(), advertise);
+        advertise
+    };
+    let lan = Some("192.168.1.2".parse().unwrap());
+    let tailscale = Some("100.101.1.2".parse().unwrap());
+    assert_eq!(wifi(&Addresses { lan, tailscale }), "192.168.1.2:7420");
+    // Without Wi-Fi, the tailnet address; with neither, only this Mac.
+    assert_eq!(wifi(&Addresses { lan: None, tailscale }), "100.101.1.2:7420");
+    assert_eq!(wifi(&Addresses::default()), "127.0.0.1:7420");
+}
+
+#[test]
+fn tailscale_is_the_tunnel_it_names_not_any_shared_address() {
+    use crate::remote::Addresses;
+    let ifs = |list: &[(&str, &str)]| -> Vec<(String, std::net::Ipv4Addr)> { list.iter().map(|(n, ip)| (n.to_string(), ip.parse().unwrap())).collect() };
+    // Carrier-grade NAT on Wi-Fi (a hotspot) is neither the LAN nor Tailscale.
+    let hotspot = ifs(&[("en0", "100.72.3.4")]);
+    assert_eq!(Addresses::from_interfaces(&hotspot, None), Addresses::default());
+    // A tunnel in that range is; a VPN's private tunnel address isn't the LAN.
+    let tailnet = ifs(&[("utun3", "10.8.0.2"), ("en0", "192.168.1.2"), ("utun4", "100.101.1.2")]);
+    let found = Addresses::from_interfaces(&tailnet, None);
+    assert_eq!((found.lan, found.tailscale), (Some("192.168.1.2".parse().unwrap()), Some("100.101.1.2".parse().unwrap())));
+    // What Tailscale says wins, when this Mac has that address.
+    let two = ifs(&[("utun2", "100.64.0.9"), ("utun4", "100.101.1.2")]);
+    assert_eq!(Addresses::from_interfaces(&two, Some("100.101.1.2".parse().unwrap())).tailscale, Some("100.101.1.2".parse().unwrap()));
+    assert_eq!(Addresses::from_interfaces(&two, Some("100.99.9.9".parse().unwrap())).tailscale, Some("100.64.0.9".parse().unwrap()));
 }
 
 fn send(id: &str, text: &str) -> impl FnOnce(tr::Reply<Option<tr::Open>>) -> tr::HostRequest {
@@ -343,6 +374,15 @@ fn a_phone_changes_only_the_settings_it_may() {
         assert_eq!(trek.read(cx, |ws, _| (ws.settings.general.hand_holding, ws.settings.inbox.auto_settle_days)), (HandHolding::Auto, 7));
         let bad = ask(&trek, cx, set(tr::SettingsChange { push_server: Some("javascript:alert(1)".into()), ..Default::default() }));
         assert_eq!(bad.unwrap_err().code, tr::ErrorCode::BadRequest);
+        // Only https: what goes to ntfy says what the agents are doing.
+        for plain in ["http://ntfy.example.com", "https://", "ftp://ntfy.example.com", "https://ntfy.example.com/a b"] {
+            let refused = ask(&trek, cx, set(tr::SettingsChange { push_server: Some(plain.into()), ..Default::default() })).unwrap_err();
+            assert_eq!(refused.code, tr::ErrorCode::BadRequest, "{plain}");
+            assert!(refused.message.contains("https://"), "{}", refused.message);
+        }
+        assert_eq!(trek.read(cx, |ws, _| ws.settings.mobile.push_server.clone()), trek_core::settings::Settings::default().mobile.push_server);
+        let own = ask(&trek, cx, set(tr::SettingsChange { push_server: Some("HTTPS://ntfy.example.com/".into()), ..Default::default() })).unwrap();
+        assert_eq!(own.push.server, "HTTPS://ntfy.example.com");
         let unknown = ask(&trek, cx, set(tr::SettingsChange { default_agent: Some("acp:nobody".into()), ..Default::default() }));
         assert_eq!(unknown.unwrap_err().code, tr::ErrorCode::NotFound);
         let topic = trek.read(cx, |ws, _| ws.settings.mobile.push_topic.clone());
@@ -408,7 +448,30 @@ fn git_from_the_phone_reviews_commits_and_switches_as_the_panel_does() {
             move |reply| tr::HostRequest::GitSwitch { req, reply }
         };
         assert_eq!(ask_later(&trek, cx, switch("--orphan=x")).await.unwrap_err().code, tr::ErrorCode::NotFound);
-        ask_later(&trek, cx, switch("dev")).await.unwrap();
+        assert!(trek.read(cx, |ws, _| ws.switch_blocked(&trek.project)).is_none(), "a refused switch lets go");
+
+        // While the phone's switch runs, the checkout is switching: nothing else switches it (nor
+        // starts a turn in it, `switch_blocked`); once done it's free again.
+        let (reply, mut switched) = tokio::sync::oneshot::channel();
+        let (second, mut refused) = tokio::sync::oneshot::channel();
+        let blocked = trek.update(cx, |ws, cx| {
+            ws.remote_request(switch("dev")(reply), cx);
+            ws.remote_request(switch("main")(second), cx);
+            ws.switch_blocked(&trek.project)
+        });
+        assert_eq!(blocked.as_deref(), Some("Switching branches…"));
+        assert_eq!(refused.try_recv().unwrap().unwrap_err().code, tr::ErrorCode::Conflict);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let done = loop {
+            cx.run_until_parked();
+            if let Ok(done) = switched.try_recv() {
+                break done;
+            }
+            assert!(std::time::Instant::now() < deadline, "no answer");
+            cx.background_executor.timer(std::time::Duration::from_millis(5)).await;
+        };
+        done.unwrap();
+        assert!(trek.read(cx, |ws, _| ws.switch_blocked(&trek.project)).is_none());
         assert_eq!(trek_core::worktree::git(&trek.project, &["branch", "--show-current"]).unwrap().trim(), "dev");
     });
 }

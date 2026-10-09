@@ -498,21 +498,45 @@ async fn pairing_then_hello() {
     assert_eq!(handle.devices().len(), 1);
 }
 
+/// Over dual-stack loopback: two addresses, `127.0.0.1` and `::1`.
+async fn start_dual_stack() -> (RemoteHandle, String, String) {
+    let (handle, _) = start_with(|config| config.bind = "[::]:0".parse().unwrap()).await;
+    let port = handle.local_addr().port();
+    (handle, format!("ws://127.0.0.1:{port}"), format!("ws://[::1]:{port}"))
+}
+
+async fn try_pair(url: &str, code: &str, device_id: &str) -> Value {
+    let (mut c, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    send(&mut c, json!({"type": "pair", "protocol": 1, "code": code, "device_id": device_id, "device_name": "x"})).await;
+    recv(&mut c).await
+}
+
 #[tokio::test]
-async fn wrong_codes_burn_the_offer() {
+async fn a_wrong_code_holds_up_only_its_address() {
+    let (handle, v4, v6) = start_dual_stack().await;
+    handle.pairing_offer_with_code("K7Q2-9XMV");
+    let wrong = try_pair(&v6, "AAAA-AAAA", "x").await;
+    assert_eq!((wrong["code"].as_str(), wrong["message"].as_str()), (Some("pairing_failed"), Some("Wrong pairing code")));
+    // That address waits, even with the right code.
+    let waits = try_pair(&v6, "K7Q2-9XMV", "x").await;
+    assert_eq!(waits["code"], "pairing_failed");
+    assert!(waits["message"].as_str().unwrap().contains("try again in 1 s"), "{waits}");
+    // A phone elsewhere pairs at once.
+    assert_eq!(try_pair(&v4, "K7Q2-9XMV", "phone").await["type"], "paired");
+    assert_eq!(handle.devices().len(), 1);
+}
+
+#[tokio::test]
+async fn wrong_codes_back_off_then_count_again() {
     let (handle, _) = start().await;
-    let offer = handle.pairing_offer_with_code("K7Q2-9XMV");
-    assert_eq!(offer.code, "K7Q2-9XMV");
-    for _ in 0..5 {
-        let mut c = connect(&handle).await;
-        send(&mut c, json!({"type": "pair", "protocol": 1, "code": "AAAA-AAAA", "device_id": "x", "device_name": "x"})).await;
-        assert_eq!(recv(&mut c).await["code"], "pairing_failed");
-        closed(&mut c).await;
-    }
-    let mut c = connect(&handle).await;
-    send(&mut c, json!({"type": "pair", "protocol": 1, "code": "K7Q2-9XMV", "device_id": "x", "device_name": "x"})).await;
-    assert_eq!(recv(&mut c).await["code"], "pairing_failed");
-    closed(&mut c).await;
+    let url = format!("ws://{}", handle.local_addr());
+    handle.pairing_offer_with_code("K7Q2-9XMV");
+    assert_eq!(try_pair(&url, "AAAA-AAAA", "x").await["message"], "Wrong pairing code");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(try_pair(&url, "AAAA-AAAA", "x").await["message"], "Wrong pairing code");
+    assert!(try_pair(&url, "K7Q2-9XMV", "x").await["message"].as_str().unwrap().contains("try again in 2 s"));
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert_eq!(try_pair(&url, "K7Q2-9XMV", "x").await["type"], "paired");
 }
 
 #[tokio::test]
@@ -534,18 +558,48 @@ async fn replacing_a_connection_does_not_report_the_device_disconnected() {
 }
 
 #[tokio::test]
-async fn unauthenticated_connections_are_capped() {
-    let (handle, _) = start_with(|config| config.auth_timeout = Duration::from_secs(5)).await;
+async fn unauthenticated_connections_are_capped_per_address() {
+    let (handle, v4, v6) = start_dual_stack().await;
+    let port = handle.local_addr().port();
     let mut held = Vec::new();
-    for _ in 0..16 {
-        held.push(TcpStream::connect(handle.local_addr()).await.unwrap());
+    for _ in 0..server::PRE_AUTH_PER_ADDRESS {
+        held.push(TcpStream::connect(("127.0.0.1", port)).await.unwrap());
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut refused = TcpStream::connect(handle.local_addr()).await.unwrap();
+    let mut refused = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let mut byte = [0];
     let read = tokio::time::timeout(Duration::from_secs(1), refused.read(&mut byte)).await.unwrap().unwrap();
-    assert_eq!(read, 0, "the seventeenth unauthenticated socket is closed");
-    assert_eq!(held.len(), 16);
+    assert_eq!(read, 0, "a fifth unauthenticated socket from one address is closed");
+    // Another address still pairs; this one does once a place is free.
+    let offer = handle.pairing_offer();
+    assert_eq!(try_pair(&v6, &offer.code, "dev-6").await["type"], "paired");
+    drop(held.pop());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let offer = handle.pairing_offer();
+    assert_eq!(try_pair(&v4, &offer.code, "dev-4").await["type"], "paired");
+}
+
+#[tokio::test]
+async fn messages_before_authenticating_are_capped() {
+    let (handle, host) = start().await;
+    let offer = handle.pairing_offer();
+    // A pair padded past the cap closes the socket unanswered, and doesn't spend the code.
+    let mut c = connect(&handle).await;
+    let name = "x".repeat(server::MAX_PRE_AUTH);
+    let _ = c.send(Message::text(json!({"type": "pair", "protocol": 1, "code": offer.code, "device_id": "big", "device_name": name}).to_string())).await;
+    closed(&mut c).await;
+    assert!(handle.devices().is_empty());
+    // The longest fields a pair can carry fit.
+    let mut c = connect(&handle).await;
+    let (id, name) = ("i".repeat(128), "\u{1F4F1}".repeat(128));
+    send(&mut c, json!({"type": "pair", "protocol": 1, "code": offer.code, "device_id": id, "device_name": name, "app_version": "1.0.0 (100)"})).await;
+    assert_eq!(recv(&mut c).await["type"], "paired");
+    assert_eq!(recv(&mut c).await["type"], "snapshot");
+    // Once authenticated, messages may be as large as `max_message`.
+    let text = "y".repeat(64 << 10);
+    send(&mut c, json!({"type": "send", "id": "1", "thread_id": "t1", "text": text})).await;
+    assert_eq!(recv(&mut c).await["type"], "ack");
+    assert!(host.calls().iter().any(|call| call.starts_with("send t1 yyy")));
 }
 
 #[tokio::test]

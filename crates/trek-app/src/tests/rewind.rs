@@ -99,19 +99,45 @@ async fn files(trek: &Trek, cx: &mut TestAppContext, what: &str, f: impl Fn(&Pat
     }
 }
 
-/// Two turns ("apple", then "banana") in a git project, with the files changed after each as
-/// the agent would have: after the first, notes.txt says "v2" and new.txt exists; after the
-/// second, notes.txt says "v3", extra.txt exists and new.txt is gone.
+/// As the next turn ends (before the checkpoint that closes it), `f` changes the project's
+/// files: what that turn's agent did.
+pub(super) fn during_next_turn(trek: &Trek, cx: &mut TestAppContext, f: impl FnOnce(&Path) + 'static) {
+    let dir = trek.project.clone();
+    trek.update(cx, |ws, _| ws.at_turn_end = Some(Box::new(move || f(&dir))));
+}
+
+/// Two turns ("apple", then "banana") in a git project, with the files changed during each as
+/// the agent would have: in the first, notes.txt comes to say "v2" and new.txt is made; in the
+/// second, notes.txt comes to say "v3", extra.txt is made and new.txt goes.
 async fn two_turns(trek: &Trek, cx: &mut TestAppContext) -> String {
     git_project(&trek.project);
+    during_next_turn(trek, cx, |p| {
+        std::fs::write(p.join("notes.txt"), "v2\n").unwrap();
+        std::fs::write(p.join("new.txt"), "made by turn one\n").unwrap();
+    });
     let id = turn(trek, cx, "apple").await;
-    std::fs::write(trek.project.join("notes.txt"), "v2\n").unwrap();
-    std::fs::write(trek.project.join("new.txt"), "made by turn one\n").unwrap();
+    during_next_turn(trek, cx, |p| {
+        std::fs::write(p.join("notes.txt"), "v3\n").unwrap();
+        std::fs::write(p.join("extra.txt"), "made by turn two\n").unwrap();
+        std::fs::remove_file(p.join("new.txt")).unwrap();
+    });
     turn(trek, cx, "banana").await;
-    std::fs::write(trek.project.join("notes.txt"), "v3\n").unwrap();
-    std::fs::write(trek.project.join("extra.txt"), "made by turn two\n").unwrap();
-    std::fs::remove_file(trek.project.join("new.txt")).unwrap();
     id
+}
+
+/// The Undo of every toast `trek` shows from now on, with its message.
+pub(super) fn toasts(trek: &Trek, cx: &mut TestAppContext) -> std::rc::Rc<std::cell::RefCell<Vec<(String, Option<crate::workspace::UndoAction>)>>> {
+    let toasts = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+    let sink = toasts.clone();
+    cx.update(|cx| {
+        cx.subscribe(&trek.ws, move |_, event: &crate::workspace::WorkspaceEvent, _| {
+            if let crate::workspace::WorkspaceEvent::Toast { message, undo } = event {
+                sink.borrow_mut().push((message.clone(), undo.clone()));
+            }
+        })
+        .detach()
+    });
+    toasts
 }
 
 #[test]
@@ -119,10 +145,11 @@ fn rewinding_takes_back_the_conversation_the_files_and_what_the_agent_knows() {
     run(async |cx| {
         let trek = open(cx);
         let id = two_turns(&trek, cx).await;
-        // Each turn's first message got a checkpoint, in the repo and in the store.
+        // Each turn got a checkpoint as its first message went and another as it ended, in the
+        // repo and in the store.
         let checkpoints = trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap());
-        assert_eq!(checkpoints.len(), 2);
-        assert_eq!(git(&trek.project, &["for-each-ref", "--format=%(refname)", "refs/trek/checkpoints/"]).lines().count(), 2);
+        assert_eq!(checkpoints.len(), 4);
+        assert_eq!(git(&trek.project, &["for-each-ref", "--format=%(refname)", "refs/trek/checkpoints/"]).lines().count(), 4);
         let head = git(&trek.project, &["rev-parse", "HEAD"]);
 
         // "Rewind to here" on the second message: the popover lists what restoring changes.
@@ -141,9 +168,9 @@ fn rewinding_takes_back_the_conversation_the_files_and_what_the_agent_knows() {
         assert!(matches!(trek.items(cx, &id).last(), Some(Item::TurnEnd { .. })), "the first turn is left whole");
         assert_eq!(trek.composer_text(cx), "banana", "the message is back in the composer");
         assert_eq!(git(&trek.project, &["rev-parse", "HEAD"]), head, "HEAD untouched");
-        // The rewound message's checkpoint went with it.
+        // The rewound turn's checkpoints went with it.
         let left: Vec<String> = trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap()).into_iter().map(|c| c.item_id).collect();
-        assert_eq!(left, [checkpoints[0].item_id.clone()]);
+        assert_eq!(left, [checkpoints[0].item_id.clone(), checkpoints[1].item_id.clone()]);
         // The agent was taken back too (its own session, cut back): it never heard "banana".
         assert!(matches!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Native { fork: false, .. })));
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
@@ -201,8 +228,8 @@ fn edit_and_resend_replaces_the_message() {
         assert_eq!(trek.composer_text(cx), "a draft of mine", "the draft from before the edit is back");
         // The first message started the session: the edit starts a new one.
         assert_eq!(recall(&trek, cx, &id).await, "I remember: cherry");
-        // The edited message has a checkpoint of its own.
-        assert_eq!(trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap().len()), 2);
+        // The edited message's turn has checkpoints of its own (as did "recall"'s).
+        assert_eq!(trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap().len()), 4);
     });
 }
 
@@ -252,7 +279,10 @@ fn forking_copies_the_conversation_and_leaves_the_original_alone() {
         let id = two_turns(&trek, cx).await;
         let first_end = trek.item_ix(cx, &id, |i| matches!(i, Item::TurnEnd { .. }));
         let title = trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone());
-        // An earlier turn's actions show while the pointer is on its footer.
+        // An earlier turn's actions show while the pointer is on its footer (scrolled to: the
+        // turns' change cards are tall).
+        trek.update(cx, |ws, cx| ws.open_thread_at(&id, ItemRef::Position(first_end), cx));
+        trek.render(cx);
         trek.window(cx, |window, cx| window.hover(("copy-turn", first_end), cx));
         trek.click(cx, ("fork-turn", first_end));
         let fork = trek.thread_id(cx);
@@ -261,8 +291,9 @@ fn forking_copies_the_conversation_and_leaves_the_original_alone() {
         assert_eq!((t.title.as_str(), t.agent.clone(), t.cwd.as_deref()), (format!("{title} (fork)").as_str(), mock(), Some(trek.project.as_path())));
         assert_eq!(said(&trek, cx, &fork), ["apple"]);
         assert!(matches!(t.reopen, Some(Reopen::Native { fork: true, .. })));
-        // Its message keeps its checkpoint (the fork can take its files back too).
-        trek.wait(cx, "the fork's checkpoints", |ws| ws.store.checkpoints(&fork).is_ok_and(|c| c.len() == 1)).await;
+        // Its message keeps its checkpoints, as it went and as its turn ended (the fork can take
+        // its files back too).
+        trek.wait(cx, "the fork's checkpoints", |ws| ws.store.checkpoints(&fork).is_ok_and(|c| c.len() == 2)).await;
         let link = trek.read(cx, |ws, _| ws.store.checkpoints(&fork).unwrap()[0].clone());
         assert_eq!(git(&trek.project, &["rev-parse", &trek_core::checkpoint::ref_name(&fork, &link.item_id)]), link.sha);
         // The agent's session was forked at that point; the original's is as it was.
@@ -467,15 +498,22 @@ fn a_restore_can_be_undone() {
     run(async |cx| {
         let trek = open(cx);
         let id = two_turns(&trek, cx).await;
+        let shown = toasts(&trek, cx);
         let end = last_end(&trek, cx, &id);
         trek.click(cx, ("undo-turn", end));
         files_checked(&trek, cx).await;
         trek.click(cx, "confirm-go");
         files(&trek, cx, "the files restored", |p| read(p, "notes.txt").as_deref() == Some("v2\n")).await;
-        // The toast's Undo puts back what the restore replaced.
-        let sha = git(&trek.project, &["rev-parse", &trek_core::checkpoint::undo_ref(&id)]);
-        trek.update(cx, |ws, cx| ws.undo(crate::workspace::UndoAction::Unrestore { thread: id.clone(), repo: trek.project.clone(), sha }, cx));
+        // Meanwhile something else writes a file of its own: the undo leaves it be.
+        std::fs::write(trek.project.join("later.txt"), "not the turn's\n").unwrap();
+        // The toast's Undo puts back what the restore replaced, and only that.
+        let (message, undo) = shown.borrow().last().cloned().expect("a toast");
+        assert_eq!(message, "Restored 3 files");
+        let Some(undo @ crate::workspace::UndoAction::Unrestore { .. }) = undo else { panic!("no Undo on {message}") };
+        trek.update(cx, |ws, cx| ws.undo(undo, cx));
         files(&trek, cx, "the files as they were", |p| read(p, "notes.txt").as_deref() == Some("v3\n") && read(p, "extra.txt").is_some() && read(p, "new.txt").is_none()).await;
+        assert_eq!(read(&trek.project, "later.txt").as_deref(), Some("not the turn's\n"));
+        assert!(crate::root::UNDO_RESTORE_TOAST >= Duration::from_secs(20), "the Undo stays up long enough to reach");
     });
 }
 
@@ -531,8 +569,8 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
         });
         assert!(!trek.read(cx, |ws, _| ws.turn_running(&id)), "stopped at once");
         assert!(matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text == "Interrupted"));
-        // The checkpoint still lands; the agent never heard "banana".
-        trek.wait(cx, "the checkpoint", |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 2)).await;
+        // The checkpoint still lands (and the stopped turn's end one); the agent never heard "banana".
+        trek.wait(cx, "the checkpoint", |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)).await;
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
     });
 }
@@ -715,8 +753,104 @@ fn undoing_a_restore_waits_for_the_running_turn() {
         });
         // The resent turn has started when "Restored N files · Undo" is clicked.
         trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::TextDelta("Editing the parser".into())], cx));
-        let undo = crate::workspace::UndoAction::Unrestore { thread: id.clone(), repo: trek.project.clone(), sha: "0".repeat(40) };
+        let undo = crate::workspace::UndoAction::Unrestore { thread: id.clone(), repo: trek.project.clone(), sha: "0".repeat(40), paths: vec!["notes.txt".into()] };
         trek.update(cx, |ws, cx| ws.undo(undo, cx));
         assert_eq!(*toasts.borrow(), ["Stop the running turn first."], "nothing was put back under the agent");
+    });
+}
+
+#[test]
+fn files_are_not_put_back_under_another_threads_agent_at_work() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = two_turns(&trek, cx).await;
+        // A second thread in the same folder, mid-turn.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| ws.send("mock:long 600s".into(), vec![], cx));
+        let other = trek.thread_id(cx);
+        assert_ne!(other, id);
+        trek.wait(cx, "the other thread's turn", |ws| ws.turn_running(&other)).await;
+        let banana = user_ix(&trek, cx, &id, "banana");
+        let item = trek.read(cx, |ws, _| ws.live[&id].items.ids()[banana].clone());
+        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, true, cx)).is_none(), "refused while it works");
+        assert_eq!(said(&trek, cx, &id), ["apple", "banana"]);
+        assert_eq!(read(&trek.project, "notes.txt").as_deref(), Some("v3\n"));
+        // The conversation alone can still go back.
+        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx)).is_some());
+        assert_eq!(said(&trek, cx, &id), ["apple"]);
+        assert_eq!(read(&trek.project, "notes.txt").as_deref(), Some("v3\n"));
+        trek.update(cx, |ws, cx| ws.interrupt(&other, cx));
+        trek.wait_done(cx, &other, RunState::Idle).await;
+    });
+}
+
+#[test]
+fn undoing_a_turn_that_changed_nothing_leaves_other_threads_work_alone() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_project(&trek.project);
+        // Thread A answers a question: no files change.
+        let a = turn(&trek, cx, "How does the app start up?").await;
+        // Thread B, in the same folder, makes a file, the user edits another, and commits it all.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        let b = turn(&trek, cx, "mock:write notes.md").await;
+        assert_ne!(a, b);
+        assert!(read(&trek.project, "notes.md").is_some());
+        std::fs::write(trek.project.join("notes.txt"), "the user's\n").unwrap();
+        git(&trek.project, &["add", "-A"]);
+        git(&trek.project, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "theirs"]);
+
+        // Back on A: its turn changed nothing, and undoing it puts nothing back.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
+        trek.render(cx);
+        let end = last_end(&trek, cx, &a);
+        let a2 = a.clone();
+        trek.wait(cx, "A's changes counted", move |ws| ws.turn_changes_settled(&a2, end)).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.turn_changes(&a, end)), None, "no card: B's file and the user's edit aren't A's");
+        trek.click(cx, ("undo-turn", end));
+        assert_eq!(files_checked(&trek, cx).await, "changes: ", "nothing to restore");
+        trek.click(cx, "confirm-go");
+        assert!(said(&trek, cx, &a).is_empty());
+        // And the restore itself, asked for outright, finds nothing of A's to put back.
+        trek.update(cx, |ws, cx| ws.send_to(&a, "How does the app start up?".into(), vec![], cx));
+        trek.wait_done(cx, &a, RunState::Idle).await;
+        let ix = last_end(&trek, cx, &a);
+        let end = trek.read(cx, |ws, _| ws.live[&a].items.ids()[ix].clone());
+        assert!(trek.update(cx, |ws, cx| ws.undo_turn(&a, &end, true, cx)).is_some());
+        trek.wait(cx, "A's git work", |ws| ws.live.get(&a).is_some_and(|l| l.git_jobs_idle())).await;
+        assert_eq!(read(&trek.project, "notes.md").as_deref(), Some("# Notes\n\n- Note 1\n"));
+        assert_eq!(read(&trek.project, "notes.txt").as_deref(), Some("the user's\n"));
+        assert_eq!(git(&trek.project, &["status", "--porcelain"]), "", "nothing moved");
+    });
+}
+
+#[test]
+fn undoing_a_turn_puts_back_only_what_it_changed() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_project(&trek.project);
+        during_next_turn(&trek, cx, |p| {
+            std::fs::write(p.join("notes.txt"), "the turn's\n").unwrap();
+            std::fs::write(p.join("made.txt"), "the turn's\n").unwrap();
+        });
+        let a = turn(&trek, cx, "tidy the notes").await;
+        // Afterwards: another thread makes a file, and the user edits one and makes one.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        turn(&trek, cx, "mock:write notes.md").await;
+        std::fs::write(trek.project.join("user.txt"), "the user's\n").unwrap();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
+        trek.render(cx);
+        let end = last_end(&trek, cx, &a);
+        let a2 = a.clone();
+        trek.wait(cx, "A's changes counted", move |ws| ws.turn_changes_settled(&a2, end)).await;
+        let counted: Vec<String> = trek.read(cx, |ws, _| ws.turn_changes(&a, end)).expect("a card").files.into_iter().map(|f| f.path).collect();
+        assert_eq!(counted, ["made.txt", "notes.txt"], "the card counts the turn alone");
+
+        trek.click(cx, ("undo-turn", end));
+        assert_eq!(files_checked(&trek, cx).await, "changes: made.txt notes.txt", "the sheet lists exactly what goes back");
+        trek.click(cx, "confirm-go");
+        files(&trek, cx, "A's files put back", |p| read(p, "notes.txt").as_deref() == Some("v1\n") && read(p, "made.txt").is_none()).await;
+        assert!(read(&trek.project, "notes.md").is_some(), "the other thread's file stays");
+        assert_eq!(read(&trek.project, "user.txt").as_deref(), Some("the user's\n"), "the user's file stays");
     });
 }

@@ -1,6 +1,6 @@
 //! Images going out with the next message: what a paste attaches instead of inserting as text,
 //! saving clipboard image data (and converting image files agents can't read) to disk, and the
-//! thumbnail strip above the prompt.
+//! thumbnail strip above the prompt (a click previews them; see `image_preview`).
 
 use crate::mentions;
 use crate::workspace::WorkspaceEvent;
@@ -32,6 +32,11 @@ impl Outbox {
                 self.paths.push(path);
             }
         }
+    }
+
+    /// Take `path` back out (its thumbnail's ×, or Remove in the preview).
+    pub fn remove(&mut self, path: &Path) {
+        self.paths.retain(|p| p != path);
     }
 
     /// Hold a send to `target` while images are still being saved (⌘V then Return straight
@@ -246,24 +251,28 @@ pub fn paste<T: Attaching>(this: &mut T, pasted: Pasted, input: &Entity<Textarea
 }
 
 /// Thumbnails of `paths` (`size` square) with a remove button on hover, plus a spinner tile while
-/// `busy` (a snapshot or paste is still being saved).
+/// `busy` (a snapshot or paste is still being saved). A click previews the outbox from that image
+/// (its name is in the preview's header, so no tooltip: one would stay up over the preview), where
+/// Remove takes it out as the × does (`on_remove`).
 pub fn thumbnails(
     paths: &[PathBuf],
     size: Pixels,
     busy: bool,
-    on_remove: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+    on_remove: impl Fn(&Path, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
     let radius = size * (10. / 56.);
+    let all: std::rc::Rc<[PathBuf]> = paths.into();
     h_flex()
         .gap_2()
         .flex_wrap()
         .children(paths.iter().enumerate().map(|(i, p)| {
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let on_remove = on_remove.clone();
+            let (remove, preview_remove) = (on_remove.clone(), on_remove.clone());
+            let (path, all) = (p.clone(), all.clone());
             div()
                 .id(("attachment", i))
+                .test_support()
                 .group("att")
                 .relative()
                 .flex_none()
@@ -272,11 +281,16 @@ pub fn thumbnails(
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx))
+                .cursor_pointer()
+                .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
                 .child(img(p.clone()).size_full().object_fit(ObjectFit::Cover))
+                // A faint lift under the pointer: it opens.
+                .child(div().absolute().top_0().left_0().size_full().bg(gpui_kit::white().opacity(0.08)).invisible().group_hover("att", |s| s.visible()))
+                .on_click(move |_, window, cx| crate::image_preview::open_outbox(all.to_vec(), i, preview_remove.clone(), window, cx))
                 .child(
                     div()
                         .id(("att-x", i))
+                        .test_support()
                         .absolute()
                         .top(px(3.))
                         .right(px(3.))
@@ -292,7 +306,7 @@ pub fn thumbnails(
                         .child(Icon::new(IconName::Close).xsmall().text_color(gpui_kit::white()))
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
-                            on_remove(i, window, cx);
+                            remove(&path, window, cx);
                         }),
                 )
         }))
@@ -338,6 +352,8 @@ mod tests {
     #[test]
     fn text_pastes_stay_text() {
         assert_eq!(pasted(&ClipboardItem::new_string("hello".into())), None);
+        // A design's link (Figma's Copy link) stays a link the agent can hand to Figma's tools.
+        assert_eq!(pasted(&ClipboardItem::new_string("https://www.figma.com/design/AbC123/App?node-id=1-2".into())), None);
         // Finder copy of non-image files: their names paste as text, as before.
         let files = ClipboardItem {
             entries: vec![

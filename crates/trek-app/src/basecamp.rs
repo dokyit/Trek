@@ -1,39 +1,38 @@
-//! Basecamp: the day's (or week's, or all time's) trek at a glance. On the left, what's ready
-//! for review; on the right, the recap in a few sentences, the elevation profile (activity drawn
-//! as a mountain, the summit flagged, the hiker at "now") and quiet stat tiles.
+//! Basecamp: what needs the user, then the range's work in numbers: totals, turns over time, and
+//! tables by project and by model.
 //!
-//! The recap is computed off the main thread (`trek_core::basecamp`) when Basecamp opens and
-//! whenever threads change while it's open; frames only draw it.
+//! The numbers are computed off the main thread (`summarize`, from `trek_core::basecamp`) when
+//! Basecamp opens and whenever threads change while it's open; frames only draw them. The phone's
+//! Basecamp reads the same recap through the helpers at the end of this file.
 
 use crate::palette;
 use crate::ui;
-use chrono::Datelike as _;
 use crate::workspace::{Route, Workspace, fmt_tokens};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use chrono::{DateTime, Datelike as _, Duration as Days, NaiveDate, TimeZone, Timelike as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::cell::Cell;
-use std::rc::Rc;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use trek_core::basecamp::{self, Range, Recap, Span};
-use trek_core::store::{Thread, now_ms};
-use trek_core::{AgentId, RunState};
+use std::time::Duration;
+use trek_core::basecamp::{self, Range, Recap, ThreadActivity};
+use trek_core::pricing::Spend;
+use trek_core::store::{Activity, Store, Thread, UsageRow, now_ms};
+use trek_core::{AgentId, RunState, TokenUsage, UsageCost};
 
 actions!(basecamp, [Leave]);
 
-/// How long the numbers take to count up when Basecamp opens.
-const COUNT_UP: Duration = Duration::from_millis(400);
-/// The elevation profile: room above the silhouette (the summit flag), the silhouette, and the
-/// axis labels under it.
-const PROFILE_TOP: f32 = 24.;
-const PROFILE_HEIGHT: f32 = 96.;
-const PROFILE_AXIS: f32 = 20.;
-/// The hiker on the profile, in points per sprite pixel.
-const HIKER_CELL: f32 = 1.;
+/// Rows of "Needs review" shown before "Show more".
+const REVIEW_ROWS: usize = 8;
+/// The activity chart's bars, at their tallest.
+const CHART_HEIGHT: f32 = 96.;
+/// A bar's widest: a week's seven stay bars, not blocks.
+const MAX_BAR: f32 = 28.;
+/// The tables' number columns.
+const NUMBER_WIDTH: f32 = 84.;
 
-/// What a recap was computed from: another key means it's out of date.
+/// What a summary was computed from: another key means it's out of date.
 #[derive(Debug, Clone, PartialEq)]
 struct Key {
     range: Range,
@@ -47,19 +46,17 @@ pub struct Basecamp {
     workspace: Entity<Workspace>,
     focus: FocusHandle,
     range: Range,
-    recap: Option<Arc<Recap>>,
+    summary: Option<Arc<Summary>>,
     key: Option<Key>,
     computing: bool,
     /// On screen (the main window's route).
     open: bool,
-    /// When the numbers started counting up on this visit.
-    shown_at: Option<Instant>,
-    /// The stretch of the profile under the pointer.
+    /// The chart's bar under the pointer.
     hovered: Option<usize>,
-    /// Where the profile was last laid out, to tell which stretch the pointer is over.
-    profile: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// "Needs review" lists every thread, not just the first `REVIEW_ROWS`.
+    review_expanded: bool,
     _compute: Option<Task<()>>,
-    /// While open: a tick a minute (the hiker walks with the clock, the day may turn over).
+    /// While open: a tick a minute (relative times move on, the day may turn over).
     _clock: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -71,13 +68,12 @@ impl Basecamp {
             workspace,
             focus: cx.focus_handle(),
             range: Range::Today,
-            recap: None,
+            summary: None,
             key: None,
             computing: false,
             open: false,
-            shown_at: None,
             hovered: None,
-            profile: Rc::default(),
+            review_expanded: false,
             _compute: None,
             _clock: None,
             _subscription,
@@ -90,28 +86,16 @@ impl Basecamp {
         self.focus.clone()
     }
 
-    /// The recap on screen, once it's up to date (none is being computed).
+    /// Everything on screen, once it's up to date.
     #[cfg(test)]
-    pub fn recap(&self) -> Option<&Recap> {
-        self.recap.as_deref().filter(|_| !self.computing)
+    pub fn summary(&self) -> Option<&Summary> {
+        self.summary.as_deref().filter(|_| !self.computing)
     }
 
-    /// Where the profile was drawn, and the stretch under the pointer.
+    /// The chart's bar under the pointer.
     #[cfg(test)]
-    pub fn profile_hover(&self) -> (Option<Bounds<Pixels>>, Option<usize>) {
-        (self.profile.get(), self.hovered)
-    }
-
-    /// The line over the profile, as drawn now.
-    #[cfg(test)]
-    pub fn profile_line(&self) -> Option<String> {
-        self.recap.as_deref().map(|r| profile_line(r, self.hovered))
-    }
-
-    /// Count the numbers up again, as on opening.
-    #[cfg(test)]
-    pub fn replay_count_up(&mut self) {
-        self.shown_at = None;
+    pub fn hovered_bar(&self) -> Option<usize> {
+        self.hovered
     }
 
     pub fn range(&self) -> Range {
@@ -124,7 +108,6 @@ impl Basecamp {
         if open != self.open {
             self.open = open;
             self.hovered = None;
-            self.shown_at = None;
             self._clock = open.then(|| {
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor().timer(Duration::from_secs(60)).await;
@@ -136,17 +119,8 @@ impl Basecamp {
             cx.notify();
         }
         if open {
-            // Plan limits for the "Left on" tiles, once the agents are known (asked at most every
-            // 30 seconds; nothing is asked when no agent reports limits).
-            let ws = self.workspace.read(cx);
-            if ws.agent_status.is_empty() && !ws.usage_loading && !ws.detecting {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.refresh_usage(cx);
-                    ws.refresh_devin_usage(cx);
-                });
-            }
             self.refresh(cx);
-            // The review list and the tiles read the workspace as it is now.
+            // The needs lists read the workspace as it is now.
             cx.notify();
         }
     }
@@ -154,32 +128,30 @@ impl Basecamp {
     pub fn set_range(&mut self, range: Range, cx: &mut Context<Self>) {
         if range != self.range {
             self.range = range;
-            self.shown_at = None;
             self.hovered = None;
             self.refresh(cx);
             cx.notify();
         }
     }
 
-    /// The clock moved on to `now`: a recap still current only moves its "now" (the hiker, the
-    /// trail walked, "Updated"), one that isn't is computed again. Either way it's drawn again,
-    /// relative times and the greeting with it.
+    /// The clock moved on to `now`: a summary still current only moves its "now", one that isn't
+    /// (a new day) is computed again. Either way it's drawn again, relative times with it.
     pub fn tick(&mut self, now: i64, cx: &mut Context<Self>) {
         self.refresh(cx);
         if !self.computing
-            && let Some(recap) = self.recap.as_mut()
+            && let Some(summary) = self.summary.as_mut()
         {
-            Arc::make_mut(recap).now = now;
+            Arc::make_mut(summary).recap.now = now;
         }
         cx.notify();
     }
 
-    /// Compute the recap again if what it was computed from changed. One at a time: one that
+    /// Compute the summary again if what it was computed from changed. One at a time: one that
     /// finishes looks again.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        // A new day (or week) makes the recap out of date. All time's own start is found with the
-        // history, off the main thread; this one is today's, so it's computed again each day too.
+        // A new day (or week) makes the summary out of date. All time's own start is found with
+        // the history, off the main thread; this one is today's, so it's computed again each day.
         let window = self.range.window(&chrono::Local::now());
         let key = Key {
             range: self.range,
@@ -196,18 +168,18 @@ impl Basecamp {
         let range = self.range;
         let work = cx.background_executor().spawn(async move {
             let now = chrono::Local::now();
-            basecamp::recap(&store, range, &now).unwrap_or_else(|e| {
+            summarize(&store, range, &now).unwrap_or_else(|e| {
                 tracing::warn!("basecamp: {e:#}");
-                Recap::compute(range.window(&now), now.timestamp_millis(), &[])
+                Summary::compute(range, &now, range.window(&now), &[])
             })
         });
         self._compute = Some(cx.spawn(async move |this, cx| {
-            let recap = work.await;
+            let summary = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.computing = false;
                 // Switching range while it ran makes this one moot.
                 if key.range == this.range {
-                    this.recap = Some(Arc::new(recap));
+                    this.summary = Some(Arc::new(summary));
                     this.key = Some(key);
                 }
                 this.refresh(cx);
@@ -216,41 +188,13 @@ impl Basecamp {
         }));
     }
 
-    /// How far the numbers have counted up: 0 to 1 over `COUNT_UP`, eased; 1 with reduced motion.
-    pub(crate) fn count_up(&mut self, cx: &App) -> f32 {
-        if self.workspace.read(cx).settings.appearance.reduce_motion || cx.reduce_motion() {
-            return 1.;
-        }
-        let started = *self.shown_at.get_or_insert_with(Instant::now);
-        let t = (started.elapsed().as_secs_f32() / COUNT_UP.as_secs_f32()).min(1.);
-        1. - (1. - t).powi(3)
-    }
-
-    /// `count_up`, drawing again until it's done.
-    fn progress(&mut self, window: &mut Window, cx: &App) -> f32 {
-        let p = self.count_up(cx);
-        if p < 1. {
-            window.request_animation_frame();
-        }
-        p
-    }
-
     fn header(&self, review_unread: bool, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let range = self.range;
-        // All time says since when, once the recap knows.
-        let greeting = greeting_line(range, self.recap.as_deref());
         let this = cx.entity().downgrade();
         h_flex()
             .w_full()
             .gap(px(12.))
-            .items_end()
-            // Too narrow (the tools panel open): the greeting truncates, then the controls wrap
-            // below; narrower still, "Mark all read" wraps under the segmented control, which
-            // never clips.
             .flex_wrap()
-            .child(div().flex_none().text_size(px(24.)).font_semibold().line_height(px(30.)).child("Basecamp"))
-            .child(div().pb(px(4.)).min_w(px(140.)).truncate().text_size(px(13.5)).text_color(theme.muted_foreground).child(greeting))
+            .child(div().flex_none().text_size(px(22.)).font_semibold().line_height(px(30.)).child("Basecamp"))
             .child(div().flex_1())
             .child(
                 h_flex()
@@ -261,7 +205,7 @@ impl Basecamp {
                     .child(ui::segmented(
                         "basecamp-range",
                         [Range::Today, Range::Week, Range::All].map(|r| (r, r.label())).to_vec(),
-                        range,
+                        self.range,
                         move |r, _, cx| {
                             let _ = this.update(cx, |this, cx| this.set_range(r, cx));
                         },
@@ -279,231 +223,269 @@ impl Basecamp {
             .into_any_element()
     }
 
-    /// "Ready for review": what needs the user first, then finished threads not looked at yet.
-    fn review(&self, threads: &[Thread], cx: &mut Context<Self>) -> AnyElement {
+    /// "Needs you" (questions, approvals, plans, failures), then "Needs review" (finished
+    /// threads not looked at yet): the workspace's `ready_for_review`, split where it ranks them.
+    fn needs(&self, threads: &[Thread], cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let projects: Vec<Option<String>> = {
-            let ws = self.workspace.read(cx);
-            threads.iter().map(|t| t.project_id.as_ref().and_then(|p| ws.project(p)).map(|p| p.name.clone())).collect()
-        };
-        let waiting: Vec<Option<Waiting>> = {
+        let (needs, review): (Vec<(&Thread, Option<Waiting>)>, Vec<(&Thread, Option<Waiting>)>) = {
             let ws = self.workspace.read(cx);
             let sub_agents = ws.waiting_on_sub_agents();
             threads
                 .iter()
-                .map(|t| match t.run_state {
-                    RunState::NeedsYou => Some(Waiting::of(ws.pending_request(&t.id))),
-                    _ if sub_agents.contains(&t.id) => Some(Waiting::SubAgent),
-                    _ => None,
+                .map(|t| {
+                    let waiting = match t.run_state {
+                        RunState::NeedsYou => Some(Waiting::of(ws.pending_request(&t.id))),
+                        _ if sub_agents.contains(&t.id) => Some(Waiting::SubAgent),
+                        _ => None,
+                    };
+                    (t, waiting)
                 })
-                .collect()
+                .partition(|(t, waiting)| t.needs_you() || waiting.is_some())
+        };
+        let projects: HashMap<String, String> = {
+            let ws = self.workspace.read(cx);
+            threads.iter().filter_map(|t| t.project_id.as_ref()).filter_map(|p| ws.project(p)).map(|p| (p.id.clone(), p.name.clone())).collect()
         };
         let now = self.workspace.read(cx).now();
-        let rows: Vec<AnyElement> = threads.iter().zip(projects).zip(waiting).map(|((t, project), waiting)| review_row(t, project, waiting, now, cx)).collect();
+        let project = |t: &Thread| t.project_id.as_ref().and_then(|p| projects.get(p)).cloned();
+        let shown = if self.review_expanded { review.len() } else { review.len().min(REVIEW_ROWS) };
+        let more = review.len() - shown;
+        let needs_rows: Vec<AnyElement> = needs.iter().map(|(t, w)| needs_row(t, project(t), *w, now, cx)).collect();
+        let review_rows: Vec<AnyElement> = review.iter().take(shown).map(|(t, w)| needs_row(t, project(t), *w, now, cx)).collect();
         v_flex()
-            .gap(px(4.))
+            .id("basecamp-needs")
+            .test_support()
+            .gap(px(20.))
             .child(
-                h_flex()
-                    .px(px(10.))
-                    .pb(px(6.))
-                    .gap(px(6.))
-                    .text_size(px(13.))
-                    .child(div().font_medium().child("Ready for review"))
-                    .when(!threads.is_empty(), |el| el.child(div().text_color(theme.muted_foreground).child(threads.len().to_string()))),
+                v_flex()
+                    .child(section_title("Needs you", Some(needs.len()), cx))
+                    .when(needs.is_empty(), |el| el.child(div().py(px(6.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Nothing is waiting on you.")))
+                    .when(!needs.is_empty(), |el| el.child(list(needs_rows, cx))),
             )
-            .when(threads.is_empty(), |el| {
-                el.child(div().px(px(10.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Nothing waiting on you. Every thread is read."))
+            .when(!review.is_empty(), |el| {
+                el.child(
+                    v_flex()
+                        .child(section_title("Needs review", Some(review.len()), cx))
+                        .child(list(review_rows, cx))
+                        .when(more > 0 || (self.review_expanded && review.len() > REVIEW_ROWS), |el| {
+                            let label = if more > 0 { format!("Show {more} more") } else { "Show less".to_string() };
+                            el.child(
+                                div()
+                                    .id("basecamp-review-more")
+                                    .test_support()
+                                    .pt(px(6.))
+                                    .px(px(8.))
+                                    .text_size(px(12.))
+                                    .text_color(theme.muted_foreground)
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child(label)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.review_expanded = !this.review_expanded;
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
             })
-            .children(rows)
             .into_any_element()
     }
 
-    /// The recap: what the trek came to in sentences, the profile, the tiles.
-    fn trek(&self, recap: &Recap, p: f32, tiles_per_row: usize, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let title = trek_title(recap.window.range);
-        let updated = if self.computing { "Updating…".to_string() } else { format!("Updated {}", crate::time::clock(recap.now)) };
-        v_flex()
-            .child(
-                h_flex()
-                    .pb(px(12.))
-                    .text_size(px(13.))
-                    .child(div().flex_1().font_medium().child(title))
-                    .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(updated)),
-            )
-            .child(narrative(&recap.narrative(basecamp::model_label), p, &self.workspace, cx))
-            .child(div().mt(px(24.)).h(px(1.)).bg(theme.foreground.opacity(0.07)))
-            .child(self.profile(recap, p, cx))
-            .child(self.tiles(recap, p, tiles_per_row, cx))
+    /// The range's totals in a row of figures.
+    fn totals(&self, recap: &Recap, spend: &Spend, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let line = theme.foreground.opacity(0.07);
+        let figures = [
+            ("Threads", recap.threads.to_string(), None),
+            ("Turns", recap.turns.to_string(), None),
+            ("Tokens", fmt_tokens(recap.tokens.total()), None),
+            ("Cost", cost(spend), None),
+            ("Failures", recap.failed.to_string(), (recap.failed > 0).then(|| palette::red(cx))),
+            ("Agent time", agent_time(recap.agent_secs), None),
+        ];
+        h_flex()
+            .id("basecamp-totals")
+            .test_support()
+            .w_full()
+            .items_stretch()
+            .border_t_1()
+            .border_b_1()
+            .border_color(line)
+            .children(figures.into_iter().enumerate().map(|(i, (label, value, color))| {
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .py(px(12.))
+                    .px(px(14.))
+                    .gap(px(4.))
+                    .when(i > 0, |el| el.border_l_1().border_color(line))
+                    .child(div().text_size(px(12.)).text_color(theme.muted_foreground).truncate().child(label))
+                    .child(div().text_size(px(17.)).font_medium().truncate().when_some(color, |el, c| el.text_color(c)).child(value))
+            }))
             .into_any_element()
     }
 
-    fn profile(&self, recap: &Recap, p: f32, cx: &mut Context<Self>) -> AnyElement {
+    /// Turns over the range, a bar a stretch, with the stretch under the pointer spelled out.
+    fn chart(&self, chart: &Chart, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let total = basecamp::count(recap.prompts, "prompt", "prompts");
-        let line = profile_line(recap, self.hovered);
-        let data = Profile::of(recap, p, self.hovered, cx);
-        let bounds = self.profile.clone();
+        let max = chart.bars.iter().map(|b| b.turns).max().unwrap_or(0);
+        let total: usize = chart.bars.iter().map(|b| b.turns).sum();
+        let line = match self.hovered.and_then(|i| chart.bars.get(i)) {
+            Some(b) => {
+                let mut parts = vec![b.label.clone(), basecamp::count(b.turns, "turn", "turns")];
+                if b.tokens > 0 {
+                    parts.push(format!("{} tokens", fmt_tokens(b.tokens)));
+                }
+                parts.join(" · ")
+            }
+            None => format!("Turns per {}", chart.step.noun()),
+        };
+        let n = chart.bars.len();
+        let gap = if n > 40 { 1. } else { 3. };
+        let bar_color = theme.foreground.opacity(0.42);
+        let bars = chart.bars.iter().enumerate().map(|(i, b)| {
+            let hovered = self.hovered == Some(i);
+            let frac = if max > 0 { b.turns as f32 / max as f32 } else { 0. };
+            div()
+                .id(("basecamp-bar", i))
+                .test_support()
+                .flex_1()
+                .min_w(px(1.))
+                .h_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .items_center()
+                .when(hovered, |el| el.bg(theme.foreground.opacity(0.04)))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    let next = if *hovered { Some(i) } else { this.hovered.filter(|h| *h != i) };
+                    if next != this.hovered {
+                        this.hovered = next;
+                        cx.notify();
+                    }
+                }))
+                .when(b.turns > 0, |el| {
+                    el.child(div().w_full().max_w(px(MAX_BAR)).h(relative(frac)).min_h(px(2.)).rounded(px(1.5)).bg(if hovered { theme.foreground.opacity(0.8) } else { bar_color }))
+                })
+        }).collect::<Vec<_>>();
+        let mut ticks = chart.ticks.iter().peekable();
+        let labels = (0..n).map(|i| {
+            let label = ticks.next_if(|(at, _)| *at == i).map(|(_, l)| l.clone());
+            // Wider than its bar, a label hangs over its neighbours, centred on its own.
+            div().flex_1().min_w(px(1.)).flex().justify_center().when_some(label, |el, l| el.child(div().flex_none().whitespace_nowrap().child(l)))
+        }).collect::<Vec<_>>();
         v_flex()
-            .pt(px(16.))
+            .gap(px(8.))
             .child(
                 h_flex()
                     .text_size(px(12.5))
                     .child(div().flex_1().min_w_0().truncate().text_color(theme.muted_foreground).child(line))
-                    .child(div().text_color(theme.muted_foreground).child(tween(&total, p))),
+                    .child(div().text_color(theme.muted_foreground).child(basecamp::count(total, "turn", "turns"))),
             )
             .child(
-                div()
-                    .id("basecamp-profile")
+                h_flex()
+                    .id("basecamp-chart")
                     .test_support()
                     .w_full()
-                    .h(px(PROFILE_TOP + PROFILE_HEIGHT + PROFILE_AXIS))
-                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                        let Some(b) = this.profile.get() else { return };
-                        let n = this.recap.as_ref().map_or(0, |r| r.buckets.len());
-                        let w = b.size.width.as_f32();
-                        if n == 0 || w <= 0. {
-                            return;
-                        }
-                        let i = (((e.position.x - b.origin.x).as_f32() / w) * n as f32).floor().clamp(0., n as f32 - 1.) as usize;
-                        if this.hovered != Some(i) {
-                            this.hovered = Some(i);
-                            cx.notify();
-                        }
-                    }))
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if !*hovered && this.hovered.take().is_some() {
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        canvas(
-                            move |b, _, _| bounds.set(Some(b)),
-                            move |b, _, window, cx| data.paint(b, window, cx),
-                        )
-                        .size_full(),
-                    ),
+                    .h(px(CHART_HEIGHT))
+                    .items_end()
+                    .gap(px(gap))
+                    .border_b_1()
+                    .border_color(theme.foreground.opacity(0.12))
+                    .children(bars),
             )
+            .child(h_flex().w_full().gap(px(gap)).text_size(px(11.)).text_color(theme.muted_foreground).children(labels))
             .into_any_element()
     }
 
-    fn tiles(&self, recap: &Recap, p: f32, per_row: usize, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let ws = self.workspace.read(cx);
-        let figure = |text: String| div().text_size(px(17.)).font_medium().min_w_0().truncate().child(tween(&text, p));
-        let mut tiles: Vec<AnyElement> = vec![];
-        for t in tile_data(recap, ws) {
-            let shown = match t.kind {
-                TileKind::BestModel => {
-                    let agent = t.agent.clone().unwrap_or(AgentId::ClaudeCode);
-                    h_flex().gap(px(8.)).min_w_0().child(ui::agent_logo(&agent, px(16.), cx)).child(figure(t.figure)).into_any_element()
-                }
-                TileKind::WorkedMostOn => {
-                    let look = t.project.as_ref().and_then(|(id, _)| ws.project(id)).map(|p| ws.project_look(&p.path)).unwrap_or_default();
-                    let name = t.project.as_ref().map(|(_, n)| n.clone()).unwrap_or_default();
-                    h_flex().gap(px(8.)).min_w_0().child(ui::project_badge(&name, &look, cx)).child(figure(t.figure)).into_any_element()
-                }
-                TileKind::Tokens => {
-                    let spark = Sparkline::of(recap, p, cx);
-                    h_flex()
-                        .gap(px(12.))
-                        .child(figure(t.figure))
-                        .child(div().flex_1().min_w(px(24.)).h(px(18.)).child(canvas(|_, _, _| {}, move |b, _, window, _| spark.paint(b, window)).size_full()))
-                        .into_any_element()
-                }
-                TileKind::AgentTime => figure(t.figure).into_any_element(),
-                TileKind::PlanLeft => {
-                    let left = t.left.unwrap_or_default();
-                    let agent = t.agent.clone().unwrap_or(AgentId::ClaudeCode);
-                    let color = if left <= 10. { palette::red(cx) } else if left <= 30. { palette::amber(cx) } else { theme.foreground.opacity(0.85) };
-                    v_flex()
-                        .gap(px(8.))
-                        .child(h_flex().gap(px(8.)).child(ui::agent_logo(&agent, px(16.), cx)).child(figure(t.figure)))
-                        .child(div().h(px(4.)).w_full().rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(color).w(relative(left / 100. * p))))
-                        .into_any_element()
-                }
-            };
-            tiles.push(tile(t.label, shown, t.note, cx));
-        }
+    /// A table of `rows` under `title`: the name, then threads, turns, tokens, cost and failures.
+    fn table(&self, id: &'static str, title: &'static str, name: &'static str, rows: &[Row], cx: &App) -> AnyElement {
+        let theme = cx.theme();
         let line = theme.foreground.opacity(0.07);
-        let rows: Vec<AnyElement> = tiles
-            .chunks_mut(per_row.max(1))
-            .map(|row| {
-                let n = row.len();
-                // Stretched, so the hairline between tiles runs the row's full height.
-                h_flex()
-                    .items_stretch()
-                    .border_t_1()
-                    .border_color(line)
-                    .children(row.iter_mut().enumerate().map(|(i, t)| {
-                        let t = std::mem::replace(t, div().into_any_element());
-                        div().flex_1().min_w_0().when(i > 0, |el| el.border_l_1().border_color(line)).child(t)
-                    }))
-                    // Short rows keep the grid: empty cells fill them out.
-                    .children((n..per_row).map(|_| div().flex_1()))
-                    .into_any_element()
-            })
-            .collect();
-        v_flex().mt(px(20.)).border_b_1().border_color(line).children(rows).into_any_element()
+        let ws = self.workspace.read(cx);
+        let number = |text: String| div().w(px(NUMBER_WIDTH)).flex_none().text_right().truncate().child(text);
+        let header = h_flex()
+            .h(px(28.))
+            .px(px(8.))
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .border_b_1()
+            .border_color(line)
+            .child(div().flex_1().min_w_0().child(name))
+            .children(["Threads", "Turns", "Tokens", "Cost", "Failures"].map(|h| number(h.to_string())));
+        let body = rows.iter().enumerate().map(|(i, r)| {
+            let badge = match (&r.agent, &r.project) {
+                (Some(agent), _) => Some(ui::agent_logo(agent, px(14.), cx)),
+                (None, Some(id)) => {
+                    let look = ws.project(id).map(|p| ws.project_look(&p.path)).unwrap_or_default();
+                    Some(ui::project_badge(&r.label, &look, cx))
+                }
+                (None, None) => None,
+            };
+            h_flex()
+                .id((id, i))
+                .test_support()
+                .h(px(32.))
+                .px(px(8.))
+                .text_size(px(13.))
+                .border_b_1()
+                .border_color(line)
+                .child(h_flex().flex_1().min_w_0().gap(px(8.)).children(badge).child(div().min_w_0().truncate().child(r.label.clone())))
+                .child(number(r.threads.to_string()))
+                .child(number(r.turns.to_string()))
+                .child(number(fmt_tokens(r.tokens)))
+                .child(number(cost(&r.spend)))
+                .child(number(r.failed.to_string()).when(r.failed > 0, |el| el.text_color(palette::red(cx))))
+        });
+        v_flex().child(section_title(title, None, cx)).child(v_flex().child(header).children(body)).into_any_element()
     }
 
-    /// Nothing on the trail in this range yet.
+    /// Nothing done in this range yet.
     fn empty(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let invitation = invitation(self.range);
-        let data = Profile::flat(self.recap.as_deref(), cx);
-        v_flex()
+        let text = match self.range {
+            Range::Today => "No activity today.",
+            Range::Week => "No activity this week.",
+            Range::All => "No activity yet.",
+        };
+        h_flex()
             .id("basecamp-empty")
             .test_support()
-            .gap(px(12.))
-            .child(div().w_full().h(px(PROFILE_TOP + 40.)).child(canvas(|_, _, _| {}, move |b, _, window, cx| data.paint(b, window, cx)).size_full()))
-            .child(div().text_size(px(17.)).line_height(px(26.)).text_color(theme.foreground.opacity(0.85)).child(invitation))
+            .gap(px(16.))
+            .py(px(14.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(theme.foreground.opacity(0.07))
+            .child(div().flex_1().text_size(px(13.)).text_color(theme.muted_foreground).child(text))
             .child(
-                h_flex().child(
-                    Button::new("basecamp-new-thread")
-                        .primary()
-                        .small()
-                        .icon(crate::assets::Lucide::SquarePen)
-                        .label("New thread")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx)))),
-                ),
+                Button::new("basecamp-new-thread")
+                    .outline()
+                    .small()
+                    .icon(crate::assets::Lucide::SquarePen)
+                    .label("New thread")
+                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx)))),
             )
             .into_any_element()
     }
 }
 
 impl Render for Basecamp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Basecamp");
         let theme = cx.theme().clone();
-        let ws = self.workspace.read(cx);
-        let review: Vec<Thread> = ws.ready_for_review().into_iter().cloned().collect();
+        let review: Vec<Thread> = self.workspace.read(cx).ready_for_review().into_iter().cloned().collect();
         let unread = review.iter().any(Thread::is_unseen);
-        // Room for the columns side by side, and for three tiles in a row.
-        let side = if ws.sidebar_collapsed { 16. } else { crate::root::SIDEBAR_WIDTH + 8. };
-        let room = window.viewport_size().width.as_f32() - side;
-        let tiles_per_row = if room >= 1080. { 3 } else { 2 };
-        let recap = self.recap.clone();
-        let p = if recap.is_some() { self.progress(window, cx) } else { 0. };
-        let right = match recap.as_deref() {
-            Some(r) if !r.is_empty() => self.trek(r, p, tiles_per_row, cx),
-            Some(_) => self.empty(cx),
-            None => div().text_size(px(13.)).text_color(theme.muted_foreground).child("Reading the trail…").into_any_element(),
-        };
-        let columns = if review.is_empty() && recap.as_deref().is_some_and(Recap::is_empty) {
-            // A fresh start: just the invitation, with no empty list beside it.
-            div().max_w(px(560.)).child(right).into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_wrap()
-                .items_start()
-                .gap_x(px(40.))
-                .gap_y(px(32.))
-                .child(div().w(px(300.)).flex_none().child(self.review(&review, cx)))
-                .child(div().flex_1().min_w(px(420.)).child(right))
-                .into_any_element()
+        let summary = self.summary.clone();
+        let activity: Vec<AnyElement> = match summary.as_deref() {
+            Some(s) if !s.recap.is_empty() => vec![
+                self.totals(&s.recap, &s.spend, cx),
+                self.chart(&s.chart, cx),
+                self.table("basecamp-project", "Projects", "Project", &s.projects, cx),
+                self.table("basecamp-model", "Models", "Model", &s.models, cx),
+            ],
+            Some(_) => vec![self.empty(cx)],
+            None => vec![div().text_size(px(13.)).text_color(theme.muted_foreground).child("Loading…").into_any_element()],
         };
         div()
             .id("basecamp")
@@ -517,17 +499,427 @@ impl Render for Basecamp {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(1120.))
+                    .max_w(px(960.))
                     .mx_auto()
                     .px(px(40.))
                     .pt(px(28.))
                     .pb(px(48.))
                     .gap(px(28.))
                     .child(self.header(unread, cx))
-                    .child(columns),
+                    .child(self.needs(&review, cx))
+                    .children(activity),
             )
     }
 }
+
+/// A section's title, with a count beside it.
+fn section_title(title: &'static str, count: Option<usize>, cx: &App) -> AnyElement {
+    h_flex()
+        .pb(px(6.))
+        .gap(px(6.))
+        .text_size(px(13.))
+        .child(div().font_medium().child(title))
+        .when_some(count.filter(|n| *n > 0), |el, n| el.child(div().text_color(cx.theme().muted_foreground).child(n.to_string())))
+        .into_any_element()
+}
+
+/// Rows between hairlines.
+fn list(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
+    let line = cx.theme().foreground.opacity(0.07);
+    v_flex().border_t_1().border_color(line).children(rows.into_iter().map(move |r| div().border_b_1().border_color(line).child(r))).into_any_element()
+}
+
+/// A row of "Needs you" or "Needs review", on one line: status icon, title, project, diff stat,
+/// then what it waits for (or how long ago it finished). Clicking it opens the thread.
+fn needs_row(t: &Thread, project: Option<String>, waiting: Option<Waiting>, now: i64, cx: &mut Context<Basecamp>) -> AnyElement {
+    let theme = cx.theme().clone();
+    // `key` names the status for tests (`review-paused-<id>`).
+    let (key, icon, color, status): (&str, Icon, Hsla, Option<SharedString>) = match (t.run_state, waiting) {
+        (RunState::NeedsYou, w) | (_, w @ Some(Waiting::SubAgent)) => {
+            let w = w.unwrap_or(Waiting::Unknown);
+            ("needs", w.icon(), palette::amber(cx), Some(w.label().into()))
+        }
+        (RunState::Failed, _) => ("failed", Icon::new(IconName::CircleX), palette::red(cx), Some("Failed".into())),
+        // Stopped at a usage limit, to go on at its reset: not done, and no failure either.
+        (RunState::Idle, _) if t.paused.is_some() => {
+            let until = match t.paused.as_ref().and_then(|p| p.resets_at) {
+                Some(at) => format!("Paused until {}", crate::time::reset_clock(at, now)),
+                None => "Paused at its limit".to_string(),
+            };
+            ("paused", Icon::new(crate::assets::Lucide::Clock), palette::amber(cx), Some(until.into()))
+        }
+        _ => ("done", Icon::new(IconName::CircleCheck), palette::emerald(cx), None),
+    };
+    let id = t.id.clone();
+    h_flex()
+        .id(SharedString::from(format!("review-{}", t.id)))
+        .test_support()
+        .h(px(34.))
+        .gap(px(10.))
+        .px(px(8.))
+        .text_size(px(13.))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.list_hover))
+        .child(icon.size(px(14.)).text_color(color))
+        .child(div().flex_1().min_w_0().truncate().child(t.title.clone()))
+        .when_some(project, |el, p| el.child(div().max_w(px(180.)).flex_none().truncate().text_size(px(12.)).text_color(theme.muted_foreground).child(p)))
+        .when(t.additions > 0 || t.deletions > 0, |el| {
+            el.child(
+                h_flex()
+                    .flex_none()
+                    .gap(px(4.))
+                    .text_size(px(12.))
+                    .child(div().text_color(palette::emerald(cx)).child(format!("+{}", t.additions)))
+                    .child(div().text_color(palette::red(cx)).child(format!("−{}", t.deletions))),
+            )
+        })
+        .child(
+            div().id(SharedString::from(format!("review-{key}-{}", t.id))).test_support().flex_none().min_w(px(36.)).text_right().text_size(px(12.)).map(|el| match status {
+                Some(s) => el.font_medium().text_color(color).child(s),
+                None => el.text_color(theme.muted_foreground).child(crate::time::relative(t.updated_at)),
+            }),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let id = id.clone();
+            this.workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
+        }))
+        .into_any_element()
+}
+
+/// "$1.28", or "—" when none of it has a price.
+fn cost(spend: &Spend) -> String {
+    if spend.priced() { crate::cost::usd(spend.usd()) } else { "—".to_string() }
+}
+
+/// "<1m", "42m", "1h 2m".
+fn agent_time(secs: u64) -> String {
+    if secs < 60 { "<1m".to_string() } else { basecamp::duration(secs) }
+}
+
+/// What Basecamp shows for a range, computed once per change (never per frame).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    /// The range's totals.
+    pub recap: Recap,
+    /// What the range cost: the tables' cost, all of it (reports that name no model priced as
+    /// their thread's, which the recap's own total leaves unpriced).
+    pub spend: Spend,
+    /// Most tokens first.
+    pub projects: Vec<Row>,
+    /// Most tokens first.
+    pub models: Vec<Row>,
+    pub chart: Chart,
+}
+
+/// A project's or a model's part in a range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub label: String,
+    /// A model's agent, for its logo.
+    pub agent: Option<AgentId>,
+    /// A project's id (neither: threads in no project).
+    pub project: Option<String>,
+    /// The user's threads that worked in the range (sub-agents' work counts, not as threads).
+    pub threads: usize,
+    pub turns: usize,
+    pub tokens: u64,
+    pub spend: Spend,
+    pub failed: usize,
+}
+
+/// The stretch each bar of the chart covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Hour,
+    Day,
+    /// This many weeks from a Monday.
+    Weeks(u32),
+}
+
+impl Step {
+    /// "hour", "day", "week", "4 weeks".
+    fn noun(self) -> String {
+        match self {
+            Step::Hour => "hour".into(),
+            Step::Day => "day".into(),
+            Step::Weeks(1) => "week".into(),
+            Step::Weeks(n) => format!("{n} weeks"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bar {
+    /// The stretch it covers: "2–3 PM", "Tue, Oct 7", "Week of Oct 6".
+    pub label: String,
+    pub turns: usize,
+    pub tokens: u64,
+}
+
+/// Turns and tokens over the range: hours for today, days for the week, days (weeks past three
+/// months) for all time, which spans at least a week.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chart {
+    pub step: Step,
+    pub bars: Vec<Bar>,
+    /// Axis labels: the bar each sits under, and its text.
+    pub ticks: Vec<(usize, String)>,
+}
+
+/// All time is drawn a day a bar up to this many days, then a week (or several) a bar.
+const CHART_DAYS: i64 = 91;
+/// All time in at most this many bars of weeks.
+const CHART_WEEKS: i64 = 104;
+
+impl Summary {
+    pub fn compute<Tz: TimeZone>(range: Range, now: &DateTime<Tz>, window: basecamp::Window, threads: &[ThreadActivity]) -> Summary {
+        let recap = Recap::compute(window, now.timestamp_millis(), threads);
+        let (projects, models) = tables(&window, threads);
+        let chart = chart(range, now, recap.first, threads);
+        let mut spend = Spend::default();
+        for p in &projects {
+            spend.merge(&p.spend);
+        }
+        Summary { recap, spend, projects, models, chart }
+    }
+}
+
+/// Basecamp's numbers for `range` at `now`, from the store. All time opens on the day of the
+/// earliest activity found. Slow: run it off the main thread.
+pub fn summarize<Tz: TimeZone>(store: &Store, range: Range, now: &DateTime<Tz>) -> anyhow::Result<Summary> {
+    if range != Range::All {
+        let window = range.window(now);
+        return Ok(Summary::compute(range, now, window, &basecamp::gather(store, &window)?));
+    }
+    // Everything there is, whenever it was; then the window around it.
+    let threads = basecamp::gather(store, &basecamp::Window { range, start: 0, end: i64::MAX, bucket_ms: i64::MAX })?;
+    let first = threads.iter().flat_map(|t| t.activity.iter().map(Activity::at).chain(t.usage.iter().map(|u| u.at))).filter(|at| *at > 0).min();
+    Ok(Summary::compute(range, now, range.window_from(now, first), &threads))
+}
+
+/// The tables by project and by model. A thread's turns and failures go to its model (the one it
+/// was set to, else the one its reports name most); its tokens and their cost to the model each
+/// report names (else the thread's). Every column of either table adds up to the recap's total
+/// (threads aside, in the model table: a thread that switched models counts under each; cost
+/// aside, as the recap leaves reports that name no model unpriced).
+pub fn tables(window: &basecamp::Window, threads: &[ThreadActivity]) -> (Vec<Row>, Vec<Row>) {
+    struct Acc<'a> {
+        row: Row,
+        /// Reports, with the model each is priced as.
+        usage: Vec<(&'a UsageRow, Option<&'a str>)>,
+    }
+    fn at<'a, 'b>(rows: &'b mut Vec<(String, Acc<'a>)>, key: String, new: impl FnOnce() -> Row) -> &'b mut Acc<'a> {
+        let i = match rows.iter().position(|(k, _)| *k == key) {
+            Some(i) => i,
+            None => {
+                rows.push((key, Acc { row: new(), usage: vec![] }));
+                rows.len() - 1
+            }
+        };
+        &mut rows[i].1
+    }
+    let blank = |label: String, agent: Option<AgentId>, project: Option<String>| Row { label, agent, project, threads: 0, turns: 0, tokens: 0, spend: Spend::default(), failed: 0 };
+    let model_key = |agent: &AgentId, model: Option<&str>| format!("{}\u{0}{}", agent.key(), model.map(basecamp::model_key).unwrap_or_default());
+    let mut projects: Vec<(String, Acc)> = vec![];
+    let mut models: Vec<(String, Acc)> = vec![];
+    for t in threads {
+        let usage: Vec<&UsageRow> = t.usage.iter().filter(|u| window.contains(u.at)).collect();
+        let (mut prompts, mut turns, mut failed) = (0, 0, 0);
+        for a in t.activity.iter().filter(|a| window.contains(a.at())) {
+            match a {
+                Activity::Prompt { .. } => prompts += 1,
+                Activity::TurnEnd { .. } => turns += 1,
+                Activity::TurnStopped { failed: f, .. } => {
+                    turns += 1;
+                    failed += *f as usize;
+                }
+            }
+        }
+        // As the recap counts it: a thread with no record of its failed turns failed once.
+        if failed == 0 && t.thread.run_state == RunState::Failed && window.contains(t.thread.updated_at) {
+            failed = 1;
+        }
+        let worked = prompts > 0 || turns > 0 || !usage.is_empty();
+        if !worked && failed == 0 {
+            continue;
+        }
+        let own = (worked && t.thread.parent_id.is_none()) as usize;
+        let tokens: u64 = usage.iter().map(|u| u.tokens.total()).sum();
+        let model = t.thread.model.as_deref().or_else(|| busiest_model(&usage));
+        // A report that names no model was the thread's.
+        let named: Vec<(&UsageRow, Option<&str>)> = usage.iter().map(|u| (*u, u.model.as_deref().or(model))).collect();
+        // By project.
+        let (key, label, id) = match (&t.thread.project_id, &t.project) {
+            (Some(id), Some(name)) => (id.clone(), name.clone(), Some(id.clone())),
+            _ => (String::new(), "No project".to_string(), None),
+        };
+        let p = at(&mut projects, key, || blank(label, None, id));
+        p.row.threads += own;
+        p.row.turns += turns;
+        p.row.failed += failed;
+        p.row.tokens += tokens;
+        p.usage.extend(named.iter().copied());
+        // By model.
+        let agent = &t.thread.agent;
+        let m = at(&mut models, model_key(agent, model), || blank(basecamp::model_label(agent, model), Some(agent.clone()), None));
+        m.row.threads += own;
+        m.row.turns += turns;
+        m.row.failed += failed;
+        let mut counted = vec![model_key(agent, model)];
+        for &(u, named) in &named {
+            let key = model_key(&u.agent, named);
+            let m = at(&mut models, key.clone(), || blank(basecamp::model_label(&u.agent, named), Some(u.agent.clone()), None));
+            m.row.tokens += u.tokens.total();
+            m.usage.push((u, named));
+            if !counted.contains(&key) {
+                m.row.threads += own;
+                counted.push(key);
+            }
+        }
+    }
+    let finish = |rows: Vec<(String, Acc)>| {
+        let mut out: Vec<Row> = rows
+            .into_iter()
+            .map(|(_, a)| Row { spend: spend_of(&a.usage), ..a.row })
+            .collect();
+        out.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(b.turns.cmp(&a.turns)).then(a.label.cmp(&b.label)));
+        out
+    };
+    (finish(projects), finish(models))
+}
+
+/// The model `usage` reports the most tokens for, if any report names one.
+fn busiest_model<'a>(usage: &[&'a UsageRow]) -> Option<&'a str> {
+    let mut by: Vec<(String, &'a str, u64)> = vec![];
+    for u in usage {
+        let Some(m) = u.model.as_deref() else { continue };
+        let key = basecamp::model_key(m);
+        match by.iter_mut().find(|(k, ..)| *k == key) {
+            Some((_, _, n)) => *n += u.tokens.total(),
+            None => by.push((key, m, u.tokens.total())),
+        }
+    }
+    by.into_iter().max_by_key(|(.., n)| *n).map(|(_, m, _)| m)
+}
+
+/// What `rows` cost, each priced as the model beside it, once per agent, model, UTC day and kind
+/// of cost (as the recap prices them: report by report, a long history is slow).
+fn spend_of(rows: &[(&UsageRow, Option<&str>)]) -> Spend {
+    type Sum<'a> = (&'a AgentId, Option<&'a str>, i64, Option<bool>, TokenUsage, f64);
+    let mut index: HashMap<(&AgentId, Option<&str>, i64, Option<bool>), usize> = HashMap::new();
+    let mut sums: Vec<Sum> = vec![];
+    for (u, model) in rows {
+        let key = (&u.agent, *model, u.at.div_euclid(86_400_000), u.cost.map(|c| c.reported));
+        let i = *index.entry(key).or_insert_with(|| {
+            sums.push((key.0, key.1, u.at, key.3, TokenUsage::default(), 0.));
+            sums.len() - 1
+        });
+        sums[i].4.add(&u.tokens);
+        sums[i].5 += u.cost.map_or(0., |c| c.usd);
+    }
+    let mut spend = Spend::default();
+    for (agent, model, at, reported, tokens, usd) in &sums {
+        spend.add(agent, *model, tokens, reported.map(|reported| UsageCost { usd: *usd, reported }), *at);
+    }
+    spend
+}
+
+/// The chart of `range` at `now` (in `now`'s time zone). `first`: the earliest activity, where
+/// all time starts (at least a week back, so it's never a single day).
+pub fn chart<Tz: TimeZone>(range: Range, now: &DateTime<Tz>, first: Option<i64>, threads: &[ThreadActivity]) -> Chart {
+    let tz = now.timezone();
+    let today = now.date_naive();
+    let monday = |d: NaiveDate| d - Days::days(d.weekday().num_days_from_monday() as i64);
+    let (start, step, n) = match range {
+        Range::Today => (today, Step::Hour, 24),
+        Range::Week => (monday(today), Step::Day, 7),
+        Range::All => {
+            let first = first.and_then(|f| tz.timestamp_millis_opt(f).single()).map(|d| d.date_naive()).filter(|d| *d < today).unwrap_or(today);
+            let first = first.min(today - Days::days(6));
+            match (today - first).num_days() + 1 {
+                days @ ..=CHART_DAYS => (first, Step::Day, days),
+                _ => {
+                    let from = monday(first);
+                    let weeks = (today - from).num_days() / 7 + 1;
+                    let per = (weeks + CHART_WEEKS - 1) / CHART_WEEKS;
+                    (from, Step::Weeks(per as u32), (weeks + per - 1) / per)
+                }
+            }
+        }
+    };
+    let n = n as usize;
+    let bar_of = |ms: i64| -> Option<usize> {
+        let local = tz.timestamp_millis_opt(ms).single()?.naive_local();
+        let i = match step {
+            Step::Hour => (local.date() == today).then_some(local.hour() as i64)?,
+            Step::Day => (local.date() - start).num_days(),
+            Step::Weeks(per) => (local.date() - start).num_days().div_euclid(7 * per as i64),
+        };
+        usize::try_from(i).ok().filter(|i| *i < n)
+    };
+    let day_of = |i: usize| match step {
+        Step::Hour => start,
+        Step::Day => start + Days::days(i as i64),
+        Step::Weeks(per) => start + Days::days(i as i64 * 7 * per as i64),
+    };
+    let this_year = |d: NaiveDate| d.year() == today.year();
+    let date = |d: NaiveDate| if this_year(d) { d.format("%b %-d").to_string() } else { d.format("%b %-d, %Y").to_string() };
+    let mut bars: Vec<Bar> = (0..n)
+        .map(|i| {
+            let label = match step {
+                Step::Hour => format!("{}–{}", hour_name(i as u32), hour_name(i as u32 + 1)),
+                Step::Day => format!("{}, {}", day_of(i).format("%a"), date(day_of(i))),
+                Step::Weeks(1) => format!("Week of {}", date(day_of(i))),
+                Step::Weeks(per) => format!("{} – {}", date(day_of(i)), date(day_of(i) + Days::days(7 * per as i64 - 1))),
+            };
+            Bar { label, turns: 0, tokens: 0 }
+        })
+        .collect();
+    for t in threads {
+        for a in &t.activity {
+            if let Activity::TurnEnd { at, .. } | Activity::TurnStopped { at, .. } = *a
+                && let Some(i) = bar_of(at)
+            {
+                bars[i].turns += 1;
+            }
+        }
+        for u in &t.usage {
+            if let Some(i) = bar_of(u.at) {
+                bars[i].tokens += u.tokens.total();
+            }
+        }
+    }
+    let ticks: Vec<(usize, String)> = match step {
+        Step::Hour => [(0, "12 AM"), (6, "6 AM"), (12, "Noon"), (18, "6 PM")].iter().map(|(i, l)| (*i, l.to_string())).collect(),
+        Step::Day if range == Range::Week => (0..n).map(|i| (i, day_of(i).format("%a").to_string())).collect(),
+        _ => {
+            // A date under every bar while there's room, else six spread across.
+            let label = |i: usize| {
+                let d = day_of(i);
+                if this_year(d) || step == Step::Day { d.format("%b %-d").to_string() } else { d.format("%b %Y").to_string() }
+            };
+            let at: Vec<usize> = if n <= 8 { (0..n).collect() } else { (0..6).map(|k| (k * (n - 1) + 2) / 5).collect() };
+            let mut out: Vec<(usize, String)> = vec![];
+            for i in at {
+                if out.last().is_none_or(|(j, l)| *j != i && *l != label(i)) {
+                    out.push((i, label(i)));
+                }
+            }
+            out
+        }
+    };
+    Chart { step, bars, ticks }
+}
+
+/// "12 AM", "2 PM" for an hour of the day (24 is midnight again).
+fn hour_name(h: u32) -> String {
+    let h = h % 24;
+    let twelve = if h % 12 == 0 { 12 } else { h % 12 };
+    format!("{twelve} {}", if h < 12 { "AM" } else { "PM" })
+}
+
+// The phone's Basecamp (`remote/basecamp.rs`) draws the recap as tiles and a profile, worded
+// here so both read alike.
 
 /// What a stat tile shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,140 +1075,6 @@ impl Waiting {
     }
 }
 
-/// A row of "Ready for review": status, title, then agent, diff stat and project.
-fn review_row(t: &Thread, project: Option<String>, waiting: Option<Waiting>, now: i64, cx: &mut Context<Basecamp>) -> AnyElement {
-    let theme = cx.theme().clone();
-    // `key` names the status for tests (`review-paused-<id>`).
-    let (key, icon, color, status): (&str, Icon, Hsla, Option<SharedString>) = match (t.run_state, waiting) {
-        (RunState::NeedsYou, w) | (_, w @ Some(Waiting::SubAgent)) => {
-            let w = w.unwrap_or(Waiting::Unknown);
-            ("needs", w.icon(), palette::amber(cx), Some(w.label().into()))
-        }
-        (RunState::Failed, _) => ("failed", Icon::new(IconName::CircleX), palette::red(cx), Some("Failed".into())),
-        // Stopped at a usage limit, to go on at its reset: not done, and no failure either.
-        (RunState::Idle, _) if t.paused.is_some() => {
-            let until = match t.paused.as_ref().and_then(|p| p.resets_at) {
-                Some(at) => format!("Paused until {}", crate::time::reset_clock(at, now)),
-                None => "Paused at its limit".to_string(),
-            };
-            ("paused", Icon::new(crate::assets::Lucide::Clock), palette::amber(cx), Some(until.into()))
-        }
-        _ => ("done", Icon::new(IconName::CircleCheck), palette::emerald(cx), None),
-    };
-    let id = t.id.clone();
-    h_flex()
-        .id(SharedString::from(format!("review-{}", t.id)))
-        .test_support()
-        .items_start()
-        .gap(px(10.))
-        .px(px(10.))
-        .py(px(8.))
-        .rounded(px(8.))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.list_hover))
-        .child(div().pt(px(2.)).child(icon.size(px(15.)).text_color(color)))
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(4.))
-                .child(div().min_w_0().truncate().text_size(px(13.5)).child(t.title.clone()))
-                .child(
-                    h_flex()
-                        .gap(px(6.))
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .child(ui::agent_logo(&t.agent, px(12.), cx))
-                        .when(t.additions > 0 || t.deletions > 0, |el| {
-                            el.child(div().text_color(palette::emerald(cx)).child(format!("+{}", t.additions)))
-                                .child(div().text_color(palette::red(cx)).child(format!("−{}", t.deletions)))
-                        })
-                        .when_some(project, |el, p| el.child(div().min_w_0().truncate().child(p))),
-                ),
-        )
-        .child(
-            div().id(SharedString::from(format!("review-{key}-{}", t.id))).test_support().text_size(px(12.)).flex_none().map(|el| match status {
-                Some(s) => el.font_medium().text_color(color).child(s),
-                None => el.text_color(theme.muted_foreground).child(crate::time::relative(t.updated_at)),
-            }),
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            let id = id.clone();
-            this.workspace.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
-        }))
-        .into_any_element()
-}
-
-/// A stat tile: a quiet label, the figure, a note under it. No card: tiles sit between hairlines.
-fn tile(label: impl Into<SharedString>, figure: impl IntoElement, note: impl Into<SharedString>, cx: &App) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    v_flex()
-        .min_w_0()
-        .px(px(16.))
-        .py(px(16.))
-        .gap(px(8.))
-        .child(div().text_size(px(12.)).text_color(muted).truncate().child(label.into()))
-        .child(figure)
-        // Up to two lines: a narrow tile would otherwise cut a note's tail, often its caveat.
-        .child(div().text_size(px(12.)).text_color(muted).line_clamp(2).text_ellipsis().child(note.into()))
-        .into_any_element()
-}
-
-/// The narrative as wrapping text, its projects and models as inline badges. Punctuation stays
-/// with the word (or badge) before it.
-fn narrative(spans: &[Span], p: f32, workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let quiet = theme.foreground.opacity(0.62);
-    let strong = theme.foreground;
-    let ws = workspace.read(cx);
-    // Each group wraps as one: a word, or a badge and the punctuation after it.
-    let mut groups: Vec<Vec<AnyElement>> = vec![];
-    let mut space_before = true;
-    let push = |groups: &mut Vec<Vec<AnyElement>>, el: AnyElement, new_word: bool| match groups.last_mut() {
-        Some(g) if !new_word => g.push(el),
-        _ => groups.push(vec![el]),
-    };
-    for span in spans {
-        match span {
-            Span::Text(text) => {
-                for (i, word) in text.split_whitespace().enumerate() {
-                    let new_word = i > 0 || space_before || text.starts_with(char::is_whitespace);
-                    push(&mut groups, div().text_color(quiet).child(word.to_string()).into_any_element(), new_word);
-                }
-                space_before = text.ends_with(char::is_whitespace);
-            }
-            Span::Strong(text) => {
-                push(&mut groups, div().text_color(strong).font_medium().child(tween(text, p)).into_any_element(), space_before);
-                space_before = false;
-            }
-            Span::Project(name) => {
-                let look = ws.projects.iter().find(|pr| &pr.name == name).map(|pr| ws.project_look(&pr.path)).unwrap_or_default();
-                let chip = h_flex().gap(px(6.)).child(ui::project_badge(name, &look, cx)).child(div().text_color(strong).font_medium().child(name.clone()));
-                push(&mut groups, chip.into_any_element(), space_before);
-                space_before = false;
-            }
-            Span::Model { agent, label } => {
-                let chip = h_flex().gap(px(6.)).child(ui::agent_logo(agent, px(16.), cx)).child(div().text_color(strong).font_medium().child(label.clone()));
-                push(&mut groups, chip.into_any_element(), space_before);
-                space_before = false;
-            }
-        }
-    }
-    div()
-        .id("basecamp-narrative")
-        .test_support()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(5.))
-        .gap_y(px(4.))
-        .max_w(px(680.))
-        .text_size(px(17.))
-        .line_height(px(28.))
-        .children(groups.into_iter().map(|g| h_flex().children(g)))
-        .into_any_element()
-}
-
 
 /// The line over the profile: the hovered stretch's numbers, else where the summit was.
 pub(crate) fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
@@ -844,44 +1102,6 @@ pub(crate) fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
     }
 }
 
-/// `text` with every number in it scaled by `p` (0..1), decimals kept: the count-up.
-fn tween(text: &str, p: f32) -> String {
-    if p >= 1. {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if !c.is_ascii_digit() {
-            out.push(c);
-            continue;
-        }
-        let mut number = c.to_string();
-        while let Some(&d) = chars.peek() {
-            let decimal_point = d == '.' && !number.contains('.');
-            if d.is_ascii_digit() || decimal_point {
-                number.push(d);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        // A trailing dot ends a sentence rather than starting decimals.
-        let trailing_dot = number.ends_with('.');
-        let digits = number.trim_end_matches('.');
-        let decimals = digits.split_once('.').map_or(0, |(_, d)| d.len());
-        let value = digits.parse::<f64>().unwrap_or(0.) * p as f64;
-        if decimals == 0 {
-            out.push_str(&(value.round() as i64).to_string());
-        } else {
-            out.push_str(&format!("{value:.decimals$}"));
-        }
-        if trailing_dot {
-            out.push('.');
-        }
-    }
-    out
-}
 
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
@@ -976,144 +1196,6 @@ pub(crate) fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
     out
 }
 
-/// What the elevation profile draws, worked out once per render.
-struct Profile {
-    /// Height of each stretch, 0..1 of the highest (already scaled by the count-up).
-    heights: Vec<f32>,
-    /// Where "now" is across the window, 0..1.
-    now: f32,
-    peak: Option<usize>,
-    hovered: Option<usize>,
-    ticks: Vec<(f32, String)>,
-    land: Hsla,
-    ridge: Hsla,
-    trail: Hsla,
-    label: Hsla,
-    flag: Hsla,
-}
-
-impl Profile {
-    fn of(recap: &Recap, p: f32, hovered: Option<usize>, cx: &App) -> Profile {
-        let n = recap.buckets.len();
-        let max = (0..n).map(|i| recap.elevation(i)).fold(0., f32::max);
-        let heights = (0..n).map(|i| if max > 0. { recap.elevation(i) / max * p } else { 0. }).collect();
-        Profile { heights, peak: recap.peak(), hovered, ..Profile::flat(Some(recap), cx) }
-    }
-
-    /// A trail with no climb yet: the empty state's.
-    fn flat(recap: Option<&Recap>, cx: &App) -> Profile {
-        let theme = cx.theme();
-        let (now, ticks) = match recap {
-            Some(r) => {
-                let span = (r.window.end - r.window.start).max(1) as f32;
-                (((r.now - r.window.start) as f32 / span).clamp(0., 1.), ticks(&r.window))
-            }
-            None => (0.5, vec![]),
-        };
-        Profile {
-            heights: vec![],
-            now,
-            peak: None,
-            hovered: None,
-            ticks,
-            land: theme.foreground,
-            ridge: theme.foreground.opacity(0.42),
-            trail: theme.foreground.opacity(0.16),
-            label: theme.muted_foreground,
-            flag: palette::ember(cx),
-        }
-    }
-
-    fn paint(&self, b: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let (left, width) = (b.origin.x.as_f32(), b.size.width.as_f32());
-        let top = b.origin.y.as_f32() + PROFILE_TOP;
-        let height = (b.size.height.as_f32() - PROFILE_TOP - PROFILE_AXIS).max(8.);
-        let base = top + height;
-        let n = self.heights.len();
-        let now_x = left + self.now * width;
-        let at = |x: f32, y: f32| point(px(x), px(y));
-        let x_of = |i: usize| left + (i as f32 + 0.5) / n.max(1) as f32 * width;
-        let y_of = |h: f32| base - h * (height - 2.);
-        // The climb so far: every stretch whose middle is behind us, then where we stand now.
-        let mut pts: Vec<(f32, f32)> = vec![(left, base)];
-        if n > 0 {
-            let current = ((self.now * n as f32) as usize).min(n - 1);
-            for i in 0..current {
-                pts.push((x_of(i), y_of(self.heights[i])));
-            }
-            pts.push((now_x, y_of(self.heights[current])));
-        } else {
-            pts.push((now_x, base));
-        }
-        let ground = pts.last().map_or(base, |p| p.1);
-        // Catmull-Rom through the points, as cubic Béziers; kept from dipping below the ground.
-        let curve = |path: &mut PathBuilder| {
-            for k in 0..pts.len() - 1 {
-                let p0 = pts[k.saturating_sub(1)];
-                let (p1, p2) = (pts[k], pts[k + 1]);
-                let p3 = pts[(k + 2).min(pts.len() - 1)];
-                let c1 = (p1.0 + (p2.0 - p0.0) / 6., (p1.1 + (p2.1 - p0.1) / 6.).min(base));
-                let c2 = (p2.0 - (p3.0 - p1.0) / 6., (p2.1 - (p3.1 - p1.1) / 6.).min(base));
-                path.cubic_bezier_to(at(p2.0, p2.1), at(c1.0, c1.1), at(c2.0, c2.1));
-            }
-        };
-        if pts.len() > 1 && pts.iter().any(|p| p.1 < base - 0.5) {
-            let mut land = PathBuilder::fill();
-            land.move_to(at(left, base));
-            curve(&mut land);
-            land.line_to(at(now_x, base));
-            land.close();
-            if let Ok(path) = land.build() {
-                window.paint_path(path, linear_gradient(180., linear_color_stop(self.land.opacity(0.18), 0.), linear_color_stop(self.land.opacity(0.02), 1.)));
-            }
-            let mut ridge = PathBuilder::stroke(px(1.5));
-            ridge.move_to(at(left, base));
-            curve(&mut ridge);
-            if let Ok(path) = ridge.build() {
-                window.paint_path(path, self.ridge);
-            }
-        }
-        // The ground walked, and the trail ahead in dots.
-        window.paint_quad(fill(Bounds::new(at(left, base), size(px((now_x - left).max(0.)), px(1.))), self.trail));
-        let mut x = now_x + 10.;
-        while x < left + width - 2. {
-            window.paint_quad(fill(Bounds::new(at(x, base - 0.5), size(px(2.), px(2.))), self.trail).corner_radii(px(1.)));
-            x += 7.;
-        }
-        if let Some(h) = self.hovered.filter(|h| *h < n) {
-            let x = x_of(h);
-            window.paint_quad(fill(Bounds::new(at(x - 0.5, top - 4.), size(px(1.), px(base - top + 4.))), self.trail));
-            if x <= now_x + 1. {
-                let y = y_of(self.heights[h]);
-                window.paint_quad(fill(Bounds::new(at(x - 3., y - 3.), size(px(6.), px(6.))), self.ridge.opacity(0.9)).corner_radii(px(3.)));
-            }
-        }
-        // The summit flag: a pole and an ember pennant.
-        if let Some(i) = self.peak.filter(|i| *i < n && self.heights[*i] > 0.) {
-            let (x, y) = (x_of(i).min(now_x), y_of(self.heights[i]));
-            window.paint_quad(fill(Bounds::new(at(x - 0.5, y - 18.), size(px(1.), px(18.))), self.ridge));
-            let mut pennant = PathBuilder::fill();
-            pennant.move_to(at(x + 0.5, y - 18.));
-            pennant.line_to(at(x + 10.5, y - 14.5));
-            pennant.line_to(at(x + 0.5, y - 11.));
-            pennant.close();
-            if let Ok(path) = pennant.build() {
-                window.paint_path(path, self.flag);
-            }
-        }
-        // The hiker, where the day stands.
-        let (w, _) = crate::mascot::size_at(HIKER_CELL);
-        crate::mascot::stand(now_x - w / 2., ground + 1., HIKER_CELL, window);
-        // Axis labels.
-        let font = window.text_style().font();
-        for (frac, label) in &self.ticks {
-            let run = TextRun { len: label.len(), font: font.clone(), color: self.label, background_color: None, underline: None, strikethrough: None };
-            let line = window.text_system().shape_line(label.clone().into(), px(11.), &[run], None);
-            let x = (left + frac * width - line.width.as_f32() / 2.).clamp(left, left + width - line.width.as_f32());
-            let _ = line.paint(at(x, base + 6.), px(14.), TextAlign::Left, None, window, cx);
-        }
-    }
-}
 
 /// What the tokens tile says under its figure: what they'd cost at API prices (as far as they
 /// have a price, saying how many haven't), then where they came from. Kept short, as the tile is
@@ -1134,50 +1216,10 @@ pub(crate) fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
     if caveats.is_empty() { format!("{cost} {when}") } else { format!("{cost} · {}", caveats.join(" · ")) }
 }
 
-/// The tokens tile's sparkline: tokens used so far, climbing through the window.
-struct Sparkline {
-    points: Vec<f32>,
-    now: f32,
-    color: Hsla,
-}
-
-impl Sparkline {
-    fn of(recap: &Recap, p: f32, cx: &App) -> Sparkline {
-        let total: u64 = recap.buckets.iter().map(|b| b.tokens).sum();
-        let mut sum = 0;
-        let points = recap
-            .buckets
-            .iter()
-            .map(|b| {
-                sum += b.tokens;
-                if total > 0 { sum as f32 / total as f32 * p } else { 0. }
-            })
-            .collect();
-        let span = (recap.window.end - recap.window.start).max(1) as f32;
-        Sparkline { points, now: ((recap.now - recap.window.start) as f32 / span).clamp(0., 1.), color: cx.theme().foreground.opacity(0.55) }
-    }
-
-    fn paint(&self, b: Bounds<Pixels>, window: &mut Window) {
-        let n = self.points.len();
-        if n == 0 {
-            return;
-        }
-        let (left, top, w, h) = (b.origin.x.as_f32(), b.origin.y.as_f32() + 1., b.size.width.as_f32(), b.size.height.as_f32() - 2.);
-        let shown = ((self.now * n as f32).ceil() as usize).clamp(1, n);
-        let mut line = PathBuilder::stroke(px(1.5));
-        line.move_to(point(px(left), px(top + h)));
-        for (i, v) in self.points.iter().take(shown).enumerate() {
-            line.line_to(point(px(left + (i as f32 + 1.) / shown as f32 * w), px(top + h - v * h)));
-        }
-        if let Ok(path) = line.build() {
-            window.paint_path(path, self.color);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
-    use super::{DAY, stretch_label, summit_label, ticks, tokens_note, tween};
+    use super::{DAY, stretch_label, summit_label, ticks, tokens_note};
     use trek_core::basecamp::{Range, Recap, ThreadActivity};
     use trek_core::store::{Activity, Store, UsageRow};
     use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
@@ -1248,15 +1290,5 @@ mod tests {
         let r = recap(3 * 365);
         assert!(stretch_label(&r, 0).contains(" – "), "{}", stretch_label(&r, 0));
         assert!(summit_label(&r, 0).starts_with("in the weeks from "));
-    }
-
-    #[test]
-    fn numbers_count_up_in_place() {
-        assert_eq!(tween("18 prompts", 0.5), "9 prompts");
-        assert_eq!(tween("29.6M tokens", 0.5), "14.8M tokens");
-        assert_eq!(tween("1h 2m", 0.), "0h 0m");
-        assert_eq!(tween("77%", 1.), "77%");
-        assert_eq!(tween("9 of 14 turns.", 0.5), "5 of 7 turns.");
-        assert_eq!(tween("under a minute", 0.3), "under a minute");
     }
 }

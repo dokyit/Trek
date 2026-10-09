@@ -12,13 +12,25 @@
 //! atomically (a temp file renamed into place) so a half-written batch is never run.
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
-//! `send <prompt>`, `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
+//! `send <prompt>`, `attach <image>` (into the main composer's outbox), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
-//! `shot <name>`, `quit`. Lines starting with `#` are comments.
+//! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `agent-install <id> <percent>|fail <message>|clear`
+//! (an ACP Registry install's row, without downloading), `shot <name>`, `quit`.
+//!
+//! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
+//! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
+//! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
+//! `key <keystroke>…` (`cmd-k`, `escape`, `shift-tab`, `down down enter`), `scroll <element id> <px>`
+//! (a wheel over that element, positive down the page), `resize <w> <h>` (the main window, logical
+//! px). The thread on screen: `approve` / `deny` its waiting permission, plan
+//! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
+//! `rewind [n] [keep]` (undo the n-th turn from the end, 1 = the latest, as its Undo does; `keep`
+//! leaves the files).
+//! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
 use gpui_kit::*;
@@ -301,21 +313,296 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         return Ok(());
     }
     if verb == "editor" {
-        // The editor surface without a pointer: `editor <abs-path> [line]` opens it there.
-        let (path, line) = match arg.rsplit_once(' ') {
-            Some((p, n)) if n.parse::<u32>().is_ok() => (p, n.parse().ok()),
-            _ => (arg, None),
-        };
-        let path = PathBuf::from(path);
+        // The editor without a pointer: `editor on|off` (Editor mode), `editor root <folder>`,
+        // `editor view explorer|search|scm|agents`, `editor panel terminal|problems|output|tasks|off`,
+        // `editor chat new|send <prompt>|<n>`, `editor ai on|off`, and `editor [open] <abs-path> [line]`
+        // (a tab in Editor mode, the center surface in the harness). The AI side bar:
+        // `editor send <prompt>` (through its input, chips and mode included), `editor type <text>`
+        // (typed, not sent), `editor select <first> <last>` (lines in the editor), `editor add`
+        // (⌘⇧L), `editor mode agent|plan|ask`, `editor review`, `editor keep|undo all|<path>`.
+        // The editor and the chat together: `editor inline [text]` (⌘K's card, typed into),
+        // `editor inline-run <text>` (and run), `editor hunk keep|undo|next|prev`,
+        // `editor diag <abs-path> <line> <message>` (a problem, as a language server would say),
+        // `editor fix` (Fix with Agent on the first problem), `editor term-chat`, and
+        // `editor rclick|hover <element id>` (a context menu, a hover, without a pointer; `name#3`
+        // for a row's id).
+        let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
             let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
                 anyhow::bail!("editor: no Trek window");
             };
-            trek.update(cx, |t, cx| t.open_editor(path, line, window, cx));
+            let ide = trek.read(cx).ide.clone();
+            let ws = ws.clone();
+            match (sub, rest) {
+                ("on", _) => ws.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Editor, cx)),
+                ("off", _) => ws.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx)),
+                ("root", path) => ws.update(cx, |ws, cx| ws.set_ide_root(PathBuf::from(path), cx)),
+                ("view", v) => {
+                    let v = match v {
+                        "explorer" => crate::ide::SideView::Explorer,
+                        "search" => crate::ide::SideView::Search,
+                        "scm" => crate::ide::SideView::Scm,
+                        "agents" => crate::ide::SideView::Agents,
+                        other => anyhow::bail!("editor view: unknown view {other:?} (explorer|search|scm|agents)"),
+                    };
+                    ide.update(cx, |ide, cx| ide.show_view(v, window, cx));
+                }
+                ("panel", "off") => ide.update(cx, |ide, cx| {
+                    if ide.layout.panel_open {
+                        ide.toggle_panel(window, cx);
+                    }
+                }),
+                ("panel", p) => {
+                    let tab = match p {
+                        "terminal" => crate::ide::PanelTab::Terminal,
+                        "problems" => crate::ide::PanelTab::Problems,
+                        "output" => crate::ide::PanelTab::Output,
+                        "tasks" => crate::ide::PanelTab::Tasks,
+                        other => anyhow::bail!("editor panel: unknown tab {other:?} (terminal|problems|output|tasks|off)"),
+                    };
+                    ide.update(cx, |ide, cx| ide.show_panel(tab, window, cx));
+                }
+                ("ai", on) => ide.update(cx, |ide, cx| {
+                    if ide.layout.ai_open != (on == "on") {
+                        ide.toggle_ai(window, cx);
+                    }
+                }),
+                ("send", text) => {
+                    let input = ide.read(cx).ai.read(cx).input.clone();
+                    input.update(cx, |i, cx| i.send_text(text, window, cx));
+                }
+                ("type", text) => {
+                    let input = ide.read(cx).ai.read(cx).input.clone();
+                    input.update(cx, |i, cx| i.insert_text(text, window, cx));
+                }
+                ("select", lines) => {
+                    let (a, b) = lines.split_once(' ').ok_or_else(|| anyhow::anyhow!("editor select <first> <last>"))?;
+                    let (a, b): (usize, usize) = (a.parse()?, b.parse()?);
+                    let editor = ide.read(cx).active_editor().ok_or_else(|| anyhow::anyhow!("editor select: no file open"))?;
+                    let state = editor.read(cx).text_state();
+                    state.update(cx, |s, cx| {
+                        use gpui_kit::base::input::{Point, RopeExt};
+                        let text = s.text().clone();
+                        let from = text.point_to_offset(Point::new(a.saturating_sub(1), 0));
+                        let to = text.point_to_offset(Point::new(b, 0)).saturating_sub(1).max(from);
+                        s.set_selected_range(from..to, cx);
+                    });
+                }
+                ("add", _) => ide.update(cx, |ide, cx| ide.add_selection(false, window, cx)),
+                (verb @ ("inline" | "inline-run"), text) => {
+                    let editor = ide.read(cx).active_editor().ok_or_else(|| anyhow::anyhow!("editor inline: no file open"))?;
+                    editor.update(cx, |e, cx| e.type_inline(text, verb == "inline-run", window, cx));
+                }
+                ("hunk", what) => {
+                    let editor = ide.read(cx).active_editor().ok_or_else(|| anyhow::anyhow!("editor hunk: no file open"))?;
+                    editor.update(cx, |e, cx| match what {
+                        "keep" => e.act_on_hunk(true, cx),
+                        "undo" => e.act_on_hunk(false, cx),
+                        "prev" => e.step_hunk(-1, window, cx),
+                        _ => e.step_hunk(1, window, cx),
+                    });
+                }
+                ("diag", rest) => {
+                    let mut it = rest.splitn(3, ' ');
+                    let (Some(path), Some(line), Some(message)) = (it.next(), it.next(), it.next()) else { anyhow::bail!("editor diag <abs-path> <line> <message>") };
+                    let line: u32 = line.parse::<u32>()?.saturating_sub(1);
+                    let at = lsp_types::Position { line, character: 0 };
+                    let d = lsp_types::Diagnostic { range: lsp_types::Range { start: at, end: at }, severity: Some(lsp_types::DiagnosticSeverity::ERROR), message: message.to_string(), source: Some("rustc".into()), ..Default::default() };
+                    let path = PathBuf::from(path);
+                    ws.update(cx, |ws, cx| {
+                        let mut all = ws.diagnostics.get(&path).cloned().unwrap_or_default();
+                        all.push(d);
+                        ws.set_diagnostics(path, all, cx);
+                    });
+                }
+                ("fix", _) => {
+                    let first = ws.read(cx).diagnostics.iter().next().map(|(p, d)| (p.clone(), d[0].clone()));
+                    let (path, d) = first.ok_or_else(|| anyhow::anyhow!("editor fix: no problems"))?;
+                    ide.update(cx, |ide, cx| ide.fix_problem(path, d, window, cx));
+                }
+                ("term-chat", _) => ide.update(cx, |ide, cx| ide.terminal_to_chat(window, cx)),
+                (verb @ ("rclick" | "hover"), id) => pointer(window, verb, id, cx)?,
+                ("mode", m) => {
+                    let mode = match m {
+                        "agent" => crate::workspace::ChatMode::Agent,
+                        "plan" => crate::workspace::ChatMode::Plan,
+                        "ask" => crate::workspace::ChatMode::Ask,
+                        other => anyhow::bail!("editor mode: unknown mode {other:?} (agent|plan|ask)"),
+                    };
+                    ws.update(cx, |ws, cx| ws.set_chat_mode_in(&crate::workspace::Scope::Ide, mode, cx));
+                }
+                ("review", _) => ws.update(cx, |ws, cx| {
+                    if let Some(id) = ws.ide_chat.active_thread().map(str::to_string) {
+                        ws.open_review(&id, cx);
+                    }
+                }),
+                (verb @ ("keep" | "undo"), which) => ws.update(cx, |ws, cx| {
+                    let Some(id) = ws.ide_chat.active_thread().map(str::to_string) else { return };
+                    let paths = (which != "all").then(|| vec![which.to_string()]);
+                    if verb == "keep" { ws.keep_files(&id, paths, cx) } else { ws.undo_files(&id, paths, cx) }
+                }),
+                // `editor diff <rel> [staged]`: a file's changes in a diff tab, as Source Control
+                // opens them; `editor split on|off`: the diff in front side by side.
+                ("diff", rest) => {
+                    let (rel, staged) = match rest.strip_suffix(" staged") {
+                        Some(r) => (r, true),
+                        None => (rest, false),
+                    };
+                    let root = ws.read(cx).ide_root.clone().ok_or_else(|| anyhow::anyhow!("editor diff: no folder"))?;
+                    let top = crate::ide::git::top(&root).ok_or_else(|| anyhow::anyhow!("editor diff: not a repository"))?;
+                    let source = crate::ide::diff_view::DiffSource::Git { top, rel: rel.to_string(), staged };
+                    ide.update(cx, |ide, cx| _ = ide.open_diff_view(source, false, window, cx));
+                }
+                ("split", on) => {
+                    let diff = ide.read(cx).tabs.get(ide.read(cx).active).and_then(|t| t.diff().cloned()).ok_or_else(|| anyhow::anyhow!("editor split: no diff in front"))?;
+                    diff.update(cx, |d, cx| d.set_split(on == "on", cx));
+                }
+                // `editor new-file`: the Explorer's name input for a new file; `editor rename-chat`:
+                // the chat tab's; `editor edit-last`: the chat's last message back to edit;
+                // `editor undo-turn`: the last turn's Undo, asking.
+                ("new-file", _) => {
+                    let explorer = ide.read(cx).explorer.clone();
+                    explorer.update(cx, |e, cx| {
+                        if let Some(dir) = e.target_dir() {
+                            e.begin_new(dir, false, window, cx);
+                        }
+                    });
+                }
+                ("rename-chat", _) => {
+                    let active = ws.read(cx).ide_chat.active;
+                    let ai = ide.read(cx).ai.clone();
+                    ai.update(cx, |a, cx| a.begin_rename(active, window, cx));
+                }
+                ("edit-last", _) => ws.update(cx, |ws, cx| {
+                    let Some(id) = ws.ide_chat.active_thread().map(str::to_string) else { return };
+                    let Some(live) = ws.live.get(&id) else { return };
+                    let last = live.items.iter().enumerate().rev().find_map(|(i, it)| match it {
+                        trek_core::store::Item::User { text, aside: false, .. } => Some((live.items.id_at(i).map(str::to_string), text.clone())),
+                        _ => None,
+                    });
+                    if let Some((Some(item), text)) = last {
+                        cx.emit(crate::workspace::WorkspaceEvent::ComposeIn { scope: crate::workspace::Scope::Ide, thread: id, text, images: vec![], edit: Some(item) });
+                    }
+                }),
+                ("undo-turn", _) => {
+                    let transcript = ide.read(cx).ai.read(cx).transcript.clone();
+                    transcript.update(cx, |t, cx| t.confirm_last_undo(cx));
+                }
+                ("chat", "new") => ws.update(cx, |ws, cx| ws.ide_new_chat(cx)),
+                ("chat", r) if r.starts_with("send ") => ws.update(cx, |ws, cx| ws.send_in(&crate::workspace::Scope::Ide, r["send ".len()..].to_string(), vec![], cx)),
+                ("chat", n) => {
+                    let n: usize = n.parse().map_err(|_| anyhow::anyhow!("editor chat: new|send <prompt>|<tab number>"))?;
+                    ws.update(cx, |ws, cx| ws.ide_select_chat(n, cx));
+                }
+                _ => {
+                    // `editor [open] <abs-path> [line]`.
+                    let target = if sub == "open" { rest } else { arg };
+                    let (path, line) = match target.rsplit_once(' ') {
+                        Some((p, n)) if n.parse::<u32>().is_ok() => (p, n.parse().ok()),
+                        _ => (target, None),
+                    };
+                    let path = PathBuf::from(path);
+                    trek.update(cx, |t, cx| t.open_editor(path, line, window, cx));
+                }
+            }
             Ok(())
         })??;
+        cx.refresh_windows();
+        return Ok(());
+    }
+    if matches!(verb, "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements") {
+        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            match verb {
+                "click" | "rclick" | "hover" => pointer(window, verb, arg, cx),
+                "type" => {
+                    anyhow::ensure!(!arg.is_empty(), "type needs text");
+                    type_text(root, window, arg, cx)
+                }
+                "key" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (cmd-k, escape, shift-tab …)");
+                    // All of them parse before any is pressed: a typo doesn't leave half a sequence done.
+                    for k in arg.split_whitespace() {
+                        Keystroke::parse(k).map_err(|e| anyhow::anyhow!("key: bad keystroke {k:?}: {e}"))?;
+                    }
+                    for k in arg.split_whitespace() {
+                        window.press(k, cx);
+                    }
+                    Ok(())
+                }
+                "scroll" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    let (id, dy) = arg.rsplit_once(' ').ok_or_else(|| anyhow::anyhow!("scroll <element id> <px>"))?;
+                    let dy: f32 = dy.trim().parse()?;
+                    pointer(window, "hover", id, cx)?;
+                    // Positive is down the page, as a wheel turned towards you.
+                    window.scroll(element_id(id), ScrollDelta::Pixels(point(px(0.), px(-dy))), cx);
+                    Ok(())
+                }
+                "resize" => {
+                    let (w, h) = arg.split_once(' ').ok_or_else(|| anyhow::anyhow!("resize <width> <height>"))?;
+                    let (w, h): (f32, f32) = (w.trim().parse()?, h.trim().parse()?);
+                    anyhow::ensure!(w >= 100. && h >= 100., "resize: {w}×{h} is too small");
+                    window.resize(size(px(w), px(h)));
+                    Ok(())
+                }
+                _ => elements(window, cx),
+            }
+        })??;
+        cx.refresh_windows();
+        return Ok(());
+    }
+    if verb == "agent-install" {
+        // How an install from the ACP Registry looks under way or failed, without downloading:
+        // `agent-install <id> <percent>|fail <message>|clear`.
+        use trek_core::registry::Progress;
+        let (id, what) = arg.split_once(' ').ok_or_else(|| anyhow::anyhow!("agent-install <id> <percent>|fail <message>|clear"))?;
+        let state = match what.split_once(' ').map_or((what, ""), |(a, b)| (a, b)) {
+            ("clear", _) => None,
+            ("fail", why) => Some(crate::workspace::AgentInstall::Failed(why.to_string())),
+            (pct, _) => {
+                let pct: u64 = pct.parse().map_err(|_| anyhow::anyhow!("agent-install: bad percent {pct:?}"))?;
+                Some(crate::workspace::AgentInstall::Running(Some(Progress::Downloading { done: pct * 1_000_000, total: Some(100_000_000) })))
+            }
+        };
+        ws.update(cx, |ws, cx| {
+            match state {
+                Some(s) => ws.added_agents.installs.insert(id.to_string(), s),
+                None => ws.added_agents.installs.remove(id),
+            };
+            cx.notify();
+        });
+        cx.refresh_windows();
+        return Ok(());
+    }
+    if verb == "rewind" {
+        // The n-th turn from the end (1 = the latest), undone as its Undo button does: the files
+        // too when there's a checkpoint for them (the confirmation's default), and the message
+        // back in the composer. `rewind <n> keep` leaves the files alone.
+        let (n, files) = arg.split_once(' ').unwrap_or((arg, ""));
+        let n: usize = if n.is_empty() { 1 } else { n.parse().map_err(|_| anyhow::anyhow!("rewind [n] [keep]: bad n {n:?}"))? };
+        anyhow::ensure!(n >= 1, "rewind: n starts at 1 (the latest turn)");
+        ws.update(cx, |ws, cx| -> anyhow::Result<()> {
+            let id = ws.focused_thread().map(str::to_string).ok_or_else(|| anyhow::anyhow!("rewind: no thread on screen"))?;
+            let live = ws.live.get(&id).ok_or_else(|| anyhow::anyhow!("rewind: the thread isn't loaded"))?;
+            let ends: Vec<usize> = live.items.iter().enumerate().filter(|(_, i)| matches!(i, trek_core::store::Item::TurnEnd { .. })).map(|(ix, _)| ix).collect();
+            let ix = *ends.iter().rev().nth(n - 1).ok_or_else(|| anyhow::anyhow!("rewind {n}: the thread has {} finished turns", ends.len()))?;
+            let end = live.items.id_at(ix).ok_or_else(|| anyhow::anyhow!("rewind {n}: the turn has no id"))?.to_string();
+            let start = ws.turn_start_item(&id, &end).ok_or_else(|| anyhow::anyhow!("rewind {n}: no message starts that turn"))?;
+            let restore = files != "keep" && ws.restorable_checkpoint(&id, &start).is_some();
+            let (text, images) = ws.undo_turn(&id, &end, restore, cx).ok_or_else(|| anyhow::anyhow!("rewind {n}: refused (see the toast)"))?;
+            cx.emit(crate::workspace::WorkspaceEvent::ComposeIn { scope: ws.focused_scope(), thread: id, text, images, edit: None });
+            Ok(())
+        })?;
+        cx.refresh_windows();
+        return Ok(());
+    }
+    if matches!(verb, "approve" | "deny" | "answer") {
+        ws.update(cx, |ws, cx| card(ws, verb, arg, cx))?;
+        cx.refresh_windows();
         return Ok(());
     }
     ws.update(cx, |ws, cx| -> anyhow::Result<()> {
@@ -348,6 +635,9 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             ("route", other) if other.starts_with("project:") => ws.navigate(Route::Draft { project: Some(PathBuf::from(&other["project:".len()..])) }, cx),
             ("route", other) if other.starts_with("thread:") => ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx),
             ("route", other) => anyhow::bail!("route: unknown route {other:?}"),
+            // An image in the composer's outbox, as a drop or paste attaches it.
+            ("attach", "") => anyhow::bail!("attach needs an image path"),
+            ("attach", path) => cx.emit(crate::workspace::WorkspaceEvent::AttachImage(PathBuf::from(path))),
             ("send", "") => anyhow::bail!("send needs a prompt"),
             ("send", text) => ws.send(text.to_string(), vec![], cx),
             ("project", "") => anyhow::bail!("project needs a folder"),
@@ -421,6 +711,124 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         Ok(())
     })?;
     cx.refresh_windows();
+    Ok(())
+}
+
+/// An element id as written in a command: `name#3` is a row, ("name", 3).
+fn element_id(id: &str) -> ElementId {
+    match id.rsplit_once('#').and_then(|(n, i)| Some((n, i.parse::<u64>().ok()?))) {
+        Some((name, ix)) => ElementId::NamedInteger(name.to_string().into(), ix),
+        None => ElementId::Name(id.to_string().into()),
+    }
+}
+
+/// How `elements` writes an id, the way `click` reads it back.
+fn id_text(id: &ElementId) -> String {
+    match id {
+        ElementId::Name(n) => n.to_string(),
+        ElementId::NamedInteger(n, i) => format!("{n}#{i}"),
+        other => format!("{other:?}"),
+    }
+}
+
+/// `click|rclick|hover <id>`: the pointer on the one element on screen with that id, as events
+/// dispatched to the window (no real input). The kit's lookup panics on a missing or ambiguous id,
+/// so both are checked first.
+fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::Result<()> {
+    use gpui_kit::test::TestWindowExt as _;
+    anyhow::ensure!(!id.is_empty(), "{verb} needs an element id (see `elements`)");
+    window.render_frame(cx);
+    let id = element_id(id);
+    let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| s.path().last() == Some(&id)).collect();
+    match found.as_slice() {
+        [] => anyhow::bail!("{verb}: nothing on screen is {}", id_text(&id)),
+        [one] if !one.visible() => anyhow::bail!("{verb}: {} is hidden or scrolled away", id_text(&id)),
+        [_] => {}
+        many => anyhow::bail!("{verb}: {} elements are {}: {:?}", many.len(), id_text(&id), many.iter().map(|s| s.path().to_vec()).collect::<Vec<_>>()),
+    }
+    match verb {
+        "rclick" => window.right_click(id, cx),
+        "hover" => window.hover(id, cx),
+        _ => window.click(id, cx),
+    }
+    Ok(())
+}
+
+/// `type <text>`: into the focused field as typed text, or into the main composer when no field
+/// has the keyboard.
+fn type_text(root: AnyView, window: &mut Window, text: &str, cx: &mut App) -> anyhow::Result<()> {
+    let typed = window.focused(cx).is_some() && window.dispatch_keystroke(Keystroke { modifiers: Modifiers::default(), key: String::new(), key_char: Some(text.to_string()) }, cx);
+    if typed {
+        return Ok(());
+    }
+    let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+    let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()).ok_or_else(|| anyhow::anyhow!("type: no Trek window"))?;
+    let composer = trek.read(cx).composer.clone();
+    composer.update(cx, |c, cx| {
+        c.focus(window, cx);
+        c.insert_text(text, window, cx);
+    });
+    Ok(())
+}
+
+/// `elements`: every visible element `click` can name, one per line, to `elements.txt` — its id,
+/// then its role and label when it has them, then where it is.
+fn elements(window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    use gpui_kit::test::TestWindowExt as _;
+    window.render_frame(cx);
+    let mut lines: Vec<String> = gpui_kit::base::test_support::snapshots(window)
+        .into_iter()
+        .filter(|s| s.visible())
+        .filter_map(|s| {
+            let id = id_text(s.path().last()?);
+            let b = s.bounds();
+            let role = s.role().map(|r| format!(" {r:?}")).unwrap_or_default();
+            let label = s.label().map(|l| format!(" {l:?}")).unwrap_or_default();
+            Some(format!("{id}{role}{label} @ {:.0},{:.0} {:.0}×{:.0}", f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)))
+        })
+        .collect();
+    lines.sort();
+    let dir = std::env::var_os("TREK_SHOT_DIR").ok_or_else(|| anyhow::anyhow!("elements: no TREK_SHOT_DIR"))?;
+    std::fs::write(Path::new(&dir).join("elements.txt"), lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+/// `approve`, `deny`, `answer <text|n>`: the thread on screen's waiting card, through what its
+/// buttons call. `approve` allows a permission or starts a plan; `deny` is Deny, Keep planning or
+/// Skip; `answer <n>` picks option n (from 1) of every question and sends, `answer <text>` is the
+/// answer typed in the composer.
+fn card(ws: &mut Workspace, verb: &str, arg: &str, cx: &mut Context<Workspace>) -> anyhow::Result<()> {
+    use trek_agents::{Decision, Prompt};
+    let id = ws.focused_thread().map(str::to_string).ok_or_else(|| anyhow::anyhow!("{verb}: no thread on screen"))?;
+    let p = ws.live.get(&id).and_then(|l| l.permissions.first()).cloned().ok_or_else(|| anyhow::anyhow!("{verb}: nothing is waiting on the thread"))?;
+    match (verb, &p.prompt) {
+        ("approve", None) => ws.respond(&id, &p.request_id, Decision::Allow, cx),
+        ("approve", Some(Prompt::Plan(_))) => ws.approve_plan(&id, &p.request_id, cx),
+        ("approve", Some(Prompt::Questions(_))) => anyhow::bail!("approve: it's a question (answer <text|n>, or deny to skip)"),
+        ("deny", _) => ws.respond(&id, &p.request_id, Decision::Deny, cx),
+        ("answer", Some(Prompt::Questions(questions))) => {
+            anyhow::ensure!(!arg.is_empty(), "answer needs <text> or an option number");
+            match arg.parse::<usize>() {
+                Ok(n) => {
+                    let mut answers = vec![];
+                    for (qi, q) in questions.iter().enumerate() {
+                        let (label, _) = q.options.get(n.wrapping_sub(1)).ok_or_else(|| anyhow::anyhow!("answer {n}: “{}” has {} options", q.question, q.options.len()))?;
+                        if let Some(live) = ws.live.get_mut(&id) {
+                            live.picks.insert((p.request_id.clone(), qi), vec![label.clone()]);
+                        }
+                        answers.push((q.question.clone(), label.clone()));
+                    }
+                    ws.answer(&id, &p.request_id, answers, cx);
+                }
+                Err(_) => {
+                    let scope = ws.focused_scope();
+                    ws.send_in(&scope, arg.to_string(), vec![], cx);
+                }
+            }
+        }
+        ("answer", _) => anyhow::bail!("answer: the thread is waiting on a {}, not a question (approve or deny)", if p.prompt.is_some() { "plan" } else { "permission" }),
+        _ => unreachable!(),
+    }
     Ok(())
 }
 

@@ -287,3 +287,26 @@ fn the_mac_stays_awake_exactly_while_agents_work() {
         assert_eq!(cx.active_idle_sleep_preventions(), 0);
     });
 }
+
+#[test]
+fn the_dock_shows_the_app_icon_picked_in_appearance() {
+    use crate::system::APP_ICON;
+    use crate::workspace::SettingsPage;
+    use trek_core::settings::AppIcon;
+    run(async |cx| {
+        let trek = open_with(cx, |_| {});
+        APP_ICON.with(|i| i.set(None));
+        cx.update(|cx| crate::system::init(trek.ws.clone(), cx));
+        // The cairn on Trek orange goes up at launch, whatever the bundle's icon is.
+        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Ember));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Appearance), cx));
+        trek.render(cx);
+        trek.click(cx, "app-icon-Night");
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.settings.appearance.app_icon), AppIcon::Night);
+        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Night));
+        trek.click(cx, "app-icon-Glass");
+        cx.run_until_parked();
+        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Glass));
+    });
+}

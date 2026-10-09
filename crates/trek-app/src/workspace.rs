@@ -1,7 +1,9 @@
 //! The application model: threads, live agent sessions, routing, updates. Views observe it.
 
+mod added_agents;
 mod agent_updates;
 mod limits;
+mod mcp;
 mod orchestrate;
 mod tabs;
 #[cfg(test)]
@@ -9,11 +11,18 @@ pub use tabs::MAX_TABS;
 mod turn_changes;
 mod verification;
 mod worktrees;
+mod ide;
+mod review;
 
+pub use ide::{ChatMode, IdeChat, IdeTab, Mode};
+pub use review::{FileReview, Review, as_given};
+
+pub use added_agents::{AddedAgents, Install as AgentInstall, is_added};
 pub use agent_updates::Hold;
 pub use limits::Clock;
+pub use mcp::{McpCheck, mcp_server_of};
 pub use orchestrate::{TaskState, waiting_label};
-pub use turn_changes::TurnRange;
+pub use turn_changes::{TurnRange, TurnSpans};
 pub use verification::ago;
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task};
@@ -49,12 +58,18 @@ pub enum Route {
     Onboarding,
 }
 
-/// What a transcript or composer is bound to: whatever the main window shows, or one thread
-/// (a thread window, which never follows the main window's route).
+/// Spends one reset credit by id (`Workspace::reset_consumer`).
+pub type ResetConsumer = std::sync::Arc<dyn Fn(String) -> ResetFuture + Send + Sync>;
+pub type ResetFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+
+/// What a transcript or composer is bound to: whatever the main window shows, one thread (a
+/// thread window, which never follows the main window's route), or the editor's AI side bar
+/// (its active chat tab, a thread or a draft).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     Main,
     Thread(String),
+    Ide,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,10 +158,15 @@ pub struct LiveThread {
     /// Index of the assistant item currently streaming.
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
+    /// How long each reasoning item (by id) took, as seen here: from its first piece to what
+    /// came after it. Not kept: a transcript read back shows "Thought" alone.
+    pub thought: HashMap<String, (Instant, Instant)>,
     pub permissions: Vec<PendingPermission>,
     /// Options picked so far on the question card: (request id, question index) → labels.
     pub picks: HashMap<(String, usize), Vec<String>>,
     pub commands: Option<async_channel::Sender<Command>>,
+    /// What the agent's processes in its latest session wrote to stderr (the IDE's Output).
+    pub stderr: Option<trek_agents::SessionLog>,
     /// Counts the sessions attached so far. A session that was let finish after another took its
     /// place (`end_session`) speaks for the thread no more: its events are dropped.
     session_gen: u64,
@@ -155,6 +175,9 @@ pub struct LiveThread {
     turn_error: bool,
     pub plan: bool,
     pub fast: bool,
+    /// Ask mode (the editor's AI side bar): the agent answers without changing anything. Its
+    /// session starts read-only where the agent can be (`Workspace::set_chat_mode_in`).
+    pub ask: bool,
     /// Settings the agent reads only at launch changed mid-turn: the session restarts (and
     /// resumes) once the turn is over, or is told them then if it has work in the background.
     relaunch: bool,
@@ -218,6 +241,8 @@ pub struct LiveThread {
     /// Git work for this thread (checkpoints, restoring files), done in order off the main thread.
     git_jobs: VecDeque<GitJob>,
     git_busy: bool,
+    /// The git work under way, while `git_busy`.
+    git_running: Option<GitJob>,
     /// Shared with the git work under way, so deleting the thread can wait for it.
     git_guard: std::sync::Arc<GitGuard>,
     /// Messages for the agent held until the git work before them is done: a turn mustn't start
@@ -245,6 +270,14 @@ pub struct LiveThread {
     pub notes_pending: Option<String>,
 }
 
+#[cfg(test)]
+impl LiveThread {
+    /// No git work queued or under way.
+    pub fn git_jobs_idle(&self) -> bool {
+        !self.git_busy && self.git_jobs.is_empty()
+    }
+}
+
 /// Held by a thread's git work while it runs. Once the thread is deleted (`gone`), work that
 /// hadn't started does nothing, and the cleanup takes the lock, so it runs after any that had.
 #[derive(Default)]
@@ -262,12 +295,24 @@ enum GitJob {
     /// Find where the agent's `session` stands (`trek_agents::session_tail`), for message `item`
     /// sent in a thread that doesn't know yet (imported, or kept by an older Trek).
     FindPoint { agent: AgentId, session: String, item: String },
-    /// Put the files back as checkpoint `sha` of `repo` has them.
-    Restore { repo: PathBuf, sha: String },
+    /// Put the files back as checkpoint `sha` of `repo` has them: those `only` names.
+    Restore { repo: PathBuf, sha: String, only: RestoreOnly },
     /// Drop checkpoints by message (theirs left the transcript).
     Forget { repo: PathBuf, items: Vec<String> },
+    /// Drop every checkpoint of the thread, and what would undo its last restore (its worktree
+    /// went).
+    ForgetAll { repo: PathBuf },
     /// Give a fork the checkpoints of the messages it copied: `(item, commit)`.
     Link { repo: PathBuf, checkpoints: Vec<(String, String)> },
+}
+
+/// Which files a restore puts back; every other file is left as it is.
+#[derive(Debug, Clone)]
+enum RestoreOnly {
+    /// Those the turns a rewind takes back changed.
+    Turns(TurnSpans),
+    /// These, relative to the repository's top folder (a restore being undone: the files it put back).
+    Paths(Vec<String>),
 }
 
 /// What a `GitJob` came to.
@@ -278,6 +323,28 @@ enum GitDone {
     Restored(trek_core::checkpoint::Restored),
     /// Where the session stands (`GitJob::FindPoint`).
     Point(Option<String>),
+}
+
+/// What a rewind would put back (`Workspace::rewind_files`).
+pub struct RewindFiles {
+    store: Store,
+    thread: String,
+    repo: PathBuf,
+    sha: String,
+    spans: TurnSpans,
+}
+
+impl RewindFiles {
+    /// What restoring changes, file by file: the files the turns taken back changed, and only
+    /// those. Blocks on git.
+    pub fn changes(&self) -> anyhow::Result<Vec<trek_core::checkpoint::FileChange>> {
+        let r = trek_core::checkpoint::Repo::find(&self.repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", self.repo.display()))?;
+        let only = self.spans.paths(&self.store, &self.thread, &r)?;
+        if only.is_empty() {
+            return Ok(vec![]);
+        }
+        r.changes_since_in(&self.sha, &only)
+    }
 }
 
 /// Why a message has no file checkpoint to go back to.
@@ -419,6 +486,11 @@ pub struct SubTask {
 }
 
 impl LiveThread {
+    /// Whole seconds reasoning item `item` took, when it was seen here and took one or more.
+    pub fn thought_secs(&self, item: &str) -> Option<u64> {
+        self.thought.get(item).map(|(a, b)| b.saturating_duration_since(*a).as_secs()).filter(|s| *s > 0)
+    }
+
     pub fn active_tasks(&self) -> usize {
         self.tasks.iter().filter(|t| t.done.is_none()).count()
     }
@@ -729,13 +801,16 @@ pub enum WorkspaceEvent {
     /// banner / sound per the notification settings.
     Attention { message: String, thread: String },
     FocusComposer,
+    /// The editor's AI side bar takes the keys (a chat tab switched or opened, the editor shown).
+    FocusAiInput,
     /// Run a shell command in a new terminal tab (an agent install or sign-in, a project action),
     /// in `cwd` or else the folder on screen, then rescan agents.
     RunInTerminal { command: String, cwd: Option<PathBuf> },
     /// Insert text at the composer's cursor (e.g. an element picked in the browser).
     InsertIntoComposer(String),
     /// Open `path` in the in-app editor, at `line` when given (Explorer, `trek://edit`).
-    OpenEditor { path: PathBuf, line: Option<u32> },
+    /// `preview`: in the editor, a tab the next preview replaces until it's edited or kept.
+    OpenEditor { path: PathBuf, line: Option<u32>, preview: bool },
     /// Attach an image to the composer (e.g. a browser screenshot).
     AttachImage(std::path::PathBuf),
     /// Follow-ups held for a turn that stopped or failed go back into the composer showing `thread`.
@@ -763,14 +838,21 @@ pub enum WorkspaceEvent {
     /// Show the changes of the turn ending at `end` (by item id) of `thread` in the Git tool,
     /// with `path`'s diff open (relative to the repository's top folder).
     ShowTurnDiff { thread: String, end: String, path: Option<String> },
+    /// A thread's review (Keep / Undo) moved: its pending files, or it closed.
+    ReviewChanged { id: String },
+    /// Show the review of `thread`'s pending changes in the editor's diff tab.
+    OpenReview { thread: String },
+    /// "Add to Chat" (the Explorer, the terminal): a chip for the editor's AI side bar.
+    AddToChat(crate::ide::ai::context::ContextChip),
 }
 
 #[derive(Debug, Clone)]
 pub enum UndoAction {
     Unsettle(String),
     Unarchive(String),
-    /// Put the files of `repo` back as they were before a restore (`Restored::undo`).
-    Unrestore { thread: String, repo: PathBuf, sha: String },
+    /// Put `paths` (relative to the top folder of `repo`) back as they were before a restore
+    /// (`Restored::undo`, or the undo kept before a review's Undo); other files are left as they are.
+    Unrestore { thread: String, repo: PathBuf, sha: String, paths: Vec<String> },
     /// Call off a restart to update that's counting down (`RESTART_GRACE`); it waits for a click
     /// or a quit again.
     CancelRestart,
@@ -810,6 +892,11 @@ pub struct GitInfo {
     pub default_branch: Option<String>,
     /// Local branches, most recently committed first.
     pub branches: Vec<String>,
+    /// Local branches checked out in another worktree (Trek's own included): git won't switch
+    /// to them here.
+    pub elsewhere: Vec<String>,
+    /// The commit checked out: when it moves, files on disk changed under open editors.
+    pub head: Option<String>,
     pub remote: Option<String>,
 }
 
@@ -820,15 +907,21 @@ impl GitInfo {
 }
 
 pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
-    let run = |args: &[&str]| {
-        std::process::Command::new("git").args(args).current_dir(cwd).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
+    // Read-only: `git status` mustn't take index.lock and trip a switch or commit running now,
+    // nor run anything the folder's config names.
+    let run = |args: &[&str]| trek_core::git::read(cwd, args);
     if run(&["rev-parse", "--is-inside-work-tree"]).is_none() {
         return GitInfo::default();
     }
+    let branch = run(&["branch", "--show-current"]).filter(|b| !b.is_empty());
+    let elsewhere = run(&["worktree", "list", "--porcelain"])
+        .map(|s| s.lines().filter_map(|l| l.strip_prefix("branch refs/heads/")).filter(|b| Some(*b) != branch.as_deref()).map(str::to_string).collect())
+        .unwrap_or_default();
     GitInfo {
         is_repo: true,
-        branch: run(&["branch", "--show-current"]).filter(|b| !b.is_empty()),
+        head: run(&["rev-parse", "--verify", "-q", "HEAD"]),
+        elsewhere,
+        branch,
         // Every untracked file, not their folders, so the count matches the Git panel's list.
         changed: run(&["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0),
         ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -839,11 +932,32 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
                 let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
                 ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
             }),
-        branches: run(&["for-each-ref", "--sort=-committerdate", "--count=20", "--format=%(refname:short)", "refs/heads"])
+        branches: run(&["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
             .map(|s| s.lines().map(str::to_string).collect())
             .unwrap_or_default(),
         remote: trek_core::store::git_remote(cwd),
     }
+}
+
+/// What git said went wrong, for a toast: its `error:`/`fatal:` line without the prefix, with the
+/// files it names (local changes a checkout would overwrite), else `fallback`.
+pub(crate) fn git_error(stderr: &str, fallback: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let Some(at) = lines.iter().position(|l| l.starts_with("error:") || l.starts_with("fatal:")) else {
+        return stderr.trim().lines().last().filter(|l| !l.trim().is_empty()).unwrap_or(fallback).trim().to_string();
+    };
+    let head = lines[at].split_once(':').map_or(lines[at], |(_, rest)| rest).trim();
+    let mut msg: String = head.chars().take(1).flat_map(char::to_uppercase).chain(head.chars().skip(1)).collect();
+    let files: Vec<&str> = lines[at + 1..].iter().take_while(|l| l.starts_with(char::is_whitespace)).map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if !files.is_empty() {
+        let shown = files.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+        let more = if files.len() > 5 { format!(" and {} more", files.len() - 5) } else { String::new() };
+        msg = format!("{} {shown}{more}.", msg.trim_end_matches(':'));
+    }
+    if stderr.contains("commit your changes or stash them") {
+        msg.push_str(" Commit or stash them first.");
+    }
+    msg
 }
 
 pub struct Workspace {
@@ -854,6 +968,8 @@ pub struct Workspace {
     pub agents: Vec<DetectedAgent>,
     /// Live models from the user's Codex setup (custom providers included).
     pub codex_models: Vec<ModelInfo>,
+    /// What checking each of the user's MCP servers found, by name (`check_mcp_server`).
+    pub mcp_checks: HashMap<String, McpCheck>,
     pub detecting: bool,
     pub importing: bool,
     pub import_summary: Option<ImportSummary>,
@@ -895,6 +1011,13 @@ pub struct Workspace {
     pub git_info: HashMap<PathBuf, GitInfo>,
     /// When each folder's git info was last asked for (refresh_git throttles to it).
     git_fetched: HashMap<PathBuf, Instant>,
+    /// The newest git read asked for, per folder (`refresh_git_at`).
+    git_reads: HashMap<PathBuf, u64>,
+    /// Checkouts with a `git switch` running (by checkout root).
+    pub(crate) switching: HashSet<PathBuf>,
+    /// Bumped when files on disk changed wholesale under the app (another branch or commit
+    /// checked out, a rewind): open editors reload, file lists read again.
+    pub files_epoch: u64,
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
@@ -907,9 +1030,13 @@ pub struct Workspace {
     pub devin_loading: bool,
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
+    /// The ACP Registry and the agents being added from it (Settings › Agents › Add agent).
+    pub added_agents: AddedAgents,
     /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
     agent_commands: HashMap<(String, PathBuf), Vec<SlashCommand>>,
     pub usage_loading: bool,
+    /// Reset credits currently being consumed; keeps the Usage action single-flight.
+    reset_credits_in_flight: HashSet<String>,
     /// The project open on Settings → Project (project id).
     pub settings_project: Option<String>,
     /// An agent session started while the user was still typing a new thread's first message.
@@ -921,12 +1048,26 @@ pub struct Workspace {
     /// A Trek menu is open over the window; native views (the browser) hide so they don't cover it.
     pub overlay_open: bool,
     pub main_window: Option<AnyWindowHandle>,
-    /// IDE mode: the window is files + editor + the chat column on the right.
-    pub ide: bool,
+    /// Which layout the main window shows: the harness, or the editor (Trek IDE).
+    pub mode: Mode,
     /// The folder the IDE's file tree is rooted at (`None` → the welcome screen).
     pub ide_root: Option<PathBuf>,
-    /// Live language servers, keyed `root|language` — spawned lazily as files open.
-    lsp_servers: HashMap<String, Arc<crate::lsp_client::Client>>,
+    /// The editor's AI side bar: its chat tabs and what a new chat starts with.
+    pub ide_chat: IdeChat,
+    /// The chat tabs as last kept in the store for the IDE folder (`chats_moved`).
+    ide_chats_saved: Option<String>,
+    /// What the language servers last said about each open file, for Problems and the status bar.
+    pub diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Open reviews of what agents changed (Keep / Undo), by thread (`review`).
+    pub reviews: HashMap<String, Review>,
+    /// Bumped as agents finish tool calls and turns, which may have written files: the editor's
+    /// clean buffers read their files again.
+    pub agent_edits: u64,
+    /// A file the editor's file bar stepped to: its editor puts the caret on its first hunk.
+    pub reveal_hunk: Option<PathBuf>,
+    /// Live language servers per (root, language), spawned lazily as files open; only the most
+    /// recently used roots keep theirs.
+    lsp_servers: crate::lsp_client::Servers,
     ide_prev_route: Option<Route>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
@@ -935,6 +1076,10 @@ pub struct Workspace {
     pub(crate) pending_compose: Option<(String, String, Vec<PathBuf>)>,
     /// Offer Trek's scripted mock agent (`TREK_MOCK_AGENT=1`, and in tests).
     pub mock_agent: bool,
+    /// Tests: run once as the next turn ends, before its end checkpoint: what the agent changes
+    /// over a turn, without an agent that changes files.
+    #[cfg(test)]
+    pub at_turn_end: Option<Box<dyn FnOnce()>>,
     /// Where Basecamp goes back to (Esc): the screen it was opened from.
     basecamp_back: Option<Route>,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
@@ -957,6 +1102,9 @@ pub struct Workspace {
     /// Asks agents for their usage windows before a resume; Claude Code's and Codex's own report
     /// when unset (tests set their own).
     pub usage_probe: Option<limits::UsageProbe>,
+    /// Spends a granted reset credit (Usage › "Use reset"); Codex's app-server when unset (tests
+    /// set their own). Runs on Trek's tokio runtime.
+    pub reset_consumer: Option<ResetConsumer>,
     /// Trek's end of its agents' orchestration tools, when its socket could be opened.
     pub(crate) ipc: Option<crate::ipc::IpcServer>,
     _ipc_calls: Option<Task<()>>,
@@ -975,13 +1123,17 @@ pub struct Workspace {
     verify_runs: HashMap<String, verification::VerifyRun>,
     /// What finished turns changed (`turn_changes`).
     changes_cache: turn_changes::Cache,
+    /// What quitting runs to end every child process group this process started
+    /// (`trek_core::procs::end_all`). None in tests, which share one process: one test quitting
+    /// mustn't end another's children.
+    pub end_children_on_quit: Option<fn(std::time::Duration)>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
 
 impl Workspace {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let settings = Settings::load();
+        let (mut settings, settings_problem) = Settings::load_checked();
         let (store, store_error) = match Store::open_default() {
             Ok(store) => (store, None),
             // The main window asks whether to quit or go on with nothing saved (`store_error`).
@@ -991,6 +1143,19 @@ impl Workspace {
             }
         };
         let alone = hold_data_folder();
+        // Agents and language servers a crashed run left behind go first.
+        cx.background_executor().spawn(async { trek_core::procs::reap_stale() }).detach();
+        let mut launch_toasts: Vec<String> = settings_problem.map(|p| p.message()).into_iter().collect();
+        launch_toasts.extend(crate::logging::take_crash_note(&trek_core::paths::data_dir()));
+        if store.newer_schema().is_some() {
+            launch_toasts.push("This data folder was last used by a newer Trek. Threads it saved may show only in part here, and rewinding or editing them is off until you update.".into());
+        }
+        // Two Treks on one data folder would each write their own copy of the settings over the
+        // other's: the one that came second leaves the file alone.
+        if !alone {
+            settings.guard.block("another Trek is using this data folder");
+            launch_toasts.push("Another Trek is using this data folder, so settings changed in this one aren't saved.".into());
+        }
         // Side chats an earlier run started from a draft can't be reopened: they go before any
         // opens. Their file checkpoints go in the background, with those of threads put away
         // long ago, which only keep objects alive in the user's repos. Not while another Trek
@@ -1042,6 +1207,17 @@ impl Workspace {
                 this.save_settings(cx);
             }
             this.fetch_changelog(cx);
+        }
+        if !launch_toasts.is_empty() {
+            // Spawned so they land after the window has subscribed to workspace events.
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |_, cx| {
+                    for message in launch_toasts {
+                        cx.emit(WorkspaceEvent::Toast { message, undo: None });
+                    }
+                });
+            })
+            .detach();
         }
         if let Some(from) = after_update {
             tracing::info!("updated from {from} to {}", trek_core::VERSION);
@@ -1130,11 +1306,14 @@ impl Workspace {
             projects: vec![],
             agents: vec![],
             codex_models: vec![],
+            mcp_checks: HashMap::new(),
             detecting: false,
             importing: false,
             import_summary: None,
             live: HashMap::new(),
             route,
+            ide_chat: IdeChat::new(draft_prefs.clone()),
+            ide_chats_saved: None,
             draft_prefs,
             updater: Default::default(),
             agent_updates: Default::default(),
@@ -1156,6 +1335,9 @@ impl Workspace {
             notes_epoch: 0,
             git_info: HashMap::new(),
             git_fetched: HashMap::new(),
+            git_reads: HashMap::new(),
+            switching: HashSet::new(),
+            files_epoch: 0,
             agent_status: HashMap::new(),
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
@@ -1163,20 +1345,28 @@ impl Workspace {
             devin_status_at: 0,
             devin_loading: false,
             acp_info: HashMap::new(),
+            added_agents: AddedAgents::default(),
             usage_loading: false,
+            reset_credits_in_flight: HashSet::new(),
             settings_project: None,
             warm: None,
             checking_merges: false,
             tidied_at: 0,
             overlay_open: false,
             main_window: None,
-            ide: false,
+            mode: Mode::Agents,
             ide_root: None,
-            lsp_servers: HashMap::new(),
+            diagnostics: HashMap::new(),
+            reviews: HashMap::new(),
+            agent_edits: 0,
+            reveal_hunk: None,
+            lsp_servers: Default::default(),
             ide_prev_route: None,
             thread_windows: HashMap::new(),
             pending_compose: None,
             mock_agent: trek_agents::mock::enabled(),
+            #[cfg(test)]
+            at_turn_end: None,
             basecamp_back: None,
             applied_defaults,
             tasks: vec![],
@@ -1187,6 +1377,7 @@ impl Workspace {
             resumes_from: 0,
             limit_checks: HashSet::new(),
             usage_probe: None,
+            reset_consumer: None,
             ipc: None,
             _ipc_calls: None,
             delegations: HashMap::new(),
@@ -1196,8 +1387,14 @@ impl Workspace {
             warm_ipc: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
+            end_children_on_quit: (!cfg!(test)).then_some(trek_core::procs::end_all as fn(std::time::Duration)),
         };
         this.reload(cx);
+        // Agents the user added are known before any thread of theirs is shown or resumed.
+        if !this.settings.added_agents.is_empty() {
+            this.sync_added_agents(cx);
+        }
+        this.restore_reviews(cx);
         this.start_ipc(cx);
         // Sub-agents' reports that hadn't reached their parents: they're delivered now. Not while
         // another Trek has the data folder: they may well be on their way there.
@@ -1205,18 +1402,18 @@ impl Workspace {
             this.restore_wakes(&closed, cx);
         }
         this.refresh_all_verification(cx);
-        if this.route == (Route::Draft { project: None }) {
-            let first = this.workspace_projects().first().map(|p| p.path.clone()).or_else(|| this.projects.first().map(|p| p.path.clone()));
-            // The first draft starts from its project's defaults, as drafts opened later do.
-            if let Some(p) = &first {
-                this.apply_project_defaults(p);
-            }
-            this.route = Route::Draft { project: first };
-        }
+        // Trek opens on a new thread in no project: which folder it works in is picked, not
+        // guessed from whichever project happens to be first.
         cx.on_app_quit(|this, _| {
             // What streamed since the last save is kept (a turn paused on a card, say); the next
             // launch closes the turns left open.
             this.persist_all();
+            // Every way out ends what Trek started (the menu's Quit, the Dock, a logout): agents
+            // and language servers sit in process groups of their own, which no hang-up reaches.
+            this.shutdown_sessions();
+            if let Some(end) = this.end_children_on_quit {
+                end(std::time::Duration::from_millis(150));
+            }
             this.install_on_quit();
             // The socket goes with the process.
             this.ipc = None;
@@ -1267,18 +1464,35 @@ impl Workspace {
         }
     }
 
-    /// The thread `scope` shows, if it shows one (the main window may be on a draft or settings).
+    /// The thread `scope` shows, if it shows one (the main window may be on a draft or settings,
+    /// the AI side bar on a new chat).
     pub fn thread_id_in<'a>(&'a self, scope: &'a Scope) -> Option<&'a str> {
-        scope_thread(scope, &self.route)
+        match scope {
+            Scope::Ide => self.ide_chat.active_thread(),
+            _ => scope_thread(scope, &self.route),
+        }
     }
 
     pub fn thread_in(&self, scope: &Scope) -> Option<&Thread> {
         self.thread_id_in(scope).and_then(|id| self.thread(id))
     }
 
-    /// `scope` is composing a new thread (only the main window does).
+    /// `scope` is composing a new thread (the main window, or the AI side bar's new chat).
     pub fn is_draft_in(&self, scope: &Scope) -> bool {
-        scope_is_draft(scope, &self.route)
+        match scope {
+            Scope::Ide => self.ide_chat.is_draft(),
+            _ => scope_is_draft(scope, &self.route),
+        }
+    }
+
+    /// The folder a new thread from `scope` would start in: the main window's draft project, or
+    /// the IDE folder for the AI side bar's new chat. `None` for a scope on a thread.
+    pub fn draft_project_in(&self, scope: &Scope) -> Option<PathBuf> {
+        match (scope, &self.route) {
+            (Scope::Ide, _) if self.ide_chat.is_draft() => self.ide_root.clone(),
+            (Scope::Main, Route::Draft { project }) => project.clone(),
+            _ => None,
+        }
     }
 
     /// Working directory for `scope`: its thread's folder, or the main window's draft project.
@@ -1286,6 +1500,10 @@ impl Workspace {
         match scope {
             Scope::Main => self.current_cwd(),
             Scope::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+            Scope::Ide => match self.ide_chat.active_thread() {
+                Some(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+                None => self.ide_root.clone(),
+            },
         }
     }
 
@@ -1296,7 +1514,19 @@ impl Workspace {
     /// Where `id` is on screen: its own window, else the main window when it shows the thread.
     /// Its own window wins, so queued follow-ups go back to that window's composer.
     pub fn shown_in(&self, id: &str) -> Option<Scope> {
-        shown_in(id, &self.route, self.thread_windows.contains_key(id), self.main_window.is_some())
+        let main = match self.mode {
+            Mode::Agents => Scope::Main,
+            Mode::Editor => Scope::Ide,
+        };
+        shown_in(id, self.in_main(id).then_some(main), self.thread_windows.contains_key(id), self.main_window.is_some())
+    }
+
+    /// The main window shows `id`: the harness on it, or the editor's AI side bar.
+    fn in_main(&self, id: &str) -> bool {
+        match self.mode {
+            Mode::Agents => matches!(&self.route, Route::Thread(t) if t == id),
+            Mode::Editor => self.ide_chat.active_thread() == Some(id),
+        }
     }
 
     /// The thread is on screen somewhere: in the main window or a window of its own.
@@ -1307,7 +1537,7 @@ impl Workspace {
     /// Whether the user is looking at `thread`: it's in the frontmost Trek window, or (when no
     /// Trek window is frontmost) in any of them.
     pub fn viewing(&self, thread: &str, active: Option<AnyWindowHandle>) -> bool {
-        let in_main = self.main_window.is_some() && matches!(&self.route, Route::Thread(t) if t == thread);
+        let in_main = self.main_window.is_some() && self.in_main(thread);
         viewing(in_main, self.thread_windows.get(thread).copied(), self.main_window, active)
     }
 
@@ -1315,7 +1545,7 @@ impl Workspace {
     pub fn thread_window_opened(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
         self.thread_windows.insert(id.to_string(), handle);
         self.mutate_thread(id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
-        self.ensure_loaded(id, cx);
+        self.load_for_view(id, cx);
         if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()) {
             self.refresh_git_at(cwd, cx);
         }
@@ -1441,20 +1671,22 @@ impl Workspace {
     pub fn apply_default_prefs(&mut self, cx: &mut Context<Self>) {
         let (agent, model, effort, hand) = default_prefs_key(&self.settings);
         let (old_agent, old_model, old_effort, old_hand) = std::mem::replace(&mut self.applied_defaults, (agent.clone(), model.clone(), effort, hand));
-        let p = &mut self.draft_prefs;
         let agent_id = AgentId::from_key(&agent);
-        if agent != old_agent && p.agent != agent_id {
-            p.agent = agent_id;
-            p.model = model.clone();
-        }
-        if model != old_model {
-            p.model = model;
-        }
-        if effort != old_effort {
-            p.effort = effort;
-        }
-        if hand != old_hand {
-            p.hand_holding = hand;
+        // The editor's new chats start from the same defaults as the harness's drafts.
+        for p in [&mut self.draft_prefs, &mut self.ide_chat.draft_prefs] {
+            if agent != old_agent && p.agent != agent_id {
+                p.agent = agent_id.clone();
+                p.model = model.clone();
+            }
+            if model != old_model {
+                p.model = model.clone();
+            }
+            if effort != old_effort {
+                p.effort = effort;
+            }
+            if hand != old_hand {
+                p.hand_holding = hand;
+            }
         }
         cx.notify();
     }
@@ -1628,11 +1860,26 @@ impl Workspace {
 
     pub fn refresh_git_at(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         self.git_fetched.insert(cwd.clone(), Instant::now());
+        // Reads can overlap (a switch right after a navigation): only the newest one lands.
+        let seq = {
+            let n = self.git_reads.entry(cwd.clone()).or_default();
+            *n += 1;
+            *n
+        };
         let task = cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
             let _ = this.update(cx, |this, cx| {
-                if this.git_info.get(&cwd) != Some(&info) {
+                if this.git_reads.get(&cwd) != Some(&seq) {
+                    return;
+                }
+                let old = this.git_info.get(&cwd);
+                if old != Some(&info) {
+                    // Another branch or commit checked out (here or in a terminal): files on
+                    // disk changed under open editors and file lists.
+                    if old.is_some_and(|o| o.head != info.head || o.branch != info.branch) {
+                        this.files_epoch += 1;
+                    }
                     this.git_info.insert(cwd, info);
                     cx.notify();
                 }
@@ -1641,30 +1888,76 @@ impl Workspace {
         self.keep(task);
     }
 
-    /// `git switch <branch>` in `cwd`.
+    /// Read git again for every folder on file that's in the same checkout as `cwd`: a thread
+    /// window or a subfolder's thread shows the same branch.
+    pub(crate) fn refresh_checkout(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        let root = trek_core::worktree::checkout_root(&cwd);
+        let mut dirs: Vec<PathBuf> = self.git_info.keys().filter(|k| trek_core::worktree::checkout_root(k) == root).cloned().collect();
+        if !dirs.contains(&cwd) {
+            dirs.push(cwd);
+        }
+        for dir in dirs {
+            self.refresh_git_at(dir, cx);
+        }
+    }
+
+    /// The title of a thread other than `except` with a turn under way in the checkout `cwd` is in.
+    pub fn working_in_checkout(&self, cwd: &Path, except: &str) -> Option<String> {
+        let root = trek_core::worktree::checkout_root(cwd);
+        self.threads
+            .iter()
+            .filter(|t| t.id != except && t.cwd.as_deref().is_some_and(|c| c.starts_with(&root)))
+            .find(|t| t.run_state == RunState::Working || self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()))
+            .map(|t| t.title.clone())
+    }
+
+    /// Why another branch can't be checked out in `cwd` right now, if it can't: an agent working
+    /// anywhere in that checkout would have its files changed mid-turn.
+    pub fn switch_blocked(&self, cwd: &Path) -> Option<String> {
+        if self.switching.contains(&trek_core::worktree::checkout_root(cwd)) {
+            return Some("Switching branches…".into());
+        }
+        self.working_in_checkout(cwd, "").map(|_| "A thread is working in this folder: switch once it's done.".to_string())
+    }
+
+    /// `git switch <branch>` in `cwd`: never under a working agent, one at a time per checkout.
     pub fn switch_branch(&mut self, cwd: PathBuf, branch: String, cx: &mut Context<Self>) {
+        if let Some(why) = self.switch_blocked(&cwd) {
+            cx.emit(WorkspaceEvent::Toast { message: why, undo: None });
+            return;
+        }
+        let root = trek_core::worktree::checkout_root(&cwd);
+        self.switching.insert(root.clone());
+        cx.notify();
         let task = cx.spawn(async move |this, cx| {
             let dir = cwd.clone();
             let out = cx
                 .background_executor()
-                .spawn(async move { std::process::Command::new("git").args(["switch", &branch]).current_dir(&dir).output() })
+                .spawn(async move {
+                    // `--no-guess`: a branch deleted since the menu was drawn isn't quietly
+                    // re-made from origin; `--`: a name can't be read as an option.
+                    std::process::Command::new("git").args(["switch", "--no-guess", "--", &branch]).current_dir(&dir).output()
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.switching.remove(&root);
                 match out {
-                    Ok(o) if o.status.success() => {}
-                    Ok(o) => {
-                        let err = String::from_utf8_lossy(&o.stderr).lines().find(|l| l.starts_with("error")).unwrap_or("git switch failed").to_string();
-                        cx.emit(WorkspaceEvent::Toast { message: err, undo: None });
-                    }
+                    Ok(o) if o.status.success() => this.files_epoch += 1,
+                    Ok(o) => cx.emit(WorkspaceEvent::Toast { message: git_error(&String::from_utf8_lossy(&o.stderr), "git switch failed"), undo: None }),
                     Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("git: {e}"), undo: None }),
                 }
-                this.refresh_git_at(cwd, cx);
+                this.refresh_checkout(cwd, cx);
+                cx.notify();
             });
         });
         self.keep(task);
     }
 
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+        // Screens only the harness draws (settings, Basecamp, notes) bring it back from the editor.
+        if self.ide() && matches!(route, Route::Settings(_) | Route::Basecamp | Route::Notes | Route::Onboarding) {
+            self.mode = Mode::Agents;
+        }
         if let Route::Thread(id) = &route {
             let id = id.clone();
             self.open_tab(&id);
@@ -1672,7 +1965,7 @@ impl Workspace {
             if self.thread(&id).is_some_and(|t| t.is_unseen()) {
                 self.mutate_thread(&id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
             }
-            self.ensure_loaded(&id, cx);
+            self.load_for_view(&id, cx);
         }
         if let Route::Draft { project: Some(p) } = &route {
             if self.route != route {
@@ -1948,20 +2241,18 @@ impl Workspace {
             _ => false,
         };
         if gone || matches!(self.route, Route::Settings(_)) {
-            let next = self.workspace_projects().first().map(|p| p.path.clone());
-            self.navigate(Route::Draft { project: next }, cx);
+            self.navigate(Route::Draft { project: None }, cx);
         }
         cx.emit(WorkspaceEvent::Toast { message: format!("Removed {} from Trek", project.name), undo: None });
     }
 
+    /// ⌘N, the menu's New Thread and the sidebar's new-thread button: a thread in no project.
+    /// One in a project comes from its header's +, the palette's "New thread in…" or the
+    /// composer's project chip; a draft already in a project stays there.
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         let project = match &self.route {
-            // From a thread without a project, or a draft without one, the next has none either.
-            Route::Thread(id) if self.thread(id).is_some_and(|t| t.project_id.is_none() && t.cwd.as_deref().is_some_and(trek_core::paths::is_chat_dir)) => None,
-            Route::Draft { project: None } => None,
-            Route::Thread(id) => self.thread(id).and_then(|t| self.draft_folder(t)).or_else(|| self.workspace_projects().first().map(|p| p.path.clone())),
             Route::Draft { project } => project.clone(),
-            _ => self.workspace_projects().first().map(|p| p.path.clone()),
+            _ => None,
         };
         self.navigate(Route::Draft { project }, cx);
     }
@@ -2010,6 +2301,74 @@ impl Workspace {
         for id in unread {
             self.mutate_thread(&id, cx, |t| t.last_seen_at = now.max(t.updated_at));
         }
+    }
+
+    /// `ensure_loaded` for a thread coming on screen: its stored history is read off the main
+    /// thread, as an imported one's is, so opening a long thread doesn't stall the click (the
+    /// transcript shows it loading meanwhile). Work that needs the history at once (forking, a
+    /// resume, reports) still calls `ensure_loaded`.
+    pub(crate) fn load_for_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.live.get(id).is_some_and(|l| l.loaded || l.loading) || self.thread(id).is_none() {
+            return self.ensure_loaded(id, cx);
+        }
+        if self.live.get(id).is_none_or(|l| l.spend.is_none()) {
+            let spend = self.load_spend(id);
+            self.live.entry(id.to_string()).or_default().spend = Some(spend);
+        }
+        self.live.entry(id.to_string()).or_default().loading = true;
+        let (store, tid) = (self.store.clone(), id.to_string());
+        let task = cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    let checkpointed: HashSet<String> = store.checkpoints(&tid).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+                    (tid.clone(), checkpointed, store.tool_lines(&tid).unwrap_or_default(), store.items_with_ids(&tid).unwrap_or_default())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let (id, checkpointed, lines, rows) = read;
+                let Some(live) = this.live.get_mut(&id) else { return };
+                live.loading = false;
+                // Deleted while it was read: nothing is left to show it in.
+                if this.thread(&id).is_none() {
+                    return;
+                }
+                // Nothing stored yet (an imported thread's history is still in the agent's files,
+                // or a thread with no messages): the usual path takes it from here.
+                if rows.is_empty() {
+                    return this.ensure_loaded(&id, cx);
+                }
+                let updated_at = this.thread(&id).map_or_else(now_ms, |t| t.updated_at);
+                let live = this.live.entry(id.clone()).or_default();
+                live.checkpointed = checkpointed;
+                live.lines = lines;
+                // Anything that arrived while it was read (a message held for it, a notice) goes
+                // after the history, still to be saved.
+                let arrived = std::mem::replace(&mut live.items, Transcript::stored(rows));
+                if matches!(live.items.last(), Some(Item::Assistant { .. })) {
+                    // As in `ensure_loaded`: a turn saved before Trek marked ends gets one.
+                    live.items.push(Item::TurnEnd { at: updated_at, took_secs: 0 });
+                }
+                let n = live.items.len();
+                for item in arrived.iter().cloned() {
+                    live.items.push(item);
+                }
+                live.streaming = live.streaming.map(|i| i + n);
+                live.reasoning = live.reasoning.map(|i| i + n);
+                live.loaded = true;
+                live.revision += 1;
+                if live.end_orphaned_calls() || !arrived.is_empty() {
+                    this.persist_items(&id, cx);
+                }
+                this.settle_cut_off_rows(&id, cx);
+                // Messages sent while it loaded go out now, after the history; then reports from
+                // its sub-agents.
+                this.send_queued(&id, cx);
+                this.deliver_wakes(&id, cx);
+                cx.notify();
+            });
+        });
+        self.keep(task);
     }
 
     pub(crate) fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2118,6 +2477,7 @@ impl Workspace {
                 fast: self.live.get(&t.id).is_some_and(|l| l.fast),
                 worktree: t.worktree.is_some(),
             },
+            None if *scope == Scope::Ide => self.ide_chat.draft_prefs.clone(),
             None => self.draft_prefs.clone(),
         }
     }
@@ -2236,6 +2596,7 @@ impl Workspace {
                     }
                 }
             }
+            None if *scope == Scope::Ide => self.ide_chat.draft_prefs = prefs,
             None => self.draft_prefs = prefs,
         }
         cx.notify();
@@ -2315,28 +2676,15 @@ impl Workspace {
         .detach();
     }
 
-    /// The IDE toggle: chat ⇄ code. The chat route stays live (it renders as the IDE's right
-    /// column), so toggling out is instant — nothing to restore. Entering from a lone
-    /// `Route::Editor` adopts that file as an IDE tab and steps back to the chat it came from.
+    /// ⌥⌘E and the title bar's switch: Agents ⇄ Editor (`set_mode`).
     pub fn toggle_ide(&mut self, cx: &mut Context<Self>) {
-        self.ide = !self.ide;
-        if self.ide {
-            // No folder picked yet? Root the tree at whatever the chat is working on.
-            if self.ide_root.is_none() {
-                self.ide_root = self.current_cwd();
-            }
-            self.ide_prev_route = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding | Route::Editor { .. }));
-            if matches!(self.route, Route::Editor { .. }) {
-                let back = self.ide_prev_route.clone().unwrap_or(Route::Draft { project: self.ide_root.clone() });
-                self.navigate(back, cx);
-            }
-        }
-        cx.notify();
+        let mode = if self.ide() { Mode::Agents } else { Mode::Editor };
+        self.set_mode(mode, cx);
     }
 
     /// Pick the folder the IDE's file tree roots at.
     pub fn set_ide_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.ide_root = Some(path.clone());
+        self.move_ide_root(Some(path.clone()));
         self.settings.ide.remember_folder(&path.display().to_string());
         let _ = self.settings.save();
         cx.notify();
@@ -2385,16 +2733,7 @@ impl Workspace {
             return None;
         }
         let root = self.ide_root.clone().unwrap_or_else(|| trek_core::store::project_root(path));
-        let (_, _, language_id) = crate::lsp_client::spec(lang)?;
-        let key = format!("{}|{language_id}", root.display());
-        match self.lsp_servers.get(&key) {
-            Some(c) => Some(c.clone()),
-            None => {
-                let c = crate::lsp_client::Client::start(root, lang)?;
-                self.lsp_servers.insert(key, c.clone());
-                Some(c)
-            }
-        }
+        self.lsp_servers.get_or_start(root, lang)
     }
 
     /// A file opened in the editor — remember it for the welcome screen.
@@ -2406,7 +2745,12 @@ impl Workspace {
     /// Open `path` in the main window's editor; `line` puts the caret there (Explorer,
     /// `trek://edit` deep links).
     pub fn open_editor(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
-        cx.emit(WorkspaceEvent::OpenEditor { path, line });
+        cx.emit(WorkspaceEvent::OpenEditor { path, line, preview: false });
+    }
+
+    /// A single click in the editor's Explorer: open `path` in the preview tab.
+    pub fn preview_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::OpenEditor { path, line: None, preview: true });
     }
 
     /// Working directory for whatever is on screen: the thread's folder or the draft's project.
@@ -2519,83 +2863,11 @@ impl Workspace {
         let id = match self.route.clone() {
             Route::Thread(id) => id,
             Route::Draft { project } => {
-                // No project: the thread gets a folder of its own to work in, and belongs to none.
-                let chat = project.is_none();
-                let cwd = match project {
-                    Some(cwd) => cwd,
-                    None => match trek_core::paths::new_chat_dir() {
-                        Ok(dir) => dir,
-                        Err(e) => {
-                            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't make a folder for the thread: {e}"), undo: None });
-                            return;
-                        }
-                    },
-                };
-                let p = self.draft_prefs.clone();
-                // A worktree of its own: its branch and folder are picked now, and it's made in
-                // the background while the message waits. Other threads' worktrees are taken,
-                // made yet or not.
-                let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
-                let planned = match (p.worktree && !chat).then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, &text, &taken)) {
-                    Some(Err(e)) => {
-                        cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start a worktree: {e}"), undo: None });
-                        cx.emit(WorkspaceEvent::InsertIntoComposer(text));
-                        for image in images {
-                            cx.emit(WorkspaceEvent::AttachImage(image));
-                        }
-                        return;
-                    }
-                    Some(Ok(wt)) => Some(wt),
-                    None => None,
-                };
-                let mut thread = match self.store.create_thread((!chat).then_some(cwd.as_path()), p.agent, p.model, p.effort, p.hand_holding) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't create thread: {e}"), undo: None });
-                        return;
-                    }
-                };
-                thread.title = trek_core::import_title(&text);
-                if chat {
-                    thread.cwd = Some(cwd.clone());
-                }
-                if let Some(wt) = &planned {
-                    thread.cwd = Some(wt.path.clone());
-                    thread.worktree = Some(wt.clone());
-                }
-                let _ = self.store.save_thread(&thread);
-                let id = thread.id.clone();
-                self.reload(cx);
-                let live = self.live.entry(id.clone()).or_default();
-                live.loaded = true;
-                live.plan = p.plan;
-                live.fast = p.fast;
+                let prefs = self.draft_prefs.clone();
+                let Some(id) = self.start_thread(project, prefs, &text, &images, cx) else { return };
                 // The draft's tab becomes the thread's.
                 self.open_tab(&id);
                 self.route = Route::Thread(id.clone());
-                match planned {
-                    Some(wt) => self.make_worktree(&id, cwd, wt, cx),
-                    // Use the session that was started while the message was being typed, if it still fits.
-                    None => {
-                        let key = self.draft_key(&cwd);
-                        match self.warm.take() {
-                            Some((k, handle, _)) if k == key => {
-                                // A new session, given the project notes the key says.
-                                let notes = k.7.filter(|_| !self.thread(&id).is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent)));
-                                self.live.entry(id.clone()).or_default().notes_pending = notes;
-                                self.attach(&id, handle, cx);
-                                let ipc = self.warm_ipc.take();
-                                self.adopt_ipc_session(&id, ipc);
-                            }
-                            // It doesn't fit (or there's none): its tools' key goes with it.
-                            _ => {
-                                if let (Some(key), Some(ipc)) = (self.warm_ipc.take(), &self.ipc) {
-                                    ipc.close_session(&key);
-                                }
-                            }
-                        }
-                    }
-                }
                 id
             }
             _ => return,
@@ -2603,7 +2875,90 @@ impl Workspace {
         self.send_to(&id, text, images, cx);
     }
 
-    /// Send from `scope`'s composer: the main window's (which may start a new thread) or a thread window's.
+    /// Make a new thread for a first message: in `project` (none: a folder of its own), with
+    /// `prefs`, in a worktree when they ask for one, on the session warmed up while it was typed
+    /// if that still fits. Puts it nowhere on screen (the harness's draft and the editor's AI side
+    /// bar each do that their own way) and sends nothing. `None` when it couldn't be made (said in
+    /// a toast; the message goes back to the composer when a worktree couldn't be planned).
+    pub fn start_thread(&mut self, project: Option<PathBuf>, prefs: Prefs, text: &str, images: &[PathBuf], cx: &mut Context<Self>) -> Option<String> {
+        // No project: the thread gets a folder of its own to work in, and belongs to none.
+        let chat = project.is_none();
+        let cwd = match project {
+            Some(cwd) => cwd,
+            None => match trek_core::paths::new_chat_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't make a folder for the thread: {e}"), undo: None });
+                    return None;
+                }
+            },
+        };
+        let p = prefs;
+        // A worktree of its own: its branch and folder are picked now, and it's made in
+        // the background while the message waits. Other threads' worktrees are taken,
+        // made yet or not.
+        let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
+        let planned = match (p.worktree && !chat).then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, text, &taken)) {
+            Some(Err(e)) => {
+                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start a worktree: {e}"), undo: None });
+                cx.emit(WorkspaceEvent::InsertIntoComposer(text.to_string()));
+                for image in images {
+                    cx.emit(WorkspaceEvent::AttachImage(image.clone()));
+                }
+                return None;
+            }
+            Some(Ok(wt)) => Some(wt),
+            None => None,
+        };
+        let key = self.draft_key_with(&p, &cwd);
+        let mut thread = match self.store.create_thread((!chat).then_some(cwd.as_path()), p.agent, p.model, p.effort, p.hand_holding) {
+            Ok(t) => t,
+            Err(e) => {
+                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't create thread: {e}"), undo: None });
+                return None;
+            }
+        };
+        thread.title = trek_core::import_title(text);
+        if chat {
+            thread.cwd = Some(cwd.clone());
+        }
+        if let Some(wt) = &planned {
+            thread.cwd = Some(wt.path.clone());
+            thread.worktree = Some(wt.clone());
+        }
+        let _ = self.store.save_thread(&thread);
+        let id = thread.id.clone();
+        self.reload(cx);
+        let live = self.live.entry(id.clone()).or_default();
+        live.loaded = true;
+        live.plan = p.plan;
+        live.fast = p.fast;
+        match planned {
+            Some(wt) => self.make_worktree(&id, cwd, wt, cx),
+            // Use the session that was started while the message was being typed, if it still fits.
+            None => match self.warm.take() {
+                Some((k, handle, _)) if k == key => {
+                    // A new session, given the project notes the key says.
+                    let notes = k.7.filter(|_| !self.thread(&id).is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent)));
+                    self.live.entry(id.clone()).or_default().notes_pending = notes;
+                    self.attach(&id, handle, cx);
+                    let ipc = self.warm_ipc.take();
+                    self.adopt_ipc_session(&id, ipc);
+                }
+                // It doesn't fit (or there's none): its tools' key goes with it.
+                _ => {
+                    if let (Some(key), Some(ipc)) = (self.warm_ipc.take(), &self.ipc) {
+                        ipc.close_session(&key);
+                    }
+                }
+            },
+        }
+        Some(id)
+    }
+
+    /// Send from `scope`'s composer: the main window's (which may start a new thread), a thread
+    /// window's, or the editor's AI side bar (whose new chat starts a thread without moving the
+    /// harness off what it shows).
     pub fn send_in(&mut self, scope: &Scope, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         match scope {
             Scope::Main => self.send(text, images, cx),
@@ -2615,11 +2970,21 @@ impl Workspace {
                     cx.emit(WorkspaceEvent::ActivateMain);
                 }
             }
+            Scope::Ide => match self.ide_chat.active_thread().map(str::to_string) {
+                Some(id) => self.send_to(&id, text, images, cx),
+                None => self.send_ide_draft(text, images, cx),
+            },
         }
     }
 
     /// Send a prompt to a specific thread (main view or a side chat).
     pub fn send_to(&mut self, id: &str, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.send_as(id, text, images, None, cx);
+    }
+
+    /// `send_to`, saying how a message sent while a turn runs goes: queued for after it, or
+    /// steering it now (`None`: as Settings › General has it).
+    pub fn send_as(&mut self, id: &str, text: String, images: Vec<PathBuf>, follow: Option<FollowUp>, cx: &mut Context<Self>) {
         let id = id.to_string();
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
@@ -2680,7 +3045,7 @@ impl Workspace {
             },
             true => (text, images),
         };
-        if running && self.settings.general.follow_up == FollowUp::Queue {
+        if running && follow.unwrap_or(self.settings.general.follow_up) == FollowUp::Queue {
             let live = self.live.entry(id.clone()).or_default();
             live.queued.push((text, images));
             live.revision += 1;
@@ -2707,6 +3072,8 @@ impl Workspace {
         }
         live.streaming = None;
         live.reasoning = None;
+        // A turn starting: the message it starts from (a review of its changes may open there).
+        let started = (!running).then(|| live.items.id_at(ix).map(str::to_string)).flatten();
         // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
         if !running {
             live.turn_started = Some(Instant::now());
@@ -2727,6 +3094,9 @@ impl Workspace {
         live.revision += 1;
         self.dispatch(&id, Command::Prompt { text, images });
         self.run_git(&id, cx);
+        if let Some(item) = started {
+            self.review_turn_started(&id, &item, cx);
+        }
         self.mutate_thread(&id, cx, |t| {
             t.run_state = RunState::Working;
             t.settled_at = None;
@@ -2796,7 +3166,7 @@ impl Workspace {
         if thread.worktree.as_ref().is_some_and(|w| w.is_missing()) || self.agent_updating(&thread.agent.key()) {
             return;
         }
-        let (plan, fast_on) = self.live.get(id).map(|l| (l.plan, l.fast)).unwrap_or_default();
+        let (plan, fast_on, asking) = self.live.get(id).map(|l| (l.plan, l.fast, l.ask)).unwrap_or_default();
         // After a rewind or a fork the session picks up from part of one, or from a recap.
         let recap = || self.live.get(id).map(|l| trek_core::rewind::recap(&l.items)).filter(|r| !r.is_empty());
         let (resume, resume_at, fork, recap) = match thread.reopen.clone() {
@@ -2824,10 +3194,11 @@ impl Workspace {
             cwd,
             model: thread.model.clone(),
             effort: thread.effort,
-            hand_holding: thread.hand_holding,
+            // Codex reads only in its Supervised sandbox: Ask mode holds it there.
+            hand_holding: if asking && thread.agent == AgentId::Codex { HandHolding::Supervised } else { thread.hand_holding },
             plan,
-            // A sub-agent that only advises can't change anything.
-            read_only: self.advising(id),
+            // A sub-agent that only advises can't change anything, nor can a chat in Ask mode.
+            read_only: self.advising(id) || asking,
             resume,
             resume_at,
             fork,
@@ -2845,6 +3216,7 @@ impl Workspace {
     fn attach(&mut self, id: &str, handle: trek_agents::SessionHandle, cx: &mut Context<Self>) {
         let live = self.live.entry(id.to_string()).or_default();
         live.commands = Some(handle.commands);
+        live.stderr = Some(handle.log);
         live.relaunch = false;
         live.last_active = Some(cx.background_executor().now());
         // A new process says how it's billed again (the login may have changed since).
@@ -2878,8 +3250,9 @@ impl Workspace {
         self.run_git(&thread, cx);
     }
 
-    fn draft_key(&self, cwd: &std::path::Path) -> WarmKey {
-        let p = &self.draft_prefs;
+    /// What a session warmed up for a new thread in `cwd` with `p` was started with: one that
+    /// still matches when the message goes takes it.
+    fn draft_key_with(&self, p: &Prefs, cwd: &std::path::Path) -> WarmKey {
         (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast, self.session_notes(Some(cwd), cwd, true))
     }
 
@@ -2899,49 +3272,65 @@ impl Workspace {
         match self.route.clone() {
             Route::Thread(id) => self.warm_thread(&id, cx),
             Route::Draft { project: Some(cwd) } => {
-                // A thread in a worktree starts its agent there, once the worktree is made.
-                if matches!(self.draft_prefs.agent, AgentId::Direct(_)) || self.draft_prefs.worktree || self.agent_updating(&self.draft_prefs.agent.key()) {
-                    return;
-                }
-                if self.warm.as_ref().is_some_and(|(k, _, _)| *k == self.draft_key(&cwd)) {
-                    return;
-                }
-                let p = self.draft_prefs.clone();
-                let (mcp_servers, ipc) = self.session_mcp(&p.agent, None);
-                if let (Some(old), Some(server)) = (std::mem::replace(&mut self.warm_ipc, ipc), &self.ipc) {
-                    server.close_session(&old);
-                }
-                self.refresh_verification(&cwd, cx);
-                let key = self.draft_key(&cwd);
-                let instructions = key.7.clone();
-                let handle = start_session(SessionConfig {
-                    agent: p.agent.clone(),
-                    cwd,
-                    model: p.model.clone(),
-                    effort: p.effort,
-                    hand_holding: p.hand_holding,
-                    plan: p.plan,
-                    read_only: false,
-                    resume: None,
-                    resume_at: None,
-                    fork: false,
-                    recap: None,
-                    fast: self.fast_tier(&p.agent, p.model.as_ref(), p.fast),
-                    mcp_servers,
-                    instructions,
-                    read_dirs: vec![trek_core::skills::shipped_root()],
-                });
-                // Replacing the old one drops its command channel, which ends that process.
-                self.warm = Some((key, handle, cx.background_executor().now()));
+                let prefs = self.draft_prefs.clone();
+                self.warm_draft(cwd, prefs, cx);
             }
             _ => {}
         }
+    }
+
+    /// `warm_up` for a new thread in `cwd` with `p` (the harness's draft, or the AI side bar's
+    /// new chat: one session is kept warm at a time, for whichever was typed in last).
+    fn warm_draft(&mut self, cwd: PathBuf, p: Prefs, cx: &mut Context<Self>) {
+        // A thread in a worktree starts its agent there, once the worktree is made.
+        if matches!(p.agent, AgentId::Direct(_)) || p.worktree || self.agent_updating(&p.agent.key()) {
+            return;
+        }
+        if self.warm.as_ref().is_some_and(|(k, _, _)| *k == self.draft_key_with(&p, &cwd)) {
+            return;
+        }
+        let (mcp_servers, ipc) = self.session_mcp(&p.agent, None);
+        if let (Some(old), Some(server)) = (std::mem::replace(&mut self.warm_ipc, ipc), &self.ipc) {
+            server.close_session(&old);
+        }
+        self.refresh_verification(&cwd, cx);
+        let key = self.draft_key_with(&p, &cwd);
+        let instructions = key.7.clone();
+        let handle = start_session(SessionConfig {
+            agent: p.agent.clone(),
+            cwd,
+            model: p.model.clone(),
+            effort: p.effort,
+            hand_holding: p.hand_holding,
+            plan: p.plan,
+            read_only: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: self.fast_tier(&p.agent, p.model.as_ref(), p.fast),
+            mcp_servers,
+            instructions,
+            read_dirs: vec![trek_core::skills::shipped_root()],
+        });
+        // Replacing the old one drops its command channel, which ends that process.
+        self.warm = Some((key, handle, cx.background_executor().now()));
     }
 
     pub fn warm_up_in(&mut self, scope: &Scope, cx: &mut Context<Self>) {
         match scope {
             Scope::Main => self.warm_up(cx),
             Scope::Thread(id) => self.warm_thread(id, cx),
+            Scope::Ide => match (self.ide_chat.active_thread().map(str::to_string), self.ide_root.clone()) {
+                (Some(id), _) => self.warm_thread(&id, cx),
+                // Ask mode starts its session read-only, which a warm one isn't.
+                (None, Some(_)) if self.ide_chat.draft_ask => {}
+                (None, Some(cwd)) => {
+                    let prefs = self.ide_chat.draft_prefs.clone();
+                    self.warm_draft(cwd, prefs, cx);
+                }
+                (None, None) => {}
+            },
         }
     }
 
@@ -2954,8 +3343,25 @@ impl Workspace {
     }
 
     pub(crate) fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
-        // An advising sub-agent's requests are declined before anyone sees them.
+        // A finished call may have changed files, and a finished turn ends a span of changes:
+        // an open review works its pending files out again.
+        let finished = events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { .. } | AgentEvent::TurnComplete { .. }));
+        let moved = self.reviews.contains_key(id) && finished;
+        // Open editors read files an agent may have written again (`agent_edits`).
+        if finished {
+            self.agent_edits += 1;
+        }
+        self.apply_agent_events(id, events, cx);
+        if moved {
+            self.review_moved(id, cx);
+        }
+    }
+
+    fn apply_agent_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
+        // An advising sub-agent's requests are declined before anyone sees them, and an asking
+        // chat's requests to change things.
         let events = self.screen_advice(id, events);
+        let events = self.screen_ask(id, events);
         // Background tasks' output is read while it runs (polled): it goes to whatever shows it,
         // and changes nothing else.
         let (outputs, events): (Vec<AgentEvent>, Vec<AgentEvent>) = events.into_iter().partition(|e| matches!(e, AgentEvent::TaskOutput { .. }));
@@ -3026,7 +3432,14 @@ impl Workspace {
             live.last_active = Some(cx.background_executor().now());
             // When the turn ending here began, as wall time (`note_branch`).
             turn_began = live.turn_started.map(|t| now_ms() - t.elapsed().as_millis() as i64);
+            let now = cx.background_executor().now();
             for ev in events {
+                // Whatever comes after a reasoning item ends its time.
+                if let (Some(ix), false) = (live.reasoning, matches!(ev, AgentEvent::ReasoningDelta(_))) {
+                    if let Some(span) = live.items.id_at(ix).and_then(|item| live.thought.get_mut(item)) {
+                        span.1 = now;
+                    }
+                }
                 // A point the session can be taken back to changes nothing on screen.
                 let ev = match ev {
                     AgentEvent::Mark(m) => {
@@ -3182,6 +3595,9 @@ impl Workspace {
                             None => {
                                 let ix = live.items.push(Item::Reasoning { text: String::new() });
                                 live.reasoning = Some(ix);
+                                if let Some(item) = live.items.id_at(ix) {
+                                    live.thought.insert(item.to_string(), (now, now));
+                                }
                                 ix
                             }
                         };
@@ -3441,7 +3857,8 @@ impl Workspace {
         }
         if finished {
             self.turns_finished += 1;
-            // The turn before is counted against the files as they are, or waits on this one.
+            self.checkpoint_turn_end(id, cx);
+            // The turn's count waits on its end checkpoint.
             self.forget_turn_changes(id, false, cx);
             self.refresh_git(cx);
             if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()).filter(|c| Some(c) != self.current_cwd().as_ref()) {
@@ -3789,6 +4206,34 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A turn of `id` ended: the files are checkpointed as they stand, so what it changed is
+    /// counted up to here (`turn_changes`, a review, a rewind), and what the user or another
+    /// thread changes afterwards isn't its. Keyed by the item that ended it (its footer, error
+    /// or interruption), or the turn's last item when nothing did.
+    fn checkpoint_turn_end(&mut self, id: &str, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if let Some(f) = self.at_turn_end.take() {
+            f();
+        }
+        let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()).filter(|c| in_repo(Some(c))) else { return };
+        let Some(live) = self.live.get_mut(id) else { return };
+        let items = &live.items;
+        let Some(last) = items.len().checked_sub(1) else { return };
+        let end = match items.iter().rposition(trek_core::rewind::ends_turn) {
+            Some(e) if !items[e + 1..].iter().any(|i| matches!(i, Item::User { aside: false, .. })) => e,
+            _ => last,
+        };
+        let start = if trek_core::rewind::ends_turn(&items[end]) { trek_core::rewind::turn_start(items, end) } else { trek_core::rewind::turn_start(items, end + 1) };
+        // A turn the agent took by itself has no checkpoint to count from.
+        let Some(start) = start.filter(|s| *s < end) else { return };
+        let (Some(first), Some(item)) = (items.id_at(start), items.id_at(end)) else { return };
+        if live.checkpoint_failed.contains_key(first) || live.checkpointed.contains(item) {
+            return;
+        }
+        live.git_jobs.push_back(GitJob::Checkpoint { cwd, item: item.to_string() });
+        self.run_git(id, cx);
+    }
+
     /// Send `cmd` to `id`'s agent once the git work queued before it is done.
     fn dispatch(&mut self, id: &str, cmd: Command) {
         let Some(live) = self.live.get_mut(id) else { return };
@@ -3830,6 +4275,7 @@ impl Workspace {
             return;
         };
         live.git_busy = true;
+        live.git_running = Some(job.clone());
         let (store, thread, run, guard) = (self.store.clone(), id.to_string(), job.clone(), live.git_guard.clone());
         live._git = Some(cx.spawn(async move |this, cx| {
             let t = thread.clone();
@@ -3850,11 +4296,21 @@ impl Workspace {
     fn git_done(&mut self, id: &str, job: GitJob, result: anyhow::Result<GitDone>, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(id) else { return };
         live.git_busy = false;
-        // A checkpoint ends the latest turn's count; restored files move it.
+        live.git_running = None;
+        // A checkpoint ends a turn's count; restored files move it.
         let files_moved = matches!(job, GitJob::Checkpoint { .. } | GitJob::Restore { .. });
         match (job, result) {
             // Taking one may have pruned the oldest.
-            (GitJob::Checkpoint { .. }, Ok(GitDone::Taken)) => live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect(),
+            (GitJob::Checkpoint { item, .. }, Ok(GitDone::Taken)) => {
+                live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+                // Its message left the transcript while it was taken (stopped, then rewound): the
+                // rewind found nothing to drop yet, so it goes now.
+                if live.items.position(&item).is_none() {
+                    if let Ok(Some(c)) = self.store.checkpoint(id, &item) {
+                        live.git_jobs.push_back(GitJob::Forget { repo: c.repo, items: vec![item] });
+                    }
+                }
+            }
             (GitJob::Checkpoint { item, .. }, Err(e)) => {
                 tracing::warn!("checkpoint of {id}: {e:#}");
                 // Said once per thread: a repo where it fails tends to fail every time.
@@ -3898,7 +4354,14 @@ impl Workspace {
                     (0, None) => None,
                     (n, None) => Some(format!("Restored {n} file{}", if n == 1 { "" } else { "s" })),
                 };
-                let undo = restored.and_then(|r| r.undo.clone()).map(|sha| UndoAction::Unrestore { thread: id.to_string(), repo: repo.clone(), sha });
+                let undo = restored.and_then(|r| {
+                    let paths = r.changes.iter().filter(|c| !matches!(c.change, trek_core::checkpoint::Change::Nested | trek_core::checkpoint::Change::Kept)).map(|c| c.path.clone()).collect();
+                    Some(UndoAction::Unrestore { thread: id.to_string(), repo: repo.clone(), sha: r.undo.clone()?, paths })
+                });
+                if restored.is_some_and(|r| r.restored() > 0) {
+                    // Open editors and file lists show the files put back.
+                    self.files_epoch += 1;
+                }
                 if let Some(message) = message {
                     cx.emit(WorkspaceEvent::Toast { message, undo });
                 }
@@ -3912,6 +4375,7 @@ impl Workspace {
                     live.checkpointed.remove(i);
                 }
             }
+            (GitJob::ForgetAll { .. }, Ok(_)) => live.checkpointed.clear(),
             (GitJob::Link { checkpoints, .. }, Ok(_)) => live.checkpointed.extend(checkpoints.into_iter().map(|(item, _)| item)),
             (_, Err(e)) => tracing::warn!("git work for {id}: {e:#}"),
             _ => {}
@@ -3950,8 +4414,22 @@ impl Workspace {
             return None;
         }
         let thread = self.thread(id)?.clone();
+        // Putting files back rewrites the whole checkout: not under another thread's agent at work
+        // in it.
+        if restore && self.store.checkpoint(id, item).ok().flatten().is_some() {
+            if let Some(other) = thread.cwd.as_deref().and_then(|c| self.working_in_checkout(c, id)) {
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("“{other}” is working in this folder: restoring files now would change them under it. Wait for it, or rewind without restoring files."),
+                    undo: None,
+                });
+                return None;
+            }
+        }
         let reopen = self.rewind_plan(id, item);
         let checkpoints = self.store.checkpoints(id).unwrap_or_default();
+        // Only the files the turns taken back changed go back: not the user's edits between
+        // them, nor what other threads did meanwhile.
+        let spans = self.live.get(id).and_then(|l| l.items.position(item)).map(|pos| self.turn_spans(id, pos)).unwrap_or_default();
         // A missing worktree's files can't be put back. The refs of its checkpoints are in the
         // repository the project folder shares with it, so they're dropped from there.
         let shared = worktree_missing(&thread).then(|| self.project_dir(&thread)).flatten();
@@ -3982,7 +4460,7 @@ impl Workspace {
         live.revision += 1;
         if restore {
             if let Some(c) = checkpoints.iter().find(|c| c.item_id == item) {
-                live.git_jobs.push_back(GitJob::Restore { repo: c.repo.clone(), sha: c.sha.clone() });
+                live.git_jobs.push_back(GitJob::Restore { repo: c.repo.clone(), sha: c.sha.clone(), only: RestoreOnly::Turns(spans) });
             }
         }
         // The checkpoints of messages that left the transcript go too.
@@ -4038,6 +4516,14 @@ impl Workspace {
             return None;
         }
         self.store.checkpoint(id, item).ok().flatten()
+    }
+
+    /// What a rewind of `id` to just before message `item` would put back, worked out off the
+    /// main thread (`RewindFiles::changes`): `None` when there's no checkpoint to restore.
+    pub fn rewind_files(&self, id: &str, item: &str) -> Option<RewindFiles> {
+        let c = self.restorable_checkpoint(id, item)?;
+        let pos = self.live.get(id)?.items.position(item)?;
+        Some(RewindFiles { store: self.store.clone(), thread: id.to_string(), repo: c.repo, sha: c.sha, spans: self.turn_spans(id, pos) })
     }
 
     /// How the agent would pick up `id` if it were rewound to just before message `item`.
@@ -4112,14 +4598,17 @@ impl Workspace {
             return None;
         }
         let (fork_id, message) = self.fork_quietly(id, &at, cx)?;
+        // The editor's fork opens as a chat tab beside the one it came from.
+        let into = if *scope == Scope::Ide { Scope::Ide } else { Scope::Main };
         match scope {
             Scope::Main => self.navigate(Route::Thread(fork_id.clone()), cx),
             Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
+            Scope::Ide => self.ide_open_thread(&fork_id, cx),
         }
         if let Some((text, images)) = message {
             // A main window reopened for the fork can't hear it yet: it takes the message itself.
             if self.main_window.is_some() {
-                cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Main, thread: fork_id.clone(), text, images, edit: None });
+                cx.emit(WorkspaceEvent::ComposeIn { scope: into, thread: fork_id.clone(), text, images, edit: None });
             } else {
                 self.pending_compose = Some((fork_id.clone(), text, images));
             }
@@ -4230,7 +4719,12 @@ impl Workspace {
             // Dealt with: a merge of its branch later has nothing left to settle.
             t.branch = None;
         });
-        cx.emit(WorkspaceEvent::Toast { message: "Settled".into(), undo: Some(UndoAction::Unsettle(id.into())) });
+        // Named, so a stray ⌘E is noticed (and undone) before the thread leaves sight.
+        let message = match self.thread(id) {
+            Some(t) => format!("Settled “{}”", trek_core::orchestrate::preview(&t.title, 48)),
+            None => "Settled".into(),
+        };
+        cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::Unsettle(id.into())) });
     }
 
     /// Back to the inbox, and counted as looked at now: auto-settle (which waits from the last
@@ -4313,6 +4807,9 @@ impl Workspace {
         if self.route == Route::Thread(id.into()) {
             self.new_thread(cx);
         }
+        // Its chat tab in the editor goes too.
+        self.ide_chat.forget(id);
+        self.chats_moved();
         self.threads.retain(|t| t.archived_at.is_none());
         self.threads_gen += 1;
         cx.emit(WorkspaceEvent::Toast { message: "Archived".into(), undo: Some(UndoAction::Unarchive(id.into())) });
@@ -4386,6 +4883,11 @@ impl Workspace {
             if let Some(cwd) = t.cwd.as_deref().filter(|c| in_repo(Some(c))) {
                 refs.insert((t.id.clone(), cwd.to_path_buf()));
             }
+            // A worktree thread's refs are in the repository its project shares, even with the
+            // worktree gone.
+            if let Some(project) = self.project_dir(t).filter(|p| in_repo(Some(p))) {
+                refs.insert((t.id.clone(), project));
+            }
             if let Some(live) = self.live.remove(&t.id) {
                 live.git_guard.gone.store(true, std::sync::atomic::Ordering::SeqCst);
                 guards.push(live.git_guard.clone());
@@ -4425,6 +4927,8 @@ impl Workspace {
             cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't delete: {e}"), undo: None });
         }
         let was_open = self.route == Route::Thread(id.into());
+        self.ide_chat.forget(id);
+        self.chats_moved();
         self.reload(cx);
         if was_open {
             self.new_thread(cx);
@@ -4507,9 +5011,12 @@ impl Workspace {
             let _ = tx.send(trek_agents::generate_title(&request, &reply).await.map_err(|e| format!("{e:#}"))).await;
         });
         let id = id.to_string();
+        // An automatic title doesn't overwrite a name given while it was being written.
+        let asked_over = self.thread(&id).map(|t| t.title.clone());
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| match result {
+                Ok(_) if !announce && this.thread(&id).map(|t| t.title.clone()) != asked_over => {}
                 Ok(title) => this.rename(&id, title, cx),
                 Err(e) if announce => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't write a title: {e}"), undo: None }),
                 Err(e) => tracing::warn!("auto title: {e}"),
@@ -4530,10 +5037,13 @@ impl Workspace {
         }
         let Some(live) = self.live.get(id) else { return };
         let Some(first) = live.items.iter().find_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }) else { return };
-        // Only on the first turn (answers to the agent's questions on the way are messages too),
-        // and only if the title is still the automatic one.
+        // Only as the first prompt's turn ends (answers to the agent's questions on the way are
+        // asides, not prompts), and only if the title is still the automatic one. Counting prompts
+        // as well as turn ends: a first turn cut off (Trek quit, the user stopped it) ends with no
+        // `TurnEnd`, and a later prompt mustn't name the thread after the first one.
         let turns = live.items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count();
-        if turns > 1 || t.title != trek_core::import_title(first) || first.starts_with('/') {
+        let prompts = live.items.iter().filter(|i| matches!(i, Item::User { aside: false, .. })).count();
+        if turns > 1 || prompts > 1 || t.title != trek_core::import_title(first) || first.starts_with('/') {
             return;
         }
         self.regenerate_title(id, false, cx);
@@ -4552,8 +5062,8 @@ impl Workspace {
                 cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn first.".into(), undo: None });
             }
             // Not for a thread deleted since: its refs are gone.
-            UndoAction::Unrestore { thread, repo, sha } if self.thread(&thread).is_some() => {
-                self.live.entry(thread.clone()).or_default().git_jobs.push_back(GitJob::Restore { repo, sha });
+            UndoAction::Unrestore { thread, repo, sha, paths } if self.thread(&thread).is_some() => {
+                self.live.entry(thread.clone()).or_default().git_jobs.push_back(GitJob::Restore { repo, sha, only: RestoreOnly::Paths(paths) });
                 self.run_git(&thread, cx);
             }
             UndoAction::Unrestore { .. } => {}
@@ -4808,10 +5318,12 @@ impl Workspace {
                     this.probe_acp_agents(cx);
                     // Default to an agent that's actually installed.
                     let ready = this.ready_agents();
-                    if !ready.contains(&this.draft_prefs.agent) {
-                        if let Some(a) = ready.first() {
-                            this.draft_prefs.agent = a.clone();
-                            this.draft_prefs.model = None;
+                    for p in [&mut this.draft_prefs, &mut this.ide_chat.draft_prefs] {
+                        if !ready.contains(&p.agent) {
+                            if let Some(a) = ready.first() {
+                                p.agent = a.clone();
+                                p.model = None;
+                            }
                         }
                     }
                     cx.notify();
@@ -4821,27 +5333,56 @@ impl Workspace {
         self.keep(task);
     }
 
-    /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
-    /// no prompt is sent. Throttled to once every 30 seconds. Devin is asked on its own
-    /// (`refresh_devin_usage`).
     /// Spend one granted rate-limit reset (Usage › "Use reset"), then re-read the plan.
     pub fn use_reset_credit(&mut self, credit_id: String, cx: &mut Context<Self>) {
+        if !self.reset_credits_in_flight.insert(credit_id.clone()) {
+            return;
+        }
+        cx.notify();
         let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
+        // The app-server talk needs tokio's timers and processes: on gpui's executor it panics.
+        let (tx, rx) = async_channel::bounded(1);
+        let consume: ResetFuture = match &self.reset_consumer {
+            Some(consumer) => consumer(credit_id.clone()),
+            None => {
+                let id = credit_id.clone();
+                Box::pin(async move { trek_agents::codex_consume_reset(&cwd, &id).await })
+            }
+        };
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(consume.await).await;
+        });
         cx.spawn(async move |this, cx| {
-            let res = trek_agents::codex_consume_reset(&cwd, &credit_id).await;
-            let _ = this.update(cx, |this, cx| match res {
-                Ok(()) => {
-                    // Let the provider settle, then re-read so the bars jump to 0%.
-                    this.usage_loading = false;
-                    this.refresh_usage(cx);
-                    cx.emit(WorkspaceEvent::Toast { message: "Usage limits reset".into(), undo: None });
+            let res = rx.recv().await.unwrap_or_else(|_| Err(anyhow::anyhow!("the request was dropped")));
+            let _ = this.update(cx, |this, cx| {
+                this.reset_credits_in_flight.remove(&credit_id);
+                cx.notify();
+                match res {
+                    Ok(()) => {
+                        // Spent: gone from the list now, not when the re-read lands.
+                        for st in this.agent_status.values_mut() {
+                            st.resets.retain(|r| r.id != credit_id);
+                        }
+                        // Re-read now (past the 30-second throttle) so the bars jump to 0%.
+                        this.usage_loading = false;
+                        this.status_fetched_at = 0;
+                        this.refresh_usage(cx);
+                        cx.emit(WorkspaceEvent::Toast { message: "Usage limits reset".into(), undo: None });
+                    }
+                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
                 }
-                Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
             });
         })
         .detach();
     }
 
+    pub fn reset_credit_in_flight(&self, credit_id: &str) -> bool {
+        self.reset_credits_in_flight.contains(credit_id)
+    }
+
+    /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
+    /// no prompt is sent. Throttled to once every 30 seconds. Devin is asked on its own
+    /// (`refresh_devin_usage`).
     pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
         if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 || trek_core::paths::isolated() {
             return;
@@ -5161,13 +5702,16 @@ impl Workspace {
             let bin = bin.display().to_string();
             for (on, family) in [(tools.computer_use, "computer"), (tools.simulator, "simulator")] {
                 if on {
-                    out.push(McpServer { name: format!("trek-{family}"), command: bin.clone(), args: vec![family.into()], env: vec![], tool_timeout_secs: None });
+                    out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], vec![]));
                 }
             }
         }
-        for s in tools.mcp_servers.iter().filter(|s| s.enabled) {
-            out.push(McpServer { name: s.name.clone(), command: s.command.clone(), args: s.args.clone(), env: vec![], tool_timeout_secs: None });
+        // Figma's own server in its desktop app: local and without a login, so every agent can
+        // have it (one that can't take HTTP servers says so when its session starts).
+        if tools.figma_desktop && !tools.mcp_servers.iter().any(|s| s.enabled && s.name == trek_core::settings::FIGMA_DESKTOP_SERVER) {
+            out.push(McpServer::http(trek_core::settings::FIGMA_DESKTOP_SERVER, trek_core::settings::FIGMA_DESKTOP_URL, vec![]));
         }
+        out.extend(tools.mcp_servers.iter().filter(|s| s.enabled).map(mcp_server_of));
         out
     }
 
@@ -5489,19 +6033,44 @@ fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<GitDone> 
     let repo_at = |path: &std::path::Path| Repo::find(path).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", path.display()));
     match job {
         GitJob::Checkpoint { cwd, item } => {
-            // Folders outside git get no checkpoints.
-            let Some(repo) = Repo::find(&cwd) else { return Ok(GitDone::Nothing) };
+            // Folders outside git get no checkpoints; one with a `.git` that git can't open is
+            // told why (an unknown extension, dubious ownership).
+            if !in_repo(Some(&cwd)) {
+                return Ok(GitDone::Nothing);
+            }
+            let repo = Repo::open(&cwd)?;
             let sha = repo.snapshot(thread, &item)?;
             store.add_checkpoint(thread, &item, &repo.top, &sha)?;
-            prune_checkpoints(store, thread, KEEP)?;
+            // Taken all the same if the oldest can't go now (a lock held): next time.
+            if let Err(e) = prune_checkpoints(store, thread, KEEP) {
+                tracing::warn!("prune checkpoints of {thread}: {e:#}");
+            }
             Ok(GitDone::Taken)
         }
         GitJob::FindPoint { agent, session, .. } => Ok(GitDone::Point(trek_agents::session_tail(&agent, &session))),
-        GitJob::Restore { repo, sha } => Ok(GitDone::Restored(repo_at(&repo)?.restore(&sha, thread)?)),
+        GitJob::Restore { repo, sha, only } => {
+            let r = repo_at(&repo)?;
+            let only: HashSet<String> = match only {
+                RestoreOnly::Turns(spans) => spans.paths(store, thread, &r)?,
+                RestoreOnly::Paths(paths) => paths.into_iter().collect(),
+            };
+            if only.is_empty() {
+                return Ok(GitDone::Restored(trek_core::checkpoint::Restored::default()));
+            }
+            Ok(GitDone::Restored(r.restore_in(&sha, thread, &only)?))
+        }
         GitJob::Forget { repo, items } => {
-            if let Some(r) = Repo::find(&repo) {
+            if let Some(r) = trek_core::checkpoint::refs_repo(store, thread, &repo) {
                 r.delete(thread, &items)?;
             }
+            store.delete_checkpoints(thread, &items)?;
+            Ok(GitDone::Nothing)
+        }
+        GitJob::ForgetAll { repo } => {
+            if let Some(r) = trek_core::checkpoint::refs_repo(store, thread, &repo) {
+                r.delete_all(thread)?;
+            }
+            let items: Vec<String> = store.checkpoints(thread)?.into_iter().map(|c| c.item_id).collect();
             store.delete_checkpoints(thread, &items)?;
             Ok(GitDone::Nothing)
         }
@@ -5610,7 +6179,7 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
     let (tx, events) = async_channel::unbounded();
     let _ = tx.try_send(AgentEvent::Error(format!("{} isn't started in tests.", config.agent.display_name())));
     let _ = tx.try_send(AgentEvent::Exited);
-    trek_agents::SessionHandle { commands, events }
+    trek_agents::SessionHandle { commands, events, log: Default::default() }
 }
 
 /// Lock `dir` for this process (an advisory `flock` on a file in it, released when the process
@@ -5698,13 +6267,14 @@ fn scope_is_draft(scope: &Scope, route: &Route) -> bool {
     *scope == Scope::Main && matches!(route, Route::Draft { .. })
 }
 
-/// See `Workspace::shown_in`. `own_window`: the thread has a window of its own; `main_open`: the
-/// main window hasn't been closed.
-fn shown_in(id: &str, route: &Route, own_window: bool, main_open: bool) -> Option<Scope> {
+/// See `Workspace::shown_in`. `main`: the main window's scope showing the thread, if one does;
+/// `own_window`: the thread has a window of its own; `main_open`: the main window hasn't been
+/// closed.
+fn shown_in(id: &str, main: Option<Scope>, own_window: bool, main_open: bool) -> Option<Scope> {
     if own_window {
         Some(Scope::Thread(id.to_string()))
-    } else if main_open && matches!(route, Route::Thread(t) if t == id) {
-        Some(Scope::Main)
+    } else if main_open {
+        main
     } else {
         None
     }
@@ -5972,15 +6542,17 @@ mod tests {
 
     #[test]
     fn queued_follow_ups_go_where_the_thread_is_shown() {
-        let on_a = Route::Thread("a".into());
-        assert_eq!(shown_in("a", &on_a, false, true), Some(Scope::Main));
+        // The main window on "a" (the harness's route or the editor's AI side bar).
+        let main = Some(Scope::Main);
+        assert_eq!(shown_in("a", main.clone(), false, true), Some(Scope::Main));
+        assert_eq!(shown_in("a", Some(Scope::Ide), false, true), Some(Scope::Ide));
         // Its own window wins over the main window showing it too.
-        assert_eq!(shown_in("a", &on_a, true, true), Some(Scope::Thread("a".into())));
-        assert_eq!(shown_in("b", &on_a, true, true), Some(Scope::Thread("b".into())));
-        assert_eq!(shown_in("b", &on_a, false, true), None);
+        assert_eq!(shown_in("a", main.clone(), true, true), Some(Scope::Thread("a".into())));
+        assert_eq!(shown_in("b", None, true, true), Some(Scope::Thread("b".into())));
+        assert_eq!(shown_in("b", None, false, true), None);
         // A closed main window shows nothing, whatever its route says.
-        assert_eq!(shown_in("a", &on_a, false, false), None);
-        assert_eq!(shown_in("a", &on_a, true, false), Some(Scope::Thread("a".into())));
+        assert_eq!(shown_in("a", main.clone(), false, false), None);
+        assert_eq!(shown_in("a", main, true, false), Some(Scope::Thread("a".into())));
     }
 
     #[test]
@@ -6085,4 +6657,3 @@ mod tests {
         assert!(!viewing(false, thread_win, main, other));
     }
 }
-

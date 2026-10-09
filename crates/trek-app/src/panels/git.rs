@@ -47,7 +47,19 @@ enum LineKind {
 }
 
 pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git").args(args).current_dir(cwd).env("PATH", trek_core::detect::login_path()).output().map_err(|e| e.to_string())?;
+    // No optional locks: a status refresh mustn't hold index.lock while a switch or commit runs.
+    let out = Command::new("git").args(args).current_dir(cwd).env("PATH", trek_core::detect::login_path()).env("GIT_OPTIONAL_LOCKS", "0").output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// `git` for questions that change nothing: through `trek_core::git::read_only`, so the folder's
+/// own config runs nothing (fsmonitor, hooks) and takes no lock.
+pub(crate) fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let out = trek_core::git::read_only(cwd).args(args).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
@@ -56,16 +68,16 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
-    if git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_err() {
+    if git_read(cwd, &["rev-parse", "--is-inside-work-tree"]).is_err() {
         return Snapshot::default();
     }
-    let branch = git(cwd, &["branch", "--show-current"]).unwrap_or_default().trim().to_string();
-    let upstream = git(cwd, &["rev-list", "--left-right", "--count", "@{u}...HEAD"]).ok().and_then(|s| {
+    let branch = git_read(cwd, &["branch", "--show-current"]).unwrap_or_default().trim().to_string();
+    let upstream = git_read(cwd, &["rev-list", "--left-right", "--count", "@{u}...HEAD"]).ok().and_then(|s| {
         let mut it = s.split_whitespace().filter_map(|n| n.parse::<u32>().ok());
         Some((it.next()?, it.next()?))
     });
     let mut stats = std::collections::HashMap::new();
-    let numstat = git(cwd, &["diff", "HEAD", "--numstat"]).or_else(|_| git(cwd, &["diff", "--cached", "--numstat"])).unwrap_or_default();
+    let numstat = git_read(cwd, &["diff", "HEAD", "--numstat"]).or_else(|_| git_read(cwd, &["diff", "--cached", "--numstat"])).unwrap_or_default();
     for line in numstat.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() == 3 {
@@ -73,7 +85,7 @@ pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
         }
     }
     let mut files = Vec::new();
-    for line in git(cwd, &["status", "--porcelain=v1", "-uall"]).unwrap_or_default().lines() {
+    for line in git_read(cwd, &["status", "--porcelain=v1", "-uall"]).unwrap_or_default().lines() {
         if line.len() < 4 {
             continue;
         }
@@ -140,7 +152,7 @@ fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
             None => "Binary, unreadable, or too large to show".into(),
         }
     } else {
-        git(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|_| git(cwd, &["diff", "--", &file.path])).unwrap_or_default()
+        git_read(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|_| git_read(cwd, &["diff", "--", &file.path])).unwrap_or_default()
     };
     diff_lines(&text)
 }
@@ -250,6 +262,8 @@ pub struct GitPanel {
     turns_seen: u64,
     /// The thread's worktree is being made (or made again): nothing to review yet.
     preparing: bool,
+    /// The editor's Source Control: the IDE folder's changes, whatever thread is on screen.
+    ide: bool,
     _subscriptions: Vec<Subscription>,
     _task: Option<Task<()>>,
     /// Reading the selected file's diff; a newer selection replaces it.
@@ -261,11 +275,17 @@ pub struct GitPanel {
 
 impl GitPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with(workspace, false, window, cx)
+    }
+
+    fn with(workspace: Entity<Workspace>, ide: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let sub = cx.observe(&workspace, |this, ws, cx| {
             let (cwd, turns, target, preparing, thread) = {
                 let ws = ws.read(cx);
-                (ws.current_cwd(), ws.turns_finished, Self::target_in(ws), Self::preparing_in(ws), ws.current_thread().map(|t| t.id.clone()))
+                // Another branch checked out counts as news too: the changed files are other ones.
+                let thread = if this.ide { None } else { ws.current_thread().map(|t| t.id.clone()) };
+                (this.cwd_in(ws), ws.turns_finished + ws.files_epoch, this.target(ws), this.preparing(ws), thread)
             };
             if this.turn.as_ref().is_some_and(|t| Some(&t.thread) != thread.as_ref()) {
                 this.close_turn(cx);
@@ -290,6 +310,7 @@ impl GitPanel {
             busy: None,
             turns_seen: 0,
             preparing: false,
+            ide,
             _subscriptions: vec![sub],
             _task: None,
             _diff: None,
@@ -361,10 +382,24 @@ impl GitPanel {
         ws.current_thread().and_then(|t| ws.live.get(&t.id)).is_some_and(|l| l.preparing)
     }
 
+    /// The folder shown: the one on screen, or in the editor the IDE folder.
+    fn cwd_in(&self, ws: &Workspace) -> Option<PathBuf> {
+        if self.ide { ws.ide_root.clone() } else { ws.current_cwd() }
+    }
+
+    /// The worktree thread to review; the editor shows the folder's working tree instead.
+    fn target(&self, ws: &Workspace) -> Option<Target> {
+        if self.ide { None } else { Self::target_in(ws) }
+    }
+
+    fn preparing(&self, ws: &Workspace) -> bool {
+        !self.ide && Self::preparing_in(ws)
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let (cwd, target, preparing) = {
             let ws = self.workspace.read(cx);
-            (ws.current_cwd(), Self::target_in(ws), Self::preparing_in(ws))
+            (self.cwd_in(ws), self.target(ws), self.preparing(ws))
         };
         if target != self.target || preparing != self.preparing {
             self.review = None;
@@ -592,6 +627,11 @@ impl GitPanel {
                     Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
                 }
                 this.refresh(cx);
+                // The branch chip, the changed count and the IDE's status bar read the same
+                // checkout: read it now rather than at the next poll.
+                if let Some(cwd) = this.cwd.clone() {
+                    this.workspace.update(cx, |ws, cx| ws.refresh_checkout(cwd, cx));
+                }
             });
         })
         .detach();
@@ -695,6 +735,11 @@ impl GitPanel {
                     Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
                 }
                 this.refresh(cx);
+                // The branch chip, the changed count and the IDE's status bar read the same
+                // checkout: read it now rather than at the next poll.
+                if let Some(cwd) = this.cwd.clone() {
+                    this.workspace.update(cx, |ws, cx| ws.refresh_checkout(cwd, cx));
+                }
             });
         })
         .detach();
