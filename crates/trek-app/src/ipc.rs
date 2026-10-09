@@ -132,11 +132,11 @@ fn address(dir: &Path, n: usize) -> std::io::Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-/// Where server number `n` of this process listens: a pipe, named at random in part so that no
-/// other process can guess the name and make it first (Trek would then refuse to listen).
+/// Where server number `n` of this process listens: a pipe, named by `trek_ipc::pipe_name` (at
+/// random in part, and with this process's id, which clients check).
 #[cfg(windows)]
 fn address(_dir: &Path, n: usize) -> std::io::Result<PathBuf> {
-    Ok(format!(r"\\.\pipe\trek-{}-{n}-{}", std::process::id(), &trek_ipc::token()?[..16]).into())
+    trek_ipc::pipe_name(n)
 }
 
 /// A session key when the system's random source can't be read (it always can on macOS).
