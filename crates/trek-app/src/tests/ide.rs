@@ -356,7 +356,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 
 /// The project as a git repository with one commit (`README.md`).
 fn make_repo(trek: &Trek) {
-    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
         git(&trek.project, args);
     }
     std::fs::write(trek.project.join("README.md"), "hello\n").unwrap();

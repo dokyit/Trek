@@ -374,7 +374,8 @@ fn the_cached_tools_panel_redraws_what_changes_inside_it() {
         trek.type_live(cx, "W");
         super::take_renders();
         // Typing redraws the panel (and nothing else) and its layout: the field grows as text wraps.
-        trek.type_live(cx, &"hich parsers here take untrusted input, and do they cap sizes? ".repeat(2));
+        // Enough to wrap past the field's two rows: Segoe UI sets narrower than SF Pro, so it takes more.
+        trek.type_live(cx, &"hich parsers here take untrusted input, and do they cap sizes? ".repeat(if cfg!(windows) { 4 } else { 2 }));
         let renders = super::take_renders();
         assert!(renders.get("RightPanel").is_some_and(|n| *n > 0), "{renders:?}");
         for view in ["ThreadView", "Sidebar", "Composer", "WindowTitle"] {

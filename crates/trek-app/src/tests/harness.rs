@@ -77,12 +77,6 @@ fn isolate_process() {
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var("APPDATA", &roaming);
             std::env::set_var("LOCALAPPDATA", &local);
-            // Git for Windows ships `core.autocrlf=true`: every checkout the tests make (a branch
-            // switch, a restore) would write CRLF where they compare against "\n". The repos are
-            // theirs to configure, so every git started from here sees autocrlf off.
-            std::env::set_var("GIT_CONFIG_COUNT", "1");
-            std::env::set_var("GIT_CONFIG_KEY_0", "core.autocrlf");
-            std::env::set_var("GIT_CONFIG_VALUE_0", "false");
         }
     }
 }
@@ -184,6 +178,11 @@ pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "isn't available on Windows
 /// the string the app builds from its own components.
 pub fn join(root: &std::path::Path, rel: &str) -> PathBuf {
     rel.split('/').fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
+/// `path` with symlinks resolved, as git and the app write it (no `\\?\` prefix on Windows).
+pub fn canonical(path: &std::path::Path) -> PathBuf {
+    crate::system::canonical(path).expect("a folder that exists")
 }
 
 /// A fresh, empty folder to use as a project.
