@@ -32,6 +32,27 @@ fn load_icon(name: &str) -> Option<Icon> {
     Icon::from_rgba(buf, info.width, info.height).ok()
 }
 
+/// The glyph is a template on macOS (the menu bar tints it); the other platforms draw the PNG as it is.
+#[cfg(target_os = "macos")]
+fn with_glyph(builder: TrayIconBuilder, icon: Icon) -> TrayIconBuilder {
+    builder.with_icon_templated(icon)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_glyph(builder: TrayIconBuilder, icon: Icon) -> TrayIconBuilder {
+    builder.with_icon(icon)
+}
+
+#[cfg(target_os = "macos")]
+fn set_glyph(tray: &TrayIcon, icon: Option<Icon>) -> tray_icon::Result<()> {
+    tray.set_icon_templated(icon)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_glyph(tray: &TrayIcon, icon: Option<Icon>) -> tray_icon::Result<()> {
+    tray.set_icon(icon)
+}
+
 struct Parts {
     icon: TrayIcon,
     status: MenuItem,
@@ -55,8 +76,7 @@ fn build() -> anyhow::Result<Parts> {
         &settings,
         &quit,
     ])?;
-    let icon = TrayIconBuilder::new()
-        .with_icon_templated(load_icon("idle").ok_or_else(|| anyhow::anyhow!("menu bar icon"))?)
+    let icon = with_glyph(TrayIconBuilder::new(), load_icon("idle").ok_or_else(|| anyhow::anyhow!("menu bar icon"))?)
         .with_tooltip("Trek")
         .with_menu(Box::new(menu))
         .build()?;
@@ -141,7 +161,7 @@ impl Tray {
                 Glyph::Working => "working",
                 Glyph::Attention => "attention",
             };
-            let _ = self.icon.set_icon_templated(load_icon(name));
+            let _ = set_glyph(&self.icon, load_icon(name));
             self.blink = (glyph == Glyph::Working && !reduce).then(|| {
                 cx.spawn(async move |this, cx| {
                     let mut lit = false;
@@ -149,7 +169,7 @@ impl Tray {
                         cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
                         lit = !lit;
                         let ok = this.update(cx, |this, _| {
-                            let _ = this.icon.set_icon_templated(load_icon(if lit { "idle" } else { "working" }));
+                            let _ = set_glyph(&this.icon, load_icon(if lit { "idle" } else { "working" }));
                         });
                         if ok.is_err() {
                             break;
