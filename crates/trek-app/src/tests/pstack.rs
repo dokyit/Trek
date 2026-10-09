@@ -22,6 +22,19 @@ fn last_end(trek: &Trek, cx: &TestAppContext, id: &str) -> usize {
     trek.items(cx, id).iter().rposition(|i| matches!(i, Item::TurnEnd { .. })).expect("a finished turn")
 }
 
+/// `find <dir> -exec touch -t 202001010000 {} +`: every file under it reads as from 2020.
+fn age(dir: &std::path::Path) {
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            age(&path);
+        } else {
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800)).unwrap();
+        }
+    }
+}
+
 #[test]
 fn restate_first_says_it_back_then_goes_ahead_on_a_yes() {
     run(async |cx| {
@@ -298,10 +311,15 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
         let skill = project.join(".agents/skills/verify-app");
         std::fs::create_dir_all(skill.join("scripts")).unwrap();
         std::fs::create_dir_all(skill.join("references/features")).unwrap();
-        std::fs::write(skill.join("SKILL.md"), "---\nname: verify-app\nmetadata:\n  trek: verification\n  cli: ./.agents/skills/verify-app/scripts/app\n---\n").unwrap();
+        // Windows has no execute bit: a program is a file with a program's extension (app.cmd).
+        let script = if cfg!(windows) { "app.cmd" } else { "app" };
+        let cli = format!("./.agents/skills/verify-app/scripts/{script}");
+        let program = if cfg!(windows) { "@echo off\r\necho ok\r\n" } else { "#!/bin/sh\necho ok\n" };
+        std::fs::write(skill.join("SKILL.md"), format!("---\nname: verify-app\nmetadata:\n  trek: verification\n  cli: {cli}\n---\n")).unwrap();
         std::fs::write(skill.join("references/features/README.md"), "# Features\n").unwrap();
-        std::fs::write(skill.join("scripts/app"), "#!/bin/sh\necho ok\n").unwrap();
-        std::fs::set_permissions(skill.join("scripts/app"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(skill.join("scripts").join(script), program).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(skill.join("scripts").join(script), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
         assert!(trek.read(cx, |ws, _| ws.verification(&project)).is_some());
 
@@ -312,7 +330,7 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
         trek.wait_done(cx, &id, RunState::Idle).await;
         let wt = trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.worktree.clone())).expect("a worktree");
         assert!(!wt.path.join(".agents").exists());
-        let full = skill.join("scripts/app");
+        let full = skill.join("scripts").join(script);
         assert!(trek.answers(cx, &id).contains(&format!("verified it with `{} check`", full.display())), "{}", trek.answers(cx, &id));
         let end = last_end(&trek, cx, &id);
         trek.render(cx);
@@ -326,7 +344,7 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
         let id = trek.send(cx, "mock:verify the notes change");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.worktree.clone())).is_some_and(|w| w.path.join(".agents/skills/verify-app/SKILL.md").exists()));
-        assert!(trek.answers(cx, &id).contains("verified it with `./.agents/skills/verify-app/scripts/app check`"), "{}", trek.answers(cx, &id));
+        assert!(trek.answers(cx, &id).contains(&format!("verified it with `{cli} check`")), "{}", trek.answers(cx, &id));
     });
 }
 
@@ -406,8 +424,7 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         // it (here it found no Feature Map to work on) doesn't, nor does a later turn that leaves
         // it alone.
         let old = trek_core::store::now_ms() - 3 * trek_core::verification::WEEK_MS;
-        let aged = std::process::Command::new("find").arg(&v.skill).args(["-exec", "touch", "-t", "202001010000", "{}", "+"]).status().unwrap();
-        assert!(aged.success());
+        age(std::path::Path::new(&v.skill));
         trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.verification.iter_mut().for_each(|v| v.maintained_at = Some(old)), cx));
         let map = std::path::Path::new(&v.skill).join("references/features/README.md");
         std::fs::rename(&map, map.with_extension("md.away")).unwrap();
