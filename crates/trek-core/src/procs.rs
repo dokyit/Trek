@@ -78,25 +78,44 @@ pub fn end_all(grace: Duration) {
     write_record(&live);
 }
 
-/// End every tracked group: each first process that still runs with the start time recorded, and
-/// everything under it. For quitting.
+/// End every tracked group: up to `grace` for the first processes to go, then each that still
+/// runs with the start time recorded is ended, and everything under it. Blocks the caller for at
+/// most `grace` (and the ending). For quitting.
 ///
-/// Windows has no TERM to send from here (the gentle stop, closing stdin, belongs to whoever holds
-/// the child), so there's nothing to wait `grace` out for: the trees are ended at once. A tree
-/// whose first process is gone is left to its job, which ends it as Trek exits.
+/// Windows has no TERM to send from here: the gentle stop, closing stdin, belongs to whoever holds
+/// the child, and Trek has just asked its sessions to stop that way, so `grace` is theirs to do it
+/// in. What can't be found from a first process (one nobody holds open any more, or one whose
+/// parent exited) is left to its job, which ends it as Trek exits.
 #[cfg(windows)]
-pub fn end_all(_grace: Duration) {
+pub fn end_all(grace: Duration) {
     let groups = LIVE.lock().unwrap_or_else(PoisonError::into_inner).clone();
     if groups.is_empty() {
         return;
     }
     tracing::info!("ending {} child process group(s)", groups.len());
+    // Held open while waiting, so that no id goes to another process meanwhile.
+    let roots: Vec<win::Proc> = groups.iter().filter_map(|g| win::Proc::open(g.id).filter(|p| win::unix_secs(p.created) == g.started)).collect();
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline && roots.iter().any(win::Proc::running) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     for g in &groups {
         win::end_tree(*g);
     }
+    drop(roots);
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.retain(|l| !groups.iter().any(|g| g.id == l.id));
     write_record(&live);
+}
+
+/// End tracked group `group` now: its first process and everything under it, found by parent
+/// ids, for a group with no job to end it by (putting the child in one failed). The first process
+/// must be one `register` dated, still about (the caller holds it open, so its id is still its
+/// own), running or not. True when all of it could be ended. It stays tracked: `unregister` it.
+#[cfg(windows)]
+pub fn end_tree(group: i32) -> bool {
+    let Some(g) = LIVE.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|g| g.id == group).copied() else { return false };
+    win::end_tree(g)
 }
 
 /// End the groups an earlier Trek recorded and didn't end (it crashed, or was killed): those of
@@ -359,9 +378,11 @@ fn boot_time() -> i64 {
 mod win {
     use super::Group;
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE, STILL_ACTIVE};
+    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE, STILL_ACTIVE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+    };
 
     /// FILETIME ticks (100 ns since 1601) at the unix epoch, and in a second.
     const UNIX_EPOCH: u64 = 116_444_736_000_000_000;
@@ -371,33 +392,36 @@ mod win {
         (ticks.saturating_sub(UNIX_EPOCH) / TICKS_PER_SEC) as i64
     }
 
-    /// A running process, held open: while it is, its id can't go to another process.
+    /// A process, held open: while it is, its id can't go to another process.
     pub(super) struct Proc {
         pub(super) pid: u32,
         /// When it was created, in FILETIME ticks.
         pub(super) created: u64,
+        /// Opened with the right to end it.
+        can_end: bool,
         handle: OwnedHandle,
     }
 
     impl Proc {
         /// Process `pid`, if it runs and Trek may look at it.
         pub(super) fn open(pid: i32) -> Option<Proc> {
+            Proc::open_any(pid).filter(Proc::running)
+        }
+
+        /// Process `pid` whether it runs or has exited, as long as it's still about (someone holds
+        /// it open) and Trek may look at it.
+        fn open_any(pid: i32) -> Option<Proc> {
             // 0 and 4 are the idle and system processes.
             let pid = u32::try_from(pid).ok().filter(|p| *p > 4)?;
-            // SAFETY: plain calls; a null handle is checked before it's used.
-            let mut h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid) };
-            if h.is_null() {
-                // One Trek can't end (elevated, say) can still be looked at.
-                h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-            }
-            if h.is_null() {
-                return None;
-            }
+            let query = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+            // One Trek can't end (elevated, say) can still be looked at; one it can't wait on, too.
+            let (h, can_end) = [(query | PROCESS_TERMINATE, true), (query, false), (PROCESS_QUERY_LIMITED_INFORMATION, false)]
+                .into_iter()
+                // SAFETY: plain calls; a null handle is passed over.
+                .map(|(access, can_end)| (unsafe { OpenProcess(access, 0, pid) }, can_end))
+                .find(|(h, _)| !h.is_null())?;
             // SAFETY: `h` was just opened, and is owned from here on.
-            let mut p = Proc { pid, created: 0, handle: unsafe { OwnedHandle::from_raw_handle(h) } };
-            if !p.running() {
-                return None;
-            }
+            let mut p = Proc { pid, created: 0, can_end, handle: unsafe { OwnedHandle::from_raw_handle(h) } };
             let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
             let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
             // SAFETY: four writable FILETIMEs, and a handle with query rights.
@@ -408,28 +432,37 @@ mod win {
             Some(p)
         }
 
-        /// It hasn't exited. (A process that has stays around while a handle to it is open.) One
-        /// that exited with code 259, STILL_ACTIVE, would look as if it runs; nothing Trek starts
-        /// does that.
+        /// It hasn't exited. (A process that has stays around while a handle to it is open.)
         pub(super) fn running(&self) -> bool {
-            let mut code = 0u32;
-            // SAFETY: a handle with query rights, and a writable u32.
-            let ok = unsafe { GetExitCodeProcess(self.handle.as_raw_handle(), &mut code) } != 0;
-            ok && code == STILL_ACTIVE as u32
+            // SAFETY: a process handle this owns; a wait of 0 only asks.
+            match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } {
+                WAIT_TIMEOUT => true,
+                WAIT_OBJECT_0 => false,
+                // Opened without SYNCHRONIZE: its exit code says, unless it exited with 259.
+                _ => {
+                    let mut code = 0u32;
+                    // SAFETY: a handle with query rights, and a writable u32.
+                    let ok = unsafe { GetExitCodeProcess(self.handle.as_raw_handle(), &mut code) } != 0;
+                    ok && code == STILL_ACTIVE as u32
+                }
+            }
         }
 
+        /// End it. Fails harmlessly without the right to, or once it's exited.
         fn terminate(&self) {
-            // SAFETY: a handle this owns. Fails harmlessly without PROCESS_TERMINATE, or once it's exited.
-            unsafe { TerminateProcess(self.handle.as_raw_handle(), 1) };
+            if self.can_end {
+                // SAFETY: a handle this owns, with PROCESS_TERMINATE.
+                unsafe { TerminateProcess(self.handle.as_raw_handle(), 1) };
+            }
         }
     }
 
-    /// Every process: its id and its parent's.
-    fn snapshot() -> Vec<(u32, u32)> {
+    /// Every process: its id and its parent's. `None` when the system won't say.
+    fn snapshot() -> Option<Vec<(u32, u32)>> {
         // SAFETY: plain call; the handle is checked, then owned.
         let h = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
         if h == INVALID_HANDLE_VALUE {
-            return vec![];
+            return None;
         }
         let snap = unsafe { OwnedHandle::from_raw_handle(h) };
         // SAFETY: all zeroes is a valid PROCESSENTRY32W (integers and a u16 array).
@@ -442,41 +475,68 @@ mod win {
             out.push((entry.th32ProcessID, entry.th32ParentProcessID));
             more = unsafe { Process32NextW(snap.as_raw_handle(), &mut entry) } != 0;
         }
-        out
+        (!out.is_empty()).then_some(out)
     }
 
-    /// What runs under `root`, held open. A process counts when its parent does and was created
-    /// no later than it was: one whose parent id belonged to an earlier process is passed over. A
-    /// process whose parent has exited can't be found this way; its job ends it.
-    pub(super) fn descendants(root: &Proc) -> Vec<Proc> {
-        let all = snapshot();
-        let mut found: Vec<Proc> = vec![];
+    /// What runs under `root`, held open; `None` when the processes can't be listed. A process
+    /// counts when its parent does and was created no later than it was: one whose parent id
+    /// belonged to an earlier process is passed over. A process whose parent has exited can't be
+    /// found this way; its job ends it.
+    ///
+    /// The list is read before the processes are opened, and an id can go to a new process in
+    /// between. So it's read again once they're held (when their ids can't change hands): one
+    /// whose parent isn't the one it had is someone else's, and so is all under it.
+    pub(super) fn descendants(root: &Proc) -> Option<Vec<Proc>> {
+        let all = snapshot()?;
+        let mut found: Vec<(Proc, u32)> = vec![];
         let mut parents = vec![(root.pid, root.created)];
         while let Some((parent, created)) = parents.pop() {
             for &(pid, ppid) in &all {
-                if ppid != parent || pid == root.pid || found.iter().any(|p| p.pid == pid) {
+                if ppid != parent || pid == root.pid || found.iter().any(|(p, _)| p.pid == pid) {
                     continue;
                 }
                 let Some(p) = Proc::open(pid as i32).filter(|p| p.created >= created) else { continue };
                 parents.push((p.pid, p.created));
-                found.push(p);
+                found.push((p, ppid));
             }
         }
-        found
+        let ids: Vec<(u32, u32)> = found.iter().map(|(p, ppid)| (p.pid, *ppid)).collect();
+        let keep = unchanged(&ids, root.pid, &snapshot()?);
+        Some(found.into_iter().zip(keep).filter_map(|((p, _), keep)| keep.then_some(p)).collect())
     }
 
-    /// End `g`'s first process and everything under it, when that process still runs with the
-    /// start time recorded. Twice over, for anything started while the first pass ran.
+    /// Which of `found` (ids and parent ids, each parent before its children, all under `root`)
+    /// are still where they were by the later list `again`: with the same parent, under a parent
+    /// that is.
+    pub(super) fn unchanged(found: &[(u32, u32)], root: u32, again: &[(u32, u32)]) -> Vec<bool> {
+        let mut keep: Vec<bool> = Vec::with_capacity(found.len());
+        for (i, &(pid, ppid)) in found.iter().enumerate() {
+            let parent_kept = ppid == root || found[..i].iter().zip(&keep).any(|(&(p, _), &k)| k && p == ppid);
+            keep.push(parent_kept && again.contains(&(pid, ppid)));
+        }
+        keep
+    }
+
+    /// End `g`'s first process and everything under it, when that process, running or exited but
+    /// held open by someone (so its id is still its own), has the start time recorded. Twice over,
+    /// for anything started while the first pass ran. True when all of it could be ended: false
+    /// when it isn't `g`'s, when the processes couldn't be listed, or when one of them couldn't
+    /// be opened with the right to end it.
     pub(super) fn end_tree(g: Group) -> bool {
-        let Some(root) = Proc::open(g.id).filter(|p| g.started > 0 && unix_secs(p.created) == g.started) else { return false };
+        let Some(root) = Proc::open_any(g.id).filter(|p| g.started > 0 && unix_secs(p.created) == g.started) else { return false };
+        let mut all = root.can_end;
         for _ in 0..2 {
             let tree = descendants(&root);
             root.terminate();
-            for p in &tree {
-                p.terminate();
+            match tree {
+                Some(tree) => tree.iter().for_each(|p| {
+                    all &= p.can_end;
+                    p.terminate();
+                }),
+                None => all = false,
             }
         }
-        true
+        all
     }
 }
 
@@ -511,8 +571,17 @@ mod tests {
         assert_eq!(Record::parse("owner 5 1\ngroup 1 0\n"), None, "never group 1 (launchd)");
     }
 
+    /// For tests that register groups: the registry is the whole process's, and `end_all` in one
+    /// test would end another's.
+    static REGISTRY: Mutex<()> = Mutex::new(());
+
+    fn registry() -> std::sync::MutexGuard<'static, ()> {
+        REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[test]
     fn end_all_ends_registered_groups() {
+        let _registry = registry();
         let mut child = sleeper();
         let id = child.id() as i32;
         register(id);
@@ -569,10 +638,10 @@ mod tests {
         let id = child.id() as i32;
         let root = win::Proc::open(id).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut tree = win::descendants(&root);
+        let mut tree = win::descendants(&root).unwrap();
         while tree.is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
-            tree = win::descendants(&root);
+            tree = win::descendants(&root).unwrap();
         }
         assert!(!tree.is_empty(), "cmd started its ping");
         // Recorded with another start time, it's someone else's: left alone.
@@ -585,6 +654,68 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!tree.iter().any(win::Proc::running), "the ping under cmd was ended too");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn end_all_gives_groups_their_grace_before_ending_them() {
+        let _registry = registry();
+        // One goes by itself within the grace (cmd waits a second for its ping), one doesn't.
+        let mut quick = quiet("cmd.exe", &["/d", "/c", "ping -n 2 127.0.0.1 >nul"]);
+        let mut slow = sleeper();
+        register(quick.id() as i32);
+        register(slow.id() as i32);
+        let grace = Duration::from_secs(4);
+        let started = std::time::Instant::now();
+        end_all(grace);
+        let took = started.elapsed();
+        assert!(quick.wait().unwrap().success(), "left to finish on its own");
+        assert!(!slow.wait().unwrap().success(), "ended once the grace ran out");
+        assert!(took >= grace - Duration::from_millis(50) && took < grace + Duration::from_secs(5), "{took:?}");
+        assert!(live().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_group_with_no_job_is_ended_by_its_tree_even_once_its_first_process_has_exited() {
+        let _registry = registry();
+        // cmd starts a ping it doesn't wait for, then exits a second later. `child` holds cmd open,
+        // as trek-agents holds its children, so cmd's id stays its own after it exits.
+        let mut child = quiet("cmd.exe", &["/d", "/c", "start /b ping -n 60 127.0.0.1 >nul & ping -n 2 127.0.0.1 >nul"]);
+        let id = child.id() as i32;
+        register(id);
+        assert!(!end_tree(0), "only a tracked group");
+        let root = win::Proc::open(id).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut tree = win::descendants(&root).unwrap();
+        while tree.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            tree = win::descendants(&root).unwrap();
+        }
+        assert!(!tree.is_empty(), "cmd started its ping");
+        drop(root);
+        assert!(child.wait().unwrap().success());
+        assert!(tree.iter().any(win::Proc::running), "the first ping outlives cmd");
+        assert!(end_tree(id), "cmd and all under it could be ended");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while tree.iter().any(win::Proc::running) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!tree.iter().any(win::Proc::running), "the ping cmd left behind was ended");
+        assert!(live().contains(&id), "still tracked until unregistered");
+        unregister(id);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn processes_whose_ids_changed_hands_are_passed_over() {
+        // 10 and 20 under the root (1), 11 under 10, 12 under 11. By the second list, 11 has a
+        // parent it didn't have (its id went to another process): it and 12 under it are passed
+        // over, and so is 20, gone.
+        let found = [(10, 1), (11, 10), (12, 11), (20, 1)];
+        let again = [(10, 1), (11, 99), (12, 11), (30, 1)];
+        assert_eq!(win::unchanged(&found, 1, &again), [true, false, false, false]);
+        assert_eq!(win::unchanged(&found, 1, &found), [true; 4]);
     }
 
     #[cfg(windows)]

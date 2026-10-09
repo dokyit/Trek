@@ -17,15 +17,17 @@
 //!
 //! Prompts and results travel only over this socket: nothing here logs them.
 //!
-//! On Windows the socket is a named pipe instead, `\\.\pipe\trek-<pid>-<n>-<random>` (in
-//! `ENV_SOCKET` like a socket's path), with the same guarantees by other means. There is no
-//! folder: the pipe's own security descriptor lets only this user open it (one allow entry, for
-//! the user's SID, who also owns it), it refuses clients from other machines, and Trek creates
-//! its first instance exclusively so no other process can have claimed the name. Each connection
-//! is then checked like a socket's: the client process's token must belong to the same user
-//! (`client_is_me`), and the hello must carry the token and a session key. The client checks the
-//! pipe is served by its own user before sending the token, since a pipe's name, unlike a
-//! socket's folder, isn't private. Pipes vanish with their process, so there's nothing to sweep.
+//! On Windows the socket is a named pipe instead, `\\.\pipe\trek-<pid>-<n>-<random>`
+//! (`pipe_name`; in `ENV_SOCKET` like a socket's path), with the same guarantees by other means.
+//! There is no folder: the pipe's own security descriptor lets only this user open it or add an
+//! instance to it (one allow entry, for the user's SID, who also owns it), it refuses clients
+//! from other machines, and Trek creates its first instance exclusively, so no other process can
+//! have claimed the name first. Each connection is then checked like a socket's: the client
+//! process's token must belong to the same user (`client_is_me`), and the hello must carry the
+//! token and a session key. A pipe's name, unlike a socket's folder, isn't private, and a process
+//! of the same user could add an instance of its own (as on Unix it could replace the socket), so
+//! before sending the token the client checks the pipe is served by its own user and by the very
+//! process whose id the name carries. Pipes vanish with their process, so there's nothing to sweep.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -45,7 +47,7 @@ mod windows;
 #[cfg(unix)]
 pub use std::os::unix::net::UnixStream as Stream;
 #[cfg(windows)]
-pub use windows::{Handle, PipeSecurity, PipeStream as Stream, client_is_me};
+pub use windows::{Handle, PipeSecurity, PipeStream as Stream, client_is_me, pipe_name};
 
 /// A connection's stream as another thread holds it, to shut the connection down (which gives
 /// up on a call in progress: its read ends at once).
@@ -197,7 +199,14 @@ impl Client {
     /// Connect and introduce ourselves. The stream can be shut down from another thread (a
     /// clone of it) to give up on a call.
     pub fn connect(&self) -> Result<Connection, String> {
-        let stream = Stream::connect(&self.socket).map_err(|e| format!("Trek isn't reachable ({e}). Is it still running?"))?;
+        let stream = Stream::connect(&self.socket).map_err(|e| {
+            // On Windows, a pipe the client won't trust with the token (see `PipeStream::connect`).
+            if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput) {
+                format!("Didn't connect to Trek: {e}.")
+            } else {
+                format!("Trek isn't reachable ({e}). Is it still running?")
+            }
+        })?;
         let mut conn = Connection { reader: BufReader::new(stream.try_clone().map_err(|e| e.to_string())?), writer: stream, next: 0 };
         conn.send(&hello(&self.token, &self.session))?;
         let answer = conn.receive()?;
@@ -361,6 +370,21 @@ mod tests {
         let delegate = &tools[1].2;
         assert_eq!(delegate["required"], json!(["title", "prompt"]));
         assert_eq!(delegate["properties"]["mode"]["enum"], json!(["advise", "implement"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pipe_s_name_says_whose_it_is() {
+        use std::path::Path;
+        let name = pipe_name(3).unwrap();
+        assert_eq!(windows::named_for(&name), Some(std::process::id()));
+        assert_ne!(name, pipe_name(3).unwrap(), "random in part");
+        assert_eq!(windows::named_for(Path::new(&windows::name_for(1234, 0, "ab12"))), Some(1234));
+        for other in [r"\\.\pipe\trek-ipc-x-1-ab", r"\\.\pipe\trek-12-0-", r"\\.\pipe\trek-12-x-ab", r"\\.\pipe\other-12-0-ab", "/tmp/trek-12-0.sock"] {
+            assert_eq!(windows::named_for(Path::new(other)), None, "{other}");
+        }
+        let err = Stream::connect(r"\\.\pipe\not-trek").err().unwrap();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "refused without opening it: {err}");
     }
 
     #[cfg(unix)]

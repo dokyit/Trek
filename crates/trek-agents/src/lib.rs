@@ -565,6 +565,9 @@ pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Res
 /// Start `command` in a job object of its own, with no console window, tracked by
 /// `trek_core::procs` (by the child's pid) until it's ended. The job ends everything in it when
 /// its last handle closes, so a Trek that crashes or is killed takes its agents along.
+///
+/// This sets the command's creation flags, replacing any the caller set (tokio's `Command` has
+/// no way to read them back to add to): callers set none.
 #[cfg(windows)]
 pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
@@ -576,14 +579,21 @@ pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Res
     // suspended would close that gap, but the handle of its first thread, needed to resume it, is
     // one std doesn't hand out. A child that's in a job already (Trek run under a CI runner or a
     // terminal that uses jobs) can be put in this one too: jobs nest since Windows 8.
-    if let Some(handle) = child.raw_handle()
-        && let Err(e) = job.assign(handle)
-    {
-        tracing::warn!("couldn't put process {:?} in a job; what it starts may outlive it: {e}", child.id());
-    }
+    let assigned = child.raw_handle().map(|handle| job.assign(handle));
+    let job = match assigned {
+        Some(Ok(())) => Some(job),
+        // Without the job, ending the group ends what can be found under the child by parent ids
+        // (`trek_core::procs::end_tree`); what it starts outlives a Trek that crashes.
+        Some(Err(e)) => {
+            tracing::warn!("couldn't put process {:?} in a job; it will be ended by its process tree instead: {e}", child.id());
+            None
+        }
+        // It has been reaped already: nothing to put in a job.
+        None => None,
+    };
     let group = child.id().unwrap_or_default() as i32;
     trek_core::procs::register(group);
-    Ok(GroupChild { child: Some(child), group, job: Some(job) })
+    Ok(GroupChild { child: Some(child), group, job })
 }
 
 /// A Windows job object that ends the processes in it when its last handle closes.
@@ -667,6 +677,12 @@ pub(crate) async fn output_group(command: &mut tokio::process::Command, input: O
 }
 
 impl GroupChild {
+    /// End the child and everything it started: the gentle stop, up to 2 s for the child to
+    /// exit, then the whole group (or job) is killed.
+    ///
+    /// On Windows the gentle stop is the end of the child's stdin, so it only works when the
+    /// caller has dropped any stdin writer it took from the child (`child.stdin.take()`) first;
+    /// otherwise the child doesn't hear it and the full 2 s pass before the kill.
     pub(crate) async fn terminate(&mut self) {
         let Some(child) = self.child.take() else { return };
         #[cfg(unix)]
@@ -724,15 +740,28 @@ fn soft_stop(child: &mut tokio::process::Child) {
     drop(child.stdin.take());
 }
 
+/// Kill everything in `group`: its job, or with none (the child couldn't be put in one), the
+/// child and what can be found under it by parent ids. The caller still holds the child, so its
+/// id is its own even once it has exited, and what it left running can be found.
+#[cfg(windows)]
+fn end_job_or_tree(job: Option<&job::Job>, group: i32) {
+    match job {
+        Some(job) => job.terminate(),
+        None => {
+            if !trek_core::procs::end_tree(group) {
+                tracing::warn!("couldn't end all of process {group}'s tree");
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 async fn finish_group(mut child: tokio::process::Child, group: i32, job: Option<job::Job>) {
     soft_stop(&mut child);
     let waited = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
     // As with KILL to a process group: end the whole job even when the child has exited, so
     // nothing it started is left behind.
-    if let Some(job) = &job {
-        job.terminate();
-    }
+    end_job_or_tree(job.as_ref(), group);
     if waited.is_err() {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
@@ -766,9 +795,7 @@ impl Drop for GroupChild {
         // closed here, the job would end its processes at once, with no grace.
         std::thread::spawn(move || {
             let exited = reaped(&mut child, std::time::Duration::from_secs(2));
-            if let Some(job) = &job {
-                job.terminate();
-            }
+            end_job_or_tree(job.as_ref(), group);
             if !exited {
                 let _ = child.start_kill();
                 reaped(&mut child, REAP_AFTER_KILL);
@@ -1253,6 +1280,121 @@ mod tests {
         let err = output_group(&mut slow, None, std::time::Duration::from_secs(1)).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < std::time::Duration::from_secs(20), "the group was ended, not waited out");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_group_with_no_job_is_ended_by_its_tree() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        // As `spawn_group` leaves a child it couldn't put in a job: tracked, with no job. PowerShell
+        // starts a ping, says its pid, then runs `then`.
+        async fn tree(then: &str) -> (GroupChild, Held) {
+            use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+            let script = format!(
+                "$i = New-Object Diagnostics.ProcessStartInfo 'ping.exe', '-n 300 127.0.0.1'; $i.UseShellExecute = $false; $i.RedirectStandardOutput = $true; \
+                 $p = [Diagnostics.Process]::Start($i); [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); {then}"
+            );
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::piped()).stdout(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
+            let mut child = command.spawn().unwrap();
+            let group = child.id().unwrap() as i32;
+            trek_core::procs::register(group);
+            let mut line = String::new();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line)).await.expect("PowerShell said the ping's pid").unwrap();
+            (GroupChild { child: Some(child), group, job: None }, Held::open(line.trim().parse().unwrap()))
+        }
+
+        let (mut child, grandchild) = tree("Start-Sleep 300").await;
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its group");
+
+        let (child, grandchild) = tree("Start-Sleep 300").await;
+        drop(child);
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its dropped group");
+
+        // Its parent gone, the grandchild is still found by its parent's id, which the group
+        // holds on to.
+        let (mut child, grandchild) = tree("exit").await;
+        assert!(tokio::time::timeout(Duration::from_secs(30), child.wait()).await.unwrap().unwrap().success());
+        assert!(!grandchild.exits_within(Duration::from_millis(500)), "the ping runs on");
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its group");
+    }
+
+    /// A Trek that dies without cleaning up (killed: no destructors, no atexit) takes its agents
+    /// along: the job's last handle closes with it. The test binary runs itself as that Trek: it
+    /// starts a ping in a group, says the ping's pid, and waits to be killed.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_killed_trek_takes_its_jobs_along() {
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        if std::env::var_os("TREK_TEST_KILLED_TREK").is_some() {
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let child = spawn_group(&mut command).unwrap();
+            println!("PING PID {}", child.id().unwrap());
+            tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+            return;
+        }
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::a_killed_trek_takes_its_jobs_along", "--nocapture", "--test-threads=1"])
+            .env("TREK_TEST_KILLED_TREK", "1")
+            .stdout(std::process::Stdio::piped());
+        let mut trek = command.spawn().unwrap();
+        let mut lines = BufReader::new(trek.stdout.take().unwrap()).lines();
+        let pid: u32 = loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(60), lines.next_line()).await.unwrap().unwrap().expect("the stand-in Trek ended before saying the ping's pid");
+            // After libtest's "test … ... " on the same line.
+            if let Some((_, pid)) = line.split_once("PING PID ") {
+                break pid.trim().parse().unwrap();
+            }
+        };
+        let ping = Held::open(pid);
+        assert!(!ping.exits_within(std::time::Duration::from_millis(500)), "the ping runs while its Trek does");
+        trek.start_kill().unwrap();
+        let _ = trek.wait().await;
+        let ended = ping.exits_within(std::time::Duration::from_secs(10));
+        if !ended {
+            let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+        }
+        assert!(ended, "the agent outlived a Trek that was killed");
+    }
+
+    /// Trek run inside a job of its own (a CI runner's, a terminal's) still gets its agents into
+    /// theirs, nested, and ending that ends the tree. The test binary re-runs itself as that Trek.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_job_works_inside_the_job_trek_runs_in() {
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        if std::env::var_os("TREK_TEST_NESTED_JOB").is_some() {
+            // SAFETY: plain calls. This stand-in Trek joins a job of its own first (not ended on
+            // close; it's left open until the process exits).
+            let outer = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!outer.is_null());
+            assert_ne!(unsafe { AssignProcessToJobObject(outer, GetCurrentProcess()) }, 0, "{}", std::io::Error::last_os_error());
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let mut child = spawn_group(&mut command).unwrap();
+            assert!(child.job.is_some(), "the child is in a job of its own, inside Trek's");
+            let ping = Held::open(child.id().unwrap());
+            assert!(!ping.exits_within(std::time::Duration::from_millis(300)));
+            child.terminate().await;
+            assert!(ping.exits_within(std::time::Duration::from_secs(10)), "the nested job didn't end the ping");
+            println!("NESTED JOB OK");
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::a_job_works_inside_the_job_trek_runs_in", "--nocapture", "--test-threads=1"])
+            .env("TREK_TEST_NESTED_JOB", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("NESTED JOB OK"), "{text}");
     }
 
     #[test]

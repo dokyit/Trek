@@ -16,8 +16,6 @@ mod simulator;
 #[cfg(target_os = "macos")]
 mod util;
 
-use std::io::{BufRead, Write};
-
 const USAGE: &str = "\
 trek-mcp — Trek's MCP server (stdio, JSON-RPC 2.0, newline-delimited)
 
@@ -28,40 +26,38 @@ USAGE:
     trek-mcp --version
 ";
 
-// Off macOS only `orchestrate` runs, and it serves inside the match: the loop after it is macOS's.
-#[cfg_attr(not(target_os = "macos"), allow(unreachable_code, unused_variables, unused_mut))]
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
-    let mut tools: Box<dyn rpc::ToolSet> = match arg.as_str() {
+    match arg.as_str() {
         #[cfg(target_os = "macos")]
-        "computer" => Box::new(computer::Computer::default()),
+        "computer" => serve(Box::new(computer::Computer::default())),
         #[cfg(not(target_os = "macos"))]
         "computer" | "simulator" | "sim" => {
             eprintln!("trek-mcp: the {arg} tools run only on macOS");
             std::process::exit(2);
         }
         #[cfg(target_os = "macos")]
-        "simulator" | "sim" => Box::new(simulator::Simulator::default()),
+        "simulator" | "sim" => serve(Box::new(simulator::Simulator::default())),
         "orchestrate" => {
             eprintln!("trek-mcp {} (orchestrate) ready on stdio", env!("CARGO_PKG_VERSION"));
             orchestrate::serve(orchestrate::Orchestrate::from_env());
-            return;
         }
-        "--version" | "-V" => {
-            println!("trek-mcp {}", env!("CARGO_PKG_VERSION"));
-            return;
-        }
-        "--help" | "-h" | "help" => {
-            print!("{USAGE}");
-            return;
-        }
+        "--version" | "-V" => println!("trek-mcp {}", env!("CARGO_PKG_VERSION")),
+        "--help" | "-h" | "help" => print!("{USAGE}"),
         other => {
             eprintln!(
                 "trek-mcp: unknown or missing tool family {other:?}\n\n{USAGE}"
             );
             std::process::exit(2);
         }
-    };
+    }
+}
+
+/// Serve `tools` on stdin/stdout, one request at a time, until stdin closes. (`orchestrate`
+/// serves itself, with calls side by side: the only family off macOS.)
+#[cfg(target_os = "macos")]
+fn serve(mut tools: Box<dyn rpc::ToolSet>) {
+    use std::io::{BufRead, Write};
 
     eprintln!(
         "trek-mcp {} ({}) ready on stdio",
