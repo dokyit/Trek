@@ -176,7 +176,8 @@ async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
             }
         }
     }
-    child.terminate().await;
+    // A probe: Claude has nothing to save, and it has been answered (or given up on).
+    child.kill_now().await;
 
     let null = Value::Null;
     let init = responses.get("i1").unwrap_or(&null);
@@ -367,7 +368,8 @@ async fn codex_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
         Ok(Err(e)) => status.add_error(format!("models: {e:#}")),
         Err(_) => status.add_error("models: timed out"),
     }
-    child.terminate().await;
+    // A probe that opened no thread: Codex has nothing to save.
+    child.kill_now().await;
     Ok(status)
 }
 
@@ -386,7 +388,8 @@ pub async fn codex_consume_reset(cwd: &Path, credit_id: &str) -> Result<()> {
         json!({ "creditId": credit_id, "idempotencyKey": trek_core::transcript::new_id() }),
     )
     .await?;
-    child.terminate().await;
+    // Codex has answered: the credit is spent, and there's nothing else to save.
+    child.kill_now().await;
     Ok(())
 }
 
