@@ -62,6 +62,13 @@ pub enum PickIcon {
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".build", "build", "dist", ".next", "DerivedData", "Pods", ".venv", "venv", "__pycache__", ".cache", ".turbo"];
 const MAX_FILES: usize = 30_000;
 
+/// A path under a folder as the app keeps them: written with `/` on every platform, as git does,
+/// so the code that splits one into folder and name has one separator to look for.
+pub fn rel_string(rel: &Path) -> String {
+    let s = rel.to_string_lossy();
+    if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
+}
+
 /// Relative paths of the project's files and folders (folders end with `/`).
 pub fn index_files(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -75,7 +82,7 @@ pub fn index_files(root: &Path) -> Vec<String> {
             }
             let path = e.path();
             let Ok(rel) = path.strip_prefix(root) else { continue };
-            let rel = rel.to_string_lossy().to_string();
+            let rel = rel_string(rel);
             match e.file_type() {
                 Ok(t) if t.is_dir() => {
                     if SKIP_DIRS.contains(&name.as_str()) || (name.starts_with('.') && !matches!(name.as_str(), ".github" | ".claude" | ".codex" | ".vscode")) {

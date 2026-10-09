@@ -185,14 +185,22 @@ async fn loaded(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext) 
 fn pipes_devices_and_huge_files_open_read_only_without_hanging() {
     run(async |cx| {
         let trek = open(cx);
-        // A pipe nobody writes to: reading it would wait for ever.
-        let fifo = trek.project.join("pipe");
-        let c = std::ffi::CString::new(fifo.display().to_string()).unwrap();
-        // SAFETY: a plain path, a plain mode.
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
         let big = trek.project.join("big.log");
         std::fs::File::create(&big).unwrap().set_len(2_000_001).unwrap();
-        for (path, why) in [(fifo, "Not a file"), (std::path::PathBuf::from("/dev/zero"), "Not a file"), (big, "Too big")] {
+        let mut cases = Vec::new();
+        // Unix only: Windows has no FIFOs or device files to open by path.
+        #[cfg(unix)]
+        {
+            // A pipe nobody writes to: reading it would wait for ever.
+            let fifo = trek.project.join("pipe");
+            let c = std::ffi::CString::new(fifo.display().to_string()).unwrap();
+            // SAFETY: a plain path, a plain mode.
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+            cases.push((fifo, "Not a file"));
+            cases.push((std::path::PathBuf::from("/dev/zero"), "Not a file"));
+        }
+        cases.push((big, "Too big"));
+        for (path, why) in cases {
             trek.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx));
             let editor = loaded(&trek, cx).await;
             let (problem, text) = editor.read_with(cx, |e, cx| (e.problem().map(str::to_string), e.text_state().read(cx).value().to_string()));
@@ -216,24 +224,36 @@ fn a_deep_link_lands_on_its_line_once_the_file_is_read() {
 
 #[test]
 fn saving_replaces_the_file_whole_and_keeps_its_permissions_and_links() {
-    use std::os::unix::fs::PermissionsExt as _;
     run(async |cx| {
         let trek = open(cx);
         let file = trek.project.join("run.sh");
         std::fs::write(&file, "echo one\n").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The executable bit is Unix's: a Windows file has none to keep.
+        #[cfg(unix)]
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let link = trek.project.join("link.sh");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&file, &link).unwrap();
+        // Making a link takes Developer Mode or an elevated process on Windows: without either, the
+        // file is edited directly and the link checks are skipped.
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&file, &link).is_ok();
+        #[cfg(unix)]
+        let linked = true;
         // Edited through the link.
-        trek.update(cx, |ws, cx| ws.open_editor(link.clone(), None, cx));
+        let opened = if linked { link.clone() } else { file.clone() };
+        trek.update(cx, |ws, cx| ws.open_editor(opened.clone(), None, cx));
         let editor = loaded(&trek, cx).await;
         trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.insert("set -e\n", window, cx))));
         cx.run_until_parked();
         editor.update(cx, |e, cx| e.save_now(cx));
         assert!(!editor.read_with(cx, |e, _| e.dirty()));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "set -e\necho one\n");
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755, "still runs");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o755, "still runs");
+        if linked {
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+        }
         let left: Vec<String> = std::fs::read_dir(&trek.project).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains("trek-save")).collect();
         assert!(left.is_empty(), "no temporary file left behind: {left:?}");
     });

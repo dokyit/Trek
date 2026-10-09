@@ -469,7 +469,7 @@ impl BackgroundStrip {
 fn output_file(result: &str) -> Option<std::path::PathBuf> {
     let rest = result.split("Output is being written to").nth(1)?;
     let path = rest.trim_start_matches(':').trim_start().split(|c: char| c.is_whitespace() || c == ';').next()?.trim_end_matches('.');
-    path.starts_with('/').then(|| std::path::PathBuf::from(path))
+    (path.starts_with('/') || std::path::Path::new(path).is_absolute()).then(|| std::path::PathBuf::from(path))
 }
 
 /// The icon a task's kind wears.

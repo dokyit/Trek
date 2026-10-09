@@ -417,7 +417,7 @@ impl AiTranscript {
         let cwd = ws.thread(id).and_then(|t| t.cwd.clone());
         // Where the folder really is: turns' changes name files under the repository's top
         // folder as git sees it (links resolved).
-        let canon_cwd = cwd.as_deref().and_then(|c| std::fs::canonicalize(c).ok());
+        let canon_cwd = cwd.as_deref().and_then(crate::system::canonical);
         let agent = ws.thread(id).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode);
         let ids = live.item_ids();
         let earlier = all.len().saturating_sub(self.shown);
