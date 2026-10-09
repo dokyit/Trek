@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use trek_core::{Effort, HandHolding, RunState};
 
 /// CPU time of the calling thread.
+#[cfg(unix)]
 fn thread_cpu() -> Duration {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: plain syscall writing into a local.
@@ -17,12 +18,44 @@ fn thread_cpu() -> Duration {
 }
 
 /// CPU time of the whole process (user + system), as `top` counts it.
+#[cfg(unix)]
 fn process_cpu() -> Duration {
     // SAFETY: plain syscall writing into a local.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
     let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
     tv(ru.ru_utime) + tv(ru.ru_stime)
+}
+
+/// Kernel + user time of a `GetThreadTimes`/`GetProcessTimes` result: FILETIMEs count 100 ns ticks.
+#[cfg(windows)]
+fn cpu_time(kernel: windows_sys::Win32::Foundation::FILETIME, user: windows_sys::Win32::Foundation::FILETIME) -> Duration {
+    let ticks = |t: windows_sys::Win32::Foundation::FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+}
+
+/// CPU time of the calling thread.
+#[cfg(windows)]
+fn thread_cpu() -> Duration {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the pseudo-handle for this thread, and locals to write into.
+    unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) };
+    cpu_time(kernel, user)
+}
+
+/// CPU time of the whole process (user + system), as Task Manager counts it.
+#[cfg(windows)]
+fn process_cpu() -> Duration {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the pseudo-handle for this process, and locals to write into.
+    unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    cpu_time(kernel, user)
 }
 
 /// A realistic window: a long inbox, a thread on screen with a transcript and a long mock turn
