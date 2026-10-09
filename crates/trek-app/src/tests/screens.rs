@@ -233,12 +233,12 @@ fn a_pasted_screenshot_is_saved_attached_and_sent() {
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
         // Text pastes as text.
         cx.write_to_clipboard(ClipboardItem::new_string("cargo test".into()));
-        trek.press(cx, "cmd-v");
+        trek.press(cx, "secondary-v");
         assert_eq!(trek.composer_text(cx), "cargo test");
         // Image data becomes a file in Trek's data folder, attached to the message.
         let image = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png());
         cx.write_to_clipboard(ClipboardItem::new_image(&image));
-        trek.press(cx, "cmd-v");
+        trek.press(cx, "secondary-v");
         until(cx, "the image to be saved", |cx| composer.read_with(cx, |c, _| c.attached()).0.len() == 1 && composer.read_with(cx, |c, _| c.attached()).1 == 0);
         let path = composer.read_with(cx, |c, _| c.attached()).0[0].clone();
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("png"));
