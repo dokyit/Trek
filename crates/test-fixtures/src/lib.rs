@@ -96,6 +96,10 @@ mod tests {
         cat.stdin.take().unwrap().write_all(b"hello").unwrap();
         let out = cat.wait_with_output().unwrap();
         assert_eq!((out.stdout.as_slice(), String::from_utf8_lossy(&out.stderr).trim()), (b"hello".as_slice(), "err"));
+        let started = std::time::Instant::now();
+        let out = fixture(&["cat", "--delay", "0.2"]).output().unwrap();
+        assert_eq!(out.stdout, b"");
+        assert!(started.elapsed() >= Duration::from_millis(200));
         assert!(fixture(&["exit"]).status().unwrap().success());
         assert_eq!(fixture(&["exit", "7"]).status().unwrap().code(), Some(7));
         assert_eq!(fixture(&["bogus"]).status().unwrap().code(), Some(2));
