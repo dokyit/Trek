@@ -268,7 +268,7 @@ fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
     let path = if let Some(rest) = raw.strip_prefix("~/") {
         trek_core::paths::home().join(rest)
-    } else if raw.starts_with('/') {
+    } else if raw.starts_with('/') || Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else if raw.contains(':') {
         return None;
@@ -614,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "the cases are Unix absolute paths (/Users/me, /tmp); Windows ones (drive-letter paths) arrive with the paths phase")]
     fn only_the_threads_own_folders_are_the_projects() {
         let cwd = Some(Path::new("/Users/me/code/app"));
         for inside in ["src/", "./src/", "src/ui/", "/Users/me/code/app/src/", "src/main.rs:12"] {
@@ -653,6 +654,7 @@ mod tests {
         let abs = file.to_string_lossy().to_string();
         assert_eq!(link_path(&abs, Some(&dir)).as_deref(), Some(file.as_path()));
         assert_eq!(link_path("shot.png", Some(&dir)).as_deref(), Some(file.as_path()));
+        #[cfg(unix)]
         assert_eq!(link_path("file:///tmp", None).as_deref(), Some(Path::new("/tmp")));
         assert!(link_path("https://example.com", Some(&dir)).is_none());
         assert!(link_path("mailto:a@b.co", Some(&dir)).is_none());
