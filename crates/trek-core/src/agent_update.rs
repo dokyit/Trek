@@ -1076,7 +1076,9 @@ mod tests {
         assert_eq!(parse_latest(&Source::Feed(Feed::GrokStable), "<!DOCTYPE html>"), None);
     }
 
+    // Unix only for now: the search path and installer are `:`-separated paths and `/bin/sh`; Phase 2 ports agent updates to Windows.
     #[test]
+    #[cfg(unix)]
     fn updates_run_the_vendors_documented_command() {
         let bin = Path::new("/opt/homebrew/bin/x");
         let shown = |agent: &str, install: Install, auto: bool| update_command(h(agent), &install, bin, auto, None).map(|c| c.shown());
@@ -1152,6 +1154,8 @@ mod tests {
         assert!(v.update_available());
     }
 
+    // Unix only: npm on Windows is `npm.cmd`; Phase 2 ports agent updates.
+    #[cfg(unix)]
     /// Pi's move to its new package, run against a fake `npm` that logs what it's asked and fails
     /// at `fail` (each a line of arguments): the old package is never simply gone.
     fn move_pi(fail: &[&str]) -> (Outcome, Vec<String>) {
@@ -1182,7 +1186,9 @@ mod tests {
         (outcome, ran)
     }
 
+    // Unix only: it runs a `#!/bin/sh` fake npm (npm on Windows is `npm.cmd`); Phase 2 ports agent updates.
     #[test]
+    #[cfg(unix)]
     fn a_failed_package_move_puts_the_old_package_back() {
         let (remove, add, back) = ("uninstall -g @mariozechner/pi-coding-agent", "install -g @earendil-works/pi-coding-agent@latest", "install -g --prefer-offline @mariozechner/pi-coding-agent@0.73.1");
         // Offline mid-update: the new package doesn't come, the old one goes back from the cache.
@@ -1238,19 +1244,23 @@ mod tests {
         let amp_acp = r#"{"name":"amp-acp","version":"0.9.0","type":"module","bin":{"amp-acp":"dist/index.js"}}"#;
         assert_eq!(version_in_package_json(amp_acp).as_deref(), Some("0.9.0"));
         assert_eq!(version_in_package_json("{}"), None);
-        // Read from disk, through the binary's link.
-        let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
-        let pkg = root.join("lib/node_modules/pi-acp");
-        std::fs::create_dir_all(pkg.join("dist")).unwrap();
-        std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
-        std::fs::write(pkg.join("dist/index.js"), "#!/usr/bin/env node\n").unwrap();
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        let link = root.join("bin/pi-acp");
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(pkg.join("dist/index.js"), &link).unwrap();
-        let adapter = harness("pi-acp").unwrap();
-        assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
-        let _ = std::fs::remove_dir_all(&root);
+        // Read from disk, through the binary's link. Unix only: a symlink on Windows needs a
+        // privilege the tests can't count on; Phase 2 ports agent updates.
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
+            let pkg = root.join("lib/node_modules/pi-acp");
+            std::fs::create_dir_all(pkg.join("dist")).unwrap();
+            std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
+            std::fs::write(pkg.join("dist/index.js"), "#!/usr/bin/env node\n").unwrap();
+            std::fs::create_dir_all(root.join("bin")).unwrap();
+            let link = root.join("bin/pi-acp");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(pkg.join("dist/index.js"), &link).unwrap();
+            let adapter = harness("pi-acp").unwrap();
+            assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     fn version(agent: &str, installed: &str, latest: Option<&str>) -> AgentVersion {
