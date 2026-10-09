@@ -303,7 +303,7 @@ pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
 /// Each `token_count` event carries the thread's running total; what a request used is how far
 /// the total moved (the same count is sometimes written twice). The first one in the file has
 /// nothing before it: its `last_token_usage` is the request's own.
-fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
+pub(super) fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
     let Ok(file) = std::fs::File::open(path) else { return vec![] };
     let mut out = Vec::new();
     let mut total: Option<TokenUsage> = None;
@@ -343,7 +343,7 @@ pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
 }
 
 /// The transcript of thread `id` from its rollout file.
-fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
+pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     let mut t = Transcript::default();
     // The last turn that ended: where the thread can be cut back to drop the next message's turn.

@@ -6,7 +6,9 @@
 //! plan mode still can't change files.
 //!
 //! The user's config is read from the places OpenCode reads it on this machine. Remote and
-//! organisation configs aren't fetched.
+//! organisation configs aren't fetched. OpenCode 2 renamed the keys (`agents`, `permissions` as
+//! a list of `{action, resource, effect}` rules, `shell` for `bash`) and still takes 1.x's, so
+//! both are read, and Trek's own rules are written the 1.x way, which both versions take.
 
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,21 +52,37 @@ fn glob(pattern: &str, name: &str) -> bool {
     }
 }
 
-/// The gated permissions a permission or tools key covers. Edit tools all fall under "edit".
+/// The gated permissions a permission or tools key covers. Edit tools all fall under "edit";
+/// OpenCode 2's `shell` is 1.x's `bash`.
 fn gated(key: &str) -> impl Iterator<Item = &'static str> + '_ {
     GATED.into_iter().filter(move |g| {
-        let names: &[&str] = if *g == "edit" { &["edit", "write", "patch", "apply_patch", "multiedit"] } else { &[g] };
+        let names: &[&str] = match *g {
+            "edit" => &["edit", "write", "patch", "apply_patch", "multiedit"],
+            "bash" => &["bash", "shell"],
+            _ => &[g],
+        };
         names.iter().any(|n| glob(key, n))
     })
 }
 
-/// Gated permissions a config section (the top level, or one agent) sets.
+/// Gated permissions a config section (the top level, or one agent) sets: 1.x's `permission`
+/// (a map, or one action for everything) and OpenCode 2's `permissions` (rules naming an action).
 fn set_in(section: &Value) -> BTreeSet<&'static str> {
     let mut out = BTreeSet::new();
-    match &section["permission"] {
-        Value::Null => {}
-        Value::Object(rules) => out.extend(rules.keys().flat_map(|k| gated(k))),
-        _ => out.extend(GATED),
+    for key in ["permission", "permissions"] {
+        match &section[key] {
+            Value::Null => {}
+            Value::Object(rules) => out.extend(rules.keys().flat_map(|k| gated(k))),
+            Value::Array(rules) => {
+                for rule in rules {
+                    match rule["action"].as_str() {
+                        Some(action) => out.extend(gated(action)),
+                        None => out.extend(GATED),
+                    }
+                }
+            }
+            _ => out.extend(GATED),
+        }
     }
     for k in section["tools"].as_object().into_iter().flat_map(|t| t.keys()) {
         out.extend(gated(k));
@@ -75,7 +93,7 @@ fn set_in(section: &Value) -> BTreeSet<&'static str> {
 impl UserRules {
     fn add_config(&mut self, c: &Value) {
         self.global.extend(set_in(c));
-        for (name, agent) in ["agent", "mode"].iter().filter_map(|k| c[*k].as_object()).flatten() {
+        for (name, agent) in ["agent", "agents", "mode"].iter().filter_map(|k| c[*k].as_object()).flatten() {
             self.agents.entry(name.clone()).or_default().extend(set_in(agent));
             self.custom.insert(name.clone());
         }
@@ -95,7 +113,7 @@ impl UserRules {
             .map(|n| n.trim().trim_matches(['"', '\'']).to_string())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| name.to_string());
-        if front.iter().any(|l| l.starts_with("permission:") || l.starts_with("tools:")) {
+        if front.iter().any(|l| ["permission:", "permissions:", "tools:"].iter().any(|k| l.starts_with(k))) {
             self.agents.entry(name.clone()).or_default().extend(GATED);
         }
         self.custom.insert(name);
@@ -354,6 +372,36 @@ mod tests {
         assert_eq!(ask_rules(&rules(&[r#"{"permission":{"*":"deny"}}"#])), None);
         let write_off = rules(&[r#"{"tools":{"write":false,"bash":true}}"#]);
         assert_eq!(write_off.global, BTreeSet::from(["edit", "bash"]));
+    }
+
+    #[test]
+    fn opencode_2_rules_are_the_users_too() {
+        // OpenCode 2's keys: rule lists, `agents`, `shell` for bash. A rule Trek added after the
+        // user's deny would win (the last matching rule does), so none is.
+        let r = rules(&[r#"{
+            "permissions": [ { "action": "shell", "resource": "git push *", "effect": "deny" } ],
+            "agents": {
+                "build": { "permissions": [ { "action": "webfetch", "resource": "*", "effect": "deny" } ] },
+                "reviewer": { "mode": "subagent", "permissions": [ { "action": "edit", "resource": "*", "effect": "deny" } ] },
+            },
+        }"#]);
+        assert_eq!(r.global, BTreeSet::from(["bash"]));
+        assert_eq!(
+            ask_rules(&r),
+            Some(json!({"agent":{
+                "build":{"permission":{"edit":"ask"}},
+                "general":{"permission":{"edit":"ask","webfetch":"ask"}},
+                "plan":{"permission":{"webfetch":"ask"}},
+                "explore":{"permission":{"webfetch":"ask"}},
+                "reviewer":{"permission":{"webfetch":"ask"}},
+            }}))
+        );
+        // A rule for every action, or one Trek can't read, sets everything.
+        assert_eq!(ask_rules(&rules(&[r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}"#])), None);
+        assert_eq!(ask_rules(&rules(&[r#"{"permissions":[{"resource":"*","effect":"allow"}]}"#])), None);
+        let mut md = UserRules::default();
+        md.add_agent_file("reviewer", "---\nmode: subagent\npermissions:\n  - action: edit\n---\n");
+        assert_eq!(md.agents["reviewer"], BTreeSet::from(GATED));
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub struct Settings {
     pub ide: Ide,
     /// Trek on your iPhone (Settings › Phone).
     pub mobile: Mobile,
+    /// The sidebar's Usage card.
+    pub usage: Usage,
     /// What `load` couldn't read, and whether `save` may write the file.
     #[serde(skip)]
     pub guard: SaveGuard,
@@ -518,9 +520,23 @@ impl Default for Settings {
             hidden_projects: vec![],
             ide: Ide::default(),
             mobile: Mobile::default(),
+            usage: Usage::default(),
             guard: SaveGuard::default(),
         }
     }
+}
+
+/// How many providers the Usage card shows at once.
+pub const USAGE_SHOWN_MAX: usize = 3;
+
+/// The sidebar's Usage card.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Usage {
+    /// The providers it shows (`AgentId::key()`), up to `USAGE_SHOWN_MAX`, as the user picked
+    /// them. Unset: the first few that have usage to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1085,6 +1101,22 @@ mod tests {
         let partial: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
         assert_eq!(partial.general.hand_holding, HandHolding::Auto);
         assert_eq!(partial.inbox.auto_settle_days, 3);
+    }
+
+    #[test]
+    fn the_usage_card_picks_automatically_until_the_user_picks() {
+        // Files from before the choice existed: automatic, and nothing is written for it.
+        let old: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
+        assert_eq!(old.usage.shown, None);
+        assert!(!toml::to_string_pretty(&old).unwrap().contains("shown"));
+        let mut s = Settings::default();
+        s.usage.shown = Some(vec!["claude-code".into(), "acp:devin".into()]);
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(text.contains("[usage]"), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap().usage.shown, s.usage.shown);
+        // Unchecking every one is a choice too (an empty card), not a return to automatic.
+        s.usage.shown = Some(vec![]);
+        assert_eq!(toml::from_str::<Settings>(&toml::to_string_pretty(&s).unwrap()).unwrap().usage.shown, Some(vec![]));
     }
 
     #[test]

@@ -26,7 +26,29 @@ pub fn open(workspace: Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mu
     let sheet = cx.new(|cx| AddAgentSheet::new(workspace, tab, window, cx));
     let focus = sheet.clone();
     window.defer(cx, move |window, cx| focus.update(cx, |s, cx| s.focus_first(window, cx)));
-    window.open_dialog(cx, move |dialog, _, _| dialog.w(px(640.)).p(px(0.)).child(sheet.clone()));
+    window.open_dialog(cx, move |dialog, _, _| {
+        // Esc, a click beside it, its ×: it leaves as it came, rather than vanishing.
+        let leaving = sheet.clone();
+        dialog.w(px(640.)).p(px(0.)).child(sheet.clone()).on_close(move |_, window, cx| left(&leaving, window, cx))
+    });
+}
+
+/// The sheet went (the library took it down): let it leave (`motion::sheet_left`).
+fn left(sheet: &Entity<AddAgentSheet>, window: &mut Window, cx: &mut App) {
+    let (bounds, motion) = {
+        let s = sheet.read(cx);
+        (s.bounds.clone(), s.workspace.read(cx).motion(cx))
+    };
+    crate::motion::sheet_left(sheet.clone().into(), &bounds, motion, window, cx);
+}
+
+impl AddAgentSheet {
+    /// Take the sheet down from inside it, letting it leave.
+    fn close(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let motion = self.workspace.read(cx).motion(cx);
+        window.close_dialog(cx);
+        crate::motion::sheet_left(cx.entity().into(), &self.bounds, motion, window, cx);
+    }
 }
 
 /// One environment variable row of the command form.
@@ -47,6 +69,8 @@ pub struct AddAgentSheet {
     env: Vec<EnvRow>,
     /// Why the command form wasn't added.
     error: Option<String>,
+    /// Where it's drawn, for leaving from there.
+    bounds: crate::motion::SheetBounds,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -91,7 +115,7 @@ impl AddAgentSheet {
                 }
             }));
         }
-        Self { workspace, tab, search, name, command, id, args: vec![], env: vec![], error: None, _subscriptions: subs }
+        Self { workspace, tab, search, name, command, id, args: vec![], env: vec![], error: None, bounds: Default::default(), _subscriptions: subs }
     }
 
     /// The tab's first field: the search, or the name.
@@ -455,7 +479,7 @@ impl AddAgentSheet {
         match added {
             Ok(name) => {
                 self.error = None;
-                window.close_dialog(cx);
+                self.close(window, cx);
                 self.workspace.update(cx, |ws, cx| {
                     if ws.route != Route::Settings(SettingsPage::Agents) && ws.route != Route::Onboarding {
                         ws.navigate(Route::Settings(SettingsPage::Agents), cx);
@@ -486,7 +510,7 @@ impl AddAgentSheet {
             .child("Paying per token instead? Add an API key")
             .child(Icon::new(IconName::ChevronRight).size(px(12.)))
             .on_click(cx.listener(|this, _, window, cx| {
-                window.close_dialog(cx);
+                this.close(window, cx);
                 this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::ApiKeys), cx));
             }));
         h_flex()
@@ -511,7 +535,7 @@ impl AddAgentSheet {
                 None => api.into_any_element(),
             }))
             .when(self.tab == Tab::Command, |el| {
-                el.child(Button::new("command-cancel").small().ghost().label("Cancel").on_click(|_, window, cx| window.close_dialog(cx)))
+                el.child(Button::new("command-cancel").small().ghost().label("Cancel").on_click(cx.listener(|this, _, window, cx| this.close(window, cx))))
                     .child(Button::new("command-add").small().primary().label("Add agent").on_click(cx.listener(|this, _, window, cx| this.add_command(window, cx))))
             })
             .into_any_element()
@@ -543,7 +567,7 @@ impl Render for AddAgentSheet {
             Tab::Registry => self.registry_body(cx),
             Tab::Command => self.command_body(cx),
         };
-        v_flex().id("add-agent-sheet").test_support().w_full().h(px(HEIGHT)).child(header).child(body).child(self.footer(cx))
+        v_flex().id("add-agent-sheet").test_support().relative().w_full().h(px(HEIGHT)).child(header).child(body).child(self.footer(cx)).child(crate::motion::sheet_marker(&self.bounds))
     }
 }
 

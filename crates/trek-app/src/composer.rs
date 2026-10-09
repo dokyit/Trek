@@ -1949,6 +1949,9 @@ impl Render for Composer {
         let billing = thread.as_ref().and_then(|t| ws.billing_of(t));
         let spend = live.and_then(|l| l.spend.clone()).unwrap_or_default();
         let cost_label = crate::cost::label(billing.as_ref(), &spend);
+        // Beside the estimate: how much of the prompts the cache served (a model on this Mac
+        // has no estimate and no cache to speak of).
+        let cache_hits = cost_label.as_ref().and_then(|_| crate::cost::CacheHits::of(&spend));
         let billing_tip = crate::cost::billing_note(billing.as_ref());
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let theme = cx.theme().clone();
@@ -2181,6 +2184,17 @@ impl Render for Composer {
                         .when_some(billing_tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))),
                 )
                 .when_some(cost_label, |el, label| el.child(cost_chip(label, billing.clone(), spend, cx)))
+                .when_some(cache_hits, |el, c| {
+                    let tip = c.detail();
+                    el.child(
+                        div()
+                            .id("cache-hits")
+                            .test_support()
+                            .flex_none()
+                            .child(c.label())
+                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)),
+                    )
+                })
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
                 .when(crowded.is_some(), |el| {
                     let ws = self.workspace.clone();

@@ -170,8 +170,7 @@ impl Workspace {
         }
         // The agent's usage windows may say when it resets: ask them now rather than in minutes.
         if unknown && matches!(thread.agent, AgentId::ClaudeCode | AgentId::Codex) {
-            self.status_fetched_at = 0;
-            self.refresh_usage(cx);
+            self.refresh_usage_now(cx);
         } else if unknown && thread.agent == super::devin_agent() {
             self.devin_status_at = 0;
             self.refresh_devin_usage(cx);

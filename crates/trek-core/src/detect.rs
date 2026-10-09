@@ -94,6 +94,15 @@ pub fn which(binary: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// OpenCode's command.
+pub const OPENCODE: &str = "opencode";
+
+/// OpenCode: `opencode`, else `opencode2`, the name OpenCode 2's beta package installs it under
+/// so it can sit beside 1.x (its later packages and installers install `opencode` as well).
+pub fn opencode() -> Option<PathBuf> {
+    which(OPENCODE).or_else(|| which("opencode2"))
+}
+
 pub(crate) async fn version_of(path: &Path) -> Option<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(4),
@@ -114,7 +123,8 @@ pub(crate) async fn version_of(path: &Path) -> Option<String> {
 
 async fn cli_agent(agent: AgentId, binary: &str, hint: &str) -> DetectedAgent {
     let name = agent.display_name();
-    match which(binary) {
+    let found = if agent == AgentId::OpenCode { opencode() } else { which(binary) };
+    match found {
         Some(path) => {
             let version = version_of(&path).await;
             DetectedAgent {
@@ -193,7 +203,7 @@ pub async fn detect_all() -> Vec<DetectedAgent> {
     let (claude, codex, opencode, droid) = tokio::join!(
         cli_agent(AgentId::ClaudeCode, "claude", "npm i -g @anthropic-ai/claude-code"),
         cli_agent(AgentId::Codex, "codex", "npm i -g @openai/codex"),
-        cli_agent(AgentId::OpenCode, "opencode", "curl -fsSL https://opencode.ai/install | bash"),
+        cli_agent(AgentId::OpenCode, OPENCODE, "curl -fsSL https://opencode.ai/install | bash"),
         cli_agent(AgentId::Droid, "droid", "curl -fsSL https://app.factory.ai/cli | sh"),
     );
     let mut codex = codex;

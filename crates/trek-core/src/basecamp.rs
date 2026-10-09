@@ -13,7 +13,9 @@ use crate::store::{Activity, Store, Thread, UsageRow};
 use crate::types::{AgentId, RunState, ThreadSource, TokenUsage};
 use chrono::{DateTime, Datelike as _, Duration, NaiveDate, TimeZone};
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// All time is drawn a day a stretch up to this many days, a week a stretch beyond.
 const ALL_DAYS: i64 = 91;
@@ -123,56 +125,332 @@ pub struct ThreadActivity {
     pub usage: Vec<UsageRow>,
 }
 
-/// What an imported thread's own history holds for a window.
-type Imported = Arc<(Vec<Activity>, Vec<UsageRow>)>;
-/// By (source, session, window start, read until, with activity): the thread's `updated_at`
-/// when it was read (0 when what was read can't change any more), and what it held.
-type ImportedKey = (String, String, i64, i64, bool);
-static IMPORTED: LazyLock<Mutex<HashMap<ImportedKey, (i64, Imported)>>> = LazyLock::new(Default::default);
+/// What an imported thread's own history holds, all of it: every token report, and its prompts
+/// and turn ends when they were read too.
+#[derive(Debug, Default, PartialEq)]
+struct History {
+    activity: Option<Vec<Activity>>,
+    usage: Vec<import::UsageEntry>,
+}
 
-/// Everything a recap of `window` needs, read from the store and (for imported threads not
-/// continued here) the agents' files. Slow: run it off the main thread.
-pub fn gather(store: &Store, window: &Window) -> anyhow::Result<Vec<ThreadActivity>> {
-    let threads = store.threads_since(window.start)?;
-    let names: HashMap<String, String> = store.projects()?.into_iter().map(|p| (p.id, p.name)).collect();
-    let ids: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
-    let stored = store.with_transcripts(&ids)?;
-    let recorded_from = store.first_usage(&ids)?;
-    let mut activity: HashMap<String, Vec<Activity>> = HashMap::new();
-    for (thread, a) in store.activity_between(window.start, window.end)? {
-        activity.entry(thread).or_default().push(a);
-    }
-    let mut usage: HashMap<String, Vec<UsageRow>> = HashMap::new();
-    for row in store.usage_between(window.start, window.end)? {
-        usage.entry(row.thread_id.clone()).or_default().push(row);
-    }
-    // Imported histories are files to read and parse (all time can mean thousands): a few at once.
-    let found = par_map(&threads, |t| match (&t.native_id, t.source) {
-        (Some(native), source) if source != ThreadSource::Trek && !stored.contains(&t.id) => Some(imported(t, source, native, window, window.end, true)),
-        // An imported thread continued here, in the same session: the agent's history has what
-        // it used until Trek recorded its first turn, Trek's rows the rest.
-        (Some(native), source) if source != ThreadSource::Trek => {
-            let until = recorded_from.get(&t.id).map_or(window.end, |at| (*at).min(window.end));
-            (until > window.start).then(|| imported(t, source, native, window, until, false))
+/// Files of imported histories read since launch (the persisted and in-memory copies spare
+/// the rest). For tests and timings.
+pub static HISTORIES_READ: AtomicUsize = AtomicUsize::new(0);
+
+fn history_key(source: ThreadSource, native: &str) -> String {
+    format!("{}:{native}", source.key())
+}
+
+/// What says a history changed: its file's modification time and size (and where it is, so
+/// it's found again without a search), or, for one in a database (OpenCode's), the thread's
+/// last activity as the import saw it.
+fn history_stamp(path: Option<&Path>, t: &Thread) -> String {
+    match path.and_then(|p| std::fs::metadata(p).ok().map(|m| (p, m))) {
+        Some((p, m)) => {
+            let at = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis());
+            format!("f{at}:{}|{}", m.len(), p.display())
         }
-        _ => None,
-    });
-    Ok(threads
-        .into_iter()
-        .zip(found)
-        .map(|(t, found)| {
-            let (activity, usage) = match found {
-                Some(found) if !stored.contains(&t.id) => (found.0.clone(), found.1.clone()),
-                found => {
-                    let mut usage = usage.remove(&t.id).unwrap_or_default();
-                    if let Some(found) = found {
-                        usage.splice(0..0, found.1.iter().cloned());
+        None => format!("u{}", t.updated_at),
+    }
+}
+
+/// Where an imported thread's history lives (`import::history_file`; tests put fixtures there).
+fn history_file(source: ThreadSource, native: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(p) = tests::FIXTURES.lock().unwrap().get(native) {
+        return Some(p.clone());
+    }
+    import::history_file(source, native)
+}
+
+/// The file a stamp was taken of.
+fn stamped_path(stamp: &str) -> Option<PathBuf> {
+    stamp.starts_with('f').then(|| stamp.split_once('|')).flatten().map(|(_, p)| PathBuf::from(p))
+}
+
+/// A history as the store keeps it: compact JSON, models named once.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    /// Prompts `[0, at, 0]` and turn ends `[1, at, took_secs]`, when they were read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    a: Option<Vec<(u8, i64, u32)>>,
+    m: Vec<String>,
+    /// `[at, model (index into m, -1 for none), input, output, cache read, cache write]`.
+    u: Vec<(i64, i32, u64, u64, u64, u64)>,
+}
+
+impl History {
+    fn encode(&self) -> String {
+        let mut m: Vec<String> = vec![];
+        let u = self
+            .usage
+            .iter()
+            .map(|(at, model, t)| {
+                let i = model.as_ref().map_or(-1, |model| match m.iter().position(|x| x == model) {
+                    Some(i) => i as i32,
+                    None => {
+                        m.push(model.clone());
+                        m.len() as i32 - 1
                     }
-                    (activity.remove(&t.id).unwrap_or_default(), usage)
+                });
+                (*at, i, t.input, t.output, t.cache_read, t.cache_write)
+            })
+            .collect();
+        let a = self.activity.as_ref().map(|a| {
+            a.iter()
+                .filter_map(|a| match *a {
+                    Activity::Prompt { at } => Some((0, at, 0)),
+                    Activity::TurnEnd { at, took_secs } => Some((1, at, took_secs)),
+                    Activity::TurnStopped { .. } => None,
+                })
+                .collect()
+        });
+        serde_json::to_string(&Kept { a, m, u }).unwrap_or_default()
+    }
+
+    fn decode(data: &str) -> Option<History> {
+        let k: Kept = serde_json::from_str(data).ok()?;
+        let activity = k.a.map(|a| a.into_iter().map(|(kind, at, took_secs)| if kind == 0 { Activity::Prompt { at } } else { Activity::TurnEnd { at, took_secs } }).collect());
+        let usage = k
+            .u
+            .into_iter()
+            .map(|(at, i, input, output, cache_read, cache_write)| (at, usize::try_from(i).ok().and_then(|i| k.m.get(i).cloned()), TokenUsage { input, output, cache_read, cache_write }))
+            .collect();
+        Some(History { activity, usage })
+    }
+}
+
+/// An imported thread's history, its prompts and turns too when `with_activity`: what the
+/// store kept of it (`kept`, its stamp and data) while its file is as it was then, else read
+/// from the agent's files. A history read here comes back with what to keep of it. (What's
+/// gathered holds on to it from then on: `Gathered`, `Cache`.)
+fn history(t: &Thread, source: ThreadSource, native: &str, with_activity: bool, kept: Option<&(String, String)>) -> (History, Option<(String, String, String)>) {
+    let key = history_key(source, native);
+    // Where the file is, as last seen: looked up again only when it moved.
+    let path = kept.and_then(|(stamp, _)| stamped_path(stamp)).filter(|p| p.is_file()).or_else(|| history_file(source, native));
+    let stamp = history_stamp(path.as_deref(), t);
+    if let Some((at, data)) = kept
+        && *at == stamp
+        && let Some(found) = History::decode(data).filter(|h| !with_activity || h.activity.is_some())
+    {
+        return (found, None);
+    }
+    HISTORIES_READ.fetch_add(1, Ordering::Relaxed);
+    let activity = with_activity.then(|| {
+        let items = import::load_transcript_from(source, native, path.as_deref()).unwrap_or_else(|e| {
+            tracing::debug!("basecamp: {} {native}: {e:#}", source.key());
+            vec![]
+        });
+        items
+            .iter()
+            .filter_map(|i| match i {
+                crate::store::Item::User { at: Some(at), aside: false, .. } => Some(Activity::Prompt { at: *at }),
+                crate::store::Item::TurnEnd { at, took_secs } => Some(Activity::TurnEnd { at: *at, took_secs: *took_secs }),
+                _ => None,
+            })
+            .collect()
+    });
+    let found = History { activity, usage: import::load_usage_from(source, native, path.as_deref(), i64::MIN, i64::MAX) };
+    let data = found.encode();
+    (found, Some((key, stamp, data)))
+}
+
+/// What decides whether a thread's numbers need reading again: its last activity and state,
+/// whether Trek keeps its transcript, and the reports and stopped turns recorded for it.
+#[derive(Debug, Clone, PartialEq)]
+struct Stamp {
+    updated_at: i64,
+    run_state: RunState,
+    stored: bool,
+    /// Reports: how many, the first's time and the last's.
+    usage: Option<(usize, i64, i64)>,
+    stops: usize,
+}
+
+/// Everything Basecamp counts, for all time: each thread's prompts, turns and token reports.
+/// Read whole once; after that only the threads that moved on are read again (`gather` with
+/// what was gathered before), and every range is worked out from it without reading anything.
+#[derive(Debug, Clone, Default)]
+pub struct Gathered {
+    pub threads: Vec<ThreadActivity>,
+    stamps: HashMap<String, Stamp>,
+    /// The earliest prompt, turn or report: where all time starts.
+    pub first: Option<i64>,
+    /// How many threads were read to make this one (all of them the first time).
+    pub read: usize,
+}
+
+impl Gathered {
+    /// Everything there is, from the store and (for imported threads) the agents' files.
+    /// Given what was gathered before, threads that haven't changed since keep what was read of
+    /// them. Slow the first time: run it off the main thread.
+    pub fn gather(store: &Store, prev: Option<Gathered>) -> anyhow::Result<Gathered> {
+        Self::gather_since(store, i64::MIN, prev)
+    }
+
+    /// `gather`, of only the threads active since `since` (unix ms) and what they did from then
+    /// on: enough for today or this week, quickly, before all time is read. Its `first` is
+    /// where those start, not all time.
+    pub fn gather_since(store: &Store, since: i64, prev: Option<Gathered>) -> anyhow::Result<Gathered> {
+        let threads = store.threads_since(since)?;
+        let names: HashMap<String, String> = store.projects()?.into_iter().map(|p| (p.id, p.name)).collect();
+        let ids: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
+        let stored = store.with_transcripts(&ids)?;
+        let counts = store.usage_counts()?;
+        let stops = store.turns_stopped()?;
+        let stamps: HashMap<String, Stamp> = threads
+            .iter()
+            .map(|t| {
+                let stamp = Stamp { updated_at: t.updated_at, run_state: t.run_state, stored: stored.contains(&t.id), usage: counts.get(&t.id).copied(), stops: stops.get(&t.id).copied().unwrap_or(0) };
+                (t.id.clone(), stamp)
+            })
+            .collect();
+        // What hasn't changed is taken as it was.
+        let mut kept: HashMap<String, ThreadActivity> = match prev {
+            Some(prev) => {
+                let old = prev.stamps;
+                prev.threads.into_iter().filter(|t| old.get(&t.thread.id).is_some_and(|s| stamps.get(&t.thread.id) == Some(s))).map(|t| (t.thread.id.clone(), t)).collect()
+            }
+            None => HashMap::new(),
+        };
+        let changed: Vec<&Thread> = threads.iter().filter(|t| !kept.contains_key(&t.id)).collect();
+        let changed_ids: Vec<String> = changed.iter().map(|t| t.id.clone()).collect();
+        // Trek's own records of those: all at once when that's most of them, else thread by thread.
+        let bulk = changed.len() * 2 > threads.len();
+        let mut activity: HashMap<String, Vec<Activity>> = HashMap::new();
+        let mut usage: HashMap<String, Vec<UsageRow>> = HashMap::new();
+        if !changed.is_empty() {
+            let found = if bulk { store.activity_between(since, i64::MAX)? } else { store.activity_of(&changed_ids)? };
+            for (thread, a) in found {
+                activity.entry(thread).or_default().push(a);
+            }
+            let found = if bulk { store.usage_between(since, i64::MAX)? } else { store.usage_of(&changed_ids)? };
+            for row in found {
+                usage.entry(row.thread_id.clone()).or_default().push(row);
+            }
+        }
+        // Imported histories are files to read and parse (all time can mean thousands): what was
+        // read before is taken from the store, the rest read a few at once.
+        let imported: Vec<(&Thread, ThreadSource, &str)> =
+            changed.iter().filter_map(|t| t.native_id.as_deref().filter(|_| t.source != ThreadSource::Trek).map(|n| (*t, t.source, n))).collect();
+        let keys: Vec<String> = imported.iter().map(|(_, source, native)| history_key(*source, native)).collect();
+        let on_disk = if imported.is_empty() {
+            HashMap::new()
+        } else {
+            store.histories_kept(&keys).unwrap_or_else(|e| {
+                tracing::warn!("basecamp: kept histories: {e:#}");
+                HashMap::new()
+            })
+        };
+        let found = par_map(&imported, |(t, source, native)| history(t, *source, native, !stored.contains(&t.id), on_disk.get(&history_key(*source, native))));
+        let fresh: Vec<(String, String, String)> = found.iter().filter_map(|(_, keep)| keep.clone()).collect();
+        if !fresh.is_empty()
+            && let Err(e) = store.keep_histories(&fresh)
+        {
+            tracing::warn!("basecamp: keep histories: {e:#}");
+        }
+        let mut histories: HashMap<String, History> = imported.iter().zip(found).map(|((t, ..), (h, _))| (t.id.clone(), h)).collect();
+        let read = changed.len();
+        let mut out = Vec::with_capacity(threads.len());
+        for t in threads {
+            let project = t.project_id.as_ref().and_then(|p| names.get(p).cloned());
+            if let Some(mut was) = kept.remove(&t.id) {
+                was.thread = t;
+                was.project = project;
+                out.push(was);
+                continue;
+            }
+            let row = |(at, model, tokens): &import::UsageEntry| UsageRow {
+                thread_id: t.id.clone(),
+                at: *at,
+                agent: t.source.agent().unwrap_or_else(|| t.agent.clone()),
+                model: model.clone().or_else(|| t.model.clone()),
+                tokens: *tokens,
+                cost: None,
+            };
+            let (activity, usage) = match histories.remove(&t.id) {
+                // Not continued here: its history is all there is.
+                Some(h) if !stored.contains(&t.id) => (h.activity.unwrap_or_default(), h.usage.iter().map(row).collect()),
+                // Continued here, in the same session: the agent's history has what it used until
+                // Trek recorded its first turn, Trek's rows the rest.
+                found => {
+                    let until = counts.get(&t.id).map_or(i64::MAX, |c| c.1);
+                    let mut own = usage.remove(&t.id).unwrap_or_default();
+                    if let Some(h) = found {
+                        own.splice(0..0, h.usage.iter().filter(|u| u.0 < until).map(row));
+                    }
+                    (activity.remove(&t.id).unwrap_or_default(), own)
                 }
             };
-            let project = t.project_id.as_ref().and_then(|p| names.get(p).cloned());
-            ThreadActivity { thread: t, project, activity, usage }
+            out.push(ThreadActivity { thread: t, project, activity, usage });
+        }
+        let first = out.iter().flat_map(|t| t.activity.iter().map(Activity::at).chain(t.usage.iter().map(|u| u.at))).filter(|at| *at > 0).min();
+        Ok(Gathered { threads: out, stamps, first, read })
+    }
+
+    /// The window `range` covers at `now`: all time from the day of the first thing done.
+    pub fn window<Tz: TimeZone>(&self, range: Range, now: &DateTime<Tz>) -> Window {
+        match range {
+            Range::All => range.window_from(now, self.first),
+            _ => range.window(now),
+        }
+    }
+
+    /// The threads that may have worked in `window`: the ones active since it began (the
+    /// threads are kept latest first).
+    pub fn threads_in(&self, window: &Window) -> &[ThreadActivity] {
+        &self.threads[..self.threads.partition_point(|t| t.thread.updated_at >= window.start)]
+    }
+
+    /// The recap of `range` at `now`, read from what was gathered (nothing is read again).
+    pub fn recap<Tz: TimeZone>(&self, range: Range, now: &DateTime<Tz>) -> Recap {
+        let window = self.window(range, now);
+        Recap::compute(window, now.timestamp_millis(), self.threads_in(&window))
+    }
+}
+
+/// Basecamp's numbers kept between reads (`Gathered`), shared by whatever shows them (the
+/// window's Basecamp, the phone's): each read after the first reads only what changed.
+#[derive(Clone, Default)]
+pub struct Cache(Arc<CacheInner>);
+
+#[derive(Default)]
+pub struct CacheInner {
+    kept: Mutex<Option<Gathered>>,
+    /// Everything has been read once.
+    warm: std::sync::atomic::AtomicBool,
+}
+
+impl Cache {
+    /// Bring what's kept up to date with `store` and work `f` out from it. One read at a time:
+    /// a second waits for the first, then has nothing left to read. Slow the first time: run it
+    /// off the main thread.
+    pub fn with<R>(&self, store: &Store, f: impl FnOnce(&Gathered) -> R) -> anyhow::Result<R> {
+        let mut kept = self.0.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        let fresh = Gathered::gather(store, kept.take())?;
+        let out = f(&fresh);
+        *kept = Some(fresh);
+        self.0.warm.store(true, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    /// Everything has been read once: another read is quick.
+    pub fn warm(&self) -> bool {
+        self.0.warm.load(Ordering::Relaxed)
+    }
+}
+
+/// Everything a recap of `window` needs, read from the store and (for imported threads not
+/// continued here) the agents' files: the threads active since it began, with what they did in
+/// it. Slow: run it off the main thread.
+pub fn gather(store: &Store, window: &Window) -> anyhow::Result<Vec<ThreadActivity>> {
+    Ok(Gathered::gather_since(store, window.start, None)?
+        .threads
+        .into_iter()
+        .map(|mut t| {
+            t.activity.retain(|a| window.contains(a.at()));
+            t.usage.retain(|u| window.contains(u.at));
+            t
         })
         .collect())
 }
@@ -184,7 +462,7 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
     if threads <= 1 {
         return items.iter().map(f).collect();
     }
-    let next = std::sync::atomic::AtomicUsize::new(0);
+    let next = AtomicUsize::new(0);
     let (f, next) = (&f, &next);
     let mut out: Vec<(usize, R)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
@@ -192,7 +470,7 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
                 s.spawn(move || {
                     let mut done = vec![];
                     loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(item) = items.get(i) else { break done };
                         done.push((i, f(item)));
                     }
@@ -205,56 +483,10 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
     out.into_iter().map(|(_, r)| r).collect()
 }
 
-/// The recap of `range` at `now`, from the store (see `gather`). All time opens on the day of the
-/// earliest activity found. Slow: run it off the main thread.
+/// The recap of `range` at `now`, from the store (see `Gathered`). All time opens on the day of
+/// the earliest activity found. Slow: run it off the main thread.
 pub fn recap<Tz: TimeZone>(store: &Store, range: Range, now: &DateTime<Tz>) -> anyhow::Result<Recap> {
-    let at = now.timestamp_millis();
-    if range != Range::All {
-        let window = range.window(now);
-        return Ok(Recap::compute(window, at, &gather(store, &window)?));
-    }
-    // Everything there is, whenever it was; then the window around it.
-    let threads = gather(store, &Window { range, start: 0, end: i64::MAX, bucket_ms: i64::MAX })?;
-    let first = threads.iter().flat_map(|t| t.activity.iter().map(Activity::at).chain(t.usage.iter().map(|u| u.at))).filter(|at| *at > 0).min();
-    Ok(Recap::compute(range.window_from(now, first), at, &threads))
-}
-
-/// An imported thread's tokens in `window` up to `until`, from its agent's history, and its
-/// prompts and turns there when `with_activity`. Read again only once the thread has moved on
-/// since (what lies before `until` < the window's end can't).
-fn imported(t: &Thread, source: ThreadSource, native: &str, window: &Window, until: i64, with_activity: bool) -> Imported {
-    let key = (source.key().to_string(), native.to_string(), window.start, until, with_activity);
-    let stamp = if until < window.end { 0 } else { t.updated_at };
-    if let Some((at, found)) = IMPORTED.lock().expect("basecamp cache").get(&key)
-        && *at == stamp
-    {
-        return found.clone();
-    }
-    let items = if with_activity {
-        import::load_transcript(source, native).unwrap_or_else(|e| {
-            tracing::debug!("basecamp: {} {native}: {e:#}", source.key());
-            vec![]
-        })
-    } else {
-        vec![]
-    };
-    let activity: Vec<Activity> = items
-        .iter()
-        .filter_map(|i| match i {
-            crate::store::Item::User { at: Some(at), aside: false, .. } => Some(Activity::Prompt { at: *at }),
-            crate::store::Item::TurnEnd { at, took_secs } => Some(Activity::TurnEnd { at: *at, took_secs: *took_secs }),
-            _ => None,
-        })
-        .filter(|a| window.contains(a.at()))
-        .collect();
-    let agent = source.agent().unwrap_or_else(|| t.agent.clone());
-    let usage = import::load_usage(source, native, window.start, until)
-        .into_iter()
-        .map(|(at, model, tokens)| UsageRow { thread_id: t.id.clone(), at, agent: agent.clone(), model: model.or_else(|| t.model.clone()), tokens, cost: None })
-        .collect();
-    let found = Arc::new((activity, usage));
-    IMPORTED.lock().expect("basecamp cache").insert(key, (stamp, found.clone()));
-    found
+    Ok(Gathered::gather(store, None)?.recap(range, now))
 }
 
 /// A project's part in a recap.
@@ -1247,5 +1479,104 @@ mod tests {
         // Recorded without a cost, it's priced from the table: 100 × $2 + 900 × $10 per million.
         let priced = r.spend.models.iter().find(|m| m.model.as_deref() == Some("gpt-6.1-sol")).unwrap();
         assert!((priced.usd - 0.0092).abs() < 1e-12 && !priced.reported);
+    }
+
+    /// Imported histories' files, by session id (`history_file`).
+    pub(super) static FIXTURES: std::sync::LazyLock<Mutex<HashMap<String, PathBuf>>> = std::sync::LazyLock::new(Default::default);
+
+    fn turn(s: &Store, id: &str, at: i64, model: &str, output: u64) {
+        let items = vec![
+            Item::User { text: "go".into(), images: vec![], at: Some(at), resume: None, aside: false },
+            Item::Assistant { text: "done".into() },
+            Item::TurnEnd { at: at + 60_000, took_secs: 60 },
+        ];
+        s.save_transcript(id, &mut crate::transcript::Transcript::unsaved(items)).unwrap();
+        s.record_usage(id, at + 60_000, &AgentId::ClaudeCode, Some(model), &TokenUsage { output, ..Default::default() }, None).unwrap();
+    }
+
+    #[test]
+    fn a_second_read_reads_only_the_threads_that_moved_on() {
+        let s = Store::in_memory().unwrap();
+        let now = chrono::Local::now();
+        let at = now.timestamp_millis() - 3_600_000;
+        let ids: Vec<String> = (0..3)
+            .map(|i| {
+                let t = s.create_thread(None, AgentId::ClaudeCode, Some("claude-opus-5-5".into()), Effort::High, HandHolding::Auto).unwrap();
+                turn(&s, &t.id, at + i * 1_000, "claude-opus-5-5", 100);
+                t.id
+            })
+            .collect();
+        let g = Gathered::gather(&s, None).unwrap();
+        assert_eq!(g.read, 3);
+        let all = g.recap(Range::All, &now);
+        assert_eq!((all.prompts, all.turns, all.tokens.total()), (3, 3, 300));
+        // Nothing changed: nothing is read, and every range comes out the same.
+        let g = Gathered::gather(&s, Some(g)).unwrap();
+        assert_eq!(g.read, 0);
+        assert_eq!(g.recap(Range::All, &now), all);
+        assert_eq!(g.recap(Range::Today, &now).turns, if Range::Today.window(&now).contains(at) { 3 } else { 0 });
+        // A turn in one thread failed after it reported its tokens: that one is read again.
+        s.record_usage(&ids[1], at + 120_000, &AgentId::ClaudeCode, Some("claude-opus-5-5"), &TokenUsage { output: 50, ..Default::default() }, None).unwrap();
+        s.record_stop(&ids[1], at + 120_000, 30, true).unwrap();
+        s.update_thread(&ids[1], |t| t.updated_at = now.timestamp_millis()).unwrap();
+        let g = Gathered::gather(&s, Some(g)).unwrap();
+        assert_eq!(g.read, 1);
+        let r = g.recap(Range::All, &now);
+        assert_eq!((r.turns, r.failed, r.tokens.total()), (4, 1, 350));
+        // Usage recorded with nothing else about the thread changed is noticed too.
+        s.record_usage(&ids[0], at + 130_000, &AgentId::ClaudeCode, None, &TokenUsage { output: 5, ..Default::default() }, None).unwrap();
+        let g = Gathered::gather(&s, Some(g)).unwrap();
+        assert_eq!((g.read, g.recap(Range::All, &now).tokens.total()), (1, 355));
+        // A thread deleted is gone, without reading anything.
+        s.delete_thread(&ids[2]).unwrap();
+        let g = Gathered::gather(&s, Some(g)).unwrap();
+        assert_eq!((g.read, g.threads.len(), g.recap(Range::All, &now).turns), (0, 2, 3));
+        // The shared cache does the same between whoever reads through it.
+        let cache = Cache::default();
+        assert!(!cache.warm());
+        assert_eq!(cache.with(&s, |g| g.read).unwrap(), 2);
+        assert_eq!(cache.with(&s, |g| (g.read, g.recap(Range::All, &now).turns)).unwrap(), (0, 3));
+        assert!(cache.warm());
+    }
+
+    #[test]
+    fn imported_histories_are_read_once_and_kept_for_the_next_launch() {
+        let dir = crate::import::Scratch::new();
+        let native = uuid::Uuid::new_v4().to_string();
+        let line = |v: serde_json::Value| v.to_string() + "\n";
+        let user = line(serde_json::json!({ "type": "user", "message": { "role": "user", "content": "go" }, "timestamp": "2026-10-03T15:00:00.000Z", "cwd": "/tmp", "sessionId": native, "isSidechain": false }));
+        let reply = |id: &str, out: u64, at: &str| {
+            line(serde_json::json!({ "type": "assistant", "timestamp": at, "cwd": "/tmp", "sessionId": native, "isSidechain": false,
+                "message": { "id": id, "role": "assistant", "model": "claude-opus-5-5", "content": [{ "type": "text", "text": "done" }], "stop_reason": "end_turn",
+                    "usage": { "input_tokens": 10, "output_tokens": out, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 } } }))
+        };
+        let path = dir.write("session.jsonl", &(user.clone() + &reply("m1", 90, "2026-10-03T15:01:00.000Z")));
+        FIXTURES.lock().unwrap().insert(native.clone(), path.clone());
+        let s = Store::in_memory().unwrap();
+        let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        t.source = ThreadSource::ClaudeCode;
+        t.native_id = Some(native.clone());
+        s.save_thread(&t).unwrap();
+        let tokens = |g: &Gathered| g.threads[0].usage.iter().map(|u| u.tokens.total()).sum::<u64>();
+        let g = Gathered::gather(&s, None).unwrap();
+        assert_eq!(g.threads[0].activity.iter().filter(|a| matches!(a, Activity::Prompt { .. })).count(), 1);
+        assert_eq!(tokens(&g), 100);
+        // What was read is kept in the store, stamped with the file's time, size and place.
+        let key = history_key(ThreadSource::ClaudeCode, &native);
+        let kept = s.histories_kept(std::slice::from_ref(&key)).unwrap();
+        let (stamp, data) = kept.get(&key).expect("kept").clone();
+        assert!(stamp.ends_with(&format!("|{}", path.display())), "{stamp}");
+        let decoded = History::decode(&data).expect("decodes");
+        assert_eq!((decoded.activity.as_deref(), decoded.usage.len()), (Some(&g.threads[0].activity[..]), 1));
+        // Another read (a relaunch, say) takes the kept copy as long as the file is as it was:
+        // made up here, to tell it from the file.
+        let doctored = History { activity: Some(vec![]), usage: vec![(1, None, TokenUsage { output: 7, ..Default::default() })] };
+        s.keep_histories(&[(key.clone(), stamp.clone(), doctored.encode())]).unwrap();
+        assert_eq!(tokens(&Gathered::gather(&s, None).unwrap()), 7);
+        // The file grows: it's read again, and what's kept follows.
+        std::fs::write(&path, user + &reply("m1", 90, "2026-10-03T15:01:00.000Z") + &reply("m2", 40, "2026-10-03T15:05:00.000Z")).unwrap();
+        assert_eq!(tokens(&Gathered::gather(&s, None).unwrap()), 150);
+        assert_ne!(s.histories_kept(std::slice::from_ref(&key)).unwrap()[&key].0, stamp);
+        FIXTURES.lock().unwrap().remove(&native);
     }
 }

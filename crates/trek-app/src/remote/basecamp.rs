@@ -23,10 +23,10 @@ impl Workspace {
             self.refresh_usage(cx);
             self.refresh_devin_usage(cx);
         }
-        let store = self.store.clone();
+        let (store, cache) = (self.store.clone(), self.basecamp_cache.clone());
         let work = cx.background_executor().spawn(async move {
             let now = chrono::Local::now();
-            basecamp::recap(&store, range, &now).unwrap_or_else(|e| {
+            cache.with(&store, |g| g.recap(range, &now)).unwrap_or_else(|e| {
                 tracing::warn!("basecamp: {e:#}");
                 Recap::compute(range.window(&now), now.timestamp_millis(), &[])
             })

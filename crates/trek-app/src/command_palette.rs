@@ -312,6 +312,8 @@ pub struct CommandPalette {
     basecamp: Entity<crate::basecamp::Basecamp>,
     input: Entity<InputState>,
     pub open: bool,
+    /// Coming in and going out: dismissed, it stays drawn (rows and all) until it has faded.
+    presence: crate::motion::Presence<()>,
     query: String,
     selected: usize,
     /// Full-text results and the query they answer (kept on screen until the next ones arrive).
@@ -355,6 +357,7 @@ impl CommandPalette {
             files_only: false,
             input,
             open: false,
+            presence: crate::motion::Presence::new(crate::motion::SURFACE),
             query: String::new(),
             selected: 0,
             hits: vec![],
@@ -424,6 +427,8 @@ impl CommandPalette {
             });
         }
         self.open = true;
+        let motion = self.workspace.read(cx).motion(cx);
+        self.presence.enter((), motion, crate::motion::now(cx));
         self.restore = window.focused(cx);
         self.selected = 0;
         self.input.update(cx, |s, cx| {
@@ -440,6 +445,8 @@ impl CommandPalette {
             return;
         }
         self.open = false;
+        let motion = self.workspace.read(cx).motion(cx);
+        self.presence.exit(motion, crate::motion::now(cx));
         self._search = None;
         self.confirm_when_ready = false;
         if let Some(h) = self.restore.take() {
@@ -888,10 +895,10 @@ impl CommandPalette {
 }
 
 impl Render for CommandPalette {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.open {
-            return div().into_any_element();
-        }
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Dismissed, it stays (inert) while it fades and lifts away.
+        let Some(t) = self.presence.sample(crate::motion::now(cx), window) else { return div().into_any_element() };
+        let leaving = !self.open;
         let theme = cx.theme().clone();
         let entries = self.entries(cx);
         self.selected = self.selected.min(entries.len().saturating_sub(1));
@@ -917,8 +924,8 @@ impl Render for CommandPalette {
             .top_0()
             .left_0()
             .size_full()
-            .occlude()
-            .bg(theme.overlay)
+            .when(!leaving, |el| el.occlude())
+            .bg(theme.overlay.opacity(t))
             .flex()
             .justify_center()
             .items_start()
@@ -927,6 +934,7 @@ impl Render for CommandPalette {
                 ui::menu_surface(cx)
                     .id("palette")
                     .test_support()
+                    .when(t < 1., |el| el.opacity(t).mt(px(-8. * (1. - t))))
                     .w(px(WIDTH))
                     .max_w(relative(0.9))
                     .p_0()

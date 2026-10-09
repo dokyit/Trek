@@ -6,7 +6,7 @@ use super::{Store, Thread};
 use crate::pricing::Spend;
 use crate::types::{AgentId, TokenUsage, UsageCost};
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use std::collections::{HashMap, HashSet};
 
 /// One row per model a turn used (sub-agents on another model add rows of their own), with
@@ -21,7 +21,9 @@ CREATE INDEX IF NOT EXISTS token_usage_thread ON token_usage(thread_id);
 CREATE TABLE IF NOT EXISTS turn_stops (
   thread_id TEXT NOT NULL, at INTEGER NOT NULL, took_secs INTEGER NOT NULL, failed INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS turn_stops_at ON turn_stops(at);";
+CREATE INDEX IF NOT EXISTS turn_stops_at ON turn_stops(at);
+CREATE INDEX IF NOT EXISTS turn_stops_thread ON turn_stops(thread_id);
+CREATE TABLE IF NOT EXISTS history_cache (key TEXT PRIMARY KEY, stamp TEXT NOT NULL, data TEXT NOT NULL);";
 
 /// Columns `token_usage` gained after it was first made.
 const COLUMNS_ADDED: &[(&str, &str)] = &[("cost_usd", "REAL"), ("cost_reported", "INTEGER NOT NULL DEFAULT 0")];
@@ -220,38 +222,139 @@ impl Store {
     /// is a sub-agent's brief or the message Trek wakes an agent with when its sub-agents report.
     pub fn activity_between(&self, from: i64, to: i64) -> Result<Vec<(String, Activity)>> {
         self.reading(|c| {
-            let mut st = c.prepare(
-                "SELECT i.thread_id, json_extract(i.data, '$.kind'), json_extract(i.data, '$.at'), json_extract(i.data, '$.took_secs')
-                 FROM items i JOIN threads t ON t.id = i.thread_id
-                 WHERE t.updated_at >= ?1
-                   AND json_extract(i.data, '$.kind') IN ('user', 'turn_end')
-                   AND COALESCE(json_extract(i.data, '$.aside'), 0) = 0
-                   AND NOT (json_extract(i.data, '$.kind') = 'user' AND json_extract(i.data, '$.text') IS ?3)
-                   AND NOT (json_extract(i.data, '$.kind') = 'user' AND (t.parent_id IS NOT NULL OR substr(json_extract(i.data, '$.text'), 1, ?4) = ?5))
-                   AND json_extract(i.data, '$.at') >= ?1 AND json_extract(i.data, '$.at') < ?2
-                 ORDER BY i.thread_id, i.seq",
-            )?;
-            let rows = st.query_map(params![from, to, crate::limit::CONTINUE, crate::orchestrate::WAKE_PREFIX.chars().count() as i64, crate::orchestrate::WAKE_PREFIX], |r| {
-                let kind: String = r.get(1)?;
-                let at: i64 = r.get(2)?;
-                let activity = match kind.as_str() {
-                    "user" => Activity::Prompt { at },
-                    _ => Activity::TurnEnd { at, took_secs: r.get::<_, Option<i64>>(3)?.unwrap_or(0).clamp(0, u32::MAX as i64) as u32 },
-                };
-                Ok((r.get::<_, String>(0)?, activity))
-            })?;
+            let mut st = c.prepare(&activity_sql("t.updated_at >= ?1"))?;
+            let rows = st.query_map(activity_params(from, to), activity_row)?;
             let mut out: Vec<(String, Activity)> = rows.collect::<rusqlite::Result<_>>()?;
             let mut st = c.prepare("SELECT thread_id, at, took_secs, failed FROM turn_stops WHERE at >= ?1 AND at < ?2 ORDER BY at")?;
-            let stops = st.query_map(params![from, to], |r| {
-                let took_secs = r.get::<_, i64>(2)?.clamp(0, u32::MAX as i64) as u32;
-                Ok((r.get::<_, String>(0)?, Activity::TurnStopped { at: r.get(1)?, took_secs, failed: r.get(3)? }))
-            })?;
-            for stop in stops {
+            for stop in st.query_map(params![from, to], stop_row)? {
                 out.push(stop?);
             }
             Ok(out)
         })
     }
+
+    /// `activity_between` all time, of `threads` only: what Basecamp reads again of the threads
+    /// that moved on since it last looked.
+    pub fn activity_of(&self, threads: &[String]) -> Result<Vec<(String, Activity)>> {
+        self.reading(|c| {
+            let mut items = c.prepare_cached(&activity_sql("i.thread_id = ?6"))?;
+            let mut stops = c.prepare_cached("SELECT thread_id, at, took_secs, failed FROM turn_stops WHERE thread_id = ?1 ORDER BY at")?;
+            let mut out = vec![];
+            for id in threads {
+                let (a, b, c, d, e) = activity_params(i64::MIN, i64::MAX);
+                for r in items.query_map(params![a, b, c, d, e, id], activity_row)? {
+                    out.push(r?);
+                }
+                for r in stops.query_map([id], stop_row)? {
+                    out.push(r?);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// For each thread with usage recorded: how many reports, and the first and last one's time.
+    /// With `turns_stopped`, what tells Basecamp a thread's numbers moved without reading them.
+    pub fn usage_counts(&self) -> Result<HashMap<String, (usize, i64, i64)>> {
+        self.reading(|c| {
+            let mut st = c.prepare_cached("SELECT thread_id, COUNT(*), MIN(at), MAX(at) FROM token_usage GROUP BY thread_id")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as usize, r.get(2)?, r.get(3)?))))?;
+            rows.collect()
+        })
+    }
+
+    /// How many turns of each thread failed or were stopped.
+    pub fn turns_stopped(&self) -> Result<HashMap<String, usize>> {
+        self.reading(|c| {
+            let mut st = c.prepare_cached("SELECT thread_id, COUNT(*) FROM turn_stops GROUP BY thread_id")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;
+            rows.collect()
+        })
+    }
+
+    /// Tokens reported since `from`, summed by agent and model (and whether a cost was recorded,
+    /// and the agent's own): one row each, dated at the first report. For the Usage card.
+    pub fn usage_since_by_agent(&self, from: i64) -> Result<Vec<UsageRow>> {
+        self.reading(|c| {
+            let mut st = c.prepare_cached(
+                "SELECT '', MIN(at), agent, model, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write),
+                        CASE WHEN COUNT(cost_usd) > 0 THEN SUM(cost_usd) END, cost_reported
+                 FROM token_usage WHERE at >= ?1 GROUP BY agent, model, cost_usd IS NULL, cost_reported",
+            )?;
+            let rows = st.query_map([from], row)?;
+            rows.collect()
+        })
+    }
+
+    /// What Basecamp kept of imported histories, by key: when it read each (`stamp`) and what it
+    /// found (`data`). Only `keys` are read.
+    pub fn histories_kept(&self, keys: &[String]) -> Result<HashMap<String, (String, String)>> {
+        self.reading(|c| {
+            let mut st = c.prepare_cached("SELECT stamp, data FROM history_cache WHERE key = ?1")?;
+            let mut out = HashMap::new();
+            for key in keys {
+                if let Some(found) = st.query_row([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()? {
+                    out.insert(key.clone(), found);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Keep what Basecamp read of imported histories, `(key, stamp, data)`, replacing what was
+    /// kept under those keys. A few at a time, so the main thread's saves never wait long.
+    pub fn keep_histories(&self, found: &[(String, String, String)]) -> Result<()> {
+        for chunk in found.chunks(64) {
+            self.with(|c| {
+                let tx = c.unchecked_transaction()?;
+                {
+                    let mut st = tx.prepare_cached("INSERT OR REPLACE INTO history_cache (key, stamp, data) VALUES (?1, ?2, ?3)")?;
+                    for (key, stamp, data) in chunk {
+                        st.execute(params![key, stamp, data])?;
+                    }
+                }
+                tx.commit()
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The transcript entries `activity_between` and `activity_of` read, of the threads `filter`
+/// picks. Rows are told apart by the start of their JSON (serde writes the tag first) before
+/// any is parsed: a long history is mostly tool output, which needn't be.
+fn activity_sql(filter: &str) -> String {
+    format!(
+        "SELECT i.thread_id, json_extract(i.data, '$.kind'), json_extract(i.data, '$.at'), json_extract(i.data, '$.took_secs')
+         FROM items i JOIN threads t ON t.id = i.thread_id
+         WHERE {filter}
+           AND (substr(i.data, 1, 14) = '{{\"kind\":\"user\"' OR substr(i.data, 1, 18) = '{{\"kind\":\"turn_end\"')
+           AND json_extract(i.data, '$.kind') IN ('user', 'turn_end')
+           AND COALESCE(json_extract(i.data, '$.aside'), 0) = 0
+           AND NOT (json_extract(i.data, '$.kind') = 'user' AND json_extract(i.data, '$.text') IS ?3)
+           AND NOT (json_extract(i.data, '$.kind') = 'user' AND (t.parent_id IS NOT NULL OR substr(json_extract(i.data, '$.text'), 1, ?4) = ?5))
+           AND json_extract(i.data, '$.at') >= ?1 AND json_extract(i.data, '$.at') < ?2
+         ORDER BY i.thread_id, i.seq"
+    )
+}
+
+fn activity_params(from: i64, to: i64) -> (i64, i64, &'static str, i64, &'static str) {
+    (from, to, crate::limit::CONTINUE, crate::orchestrate::WAKE_PREFIX.chars().count() as i64, crate::orchestrate::WAKE_PREFIX)
+}
+
+fn activity_row(r: &rusqlite::Row) -> rusqlite::Result<(String, Activity)> {
+    let kind: String = r.get(1)?;
+    let at: i64 = r.get(2)?;
+    let activity = match kind.as_str() {
+        "user" => Activity::Prompt { at },
+        _ => Activity::TurnEnd { at, took_secs: r.get::<_, Option<i64>>(3)?.unwrap_or(0).clamp(0, u32::MAX as i64) as u32 },
+    };
+    Ok((r.get::<_, String>(0)?, activity))
+}
+
+fn stop_row(r: &rusqlite::Row) -> rusqlite::Result<(String, Activity)> {
+    let took_secs = r.get::<_, i64>(2)?.clamp(0, u32::MAX as i64) as u32;
+    Ok((r.get::<_, String>(0)?, Activity::TurnStopped { at: r.get(1)?, took_secs, failed: r.get(3)? }))
 }
 
 #[cfg(test)]

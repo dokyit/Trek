@@ -498,3 +498,70 @@ fn a_thread_paused_at_its_limit_waits_for_review_without_failing() {
         assert!(trek.visible(cx, format!("review-paused-{id}")));
     });
 }
+
+/// Two threads of the mock's in the store: one with a turn `ago` ms before now, in `project`.
+fn worked(trek: &Trek, cx: &mut TestAppContext, ago: &[(i64, &std::path::PathBuf)]) {
+    trek.update(cx, |ws, cx| {
+        for (ago, project) in ago {
+            let at = now_ms().max(Range::Today.window(&chrono::Local::now()).start + 61_000) - ago - 60_000;
+            let t = ws.store.create_thread(Some(project), mock(), Some("mock-swift".into()), Effort::Medium, HandHolding::Auto).unwrap();
+            let items = vec![Item::User { text: "go".into(), images: vec![], at: Some(at), resume: None, aside: false }, Item::Assistant { text: "ok".into() }, Item::TurnEnd { at: at + 30_000, took_secs: 30 }];
+            store_items(&ws.store, &t.id, items);
+            ws.store.record_usage(&t.id, at + 30_000, &mock(), Some("mock-swift"), &TokenUsage { input: 1_000, output: 500, cache_read: 0, cache_write: 0 }, None).unwrap();
+        }
+        ws.reload(cx);
+    });
+}
+
+#[test]
+fn every_range_is_worked_out_in_one_pass_and_switching_reads_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let website = new_project("website");
+        worked(&trek, cx, &[(0, &trek.project.clone()), (42 * 24 * 3_600_000, &website)]);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        assert_eq!(recap(&trek, cx).prompts, 1);
+        let basecamp = cx.read(|cx| trek.root.read(cx).basecamp.clone());
+        let passes = basecamp.read_with(cx, |b, _| b.passes);
+        for (i, range, prompts) in [(2usize, Range::All, 2), (1, Range::Week, 1), (0, Range::Today, 1), (2, Range::All, 2)] {
+            trek.click(cx, ("basecamp-range", i));
+            // Drawn at once from what the one pass worked out: nothing is read again.
+            let s = basecamp.read_with(cx, |b, _| b.summary().cloned()).expect("up to date at once");
+            assert_eq!((s.recap.window.range, s.recap.prompts), (range, prompts));
+            assert_eq!(basecamp.read_with(cx, |b, _| b.passes), passes, "no pass for {range:?}");
+            trek.render(cx);
+            assert!(trek.visible(cx, "basecamp-totals"));
+        }
+        // A turn ends: one pass brings every range up to date, reading only that thread.
+        worked(&trek, cx, &[(0, &trek.project.clone())]);
+        let all = summary(&trek, cx);
+        assert_eq!(all.recap.prompts, 3);
+        assert_eq!(basecamp.read_with(cx, |b, _| b.passes), passes + 1);
+        trek.click(cx, ("basecamp-range", 0usize));
+        assert_eq!(basecamp.read_with(cx, |b, _| b.summary().map(|s| s.recap.prompts)), Some(2));
+    });
+}
+
+#[test]
+fn reopened_basecamp_shows_what_it_had_at_once_while_it_catches_up() {
+    run(async |cx| {
+        let trek = open(cx);
+        worked(&trek, cx, &[(0, &trek.project.clone())]);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        assert_eq!(recap(&trek, cx).prompts, 1);
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        // More work while it's closed: nothing is read until it opens.
+        worked(&trek, cx, &[(0, &trek.project.clone())]);
+        let basecamp = cx.read(|cx| trek.root.read(cx).basecamp.clone());
+        let passes = basecamp.read_with(cx, |b, _| b.passes);
+        trek.ws.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        // At once: the numbers it had, while the new ones are worked out off the main thread.
+        let (shown, current) = basecamp.read_with(cx, |b, _| (b.shown_summary().map(|s| s.recap.prompts), b.summary().is_some()));
+        assert_eq!((shown, current), (Some(1), false));
+        trek.window(cx, |window, cx| gpui_kit::test::TestWindowExt::render_frame(window, cx));
+        assert!(trek.visible(cx, "basecamp-totals"), "drawn before the pass is done");
+        assert_eq!(recap(&trek, cx).prompts, 2);
+        assert_eq!(basecamp.read_with(cx, |b, _| b.passes), passes + 1);
+    });
+}

@@ -40,6 +40,10 @@ pub struct Sidebar {
     collapsed_settled: HashSet<String>,
     filter_open: bool,
     usage_open: bool,
+    /// The Usage card lists every provider to pick the ones it shows.
+    usage_picking: bool,
+    /// A fourth provider was checked: the hint says why it wasn't.
+    usage_refused: bool,
     updater_open: bool,
     /// The agent updates card is open.
     agent_updates_open: bool,
@@ -56,7 +60,31 @@ pub struct Sidebar {
     shown: Option<Vec<LiveGroup>>,
     /// The held rows aren't what's current: they're redrawn when the pointer leaves.
     deferred: bool,
+    /// The list's layout animation: rows that move between frames slide to their new places,
+    /// new ones fade in (`crate::motion`).
+    flip: crate::motion::FlipStore,
+    /// Live rows whose thread has just gone (archived, deleted): drawn where they were while they
+    /// fade, as the rows under them close the gap (AnimatePresence's "pop layout").
+    ghosts: Vec<Ghost>,
+    /// The live rows last drawn, by thread id: the thread as it was, its group, and whether it
+    /// was a card. What a ghost draws.
+    last_rows: HashMap<String, (Thread, String, bool)>,
+    /// A search was on last frame: the list it leaves (or comes to) takes its places at once.
+    was_searching: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A live row fading away after its thread left the list (see `Sidebar::ghosts`).
+struct Ghost {
+    id: String,
+    pid: String,
+    /// The row it was under in its group, if any: it's drawn after that one.
+    after: Option<String>,
+    thread: Thread,
+    card: bool,
+    height: f32,
+    /// 1 drawn in full, 0 gone.
+    left: crate::motion::Spring,
 }
 
 /// A project's group in the live list as drawn: its rows top to bottom (thread ids), and whether
@@ -149,6 +177,8 @@ impl Sidebar {
             filter_open: false,
             // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
+            usage_picking: false,
+            usage_refused: false,
             updater_open: false,
             // TREK_OPEN_AGENT_UPDATES=1 opens the agent updates card at launch, the same way.
             agent_updates_open: std::env::var_os("TREK_OPEN_AGENT_UPDATES").is_some(),
@@ -157,6 +187,10 @@ impl Sidebar {
             hovered: false,
             shown: None,
             deferred: false,
+            flip: Default::default(),
+            ghosts: vec![],
+            last_rows: HashMap::new(),
+            was_searching: false,
             _subscriptions: subscriptions,
         };
         this.sync_clock(cx);
@@ -169,6 +203,19 @@ impl Sidebar {
         if !hovered && self.deferred {
             cx.notify();
         }
+    }
+
+    /// How far the row for `key` (a thread id) is drawn from its place right now, while it
+    /// slides there.
+    #[cfg(test)]
+    pub fn row_offset(&self, key: &str, cx: &App) -> Option<f32> {
+        self.flip.borrow().offset(key, crate::motion::now(cx))
+    }
+
+    /// The threads whose rows are fading away.
+    #[cfg(test)]
+    pub fn ghosts(&self) -> Vec<String> {
+        self.ghosts.iter().map(|g| g.id.clone()).collect()
     }
 
     /// Let go of the held rows: what the user just did here shows at once.
@@ -1001,16 +1048,22 @@ impl Sidebar {
             .open(usage_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
                 this.usage_open = *open;
+                this.usage_picking = false;
+                this.usage_refused = false;
                 if *open {
                     this.workspace.update(cx, |ws, cx| {
                         ws.refresh_usage(cx);
-                        ws.refresh_devin_usage(cx);
+                        // Devin's plan takes its terminal UI a few seconds: read only when it's shown.
+                        if ws.usage_shown().contains(&crate::workspace::devin_agent()) {
+                            ws.refresh_devin_usage(cx);
+                        }
+                        ws.refresh_usage_today(cx);
                     });
                 }
                 cx.notify();
             }))
             .trigger({
-                let peak = self.workspace.read(cx).agent_status.values().flat_map(|s| s.limits.iter().map(|l| l.percent)).fold(0.0f32, f32::max);
+                let peak = self.workspace.read(cx).usage_rows().iter().flat_map(|r| r.limits.iter().map(|l| l.percent)).fold(0.0f32, f32::max);
                 let tint = if peak >= 95. { Some(palette::red(cx)) } else if peak >= 80. { Some(palette::amber(cx)) } else { None };
                 let icon = Icon::new(crate::assets::Lucide::ChartNoAxesColumn);
                 ui::icon_button("usage", match tint { Some(c) => icon.text_color(c), None => icon }, "Usage").selected(usage_open)
@@ -1108,33 +1161,51 @@ impl Sidebar {
             .child(updater)
     }
 
-    /// Plan usage per agent: 5-hour, weekly and per-model windows with reset times.
+    /// Plan usage per agent: 5-hour, weekly and per-model windows with reset times, for the
+    /// providers picked (up to three; the first with usage to show until the user picks). The
+    /// "…" button lists every provider to pick from.
     fn usage_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let picking = self.usage_picking;
+        let picker = picking.then(|| self.usage_picker(cx));
         let ws = self.workspace.read(cx);
         let loading = ws.usage_loading || ws.devin_loading;
-        // In the agent picker's order: Claude Code and Codex first, then the ACP agents.
-        let rows: Vec<(trek_core::AgentId, trek_agents::AgentStatus)> = ws
-            .ready_agents()
-            .into_iter()
-            .filter_map(|a| ws.agent_status.get(&a.key()).cloned().map(|u| (a, u)))
-            .collect();
+        let rows = ws.usage_rows();
         let bar = |pct: f32, cx: &App| {
             let color = if pct >= 90. { palette::red(cx) } else if pct >= 70. { palette::amber(cx) } else { cx.theme().foreground.opacity(0.85) };
             div().h(px(5.)).w_full().rounded_full().bg(cx.theme().foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(color).w(relative((pct / 100.).clamp(0.0, 1.0))))
         };
+        let muted = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
         ui::menu_surface(cx)
+            .id("usage-card")
+            .test_support()
             .w(px(320.))
             .p(px(14.))
             .gap(px(14.))
             .child(
                 h_flex()
-                    .child(div().flex_1().text_sm().font_semibold().child("Usage"))
-                    .when(loading, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground))),
+                    .gap_1()
+                    .child(div().flex_1().text_sm().font_semibold().child(if picking { "Show in Usage" } else { "Usage" }))
+                    .when(loading && !picking, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground)))
+                    .child(
+                        ui::icon_button("usage-choose", if picking { IconName::Check } else { IconName::Ellipsis }, if picking { "Done" } else { "Choose providers" })
+                            .selected(picking)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.usage_picking = !this.usage_picking;
+                                this.usage_refused = false;
+                                cx.notify();
+                            })),
+                    ),
             )
-            .when(rows.is_empty() && !loading, |el| el.child(div().text_sm().text_color(theme.muted_foreground).child("No plan usage reported by your agents.")))
-            .children(rows.into_iter().map(|(agent, u)| {
+            .children(picker)
+            .when(!picking && rows.is_empty() && !loading, |el| {
+                el.child(div().text_sm().text_color(theme.muted_foreground).child(if ws.usage_picked() { "No providers picked. Choose some with …" } else { "No plan usage reported by your agents." }))
+            })
+            .when(!picking, |el| el.children(rows.into_iter().map(|u| {
+                let agent = u.agent.clone();
                 v_flex()
+                    .id(SharedString::from(format!("usage-row-{}", agent.key())))
+                    .test_support()
                     .gap(px(10.))
                     .child(
                         h_flex()
@@ -1144,9 +1215,9 @@ impl Sidebar {
                             .child(div().flex_1())
                             .when_some(u.plan.clone(), |el, p| el.child(div().text_xs().text_color(theme.muted_foreground).child(p))),
                     )
-                    .when(u.limits.is_empty() && u.error.is_none(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("No usage limits on this plan.")))
+                    .when(u.no_limits, |el| el.child(muted("No usage limits on this plan.".into())))
                     .when_some(u.error.clone(), |el, e| el.child(div().text_xs().text_color(palette::amber(cx)).child(e)))
-                    .when_some(u.note.clone(), |el, n| el.child(div().text_xs().text_color(theme.muted_foreground).child(n)))
+                    .when_some(u.note.clone(), |el, n| el.child(muted(n)))
                     .children(u.limits.iter().map(|l| {
                         let resets = l.resets_at.map(time::until).unwrap_or_default();
                         v_flex()
@@ -1158,8 +1229,26 @@ impl Sidebar {
                                     .child(div().text_color(theme.muted_foreground).child(format!("{:.0}% left", (100. - l.percent).clamp(0., 100.)))),
                             )
                             .child(bar(l.percent, cx))
-                            .when(!resets.is_empty(), |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(format!("Resets {resets}"))))
+                            .when(!resets.is_empty(), |el| el.child(muted(format!("Resets {resets}"))))
                     }))
+                    // No plan to show: what Trek recorded it using today.
+                    .when(u.limits.is_empty(), |el| {
+                        el.child(muted(match &u.today {
+                            Some((n, spend)) if spend.priced() => format!("Today in Trek: {} tokens · ≈ {}", crate::cost::fmt_tokens(*n), crate::cost::usd(spend.usd())),
+                            Some((n, _)) => format!("Today in Trek: {} tokens", crate::cost::fmt_tokens(*n)),
+                            None if u.plan.is_none() && !u.no_limits && u.error.is_none() => "Nothing used today.".to_string(),
+                            None => String::new(),
+                        }))
+                    })
+                    // Kept from an earlier run: shown until the agent is read again.
+                    .when_some(u.as_of, |el, at| {
+                        let ago = time::relative(at);
+                        el.child(muted(match ago.as_str() {
+                            "now" => "As of just now".to_string(),
+                            a if a.starts_with(|c: char| c.is_ascii_digit()) => format!("As of {a} ago"),
+                            a => format!("As of {a}"),
+                        }))
+                    })
                     // Granted, unspent rate-limit resets (Codex's "Usage limit resets").
                     .when(!u.resets.is_empty(), |el| {
                         let n = u.resets.len();
@@ -1223,7 +1312,71 @@ impl Sidebar {
                                 })),
                         )
                     })
-            }))
+            })))
+            .into_any_element()
+    }
+
+    /// The Usage card's provider list: every provider it can show, checked when it does. Three
+    /// at most: a fourth is refused with a word, until one is unchecked.
+    fn usage_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let shown = ws.usage_shown();
+        let full = shown.len() >= trek_core::settings::USAGE_SHOWN_MAX;
+        let picked = ws.usage_picked();
+        let rows: Vec<AnyElement> = ws
+            .usage_providers()
+            .into_iter()
+            .map(|agent| {
+                let on = shown.contains(&agent);
+                let blocked = full && !on;
+                let key = agent.key();
+                ui::menu_row(SharedString::from(format!("usage-pick-{key}")), false, cx)
+                    .test_support()
+                    .min_h(px(30.))
+                    .px(px(8.))
+                    .when(blocked, |el| el.opacity(0.5).cursor_default())
+                    .child(ui::agent_logo(&agent, px(14.), cx))
+                    .child(div().flex_1().text_size(px(12.5)).child(agent.display_name()))
+                    .when(on, |el| el.child(Icon::new(IconName::Check).xsmall().text_color(palette::ember(cx))))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let shown = this.workspace.update(cx, |ws, cx| ws.toggle_usage_shown(&agent, cx));
+                        this.usage_refused = !shown;
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let hint = if self.usage_refused {
+            Some(("Up to 3 at a time — uncheck one first.", palette::amber(cx)))
+        } else if full {
+            Some(("Up to 3 at a time.", theme.muted_foreground))
+        } else {
+            None
+        };
+        v_flex()
+            .id("usage-picker")
+            .test_support()
+            .gap(px(2.))
+            .mx(px(-6.))
+            .children(rows)
+            .when_some(hint, |el, (text, color)| el.child(div().id("usage-pick-hint").test_support().px(px(8.)).pt(px(6.)).text_xs().text_color(color).child(text)))
+            .child(
+                h_flex()
+                    .px(px(8.))
+                    .pt(px(8.))
+                    .gap_2()
+                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child(if picked { "Picked by you" } else { "Picked automatically" }))
+                    .when(picked, |el| {
+                        el.child(
+                            ui::Pill::new("usage-pick-auto").ghost(true).small(true).child(div().text_xs().child("Pick automatically")).on_click(cx.listener(|this, _, _, cx| {
+                                this.usage_refused = false;
+                                this.workspace.update(cx, |ws, cx| ws.show_usage_automatically(cx));
+                                cx.notify();
+                            })),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1361,6 +1514,16 @@ impl Render for Sidebar {
         let searching = !ws.search.is_empty();
         let settled_open = ws.settled_open || searching;
         let importing = ws.importing;
+        // Rows slide to new places only when the list changes under the user, not as a search
+        // narrows it (or gives it back).
+        let now = crate::motion::now(cx);
+        let animate = ws.motion(cx) && !searching && !self.was_searching;
+        self.was_searching = searching;
+        self.flip.borrow_mut().begin(animate);
+        if !animate {
+            self.ghosts.clear();
+        }
+        let flip = self.flip.clone();
         // Settled history can be hundreds of threads; while it's folded only the count is needed.
         let mut settled_count = 0;
         let sections: Vec<(Section, Vec<Thread>)> = ws
@@ -1391,13 +1554,15 @@ impl Render for Sidebar {
         };
         // Pinned or snoozed threads showing mean the live run isn't really empty.
         let named_sections_busy = sections.iter().any(|(s, v)| matches!(s, Section::Pinned | Section::Snoozed) && !v.is_empty());
+        let mut pinned: HashSet<String> = HashSet::new();
         for (section, threads) in sections {
             match section {
                 Section::Settled => settled = threads,
                 Section::Pinned | Section::Snoozed => {
-                    list = list.child(Self::label(section.label(), cx));
+                    list = list.child(crate::motion::flip_row(&flip, format!("label-{}", section.label()), Self::label(section.label(), cx), now, window));
                     for t in &threads {
-                        list = list.child(self.card(t, &project_of(t), true, selected.as_deref() == Some(&t.id), cx));
+                        pinned.insert(t.id.clone());
+                        list = list.child(crate::motion::flip_row(&flip, t.id.clone(), self.card(t, &project_of(t), true, selected.as_deref() == Some(&t.id), cx), now, window));
                     }
                 }
                 Section::Inbox | Section::Working => {}
@@ -1485,6 +1650,7 @@ impl Render for Sidebar {
         // stopped or come back with news there mustn't slide another under the next click. What
         // changed shows once the pointer leaves (`hover_changed`); what the user does here (folding,
         // "Show more", searching) shows at once.
+        let before = self.shown.clone();
         let layout: Vec<LiveGroup> = match self.shown.take().filter(|_| self.hovered && !searching) {
             Some(held) => {
                 self.deferred = held != fresh;
@@ -1513,6 +1679,26 @@ impl Render for Sidebar {
         };
         self.shown = Some(layout.clone());
         let live_shown = !layout.is_empty();
+        // Live rows whose thread went from every list drawn (archived, deleted; settled with the
+        // history folded) fade where they were.
+        if animate && let Some(before) = before {
+            let drawn: HashSet<&str> = layout.iter().flat_map(|g| g.rows.iter().map(String::as_str)).collect();
+            let in_history: HashSet<&str> = if settled_open { settled.iter().map(|t| t.id.as_str()).collect() } else { HashSet::new() };
+            for g in &before {
+                for (ix, id) in g.rows.iter().enumerate() {
+                    if drawn.contains(id.as_str()) || pinned.contains(id) || in_history.contains(id.as_str()) || by_id.contains_key(id) || self.ghosts.iter().any(|x| &x.id == id) {
+                        continue;
+                    }
+                    let (Some((thread, _, card)), Some(height)) = (self.last_rows.get(id), self.flip.borrow().height(id)) else { continue };
+                    let after = g.rows[..ix].iter().rev().find(|r| drawn.contains(r.as_str())).cloned();
+                    let mut left = crate::motion::Spring::new(crate::motion::SURFACE, crate::motion::UNIT, 1., now);
+                    left.set(0., true, now);
+                    self.ghosts.push(Ghost { id: id.clone(), pid: g.pid.clone(), after, thread: thread.clone(), card: *card, height, left });
+                }
+            }
+        }
+        self.ghosts.retain(|g| g.left.moving(now) && layout.iter().any(|l| l.pid == g.pid));
+        let mut last_rows: HashMap<String, (Thread, String, bool)> = HashMap::new();
         for g in layout {
             let pid = g.pid;
             let i = info.remove(&pid).unwrap_or_else(|| GroupInfo { name: names.get(&pid).cloned().unwrap_or_else(|| "No project".into()), ..GroupInfo::default() });
@@ -1523,11 +1709,36 @@ impl Render for Sidebar {
                 .when(i.unread > 0, |el| el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("{} new", i.unread))))
                 .child(div().text_xs().child(i.total.to_string()))
                 .into_any_element();
-            list = list.child(self.group_header("live", &pid, i.name.clone(), Some(extra), Some(i.folded), &paths, &looks, cx));
-            for id in &g.rows {
-                let Some(t) = by_id.get(id) else { continue };
-                let sel = selected.as_deref() == Some(id.as_str());
-                list = list.child(if attention(t) { self.card(t, &i.name, false, sel, cx) } else { self.live_line(t, sel, cx) });
+            list = list.child(crate::motion::flip_row(&flip, format!("live-h-{pid}"), self.group_header("live", &pid, i.name.clone(), Some(extra), Some(i.folded), &paths, &looks, cx), now, window));
+            // The group's rows top to bottom, with what's fading away where it was.
+            let mut seq: Vec<Result<&String, usize>> = g.rows.iter().map(Ok).collect();
+            for (gx, ghost) in self.ghosts.iter().enumerate().filter(|(_, x)| x.pid == pid) {
+                let at = match &ghost.after {
+                    None => 0,
+                    Some(a) => seq.iter().position(|r| matches!(r, Ok(id) if *id == a)).map_or(seq.len(), |p| p + 1),
+                };
+                seq.insert(at, Err(gx));
+            }
+            for row in seq {
+                match row {
+                    Ok(id) => {
+                        let Some(t) = by_id.get(id) else { continue };
+                        let sel = selected.as_deref() == Some(id.as_str());
+                        let card = attention(t);
+                        last_rows.insert(id.clone(), (t.clone(), pid.clone(), card));
+                        let row = if card { self.card(t, &i.name, false, sel, cx) } else { self.live_line(t, sel, cx) };
+                        list = list.child(crate::motion::flip_row(&flip, id.clone(), row, now, window));
+                    }
+                    Err(gx) => {
+                        let ghost = &self.ghosts[gx];
+                        let left = ghost.left.frame(now, window).clamp(0., 1.);
+                        let row = if ghost.card { self.card(&ghost.thread, &i.name, false, false, cx) } else { self.live_line(&ghost.thread, false, cx) };
+                        // Out of the layout at once (the rows under it slide up to close the gap),
+                        // it fades where it was, under them.
+                        let row = div().h(px(0.)).child(div().absolute().top_0().left_0().w_full().h(px(ghost.height)).opacity(left).child(row));
+                        list = list.child(crate::motion::flip_row(&flip, ghost.id.clone(), row, now, window));
+                    }
+                }
             }
             if g.footer {
                 let pid2 = pid.clone();
@@ -1536,7 +1747,9 @@ impl Render for Sidebar {
                     false if i.more > 0 => (format!("live-more-{pid}"), format!("Show {} more", i.more)),
                     false => (format!("live-more-{pid}"), "Show more".to_string()),
                 };
-                list = list.child(
+                list = list.child(crate::motion::flip_row(
+                    &flip,
+                    format!("live-f-{pid}"),
                     div()
                         .id(SharedString::from(id))
                         .test_support()
@@ -1556,9 +1769,12 @@ impl Render for Sidebar {
                             }
                             this.thaw(cx);
                         })),
-                );
+                    now,
+                    window,
+                ));
             }
         }
+        self.last_rows = last_rows;
         if !live_shown && !searching && !named_sections_busy {
             list = list.child(
                 v_flex()
@@ -1592,7 +1808,9 @@ impl Render for Sidebar {
                     }
                 }
             }
-            history = history.child(
+            history = history.child(crate::motion::flip_row(
+                &flip,
+                "settled-toggle",
                 h_flex()
                     .id("settled-toggle")
                     .mx_2()
@@ -1613,16 +1831,18 @@ impl Render for Sidebar {
                             cx.notify();
                         })
                     })),
-            );
+                now,
+                window,
+            ));
             if settled_open {
                 for (pid, name, items) in groups {
                     let open = self.open_projects.contains(&pid);
                     let shown = if open || searching { items.len() } else { items.len().min(5) };
                     let pid2 = pid.clone();
                     let folded = self.collapsed_settled.contains(&pid) && !searching;
-                    history = history.child(self.group_header("settled", &pid, name.clone(), None, Some(folded), &paths, &looks, cx));
+                    history = history.child(crate::motion::flip_row(&flip, format!("settled-h-{pid}"), self.group_header("settled", &pid, name.clone(), None, Some(folded), &paths, &looks, cx), now, window));
                     for t in items.iter().take(if folded { 0 } else { shown }) {
-                        history = history.child(self.line(t, selected.as_deref() == Some(&t.id), cx));
+                        history = history.child(crate::motion::flip_row(&flip, t.id.clone(), self.line(t, selected.as_deref() == Some(&t.id), cx), now, window));
                     }
                     if items.len() > 5 && !searching && !folded {
                         history = history.child(
@@ -1650,15 +1870,17 @@ impl Render for Sidebar {
             }
         }
 
+        self.flip.borrow_mut().end();
         v_flex()
             .id("sidebar")
+            .test_support()
             .w(px(crate::root::SIDEBAR_WIDTH))
             .h_full()
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover_changed(*hovered, cx)))
             .flex_none()
             .when(!self.workspace.read(cx).see_through(), |el| el.bg(theme.sidebar))
             .child(self.top(cx))
-            .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().child(list).child(history))
+            .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().child(crate::motion::flip_scope(&flip, v_flex().w_full().child(list).child(history))))
             .child(self.footer(cx))
     }
 }

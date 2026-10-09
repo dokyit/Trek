@@ -1,4 +1,8 @@
-//! OpenCode sessions: `~/.local/share/opencode/opencode.db` (session, message, part).
+//! OpenCode sessions: `~/.local/share/opencode/opencode.db`. OpenCode 1.x keeps them in
+//! `session`, `message` and `part`; OpenCode 2 in `session_v2` and `session_message` (one row per
+//! message, its parts inside). 2.0 copies 1.x's sessions into its own tables once, under the same
+//! ids, and leaves the old tables as they were, so a database may have both, and a session may be
+//! in both: the copy that changed last is the one read.
 
 use super::{Evidence, ImportedThread, Transcript, classify, clip, source_title, title_from, user_text};
 use crate::store::{Item, ToolStatus};
@@ -14,6 +18,53 @@ fn db() -> Option<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
 }
 
+/// Which of OpenCode's tables a session is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tables {
+    /// OpenCode 1.x: `session`, `message`, `part`.
+    V1,
+    /// OpenCode 2: `session_v2`, `session_message`.
+    V2,
+}
+
+impl Tables {
+    fn session(self) -> &'static str {
+        match self {
+            Tables::V1 => "session",
+            Tables::V2 => "session_v2",
+        }
+    }
+}
+
+/// The tables this database has: 1.x's, 2's, or both.
+fn tables(conn: &Connection) -> Vec<Tables> {
+    let has = |name: &str| conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", [name], |_| Ok(())).is_ok();
+    let mut out = vec![];
+    if has("session") && has("message") && has("part") {
+        out.push(Tables::V1);
+    }
+    if has("session_v2") && has("session_message") {
+        out.push(Tables::V2);
+    }
+    out
+}
+
+/// Where session `id` is read from: the tables whose copy changed last (1.x's on a tie: a copy
+/// 2.0 made and never continued is the same conversation).
+fn tables_of(conn: &Connection, id: &str) -> Option<Tables> {
+    tables(conn)
+        .into_iter()
+        .filter_map(|t| {
+            let sql = format!("SELECT time_updated FROM {} WHERE id = ?1", t.session());
+            conn.query_row(&sql, [id], |r| r.get::<_, i64>(0)).ok().map(|at| (t, at))
+        })
+        .fold(None, |best: Option<(Tables, i64)>, (t, at)| match best {
+            Some((_, b)) if b >= at => best,
+            _ => Some((t, at)),
+        })
+        .map(|(t, _)| t)
+}
+
 /// Sessions updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
 pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     db().map(|conn| scan_conn(&conn, min_updated, held)).unwrap_or_default()
@@ -21,6 +72,7 @@ pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
 
 struct Row {
     id: String,
+    tables: Tables,
     dir: Option<String>,
     title: String,
     model: Option<String>,
@@ -37,28 +89,63 @@ struct Row {
 }
 
 fn scan_conn(conn: &Connection, min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
+    let held = serde_json::to_string(held).unwrap_or_else(|_| "[]".into());
+    let mut found: HashMap<String, Row> = HashMap::new();
+    for t in tables(conn) {
+        for row in scan_rows(conn, t, min_updated, &held) {
+            match found.get_mut(&row.id) {
+                // Both have it: the copy that changed last, still marked as a run if 1.x's was
+                // (2.0 clears what 1.x recorded of its permissions when it copies a session).
+                Some(had) if row.updated > had.updated => {
+                    let cli_run = had.cli_run;
+                    *had = row;
+                    had.cli_run |= cli_run;
+                }
+                Some(had) => had.cli_run |= row.cli_run,
+                None => {
+                    found.insert(row.id.clone(), row);
+                }
+            }
+        }
+    }
+    let mut rows: Vec<Row> = found.into_values().collect();
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows.into_iter().map(|row| thread_from(conn, row)).collect()
+}
+
+fn scan_rows(conn: &Connection, tables: Tables, min_updated: i64, held: &str) -> Vec<Row> {
     // Columns arrived over OpenCode versions; read the ones this database has.
     let columns: HashSet<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('session')")
+        .prepare(&format!("SELECT name FROM pragma_table_info('{}')", tables.session()))
         .and_then(|mut st| st.query_map([], |r| r.get::<_, String>(0))?.collect())
         .unwrap_or_default();
     let col = |name: &str| if columns.contains(name) { format!("s.{name}") } else { "NULL".to_string() };
+    let (user, assistant) = match tables {
+        Tables::V1 => (
+            "SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'user' LIMIT 2",
+            "SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'assistant'",
+        ),
+        Tables::V2 => (
+            "SELECT 1 FROM session_message m WHERE m.session_id = s.id AND m.type = 'user' LIMIT 2",
+            "SELECT 1 FROM session_message m WHERE m.session_id = s.id AND m.type = 'assistant'",
+        ),
+    };
     let sql = format!(
         "SELECT s.id, s.directory, s.title, {model}, s.time_created, s.time_updated,
                 COALESCE(s.summary_additions, 0), COALESCE(s.summary_deletions, 0), s.parent_id IS NOT NULL,
-                (SELECT COUNT(*) FROM (SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'user' LIMIT 2)),
-                EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'assistant'),
-                {permission}
-         FROM session s WHERE s.time_archived IS NULL AND (s.time_updated >= ?1 OR s.id IN (SELECT value FROM json_each(?2)))",
+                (SELECT COUNT(*) FROM ({user})), EXISTS ({assistant}), {permission}
+         FROM {session} s WHERE s.time_archived IS NULL AND (s.time_updated >= ?1 OR s.id IN (SELECT value FROM json_each(?2)))",
         model = col("model"),
         permission = col("permission"),
+        session = tables.session(),
     );
     let Ok(mut st) = conn.prepare(&sql) else { return vec![] };
-    let held = serde_json::to_string(held).unwrap_or_else(|_| "[]".into());
     let rows = st.query_map(rusqlite::params![min_updated, held], |r| {
         Ok(Row {
             id: r.get(0)?,
+            tables,
             dir: r.get(1)?,
+            // OpenCode 2 leaves a session it hasn't named untitled.
             title: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
             model: r.get(3)?,
             created: r.get(4)?,
@@ -71,18 +158,17 @@ fn scan_conn(conn: &Connection, min_updated: i64, held: &HashSet<String>) -> Vec
             cli_run: r.get::<_, Option<String>>(11)?.as_deref().is_some_and(is_cli_run),
         })
     });
-    let rows: Vec<Row> = match rows {
+    match rows {
         Ok(rows) => rows.filter_map(Result::ok).collect(),
-        Err(_) => return vec![],
-    };
-    rows.into_iter().map(|row| thread_from(conn, row)).collect()
+        Err(_) => vec![],
+    }
 }
 
 fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
     let cwd = row.dir.as_deref().map(PathBuf::from);
     let own_title = source_title(&row.title);
     // The first message names untitled sessions and tells title generators apart.
-    let first = (!row.child && row.prompts > 0 && (row.prompts == 1 || own_title.is_none())).then(|| first_prompt(conn, &row.id)).flatten();
+    let first = (!row.child && row.prompts > 0 && (row.prompts == 1 || own_title.is_none())).then(|| first_prompt(conn, row.tables, &row.id)).flatten();
     let skip = classify(&Evidence {
         cwd: cwd.as_deref(),
         scripted: row.cli_run,
@@ -115,6 +201,14 @@ fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
     }
 }
 
+/// `<provider>/<model>` from a `{"id" | "modelID", "providerID"}` object.
+fn model_name(v: &Value) -> Option<String> {
+    v["modelID"].as_str().or(v["id"].as_str()).filter(|m| !m.is_empty()).map(|m| match v["providerID"].as_str().filter(|p| !p.is_empty()) {
+        Some(provider) => format!("{provider}/{m}"),
+        None => m.to_string(),
+    })
+}
+
 /// The session's model as OpenCode's ACP agent names it (`<provider>/<model>`, what continuing the
 /// thread asks for), and its variant as an effort. The column holds JSON: `{"id","providerID",
 /// "variant"}` now, `{"providerID","modelID"}` in older versions; plain text is taken as it is.
@@ -122,15 +216,12 @@ fn session_model(raw: &str) -> (Option<String>, Option<Effort>) {
     let Ok(v) = serde_json::from_str::<Value>(raw) else {
         return (Some(raw.trim().to_string()).filter(|m| !m.is_empty()), None);
     };
-    let model = v["modelID"].as_str().or(v["id"].as_str()).filter(|m| !m.is_empty()).map(|m| match v["providerID"].as_str().filter(|p| !p.is_empty()) {
-        Some(provider) => format!("{provider}/{m}"),
-        None => m.to_string(),
-    });
-    (model, v["variant"].as_str().and_then(Effort::parse))
+    (model_name(&v), v["variant"].as_str().and_then(Effort::parse))
 }
 
 /// `opencode run` creates its session with the interactive tools (questions, plan mode) denied,
-/// as nobody is there to answer them. OpenCode's own apps don't.
+/// as nobody is there to answer them. OpenCode's own apps don't. (OpenCode 2's run records no
+/// such rules: its runs can't be told from conversations.)
 fn is_cli_run(permission: &str) -> bool {
     let Ok(Value::Array(rules)) = serde_json::from_str::<Value>(permission) else { return false };
     rules.iter().any(|r| r["permission"] == "question" && r["action"] == "deny")
@@ -139,19 +230,27 @@ fn is_cli_run(permission: &str) -> bool {
 /// Every session OpenCode has; `None` when its database can't be read.
 pub(crate) fn session_ids() -> Option<HashSet<String>> {
     let conn = db()?;
-    let mut st = conn.prepare("SELECT id FROM session").ok()?;
-    st.query_map([], |r| r.get::<_, String>(0)).ok()?.collect::<rusqlite::Result<_>>().ok()
+    let mut ids = HashSet::new();
+    for t in tables(&conn) {
+        let mut st = conn.prepare(&format!("SELECT id FROM {}", t.session())).ok()?;
+        let found: HashSet<String> = st.query_map([], |r| r.get::<_, String>(0)).ok()?.collect::<rusqlite::Result<_>>().ok()?;
+        ids.extend(found);
+    }
+    Some(ids)
 }
 
 /// Text of the session's first user message (what the user typed, not attached file contents).
-fn first_prompt(conn: &Connection, id: &str) -> Option<String> {
-    let mut st = conn
-        .prepare(
+fn first_prompt(conn: &Connection, tables: Tables, id: &str) -> Option<String> {
+    let sql = match tables {
+        Tables::V1 => {
             "SELECT p.data FROM message m JOIN part p ON p.message_id = m.id
              WHERE m.session_id = ?1 AND json_extract(m.data, '$.role') = 'user'
-             ORDER BY m.time_created, m.id, p.id LIMIT 20",
-        )
-        .ok()?;
+             ORDER BY m.time_created, m.id, p.id LIMIT 20"
+        }
+        // A user message is its text; what OpenCode adds itself is a message of another type.
+        Tables::V2 => "SELECT json_object('type', 'text', 'text', json_extract(data, '$.text')) FROM session_message WHERE session_id = ?1 AND type = 'user' ORDER BY seq LIMIT 20",
+    };
+    let mut st = conn.prepare(sql).ok()?;
     let parts = st.query_map([id], |r| r.get::<_, String>(0)).ok()?;
     parts.filter_map(Result::ok).filter_map(|d| serde_json::from_str::<Value>(&d).ok()).find_map(|p| {
         (p["type"] == "text" && p["synthetic"] != true).then(|| p["text"].as_str().map(String::from)).flatten().filter(|t| !t.trim().is_empty())
@@ -172,7 +271,14 @@ pub fn usage_priced(id: &str, from: i64, to: i64) -> Vec<(i64, Option<String>, T
 }
 
 fn usage_conn(conn: &Connection, id: &str, from: i64, to: i64) -> Vec<(i64, Option<String>, TokenUsage, Option<f64>)> {
-    let sql = "SELECT data FROM message WHERE session_id = ?1 OR session_id IN (SELECT id FROM session WHERE parent_id = ?1) ORDER BY time_created, id";
+    let sql = match tables_of(conn, id) {
+        Some(Tables::V1) => "SELECT data FROM message WHERE session_id = ?1 OR session_id IN (SELECT id FROM session WHERE parent_id = ?1) ORDER BY time_created, id",
+        Some(Tables::V2) => {
+            "SELECT json_set(data, '$.role', type) FROM session_message
+             WHERE type = 'assistant' AND (session_id = ?1 OR session_id IN (SELECT id FROM session_v2 WHERE parent_id = ?1)) ORDER BY time_created, id"
+        }
+        None => return vec![],
+    };
     let Ok(mut st) = conn.prepare(sql) else { return vec![] };
     let Ok(rows) = st.query_map([id], |r| r.get::<_, String>(0)) else { return vec![] };
     rows.filter_map(Result::ok)
@@ -191,11 +297,9 @@ fn usage_conn(conn: &Connection, id: &str, from: i64, to: i64) -> Vec<(i64, Opti
                 cache_read: n(&t["cache"]["read"]),
                 cache_write: n(&t["cache"]["write"]),
             };
-            // Named as the session's model is: `<provider>/<model>`.
-            let model = m["modelID"].as_str().filter(|id| !id.is_empty()).map(|id| match m["providerID"].as_str().filter(|p| !p.is_empty()) {
-                Some(provider) => format!("{provider}/{id}"),
-                None => id.to_string(),
-            });
+            // Named as the session's model is: `<provider>/<model>` (1.x's message has the two
+            // at its top level, 2's under `model`).
+            let model = if m["model"].is_object() { model_name(&m["model"]) } else { model_name(&m) };
             (!tokens.is_empty()).then_some((at, model, tokens, m["cost"].as_f64()))
         })
         .collect()
@@ -206,6 +310,13 @@ pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
     load_conn(&conn, id)
 }
 
+fn load_conn(conn: &Connection, id: &str) -> anyhow::Result<Vec<Item>> {
+    match tables_of(conn, id) {
+        Some(Tables::V2) => load_v2(conn, id),
+        _ => load_v1(conn, id),
+    }
+}
+
 /// A message being read: its role and times, and (for the user) the text typed so far.
 struct Message {
     id: String,
@@ -213,7 +324,7 @@ struct Message {
     typed: Vec<String>,
 }
 
-fn load_conn(conn: &Connection, id: &str) -> anyhow::Result<Vec<Item>> {
+fn load_v1(conn: &Connection, id: &str) -> anyhow::Result<Vec<Item>> {
     // Messages once, parts in order; joining them would repeat a message's data on every part.
     let mut messages: HashMap<String, String> = conn
         .prepare("SELECT id, data FROM message WHERE session_id = ?1")?
@@ -251,25 +362,13 @@ fn load_conn(conn: &Connection, id: &str) -> anyhow::Result<Vec<Item>> {
                     t.push(Item::Assistant { text });
                 }
             }
-            Some("reasoning") => {
-                let text = p["text"].as_str().unwrap_or_default();
-                if !text.trim().is_empty() {
-                    t.push(Item::Reasoning { text: text.into() });
-                }
-            }
+            Some("reasoning") => reasoning(&mut t, &p),
             Some("tool") => {
                 let state = &p["state"];
-                let input = &state["input"];
-                let detail = input["command"]
-                    .as_str()
-                    .or(input["filePath"].as_str())
-                    .or(input["pattern"].as_str())
-                    .map(String::from)
-                    .unwrap_or_else(|| clip(&input.to_string(), 200));
                 t.push(Item::Tool {
                     id: p["callID"].as_str().unwrap_or_default().into(),
                     title: state["title"].as_str().or(p["tool"].as_str()).unwrap_or("tool").into(),
-                    detail,
+                    detail: tool_detail(&state["input"]),
                     output: clip(state["output"].as_str().unwrap_or_default(), 4000),
                     status: if state["status"] == "error" { ToolStatus::Failed } else { ToolStatus::Done },
                 });
@@ -283,6 +382,24 @@ fn load_conn(conn: &Connection, id: &str) -> anyhow::Result<Vec<Item>> {
     Ok(t.finish())
 }
 
+fn reasoning(t: &mut Transcript, p: &Value) {
+    let text = p["text"].as_str().unwrap_or_default();
+    if !text.trim().is_empty() {
+        t.push(Item::Reasoning { text: text.into() });
+    }
+}
+
+/// What a tool call's row says it did: its command, file or pattern.
+fn tool_detail(input: &Value) -> String {
+    input["command"]
+        .as_str()
+        .or(input["filePath"].as_str())
+        .or(input["pattern"].as_str())
+        .or(input["description"].as_str())
+        .map(String::from)
+        .unwrap_or_else(|| clip(&input.to_string(), 200))
+}
+
 /// A user message becomes one entry; an assistant message that stopped (rather than handing
 /// over to tool calls) finishes the turn.
 fn finish_message(t: &mut Transcript, m: Message) {
@@ -293,14 +410,75 @@ fn finish_message(t: &mut Transcript, m: Message) {
         }
         return;
     }
-    let completed = time["completed"].as_i64();
-    if m.data["error"]["name"] == "MessageAbortedError" {
+    finish_reply(t, &m.data, m.data["error"]["name"] == "MessageAbortedError");
+}
+
+/// An assistant message's end: stopped by the user, the turn's end, or a step of it.
+fn finish_reply(t: &mut Transcript, data: &Value, aborted: bool) {
+    let completed = data["time"]["completed"].as_i64();
+    if aborted {
         t.interrupt();
-    } else if completed.is_some() && m.data["finish"] != "tool-calls" && m.data["error"].is_null() {
+    } else if completed.is_some() && data["finish"] != "tool-calls" && data["error"].is_null() {
         t.complete(completed);
     } else {
         t.touch(completed);
     }
+}
+
+/// OpenCode 2's messages, in order: each is a row, an assistant reply's text, reasoning and tool
+/// calls inside it (`content`). What OpenCode adds itself (`synthetic` notes, `system`
+/// instructions, compaction summaries, model switches, idle marks) isn't part of the conversation.
+fn load_v2(conn: &Connection, id: &str) -> anyhow::Result<Vec<Item>> {
+    let mut st = conn.prepare("SELECT type, data FROM session_message WHERE session_id = ?1 ORDER BY seq")?;
+    let rows = st.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut t = Transcript::default();
+    for (kind, data) in rows.filter_map(Result::ok) {
+        let Ok(m) = serde_json::from_str::<Value>(&data) else { continue };
+        let created = m["time"]["created"].as_i64();
+        match kind.as_str() {
+            "user" => {
+                let text = m["text"].as_str().unwrap_or_default();
+                if !text.trim().is_empty() {
+                    t.user(text.to_string(), created);
+                }
+            }
+            "assistant" => {
+                t.activity(created);
+                for p in m["content"].as_array().into_iter().flatten() {
+                    match p["type"].as_str() {
+                        Some("text") => {
+                            let text = p["text"].as_str().unwrap_or_default();
+                            if !text.trim().is_empty() {
+                                t.push(Item::Assistant { text: text.into() });
+                            }
+                        }
+                        Some("reasoning") => reasoning(&mut t, p),
+                        Some("tool") => {
+                            let state = &p["state"];
+                            let failed = state["status"] == "error";
+                            let output = if failed {
+                                state["error"]["message"].as_str().or(state["error"].as_str()).unwrap_or_default().to_string()
+                            } else {
+                                let text: Vec<&str> = state["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
+                                text.join("\n")
+                            };
+                            t.push(Item::Tool {
+                                id: p["id"].as_str().unwrap_or_default().into(),
+                                title: p["name"].as_str().unwrap_or("tool").into(),
+                                detail: tool_detail(&state["input"]),
+                                output: clip(&output, 4000),
+                                status: if failed { ToolStatus::Failed } else { ToolStatus::Done },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                finish_reply(&mut t, &m, m["error"]["type"] == "aborted");
+            }
+            _ => {}
+        }
+    }
+    Ok(t.finish())
 }
 
 #[cfg(test)]
@@ -479,6 +657,127 @@ mod tests {
         assert_eq!(items[3], Item::TurnEnd { at: 9_400, took_secs: 8 });
         assert_eq!(items[4], Item::User { text: "now refresh".into(), images: vec![], at: Some(20_000), resume: None, aside: false });
         assert_eq!(items.len(), 6, "the stopped reply has no footer: {items:?}");
+    }
+
+    /// Recorded with OpenCode 1.18.35 and then 2.0.26 on one database: a 1.x session (which 2.0
+    /// copied into its own tables on first start), a 2.0 session with a shell call, and a 2.0
+    /// session whose model refused it.
+    fn recorded() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // Its projects aren't part of it.
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute_batch(include_str!("../../fixtures/opencode-v1-and-v2.sql")).unwrap();
+        conn
+    }
+
+    const MIGRATED: &str = "ses_edfc986b6ffe4mZ9ccSLf9DwLP";
+    const V2: &str = "ses_edfcbb35fffervIIJpuPw7hX2w";
+    const REFUSED: &str = "ses_edfcbd056ffeGuaDEh9Roa4ew5";
+
+    #[test]
+    fn opencode_2_sessions_import_beside_1x_ones() {
+        let conn = recorded();
+        assert_eq!(tables(&conn), vec![Tables::V1, Tables::V2]);
+        let mut found: Vec<_> = scan_conn(&conn, 0, &HashSet::new()).into_iter().map(|t| (t.native_id, t.title, t.model, t.skip)).collect();
+        found.sort();
+        let row = |id: &str, title: &str, model: Option<&str>| (id.to_string(), title.to_string(), model.map(String::from), None);
+        assert_eq!(
+            found,
+            vec![
+                // Once, though both versions' tables have it.
+                row(MIGRATED, "Counting directory entries with ls", Some("opencode/mimo-v2.6-flash-free")),
+                row(V2, "Running ls and counting entries", Some("opencode/mimo-v2.6-flash-free")),
+                // Untitled: named by what was asked.
+                row(REFUSED, "Use your bash tool to run ls, then reply with just the…", None),
+            ]
+        );
+        // Outside the window unless Trek already has it.
+        assert!(scan_conn(&conn, i64::MAX, &HashSet::new()).is_empty());
+        assert_eq!(scan_conn(&conn, i64::MAX, &HashSet::from([V2.to_string()])).len(), 1);
+    }
+
+    #[test]
+    fn an_opencode_2_transcript_reads_like_a_1x_one() {
+        let conn = recorded();
+        let items = load_conn(&conn, V2).unwrap();
+        assert!(matches!(&items[0], Item::User { text, at: Some(1791541660925), .. } if text.starts_with("Use your bash tool")), "{items:?}");
+        assert!(matches!(&items[1], Item::Reasoning { .. }));
+        assert_eq!(
+            items[2],
+            Item::Tool { id: "call_63e33f94ef1f4abd8bff6720".into(), title: "shell".into(), detail: "ls".into(), output: "notes.txt\n".into(), status: ToolStatus::Done }
+        );
+        assert!(matches!(&items[3], Item::Reasoning { .. }));
+        assert_eq!(items[4], Item::Assistant { text: "1".into() });
+        assert_eq!(items[5], Item::TurnEnd { at: 1791541675204, took_secs: 14 });
+        assert_eq!(items.len(), 6, "{items:?}");
+        // The refused one: the question, and no reply to close.
+        let items = load_conn(&conn, REFUSED).unwrap();
+        assert!(matches!(&items[..], [Item::User { .. }]), "{items:?}");
+        // The same conversation from either version's tables.
+        let v1 = load_conn(&conn, MIGRATED).unwrap();
+        assert_eq!(v1, load_v2(&conn, MIGRATED).unwrap().into_iter().map(|i| match i {
+            // 1.x's tool rows have OpenCode's own title for the call.
+            Item::Tool { title, .. } if title == "bash" => v1.iter().find(|i| matches!(i, Item::Tool { .. })).unwrap().clone(),
+            other => other,
+        }).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_session_continued_in_opencode_2_is_read_from_its_tables() {
+        let conn = recorded();
+        assert_eq!(tables_of(&conn, MIGRATED), Some(Tables::V1), "2.0's untouched copy");
+        conn.execute("UPDATE session_v2 SET time_updated = time_updated + 60000 WHERE id = ?1", [MIGRATED]).unwrap();
+        let next = json!({ "time": { "created": 1791541871322i64 }, "text": "and hidden ones?" });
+        conn.execute(
+            "INSERT INTO session_message VALUES ('msg_next', ?1, 'user', 99, 1791541871322, 1791541871322, ?2)",
+            rusqlite::params![MIGRATED, next.to_string()],
+        )
+        .unwrap();
+        assert_eq!(tables_of(&conn, MIGRATED), Some(Tables::V2));
+        assert!(matches!(load_conn(&conn, MIGRATED).unwrap().last(), Some(Item::User { text, .. }) if text == "and hidden ones?"));
+        let found = scan_conn(&conn, 0, &HashSet::new());
+        assert_eq!(found.iter().filter(|t| t.native_id == MIGRATED).count(), 1);
+        // Only 1.x's tables, or only 2's.
+        let v2_only = recorded();
+        v2_only.execute_batch("DROP TABLE part; DROP TABLE message; DROP TABLE session;").unwrap();
+        assert_eq!(tables(&v2_only), vec![Tables::V2]);
+        assert_eq!(scan_conn(&v2_only, 0, &HashSet::new()).len(), 3);
+        assert_eq!(tables(&db()), vec![Tables::V1]);
+    }
+
+    #[test]
+    fn opencode_2_usage_counts_every_step() {
+        let conn = recorded();
+        let steps = usage_conn(&conn, V2, 0, i64::MAX);
+        let model = Some("opencode/mimo-v2.6-flash-free".to_string());
+        assert_eq!(
+            steps,
+            vec![
+                (1791541668636, model.clone(), TokenUsage { input: 230, output: 19 + 230, cache_read: 4672, cache_write: 0 }, Some(0.0)),
+                (1791541675204, model, TokenUsage { input: 297, output: 3 + 74, cache_read: 4864, cache_write: 0 }, Some(0.0)),
+            ]
+        );
+        assert_eq!(usage_conn(&conn, V2, 1791541668637, i64::MAX).len(), 1, "a turn's own steps");
+        assert!(usage_conn(&conn, "ses_unknown", 0, i64::MAX).is_empty());
+    }
+
+    #[test]
+    fn opencode_2_tool_errors_and_stops() {
+        let conn = recorded();
+        let user = json!({ "time": { "created": 1_000 }, "text": "fix it" });
+        let failed = json!({ "type": "tool", "id": "c1", "name": "edit", "state": { "status": "error", "input": { "filePath": "/Users/me/app/a.rs" },
+            "error": { "type": "tool.execution", "message": "Could not find oldString in the file." } } });
+        let stopped = json!({ "time": { "created": 2_000 }, "content": [failed, { "type": "text", "text": "Trying" }], "error": { "type": "aborted" } });
+        conn.execute("INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES ('s', 'p', 'x', '/Users/me/app', '2.0.26', 1, 2)", []).unwrap();
+        for (seq, (kind, data)) in [("user", user), ("assistant", stopped)].into_iter().enumerate() {
+            conn.execute("INSERT INTO session_message VALUES (?1, 's', ?2, ?3, 1, 1, ?4)", rusqlite::params![format!("m{seq}"), kind, seq as i64, data.to_string()]).unwrap();
+        }
+        let items = load_conn(&conn, "s").unwrap();
+        assert_eq!(
+            items[1],
+            Item::Tool { id: "c1".into(), title: "edit".into(), detail: "/Users/me/app/a.rs".into(), output: "Could not find oldString in the file.".into(), status: ToolStatus::Failed }
+        );
+        assert_eq!(items.len(), 3, "a stopped reply has no footer: {items:?}");
     }
 
     #[test]

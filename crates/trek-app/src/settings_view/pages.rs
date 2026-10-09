@@ -82,6 +82,57 @@ fn effort_label(e: Effort) -> &'static str {
 }
 
 impl SettingsView {
+    /// The Usage card's providers: automatic, or up to three picked (a fourth is offered
+    /// disabled until one is unchecked).
+    fn usage_shown_picker(&self, cx: &App) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ws = self.workspace.read(cx);
+        let shown = ws.usage_shown();
+        let names = shown.iter().map(AgentId::display_name).collect::<Vec<_>>().join(", ");
+        let label = match (ws.usage_picked(), names.is_empty()) {
+            (false, true) => "Automatic".to_string(),
+            (false, false) => format!("Automatic · {names}"),
+            (true, true) => "None".to_string(),
+            (true, false) => names,
+        };
+        let workspace = self.workspace.clone();
+        Button::new("usage-shown")
+            .small()
+            .outline()
+            .child(
+                h_flex()
+                    .gap(px(7.))
+                    .max_w(px(260.))
+                    .child(div().min_w_0().truncate().text_size(px(12.5)).child(label))
+                    .child(Icon::new(IconName::ChevronDown).size(px(12.)).text_color(theme.muted_foreground)),
+            )
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
+                // Read as the menu opens: what's shown may have changed since the button drew.
+                let ws = workspace.read(cx);
+                let shown = ws.usage_shown();
+                let full = shown.len() >= trek_core::settings::USAGE_SHOWN_MAX;
+                let w = workspace.clone();
+                menu = menu
+                    .min_w(px(220.))
+                    .max_h(px(360.))
+                    .scrollable(true)
+                    .label(if full { "Up to 3 at a time — uncheck one first" } else { "Up to 3 at a time" })
+                    .item(PopupMenuItem::new("Automatic").checked(!ws.usage_picked()).on_click(move |_, _, cx| w.update(cx, |ws, cx| ws.show_usage_automatically(cx))))
+                    .separator();
+                for agent in ws.usage_providers() {
+                    let on = shown.contains(&agent);
+                    let w = workspace.clone();
+                    menu = menu.item(PopupMenuItem::new(agent.display_name()).checked(on).disabled(full && !on).on_click(move |_, _, cx| {
+                        w.update(cx, |ws, cx| {
+                            ws.toggle_usage_shown(&agent, cx);
+                        })
+                    }));
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
     pub(super) fn general_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
         let agents = ws.ready_agents();
@@ -220,6 +271,12 @@ impl SettingsView {
                         "Wrap up before a usage limit",
                         "When a working agent's limit is nearly used up, Trek asks it to finish the edit in hand and say what's left, so it isn't cut off mid-edit. The thread then pauses until the reset. For agents that report their usage: Claude Code, Codex and Devin.",
                         self.switch("wrap-up-near-limit", s.general.wrap_up_near_limit, |s, v| s.general.wrap_up_near_limit = v),
+                        cx,
+                    ),
+                    Self::row(
+                        "Usage card shows",
+                        "The providers the sidebar's Usage card shows, up to three at a time. Automatic shows the first three with usage to show. The card's … button picks them too.",
+                        self.usage_shown_picker(cx),
                         cx,
                     ),
                 ],
@@ -1196,8 +1253,7 @@ impl SettingsView {
     fn skills_changed(&mut self, cx: &mut Context<Self>) {
         self.skills.invalidate();
         self.workspace.update(cx, |ws, cx| {
-            ws.status_fetched_at = 0;
-            ws.refresh_usage(cx);
+            ws.refresh_usage_now(cx);
         });
         cx.notify();
     }

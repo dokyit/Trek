@@ -47,6 +47,9 @@ fn the_estimate_follows_usage_and_survives_a_relaunch() {
         trek.render(cx);
         assert_eq!(label(&trek, cx, &id).as_deref(), Some("$0.11"));
         assert!(trek.visible(cx, "cost-estimate"));
+        // Beside it, the cache's share of the prompt: 182,000 of 197,000 tokens.
+        assert_eq!(trek.read(cx, |ws, _| crate::cost::CacheHits::of(&ws.spend_of(&id))).map(|c| c.label()).as_deref(), Some("92% cached"));
+        assert!(trek.visible(cx, "cache-hits"));
         hover(&trek, cx, "cost-estimate");
         assert!(trek.visible(cx, "cost-breakdown"), "the breakdown on hover");
         // On a plan the same tokens are an estimate at API prices.
@@ -100,7 +103,7 @@ fn local_models_show_nothing_and_unpriced_models_show_tokens() {
         trek.wait_done(cx, &id, RunState::Idle).await;
         trek.render(cx);
         assert_eq!(label(&trek, cx, &id), None);
-        assert!(!trek.visible(cx, "cost-estimate"));
+        assert!(!trek.visible(cx, "cost-estimate") && !trek.visible(cx, "cache-hits"));
         // An agent whose model has no known price: its tokens, and no guess.
         let t = trek.update(cx, |ws, cx| {
             let t = ws.store.create_thread(Some(&trek.project), AgentId::Acp("devin".into()), Some("fusion-claude-opus-5-5-high-sidekick-swe-2-medium".into()), Effort::Medium, HandHolding::Auto).unwrap();
