@@ -225,6 +225,20 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(Into::into)
 }
 
+/// `std::fs::canonicalize`, but without the `\\?\` prefix Windows puts on a drive path: git, the
+/// agents and the user all write that path as `C:\dir`, and the two spellings aren't prefixes of
+/// each other.
+pub fn canonical(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let real = std::fs::canonicalize(path).ok()?;
+    if cfg!(windows) {
+        let plain = real.to_str().and_then(|p| p.strip_prefix(r"\\?\")).filter(|p| p.as_bytes().get(1) == Some(&b':'));
+        if let Some(plain) = plain {
+            return Some(std::path::PathBuf::from(plain));
+        }
+    }
+    Some(real)
+}
+
 /// Whether Trek is the frontmost app (a relaunch after an update comes back to the front only then).
 #[cfg(target_os = "macos")]
 pub fn app_is_active() -> bool {
