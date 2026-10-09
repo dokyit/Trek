@@ -926,12 +926,14 @@ mod tests {
         assert!(custom("A", "", "x", vec![], vec![], &["a".into()]).is_err(), "taken");
         assert!(custom("A", "", "", vec![], vec![], &[]).is_err());
         assert!(custom("A", "", "bin/agent", vec![], vec![], &[]).is_err(), "relative paths are ambiguous");
+        // An absolute path looks different on each system.
+        let abs = if cfg!(windows) { r"C:\opt\a" } else { "/opt/a" };
         let env = |n: &str| vec![EnvVar { name: n.into(), value: "v".into(), secret: false }];
-        assert!(custom("A", "", "/opt/a", vec![], env("API_KEY"), &[]).is_ok());
-        assert!(custom("A", "", "/opt/a", vec![], env("1BAD"), &[]).is_err());
-        let a = custom("A", "", "/opt/a", vec![], env("TOKEN"), &[]).unwrap();
+        assert!(custom("A", "", abs, vec![], env("API_KEY"), &[]).is_ok());
+        assert!(custom("A", "", abs, vec![], env("1BAD"), &[]).is_err());
+        let a = custom("A", "", abs, vec![], env("TOKEN"), &[]).unwrap();
         assert_eq!(a.launch_env(), [("TOKEN".to_string(), "v".to_string())]);
-        assert_eq!(a.command_line(), "/opt/a");
+        assert_eq!(a.command_line(), abs);
     }
 
     #[test]
@@ -942,7 +944,9 @@ mod tests {
         assert_eq!(archive_kind("https://x/agent"), ArchiveKind::Raw);
     }
 
+    // Unix only: it packs with `/usr/bin/tar`; Phase 2 unpacks with the `tar`/`zip` crates and un-gates it.
     #[test]
+    #[cfg(unix)]
     fn archives_unpack_inside_their_folder_and_nowhere_else() {
         let dir = std::env::temp_dir().join(format!("trek-registry-unpack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
