@@ -75,8 +75,8 @@ pub fn peer_is_me(stream: &Stream) -> bool {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle as _;
-        crate::client_is_me(stream.as_raw_handle())
+        use std::os::windows::io::AsHandle as _;
+        crate::client_is_me(stream.as_handle())
     }
 }
 
