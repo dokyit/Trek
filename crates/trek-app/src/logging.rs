@@ -11,10 +11,18 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 /// How many days of log files are kept.
 const KEEP_DAYS: i64 = 7;
 
-/// The log folder: `~/Library/Logs/Trek`, or `logs` in the data folder `TREK_DATA_DIR` moved.
+/// The log folder: `~/Library/Logs/Trek` (`%LOCALAPPDATA%\Trek\logs` on Windows), or `logs` in
+/// the data folder `TREK_DATA_DIR` moved.
 pub fn log_dir() -> PathBuf {
     match std::env::var_os("TREK_DATA_DIR").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir).join("logs"),
+        #[cfg(windows)]
+        None => std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| trek_core::paths::home().join("AppData/Local"))
+            .join("Trek/logs"),
+        #[cfg(not(windows))]
         None => trek_core::paths::home().join("Library/Logs/Trek"),
     }
 }
