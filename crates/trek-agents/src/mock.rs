@@ -2515,9 +2515,12 @@ mod tests {
     #[test]
     fn consults_a_sub_agent_through_trek() {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-        // A socket on Unix, a pipe on Windows, listened on as Trek does.
-        let tag = format!("trek-mock-ipc-{}", std::process::id());
-        let path: std::path::PathBuf = if cfg!(windows) { format!(r"\\.\pipe\{tag}").into() } else { std::env::temp_dir().join(format!("{tag}.sock")) };
+        // A socket on Unix, a pipe on Windows (named as Trek's are: clients refuse others),
+        // listened on as Trek does.
+        #[cfg(unix)]
+        let path = std::env::temp_dir().join(format!("trek-mock-ipc-{}.sock", std::process::id()));
+        #[cfg(windows)]
+        let path = trek_ipc::pipe_name(0).unwrap();
         #[cfg(unix)]
         let _ = std::fs::remove_file(&path);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

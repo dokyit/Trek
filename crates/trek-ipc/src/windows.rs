@@ -1,10 +1,11 @@
-//! Named pipes, for Windows: who may open one (`PipeSecurity`), who is at the other end
-//! (`client_is_me`), and the client's blocking end of a connection (`PipeStream`).
+//! Named pipes, for Windows: what Trek's are called (`pipe_name`), who may open one
+//! (`PipeSecurity`), who is at the other end (`client_is_me`), and the client's blocking end of a
+//! connection (`PipeStream`).
 
 use std::io::{self, Read, Write};
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, FromRawHandle as _, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -97,26 +98,53 @@ fn same_user(pid: u32) -> io::Result<bool> {
     Ok(process_user(process.as_raw_handle())? == me()?)
 }
 
+/// The process connected to `pipe` (the server's end), if the system says.
+pub(crate) fn client_pid(pipe: BorrowedHandle<'_>) -> Option<u32> {
+    let mut pid = 0;
+    // SAFETY: `pipe` is an open pipe handle (borrowed for the call).
+    (unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } != 0).then_some(pid)
+}
+
+/// The process serving a pipe we connected to (`pipe`, our end), if the system says.
+fn server_pid(pipe: BorrowedHandle<'_>) -> Option<u32> {
+    let mut pid = 0;
+    // SAFETY: `pipe` is an open pipe handle (borrowed for the call).
+    (unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } != 0).then_some(pid)
+}
+
 /// Whether the client connected to `pipe` (the server's end) runs as this process's user: the
 /// pipe's counterpart of comparing a Unix socket's peer uid with ours. Any doubt says no.
 pub fn client_is_me(pipe: BorrowedHandle<'_>) -> bool {
-    let mut pid = 0;
-    // SAFETY: `pipe` is an open pipe handle (borrowed for the call).
-    let known = unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) != 0 };
-    known && same_user(pid).unwrap_or(false)
+    client_pid(pipe).is_some_and(|pid| same_user(pid).unwrap_or(false))
 }
 
-/// Whether the server of a pipe we connected to (`pipe`, our end) runs as this process's user.
-fn server_is_me(pipe: BorrowedHandle<'_>) -> bool {
-    let mut pid = 0;
-    // SAFETY: `pipe` is an open pipe handle (borrowed for the call).
-    let known = unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) != 0 };
-    known && same_user(pid).unwrap_or(false)
+/// The name of pipe number `n` of this process: `\\.\pipe\trek-<pid>-<n>-<random>`. Random in
+/// part so that no other process can guess the name and make it first (Trek would then refuse to
+/// listen), and carrying this process's id so that a client can tell the pipe is served by the
+/// process that named it (`PipeStream::connect`).
+pub fn pipe_name(n: usize) -> io::Result<PathBuf> {
+    Ok(name_for(std::process::id(), n, &crate::token()?[..16]).into())
+}
+
+pub(crate) fn name_for(pid: u32, n: usize, random: &str) -> String {
+    format!(r"\\.\pipe\trek-{pid}-{n}-{random}")
+}
+
+/// The process whose pipe `name` is, when `pipe_name` made the name.
+pub(crate) fn named_for(name: &Path) -> Option<u32> {
+    let rest = name.to_str()?.strip_prefix(r"\\.\pipe\trek-")?;
+    match rest.split('-').collect::<Vec<_>>()[..] {
+        [pid, n, random] if !random.is_empty() && n.parse::<usize>().is_ok() => pid.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Security attributes for a pipe only this process's user may open: its DACL holds one entry,
 /// allowing that user everything, and the user owns it. No other user or group gets in, not even
-/// for reading (a pipe made without these would let Everyone read it).
+/// for reading (a pipe made without these would let Everyone read it), and none can add an
+/// instance of its own to the pipe. The user's own processes can, as everything includes
+/// FILE_CREATE_PIPE_INSTANCE (much as on Unix they could put another socket in the folder): the
+/// client catches that by checking which process serves it (`PipeStream::connect`).
 pub struct PipeSecurity(Box<Parts>);
 
 struct Parts {
@@ -201,21 +229,31 @@ pub(crate) fn handle_of(stream: &PipeStream) -> io::Result<Handle> {
 }
 
 impl PipeStream {
-    /// Connect to the pipe named `name`, served by this user.
+    /// Connect to the pipe named `name` (as `pipe_name` makes them), served by the process of
+    /// this user's whose id the name carries.
     pub fn connect(name: impl AsRef<Path>) -> io::Result<PipeStream> {
+        let name = name.as_ref();
+        let Some(trek) = named_for(name) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} isn't the name of a Trek pipe", name.display())));
+        };
         let started = Instant::now();
         let file = loop {
             // Identification only: the server may learn who we are, not act as us.
-            match std::fs::OpenOptions::new().read(true).write(true).custom_flags(FILE_FLAG_OVERLAPPED).security_qos_flags(SECURITY_IDENTIFICATION).open(name.as_ref()) {
+            match std::fs::OpenOptions::new().read(true).write(true).custom_flags(FILE_FLAG_OVERLAPPED).security_qos_flags(SECURITY_IDENTIFICATION).open(name) {
                 // Every instance is taken: Trek makes the next as soon as it picks one up.
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(5)),
                 other => break other?,
             }
         };
         let pipe = OwnedHandle::from(file);
-        // Anyone could name a pipe this: make sure it's this user's before saying the token.
-        if !server_is_me(pipe.as_handle()) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the pipe belongs to another user"));
+        // Anyone could name a pipe this, and any process of this user's could add an instance of
+        // it for a client to land in: make sure it's Trek at the other end before saying the token.
+        let refuse = |why: String| Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+        match server_pid(pipe.as_handle()) {
+            None => return refuse("couldn't tell which process serves the pipe".into()),
+            Some(server) if !same_user(server).unwrap_or(false) => return refuse(format!("the pipe belongs to another user (process {server} serves it)")),
+            Some(server) if server != trek => return refuse(format!("the pipe isn't served by Trek (pid {trek}) but by process {server}")),
+            Some(_) => {}
         }
         Ok(PipeStream { pipe: Arc::new(pipe), shut: Arc::new(event()?), done: event()? })
     }
