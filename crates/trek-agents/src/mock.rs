@@ -294,7 +294,8 @@ impl Script {
 
 /// `path` is relative and stays in the session's folder: no `..`, not absolute.
 fn in_folder(path: &str) -> bool {
-    !path.contains("..") && std::path::Path::new(path).is_relative() && !path.starts_with('~')
+    // No root or drive either: `/etc/hosts` and `C:x` both leave the folder on Windows.
+    !path.contains("..") && std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) && !path.starts_with('~')
 }
 
 /// What follows the first of `keys` found in `text` (in any case), when there's something.
@@ -2216,6 +2217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work")]
     fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
         let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2494,9 +2496,9 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = std::time::Instant::now();
-            m.prompt("mock:explore 300ms").await;
+            m.prompt("mock:explore 2s").await;
             let events = m.turn().await;
-            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert!(start.elapsed() >= Duration::from_secs(2));
             let tools: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, .. } = e { Some(title.as_str()) } else { None }).collect();
             assert!(tools.len() >= 8, "{tools:?}");
             assert_eq!(tools.len(), events.iter().filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. })).count());
@@ -2515,7 +2517,7 @@ mod tests {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
         // A socket on Unix, a pipe on Windows, listened on as Trek does.
         let tag = format!("trek-mock-ipc-{}", std::process::id());
-        let path: std::path::PathBuf = if cfg!(windows) { format!(r"\.\pipe\{tag}").into() } else { std::env::temp_dir().join(format!("{tag}.sock")) };
+        let path: std::path::PathBuf = if cfg!(windows) { format!(r"\\.\pipe\{tag}").into() } else { std::env::temp_dir().join(format!("{tag}.sock")) };
         #[cfg(unix)]
         let _ = std::fs::remove_file(&path);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
