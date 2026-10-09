@@ -93,6 +93,9 @@ pub enum Blocker {
     /// Trek can't write where it's installed (a standard account with Trek in /Applications, a
     /// copy an administrator installed): an update could be downloaded but never installed.
     ReadOnlyLocation,
+    /// The in-place updater swaps a macOS `.app` bundle; the Windows installer and updater don't
+    /// exist yet, so a new release is downloaded by hand.
+    WindowsUnsupported,
 }
 
 impl Blocker {
@@ -101,6 +104,7 @@ impl Blocker {
             Blocker::DevBuild => "This is a development build. It updates when you rebuild it.",
             Blocker::Translocated => "macOS is running Trek from a read-only copy. Move Trek to Applications to get updates.",
             Blocker::ReadOnlyLocation => "Trek can't write to the folder it's in, so it can't update itself. Move it to a folder you own to get updates.",
+            Blocker::WindowsUnsupported => "Updating Trek in place isn't available on Windows yet. Download the new release from GitHub to update.",
         }
     }
 }
@@ -113,6 +117,9 @@ const RELEASE_KEY: &str = "TrekRelease";
 pub const LOCAL_UPDATES_ENV: &str = "TREK_UPDATE_LOCAL_BUNDLE";
 
 pub fn blocker() -> Option<Blocker> {
+    if cfg!(windows) {
+        return Some(Blocker::WindowsUnsupported);
+    }
     static RELEASE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let Some(bundle) = running_bundle() else { return Some(Blocker::DevBuild) };
     let release = *RELEASE.get_or_init(|| std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || is_release(&bundle));
@@ -137,11 +144,27 @@ fn is_release(app: &Path) -> bool {
     plist_value(app, RELEASE_KEY).is_ok_and(|v| v == "true")
 }
 
+#[cfg(unix)]
 fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
     // SAFETY: a valid NUL-terminated path that outlives the call.
     unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// A folder's read-only attribute doesn't stop files being created in it and there is no
+/// `access(W_OK)` that honours ACLs, so try: create and remove a file in a folder, open a file
+/// for writing (without truncating it).
+#[cfg(windows)]
+fn writable(path: &Path) -> bool {
+    if path.is_dir() {
+        let probe = path.join(format!(".trek-write-test-{}", std::process::id()));
+        let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        ok
+    } else {
+        std::fs::OpenOptions::new().write(true).open(path).is_ok()
+    }
 }
 
 /// The `.app` bundle we're running from, if any.
@@ -394,6 +417,9 @@ pub fn discard(staged: &Path) {
 /// `expected`, newer than this one, intact code signature, no quarantine. Returns the staged
 /// `.app`; the archive is removed, and on failure the whole download folder. Blocking.
 pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) -> Result<PathBuf> {
+    if cfg!(windows) {
+        bail!("{}", Blocker::WindowsUnsupported.message());
+    }
     let dir = archive.parent().context("the download has no folder")?;
     let result = (|| {
         let bundle = running_bundle().context("not running from an app bundle")?;
@@ -475,6 +501,9 @@ pub struct Installed {
 /// Swap the staged bundle in for the running one and keep the old one as the single backup.
 /// If anything fails before the swap, nothing has changed.
 pub fn install(staged: &Path) -> Result<Installed> {
+    if cfg!(windows) {
+        bail!("{}", Blocker::WindowsUnsupported.message());
+    }
     let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
     let backup = install_into(staged, &bundle, &crate::paths::updates_dir())?;
     Ok(Installed { bundle, backup })
@@ -615,6 +644,11 @@ fn relaunch_command(pid: u32, bundle: &Path, backup: Option<&Path>, skip: &Path,
 /// it replaced goes back in its place and that is opened instead; a bundle this update didn't
 /// replace is never rolled back. The caller quits right after.
 pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
+    if cfg!(windows) {
+        // The relaunch helper is a `/bin/sh` script driving `open -n`; Windows gets its own with
+        // the installer.
+        bail!("{}", Blocker::WindowsUnsupported.message());
+    }
     let mut open_args: Vec<String> = vec!["-n".into()];
     if !foreground {
         open_args.push("-g".into());
@@ -625,13 +659,15 @@ pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
         open_args.push("--env".into());
         open_args.push(format!("{k}={v}"));
     }
-    use std::os::unix::process::CommandExt as _;
     let version = bundle_version(&installed.bundle).map(|v| v.to_string()).unwrap_or_default();
     let skip = crate::paths::updates_dir().join(SKIP_MARKER);
-    relaunch_command(std::process::id(), &installed.bundle, installed.backup.as_deref(), &skip, &version, "/usr/bin/open", &open_args)
-        .process_group(0)
-        .spawn()
-        .context("couldn't schedule the relaunch")?;
+    let mut helper = relaunch_command(std::process::id(), &installed.bundle, installed.backup.as_deref(), &skip, &version, "/usr/bin/open", &open_args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        helper.process_group(0);
+    }
+    helper.spawn().context("couldn't schedule the relaunch")?;
     Ok(())
 }
 
@@ -895,6 +931,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn after_launch_clears_only_downloads_of_exited_processes() {
         let dir = scratch("after-launch");
@@ -918,6 +955,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn relaunch_helper_restores_the_backup_when_the_new_app_wont_open() {
         let dir = scratch("relaunch");
@@ -949,6 +987,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn only_releases_somewhere_writable_update_themselves() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -968,6 +1007,30 @@ mod tests {
         assert_eq!(blocker_for(&app, true), Some(Blocker::ReadOnlyLocation));
         std::fs::set_permissions(dir.join("apps"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn writable_means_files_can_be_created_there() {
+        let dir = scratch("writable");
+        assert!(writable(&dir));
+        let file = dir.join("f");
+        std::fs::write(&file, "x").unwrap();
+        assert!(writable(&file));
+        assert!(!writable(&dir.join("missing")));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x", "probing leaves files alone");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "and leaves no probe behind");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_says_updating_in_place_isnt_available_yet() {
+        assert_eq!(blocker(), Some(Blocker::WindowsUnsupported));
+        assert!(Blocker::WindowsUnsupported.message().contains("Windows"));
+        let nobody = AtomicBool::new(false);
+        assert!(stage(Path::new("x.tar.gz"), &semver::Version::new(9, 0, 0), &nobody).is_err());
+        assert!(install(Path::new("Trek.app")).is_err());
+        assert!(relaunch(&Installed { bundle: PathBuf::from("Trek.app"), backup: None }, true).is_err());
     }
 
     #[test]
