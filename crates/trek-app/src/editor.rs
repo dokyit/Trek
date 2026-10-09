@@ -600,9 +600,16 @@ impl EditorView {
 /// end, or never start), at most `MAX_FILE_BYTES`, and UTF-8.
 fn read_text(path: &Path) -> std::io::Result<String> {
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    // Opening a pipe for reading waits for a writer; not with O_NONBLOCK.
-    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // Opening a pipe for reading waits for a writer; not with O_NONBLOCK. (Windows has no FIFOs:
+    // it opens as it is, and `is_file` below turns devices away.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file"));

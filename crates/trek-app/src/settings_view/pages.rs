@@ -973,14 +973,19 @@ impl SettingsView {
             let agents: Vec<String> =
                 ws.agents.iter().map(|a| format!("{}: {:?}{}", a.name, a.availability, a.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default())).collect();
             let settings = shown_settings.clone();
-            // `sw_vers` runs off the main thread; the copy lands when it's answered.
+            // The OS version is asked for off the main thread (`sw_vers`, the registry); the copy
+            // lands when it's answered.
             cx.spawn_in(window, async move |_, cx| {
-                let macos = cx
+                #[cfg(windows)]
+                let os = cx.background_executor().spawn(async { Some(crate::system::windows_version()) }).await;
+                #[cfg(not(windows))]
+                let os = cx
                     .background_executor()
                     .spawn(async { std::process::Command::new("sw_vers").arg("-productVersion").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) })
-                    .await;
+                    .await
+                    .map(|v| format!("macOS {v}"));
                 let mut lines = vec![format!("Trek {}", trek_core::VERSION)];
-                lines.extend(macos.map(|v| format!("macOS {v}")));
+                lines.extend(os);
                 lines.extend(agents);
                 lines.push(format!("Settings: {}", settings.display()));
                 let _ = cx.update(|window, cx| {

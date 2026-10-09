@@ -455,6 +455,34 @@ pub fn play_alert_sound() {
     SOUNDS.with(|n| n.set(n.get() + 1));
 }
 
+/// The Windows release as Settings › About shows it: "Windows 11 24H2 (26100)". Read from the
+/// registry: `ProductName` there still says "Windows 10" on 11, so the build number (22000 and
+/// up is 11) names the major version.
+#[cfg(windows)]
+pub fn windows_version() -> String {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    fn value(name: &str) -> Option<String> {
+        let key: Vec<u16> = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion".encode_utf16().chain([0]).collect();
+        let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let mut buf = [0u16; 128];
+        let mut size = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: both names end in a NUL; `buf` is `size` bytes long, and `size` is how many are
+        // written (the terminator included) on success.
+        let status = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size) };
+        if status != 0 {
+            return None;
+        }
+        let chars = (size as usize / 2).saturating_sub(1).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..chars])).filter(|s| !s.is_empty())
+    }
+    let build = value("CurrentBuild");
+    let major = if build.as_deref().and_then(|b| b.parse::<u32>().ok()).is_some_and(|b| b >= 22000) { "Windows 11" } else { "Windows 10" };
+    let mut out = major.to_string();
+    out.extend(value("DisplayVersion").map(|v| format!(" {v}")));
+    out.extend(build.map(|b| format!(" ({b})")));
+    out
+}
+
 /// How to tell the user a thread needs them or finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Alert {
