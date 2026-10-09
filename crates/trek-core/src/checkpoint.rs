@@ -655,7 +655,7 @@ impl Repo {
         let index = TempIndex::new();
         let merged = (|| -> Result<bool> {
             let blob = self.run(None, &["--literal-pathspecs", "hash-object", "-w", "--", path], None)?;
-            let mode = if std::fs::metadata(&file).is_ok_and(|m| { use std::os::unix::fs::PermissionsExt as _; m.permissions().mode() & 0o111 != 0 }) { "100755" } else { "100644" };
+            let mode = self.file_mode(&file, path);
             self.run(Some(&index), &["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")], None)?;
             // Stat data for the entry, so the file reads as matching it.
             self.output(Some(&index), &["update-index", "-q", "--refresh"], None, None)?;
@@ -669,6 +669,23 @@ impl Repo {
         // Not cleanly: what was there goes back, conflict markers and all gone.
         std::fs::write(&file, &before).context("put the file back")?;
         bail!("the lines around it changed since, so it can't be taken out by itself ({first})")
+    }
+
+    /// The git tree mode of the file at `path` (`file` on disk): executable or not.
+    #[cfg(unix)]
+    fn file_mode(&self, file: &Path, _path: &str) -> &'static str {
+        use std::os::unix::fs::PermissionsExt as _;
+        if std::fs::metadata(file).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) { "100755" } else { "100644" }
+    }
+
+    /// The git tree mode of the file at `path`. Windows has no execute bit to read, and git
+    /// (`core.filemode=false`) keeps a tracked file's mode from the index, so that's where it is
+    /// read from; a file the index doesn't have is an ordinary one.
+    #[cfg(windows)]
+    fn file_mode(&self, _file: &Path, path: &str) -> &'static str {
+        let staged = self.run(None, &["--literal-pathspecs", "ls-files", "--stage", "--", path], None).unwrap_or_default();
+        // "<mode> <object> <stage>\t<path>"
+        if staged.split_whitespace().next() == Some("100755") { "100755" } else { "100644" }
     }
 
     /// A tree like `base` with one hunk of `path` (`patch`, as `file_diff` cut it) taken in: a
@@ -1358,15 +1375,51 @@ mod tests {
         let sha = repo.snapshot("t", "u").unwrap();
         s.write("locked/new.txt", "made by the turn\n");
         s.write("a.txt", "two\n");
-        use std::os::unix::fs::PermissionsExt as _;
         let locked = s.0.join("locked");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // A read-only folder can still be written to on Windows (the attribute only marks it for
+        // the shell); a file open elsewhere without delete sharing can't be removed.
+        #[cfg(windows)]
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_SHARE_READ: u32 = 1;
+            std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(locked.join("new.txt")).unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
         let restored = repo.restore(&sha, "t").unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert_eq!(restored.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["locked/new.txt"]);
         assert_eq!(restored.restored(), 1);
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"), "the other file came back");
         assert!(restored.undo.is_some());
+    }
+
+    /// Windows files have no execute bit; git keeps the mode the index has for a tracked file
+    /// (`core.filemode=false`), and a checkpoint must not lose it.
+    #[cfg(windows)]
+    #[test]
+    fn a_tracked_executable_stays_executable_in_a_checkpoint() {
+        let s = Scratch::new(false);
+        s.write("run.sh", "#!/bin/sh\n");
+        s.git(&["add", "-A"]);
+        s.git(&["update-index", "--chmod=+x", "run.sh"]);
+        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
+        let repo = s.repo();
+        let mode = |sha: &str, path: &str| s.git(&["ls-tree", sha, "--", path]).split_whitespace().next().unwrap_or_default().to_string();
+        let sha = repo.snapshot("t", "u").unwrap();
+        assert_eq!((mode(&sha, "run.sh"), mode(&sha, "a.txt")), ("100755".into(), "100644".into()));
+        s.write("run.sh", "#!/bin/sh\necho changed\n");
+        s.write("new.sh", "#!/bin/sh\n");
+        let sha = repo.snapshot("t", "v").unwrap();
+        assert_eq!((mode(&sha, "run.sh"), mode(&sha, "new.sh")), ("100755".into(), "100644".into()), "tracked keeps its mode, untracked is ordinary");
+        assert_eq!((repo.file_mode(&s.0.join("run.sh"), "run.sh"), repo.file_mode(&s.0.join("new.sh"), "new.sh")), ("100755", "100644"));
     }
 
     #[test]
