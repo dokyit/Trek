@@ -543,19 +543,97 @@ impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
     }
 }
 
-/// A child and everything it starts, in a process group of its own.
+/// A child and everything it starts, in a process group of its own (on Windows, a job object).
 pub(crate) struct GroupChild {
     child: Option<tokio::process::Child>,
     group: i32,
+    /// The job holding the child and all it starts; closing it ends them all.
+    #[cfg(windows)]
+    job: Option<job::Job>,
 }
 
 /// Start `command` in a process group of its own, tracked by `trek_core::procs` until it's ended.
+#[cfg(unix)]
 pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
     command.process_group(0);
     let child = command.spawn()?;
     let group = child.id().unwrap_or_default() as i32;
     trek_core::procs::register(group);
     Ok(GroupChild { child: Some(child), group })
+}
+
+/// Start `command` in a job object of its own, with no console window, tracked by
+/// `trek_core::procs` (by the child's pid) until it's ended. The job ends everything in it when
+/// its last handle closes, so a Trek that crashes or is killed takes its agents along.
+#[cfg(windows)]
+pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    let job = job::Job::new()?;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    let child = command.spawn()?;
+    // The child runs from here until it's in the job, a few microseconds: anything it starts in
+    // that time (it would have to load and get going first) isn't in the job. Starting it
+    // suspended would close that gap, but the handle of its first thread, needed to resume it, is
+    // one std doesn't hand out. A child that's in a job already (Trek run under a CI runner or a
+    // terminal that uses jobs) can be put in this one too: jobs nest since Windows 8.
+    if let Some(handle) = child.raw_handle()
+        && let Err(e) = job.assign(handle)
+    {
+        tracing::warn!("couldn't put process {:?} in a job; what it starts may outlive it: {e}", child.id());
+    }
+    let group = child.id().unwrap_or_default() as i32;
+    trek_core::procs::register(group);
+    Ok(GroupChild { child: Some(child), group, job: Some(job) })
+}
+
+/// A Windows job object that ends the processes in it when its last handle closes.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
+    };
+
+    pub(crate) struct Job(OwnedHandle);
+
+    impl Job {
+        /// A new, unnamed job whose handle no child inherits (a child holding it would keep the
+        /// job, and itself, alive). Without JOB_OBJECT_LIMIT_BREAKAWAY_OK nothing in it can
+        /// leave: what the child starts stays in.
+        pub(crate) fn new() -> std::io::Result<Job> {
+            // SAFETY: no security attributes and no name: both may be null.
+            let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if h.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `h` was just created, and is owned from here on.
+            let job = Job(unsafe { OwnedHandle::from_raw_handle(h) });
+            // SAFETY: all zeroes is a valid limit information (integers only): no limits.
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = std::mem::size_of_val(&info) as u32;
+            // SAFETY: `info` is the structure the class names, `size` long.
+            if unsafe { SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        pub(crate) fn assign(&self, process: RawHandle) -> std::io::Result<()> {
+            // SAFETY: both handles are open: the job is this one's, the process the caller's child's.
+            match unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), process) } {
+                0 => Err(std::io::Error::last_os_error()),
+                _ => Ok(()),
+            }
+        }
+
+        /// End every process in the job, the way KILL to a process group does.
+        pub(crate) fn terminate(&self) {
+            // SAFETY: a job handle this owns, with all access.
+            unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) };
+        }
+    }
 }
 
 /// Run `command` in a group of its own, with `input` (if any) on its stdin, and collect its
@@ -591,7 +669,10 @@ pub(crate) async fn output_group(command: &mut tokio::process::Command, input: O
 impl GroupChild {
     pub(crate) async fn terminate(&mut self) {
         let Some(child) = self.child.take() else { return };
+        #[cfg(unix)]
         finish_group(child, self.group).await;
+        #[cfg(windows)]
+        finish_group(child, self.group, self.job.take()).await;
     }
 }
 
@@ -609,6 +690,7 @@ impl std::ops::DerefMut for GroupChild {
     }
 }
 
+#[cfg(unix)]
 fn signal_group(group: i32, signal: i32) {
     if group > 0 {
         // SAFETY: a negative pid asks kill(2) to signal that process group.
@@ -616,12 +698,41 @@ fn signal_group(group: i32, signal: i32) {
     }
 }
 
+#[cfg(unix)]
 async fn finish_group(mut child: tokio::process::Child, group: i32) {
     signal_group(group, libc::SIGTERM);
     let waited = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
     // The leader can exit while a descendant ignores TERM. KILL the group even when the
     // leader was already reaped, so nothing it started is left behind.
     signal_group(group, libc::SIGKILL);
+    if waited.is_err() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
+    }
+    trek_core::procs::unregister(group);
+}
+
+/// Windows has no TERM. The gentle stop is the end of the child's stdin, which agents take as the
+/// cue to exit, when it's still the group's to close: callers that write to the child take its
+/// stdin, and the stop is theirs, by dropping it. A console CTRL_BREAK would be the nearest thing
+/// to TERM, but it only reaches processes on the sender's console, and a child started with
+/// CREATE_NO_WINDOW has one of its own (Trek, a GUI app, has none to share); attaching to the
+/// child's console to send it would change the console of the whole of Trek while other
+/// threads run. So past the grace period it's the job's KILL.
+#[cfg(windows)]
+fn soft_stop(child: &mut tokio::process::Child) {
+    drop(child.stdin.take());
+}
+
+#[cfg(windows)]
+async fn finish_group(mut child: tokio::process::Child, group: i32, job: Option<job::Job>) {
+    soft_stop(&mut child);
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+    // As with KILL to a process group: end the whole job even when the child has exited, so
+    // nothing it started is left behind.
+    if let Some(job) = &job {
+        job.terminate();
+    }
     if waited.is_err() {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
@@ -645,6 +756,29 @@ fn reaped(child: &mut tokio::process::Child, limit: std::time::Duration) -> bool
     }
 }
 
+#[cfg(windows)]
+impl Drop for GroupChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else { return };
+        let (group, job) = (self.group, self.job.take());
+        soft_stop(&mut child);
+        // As on Unix, a thread rather than a runtime task. It holds the job: were the handle
+        // closed here, the job would end its processes at once, with no grace.
+        std::thread::spawn(move || {
+            let exited = reaped(&mut child, std::time::Duration::from_secs(2));
+            if let Some(job) = &job {
+                job.terminate();
+            }
+            if !exited {
+                let _ = child.start_kill();
+                reaped(&mut child, REAP_AFTER_KILL);
+            }
+            trek_core::procs::unregister(group);
+        });
+    }
+}
+
+#[cfg(unix)]
 impl Drop for GroupChild {
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else { return };
@@ -893,6 +1027,7 @@ mod tests {
         assert_eq!(log.len(), 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ending_or_dropping_a_group_kills_its_grandchild() {
         use std::process::Stdio;
@@ -941,6 +1076,7 @@ mod tests {
         assert_eq!(split.finish().as_deref(), Some("last"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn groups_are_tracked_until_ended() {
         let sleeper = || {
@@ -964,6 +1100,7 @@ mod tests {
         assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_command_s_output_is_collected_and_a_slow_one_ended() {
         let mut cat = tokio::process::Command::new("cat");
@@ -976,6 +1113,125 @@ mod tests {
         let err = output_group(&mut slow, None, std::time::Duration::from_millis(200)).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "the group was ended, not waited out");
+    }
+
+    /// A process held open from before it's ended, so its id can't be another's when it's checked.
+    #[cfg(windows)]
+    struct Held(std::os::windows::io::OwnedHandle);
+
+    #[cfg(windows)]
+    impl Held {
+        fn open(pid: u32) -> Held {
+            use std::os::windows::io::FromRawHandle as _;
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+            // SAFETY: plain call; the handle is checked before it's owned.
+            let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            assert!(!h.is_null(), "process {pid} runs");
+            Held(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h) })
+        }
+
+        fn exits_within(&self, limit: std::time::Duration) -> bool {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            // SAFETY: a process handle with SYNCHRONIZE.
+            let waited = unsafe { WaitForSingleObject(self.0.as_raw_handle(), limit.as_millis() as u32) };
+            waited == WAIT_OBJECT_0
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ending_or_dropping_a_job_kills_its_grandchild() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        // PowerShell starts a ping, says its pid, then runs `then`. The ping doesn't read stdin, so
+        // closing it doesn't stop it: only the job's end does.
+        async fn tree(then: &str) -> (GroupChild, Held) {
+            let script = format!(
+                "$i = New-Object Diagnostics.ProcessStartInfo 'ping.exe', '-n 300 127.0.0.1'; $i.UseShellExecute = $false; $i.RedirectStandardOutput = $true; \
+                 $p = [Diagnostics.Process]::Start($i); [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); {then}"
+            );
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::piped()).stdout(Stdio::piped());
+            let mut child = spawn_group(&mut command).unwrap();
+            let mut line = String::new();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line)).await.expect("PowerShell said the ping's pid").unwrap();
+            (child, Held::open(line.trim().parse().unwrap()))
+        }
+
+        let (mut child, grandchild) = tree("Start-Sleep 300").await;
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its job");
+
+        let (child, grandchild) = tree("Start-Sleep 300").await;
+        drop(child);
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its dropped job");
+
+        // Its parent gone, the grandchild is still the job's: no parent id leads to it any more.
+        let (mut child, grandchild) = tree("exit").await;
+        assert!(tokio::time::timeout(Duration::from_secs(30), child.wait()).await.unwrap().unwrap().success());
+        assert!(!grandchild.exits_within(Duration::from_millis(500)), "the ping runs on");
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its job");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn groups_are_tracked_until_ended_on_windows() {
+        let pinger = || {
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            spawn_group(&mut command).unwrap()
+        };
+        let mut child = pinger();
+        let group = child.group;
+        assert!(trek_core::procs::live().contains(&group));
+        child.terminate().await;
+        assert!(!trek_core::procs::live().contains(&group));
+
+        let child = pinger();
+        let group = child.group;
+        drop(child);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while trek_core::procs::live().contains(&group) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_finished_child_is_gone_and_untracked() {
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command.args(["/d", "/c", "exit 3"]);
+        let mut child = spawn_group(&mut command).unwrap();
+        let group = child.group;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await.unwrap().unwrap();
+        assert_eq!(status.code(), Some(3));
+        let started = std::time::Instant::now();
+        child.terminate().await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "nothing to wait for once it's exited");
+        assert!(!trek_core::procs::live().contains(&group));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_command_s_output_is_collected_and_a_slow_one_ended_on_windows() {
+        // System32's own sort, not one from Git or MSYS that may come first on PATH.
+        let sort = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\sort.exe");
+        let out = output_group(&mut tokio::process::Command::new(sort), Some(b"b\r\na\r\n".to_vec()), std::time::Duration::from_secs(30)).await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"a\r\nb\r\n");
+        // cmd waits for the ping under it; both go when the time is up.
+        let mut slow = tokio::process::Command::new("cmd.exe");
+        slow.args(["/d", "/c", "ping -n 60 127.0.0.1 >nul"]);
+        let started = std::time::Instant::now();
+        let err = output_group(&mut slow, None, std::time::Duration::from_secs(1)).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the group was ended, not waited out");
     }
 
     #[test]
