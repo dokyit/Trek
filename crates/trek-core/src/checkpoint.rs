@@ -894,6 +894,9 @@ mod tests {
             std::fs::create_dir_all(dir.join("keep")).unwrap();
             let s = Scratch(dir);
             s.git(&["init", "-q", "-b", "main"]);
+            // Git for Windows defaults to autocrlf, which would give back CRLF for the LF files
+            // these tests write.
+            s.git(&["config", "core.autocrlf", "false"]);
             s.write("a.txt", "one\n");
             std::fs::write(s.0.join("bin.dat"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
             s.write(".gitignore", "*.log\n");
@@ -1335,6 +1338,7 @@ mod tests {
     fn nested_repo(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         git_in(dir, &["init", "-q", "-b", "main"]);
+        git_in(dir, &["config", "core.autocrlf", "false"]);
         std::fs::write(dir.join("lib.rs"), "// vendored\n").unwrap();
         git_in(dir, &["add", "-A"]);
         git_in(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "v"]);
