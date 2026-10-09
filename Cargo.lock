@@ -8995,8 +8995,11 @@ dependencies = [
 name = "trek-ipc"
 version = "0.4.0"
 dependencies = [
+ "getrandom 0.3.4",
  "libc",
  "serde_json",
+ "tokio",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9007,6 +9010,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "serde_json",
+ "tokio",
  "trek-ipc",
 ]
 
