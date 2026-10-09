@@ -19,6 +19,9 @@ use gpui_kit::*;
 
 pub const SIDEBAR_WIDTH: f32 = 272.;
 
+/// How far the mode arriving (the editor, or Agents back) slides in from its side.
+const MODE_SLIDE: f32 = 14.;
+
 /// Below this window width the title bar takes its compact form.
 const TITLE_NARROW: f32 = 1000.;
 
@@ -53,9 +56,24 @@ pub struct TrekWindow {
     panel_drag: Option<(Pixels, f32)>,
     /// Whether the window was last told to blur what's behind it (liquid glass).
     glass_applied: Option<bool>,
+    /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
+    /// second ⌘B mid-way turns it round where it is.
+    pub(crate) sidebar_motion: SharedSpring,
+    /// Agents (0) to the editor (1): the two cross over on a spring as the mode switches.
+    pub(crate) mode_motion: crate::motion::Spring,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `mascot::force_active`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+pub(crate) type SharedSpring = std::rc::Rc<std::cell::RefCell<crate::motion::Spring>>;
+
+/// The sidebar's spring at `now`, headed for out or folded as `collapsed` says; `window` gets
+/// frames while it moves. The window and its title bar each ask (they agree: the same spring).
+fn sidebar_shown(spring: &SharedSpring, collapsed: bool, motion: bool, now: std::time::Instant, window: &Window) -> f32 {
+    let mut s = spring.borrow_mut();
+    s.set(if collapsed { 0. } else { 1. }, motion, now);
+    s.frame(now, window).clamp(0., 1.)
 }
 
 /// The chat column never gets narrower than this while the right panel is open.
@@ -113,7 +131,10 @@ impl TrekWindow {
             p
         });
         let palette = cx.new(|cx| CommandPalette::new(workspace.clone(), right_panel.clone(), basecamp.clone(), window, cx));
-        let title = cx.new(|cx| WindowTitle::new(workspace.clone(), right_panel.clone(), cx));
+        let now = crate::motion::now(cx);
+        let sidebar_motion: SharedSpring = std::rc::Rc::new(std::cell::RefCell::new(crate::motion::Spring::new(crate::motion::SURFACE, crate::motion::UNIT, if workspace.read(cx).sidebar_collapsed { 0. } else { 1. }, now)));
+        let mode_motion = crate::motion::Spring::new(crate::motion::SURFACE, crate::motion::UNIT, if workspace.read(cx).ide() { 1. } else { 0. }, now);
+        let title = cx.new(|cx| WindowTitle::new(workspace.clone(), right_panel.clone(), sidebar_motion.clone(), cx));
         let preview = cx.new(|cx| crate::image_preview::ImagePreview::new(window, cx));
         let subscriptions = vec![
             // Open files follow checkouts and rewinds in the workbench, which keeps them.
@@ -297,6 +318,8 @@ impl TrekWindow {
             composer_changed: true,
             panel_drag: None,
             glass_applied: None,
+            sidebar_motion,
+            mode_motion,
             _hidden_frames: hidden_frames,
             _subscriptions: subscriptions,
         }
@@ -338,14 +361,16 @@ impl TrekWindow {
 pub struct WindowTitle {
     workspace: Entity<Workspace>,
     right_panel: Entity<RightPanel>,
+    /// The window's sidebar spring: the title's left part widens and narrows with the sidebar.
+    sidebar_motion: SharedSpring,
     _subscription: Vec<Subscription>,
 }
 
 impl WindowTitle {
-    fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, cx: &mut Context<Self>) -> Self {
+    fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, sidebar_motion: SharedSpring, cx: &mut Context<Self>) -> Self {
         // The panel opening can make the sidebar step aside, which moves the title's left edge.
         let _subscription = vec![cx.observe(&workspace, |_, _, cx| cx.notify()), cx.observe(&right_panel, |_, _, cx| cx.notify())];
-        Self { workspace, right_panel, _subscription }
+        Self { workspace, right_panel, sidebar_motion, _subscription }
     }
 }
 
@@ -471,6 +496,7 @@ impl Render for WindowTitle {
         }
         let ws = self.workspace.read(cx);
         let collapsed = ws.sidebar_collapsed || sidebar_yields(window.viewport_size().width.as_f32(), self.right_panel.read(cx).open, matches!(ws.route, Route::Settings(_)));
+        let shown = sidebar_shown(&self.sidebar_motion, collapsed, ws.motion(cx), crate::motion::now(cx), window);
         let theme = cx.theme().clone();
         let thread = ws.current_thread().cloned();
         let project_name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -529,7 +555,9 @@ impl Render for WindowTitle {
                 .child(
                     h_flex()
                         .gap_2()
-                        .when(!collapsed, |el| el.w(px(SIDEBAR_WIDTH - 80.)))
+                        // As wide as the sidebar under it, as far as that's out.
+                        .when(shown > 0., |el| el.min_w(px((SIDEBAR_WIDTH - 80.) * shown)))
+                        .when(shown >= 1., |el| el.w(px(SIDEBAR_WIDTH - 80.)))
                         .flex_none()
                         .child(
                             crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
@@ -940,6 +968,7 @@ impl Render for TrekWindow {
                 .child(TitleBar::new())
                 .child(self.onboarding.clone())
                 .child(self.focus_anchor())
+                .children(crate::motion::leaving_sheet(window, cx))
                 .into_any_element();
         }
         // Toasts clear the composer on a thread, and the status bar in the editor.
@@ -953,6 +982,11 @@ impl Render for TrekWindow {
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
         let ide = self.workspace.read(cx).ide();
+        let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
+        let shown = sidebar_shown(&self.sidebar_motion, collapsed, motion, now, window);
+        self.mode_motion.set(if ide { 1. } else { 0. }, motion, now);
+        let editor_in = self.mode_motion.frame(now, window).clamp(0., 1.);
+        let crossing = self.mode_motion.moving(now);
         let (right_open, wanted_width) = {
             let p = self.right_panel.read(cx);
             (p.open, p.width)
@@ -967,10 +1001,25 @@ impl Render for TrekWindow {
         let dragging = self.panel_drag.is_some();
         // Editor mode: the workbench is everything under the title bar. The harness's route stays
         // as it was, for when the user switches back.
-        let body = if ide {
+        let body = if crossing {
+            // Switching modes: the one arriving fades in over the one leaving, sliding a few
+            // points in from its side (the editor from the right). Both are drawn only while
+            // they cross.
+            let harness = self.harness(route, shown, in_settings, glass, right_open, right_width, overlay, dragging, window, cx);
+            let editor = v_flex().size_full().child(self.ide.clone()).into_any_element();
+            let (under, under_alpha, over, over_alpha, side) = if ide { (harness, 1. - editor_in, editor, editor_in, 1.) } else { (editor, editor_in, harness, 1. - editor_in, -1.) };
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .child(v_flex().absolute().top_0().left_0().size_full().opacity(under_alpha).child(under))
+                .child(v_flex().absolute().top_0().left(px(side * MODE_SLIDE * (1. - over_alpha))).size_full().opacity(over_alpha).occlude().child(over))
+                .into_any_element()
+        } else if ide {
             div().flex_1().min_h_0().w_full().child(self.ide.clone()).into_any_element()
         } else {
-            self.harness(route, collapsed, in_settings, glass, right_open, right_width, overlay, dragging, window, cx)
+            self.harness(route, shown, in_settings, glass, right_open, right_width, overlay, dragging, window, cx)
         };
         v_flex()
             .id("trek-window")
@@ -1149,6 +1198,7 @@ impl Render for TrekWindow {
             // ⌘K, drawn over everything else in the window.
             .child(self.palette.clone())
             .child(self.preview.clone())
+            .children(crate::motion::leaving_sheet(window, cx))
             .into_any_element()
     }
 }
@@ -1156,7 +1206,7 @@ impl Render for TrekWindow {
 impl TrekWindow {
     /// Everything under the title bar in the harness: the inbox, the routed content, the tools.
     #[allow(clippy::too_many_arguments)]
-    fn harness(&mut self, route: Route, collapsed: bool, in_settings: bool, glass: Option<f32>, right_open: bool, right_width: f32, overlay: bool, dragging: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn harness(&mut self, route: Route, shown: f32, in_settings: bool, glass: Option<f32>, right_open: bool, right_width: f32, overlay: bool, dragging: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The heavy views are cached: a frame that only moves the working bar reuses them as
         // drawn. Each re-renders when it's notified.
         let fill = || StyleRefinement::default().size_full();
@@ -1211,8 +1261,15 @@ impl TrekWindow {
         h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(!collapsed && !in_settings, |el| {
-                        el.child(self.sidebar.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none()))
+                    // The sidebar slides out to the left as it folds (`shown` of it showing), the
+                    // content widening into its room; at rest it's simply there or not.
+                    .when(shown > 0. && !in_settings, |el| {
+                        let sidebar = self.sidebar.clone().cached(StyleRefinement::default().w(px(SIDEBAR_WIDTH)).h_full().flex_none());
+                        el.child(if shown >= 1. {
+                            sidebar.into_any_element()
+                        } else {
+                            div().w(px(SIDEBAR_WIDTH * shown)).h_full().flex_none().overflow_hidden().child(div().w(px(SIDEBAR_WIDTH)).h_full().ml(px(-SIDEBAR_WIDTH * (1. - shown))).child(sidebar)).into_any_element()
+                        })
                     })
                     .when(in_settings, |el| el.child(self.settings_nav.clone()))
                     .child(
@@ -1222,7 +1279,7 @@ impl TrekWindow {
                             .h_full()
                             .pr_2()
                             .pb_2()
-                            .when(collapsed, |el| el.pl_2())
+                            .when(shown < 1., |el| el.pl(px(8. * (1. - shown))))
                             .child(
                                 div()
                                     .size_full()

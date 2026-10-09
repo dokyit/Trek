@@ -453,6 +453,7 @@ impl MarkdownPlugin for LocalImages {
         let el = div()
             .id(SharedString::from(format!("md-image-{}", path.display())))
             .test_support()
+            .relative()
             .w(shown.width)
             .h(shown.height)
             .my(px(4.))
@@ -463,6 +464,7 @@ impl MarkdownPlugin for LocalImages {
             .cursor_pointer()
             .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
             .child(img(path.clone()).size_full())
+            .child(crate::image_preview::thumb(path.clone()))
             .on_click(move |_, window, cx| crate::image_preview::open(vec![path.clone()], 0, window, cx));
         Some(InlineElement::new(el))
     }

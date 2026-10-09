@@ -426,7 +426,7 @@ pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
 /// Claude Code writes a line per content block of a response, each repeating the response's
 /// usage (the last one has the final output count): each response counts once, as its last
 /// line has it.
-fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
+pub(super) fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
     let Ok(file) = std::fs::File::open(path) else { return vec![] };
     let mut out: Vec<UsageEntry> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -470,7 +470,7 @@ pub fn load(session_id: &str) -> anyhow::Result<Vec<Item>> {
     load_file(&path)
 }
 
-fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
+pub(super) fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
     let reader = BufReader::new(std::fs::File::open(path)?);
     let session = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let mut t = Transcript::default();

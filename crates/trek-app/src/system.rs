@@ -29,34 +29,56 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         ui_font_size: 0.,
         app_icon: None,
     };
+    follow_reduce_motion(&workspace, cx);
     sync(&workspace, &mut applied, cx);
     cx.observe(&workspace, move |workspace, cx| sync(&workspace, &mut applied, cx)).detach();
-    follow_reduce_motion(cx);
 }
 
-/// macOS's Reduce motion (Accessibility › Display) stills Trek's animations as Trek's own setting
-/// does: gpui's animations and `Workspace::motion` read it from the app. Nothing tells gpui when
-/// it changes, so it's asked every couple of seconds.
-fn follow_reduce_motion(cx: &mut App) {
+/// macOS's Reduce motion is on, as last asked.
+static SYSTEM_REDUCES_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// macOS's Reduce motion (Accessibility › Display) or Trek's own setting stills every animation:
+/// `Workspace::motion` reads both, and gpui's and gpui-component's own (toasts coming and going,
+/// dialogs sliding in) read the app's flag, which follows either. Nothing tells gpui when the
+/// system's changes, so it's asked every couple of seconds; Trek's setting is followed in `sync`.
+fn follow_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     if cfg!(test) {
         return;
     }
-    cx.set_reduce_motion(reduce_motion());
+    SYSTEM_REDUCES_MOTION.store(reduce_motion(), std::sync::atomic::Ordering::Relaxed);
+    let workspace = workspace.downgrade();
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
-            let on = reduce_motion();
-            cx.update(|cx| {
-                if cx.reduce_motion() != on {
-                    cx.set_reduce_motion(on)
+            SYSTEM_REDUCES_MOTION.store(reduce_motion(), std::sync::atomic::Ordering::Relaxed);
+            let gone = cx.update(|cx| match workspace.upgrade() {
+                Some(ws) => {
+                    apply_reduce_motion(&ws, cx);
+                    false
                 }
+                None => true,
             });
+            if gone {
+                break;
+            }
         }
     })
     .detach();
 }
 
+/// The app's reduce-motion flag: the system's preference or Trek's.
+fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
+    if cfg!(test) {
+        return;
+    }
+    let on = SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed) || workspace.read(cx).settings.appearance.reduce_motion;
+    if cx.reduce_motion() != on {
+        cx.set_reduce_motion(on)
+    }
+}
+
 fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
+    apply_reduce_motion(workspace, cx);
     let ws = workspace.read(cx);
     let awake = ws.settings.general.prevent_sleep_while_running && ws.any_turn_running();
     let badge = if ws.settings.notifications.dock_badge { ws.needs_you_count() } else { 0 };

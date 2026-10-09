@@ -9,6 +9,7 @@ mod tabs;
 #[cfg(test)]
 pub use tabs::MAX_TABS;
 mod turn_changes;
+pub(crate) mod usage;
 mod verification;
 mod worktrees;
 mod ide;
@@ -1018,6 +1019,22 @@ pub struct Workspace {
     /// Bumped when files on disk changed wholesale under the app (another branch or commit
     /// checked out, a rewind): open editors reload, file lists read again.
     pub files_epoch: u64,
+    /// Tests answer for the agents' usage reads (`refresh_usage`), as `usage_probe` does for
+    /// the check before a resume.
+    pub usage_fetch: Option<usage::UsageFetch>,
+    /// Usage reads under way, by `AgentId::key()`.
+    usage_inflight: HashSet<String>,
+    /// When each agent's usage was last read (unix ms), by `AgentId::key()`.
+    usage_fetched: HashMap<String, i64>,
+    /// What each agent last said of its plan and limits, kept across launches: the Usage card
+    /// shows it, with when it was read, until the agent is read again.
+    pub usage_cached: HashMap<String, usage::Snapshot>,
+    /// Tokens Trek recorded per agent today, and what they cost (`refresh_usage_today`).
+    pub usage_today: HashMap<String, (u64, trek_core::pricing::Spend)>,
+    usage_today_reading: bool,
+    usage_today_again: bool,
+    /// Basecamp's numbers, kept between its passes over the store (the window's and the phone's).
+    pub basecamp_cache: trek_core::basecamp::Cache,
     /// Account, plan, usage limits and slash commands per vendor CLI, keyed by `AgentId::key()`.
     pub agent_status: HashMap<String, AgentStatus>,
     pub status_fetched_at: i64,
@@ -1338,6 +1355,14 @@ impl Workspace {
             git_reads: HashMap::new(),
             switching: HashSet::new(),
             files_epoch: 0,
+            usage_fetch: None,
+            usage_inflight: HashSet::new(),
+            usage_fetched: HashMap::new(),
+            usage_cached: usage::load_snapshots(),
+            usage_today: HashMap::new(),
+            usage_today_reading: false,
+            usage_today_again: false,
+            basecamp_cache: Default::default(),
             agent_status: HashMap::new(),
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
@@ -1421,6 +1446,10 @@ impl Workspace {
         })
         .detach();
         this.resume_overdue(cx);
+        this.refresh_usage_today(cx);
+        // The agents read last time are read again now, without waiting for them to be found
+        // (a few seconds): the card shows what they said then until they answer.
+        this.refresh_usage(cx);
         this
     }
 
@@ -3857,6 +3886,9 @@ impl Workspace {
         }
         if finished {
             self.turns_finished += 1;
+            if let Some(agent) = self.thread(id).map(|t| t.agent.clone()) {
+                self.usage_after_turn(&agent, cx);
+            }
             self.checkpoint_turn_end(id, cx);
             // The turn's count waits on its end checkpoint.
             self.forget_turn_changes(id, false, cx);
@@ -5309,7 +5341,7 @@ impl Workspace {
                     if this.agents.iter().any(|a| a.agent == AgentId::Codex && a.availability == Availability::Ready) {
                         this.fetch_codex_models(cx);
                     }
-                    this.status_fetched_at = 0;
+                    // Not again for the agents read since launch (`refresh_usage` at launch).
                     this.refresh_usage(cx);
                     // Opened on something that shows Devin's plan before Devin was found.
                     if matches!(this.route, Route::Basecamp | Route::Settings(SettingsPage::Agents)) || std::env::var_os("TREK_OPEN_USAGE").is_some() {
@@ -5364,9 +5396,7 @@ impl Workspace {
                             st.resets.retain(|r| r.id != credit_id);
                         }
                         // Re-read now (past the 30-second throttle) so the bars jump to 0%.
-                        this.usage_loading = false;
-                        this.status_fetched_at = 0;
-                        this.refresh_usage(cx);
+                        this.refresh_usage_now(cx);
                         cx.emit(WorkspaceEvent::Toast { message: "Usage limits reset".into(), undo: None });
                     }
                     Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
@@ -5378,63 +5408,6 @@ impl Workspace {
 
     pub fn reset_credit_in_flight(&self, credit_id: &str) -> bool {
         self.reset_credits_in_flight.contains(credit_id)
-    }
-
-    /// Re-read account, plan, usage limits and commands from the installed vendor CLIs. Free:
-    /// no prompt is sent. Throttled to once every 30 seconds. Devin is asked on its own
-    /// (`refresh_devin_usage`).
-    pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
-        if self.usage_loading || now_ms() - self.status_fetched_at < 30_000 || trek_core::paths::isolated() {
-            return;
-        }
-        // Not of a CLI being replaced: asked again once it's back (`agent_released`).
-        let ready = |a: AgentId| self.agent_ready(&a) && !self.agent_updating(&a.key());
-        let (claude, codex) = (ready(AgentId::ClaudeCode), ready(AgentId::Codex));
-        if !claude && !codex {
-            return;
-        }
-        self.usage_loading = true;
-        let cwd = self.current_cwd().unwrap_or_else(trek_core::paths::home);
-        let (tx, rx) = async_channel::bounded(1);
-        let folder = cwd.clone();
-        trek_core::runtime().spawn(async move {
-            let (a, b) = tokio::join!(
-                async { if claude { Some(trek_agents::claude_status(&cwd).await) } else { None } },
-                async { if codex { Some(trek_agents::codex_status(&cwd).await) } else { None } },
-            );
-            let _ = tx.send([(AgentId::ClaudeCode, a), (AgentId::Codex, b)]).await;
-        });
-        let task = cx.spawn(async move |this, cx| {
-            let Ok(results) = rx.recv().await else { return };
-            let _ = this.update(cx, |this, cx| {
-                for (agent, res) in results {
-                    match res {
-                        Some(Ok(st)) => {
-                            if agent == AgentId::Codex && !st.models.is_empty() {
-                                this.codex_models = st.models.clone();
-                            }
-                            // Its commands include the folder's own (project commands, skills).
-                            this.agent_commands.insert((agent.key(), folder.clone()), st.commands.clone());
-                            this.agent_status.insert(agent.key(), st);
-                        }
-                        Some(Err(e)) => {
-                            let st = this.agent_status.entry(agent.key()).or_default();
-                            st.error = Some(e.to_string());
-                        }
-                        None => {}
-                    }
-                }
-                this.usage_loading = false;
-                this.status_fetched_at = now_ms();
-                this.fill_unknown_resets(cx);
-                for agent in [AgentId::ClaudeCode, AgentId::Codex] {
-                    this.wrap_up_where_due(&agent, cx);
-                }
-                cx.notify();
-            });
-        });
-        self.keep(task);
-        cx.notify();
     }
 
     /// Re-read Devin's plan and quota. Devin shows them only in its terminal UI, which takes a
@@ -5470,6 +5443,7 @@ impl Workspace {
         let key = devin_agent().key();
         match res {
             Ok(st) => {
+                self.keep_snapshot(&key, usage::Snapshot::of(&st, self.now()), cx);
                 self.agent_status.insert(key, st);
             }
             // Without a status of its own, Settings keeps what Devin's ACP probe said of its login.
@@ -5662,8 +5636,7 @@ impl Workspace {
                 Some(String::new())
             }
             "usage" => {
-                self.status_fetched_at = 0;
-                self.refresh_usage(cx);
+                self.refresh_usage_now(cx);
                 if agent == devin_agent() {
                     self.refresh_devin_usage(cx);
                 }

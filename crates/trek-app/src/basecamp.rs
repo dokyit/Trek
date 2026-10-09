@@ -1,8 +1,10 @@
 //! Basecamp: what needs the user, then the range's work in numbers: totals, turns over time, and
 //! tables by project and by model.
 //!
-//! The numbers are computed off the main thread (`summarize`, from `trek_core::basecamp`) when
-//! Basecamp opens and whenever threads change while it's open; frames only draw them. The phone's
+//! The numbers are worked out off the main thread, every range in one pass (`summaries`, from
+//! `trek_core::basecamp`'s cache, which reads only the threads that moved on since the last
+//! pass), when Basecamp opens, soon after launch, and whenever threads change while it's open;
+//! switching range only draws another range's. Frames only draw them. The phone's
 //! Basecamp reads the same recap through the helpers at the end of this file.
 
 use crate::palette;
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use trek_core::basecamp::{self, Range, Recap, ThreadActivity};
 use trek_core::pricing::Spend;
-use trek_core::store::{Activity, Store, Thread, UsageRow, now_ms};
+use trek_core::store::{Activity, Thread, UsageRow, now_ms};
 use trek_core::{AgentId, RunState, TokenUsage, UsageCost};
 
 actions!(basecamp, [Leave]);
@@ -32,23 +34,32 @@ const MAX_BAR: f32 = 28.;
 /// The tables' number columns.
 const NUMBER_WIDTH: f32 = 84.;
 
-/// What a summary was computed from: another key means it's out of date.
+/// What the summaries were worked out from: another key means they're out of date.
 #[derive(Debug, Clone, PartialEq)]
 struct Key {
-    range: Range,
-    start: i64,
+    /// Today's start: a new day moves every range (and a new week the week).
+    day: i64,
     turns: u64,
+    threads_gen: u64,
     threads: usize,
     latest: i64,
 }
+
+/// How long after the window opens Basecamp reads its numbers on its own, so they're there
+/// when it's first opened.
+const WARM_UP: Duration = Duration::from_secs(10);
 
 pub struct Basecamp {
     workspace: Entity<Workspace>,
     focus: FocusHandle,
     range: Range,
-    summary: Option<Arc<Summary>>,
+    /// Each range's numbers as last worked out, by `Range as usize`: switching range shows
+    /// them at once, and reopening shows them while they're brought up to date.
+    summaries: [Option<Arc<Summary>>; 3],
     key: Option<Key>,
     computing: bool,
+    /// Passes over the store run so far (switching range runs none).
+    pub(crate) passes: usize,
     /// On screen (the main window's route).
     open: bool,
     /// The chart's bar under the pointer.
@@ -58,24 +69,34 @@ pub struct Basecamp {
     _compute: Option<Task<()>>,
     /// While open: a tick a minute (relative times move on, the day may turn over).
     _clock: Option<Task<()>>,
+    _warm_up: Option<Task<()>>,
     _subscription: Subscription,
 }
 
 impl Basecamp {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let _subscription = cx.observe(&workspace, |this, _, cx| this.sync(cx));
+        // Read once in the background soon after launch, so the first open has its numbers.
+        let _warm_up = (!cfg!(test)).then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(WARM_UP).await;
+                let _ = this.update(cx, |this, cx| this.refresh(cx));
+            })
+        });
         let mut this = Self {
             workspace,
             focus: cx.focus_handle(),
             range: Range::Today,
-            summary: None,
+            summaries: Default::default(),
             key: None,
             computing: false,
+            passes: 0,
             open: false,
             hovered: None,
             review_expanded: false,
             _compute: None,
             _clock: None,
+            _warm_up,
             _subscription,
         };
         this.sync(cx);
@@ -86,10 +107,21 @@ impl Basecamp {
         self.focus.clone()
     }
 
+    /// The range's numbers on screen, as last worked out (perhaps while newer ones are).
+    fn shown(&self) -> Option<&Arc<Summary>> {
+        self.summaries[self.range as usize].as_ref()
+    }
+
     /// Everything on screen, once it's up to date.
     #[cfg(test)]
     pub fn summary(&self) -> Option<&Summary> {
-        self.summary.as_deref().filter(|_| !self.computing)
+        self.shown().map(|s| &**s).filter(|_| !self.computing)
+    }
+
+    /// Everything on screen now, up to date or not.
+    #[cfg(test)]
+    pub fn shown_summary(&self) -> Option<&Summary> {
+        self.shown().map(|s| &**s)
     }
 
     /// The chart's bar under the pointer.
@@ -102,7 +134,8 @@ impl Basecamp {
         self.range
     }
 
-    /// Follow the workspace: open or close with the route, and recompute when threads moved.
+    /// Follow the workspace: open or close with the route, and bring the numbers up to date
+    /// when threads moved.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let open = self.workspace.read(cx).route == Route::Basecamp;
         if open != self.open {
@@ -125,6 +158,8 @@ impl Basecamp {
         }
     }
 
+    /// Show `range`: what was worked out for it is drawn at once (every range is worked out in
+    /// the same pass), nothing is read again.
     pub fn set_range(&mut self, range: Range, cx: &mut Context<Self>) {
         if range != self.range {
             self.range = range;
@@ -134,29 +169,29 @@ impl Basecamp {
         }
     }
 
-    /// The clock moved on to `now`: a summary still current only moves its "now", one that isn't
-    /// (a new day) is computed again. Either way it's drawn again, relative times with it.
+    /// The clock moved on to `now`: summaries still current only move their "now", ones that
+    /// aren't (a new day) are worked out again. Either way they're drawn again, relative times
+    /// with them.
     pub fn tick(&mut self, now: i64, cx: &mut Context<Self>) {
         self.refresh(cx);
-        if !self.computing
-            && let Some(summary) = self.summary.as_mut()
-        {
-            Arc::make_mut(summary).recap.now = now;
+        if !self.computing {
+            for summary in self.summaries.iter_mut().flatten() {
+                Arc::make_mut(summary).recap.now = now;
+            }
         }
         cx.notify();
     }
 
-    /// Compute the summary again if what it was computed from changed. One at a time: one that
-    /// finishes looks again.
+    /// Bring every range's numbers up to date if what they were worked out from changed. One
+    /// pass at a time, off the main thread: it reads only the threads that moved on since the
+    /// last (`basecamp::Cache`), then works out all three ranges. The very first, with nothing
+    /// worked out yet, shows today or the week (read on their own, quickly) before all time.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        // A new day (or week) makes the summary out of date. All time's own start is found with
-        // the history, off the main thread; this one is today's, so it's computed again each day.
-        let window = self.range.window(&chrono::Local::now());
         let key = Key {
-            range: self.range,
-            start: window.start,
+            day: Range::Today.window(&chrono::Local::now()).start,
             turns: ws.turns_finished,
+            threads_gen: ws.threads_gen,
             threads: ws.threads.len(),
             latest: ws.threads.iter().map(|t| t.updated_at).max().unwrap_or(0),
         };
@@ -164,27 +199,42 @@ impl Basecamp {
             return;
         }
         self.computing = true;
-        let store = ws.store.clone();
-        let range = self.range;
-        let work = cx.background_executor().spawn(async move {
-            let now = chrono::Local::now();
-            summarize(&store, range, &now).unwrap_or_else(|e| {
-                tracing::warn!("basecamp: {e:#}");
-                Summary::compute(range, &now, range.window(&now), &[])
-            })
-        });
-        self._compute = Some(cx.spawn(async move |this, cx| {
-            let summary = work.await;
-            let _ = this.update(cx, |this, cx| {
-                this.computing = false;
-                // Switching range while it ran makes this one moot.
-                if key.range == this.range {
-                    this.summary = Some(Arc::new(summary));
-                    this.key = Some(key);
+        self.passes += 1;
+        let (store, cache) = (ws.store.clone(), ws.basecamp_cache.clone());
+        let first = (self.range != Range::All && self.summaries.iter().all(Option::is_none) && !cache.warm()).then_some(self.range);
+        let (tx, rx) = async_channel::unbounded::<(bool, Vec<(Range, Summary)>)>();
+        cx.background_executor()
+            .spawn(async move {
+                let now = chrono::Local::now();
+                if let Some(range) = first {
+                    let window = range.window(&now);
+                    match basecamp::Gathered::gather_since(&store, window.start, None) {
+                        Ok(g) => _ = tx.send_blocking((false, vec![(range, Summary::compute(range, &now, window, &g.threads))])),
+                        Err(e) => tracing::warn!("basecamp: {e:#}"),
+                    }
                 }
-                this.refresh(cx);
-                cx.notify();
-            });
+                let all = cache.with(&store, |g| summaries(g, &now)).unwrap_or_else(|e| {
+                    tracing::warn!("basecamp: {e:#}");
+                    RANGES.map(|r| (r, Summary::compute(r, &now, r.window(&now), &[]))).to_vec()
+                });
+                let _ = tx.send_blocking((true, all));
+            })
+            .detach();
+        self._compute = Some(cx.spawn(async move |this, cx| {
+            while let Ok((done, found)) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    for (range, summary) in found {
+                        this.summaries[range as usize] = Some(Arc::new(summary));
+                    }
+                    if done {
+                        this.computing = false;
+                        this.key = Some(key.clone());
+                        // What moved while it ran is read now.
+                        this.refresh(cx);
+                    }
+                    cx.notify();
+                });
+            }
         }));
     }
 
@@ -325,8 +375,26 @@ impl Basecamp {
             .into_any_element()
     }
 
-    /// Turns over the range, a bar a stretch, with the stretch under the pointer spelled out.
-    fn chart(&self, chart: &Chart, cx: &mut Context<Self>) -> AnyElement {
+    /// How far the chart's entrance has played (1 at once without motion). It plays when the
+    /// chart is first drawn for a range, so again each time Basecamp opens: the moment it started
+    /// is kept with the chart's drawing and goes when that does.
+    fn entrance(&self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
+        if !self.workspace.read(cx).motion(cx) {
+            return 1.;
+        }
+        let now = crate::motion::now(cx);
+        let since = window.use_keyed_state(SharedString::from(format!("basecamp-chart-enter-{:?}", self.range)), cx, |_, _| now);
+        let t = now.saturating_duration_since(*since.read(cx)).as_secs_f32() / crate::visualization::ENTER.as_secs_f32();
+        if t < 1. {
+            window.request_animation_frame();
+        }
+        t.min(1.)
+    }
+
+    /// Turns over the range, a bar a stretch, with the stretch under the pointer spelled out. The
+    /// bars grow in one after another, as a visualization's do.
+    fn chart(&self, chart: &Chart, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let enter = self.entrance(window, cx);
         let theme = cx.theme().clone();
         let max = chart.bars.iter().map(|b| b.turns).max().unwrap_or(0);
         let total: usize = chart.bars.iter().map(|b| b.turns).sum();
@@ -345,7 +413,8 @@ impl Basecamp {
         let bar_color = theme.foreground.opacity(0.42);
         let bars = chart.bars.iter().enumerate().map(|(i, b)| {
             let hovered = self.hovered == Some(i);
-            let frac = if max > 0 { b.turns as f32 / max as f32 } else { 0. };
+            let grown = crate::visualization::arrive(enter, i, n);
+            let frac = if max > 0 { b.turns as f32 / max as f32 * grown } else { 0. };
             div()
                 .id(("basecamp-bar", i))
                 .test_support()
@@ -365,7 +434,7 @@ impl Basecamp {
                     }
                 }))
                 .when(b.turns > 0, |el| {
-                    el.child(div().w_full().max_w(px(MAX_BAR)).h(relative(frac)).min_h(px(2.)).rounded(px(1.5)).bg(if hovered { theme.foreground.opacity(0.8) } else { bar_color }))
+                    el.child(div().id(("basecamp-bar-fill", i)).test_support().w_full().max_w(px(MAX_BAR)).h(relative(frac)).min_h(px(2. * grown)).rounded(px(1.5)).bg(if hovered { theme.foreground.opacity(0.8) } else { bar_color }))
                 })
         }).collect::<Vec<_>>();
         let mut ticks = chart.ticks.iter().peekable();
@@ -470,17 +539,17 @@ impl Basecamp {
 }
 
 impl Render for Basecamp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Basecamp");
         let theme = cx.theme().clone();
         let review: Vec<Thread> = self.workspace.read(cx).ready_for_review().into_iter().cloned().collect();
         let unread = review.iter().any(Thread::is_unseen);
-        let summary = self.summary.clone();
+        let summary = self.shown().cloned();
         let activity: Vec<AnyElement> = match summary.as_deref() {
             Some(s) if !s.recap.is_empty() => vec![
                 self.totals(&s.recap, &s.spend, cx),
-                self.chart(&s.chart, cx),
+                self.chart(&s.chart, window, cx),
                 self.table("basecamp-project", "Projects", "Project", &s.projects, cx),
                 self.table("basecamp-model", "Models", "Model", &s.models, cx),
             ],
@@ -684,17 +753,17 @@ impl Summary {
     }
 }
 
-/// Basecamp's numbers for `range` at `now`, from the store. All time opens on the day of the
-/// earliest activity found. Slow: run it off the main thread.
-pub fn summarize<Tz: TimeZone>(store: &Store, range: Range, now: &DateTime<Tz>) -> anyhow::Result<Summary> {
-    if range != Range::All {
-        let window = range.window(now);
-        return Ok(Summary::compute(range, now, window, &basecamp::gather(store, &window)?));
-    }
-    // Everything there is, whenever it was; then the window around it.
-    let threads = basecamp::gather(store, &basecamp::Window { range, start: 0, end: i64::MAX, bucket_ms: i64::MAX })?;
-    let first = threads.iter().flat_map(|t| t.activity.iter().map(Activity::at).chain(t.usage.iter().map(|u| u.at))).filter(|at| *at > 0).min();
-    Ok(Summary::compute(range, now, range.window_from(now, first), &threads))
+/// The ranges, in the order they're offered.
+const RANGES: [Range; 3] = [Range::Today, Range::Week, Range::All];
+
+/// Basecamp's numbers for every range at `now`, from what was gathered: nothing is read.
+pub fn summaries<Tz: TimeZone>(g: &basecamp::Gathered, now: &DateTime<Tz>) -> Vec<(Range, Summary)> {
+    RANGES
+        .map(|range| {
+            let window = g.window(range, now);
+            (range, Summary::compute(range, now, window, g.threads_in(&window)))
+        })
+        .to_vec()
 }
 
 /// The tables by project and by model. A thread's turns and failures go to its model (the one it

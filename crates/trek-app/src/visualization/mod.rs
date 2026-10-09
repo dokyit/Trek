@@ -28,7 +28,7 @@ use crate::assets::Lucide;
 
 const PLUGIN: &str = "trek-visualization";
 /// How long marks take to arrive the first time a visualization is drawn.
-const ENTER: Duration = Duration::from_millis(720);
+pub(crate) const ENTER: Duration = Duration::from_millis(720);
 /// How long a hovered mark takes to lift.
 const LIFT: Duration = Duration::from_millis(160);
 /// One sweep of the shimmer over a visualization still being written.
@@ -270,11 +270,7 @@ impl Frame {
 
     /// Mark `ix` of `n`'s share of the entrance, eased: they arrive one after another.
     pub fn arrive(&self, ix: usize, n: usize) -> f32 {
-        if self.enter >= 1. {
-            return 1.;
-        }
-        let delay = if n > 1 { ix as f32 / (n - 1) as f32 * 0.35 } else { 0. };
-        ease_out(((self.enter - delay) / 0.65).clamp(0., 1.))
+        arrive(self.enter, ix, n)
     }
 
     /// How present mark `ix` is while another one is hovered: the hovered one and, with nothing
@@ -341,6 +337,16 @@ impl Frame {
             });
         }
     }
+}
+
+/// Mark `ix` of `n`'s share of an entrance `enter` of the way through (0 to 1), eased: they
+/// arrive one after another, the last starting a third of the way in. Basecamp's bars too.
+pub(crate) fn arrive(enter: f32, ix: usize, n: usize) -> f32 {
+    if enter >= 1. {
+        return 1.;
+    }
+    let delay = if n > 1 { ix as f32 / (n - 1) as f32 * 0.35 } else { 0. };
+    ease_out(((enter - delay) / 0.65).clamp(0., 1.))
 }
 
 pub(super) fn ease_out(t: f32) -> f32 {

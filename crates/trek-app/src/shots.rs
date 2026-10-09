@@ -15,7 +15,7 @@
 //! `send <prompt>`, `attach <image>` (into the main composer's outbox), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
-//! `range today|week|all` (Basecamp's), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
+//! `range today|week|all` (Basecamp's), `usage-demo` (plans and limits for the Usage card, no real agent asked), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
 //! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `agent-install <id> <percent>|fail <message>|clear`
@@ -237,6 +237,10 @@ fn quit(ws: &Entity<Workspace>, cx: &mut AsyncApp) -> anyhow::Result<()> {
 }
 
 fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    if verb == "usage-demo" {
+        usage_demo(ws, cx);
+        return Ok(());
+    }
     if verb == "range" {
         use trek_core::basecamp::Range;
         let range = match arg {
@@ -729,6 +733,30 @@ fn id_text(id: &ElementId) -> String {
         ElementId::NamedInteger(n, i) => format!("{n}#{i}"),
         other => format!("{other:?}"),
     }
+}
+
+/// `usage-demo`: plans and limits for the Usage card as Claude Code, Codex and Devin report them
+/// (Devin's as kept from an earlier run), without asking any real agent.
+fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
+    use trek_agents::{AgentStatus, UsageLimit};
+    use trek_core::AgentId;
+    ws.update(cx, |ws, cx| {
+        let now = ws.now();
+        let limit = |label: &str, window: &str, percent: f32, hours: i64| UsageLimit { label: label.into(), percent, resets_at: Some(now + hours * 3_600_000 + 1_380_000), window: window.into() };
+        for (agent, name) in [(AgentId::ClaudeCode, "Claude Code"), (AgentId::Codex, "Codex")] {
+            if !ws.agents.iter().any(|a| a.agent == agent) {
+                let availability = trek_core::detect::Availability::Ready;
+                ws.agents.push(trek_core::detect::DetectedAgent { agent, name: name.into(), path: None, version: None, availability, models: vec![], install_hint: None });
+            }
+        }
+        let claude = vec![limit("5-hour limit", "5h", 42., 2), limit("Weekly limit", "7d", 68., 50), limit("Weekly · Opus", "7d", 91., 50)];
+        ws.agent_status.insert(AgentId::ClaudeCode.key(), AgentStatus { plan: Some("Claude Max".into()), logged_in: true, limits: claude, ..Default::default() });
+        let codex = vec![limit("5-hour limit", "5h", 12., 3), limit("Weekly limit", "7d", 35., 120)];
+        ws.agent_status.insert(AgentId::Codex.key(), AgentStatus { plan: Some("ChatGPT Plus".into()), logged_in: true, limits: codex, ..Default::default() });
+        let devin = crate::workspace::usage::Snapshot { read_at: now - 25 * 60_000, plan: Some("Devin Pro".into()), limits: vec![limit("Daily quota", "24h", 55., 6)], note: None };
+        ws.usage_cached.insert(crate::workspace::devin_agent().key(), devin);
+        cx.notify();
+    });
 }
 
 /// `click|rclick|hover <id>`: the pointer on the one element on screen with that id, as events

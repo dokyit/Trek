@@ -25,6 +25,7 @@ mod ipc;
 mod mascot;
 mod md;
 mod mentions;
+mod motion;
 mod notes;
 mod onboarding;
 mod panels;

@@ -302,12 +302,35 @@ pub fn load_usage(source: ThreadSource, native_id: &str, from: i64, to: i64) -> 
 
 /// Size in bytes of an imported thread's transcript file, when it lives in one.
 pub fn transcript_bytes(source: ThreadSource, native_id: &str) -> Option<u64> {
-    let path = match source {
+    std::fs::metadata(history_file(source, native_id)?).ok().map(|m| m.len())
+}
+
+/// `load_transcript`, from `file` (`history_file`) when the history lives in one.
+pub fn load_transcript_from(source: ThreadSource, native_id: &str, file: Option<&std::path::Path>) -> anyhow::Result<Vec<Item>> {
+    match (source, file) {
+        (ThreadSource::ClaudeCode, Some(f)) => claude::load_file(f),
+        (ThreadSource::Codex, Some(f)) => codex::load_rollout(f, native_id),
+        _ => load_transcript(source, native_id),
+    }
+}
+
+/// `load_usage`, from `file` (`history_file`) when the history lives in one.
+pub fn load_usage_from(source: ThreadSource, native_id: &str, file: Option<&std::path::Path>, from: i64, to: i64) -> Vec<UsageEntry> {
+    match (source, file) {
+        (ThreadSource::ClaudeCode, Some(f)) => claude::usage_in(f, from, to),
+        (ThreadSource::Codex, Some(f)) => codex::usage_in(f, from, to),
+        _ => load_usage(source, native_id, from, to),
+    }
+}
+
+/// The file an imported thread's history lives in, when it lives in one of its own (Claude
+/// Code's sessions, Codex's rollouts; OpenCode keeps all of them in one database).
+pub fn history_file(source: ThreadSource, native_id: &str) -> Option<std::path::PathBuf> {
+    match source {
         ThreadSource::ClaudeCode => claude::find_session(native_id),
         ThreadSource::Codex => codex::rollout_path(native_id),
         _ => None,
-    }?;
-    std::fs::metadata(path).ok().map(|m| m.len())
+    }
 }
 
 // ---- titles ----

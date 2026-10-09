@@ -28,7 +28,7 @@ pub struct ResetCredit {
     pub expires_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UsageLimit {
     /// "5-hour limit", "Weekly limit", "Weekly · Fable", ...
     pub label: String,

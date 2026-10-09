@@ -34,7 +34,7 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
         return Ok((PathBuf::from("/usr/bin/perl"), vec![script.into()], "Fake".into()));
     }
     let (binary, args, name, hint): (&str, Vec<&str>, String, &str) = match agent {
-        AgentId::OpenCode => ("opencode", vec!["acp"], "OpenCode".into(), "curl -fsSL https://opencode.ai/install | bash"),
+        AgentId::OpenCode => (detect::OPENCODE, vec!["acp"], "OpenCode".into(), "curl -fsSL https://opencode.ai/install | bash"),
         AgentId::Droid => ("droid", vec!["exec", "--output-format", "acp"], "Droid".into(), "curl -fsSL https://app.factory.ai/cli | sh"),
         AgentId::Acp(id) => match ACP_AGENTS.iter().find(|a| a.id == id) {
             Some(a) => (a.binary, a.args.to_vec(), a.name.into(), a.install_hint),
@@ -47,7 +47,8 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
         },
         other => bail!("{} doesn't speak ACP", other.display_name()),
     };
-    let path = detect::which(binary).with_context(|| format!("{name} isn't installed ({hint})"))?;
+    let found = if *agent == AgentId::OpenCode { detect::opencode() } else { detect::which(binary) };
+    let path = found.with_context(|| format!("{name} isn't installed ({hint})"))?;
     Ok((path, args.into_iter().map(String::from).collect(), name))
 }
 
@@ -434,16 +435,23 @@ struct Tool {
     detail: String,
     /// A to-do tool's list, shown as a checklist once it's done.
     todos: Option<Vec<(String, Step)>>,
-    /// A sub-agent of the agent's own (OpenCode's `task`): it gets a sub-agent row, and its
-    /// call's end is the sub-agent's.
+    /// A sub-agent of the agent's own (OpenCode's `task`, `subagent` in OpenCode 2): it gets a
+    /// sub-agent row, and its call's end is the sub-agent's.
     agent: bool,
+    /// The tool's own name, where the agent says it (OpenCode 2: `shell`, `subagent`, …).
+    name: String,
     started: bool,
 }
 
 /// A call that starts a sub-agent of the agent's own: OpenCode's `task` names the kind of agent
-/// it sends (`subagent_type`) along with what to do.
-fn is_sub_agent(input: &Value) -> bool {
-    input["subagent_type"].is_string() && input["prompt"].is_string()
+/// it sends (`subagent_type`) along with what to do; OpenCode 2's `subagent` tool names it `agent`.
+fn is_sub_agent(name: &str, input: &Value) -> bool {
+    input["prompt"].is_string() && (input["subagent_type"].is_string() || (name == "subagent" && input["agent"].is_string()))
+}
+
+/// The kind of agent a sub-agent call sends.
+fn sub_agent_kind(input: &Value) -> Option<&str> {
+    input["subagent_type"].as_str().or(input["agent"].as_str())
 }
 
 /// Turns `session/update` notifications into [`AgentEvent`]s for one session.
@@ -498,10 +506,13 @@ impl Turn {
                 if let Some(k) = u["kind"].as_str() {
                     tool.kind = k.into();
                 }
+                if let Some(n) = u["name"].as_str() {
+                    tool.name = n.into();
+                }
                 if let Some(steps) = todo_steps(&u["rawInput"]) {
                     tool.todos = Some(steps);
                 }
-                tool.agent |= is_sub_agent(&u["rawInput"]);
+                tool.agent |= is_sub_agent(&tool.name, &u["rawInput"]);
                 let detail = tool_detail(u, &tool.kind);
                 if !detail.is_empty() {
                     tool.detail = detail;
@@ -517,7 +528,7 @@ impl Turn {
                     out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail: detail.clone() });
                     if agent {
                         // ACP carries nothing of what it does meanwhile: what kind of agent it is.
-                        let activity = u["rawInput"]["subagent_type"].as_str().map(|k| format!("The {k} agent is at work"));
+                        let activity = sub_agent_kind(&u["rawInput"]).map(|k| format!("The {k} agent is at work"));
                         out.push(AgentEvent::Task { id: id.clone(), description: Some(detail), activity, tool_uses: None, done: None });
                     }
                 }
@@ -720,6 +731,12 @@ fn select_options(opt: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// The effort an agent's level stands for. "default" (the model's own, as OpenCode 2 offers it
+/// beside the levels it names) is Trek's default, medium, unless the agent names a medium too.
+fn effort_level(value: &str, values: &[String]) -> Option<Effort> {
+    Effort::parse(value).or_else(|| (value == "default" && !values.iter().any(|v| Effort::parse(v) == Some(Effort::Medium))).then_some(Effort::Medium))
+}
+
 fn sorted_efforts(values: impl Iterator<Item = Effort>) -> Vec<Effort> {
     let mut e: Vec<Effort> = values.collect();
     e.sort();
@@ -733,7 +750,7 @@ fn controls(result: &Value) -> Controls {
     let effort = by_category("thought_level")
         .or_else(|| by_category("reasoning_effort"))
         .and_then(|o| Some((o["id"].as_str()?.to_string(), select_options(o).into_iter().map(|(v, _)| v).collect::<Vec<_>>())));
-    let shared_efforts = sorted_efforts(effort.iter().flat_map(|(_, v)| v.iter().filter_map(|s| Effort::parse(s))));
+    let shared_efforts = sorted_efforts(effort.iter().flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))));
 
     let (models, current_model, switch) = if let Some(list) = result["models"]["availableModels"].as_array() {
         let models = list
@@ -823,7 +840,7 @@ fn model_request(c: &Controls, session_id: &str, model: &str) -> Option<(&'stati
 /// Request params that set reasoning effort to the agent's nearest level.
 fn effort_request(c: &Controls, session_id: &str, effort: Effort) -> Option<(&'static str, Value)> {
     let (id, values) = c.effort.as_ref()?;
-    let levels: Vec<(Effort, &String)> = values.iter().filter_map(|v| Effort::parse(v).map(|e| (e, v))).collect();
+    let levels: Vec<(Effort, &String)> = values.iter().filter_map(|v| effort_level(v, values).map(|e| (e, v))).collect();
     let want = effort.clamp_to(&sorted_efforts(levels.iter().map(|(e, _)| *e)));
     let (_, value) = levels.iter().find(|(e, _)| *e == want)?;
     Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": value })))
@@ -1186,6 +1203,13 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
             Ok(r) => {
                 info.models = controls(&r).models;
                 opened = r["sessionId"].as_str().map(String::from);
+                // Deleted through ACP where the agent offers it (OpenCode 2, whose CLI would start
+                // its background server to do it).
+                if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
+                    && let Ok(Ok(_)) = agent.call("session/delete", json!({ "sessionId": session }), &fs, &mut backlog, Duration::from_secs(10)).await
+                {
+                    opened = None;
+                }
             }
             Err(e) if is_auth_error(&e) => info.needs_auth = true,
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
@@ -1207,14 +1231,19 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     Ok(info)
 }
 
+/// The agent deletes sessions over ACP (`session/delete`, not yet part of ACP itself).
+fn deletes_sessions(init: &Value) -> bool {
+    init["agentCapabilities"]["sessionCapabilities"]["delete"].is_object()
+}
+
 /// Delete a session Trek opened only to look at it, through the agent's own CLI. Agents
-/// without a way to do that keep it (ACP has no delete).
+/// without a way to do that keep it.
 async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
-    let (binary, args): (&str, [&str; 2]) = match agent {
-        AgentId::OpenCode => ("opencode", ["session", "delete"]),
+    let (bin, args): (Option<PathBuf>, [&str; 2]) = match agent {
+        AgentId::OpenCode => (detect::opencode(), ["session", "delete"]),
         _ => return,
     };
-    let Some(bin) = detect::which(binary) else { return };
+    let Some(bin) = bin else { return };
     let mut command = tokio::process::Command::new(bin);
     command.args(args).arg(session).current_dir(cwd).env("PATH", detect::login_path());
     match crate::output_group(&mut command, None, Duration::from_secs(20)).await {
@@ -1846,6 +1875,62 @@ mod tests {
                 ok: false
             }]
         );
+    }
+
+    #[test]
+    fn opencode_2_offers_its_efforts_beside_models_and_plan() {
+        // Recorded `session/new` (OpenCode 2.0.26): an effort select beside model and mode, with
+        // "default" (the model's own) and the levels the model names.
+        let c = controls(&serde_json::from_str(include_str!("../fixtures/opencode2-session-new.json")).unwrap());
+        assert_eq!(c.switch, ModelSwitch::Config("model".into()));
+        assert!(c.models.iter().any(|m| m.id == "opencode/mimo-v2.6-flash-free"));
+        assert_eq!(c.effort, Some(("effort".into(), vec!["high".into(), "default".into()])));
+        assert_eq!(c.models[0].efforts, vec![Effort::Medium, Effort::High], "default stands for medium");
+        let value = |e| effort_request(&c, "s", e).unwrap().1["value"].clone();
+        assert_eq!((value(Effort::Medium), value(Effort::High)), (json!("default"), json!("high")));
+        assert_eq!((value(Effort::Low), value(Effort::Max)), (json!("default"), json!("high")));
+        assert_eq!(c.plan_mode, Some(PlanSwitch::Config { id: "mode".into(), plan: "plan".into(), off: "build".into() }));
+        // A named medium is that, and "default" isn't a level then.
+        assert_eq!(effort_level("default", &["medium".into(), "default".into()]), None);
+    }
+
+    #[test]
+    fn opencode_2_turn_asks_before_its_shell() {
+        // Recorded (OpenCode 2.0.26, with the ask rules Trek gives it): `bash` is `shell` now, and
+        // still asks.
+        let lines = fixture(include_str!("../fixtures/opencode2-turn.jsonl"));
+        let ask = lines.iter().position(|v| v["method"] == "session/request_permission").unwrap();
+        let mut t = Turn::default();
+        let ev = updates(&mut t, &lines[..ask]);
+        assert!(ev.contains(&AgentEvent::ToolStarted { id: "call_a63808222f7c4f9cb300824b".into(), title: "Run command".into(), detail: "ls".into() }), "{ev:?}");
+        let Ask::User { title, detail, .. } = t.permission(&lines[ask]["params"], HandHolding::Supervised, false) else { panic!() };
+        assert_eq!((title.as_str(), detail.as_str()), ("Run command", "ls"));
+        assert_eq!(t.permission(&lines[ask]["params"], HandHolding::FullAccess, false), Ask::Answer("once".into()));
+        let ev = updates(&mut t, &lines[ask + 1..]);
+        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_a63808222f7c4f9cb300824b".into(), output: "notes.txt\n".into(), ok: true }), "{ev:?}");
+        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("1".into()), AgentEvent::TurnComplete { error: None }]);
+        let used = prompt_usage(&lines.last().unwrap()["result"]["usage"]).unwrap();
+        assert_eq!(used, TokenUsage { input: 135, output: 22 + 34, cache_read: 9728, cache_write: 0 });
+    }
+
+    #[test]
+    fn an_opencode_2_subagent_is_a_sub_agent_of_its_own() {
+        // OpenCode 2's tool is `subagent`, its input naming the `agent` it sends.
+        let mut t = Turn::default();
+        assert!(t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k1","name":"subagent","title":"subagent","kind":"other","status":"pending","rawInput":{}})).is_empty());
+        let input = json!({"agent":"explore","description":"Map the routes","prompt":"List every HTTP route."});
+        let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"k1","status":"in_progress","title":"Map the routes","rawInput":input}));
+        assert!(ev.contains(&AgentEvent::Task { id: "k1".into(), description: Some("Map the routes".into()), activity: Some("The explore agent is at work".into()), tool_uses: None, done: None }), "{ev:?}");
+        // Another tool's `agent` and `prompt` don't make it one.
+        let ev = t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k2","name":"skill","title":"skill","status":"in_progress","rawInput":{"agent":"x","prompt":"y"}}));
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Task { .. })), "{ev:?}");
+    }
+
+    #[test]
+    fn opencode_2_deletes_sessions_over_acp() {
+        let v2 = json!({"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"close":{},"delete":{},"fork":{},"list":{},"resume":{}}}});
+        let v1 = json!({"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"close":{},"fork":{},"list":{},"resume":{}}}});
+        assert!(deletes_sessions(&v2) && !deletes_sessions(&v1));
     }
 
     #[test]

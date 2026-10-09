@@ -105,6 +105,53 @@ pub fn label(billing: Option<&Billing>, s: &ThreadSpend) -> Option<String> {
     })
 }
 
+/// How much of a thread's prompts the agents' prompt caches served (sub-agents included).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CacheHits {
+    /// Prompt tokens read from a cache, written to one, and sent fresh.
+    pub read: u64,
+    pub written: u64,
+    pub fresh: u64,
+}
+
+impl CacheHits {
+    pub fn of(s: &ThreadSpend) -> Option<Self> {
+        let mut c = CacheHits { read: 0, written: 0, fresh: 0 };
+        for m in s.own.models.iter().chain(&s.subs.models) {
+            c.read += m.tokens.cache_read;
+            c.written += m.tokens.cache_write;
+            c.fresh += m.tokens.input;
+        }
+        (c.prompt() > 0).then_some(c)
+    }
+
+    fn prompt(&self) -> u64 {
+        self.read + self.written + self.fresh
+    }
+
+    /// The share of prompt tokens read from a cache, 0 to 1.
+    pub fn ratio(&self) -> f64 {
+        self.read as f64 / self.prompt().max(1) as f64
+    }
+
+    /// The status strip's text: "82% cached".
+    pub fn label(&self) -> String {
+        let pct = self.ratio() * 100.0;
+        // 99.6% isn't "100%": all of it is only all of it.
+        let shown = if self.read > 0 && pct < 1.0 { "< 1".to_string() } else if self.read < self.prompt() && pct > 99.0 { format!("{:.0}", pct.floor()) } else { format!("{pct:.0}") };
+        format!("{shown}% cached")
+    }
+
+    /// Its tooltip, in words.
+    pub fn detail(&self) -> String {
+        let mut s = format!("{} of {} prompt tokens came from the prompt cache, cheaper and faster than sending them again.", fmt_tokens(self.read), fmt_tokens(self.prompt()));
+        if self.written > 0 {
+            s.push_str(&format!(" {} were written to it for later turns.", fmt_tokens(self.written)));
+        }
+        s
+    }
+}
+
 /// One kind of token in a model's line: what it is, how many, at what price.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
@@ -259,6 +306,23 @@ pub fn reply(b: &Breakdown) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_hits_are_the_share_of_prompt_tokens_read_from_a_cache() {
+        use trek_core::{AgentId, TokenUsage};
+        let mut s = ThreadSpend::default();
+        assert_eq!(CacheHits::of(&s), None, "no prompts yet: nothing to show");
+        s.own.add(&AgentId::ClaudeCode, Some("claude-sonnet-4-5"), &TokenUsage { input: 100, output: 50, cache_read: 800, cache_write: 100 }, None, 0);
+        s.subs.add(&AgentId::Codex, Some("gpt-5"), &TokenUsage { input: 0, output: 5, cache_read: 0, cache_write: 0 }, None, 0);
+        let c = CacheHits::of(&s).unwrap();
+        assert_eq!((c.read, c.written, c.fresh), (800, 100, 100));
+        assert_eq!(c.label(), "80% cached");
+        assert!(c.detail().starts_with("800 of 1K prompt tokens"), "{}", c.detail());
+        let nearly = CacheHits { read: 999, written: 0, fresh: 1 };
+        assert_eq!(nearly.label(), "99% cached", "not all of it: not 100%");
+        assert_eq!(CacheHits { read: 1, written: 0, fresh: 999 }.label(), "< 1% cached");
+        assert_eq!(CacheHits { read: 0, written: 0, fresh: 10 }.label(), "0% cached");
+    }
+
     use super::*;
     use trek_core::{AgentId, TokenUsage, UsageCost};
 

@@ -284,6 +284,7 @@ pub fn thumbnails(
                 .cursor_pointer()
                 .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
                 .child(img(p.clone()).size_full().object_fit(ObjectFit::Cover))
+                .child(crate::image_preview::thumb(p.clone()))
                 // A faint lift under the pointer: it opens.
                 .child(div().absolute().top_0().left_0().size_full().bg(gpui_kit::white().opacity(0.08)).invisible().group_hover("att", |s| s.visible()))
                 .on_click(move |_, window, cx| crate::image_preview::open_outbox(all.to_vec(), i, preview_remove.clone(), window, cx))
