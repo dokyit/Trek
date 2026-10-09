@@ -193,11 +193,13 @@ mod tests {
 
     #[test]
     fn run_captures_and_times_out() {
-        let out = run("/bin/sh", &["-c", "cat; echo err >&2"], Some("hello"), Duration::from_secs(5)).unwrap();
+        let fixture = trek_test_fixtures::bin("fixture");
+        let fixture = fixture.to_str().unwrap();
+        let out = run(fixture, &["cat", "--stderr", "err"], Some("hello"), Duration::from_secs(5)).unwrap();
         assert!(out.success());
         assert_eq!(out.stdout, "hello");
         assert_eq!(out.stderr.trim(), "err");
-        let out = run("/bin/sleep", &["5"], None, Duration::from_millis(100)).unwrap();
+        let out = run(fixture, &["sleep", "5"], None, Duration::from_millis(100)).unwrap();
         assert_eq!(out.status, None);
     }
 }

@@ -6,7 +6,10 @@ use crate::workspace::{McpCheck, Route, SettingsPage};
 use trek_agents::McpTransport;
 use trek_core::settings::secrets;
 
-const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-agents/fixtures/fake-mcp.pl");
+/// The `fixture` binary; `fixture fake-mcp ok` is the stand-in MCP server.
+fn fake() -> String {
+    trek_test_fixtures::bin("fixture").display().to_string()
+}
 
 #[test]
 fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
@@ -18,9 +21,13 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         trek.render(cx);
         // Nothing listens at this address: the remote server's check says so.
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let config = format!(
-            r#"{{"mcpServers": {{"fake": {{"command": "perl", "args": ["{FAKE}", "ok"], "env": {{"FAKE_TOKEN": "abc"}}}}, "remote": {{"url": "http://{free}/mcp", "headers": {{"Authorization": "Bearer t"}}}}}}}}"#
-        );
+        let config = serde_json::json!({
+            "mcpServers": {
+                "fake": { "command": fake(), "args": ["fake-mcp", "ok"], "env": { "FAKE_TOKEN": "abc" } },
+                "remote": { "url": format!("http://{free}/mcp"), "headers": { "Authorization": "Bearer t" } },
+            }
+        })
+        .to_string();
         trek.click(cx, "mcp-command");
         trek.type_text(cx, &config);
         trek.click(cx, "mcp-add");
@@ -91,12 +98,12 @@ fn a_command_line_with_its_token_in_front_is_one_server() {
         cx.simulate_window_resize(trek.window, gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2400.)));
         trek.render(cx);
         trek.click(cx, "mcp-command");
-        trek.type_text(cx, &format!("FAKE_TOKEN=abc perl '{FAKE}' ok"));
+        trek.type_text(cx, &format!("FAKE_TOKEN=abc '{}' fake-mcp ok", fake()));
         trek.click(cx, "mcp-add");
-        // No name typed: it's told from the script. Return adds it, as the button does.
+        // No name typed: it's told from the command's own name. Return adds it, as the button does.
         trek.press(cx, "enter");
         let saved = trek.read(cx, |ws, _| ws.settings.tools.mcp_servers.clone());
-        assert_eq!((saved.len(), saved[0].name.as_str(), saved[0].command.as_str(), saved[0].args.clone()), (1, "fake", "perl", vec![FAKE.to_string(), "ok".into()]));
+        assert_eq!((saved.len(), saved[0].name.as_str(), saved[0].command.as_str(), saved[0].args.clone()), (1, "fake", fake().as_str(), vec!["fake-mcp".to_string(), "ok".into()]));
         assert_eq!(saved[0].env[0].name, "FAKE_TOKEN");
         trek.wait(cx, "the check", |ws| matches!(ws.mcp_checks.get("fake"), Some(McpCheck::Works(t)) if t.contains(&"env_ok".to_string()))).await;
         trek.click(cx, "mcp-del-0");

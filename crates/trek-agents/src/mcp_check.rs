@@ -256,7 +256,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn fake(mode: &str, env: Vec<(String, String)>) -> McpServer {
-        McpServer::stdio("fake", "perl", vec![concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-mcp.pl").into(), mode.into()], env)
+        McpServer::stdio("fake", trek_test_fixtures::bin("fake-mcp").display().to_string(), vec![mode.into()], env)
     }
 
     #[tokio::test]
