@@ -5,11 +5,15 @@
 //! run by the Trek that started the agent). JSON-RPC 2.0 messages are read
 //! from stdin and written to stdout, one per line. Logs go to stderr only.
 
+#[cfg(target_os = "macos")]
 mod computer;
+#[cfg(target_os = "macos")]
 mod keys;
 mod orchestrate;
 mod rpc;
+#[cfg(target_os = "macos")]
 mod simulator;
+#[cfg(target_os = "macos")]
 mod util;
 
 use std::io::{BufRead, Write};
@@ -27,7 +31,14 @@ USAGE:
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
     let mut tools: Box<dyn rpc::ToolSet> = match arg.as_str() {
+        #[cfg(target_os = "macos")]
         "computer" => Box::new(computer::Computer::default()),
+        #[cfg(not(target_os = "macos"))]
+        "computer" | "simulator" | "sim" => {
+            eprintln!("trek-mcp: the {arg} tools run only on macOS");
+            std::process::exit(2);
+        }
+        #[cfg(target_os = "macos")]
         "simulator" | "sim" => Box::new(simulator::Simulator::default()),
         "orchestrate" => {
             eprintln!("trek-mcp {} (orchestrate) ready on stdio", env!("CARGO_PKG_VERSION"));
