@@ -78,22 +78,31 @@ pub fn end_all(grace: Duration) {
     write_record(&live);
 }
 
-/// End every tracked group: each first process that still runs with the start time recorded, and
-/// everything under it. For quitting.
+/// End every tracked group: up to `grace` for the first processes to go, then each that still
+/// runs with the start time recorded is ended, and everything under it. Blocks the caller for at
+/// most `grace` (and the ending). For quitting.
 ///
-/// Windows has no TERM to send from here (the gentle stop, closing stdin, belongs to whoever holds
-/// the child), so there's nothing to wait `grace` out for: the trees are ended at once. A tree
-/// whose first process is gone is left to its job, which ends it as Trek exits.
+/// Windows has no TERM to send from here: the gentle stop, closing stdin, belongs to whoever holds
+/// the child, and Trek has just asked its sessions to stop that way, so `grace` is theirs to do it
+/// in. What can't be found from a first process (one nobody holds open any more, or one whose
+/// parent exited) is left to its job, which ends it as Trek exits.
 #[cfg(windows)]
-pub fn end_all(_grace: Duration) {
+pub fn end_all(grace: Duration) {
     let groups = LIVE.lock().unwrap_or_else(PoisonError::into_inner).clone();
     if groups.is_empty() {
         return;
     }
     tracing::info!("ending {} child process group(s)", groups.len());
+    // Held open while waiting, so that no id goes to another process meanwhile.
+    let roots: Vec<win::Proc> = groups.iter().filter_map(|g| win::Proc::open(g.id).filter(|p| win::unix_secs(p.created) == g.started)).collect();
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline && roots.iter().any(win::Proc::running) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     for g in &groups {
         win::end_tree(*g);
     }
+    drop(roots);
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.retain(|l| !groups.iter().any(|g| g.id == l.id));
     write_record(&live);
@@ -645,6 +654,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!tree.iter().any(win::Proc::running), "the ping under cmd was ended too");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn end_all_gives_groups_their_grace_before_ending_them() {
+        let _registry = registry();
+        // One goes by itself within the grace (cmd waits a second for its ping), one doesn't.
+        let mut quick = quiet("cmd.exe", &["/d", "/c", "ping -n 2 127.0.0.1 >nul"]);
+        let mut slow = sleeper();
+        register(quick.id() as i32);
+        register(slow.id() as i32);
+        let grace = Duration::from_secs(4);
+        let started = std::time::Instant::now();
+        end_all(grace);
+        let took = started.elapsed();
+        assert!(quick.wait().unwrap().success(), "left to finish on its own");
+        assert!(!slow.wait().unwrap().success(), "ended once the grace ran out");
+        assert!(took >= grace - Duration::from_millis(50) && took < grace + Duration::from_secs(5), "{took:?}");
+        assert!(live().is_empty());
     }
 
     #[cfg(windows)]
