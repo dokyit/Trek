@@ -356,7 +356,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 
 /// The project as a git repository with one commit (`README.md`).
 fn make_repo(trek: &Trek) {
-    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
         git(&trek.project, args);
     }
     std::fs::write(trek.project.join("README.md"), "hello\n").unwrap();
@@ -422,7 +422,7 @@ fn return_queues_while_a_turn_runs_and_cmd_return_steers() {
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "Return queues it for after the turn");
         trek.render(cx);
         assert!(trek.visible(cx, ("ai-queued", 0usize)));
-        ai_send(&trek, cx, "use the fast path", "cmd-enter");
+        ai_send(&trek, cx, "use the fast path", "secondary-enter");
         assert_eq!(sent(&trek, cx, &id).last().map(String::as_str), Some("use the fast path"), "⌘Return steers the turn now");
         assert!(trek.read(cx, |ws, _| ws.turn_running(&id)));
         // ⌘⇧⌫ with nothing typed and nothing pending stops the turn; what was queued for after
@@ -688,7 +688,7 @@ fn review_opens_the_pending_diff_in_a_diff_tab_and_keep_all_clears_it() {
         // ⌘Return with nothing typed keeps everything; the tab says there's nothing left.
         let input = ai_input(&trek, cx);
         trek.window(cx, |window, cx| input.update(cx, |c, cx| c.focus(window, cx)));
-        trek.press(cx, "cmd-enter");
+        trek.press(cx, "secondary-enter");
         trek.wait(cx, "all kept", |ws| ws.review(&id).is_none()).await;
         assert!(trek.project.join("one.md").exists());
         diff_rows(&trek, cx, "the review to empty", |r| r.is_empty()).await;
@@ -1056,7 +1056,7 @@ fn the_explorer_leaves_out_what_git_ignores_and_opens_folders_with_their_files()
         editor_on_draft(&trek, cx);
         trek.update(cx, |ws, cx| ws.open_editor(trek.project.join("src/a.rs"), None, cx));
         trek.render(cx);
-        let shown = |trek: &Trek, cx: &mut TestAppContext, f: &str| trek.visible(cx, trek.project.join(f).display().to_string());
+        let shown = |trek: &Trek, cx: &mut TestAppContext, f: &str| trek.visible(cx, super::harness::join(&trek.project, f).display().to_string());
         assert!(shown(&trek, cx, "src") && shown(&trek, cx, "src/a.rs"), "the opened file's folder shows open, with its files");
         assert!(shown(&trek, cx, ".gitignore") && shown(&trek, cx, "target"), "only what git ignores goes");
         assert!(!shown(&trek, cx, "build") && !shown(&trek, cx, "debug.log"));
@@ -1154,7 +1154,7 @@ fn the_explorer_makes_renames_and_trashes_files_and_tabs_follow() {
         trek.type_text(cx, "b.rs");
         trek.press(cx, "enter");
         trek.render(cx);
-        let b = trek.project.join("src/b.rs");
+        let b = super::harness::join(&trek.project, "src/b.rs");
         assert!(b.is_file(), "made");
         assert_eq!(active_file(&trek, cx).as_deref(), Some(b.as_path()), "and opened");
         assert!(trek.visible(cx, b.display().to_string()));
@@ -1176,7 +1176,7 @@ fn the_explorer_makes_renames_and_trashes_files_and_tabs_follow() {
 
         // Rename: the open tab follows the file.
         trek.window(cx, |window, cx| explorer.update(cx, |e, cx| e.begin_rename(b.clone(), window, cx)));
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.type_text(cx, "c.rs");
         trek.press(cx, "enter");
         trek.render(cx);
@@ -1334,7 +1334,7 @@ fn editing_a_message_asks_about_files_puts_the_draft_aside_and_keeps_text_on_fai
         trek.render(cx);
         trek.click(cx, "ai-edit-restore");
         trek.window(cx, |window, cx| input.update(cx, |c, cx| c.focus(window, cx)));
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.type_text(cx, "mock:write two.md");
         trek.press(cx, "enter");
         trek.wait_done(cx, &id, RunState::Idle).await;
@@ -1397,7 +1397,7 @@ fn trek_commands_and_send_with_cmd_enter_work_in_the_side_bar() {
         trek.type_text(cx, "lines");
         assert!(trek.read(cx, |ws, _| ws.ide_chat.is_draft()), "Return didn't send");
         assert_eq!(input.read_with(cx, |c, cx| c.text(cx)), "two\nlines");
-        trek.press(cx, "cmd-enter");
+        trek.press(cx, "secondary-enter");
         let new = trek.read(cx, |ws, _| ws.ide_chat.active_thread().map(str::to_string)).expect("⌘↩ sent it");
         trek.wait_done(cx, &new, RunState::Idle).await;
         assert!(sent(&trek, cx, &new)[0].starts_with("two\nlines"));

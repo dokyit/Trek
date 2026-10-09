@@ -15,7 +15,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// A repo on `main` with a `feature` branch: `a.rs` says "main" on one and "feature" on the other.
 fn two_branches(dir: &Path) {
     git(dir, &["init", "-q", "-b", "main"]);
-    for (k, v) in [("user.name", "t"), ("user.email", "t@t"), ("commit.gpgSign", "false")] {
+    for (k, v) in [("user.name", "t"), ("user.email", "t@t"), ("commit.gpgSign", "false"), ("core.autocrlf", "false")] {
         git(dir, &["config", k, v]);
     }
     std::fs::write(dir.join("a.rs"), "main\n").unwrap();

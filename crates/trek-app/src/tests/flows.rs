@@ -586,7 +586,7 @@ fn updates_wait_for_a_turn_paused_on_a_card() {
         cx.run_until_parked();
         // Then the install went ahead (and stopped, as no app bundle runs here).
         let status = update_status(&trek, cx);
-        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains(super::harness::INSTALL_BLOCKED)), "{status:?}");
     });
 }
 
