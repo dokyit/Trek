@@ -81,6 +81,7 @@ if-addrs = "0.13"
 # text lays out as it does in the app.
 gpui-kit = { workspace = true, features = ["test-support"] }
 ctor = "1"
+trek-test-fixtures.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }
