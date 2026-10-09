@@ -30,13 +30,13 @@ impl Workspace {
         .detach();
     }
 
-    /// Usage as known now, in the agent picker's order.
+    /// Usage as known now, for the agents the Usage card shows, in its order.
     pub(crate) fn usage_now(&self) -> tr::Usage {
         let providers = self
-            .ready_agents()
+            .usage_shown()
             .into_iter()
             .filter_map(|agent| {
-                let st = self.agent_status.get(&agent.key())?;
+                let st = self.usage_status(&agent.key())?;
                 Some(tr::ProviderUsage {
                     agent: agent_ref(&agent),
                     plan: st.plan.clone(),

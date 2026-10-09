@@ -213,6 +213,8 @@ impl Workspace {
             }
         }
         if agent == AgentId::ClaudeCode.key() || agent == AgentId::Codex.key() {
+            // The new version's commands and models too, shown on the Usage card or not.
+            self.commands_read.remove(agent);
             self.refresh_usage(cx);
         }
     }

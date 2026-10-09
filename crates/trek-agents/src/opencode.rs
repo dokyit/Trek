@@ -319,9 +319,69 @@ fn merge_rules(mut theirs: Value, ours: &Value) -> Option<Value> {
     Some(theirs)
 }
 
+/// What OpenCode 1.x says, and exits, when its database was made by OpenCode 2: it only migrates a
+/// database that has 1.x's `session` table.
+const MADE_BY_2: &str = "Database is not empty and has no session table";
+
+/// `opencode --version` is 1.x's: `1.18.35`. OpenCode 2 says `2.0.26`, or `opencode2
+/// v0.0.0-beta-19296` from a preview build.
+fn is_1x_version(version: &str) -> bool {
+    version.split_whitespace().last().map(|v| v.trim_start_matches('v')).is_some_and(|v| v.starts_with("1."))
+}
+
+/// Whether the OpenCode at `bin` (`stamp`: which install it is) is 1.x. Asked once per install.
+async fn is_1x(bin: &Path, stamp: String) -> bool {
+    static SEEN: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+    let seen = |s: &String| SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| k == s).map(|(_, v)| *v);
+    if let Some(v) = seen(&stamp) {
+        return v;
+    }
+    // Not cached when it didn't answer: it's asked again next time.
+    let Some(version) = trek_core::detect::version_of(bin).await else { return false };
+    let v = is_1x_version(&version);
+    SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((stamp, v));
+    v
+}
+
+/// Environment for the OpenCode at `bin`: 1.x keeps its sessions in a database of its own when
+/// OpenCode 2 made `opencode.db` (see `trek_core::import::opencode`), which Trek reads as well.
+/// An `OPENCODE_DB` the user set stands.
+pub(crate) async fn db_env(bin: &Path, stamp: String) -> Vec<(String, String)> {
+    if std::env::var_os("OPENCODE_DB").is_some() || !is_1x(bin, stamp).await {
+        return vec![];
+    }
+    trek_core::import::opencode::db_for_1x().map(|db| ("OPENCODE_DB".to_string(), db.display().to_string())).into_iter().collect()
+}
+
+/// Why OpenCode exited, said plainly, when it's 1.x refusing OpenCode 2's database.
+pub(crate) fn exit_reason(stderr: &[String]) -> Option<String> {
+    stderr.iter().any(|l| l.contains(MADE_BY_2)).then(|| {
+        format!(
+            "OpenCode 1.x can't open the history OpenCode 2 started (\"{MADE_BY_2}\"). Use OpenCode 2, or give 1.x a \
+             history of its own: OPENCODE_DB=opencode-1x.db, as Trek does unless OPENCODE_DB is set."
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_1x_is_told_by_its_version() {
+        assert!(is_1x_version("1.18.35"));
+        assert!(!is_1x_version("2.0.26"));
+        assert!(!is_1x_version("opencode2 v0.0.0-beta-19296"));
+        assert!(!is_1x_version(""));
+    }
+
+    #[test]
+    fn a_refused_database_is_explained() {
+        let stderr = ["\u{1b}[91mError: \u{1b}[0mUnexpected error".to_string(), String::new(), MADE_BY_2.to_string()];
+        let why = exit_reason(&stderr).unwrap();
+        assert!(why.starts_with("OpenCode 1.x can't open the history OpenCode 2 started") && why.contains("OPENCODE_DB=opencode-1x.db"), "{why}");
+        assert_eq!(exit_reason(&["Error: something else".to_string()]), None);
+    }
 
     /// Sorted: key order depends on serde_json's `preserve_order`, which other crates may turn on.
     fn agent_names(rules: &Value) -> Vec<String> {

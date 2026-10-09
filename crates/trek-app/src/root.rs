@@ -61,6 +61,8 @@ pub struct TrekWindow {
     pub(crate) sidebar_motion: SharedSpring,
     /// Agents (0) to the editor (1): the two cross over on a spring as the mode switches.
     pub(crate) mode_motion: crate::motion::Spring,
+    /// The last frame was mid-way between the modes (see `mode_motion`'s use in `render`).
+    mode_fading: bool,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `mascot::force_active`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -320,6 +322,7 @@ impl TrekWindow {
             glass_applied: None,
             sidebar_motion,
             mode_motion,
+            mode_fading: false,
             _hidden_frames: hidden_frames,
             _subscriptions: subscriptions,
         }
@@ -837,10 +840,13 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
         };
         (action, label)
     });
-    let (ws, hover, own) = (workspace.downgrade(), hovered.clone(), key.clone());
+    // Taken down (timed out, or undone): its message and button are inert while it goes, so a
+    // second click on Undo as it fades doesn't undo twice.
+    let gone = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (ws, hover, own, going) = (workspace.downgrade(), hovered.clone(), key.clone(), gone.clone());
     let note = Notification::new().id1::<TrekToast>(key.clone()).autohide(false).placement(TOAST_PLACEMENT).content(move |_, _, cx| {
-        let (hover, own) = (hover.clone(), own.clone());
-        h_flex()
+        let (hover, own, gone) = (hover.clone(), own.clone(), going.clone());
+        let body = h_flex()
             .id("toast-body")
             .gap_3()
             // Held only by a pointer brought onto it: one that was resting where it appeared
@@ -857,12 +863,16 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
             .child(div().flex_1().min_w_0().text_sm().text_color(cx.theme().foreground).child(message.clone()))
             .when_some(action.clone(), |el, (action, label)| {
                 let ws = ws.clone();
+                let gone = gone.clone();
                 el.child(Button::new("undo").label(label).small().flex_none().on_click(move |_, window, cx| {
+                    if gone.replace(true) {
+                        return;
+                    }
                     let _ = ws.update(cx, |ws, cx| ws.undo(action.clone(), cx));
                     window.remove_notification1::<TrekToast>(own.clone(), cx);
                 }))
-            })
-            .into_any_element()
+            });
+        if gone.get() { crate::motion::inert(body).into_any_element() } else { body.into_any_element() }
     });
     let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
     // Timed here rather than by the toast list (a fixed five seconds): the pointer on it holds
@@ -871,6 +881,9 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
         cx.background_executor().timer(lifetime).await;
         while hovered.get() {
             cx.background_executor().timer(std::time::Duration::from_millis(1_500)).await;
+        }
+        if gone.replace(true) {
+            return;
         }
         let _ = target.update(cx, |_, window, cx| window.remove_notification1::<TrekToast>(key.clone(), cx));
     })
@@ -987,6 +1000,13 @@ impl Render for TrekWindow {
         self.mode_motion.set(if ide { 1. } else { 0. }, motion, now);
         let editor_in = self.mode_motion.frame(now, window).clamp(0., 1.);
         let crossing = self.mode_motion.moving(now);
+        // Cached views (the Explorer, the sidebar, the transcript) replay their last painting,
+        // opacity and all, while their place and size hold: under the cross-fade they'd stay as
+        // they were and vanish when it ends. Each frame of it, and the one after, is drawn whole.
+        if crossing || self.mode_fading {
+            crate::motion::redraw_whole(window);
+        }
+        self.mode_fading = crossing;
         let (right_open, wanted_width) = {
             let p = self.right_panel.read(cx);
             (p.open, p.width)
@@ -1268,6 +1288,8 @@ impl TrekWindow {
                         el.child(if shown >= 1. {
                             sidebar.into_any_element()
                         } else {
+                            // Folding away, it's inert: a click on its way out does nothing.
+                            let sidebar = if self.sidebar_motion.borrow().target() == 0. { crate::motion::inert(sidebar).into_any_element() } else { sidebar.into_any_element() };
                             div().w(px(SIDEBAR_WIDTH * shown)).h_full().flex_none().overflow_hidden().child(div().w(px(SIDEBAR_WIDTH)).h_full().ml(px(-SIDEBAR_WIDTH * (1. - shown))).child(sidebar)).into_any_element()
                         })
                     })

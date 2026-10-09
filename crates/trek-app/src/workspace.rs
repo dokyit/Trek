@@ -1026,6 +1026,12 @@ pub struct Workspace {
     usage_inflight: HashSet<String>,
     /// When each agent's usage was last read (unix ms), by `AgentId::key()`.
     usage_fetched: HashMap<String, i64>,
+    /// Agents whose commands and models were read this run (or are being read), with their
+    /// usage or without: one the Usage card doesn't show isn't read again on its cadence.
+    commands_read: HashSet<String>,
+    /// Agents whose status was read without their usage (not on the Usage card): their rows
+    /// show what was kept from before, if anything, until their usage is read.
+    usage_unread: HashSet<String>,
     /// What each agent last said of its plan and limits, kept across launches: the Usage card
     /// shows it, with when it was read, until the agent is read again.
     pub usage_cached: HashMap<String, usage::Snapshot>,
@@ -1358,6 +1364,8 @@ impl Workspace {
             usage_fetch: None,
             usage_inflight: HashSet::new(),
             usage_fetched: HashMap::new(),
+            commands_read: HashSet::new(),
+            usage_unread: HashSet::new(),
             usage_cached: usage::load_snapshots(),
             usage_today: HashMap::new(),
             usage_today_reading: false,
@@ -1587,7 +1595,8 @@ impl Workspace {
     }
 
     /// Learn Claude Code's commands and skills in `cwd` (a thread window's folder; the status
-    /// check covers the main window's), unless they're known. Sends no prompt.
+    /// check covers the main window's), unless they're known. Sends no prompt, and doesn't ask
+    /// for the plan's usage.
     fn fetch_claude_commands(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         let key = (AgentId::ClaudeCode.key(), cwd);
         let ready = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
@@ -1597,7 +1606,7 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         let dir = key.1.clone();
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(trek_agents::claude_status(&dir).await).await;
+            let _ = tx.send(trek_agents::claude_commands(&dir).await).await;
         });
         let task = cx.spawn(async move |this, cx| {
             let Ok(Ok(st)) = rx.recv().await else { return };
@@ -2644,6 +2653,26 @@ impl Workspace {
         self.set_prefs_in(scope, p, cx);
     }
 
+    /// Thread `id`'s session said which effort levels `model` offers (they can change with the
+    /// model: OpenCode 2's do) and the one it's on. The model's levels are those from now on; a
+    /// thread on an effort the model doesn't have takes the session's (its default, mostly).
+    fn model_efforts(&mut self, id: &str, model: &str, offered: Vec<Effort>, effort: Option<Effort>, cx: &mut Context<Self>) {
+        let Some(t) = self.thread(id) else { return };
+        let (agent, on_model, current) = (t.agent.clone(), t.model.as_deref().is_none_or(|m| crate::composer::same_model(m, model)), t.effort);
+        if let Some(Ok(info)) = self.acp_info.get_mut(&agent.key())
+            && let Some(m) = info.models.iter_mut().find(|m| crate::composer::same_model(&m.id, model))
+        {
+            m.efforts = offered.clone();
+        }
+        if on_model
+            && current != Effort::Off
+            && !offered.contains(&current)
+            && let Some(e) = effort.filter(|e| offered.contains(e))
+        {
+            self.mutate_thread(id, cx, |t| t.effort = e);
+        }
+    }
+
     /// Models for an agent: live data for local servers, catalog otherwise.
     pub fn models_for(&self, agent: &AgentId) -> Vec<ModelInfo> {
         if let AgentId::Direct(p) = agent {
@@ -3440,6 +3469,8 @@ impl Workspace {
         // The agent stopped to ask the user something.
         let mut asked = false;
         let mut commands: Option<Vec<SlashCommand>> = None;
+        // The effort levels the session's model offers, and the one it's on.
+        let mut efforts: Option<(String, Vec<Effort>, Option<Effort>)> = None;
         // Tokens the agent reported (by the model it named) and their cost, kept once the batch
         // is through.
         let mut used: Vec<(Option<String>, trek_core::TokenUsage, Option<trek_core::UsageCost>)> = vec![];
@@ -3569,6 +3600,7 @@ impl Workspace {
                     }
                     AgentEvent::LimitUsed { scope, percent, resets_at } => windows.push(limits::Window { scope, percent, resets_at }),
                     AgentEvent::Commands(c) => commands = Some(c),
+                    AgentEvent::Efforts { model, efforts: offered, effort } => efforts = Some((model, offered, effort)),
                     AgentEvent::Notice(text) => {
                         live.streaming = None;
                         live.items.push(Item::Notice { text });
@@ -3792,6 +3824,9 @@ impl Workspace {
         if let (Some(c), Some(t)) = (commands, self.thread(id)) {
             let key = (t.agent.key(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
             self.agent_commands.insert(key, c);
+        }
+        if let Some((model, offered, effort)) = efforts {
+            self.model_efforts(id, &model, offered, effort, cx);
         }
         // Before anything hands queued messages back: they wait for the reset now.
         let mut paused = hit.is_some();
@@ -5637,10 +5672,13 @@ impl Workspace {
             }
             "usage" => {
                 self.refresh_usage_now(cx);
+                // Asked for: read even when the Usage card doesn't show it.
                 if agent == devin_agent() {
                     self.refresh_devin_usage(cx);
+                } else {
+                    self.fetch_usage(agent.clone(), true, cx);
                 }
-                let Some(st) = self.agent_status.get(&agent.key()) else {
+                let Some(st) = self.usage_status(&agent.key()) else {
                     // In a thread the agent may answer it itself; a draft has no agent to ask.
                     return thread.is_none().then(|| format!("{} hasn't reported its usage yet.", agent.display_name()));
                 };

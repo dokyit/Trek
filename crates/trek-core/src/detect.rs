@@ -103,7 +103,7 @@ pub fn opencode() -> Option<PathBuf> {
     which(OPENCODE).or_else(|| which("opencode2"))
 }
 
-pub(crate) async fn version_of(path: &Path) -> Option<String> {
+pub async fn version_of(path: &Path) -> Option<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new(path)

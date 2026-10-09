@@ -3,6 +3,10 @@
 //! message, its parts inside). 2.0 copies 1.x's sessions into its own tables once, under the same
 //! ids, and leaves the old tables as they were, so a database may have both, and a session may be
 //! in both: the copy that changed last is the one read.
+//!
+//! 1.x won't open a database 2.0 created ("Database is not empty and has no session table": it
+//! only migrates one that has its `session` table), so Trek starts 1.x on `opencode-1x.db` beside
+//! it then (`db_for_1x`). Both files are read.
 
 use super::{Evidence, ImportedThread, Transcript, classify, clip, source_title, title_from, user_text};
 use crate::store::{Item, ToolStatus};
@@ -11,11 +15,62 @@ use crate::types::{Effort, ThreadSource, TokenUsage};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn db() -> Option<Connection> {
-    let path = crate::paths::home().join(".local/share/opencode/opencode.db");
+/// OpenCode's data folder (`$XDG_DATA_HOME/opencode`, as OpenCode finds it).
+fn data_dir() -> PathBuf {
+    let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+    xdg.unwrap_or_else(|| crate::paths::home().join(".local/share")).join("opencode")
+}
+
+/// The database OpenCode uses unless told otherwise.
+const MAIN_DB: &str = "opencode.db";
+/// The one Trek gives OpenCode 1.x when 2.0 has made `opencode.db` (see the top of this file).
+const DB_1X: &str = "opencode-1x.db";
+
+fn open(path: &Path) -> Option<Connection> {
+    // Opening read-only fails rather than creating a missing file.
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
+}
+
+/// OpenCode's databases that exist: the main one, then 1.x's own beside it.
+fn dbs() -> Vec<Connection> {
+    dbs_in(&data_dir())
+}
+
+fn dbs_in(dir: &Path) -> Vec<Connection> {
+    [MAIN_DB, DB_1X].iter().map(|f| dir.join(f)).filter(|p| p.is_file()).filter_map(|p| open(&p)).collect()
+}
+
+/// The database session `id` is in.
+fn db_of(id: &str) -> Option<Connection> {
+    dbs().into_iter().find(|c| tables_of(c, id).is_some())
+}
+
+/// Where OpenCode 1.x should keep its sessions, when that isn't `opencode.db`: 2.0 made that
+/// one (it has tables, none of them 1.x's `session`), or it's gone and 1.x already has its own.
+/// `None`: 1.x opens `opencode.db` as usual (it's 1.x's, or there's none yet).
+pub fn db_for_1x() -> Option<PathBuf> {
+    db_for_1x_in(&data_dir())
+}
+
+fn db_for_1x_in(dir: &Path) -> Option<PathBuf> {
+    let (main, own) = (dir.join(MAIN_DB), dir.join(DB_1X));
+    let names: Vec<String> = match main.is_file().then(|| open(&main)).flatten() {
+        Some(conn) => conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+            // Unreadable: leave it to 1.x.
+            .ok()?,
+        None => vec![],
+    };
+    if names.iter().any(|n| n == "session") {
+        None
+    } else if !names.is_empty() || own.is_file() {
+        Some(own)
+    } else {
+        None
+    }
 }
 
 /// Which of OpenCode's tables a session is read from.
@@ -67,7 +122,22 @@ fn tables_of(conn: &Connection, id: &str) -> Option<Tables> {
 
 /// Sessions updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
 pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
-    db().map(|conn| scan_conn(&conn, min_updated, held)).unwrap_or_default()
+    scan_all(&dbs(), min_updated, held)
+}
+
+/// Every database's sessions; one in both (a copied file) is read from where it changed last.
+fn scan_all(dbs: &[Connection], min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
+    let mut found: HashMap<String, ImportedThread> = HashMap::new();
+    for conn in dbs {
+        for t in scan_conn(conn, min_updated, held) {
+            if found.get(&t.native_id).is_none_or(|had| t.updated_at > had.updated_at) {
+                found.insert(t.native_id.clone(), t);
+            }
+        }
+    }
+    let mut out: Vec<ImportedThread> = found.into_values().collect();
+    out.sort_by(|a, b| a.native_id.cmp(&b.native_id));
+    out
 }
 
 struct Row {
@@ -130,13 +200,17 @@ fn scan_rows(conn: &Connection, tables: Tables, min_updated: i64, held: &str) ->
             "SELECT 1 FROM session_message m WHERE m.session_id = s.id AND m.type = 'assistant'",
         ),
     };
+    // OpenCode 2's run leaves the session's agent unset; its other clients name one.
+    let run_mark = tables == Tables::V2 && columns.contains("agent") && columns.contains("version");
     let sql = format!(
         "SELECT s.id, s.directory, s.title, {model}, s.time_created, s.time_updated,
                 COALESCE(s.summary_additions, 0), COALESCE(s.summary_deletions, 0), s.parent_id IS NOT NULL,
-                (SELECT COUNT(*) FROM ({user})), EXISTS ({assistant}), {permission}
+                (SELECT COUNT(*) FROM ({user})), EXISTS ({assistant}), {permission}, {agent} IS NULL, {version}
          FROM {session} s WHERE s.time_archived IS NULL AND (s.time_updated >= ?1 OR s.id IN (SELECT value FROM json_each(?2)))",
         model = col("model"),
         permission = col("permission"),
+        agent = col("agent"),
+        version = col("version"),
         session = tables.session(),
     );
     let Ok(mut st) = conn.prepare(&sql) else { return vec![] };
@@ -155,7 +229,8 @@ fn scan_rows(conn: &Connection, tables: Tables, min_updated: i64, held: &str) ->
             child: r.get(8)?,
             prompts: r.get::<_, i64>(9)? as usize,
             replied: r.get(10)?,
-            cli_run: r.get::<_, Option<String>>(11)?.as_deref().is_some_and(is_cli_run),
+            cli_run: r.get::<_, Option<String>>(11)?.as_deref().is_some_and(is_cli_run)
+                || (run_mark && r.get(12)? && !r.get::<_, bool>(8)? && r.get::<_, Option<String>>(13)?.as_deref().is_some_and(made_by_2)),
         })
     });
     match rows {
@@ -221,22 +296,35 @@ fn session_model(raw: &str) -> (Option<String>, Option<Effort>) {
 
 /// `opencode run` creates its session with the interactive tools (questions, plan mode) denied,
 /// as nobody is there to answer them. OpenCode's own apps don't. (OpenCode 2's run records no
-/// such rules: its runs can't be told from conversations.)
+/// such rules; it's the one client that starts a session without naming its agent, unless told
+/// one with `--agent`.)
 fn is_cli_run(permission: &str) -> bool {
     let Ok(Value::Array(rules)) = serde_json::from_str::<Value>(permission) else { return false };
     rules.iter().any(|r| r["permission"] == "question" && r["action"] == "deny")
 }
 
+/// A session OpenCode 2 started: its version is 2's (`2.0.26`, or a preview build's
+/// `0.0.0-beta-…`), not that of the 1.x it was copied from.
+fn made_by_2(version: &str) -> bool {
+    version.starts_with("0.0.0-") || version.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 2)
+}
+
 /// Every session OpenCode has; `None` when its database can't be read.
 pub(crate) fn session_ids() -> Option<HashSet<String>> {
-    let conn = db()?;
+    let dir = data_dir();
     let mut ids = HashSet::new();
-    for t in tables(&conn) {
-        let mut st = conn.prepare(&format!("SELECT id FROM {}", t.session())).ok()?;
-        let found: HashSet<String> = st.query_map([], |r| r.get::<_, String>(0)).ok()?.collect::<rusqlite::Result<_>>().ok()?;
-        ids.extend(found);
+    let mut any = false;
+    for path in [MAIN_DB, DB_1X].iter().map(|f| dir.join(f)).filter(|p| p.is_file()) {
+        // One that's there and can't be read says nothing about which sessions are gone.
+        let conn = open(&path)?;
+        for t in tables(&conn) {
+            let mut st = conn.prepare(&format!("SELECT id FROM {}", t.session())).ok()?;
+            let found: HashSet<String> = st.query_map([], |r| r.get::<_, String>(0)).ok()?.collect::<rusqlite::Result<_>>().ok()?;
+            ids.extend(found);
+        }
+        any = true;
     }
-    Some(ids)
+    any.then_some(ids)
 }
 
 /// Text of the session's first user message (what the user typed, not attached file contents).
@@ -267,7 +355,7 @@ pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
 /// `usage`, with what OpenCode says each step cost in dollars (`0` for models it has no price
 /// for, or that a subscription covers).
 pub fn usage_priced(id: &str, from: i64, to: i64) -> Vec<(i64, Option<String>, TokenUsage, Option<f64>)> {
-    db().map(|c| usage_conn(&c, id, from, to)).unwrap_or_default()
+    db_of(id).map(|c| usage_conn(&c, id, from, to)).unwrap_or_default()
 }
 
 fn usage_conn(conn: &Connection, id: &str, from: i64, to: i64) -> Vec<(i64, Option<String>, TokenUsage, Option<f64>)> {
@@ -306,7 +394,7 @@ fn usage_conn(conn: &Connection, id: &str, from: i64, to: i64) -> Vec<(i64, Opti
 }
 
 pub fn load(id: &str) -> anyhow::Result<Vec<Item>> {
-    let conn = db().ok_or_else(|| anyhow::anyhow!("opencode db not found"))?;
+    let conn = db_of(id).or_else(|| dbs().into_iter().next()).ok_or_else(|| anyhow::anyhow!("opencode db not found"))?;
     load_conn(&conn, id)
 }
 
@@ -660,8 +748,8 @@ mod tests {
     }
 
     /// Recorded with OpenCode 1.18.35 and then 2.0.26 on one database: a 1.x session (which 2.0
-    /// copied into its own tables on first start), a 2.0 session with a shell call, and a 2.0
-    /// session whose model refused it.
+    /// copied into its own tables on first start), and two `opencode2 run`s: one with a shell
+    /// call, one whose model refused it. And a session a 2.0 preview build opened over ACP.
     fn recorded() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         // Its projects aren't part of it.
@@ -673,6 +761,7 @@ mod tests {
     const MIGRATED: &str = "ses_edfc986b6ffe4mZ9ccSLf9DwLP";
     const V2: &str = "ses_edfcbb35fffervIIJpuPw7hX2w";
     const REFUSED: &str = "ses_edfcbd056ffeGuaDEh9Roa4ew5";
+    const ACP: &str = "ses_edee57470ffeJ8L7m282BCBa0v";
 
     #[test]
     fn opencode_2_sessions_import_beside_1x_ones() {
@@ -680,15 +769,17 @@ mod tests {
         assert_eq!(tables(&conn), vec![Tables::V1, Tables::V2]);
         let mut found: Vec<_> = scan_conn(&conn, 0, &HashSet::new()).into_iter().map(|t| (t.native_id, t.title, t.model, t.skip)).collect();
         found.sort();
-        let row = |id: &str, title: &str, model: Option<&str>| (id.to_string(), title.to_string(), model.map(String::from), None);
+        let row = |id: &str, title: &str, model: Option<&str>, skip| (id.to_string(), title.to_string(), model.map(String::from), skip);
         assert_eq!(
             found,
             vec![
+                // Opened over ACP, untitled: named by what was asked.
+                row(ACP, "Reply with the single word: pong", Some("opencode/big-pickle"), None),
                 // Once, though both versions' tables have it.
-                row(MIGRATED, "Counting directory entries with ls", Some("opencode/mimo-v2.6-flash-free")),
-                row(V2, "Running ls and counting entries", Some("opencode/mimo-v2.6-flash-free")),
-                // Untitled: named by what was asked.
-                row(REFUSED, "Use your bash tool to run ls, then reply with just the…", None),
+                row(MIGRATED, "Counting directory entries with ls", Some("opencode/mimo-v2.6-flash-free"), None),
+                // `opencode2 run`s: no agent named.
+                row(V2, "Running ls and counting entries", Some("opencode/mimo-v2.6-flash-free"), Some(Skip::OneShotRun)),
+                row(REFUSED, "Use your bash tool to run ls, then reply with just the…", None, Some(Skip::OneShotRun)),
             ]
         );
         // Outside the window unless Trek already has it.
@@ -741,7 +832,7 @@ mod tests {
         let v2_only = recorded();
         v2_only.execute_batch("DROP TABLE part; DROP TABLE message; DROP TABLE session;").unwrap();
         assert_eq!(tables(&v2_only), vec![Tables::V2]);
-        assert_eq!(scan_conn(&v2_only, 0, &HashSet::new()).len(), 3);
+        assert_eq!(scan_conn(&v2_only, 0, &HashSet::new()).len(), 4);
         assert_eq!(tables(&db()), vec![Tables::V1]);
     }
 
@@ -809,5 +900,83 @@ mod tests {
         assert_eq!(turn.iter().map(|(_, _, t, _)| t.input).sum::<u64>(), 547_873 + 841 + 100 + 365);
         // Each step's own cost, as OpenCode priced it.
         assert_eq!(turn[0].3, Some(0.547873));
+    }
+
+    #[test]
+    fn an_opencode_2_run_is_told_apart_only_when_its_own() {
+        let conn = recorded();
+        let skip = |conn: &Connection, id: &str| scan_conn(conn, 0, &HashSet::new()).into_iter().find(|t| t.native_id == id).unwrap().skip;
+        // Continued with a second message: a conversation after all.
+        let next = json!({ "time": { "created": 1791541700000i64 }, "text": "and the hidden ones?" });
+        conn.execute("INSERT INTO session_message VALUES ('msg_more', ?1, 'user', 30, 1791541700000, 1791541700000, ?2)", rusqlite::params![V2, next.to_string()]).unwrap();
+        assert_eq!(skip(&conn, V2), None);
+        // Started with `--agent`, it names one like any other client.
+        conn.execute("UPDATE session_v2 SET agent = 'build' WHERE id = ?1", [REFUSED]).unwrap();
+        assert_eq!(skip(&conn, REFUSED), None);
+        // A 1.x session 2.0 copied keeps 1.x's version, whatever agent it had: 1.x's own marks decide.
+        conn.execute("UPDATE session_v2 SET agent = NULL, time_updated = time_updated + 1 WHERE id = ?1", [MIGRATED]).unwrap();
+        assert_eq!(skip(&conn, MIGRATED), None);
+        assert!(made_by_2("2.0.26") && made_by_2("0.0.0-beta-19296") && made_by_2("10.1.0"));
+        assert!(!made_by_2("1.18.35") && !made_by_2("0.15.31") && !made_by_2(""));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trek-opencode-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn opencode_1x_gets_a_database_of_its_own_beside_2s() {
+        let dir = temp_dir("db-1x");
+        let own = dir.join(DB_1X);
+        // Nothing yet, or 1.x's own (2.0 may have added its tables to it since): 1.x opens it.
+        assert_eq!(db_for_1x_in(&dir), None);
+        Connection::open(dir.join(MAIN_DB)).unwrap().execute_batch("CREATE TABLE session (id TEXT); CREATE TABLE session_v2 (id TEXT);").unwrap();
+        assert_eq!(db_for_1x_in(&dir), None);
+        // Made by 2.0: 1.x would refuse it.
+        std::fs::remove_file(dir.join(MAIN_DB)).unwrap();
+        Connection::open(dir.join(MAIN_DB)).unwrap().execute_batch("CREATE TABLE migration (id TEXT); CREATE TABLE session_v2 (id TEXT);").unwrap();
+        assert_eq!(db_for_1x_in(&dir), Some(own.clone()));
+        // And once 1.x has its own, it stays there while 2.0's is away.
+        std::fs::rename(dir.join(MAIN_DB), dir.join("opencode.db.bak")).unwrap();
+        assert_eq!(db_for_1x_in(&dir), None);
+        Connection::open(&own).unwrap().execute_batch("CREATE TABLE session (id TEXT);").unwrap();
+        assert_eq!(db_for_1x_in(&dir), Some(own));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_databases_are_read() {
+        let dir = temp_dir("both");
+        // 2.0's, as recorded, and 1.x's own beside it.
+        let main = Connection::open(dir.join(MAIN_DB)).unwrap();
+        main.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        main.execute_batch(include_str!("../../fixtures/opencode-v1-and-v2.sql")).unwrap();
+        main.execute_batch("DROP TABLE part; DROP TABLE message; DROP TABLE session;").unwrap();
+        drop(main);
+        let own = Connection::open(dir.join(DB_1X)).unwrap();
+        own.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL, model TEXT, permission TEXT,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER, summary_additions INTEGER, summary_deletions INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        session(&own, "ses_1x", "/Users/me/app", "Fix GitHub connector", None);
+        ask(&own, "ses_1x", "m1", "my github connector keeps failing", 10);
+        drop(own);
+        let dbs = dbs_in(&dir);
+        assert_eq!(dbs.len(), 2);
+        let ids: Vec<String> = scan_all(&dbs, 0, &HashSet::new()).into_iter().map(|t| t.native_id).collect();
+        let mut want = ["ses_1x", MIGRATED, ACP, V2, REFUSED].map(String::from).to_vec();
+        want.sort();
+        assert_eq!(ids, want);
+        // Each session is read from the file that has it.
+        let of = |id: &str| dbs.iter().position(|c| tables_of(c, id).is_some());
+        assert_eq!((of("ses_1x"), of(V2), of("ses_none")), (Some(1), Some(0), None));
+        assert!(matches!(&load_conn(&dbs[1], "ses_1x").unwrap()[..], [Item::User { .. }]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -89,6 +89,16 @@ impl AgentStatus {
 
 /// Status of the user's Claude Code login. Sends no prompt.
 pub async fn claude_status(cwd: &Path) -> Result<AgentStatus> {
+    claude_read(cwd, true).await
+}
+
+/// Claude Code's account, commands and models in `cwd`, without its plan's usage (no
+/// `get_usage`): for when the Usage card doesn't show it. Sends no prompt.
+pub async fn claude_commands(cwd: &Path) -> Result<AgentStatus> {
+    claude_read(cwd, false).await
+}
+
+async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
     let bin = detect::which("claude").context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
     // In a group of its own: the MCP servers it starts go with it.
     let mut command = tokio::process::Command::new(bin);
@@ -118,8 +128,8 @@ pub async fn claude_status(cwd: &Path) -> Result<AgentStatus> {
         s
     });
 
-    let wanted = [("i1", "initialize"), ("u1", "get_usage"), ("c1", "get_context_usage")];
-    for (id, subtype) in wanted {
+    let wanted: Vec<(&str, &str)> = [("i1", "initialize"), ("u1", "get_usage"), ("c1", "get_context_usage")].into_iter().filter(|(id, _)| with_usage || *id != "u1").collect();
+    for &(id, subtype) in &wanted {
         let msg = json!({ "type": "control_request", "request_id": id, "request": { "subtype": subtype } });
         let mut s = serde_json::to_string(&msg)?;
         s.push('\n');
@@ -303,6 +313,16 @@ fn claude_limits(usage: &Value) -> Vec<UsageLimit> {
 
 /// Status of the user's Codex login. Sends no prompt.
 pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
+    codex_read(cwd, true).await
+}
+
+/// Codex's account, skills and models in `cwd`, without its plan's usage (no
+/// `account/rateLimits/read`): for when the Usage card doesn't show it. Sends no prompt.
+pub async fn codex_commands(cwd: &Path) -> Result<AgentStatus> {
+    codex_read(cwd, false).await
+}
+
+async fn codex_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, _) =
         tokio::time::timeout(TIMEOUT, start_app_server(cwd, &[], &mut backlog)).await.context("codex app-server timed out")??;
@@ -316,7 +336,7 @@ pub async fn codex_status(cwd: &Path) -> Result<AgentStatus> {
         }
         Err(e) => status.add_error(format!("account: {e:#}")),
     }
-    if status.logged_in {
+    if with_usage && status.logged_in {
         match call(&mut rpc, &mut lines, &mut backlog, deadline, "account/rateLimits/read", Value::Null).await {
             Ok(r) => {
                 status.limits = codex_limits(&r);

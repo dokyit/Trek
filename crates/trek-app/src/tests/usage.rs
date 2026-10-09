@@ -1,6 +1,7 @@
 //! The sidebar's Usage card: up to three providers, picked on the card or in Settings (a fourth
 //! is refused until one is unchecked), each agent's usage read on its own off the main thread
-//! and again after a turn on it, and what was read kept for the next launch.
+//! and again after a turn on it, only while the card shows it (the others' commands and models
+//! are read without it), and what was read kept for the next launch.
 
 use super::harness::{Trek, mock, open, run};
 use crate::workspace::Route;
@@ -8,9 +9,10 @@ use crate::workspace::SettingsPage;
 use gpui_kit::TestAppContext;
 use std::cell::RefCell;
 use std::rc::Rc;
-use trek_agents::{AgentStatus, UsageLimit};
+use trek_agents::{AgentStatus, CommandKind, SlashCommand, UsageLimit};
 use trek_core::AgentId;
 use trek_core::RunState;
+use trek_core::catalog::ModelInfo;
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::settings::Settings;
 
@@ -112,7 +114,9 @@ fn each_agent_is_read_on_its_own_off_the_main_thread_and_again_after_a_turn() {
         let asked: Rc<RefCell<Vec<(AgentId, Answer)>>> = Rc::default();
         let calls = asked.clone();
         trek.update(cx, |ws, _| {
-            ws.usage_fetch = Some(Rc::new(move |agent, _| {
+            // The mock agent's usage is on the card too, so it's read after its turn.
+            ws.settings.usage.shown = Some(vec![AgentId::ClaudeCode.key(), AgentId::Codex.key(), mock().key()]);
+            ws.usage_fetch = Some(Rc::new(move |agent, _, _| {
                 let (tx, rx) = async_channel::bounded(1);
                 calls.borrow_mut().push((agent.clone(), tx));
                 rx
@@ -164,7 +168,7 @@ fn what_was_read_is_kept_and_shown_at_the_next_launch_until_read_again() {
         install(&trek, cx);
         let now = trek.read(cx, |ws, _| ws.now());
         trek.update(cx, |ws, _| {
-            ws.usage_fetch = Some(Rc::new(move |agent, _| {
+            ws.usage_fetch = Some(Rc::new(move |agent, _, _| {
                 let (tx, rx) = async_channel::bounded(1);
                 // The session window reset half an hour ago; the weekly one is a day off.
                 let mut st = plan("Claude Max", 80., Some(now - 1_800_000));
@@ -192,5 +196,134 @@ fn what_was_read_is_kept_and_shown_at_the_next_launch_until_read_again() {
         trek.click(cx, "usage");
         trek.render(cx);
         assert!(trek.visible(cx, row(&AgentId::ClaudeCode)));
+    });
+}
+
+/// What a test agent says when asked: its commands and models always, its limits only when its
+/// usage is asked for.
+fn report(agent: &AgentId, with_usage: bool) -> AgentStatus {
+    let key = agent.key();
+    let mut st = if with_usage { plan("Live plan", 12., None) } else { AgentStatus { logged_in: true, ..Default::default() } };
+    st.commands = vec![SlashCommand { name: format!("{key}-skill"), description: String::new(), kind: CommandKind::Skill }];
+    st.models = vec![ModelInfo { id: format!("{key}-model"), name: format!("{key} model"), efforts: vec![], tier: 0, fast: None }];
+    st
+}
+
+type Asked = Rc<RefCell<Vec<(AgentId, bool, async_channel::Sender<Result<AgentStatus, String>>)>>>;
+
+/// Every read asked for, with or without the usage, answered when the test says.
+fn record(trek: &Trek, cx: &mut TestAppContext) -> Asked {
+    let asked: Asked = Rc::default();
+    let calls = asked.clone();
+    trek.update(cx, |ws, _| {
+        ws.usage_fetch = Some(Rc::new(move |agent, _, with_usage| {
+            let (tx, rx) = async_channel::bounded(1);
+            calls.borrow_mut().push((agent.clone(), with_usage, tx));
+            rx
+        }))
+    });
+    asked
+}
+
+/// The reads of `agent` so far: with its usage, and in all.
+fn reads(asked: &Asked, agent: &AgentId) -> (usize, usize) {
+    let all: Vec<bool> = asked.borrow().iter().filter(|(a, ..)| a == agent).map(|(_, u, _)| *u).collect();
+    (all.iter().filter(|u| **u).count(), all.len())
+}
+
+/// Answer every read not answered yet.
+fn answer_all(asked: &Asked, cx: &mut TestAppContext) {
+    for (agent, with_usage, tx) in asked.borrow().iter() {
+        let _ = tx.try_send(Ok(report(agent, *with_usage)));
+    }
+    cx.run_until_parked();
+}
+
+#[test]
+fn only_the_providers_on_the_card_have_their_usage_read_the_others_commands_still_load() {
+    run(async |cx| {
+        let trek = open(cx);
+        install(&trek, cx);
+        let now = trek.read(cx, |ws, _| ws.now());
+        // Only Codex is on the card. Claude Code said its plan's usage at the last launch.
+        trek.update(cx, |ws, _| {
+            ws.settings.usage.shown = Some(vec![AgentId::Codex.key()]);
+            let kept = UsageLimit { label: "5-hour limit".into(), percent: 55., resets_at: Some(now + 3_600_000), window: "5h".into() };
+            ws.usage_cached.insert(AgentId::ClaudeCode.key(), crate::workspace::usage::Snapshot { read_at: now - 3_600_000, plan: Some("Claude Max".into()), limits: vec![kept], note: None });
+        });
+        let asked = record(&trek, cx);
+        trek.update(cx, |ws, cx| ws.refresh_usage(cx));
+        answer_all(&asked, cx);
+        assert_eq!(reads(&asked, &AgentId::Codex), (1, 1), "on the card: its usage is read");
+        assert_eq!(reads(&asked, &AgentId::ClaudeCode), (0, 1), "off it: read without its usage");
+        assert_eq!(reads(&asked, &mock()), (0, 1));
+        // Claude Code's commands and models load all the same; nothing of its usage is taken in.
+        let claude = AgentId::ClaudeCode;
+        assert!(trek.read(cx, |ws, _| ws.slash_commands(&crate::workspace::Scope::Main, &claude).iter().any(|c| c.name == "claude-code-skill")));
+        assert!(trek.read(cx, |ws, _| ws.models_for(&claude).iter().any(|m| m.id == "claude-code-model")));
+        assert!(trek.read(cx, |ws, _| ws.usage_status(&claude.key()).is_none() && ws.agent_status[&claude.key()].logged_in));
+        let kept = crate::workspace::usage::load_snapshots().get(&claude.key()).map(|s| (s.plan.clone(), s.limits.len()));
+        assert_eq!(kept, Some((Some("Claude Max".into()), 1)), "what the last launch kept stays");
+
+        // Later, on the card's cadence, after a turn, and when asked to read now: Codex again;
+        // Claude Code and the mock agent not at all.
+        trek.update(cx, |ws, _| ws.clock = crate::workspace::Clock::new(|| trek_core::store::now_ms() + 60_000));
+        trek.update(cx, |ws, cx| ws.refresh_usage(cx));
+        answer_all(&asked, cx);
+        let id = trek.send(cx, "explain the project");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        answer_all(&asked, cx);
+        trek.update(cx, |ws, cx| ws.refresh_usage_now(cx));
+        answer_all(&asked, cx);
+        assert_eq!(reads(&asked, &AgentId::Codex), (3, 3), "on the cadence, then asked for now");
+        assert_eq!(reads(&asked, &claude), (0, 1));
+        assert_eq!(reads(&asked, &mock()), (0, 1), "its turn didn't read its usage");
+        // Its commands changed (a skill added): read again, still without its usage.
+        trek.update(cx, |ws, cx| ws.refresh_commands(cx));
+        answer_all(&asked, cx);
+        assert_eq!(reads(&asked, &claude), (0, 2));
+
+        // Claude Code goes on the card: read right away, what was kept shown meanwhile.
+        trek.click(cx, "usage");
+        trek.click(cx, "usage-choose");
+        trek.click(cx, pick(&claude));
+        assert_eq!(reads(&asked, &claude), (1, 3));
+        let row_of = |trek: &Trek, cx: &TestAppContext| trek.read(cx, |ws, _| ws.usage_rows().into_iter().find(|r| r.agent == AgentId::ClaudeCode)).expect("a row");
+        let before = row_of(&trek, cx);
+        assert_eq!((before.as_of, before.plan.as_deref(), before.limits[0].percent), (Some(now - 3_600_000), Some("Claude Max"), 55.));
+        trek.click(cx, "usage-choose");
+        trek.render(cx);
+        assert!(trek.visible(cx, row(&claude)));
+        answer_all(&asked, cx);
+        let after = row_of(&trek, cx);
+        assert_eq!((after.as_of, after.plan.as_deref(), after.limits[0].percent), (None, Some("Live plan"), 12.));
+        // And after its turns from now on (the mock agent's, put on the card too).
+        trek.click(cx, "usage");
+        assert!(trek.update(cx, |ws, cx| ws.toggle_usage_shown(&mock(), cx)));
+        answer_all(&asked, cx);
+        assert_eq!(reads(&asked, &mock()), (1, 3), "its commands were read twice before");
+        trek.update(cx, |ws, _| ws.clock = crate::workspace::Clock::new(|| trek_core::store::now_ms() + 120_000));
+        let id = trek.send(cx, "and again");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        answer_all(&asked, cx);
+        assert_eq!(reads(&asked, &mock()), (2, 4));
+    });
+}
+
+#[test]
+fn picked_automatically_only_what_the_card_would_show_has_its_usage_read() {
+    run(async |cx| {
+        let trek = open(cx);
+        install(&trek, cx);
+        let asked = record(&trek, cx);
+        trek.update(cx, |ws, cx| ws.refresh_usage(cx));
+        answer_all(&asked, cx);
+        // Claude Code and Codex report a plan's usage; the test's own agents have none to show.
+        assert_eq!(shown(&trek, cx), [AgentId::ClaudeCode, AgentId::Codex]);
+        assert_eq!(reads(&asked, &AgentId::ClaudeCode), (1, 1));
+        assert_eq!(reads(&asked, &AgentId::Codex), (1, 1));
+        assert_eq!(reads(&asked, &mock()), (0, 1));
+        assert!(trek.read(cx, |ws, _| ws.slash_commands(&crate::workspace::Scope::Main, &mock()).iter().any(|c| c.name == format!("{}-skill", mock().key()))));
+        assert_eq!(shown(&trek, cx), [AgentId::ClaudeCode, AgentId::Codex], "read without its usage, the mock agent has none to show");
     });
 }

@@ -165,3 +165,41 @@ fn a_narrow_window_makes_room_for_the_tools_panel() {
     assert!(!overlay_panel(760. - 8. - 16.), "the smallest window fits chat and panel once the sidebar steps aside");
     assert!(overlay_panel(760. - SIDEBAR_WIDTH - 16.));
 }
+
+/// OpenCode 2's effort levels are each model's own. Once a session says which its model offers,
+/// the effort menu shows those, and a thread on a level the model doesn't have moves to the one
+/// the session is on (the model's default); a level it has stays.
+#[test]
+fn a_models_own_efforts_replace_the_shared_ones() {
+    use trek_agents::{AcpInfo, AgentEvent};
+    use trek_core::catalog::ModelInfo;
+    use trek_core::{AgentId, Effort, HandHolding};
+    run(async |cx| {
+        let trek = open(cx);
+        let shared = vec![Effort::Low, Effort::Medium, Effort::High];
+        let id = trek.update(cx, |ws, cx| {
+            let model = |id: &str| ModelInfo { id: id.into(), name: id.into(), efforts: shared.clone(), tier: 0, fast: None };
+            ws.acp_info.insert("opencode".into(), Ok(AcpInfo { models: vec![model("opencode/a"), model("opencode/b")], ..Default::default() }));
+            let t = ws.store.create_thread(Some(&trek.project), AgentId::OpenCode, Some("opencode/b".into()), Effort::Low, HandHolding::Auto).unwrap();
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        });
+        let said = |effort| AgentEvent::Efforts { model: "opencode/b".into(), efforts: vec![Effort::Medium, Effort::High], effort };
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![said(Some(Effort::Medium))], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().effort), Effort::Medium, "B has no Low: its default");
+        let efforts = |cx: &mut gpui_kit::TestAppContext, m: &str| trek.read(cx, |ws, _| ws.models_for(&AgentId::OpenCode).into_iter().find(|i| i.id == m).unwrap().efforts);
+        assert_eq!(efforts(cx, "opencode/b"), vec![Effort::Medium, Effort::High]);
+        assert_eq!(efforts(cx, "opencode/a"), shared, "another model's are as they were");
+        trek.render(cx);
+        trek.click(cx, "model-pill");
+        trek.render(cx);
+        trek.click(cx, "mm-effort");
+        trek.render(cx);
+        assert!(trek.visible(cx, "eff-medium") && trek.visible(cx, "eff-high") && !trek.visible(cx, "eff-low"));
+        // Picked from those, it stays whatever level the session reports next.
+        trek.click(cx, "eff-high");
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![said(Some(Effort::Medium))], cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().effort), Effort::High);
+    });
+}
