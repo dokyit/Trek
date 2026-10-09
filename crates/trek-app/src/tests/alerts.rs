@@ -5,7 +5,6 @@
 use super::harness::{Trek, open_with, run};
 use crate::system::{DOCK_BADGE, SOUNDS};
 use crate::workspace::{Route, WorkspaceEvent};
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::{SystemNotificationResponse, TestAppContext, VisualTestContext};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -61,7 +60,7 @@ fn banners(cx: &TestAppContext) -> Vec<(String, String)> {
 }
 
 fn toasts(trek: &Trek, cx: &mut TestAppContext) -> usize {
-    trek.window(cx, |window, cx| window.notifications(cx).len())
+    trek.window(cx, |window, cx| crate::toast::count(window, cx))
 }
 
 /// Let the toast's entrance (real time, 400 ms) finish.

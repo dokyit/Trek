@@ -1,0 +1,49 @@
+# media/mac/parity-motion.cmds — Trek's animations, filmed slowed down for porting: the sidebar
+# (⌘B) out and back, the Agents/Editor cross-fade both ways, the palette in and out, a thread
+# arriving in the sidebar, Basecamp's bars growing in. Offscreen frames come slower than the
+# screen's, so run it with the springs slowed 8 times (the clips play at 1/8 speed):
+#   TREK_SLOW_MOTION=8 FPS=30 script/capture.sh mac/parity-motion
+# `@REPO@` is the repository's root (script/lib/shot.sh), opened as a real project.
+
+pace 0
+theme night
+glass off
+project @REPO@
+send tools
+wait idle 30000
+
+record m01-sidebar 8000 30
+key cmd-b
+wait 4000
+key cmd-b
+record wait
+
+record m02-mode-switch 9000 30
+editor on
+wait 4500
+editor off
+record wait
+
+record m03-palette 7000 30
+key cmd-k
+wait 3500
+key escape
+record wait
+
+record m04-new-thread-arrives 6000 30
+route draft
+send tools
+record wait
+wait idle 30000
+
+# Basecamp's bars grow in each time a range is first drawn.
+route basecamp
+range week
+wait 1000
+record m05-basecamp-bars 7000 30
+range today
+wait 3000
+range all
+record wait
+
+quit

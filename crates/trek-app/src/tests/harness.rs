@@ -155,6 +155,7 @@ pub fn open_with(cx: &mut TestAppContext, tweak: impl FnOnce(&mut Settings)) -> 
 pub fn launch(cx: &mut TestAppContext, store: Store, settings: Settings) -> (Entity<Workspace>, Entity<TrekWindow>, AnyWindowHandle) {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        crate::toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&crate::assets::theme_json());
         crate::apply_theme(ThemeChoice::Night, None, cx);
         cx.bind_keys(crate::key_bindings());

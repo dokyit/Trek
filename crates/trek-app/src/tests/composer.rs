@@ -136,20 +136,20 @@ fn command_e_settles_with_an_undo() {
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some())));
         assert_eq!(*seen.borrow(), [("Settled “Add a note”".to_string(), true)]);
         // The toast is on screen, with its Undo.
-        assert_eq!(trek.window(cx, |window, cx| { use gpui_kit::component::WindowExt as _; window.notifications(cx).len() }), 1);
+        assert_eq!(trek.window(cx, |window, cx| crate::toast::count(window, cx)), 1);
         std::thread::sleep(std::time::Duration::from_millis(450));
         trek.render(cx);
         trek.click(cx, "undo");
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_none())), "Undo brings it back");
         // Another one, left alone: it goes once its time is up.
         trek.update(cx, |ws, cx| ws.settle(&id, cx));
-        assert!(trek.window(cx, |window, cx| { use gpui_kit::component::WindowExt as _; window.notifications(cx).len() }) >= 1);
+        assert!(trek.window(cx, |window, cx| crate::toast::count(window, cx)) >= 1);
         cx.executor().advance_clock(std::time::Duration::from_secs(12));
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(300));
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        assert_eq!(trek.window(cx, |window, cx| { use gpui_kit::component::WindowExt as _; window.notifications(cx).len() }), 0, "gone after its time");
+        assert_eq!(trek.window(cx, |window, cx| crate::toast::count(window, cx)), 0, "gone after its time");
     });
 }
 

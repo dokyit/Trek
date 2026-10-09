@@ -5367,6 +5367,8 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
             let _ = tx.send(trek_core::detect::detect_all().await).await;
+            // OpenCode 1.x opens the history OpenCode 2 started, in a terminal too.
+            trek_agents::share_opencode_history().await;
         });
         let task = cx.spawn(async move |this, cx| {
             if let Ok(agents) = rx.recv().await {

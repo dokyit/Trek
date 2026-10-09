@@ -199,7 +199,7 @@ impl Render for ThreadWindow {
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
-        crate::root::place_toasts(self.composer.read(cx).height().max(px(120.)) + px(16.), cx);
+        crate::root::place_toasts(self.composer.read(cx).height().max(px(120.)) + px(16.), window, cx);
         if self.workspace.read(cx).title_reveal(&self.id).is_some() {
             window.request_animation_frame();
         }

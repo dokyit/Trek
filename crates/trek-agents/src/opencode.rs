@@ -13,6 +13,7 @@
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use trek_core::import::opencode::share;
 
 /// The permissions Trek's access levels gate.
 const GATED: [&str; 3] = ["edit", "bash", "webfetch"];
@@ -343,22 +344,216 @@ async fn is_1x(bin: &Path, stamp: String) -> bool {
     v
 }
 
-/// Environment for the OpenCode at `bin`: 1.x keeps its sessions in a database of its own when
-/// OpenCode 2 made `opencode.db` (see `trek_core::import::opencode`), which Trek reads as well.
-/// An `OPENCODE_DB` the user set stands.
-pub(crate) async fn db_env(bin: &Path, stamp: String) -> Vec<(String, String)> {
-    if std::env::var_os("OPENCODE_DB").is_some() || !is_1x(bin, stamp).await {
-        return vec![];
+/// OpenCode 2's command where it's installed beside 1.x (its preview package's name).
+const OPENCODE_2: &str = "opencode2";
+
+/// Another OpenCode to resume session `id` with than the one at `bin`: 1.x can't open a session
+/// only OpenCode 2 has, so it's resumed with OpenCode 2 when that's installed beside it.
+pub(crate) async fn bin_for(bin: &Path, id: &str) -> Option<PathBuf> {
+    let id = id.to_string();
+    if !is_1x(bin, crate::acp::stamp(bin)).await || !tokio::task::spawn_blocking(move || trek_core::import::opencode::only_2_opens(&id)).await.unwrap_or(false) {
+        return None;
     }
-    trek_core::import::opencode::db_for_1x().map(|db| ("OPENCODE_DB".to_string(), db.display().to_string())).into_iter().collect()
+    let other = trek_core::detect::which(OPENCODE_2)?;
+    (!is_1x(&other, crate::acp::stamp(&other)).await).then_some(other)
+}
+
+/// How Trek starts OpenCode 1.x on the user's history.
+#[derive(Default)]
+pub(crate) struct DbEnv {
+    pub env: Vec<(String, String)>,
+    /// What the session should tell the user about it.
+    pub notice: Option<String>,
+    /// Held while 1.x runs on `opencode-1x.db`, so its sessions aren't moved out from under it.
+    pub own: Option<OwnInUse>,
+}
+
+/// 1.x runs on `opencode-1x.db` while one of these is alive.
+pub(crate) struct OwnInUse(());
+
+static OWN_IN_USE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl OwnInUse {
+    fn new() -> Self {
+        OWN_IN_USE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        OwnInUse(())
+    }
+}
+
+impl Drop for OwnInUse {
+    fn drop(&mut self) {
+        OWN_IN_USE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Environment for the OpenCode at `bin` (`stamp`: which install it is). 1.x and 2 share
+/// `opencode.db` (see `trek_core::import::opencode::share`); when it can't be shared, 1.x keeps
+/// its sessions in `opencode-1x.db`, which Trek reads as well. An `OPENCODE_DB` the user set
+/// stands.
+pub(crate) async fn db_env(bin: &Path, stamp: String) -> DbEnv {
+    if std::env::var_os("OPENCODE_DB").is_some() || !is_1x(bin, stamp.clone()).await {
+        return DbEnv::default();
+    }
+    let dir = trek_core::import::opencode::data_dir();
+    match prepare(bin, &stamp, &dir).await {
+        Ok(notice) => DbEnv { notice, ..DbEnv::default() },
+        Err(why) => {
+            // Said once a run, not in every session.
+            static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let tell = !TOLD.swap(true, std::sync::atomic::Ordering::SeqCst);
+            let own = share::own_db(&dir).display().to_string();
+            DbEnv { env: vec![("OPENCODE_DB".to_string(), own)], notice: tell.then(|| refused_notice(&why)), own: Some(OwnInUse::new()) }
+        }
+    }
+}
+
+/// Make the OpenCode history 1.x opens, when 2.0 made it: run as Trek finds its agents, so
+/// `opencode` 1.x works in a terminal too, not only once Trek has started it.
+pub async fn share_history() {
+    let Some(bin) = trek_core::detect::which(trek_core::detect::OPENCODE) else { return };
+    if std::env::var_os("OPENCODE_DB").is_some() || !is_1x(&bin, crate::acp::stamp(&bin)).await {
+        return;
+    }
+    match prepare(&bin, &crate::acp::stamp(&bin), &trek_core::import::opencode::data_dir()).await {
+        Ok(Some(done)) => tracing::info!("opencode: {done}"),
+        Ok(None) => {}
+        Err(why) => tracing::info!("opencode: 1.x keeps opencode-1x.db: {why}"),
+    }
+}
+
+/// Get `opencode.db` in `dir` ready for the 1.x at `bin`. `Ok`: 1.x opens it, with what the user
+/// should know about what changed; `Err`: it can't be shared, and why.
+async fn prepare(bin: &Path, stamp: &str, dir: &Path) -> Result<Option<String>, String> {
+    // Not at once from two sessions.
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // Databases that can't be shared with an install (its stamp), and why: not tried again in
+    // this run.
+    static REFUSED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    let _turn = ONE_AT_A_TIME.lock().await;
+    let in_use = OWN_IN_USE.load(std::sync::atomic::Ordering::SeqCst) > 0;
+    let at = dir.to_path_buf();
+    match share::state(dir) {
+        share::State::Opens => {
+            // Sessions 1.x kept on its own before move in, unless it's still writing there. Not
+            // tried again in this run once it failed (each try makes a copy of the database).
+            static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if in_use || FAILED.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(None);
+            }
+            match tokio::task::spawn_blocking(move || share::merge_own(&at)).await {
+                Ok(Ok(Some(c))) => Ok((c.merged > 0).then(|| merged_notice(&c))),
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(e)) => {
+                    FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tracing::warn!("opencode: couldn't move opencode-1x.db's sessions into opencode.db: {e}");
+                    Ok(None)
+                }
+                Err(e) => {
+                    tracing::warn!("opencode: {e}");
+                    Ok(None)
+                }
+            }
+        }
+        share::State::Made2 => {
+            let key = format!("{stamp}:{}", dir.display());
+            if let Some((_, why)) = REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| *k == key) {
+                return Err(why.clone());
+            }
+            let refuse = |why: String| {
+                REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((key.clone(), why.clone()));
+                why
+            };
+            let scratch = scratch_schema(bin).await.map_err(|e| refuse(format!("OpenCode 1.x didn't show its tables: {e:#}")))?;
+            let db = scratch.db.clone();
+            let done = tokio::task::spawn_blocking(move || share::share(&at, &db, !in_use)).await.map_err(|e| e.to_string())?;
+            drop(scratch);
+            match done {
+                Ok(Some(c)) => Ok(Some(shared_notice(&c))),
+                Ok(None) => Ok(None),
+                Err(share::Refused::Shape(why)) => Err(refuse(why)),
+                Err(share::Refused::Failed(why)) => Err(why),
+            }
+        }
+    }
+}
+
+/// A folder with the empty database the OpenCode 1.x at `bin` makes. Removed when dropped.
+struct Scratch {
+    dir: PathBuf,
+    db: PathBuf,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Have 1.x create its database, empty, somewhere of its own: a home and data folders of its
+/// own (nothing of the user's is read or written), no plugins, no model list fetched.
+/// `session list` creates the database and lists nothing.
+async fn scratch_schema(bin: &Path) -> anyhow::Result<Scratch> {
+    use anyhow::Context as _;
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("trek-opencode-1x-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let scratch = Scratch { db: dir.join("opencode.db"), dir };
+    let mut command = tokio::process::Command::new(bin);
+    command.args(["session", "list", "--pure"]).current_dir(&scratch.dir).env("PATH", trek_core::detect::login_path());
+    for var in ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"] {
+        command.env_remove(var);
+    }
+    for (var, sub) in [("HOME", "home"), ("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state")] {
+        command.env(var, scratch.dir.join(sub));
+    }
+    command.env("OPENCODE_DB", &scratch.db).env("OPENCODE_DISABLE_MODELS_FETCH", "1").env("OPENCODE_DISABLE_AUTOUPDATE", "1");
+    let out = crate::output_group(&mut command, None, std::time::Duration::from_secs(30)).await.context("opencode session list")?;
+    if !out.status.success() || !scratch.db.is_file() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("opencode session list: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no database").trim());
+    }
+    Ok(scratch)
+}
+
+fn shared_notice(c: &share::Changed) -> String {
+    let mut s = format!(
+        "OpenCode 1.x and 2 now keep their sessions in one opencode.db: Trek added 1.x's tables to the one OpenCode 2 \
+         made, so 1.x opens it again, in a terminal too. A copy from before is at {}.",
+        c.backup.display()
+    );
+    if c.merged > 0 {
+        s.push_str(&format!(" {} 1.x kept in opencode-1x.db moved in.", sessions(c.merged)));
+    }
+    s
+}
+
+fn merged_notice(c: &share::Changed) -> String {
+    format!(
+        "{} OpenCode 1.x kept in opencode-1x.db moved into opencode.db. A copy of opencode.db from before is at {}.",
+        sessions(c.merged),
+        c.backup.display()
+    )
+}
+
+fn sessions(n: usize) -> String {
+    if n == 1 { "The session".into() } else { format!("The {n} sessions") }
+}
+
+fn refused_notice(why: &str) -> String {
+    format!(
+        "OpenCode 1.x keeps its sessions in opencode-1x.db: Trek couldn't add 1.x's tables to the opencode.db OpenCode 2 \
+         made ({why}). Trek shows both; in a terminal, 1.x needs OPENCODE_DB=opencode-1x.db."
+    )
 }
 
 /// Why OpenCode exited, said plainly, when it's 1.x refusing OpenCode 2's database.
 pub(crate) fn exit_reason(stderr: &[String]) -> Option<String> {
     stderr.iter().any(|l| l.contains(MADE_BY_2)).then(|| {
         format!(
-            "OpenCode 1.x can't open the history OpenCode 2 started (\"{MADE_BY_2}\"). Use OpenCode 2, or give 1.x a \
-             history of its own: OPENCODE_DB=opencode-1x.db, as Trek does unless OPENCODE_DB is set."
+            "OpenCode 1.x can't open the history OpenCode 2 started (\"{MADE_BY_2}\"). Use OpenCode 2, or point \
+             OPENCODE_DB at a database of 1.x's own; without OPENCODE_DB set, Trek makes opencode.db one both open."
         )
     })
 }
@@ -375,11 +570,92 @@ mod tests {
         assert!(!is_1x_version(""));
     }
 
+    /// A folder with an `opencode` that acts as 1.x does when asked for its schema: it creates
+    /// `OPENCODE_DB` (as 1.18.35 does, from the recorded schema), and only in a home of its own.
+    fn fake_1x(dir: &Path) -> PathBuf {
+        let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-core/fixtures/opencode-1x-empty.sql");
+        let bin = dir.join("opencode");
+        let script = format!(
+            "#!/bin/sh\n\
+             [ \"$1\" = --version ] && {{ echo 1.18.35; exit 0; }}\n\
+             [ \"$1 $2 $3\" = 'session list --pure' ] || exit 2\n\
+             [ \"$HOME\" = \"$(dirname \"$OPENCODE_DB\")/home\" ] && [ \"$XDG_DATA_HOME\" = \"$(dirname \"$OPENCODE_DB\")/data\" ] || exit 3\n\
+             [ \"$OPENCODE_DISABLE_MODELS_FETCH\" = 1 ] || exit 4\n\
+             exec /usr/bin/sqlite3 \"$OPENCODE_DB\" < '{schema}'\n"
+        );
+        std::fs::write(&bin, script).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    /// Run `sql` on the database at `path` (macOS's own sqlite3).
+    fn sqlite(path: &Path, sql: &str) {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("/usr/bin/sqlite3").arg(path).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(sql.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trek-agents-opencode-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn opencode_2s_database_is_shared_with_1x() {
+        let dir = temp_dir("share");
+        let bin = fake_1x(&dir);
+        let data = dir.join("data");
+        let made_by_2 = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-core/fixtures/opencode-2-fresh.sql");
+        sqlite(&data.join("opencode.db"), &std::fs::read_to_string(made_by_2).unwrap());
+        let told = prepare(&bin, "fake", &data).await.unwrap().unwrap();
+        assert!(told.starts_with("OpenCode 1.x and 2 now keep their sessions in one opencode.db") && told.contains("opencode.db.backup-"), "{told}");
+        assert_eq!(share::state(&data), share::State::Opens);
+        // Done: 1.x opens it as it is from now on.
+        assert_eq!(prepare(&bin, "fake", &data).await, Ok(None));
+        // The schema was made, and cleared away, outside the user's folders.
+        let left: Vec<_> = std::fs::read_dir(&data).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| !n.starts_with("opencode.db")).collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_database_that_cant_be_shared_leaves_1x_its_own() {
+        let dir = temp_dir("refuse");
+        let bin = fake_1x(&dir);
+        let data = dir.join("data");
+        // Not 1.x's tables, and no journal: not something to add to.
+        sqlite(&data.join("opencode.db"), "CREATE TABLE session_v2 (id TEXT PRIMARY KEY);");
+        let why = prepare(&bin, "fake-refused", &data).await.unwrap_err();
+        assert_eq!(why, "opencode.db has no migration journal, so it isn't one OpenCode made");
+        assert!(refused_notice(&why).starts_with("OpenCode 1.x keeps its sessions in opencode-1x.db: Trek couldn't add"));
+        // Not asked again in this run.
+        std::fs::remove_file(&bin).unwrap();
+        assert_eq!(prepare(&bin, "fake-refused", &data).await.unwrap_err(), why);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With the real `opencode` 1.x on PATH, on the OpenCode data folder in
+    /// `TREK_OPENCODE_DATA` (a scratch one: this changes it).
+    #[tokio::test]
+    #[ignore = "runs the real OpenCode 1.x on TREK_OPENCODE_DATA"]
+    async fn share_with_the_real_opencode() {
+        let data = PathBuf::from(std::env::var_os("TREK_OPENCODE_DATA").expect("TREK_OPENCODE_DATA"));
+        let bin = trek_core::detect::which(trek_core::detect::OPENCODE).expect("opencode");
+        let done = prepare(&bin, &crate::acp::stamp(&bin), &data).await;
+        println!("{done:?}");
+        assert!(done.is_ok());
+        assert_eq!(share::state(&data), share::State::Opens);
+    }
+
     #[test]
     fn a_refused_database_is_explained() {
         let stderr = ["\u{1b}[91mError: \u{1b}[0mUnexpected error".to_string(), String::new(), MADE_BY_2.to_string()];
         let why = exit_reason(&stderr).unwrap();
-        assert!(why.starts_with("OpenCode 1.x can't open the history OpenCode 2 started") && why.contains("OPENCODE_DB=opencode-1x.db"), "{why}");
+        assert!(why.starts_with("OpenCode 1.x can't open the history OpenCode 2 started") && why.contains("OPENCODE_DB"), "{why}");
         assert_eq!(exit_reason(&["Error: something else".to_string()]), None);
     }
 

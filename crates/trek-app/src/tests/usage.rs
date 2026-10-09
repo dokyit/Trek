@@ -327,3 +327,70 @@ fn picked_automatically_only_what_the_card_would_show_has_its_usage_read() {
         assert_eq!(shown(&trek, cx), [AgentId::ClaudeCode, AgentId::Codex], "read without its usage, the mock agent has none to show");
     });
 }
+
+/// Against the user's own `claude` and `codex` (logged in to a plan), in a data folder of the
+/// test's own: with Claude Code off the card its usage isn't asked for, yet its commands and
+/// models load; put on the card, its usage is read. Sends no prompt. Not run by default:
+/// `TREK_LIVE_AGENT=usage cargo test -p trek-app live_usage -- --ignored` (with `SHELL` pointing
+/// at a script that puts logging shims of the CLIs first on the PATH, to see what was sent).
+#[test]
+#[ignore = "live: runs the installed claude and codex"]
+fn live_usage_is_read_only_while_on_the_card() {
+    assert!(std::env::var_os("TREK_LIVE_AGENT").is_some(), "needs TREK_LIVE_AGENT: the CLIs need the user's sign-in");
+    run(async |cx| {
+        let trek = open(cx);
+        install(&trek, cx);
+        trek.update(cx, |ws, _| {
+            ws.settings.usage.shown = Some(vec![AgentId::Codex.key()]);
+            ws.usage_fetch = Some(Rc::new(|agent, cwd, with_usage| match agent {
+                AgentId::ClaudeCode | AgentId::Codex => crate::workspace::usage::read_agent(agent, cwd, with_usage),
+                _ => {
+                    let (tx, rx) = async_channel::bounded(1);
+                    let _ = tx.try_send(Err("not read here".into()));
+                    rx
+                }
+            }));
+        });
+        // The CLIs take seconds (Claude Code's usage, up to ten), more than the harness waits.
+        async fn until(trek: &Trek, cx: &mut TestAppContext, what: &str, done: impl Fn(&crate::workspace::Workspace) -> bool) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                cx.run_until_parked();
+                if trek.read(cx, |ws, _| done(ws)) {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+                cx.background_executor.timer(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        let (claude, codex) = (AgentId::ClaudeCode, AgentId::Codex);
+        let started = std::time::Instant::now();
+        trek.update(cx, |ws, cx| ws.refresh_usage(cx));
+        until(&trek, cx, "both to answer", |ws| ws.agent_status.contains_key(&claude.key()) && ws.usage_status(&codex.key()).is_some()).await;
+        eprintln!("read in {:.2}s", started.elapsed().as_secs_f32());
+
+        let st = trek.read(cx, |ws, _| ws.agent_status[&claude.key()].clone());
+        assert!(st.logged_in && st.plan.is_some() && st.error.is_none(), "{:?} {:?}", st.plan, st.error);
+        assert!(st.limits.is_empty(), "off the card: no usage");
+        assert!(trek.read(cx, |ws, _| ws.usage_status(&claude.key()).is_none()));
+        let commands = trek.read(cx, |ws, _| ws.slash_commands(&crate::workspace::Scope::Main, &claude));
+        assert!(commands.iter().any(|c| c.kind == CommandKind::Skill) && commands.iter().any(|c| c.kind == CommandKind::Command), "{} commands", commands.len());
+        assert!(trek.read(cx, |ws, _| ws.models_for(&claude).iter().any(|m| m.id.starts_with("claude-"))));
+        let st = trek.read(cx, |ws, _| ws.agent_status[&codex.key()].clone());
+        assert!(st.logged_in && st.error.is_none(), "{:?}", st.error);
+        assert!(!st.limits.is_empty() && st.limits.iter().all(|l| l.resets_at.is_some()), "{:?}", st.limits);
+        assert!(!st.commands.is_empty() && !st.models.is_empty());
+        eprintln!("claude: {} commands, {} models; codex: {} limits, {} skills, {} models", commands.len(), trek.read(cx, |ws, _| ws.models_for(&claude).len()), st.limits.len(), st.commands.len(), st.models.len());
+
+        // On the card: read with its usage.
+        let started = std::time::Instant::now();
+        assert!(trek.update(cx, |ws, cx| ws.toggle_usage_shown(&claude, cx)));
+        until(&trek, cx, "Claude Code's usage", |ws| ws.usage_status(&claude.key()).is_some()).await;
+        eprintln!("claude usage read in {:.2}s", started.elapsed().as_secs_f32());
+        let st = trek.read(cx, |ws, _| ws.agent_status[&claude.key()].clone());
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert!(st.limits.iter().any(|l| l.window == "5h") && st.limits.iter().any(|l| l.window == "7d"), "{:?}", st.limits);
+        assert!(st.limits.iter().all(|l| l.resets_at.is_some_and(|t| t > trek_core::store::now_ms())));
+        assert!(trek.read(cx, |ws, _| !ws.slash_commands(&crate::workspace::Scope::Main, &claude).is_empty()));
+    });
+}

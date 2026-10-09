@@ -882,7 +882,7 @@ impl SettingsView {
         let text = self.mcp_command.read(cx).value().to_string();
         let mut servers = match trek_core::mcp::read_servers(&name, &text) {
             Ok(servers) => servers,
-            Err(e) => return window.push_notification(SharedString::from(e), cx),
+            Err(e) => return crate::toast::push(window, SharedString::from(e), cx),
         };
         let header = self.mcp_header_name.read(cx).value().trim().trim_end_matches(':').to_string();
         let value = self.mcp_header_value.read(cx).value().trim().to_string();
@@ -892,7 +892,7 @@ impl SettingsView {
             && !value.is_empty()
         {
             if header.contains(char::is_whitespace) {
-                return window.push_notification("A header name has no spaces, e.g. Authorization.", cx);
+                return crate::toast::push(window, "A header name has no spaces, e.g. Authorization.", cx);
             }
             server.headers.retain(|h| !h.name.eq_ignore_ascii_case(&header));
             server.headers.push(McpHeader { name: header, value, secret: false });
@@ -909,15 +909,15 @@ impl SettingsView {
         if let Some(was) = self.mcp_editing.clone() {
             let Some(at) = existing.iter().position(|m| m.name == was) else {
                 self.mcp_editing = None;
-                return window.push_notification(SharedString::from(format!("{was} was removed meanwhile; nothing was saved.")), cx);
+                return crate::toast::push(window, SharedString::from(format!("{was} was removed meanwhile; nothing was saved.")), cx);
             };
             if servers.len() != 1 {
-                return window.push_notification(SharedString::from(format!("That's {} servers. Edit one at a time, or cancel and add them.", servers.len())), cx);
+                return crate::toast::push(window, SharedString::from(format!("That's {} servers. Edit one at a time, or cancel and add them.", servers.len())), cx);
             }
             let mut server = servers.remove(0);
             let old = &existing[at];
             if server.name != was && existing.iter().any(|m| m.name == server.name) {
-                return window.push_notification(SharedString::from(format!("There's already a server named {}.", server.name)), cx);
+                return crate::toast::push(window, SharedString::from(format!("There's already a server named {}.", server.name)), cx);
             }
             server.enabled = old.enabled;
             // A header not typed again stays as it was (its token in the Keychain).
@@ -929,7 +929,7 @@ impl SettingsView {
                 }
             }
             if let Err(e) = server.stash_secrets(Some(&was)) {
-                return window.push_notification(SharedString::from(format!("Not saved: {e}.")), cx);
+                return crate::toast::push(window, SharedString::from(format!("Not saved: {e}.")), cx);
             }
             old.forget_secrets(Some(&server));
             let checked = server.name.clone();
@@ -966,7 +966,7 @@ impl SettingsView {
             self.workspace.update(cx, |ws, cx| ws.save_settings(cx));
         }
         for note in notes {
-            window.push_notification(SharedString::from(note), cx);
+            crate::toast::push(window, SharedString::from(note), cx);
         }
         if added.is_empty() {
             return;

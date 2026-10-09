@@ -1,8 +1,8 @@
 //! Account, plan, usage limits, slash commands and models for the vendor CLIs, read without
 //! sending a prompt (free). Claude: `initialize` + `get_usage` + `get_context_usage` control
 //! requests on an idle stream-json session. Codex: `account/read`, `account/rateLimits/read`,
-//! `skills/list` and `model/list` on `codex app-server`. Devin: `devin auth status`, and the
-//! quota its terminal UI shows for `/usage`.
+//! `skills/list` (once `plugin/reconcile` answers) and `model/list` on `codex app-server`.
+//! Devin: `devin auth status`, and the quota its terminal UI shows for `/usage`.
 
 use crate::codex::{Rpc, RpcLines, await_response, fetch_models, start_app_server};
 use anyhow::{Context as _, Result};
@@ -16,6 +16,8 @@ use trek_core::catalog::ModelInfo;
 use trek_core::{Effort, detect};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long Codex's skills wait for it to learn the account's plugins.
+const PLUGINS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A granted, redeemable rate-limit reset ("Use reset" in Codex's Usage).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -328,6 +330,10 @@ async fn codex_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
         tokio::time::timeout(TIMEOUT, start_app_server(cwd, &[], &mut backlog)).await.context("codex app-server timed out")??;
     let mut status = AgentStatus::default();
     let deadline = tokio::time::Instant::now() + TIMEOUT;
+    // Codex learns which of its plugins the account installed (over the network) after it
+    // starts, and lists their skills only then, without saying so: `plugin/reconcile` answers
+    // once it knows. Asked first, it runs while the rest is read.
+    let reconcile = rpc.request("plugin/reconcile", json!({ "reason": "trek" })).await;
 
     match call(&mut rpc, &mut lines, &mut backlog, deadline, "account/read", json!({})).await {
         Ok(r) => {
@@ -346,6 +352,10 @@ async fn codex_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
             Err(e) if status.plan.is_some() => status.add_error(format!("rate limits: {e:#}")),
             Err(_) => {}
         }
+    }
+    // Skills are listed regardless: without the account's plugins if it fails or takes long.
+    if let Ok(id) = reconcile {
+        let _ = response(&mut lines, &mut backlog, id, deadline.min(tokio::time::Instant::now() + PLUGINS_TIMEOUT)).await;
     }
     let cwd_s = cwd.display().to_string();
     match call(&mut rpc, &mut lines, &mut backlog, deadline, "skills/list", json!({ "cwds": [cwd_s] })).await {
@@ -414,6 +424,19 @@ async fn call(
     } else {
         rpc.request(method, params).await?
     };
+    tokio::time::timeout_at(deadline, await_response(lines, id, backlog)).await.context("timed out")?
+}
+
+/// The answer to request `id`, sent earlier: put aside while other answers were awaited, or
+/// still to come.
+async fn response<R: tokio::io::AsyncBufRead + Unpin>(lines: &mut crate::ProtocolLines<R>, backlog: &mut Vec<Value>, id: i64, deadline: tokio::time::Instant) -> Result<Value> {
+    if let Some(i) = backlog.iter().position(|v| v["id"].as_i64() == Some(id) && v.get("method").is_none()) {
+        let v = backlog.remove(i);
+        if let Some(err) = v.get("error") {
+            anyhow::bail!("codex: {}", err["message"].as_str().unwrap_or("request failed"));
+        }
+        return Ok(v["result"].clone());
+    }
     tokio::time::timeout_at(deadline, await_response(lines, id, backlog)).await.context("timed out")?
 }
 
@@ -941,6 +964,24 @@ mod tests {
         assert_eq!(limited_until(&codex, &LimitScope::Session, Some("gpt-5.6-sol"), now), None);
         assert_eq!(limited_until(&codex, &LimitScope::Model("gpt-reserve".into()), Some("gpt-5.6-luna"), now), Some(1_791_526_579_000));
         assert_eq!(limited_until(&codex_limits(&codex_rate_limits()), &LimitScope::Session, None, now), None);
+    }
+
+    #[test]
+    fn an_answer_put_aside_is_found_later() {
+        trek_core::runtime().block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            // `plugin/reconcile` (id 1) answered while `account/read` (id 2) was awaited.
+            let mut backlog = vec![json!({"id":1,"result":{"changedPlugins":[]}}), json!({"method":"account/updated","params":{}})];
+            let mut lines = crate::ProtocolLines::new(BufReader::new(&b""[..]));
+            assert_eq!(response(&mut lines, &mut backlog, 1, deadline).await.unwrap(), json!({"changedPlugins":[]}));
+            assert_eq!(backlog.len(), 1, "taken out of the backlog; the rest stays");
+            // Not answered yet: read on, setting aside what comes first.
+            let text = b"{\"method\":\"skills/changed\"}\n{\"id\":3,\"error\":{\"message\":\"unknown method\"}}\n";
+            let mut lines = crate::ProtocolLines::new(BufReader::new(&text[..]));
+            let err = response(&mut lines, &mut backlog, 3, deadline).await.unwrap_err();
+            assert!(err.to_string().contains("unknown method"), "{err}");
+            assert_eq!(backlog.len(), 2);
+        });
     }
 
     #[test]

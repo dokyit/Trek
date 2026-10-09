@@ -9,7 +9,6 @@ use crate::workspace::{TurnRange, Workspace};
 use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
@@ -621,10 +620,10 @@ impl GitPanel {
                 this.busy = None;
                 match result {
                     Ok(v) => {
-                        window.push_notification(format!("{label} done"), cx);
+                        crate::toast::push(window, format!("{label} done"), cx);
                         done(this, v, window, cx);
                     }
-                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                    Err(e) => crate::toast::push(window, crate::toast::Toast::error(format!("{e:#}")), cx),
                 }
                 this.refresh(cx);
                 // The branch chip, the changed count and the IDE's status bar read the same
@@ -640,7 +639,7 @@ impl GitPanel {
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let msg = self.message.read(cx).value().trim().to_string();
         if msg.is_empty() {
-            window.push_notification("Write a commit message first", cx);
+            crate::toast::push(window, "Write a commit message first", cx);
             return;
         }
         // The message goes once the commit is made: if a hook or signing turns it down, it's
@@ -691,7 +690,7 @@ impl GitPanel {
                 this.busy = None;
                 match result {
                     Ok(msg) => this.message.update(cx, |s, cx| s.set_value(msg, window, cx)),
-                    Err(e) => window.push_notification(Notification::error(format!("Couldn't write a message: {e}")), cx),
+                    Err(e) => crate::toast::push(window, crate::toast::Toast::error(format!("Couldn't write a message: {e}")), cx),
                 }
                 cx.notify();
             });
@@ -731,8 +730,8 @@ impl GitPanel {
                 this.busy = None;
                 match result {
                     Ok(Ok(())) => {}
-                    Ok(Err(block)) => window.push_notification(block.explain(&t.wt.base), cx),
-                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                    Ok(Err(block)) => crate::toast::push(window, block.explain(&t.wt.base), cx),
+                    Err(e) => crate::toast::push(window, crate::toast::Toast::error(format!("{e:#}")), cx),
                 }
                 this.refresh(cx);
                 // The branch chip, the changed count and the IDE's status bar read the same

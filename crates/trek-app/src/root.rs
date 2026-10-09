@@ -11,9 +11,8 @@ use crate::thread_view::ThreadView;
 use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, TitleBar, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -756,8 +755,8 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
     if alert.toast {
         let Some(target) = notice_window(workspace, front, cx) else { return };
         let (ws, thread) = (workspace.clone(), thread.to_string());
-        let note = Notification::new().message(message).placement(TOAST_PLACEMENT).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
-        let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
+        let note = crate::toast::Toast::new(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
+        let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
     }
 }
 
@@ -794,27 +793,14 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
     show_main(workspace.clone(), cx);
 }
 
-/// Trek's own toasts (the ones it times itself; see `toast`).
-struct TrekToast;
-
-/// Toasts rise from the bottom of the window, just above the composer (`place_toasts`): clear of
-/// the title bar, the tabs and the start of the transcript.
-const TOAST_PLACEMENT: Anchor = Anchor::BottomCenter;
-
-/// Sit toasts `bottom` above the window's bottom edge. One setting for all windows: each sets it
-/// as it draws, just before its toasts do.
-pub(crate) fn place_toasts(bottom: Pixels, cx: &mut App) {
-    let n = &cx.theme().notification;
-    if n.margins.bottom != bottom || n.placement != TOAST_PLACEMENT {
-        let n = &mut gpui_kit::component::Theme::global_mut(cx).notification;
-        n.margins.bottom = bottom;
-        // Toasts raised by views directly (the Git tool's "Commit done") go there too.
-        n.placement = TOAST_PLACEMENT;
-    }
+/// Sit `window`'s toasts `bottom` above its bottom edge, clear of the composer: they rise from
+/// the bottom of the window, away from the title bar, the tabs and the start of the transcript.
+pub(crate) fn place_toasts(bottom: Pixels, window: &Window, cx: &mut App) {
+    crate::toast::place(window, bottom, cx);
 }
 
 /// How long a toast stays up: long enough to read it, and at least ten seconds when it offers
-/// an undo. The pointer over it holds it (`toast`).
+/// an undo. The pointer on it holds it (`crate::toast`).
 pub(crate) fn toast_lifetime(message: &str, undo: bool) -> std::time::Duration {
     // About four words a second, after a moment to notice it.
     let words = message.split_whitespace().count() as u64;
@@ -823,15 +809,11 @@ pub(crate) fn toast_lifetime(message: &str, undo: bool) -> std::time::Duration {
 }
 
 fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction>, cx: &mut App) {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let front = key_window(cx);
     let Some(target) = notice_window(workspace, front, cx) else { return };
     // Putting files back can be taken back for a while: long enough to see what moved.
     let restore = matches!(undo, Some(UndoAction::Unrestore { .. }));
     let lifetime = if restore { UNDO_RESTORE_TOAST } else { toast_lifetime(&message, undo.is_some()) };
-    let key: SharedString = format!("toast-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)).into();
-    // The message and its button in one row that knows when the pointer is on it.
-    let hovered = std::rc::Rc::new(std::cell::Cell::new(false));
     let action = undo.map(|action| {
         let label = match action {
             UndoAction::CancelRestart => "Not now",
@@ -840,54 +822,33 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
         };
         (action, label)
     });
-    // Taken down (timed out, or undone): its message and button are inert while it goes, so a
-    // second click on Undo as it fades doesn't undo twice.
+    // Spent once used: on its way out the toast takes no clicks, and this keeps a second press
+    // before then from undoing twice.
     let gone = std::rc::Rc::new(std::cell::Cell::new(false));
-    let (ws, hover, own, going) = (workspace.downgrade(), hovered.clone(), key.clone(), gone.clone());
-    let note = Notification::new().id1::<TrekToast>(key.clone()).autohide(false).placement(TOAST_PLACEMENT).content(move |_, _, cx| {
-        let (hover, own, gone) = (hover.clone(), own.clone(), going.clone());
-        let body = h_flex()
+    let ws = workspace.downgrade();
+    let key = crate::toast::Toast::new_key();
+    let own = key.clone();
+    // The message and its button in one row.
+    let note = crate::toast::Toast::content(move |_, cx| {
+        h_flex()
             .id("toast-body")
             .gap_3()
-            // Held only by a pointer brought onto it: one that was resting where it appeared
-            // (after clicking the toast before it) doesn't keep it up.
-            .on_mouse_move({
-                let hover = hover.clone();
-                move |_, _, _| hover.set(true)
-            })
-            .on_hover(move |on, _, _| {
-                if !*on {
-                    hover.set(false)
-                }
-            })
             .child(div().flex_1().min_w_0().text_sm().text_color(cx.theme().foreground).child(message.clone()))
             .when_some(action.clone(), |el, (action, label)| {
-                let ws = ws.clone();
-                let gone = gone.clone();
+                let (ws, gone, own) = (ws.clone(), gone.clone(), own.clone());
                 el.child(Button::new("undo").label(label).small().flex_none().on_click(move |_, window, cx| {
                     if gone.replace(true) {
                         return;
                     }
                     let _ = ws.update(cx, |ws, cx| ws.undo(action.clone(), cx));
-                    window.remove_notification1::<TrekToast>(own.clone(), cx);
+                    crate::toast::dismiss(window, &own, cx);
                 }))
-            });
-        if gone.get() { crate::motion::inert(body).into_any_element() } else { body.into_any_element() }
-    });
-    let _ = target.update(cx, |_, window, cx| window.push_notification(note, cx));
-    // Timed here rather than by the toast list (a fixed five seconds): the pointer on it holds
-    // it, and a moment more once it leaves.
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(lifetime).await;
-        while hovered.get() {
-            cx.background_executor().timer(std::time::Duration::from_millis(1_500)).await;
-        }
-        if gone.replace(true) {
-            return;
-        }
-        let _ = target.update(cx, |_, window, cx| window.remove_notification1::<TrekToast>(key.clone(), cx));
+            })
+            .into_any_element()
     })
-    .detach();
+    .key(key)
+    .lifetime(lifetime);
+    let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
 }
 
 /// How long a toast whose Undo puts files back stays up.
@@ -990,7 +951,7 @@ impl Render for TrekWindow {
             Route::Thread(_) => self.composer.read(cx).height().max(px(120.)) + px(16.),
             _ => px(24.),
         };
-        place_toasts(toast_bottom, cx);
+        place_toasts(toast_bottom, window, cx);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);

@@ -12,7 +12,7 @@ use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerStat
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextViewState;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -1123,7 +1123,7 @@ impl ThreadView {
                             .tooltip("Copy message")
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
-                                window.push_notification("Copied", cx);
+                                crate::toast::push(window, "Copied", cx);
                             }),
                     ));
                 column(div().w_full().child(
@@ -1323,7 +1323,7 @@ impl ThreadView {
                                     .on_click(move |_, window, cx| {
                                         let text = workspace.read(cx).live.get(&thread).map(|l| Self::response_text(&l.items, ix)).unwrap_or_default();
                                         cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                        window.push_notification("Copied", cx);
+                                        crate::toast::push(window, "Copied", cx);
                                     }),
                             )
                             .child(crate::time::clock(finished))

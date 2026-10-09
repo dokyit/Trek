@@ -17,6 +17,7 @@ mod status;
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
 pub use limits::{Limit, LimitScope};
+pub use opencode::share_history as share_opencode_history;
 pub use status::{AgentStatus, CommandKind, ResetCredit, SlashCommand, UsageLimit, claude_commands, claude_status, codex_commands, codex_consume_reset, codex_status, devin_status};
 
 use std::collections::HashMap;
