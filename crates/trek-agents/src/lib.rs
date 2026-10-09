@@ -1028,7 +1028,7 @@ mod tests {
         let log = SessionLog::default();
         SESSION_LOG
             .scope(log.clone(), async {
-                let mut child = echo_to_stderr("echo 'warning: slow' >&2; echo done >&2", "echo warning: slow>&2 & echo done>&2").stderr(Stdio::piped()).spawn().unwrap();
+                let mut child = echo_to_stderr("echo 'warning: slow' >&2; echo done >&2", "(echo warning: slow)>&2 & (echo done)>&2").stderr(Stdio::piped()).spawn().unwrap();
                 let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
                 child.wait().await.unwrap();
             })
@@ -1041,7 +1041,7 @@ mod tests {
         }
         assert_eq!(log.lines(), ["warning: slow", "done"]);
         // Outside a session nothing is kept but the tail.
-        let mut child = echo_to_stderr("echo stray >&2", "echo stray>&2").stderr(Stdio::piped()).spawn().unwrap();
+        let mut child = echo_to_stderr("echo stray >&2", "(echo stray)>&2").stderr(Stdio::piped()).spawn().unwrap();
         let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
         child.wait().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
