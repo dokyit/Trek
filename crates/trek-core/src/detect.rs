@@ -247,7 +247,8 @@ pub fn env_api_keys() -> Vec<&'static str> {
         .collect()
 }
 
-#[cfg(test)]
+// Unix only: the one test runs `/bin/sh` as a login shell; Phase 2 rewrites PATH detection for Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
