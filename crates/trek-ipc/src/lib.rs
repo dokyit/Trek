@@ -199,7 +199,14 @@ impl Client {
     /// Connect and introduce ourselves. The stream can be shut down from another thread (a
     /// clone of it) to give up on a call.
     pub fn connect(&self) -> Result<Connection, String> {
-        let stream = Stream::connect(&self.socket).map_err(|e| format!("Trek isn't reachable ({e}). Is it still running?"))?;
+        let stream = Stream::connect(&self.socket).map_err(|e| {
+            // On Windows, a pipe the client won't trust with the token (see `PipeStream::connect`).
+            if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput) {
+                format!("Didn't connect to Trek: {e}.")
+            } else {
+                format!("Trek isn't reachable ({e}). Is it still running?")
+            }
+        })?;
         let mut conn = Connection { reader: BufReader::new(stream.try_clone().map_err(|e| e.to_string())?), writer: stream, next: 0 };
         conn.send(&hello(&self.token, &self.session))?;
         let answer = conn.receive()?;
