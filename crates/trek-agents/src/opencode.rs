@@ -570,8 +570,11 @@ mod tests {
         assert!(!is_1x_version(""));
     }
 
+    // The next five items drive a `/bin/sh` fake and macOS's `/usr/bin/sqlite3`; a Windows fake and
+    // sqlite come with the Phase 2 OpenCode work.
     /// A folder with an `opencode` that acts as 1.x does when asked for its schema: it creates
     /// `OPENCODE_DB` (as 1.18.35 does, from the recorded schema), and only in a home of its own.
+    #[cfg(unix)]
     fn fake_1x(dir: &Path) -> PathBuf {
         let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-core/fixtures/opencode-1x-empty.sql");
         let bin = dir.join("opencode");
@@ -590,6 +593,7 @@ mod tests {
     }
 
     /// Run `sql` on the database at `path` (macOS's own sqlite3).
+    #[cfg(unix)]
     fn sqlite(path: &Path, sql: &str) {
         use std::io::Write as _;
         let mut child = std::process::Command::new("/usr/bin/sqlite3").arg(path).stdin(std::process::Stdio::piped()).spawn().unwrap();
@@ -597,6 +601,7 @@ mod tests {
         assert!(child.wait().unwrap().success());
     }
 
+    #[cfg(unix)]
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("trek-agents-opencode-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -604,6 +609,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn opencode_2s_database_is_shared_with_1x() {
         let dir = temp_dir("share");
@@ -622,6 +628,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_database_that_cant_be_shared_leaves_1x_its_own() {
         let dir = temp_dir("refuse");

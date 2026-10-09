@@ -1074,12 +1074,16 @@ impl TempFile {
 
     fn write_in(dir: &Path, tag: &str, contents: &str) -> Result<Self> {
         use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
         let mut tries = 0;
         loop {
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
             let path = dir.join(format!("trek-{tag}-{}-{nanos}-{tries}.json", std::process::id()));
-            match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Windows has no mode bits: the file inherits the ACL of the user's temp folder.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            match options.open(&path) {
                 Ok(mut file) => {
                     // Removed on failure too.
                     let made = Self(path);
@@ -1268,13 +1272,16 @@ mod tests {
 
     #[test]
     fn mcp_config_is_private_and_removed_on_drop() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("trek-mcp-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = TempFile::write_in(&dir, "mcp", "{\"token\":1}").unwrap();
         let b = TempFile::write_in(&dir, "mcp", "{}").unwrap();
         assert_ne!(a.0, b.0);
-        assert_eq!(std::fs::metadata(&a.0).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&a.0).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert_eq!(std::fs::read_to_string(&a.0).unwrap(), "{\"token\":1}");
         let path = a.0.clone();
         drop(a);
@@ -1579,6 +1586,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "named zones (America/New_York) come with chrono-tz in Phase 2")]
     fn a_usage_limit_is_one_limit_event_with_its_reset() {
         // The stream as Claude Code 2.1.287 sends it at a session limit: a rejected
         // `rate_limit_event`, its own message (no model behind it), and an error result. The

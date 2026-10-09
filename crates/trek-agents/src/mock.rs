@@ -294,7 +294,8 @@ impl Script {
 
 /// `path` is relative and stays in the session's folder: no `..`, not absolute.
 fn in_folder(path: &str) -> bool {
-    !path.contains("..") && std::path::Path::new(path).is_relative() && !path.starts_with('~')
+    // No root or drive either: `/etc/hosts` and `C:x` both leave the folder on Windows.
+    !path.contains("..") && std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) && !path.starts_with('~')
 }
 
 /// What follows the first of `keys` found in `text` (in any case), when there's something.
@@ -1195,10 +1196,14 @@ impl Session {
             let full = dir.join(path);
             self.tool_start(&id, "Write", &full.display().to_string()).await?;
             let wrote = full.parent().map(|p| std::fs::create_dir_all(p)).transpose().and_then(|_| std::fs::write(&full, &body));
+            // Windows has no execute bit: nothing to set.
+            #[cfg(unix)]
             if exec && wrote.is_ok() {
                 use std::os::unix::fs::PermissionsExt as _;
                 let _ = std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o755));
             }
+            #[cfg(not(unix))]
+            let _ = exec;
             self.emit(AgentEvent::ToolLines { id: id.clone(), added: body.lines().count() as u32, removed: 0 }).await?;
             let (output, ok) = match wrote {
                 Ok(()) => (format!("Wrote {path}"), true),
@@ -2212,6 +2217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work")]
     fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
         let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2490,9 +2496,9 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = std::time::Instant::now();
-            m.prompt("mock:explore 300ms").await;
+            m.prompt("mock:explore 2s").await;
             let events = m.turn().await;
-            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert!(start.elapsed() >= Duration::from_secs(2));
             let tools: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, .. } = e { Some(title.as_str()) } else { None }).collect();
             assert!(tools.len() >= 8, "{tools:?}");
             assert_eq!(tools.len(), events.iter().filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. })).count());
@@ -2508,24 +2514,34 @@ mod tests {
 
     #[test]
     fn consults_a_sub_agent_through_trek() {
-        use std::io::{BufReader, Write as _};
-        let dir = std::env::temp_dir().join(format!("trek-mock-ipc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.sock");
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        // A socket on Unix, a pipe on Windows, listened on as Trek does.
+        let tag = format!("trek-mock-ipc-{}", std::process::id());
+        let path: std::path::PathBuf = if cfg!(windows) { format!(r"\\.\pipe\{tag}").into() } else { std::env::temp_dir().join(format!("{tag}.sock")) };
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&path);
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut listener = {
+            let _enter = rt.enter();
+            trek_ipc::server::Listener::bind(&path).unwrap()
+        };
         // Trek's side: one delegate_task, answered as a finished sub-agent.
         let trek = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut r = BufReader::new(stream.try_clone().unwrap());
-            let mut w = stream;
-            let hello: serde_json::Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
-            assert_eq!(trek_ipc::parse_hello(&hello).map(|h| (h.1.to_string(), h.2.to_string())), Some(("tok".into(), "ses".into())));
-            w.write_all(trek_ipc::encode(&serde_json::json!({"ok": true})).as_bytes()).unwrap();
-            let req: serde_json::Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
-            let answer = serde_json::json!({"id": "child-1", "status": "done", "result": "Use a cache."});
-            w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(answer))).as_bytes()).unwrap();
-            req
+            rt.block_on(async {
+                let (rd, mut w) = tokio::io::split(listener.accept().await.unwrap());
+                let mut r = tokio::io::BufReader::new(rd);
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                let hello: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(trek_ipc::parse_hello(&hello).map(|h| (h.1.to_string(), h.2.to_string())), Some(("tok".into(), "ses".into())));
+                w.write_all(trek_ipc::encode(&serde_json::json!({"ok": true})).as_bytes()).await.unwrap();
+                line.clear();
+                r.read_line(&mut line).await.unwrap();
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let answer = serde_json::json!({"id": "child-1", "status": "done", "result": "Use a cache."});
+                w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(answer))).as_bytes()).await.unwrap();
+                req
+            })
         });
         trek_core::runtime().block_on(async {
             set_pace(0.);
@@ -2553,7 +2569,8 @@ mod tests {
         assert_eq!(req["params"]["prompt"], "check the cache");
         assert_eq!(req["params"]["wait"], true);
         assert_eq!(req["params"]["mode"], "advise");
-        let _ = std::fs::remove_dir_all(dir);
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(path);
 
         // Without Trek's tools the call fails, and the turn says so.
         trek_core::runtime().block_on(async {
