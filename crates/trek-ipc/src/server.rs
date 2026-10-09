@@ -69,16 +69,26 @@ fn instance(name: &std::ffi::OsStr, security: &crate::PipeSecurity, first: bool)
 }
 
 /// Whether the process at the other end of a connection Trek accepted runs as Trek's own user.
+/// One that doesn't is logged (who it was, never what it sent).
 pub fn peer_is_me(stream: &Stream) -> bool {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
-        crate::peer_uid(stream.as_raw_fd()).ok() == Some(crate::my_uid())
+        let uid = crate::peer_uid(stream.as_raw_fd());
+        let me = uid.as_ref().ok() == Some(&crate::my_uid());
+        if !me {
+            tracing::warn!("refused an IPC connection from another user (uid {uid:?})");
+        }
+        me
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::AsHandle as _;
-        crate::client_is_me(stream.as_handle())
+        let me = crate::client_is_me(stream.as_handle());
+        if !me {
+            tracing::warn!("refused an IPC connection from another user, or a process Trek can't look at (pid {:?})", crate::windows::client_pid(stream.as_handle()));
+        }
+        me
     }
 }
 
@@ -257,6 +267,6 @@ mod tests {
         let _rogue = add_instance();
         let client = Client { socket: address, token: "secret".into(), session: "s".into() };
         let err = client.connect().err().unwrap();
-        assert!(err.contains("isn't served by Trek"), "{err}");
+        assert!(err.starts_with("Didn't connect to Trek: the pipe isn't served by Trek"), "a refusal, not Trek gone: {err}");
     }
 }
