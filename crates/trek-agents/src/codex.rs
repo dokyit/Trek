@@ -1519,7 +1519,8 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, _) = start_app_server(&trek_core::paths::home(), &[], &mut backlog).await?;
     let out = fetch_models(&mut rpc, &mut lines, &mut backlog).await;
-    child.terminate().await;
+    // A probe that opened no thread: Codex has nothing to save.
+    child.kill_now().await;
     out
 }
 
