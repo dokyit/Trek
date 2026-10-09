@@ -162,9 +162,12 @@ mod tests {
     #[test]
     fn calls_reach_trek_and_come_back_as_text() {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-        // A socket on Unix, a pipe on Windows, listened on as Trek does.
-        let tag = format!("trek-mcp-orch-{}", std::process::id());
-        let path: std::path::PathBuf = if cfg!(windows) { format!(r"\\.\pipe\{tag}").into() } else { std::env::temp_dir().join(format!("{tag}.sock")) };
+        // A socket on Unix, a pipe on Windows (named as Trek's are: clients refuse others),
+        // listened on as Trek does.
+        #[cfg(unix)]
+        let path = std::env::temp_dir().join(format!("trek-mcp-orch-{}.sock", std::process::id()));
+        #[cfg(windows)]
+        let path = trek_ipc::pipe_name(0).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let mut listener = {
             let _enter = rt.enter();
