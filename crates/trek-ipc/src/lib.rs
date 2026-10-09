@@ -16,13 +16,57 @@
 //! ```
 //!
 //! Prompts and results travel only over this socket: nothing here logs them.
+//!
+//! On Windows the socket is a named pipe instead, `\\.\pipe\trek-<pid>-<n>-<random>` (in
+//! `ENV_SOCKET` like a socket's path), with the same guarantees by other means. There is no
+//! folder: the pipe's own security descriptor lets only this user open it (one allow entry, for
+//! the user's SID, who also owns it), it refuses clients from other machines, and Trek creates
+//! its first instance exclusively so no other process can have claimed the name. Each connection
+//! is then checked like a socket's: the client process's token must belong to the same user
+//! (`client_is_me`), and the hello must carry the token and a session key. The client checks the
+//! pipe is served by its own user before sending the token, since a pipe's name, unlike a
+//! socket's folder, isn't private. Pipes vanish with their process, so there's nothing to sweep.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::path::Path;
 
-/// Where Trek listens.
+#[cfg(any(feature = "server", test))]
+pub mod server;
+#[cfg(windows)]
+mod windows;
+
+/// The client's end of a connection to Trek: a Unix socket, or a named pipe on Windows. Both
+/// have `connect(address)` and `try_clone()`, and read and write.
+#[cfg(unix)]
+pub use std::os::unix::net::UnixStream as Stream;
+#[cfg(windows)]
+pub use windows::{Handle, PipeSecurity, PipeStream as Stream, client_is_me};
+
+/// A connection's stream as another thread holds it, to shut the connection down (which gives
+/// up on a call in progress: its read ends at once).
+#[cfg(unix)]
+pub struct Handle(UnixStream);
+
+#[cfg(unix)]
+impl Handle {
+    pub fn shutdown(&self) -> std::io::Result<()> {
+        self.0.shutdown(std::net::Shutdown::Both)
+    }
+}
+
+#[cfg(unix)]
+fn handle_of(stream: &UnixStream) -> std::io::Result<Handle> {
+    stream.try_clone().map(Handle)
+}
+#[cfg(windows)]
+use windows::handle_of;
+
+/// Where Trek listens: a socket's path, or on Windows a named pipe's name (`\\.\pipe\…`).
 pub const ENV_SOCKET: &str = "TREK_IPC_SOCKET";
 /// The token of the Trek process that started the session.
 pub const ENV_TOKEN: &str = "TREK_IPC_TOKEN";
@@ -81,7 +125,7 @@ pub fn reply(id: &Value, result: Result<Value, String>) -> Value {
 /// A fresh random token: 32 bytes from the system's generator, as hex.
 pub fn token() -> std::io::Result<String> {
     let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -92,6 +136,7 @@ pub fn same_secret(a: &str, b: &str) -> bool {
 }
 
 /// The user id of the process at the other end of a connected Unix socket.
+#[cfg(unix)]
 pub fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
     let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
     // SAFETY: getpeereid only writes the two ids it's given; `fd` is the caller's open socket.
@@ -102,6 +147,7 @@ pub fn peer_uid(fd: std::os::fd::RawFd) -> std::io::Result<u32> {
 }
 
 /// This process's effective user id.
+#[cfg(unix)]
 pub fn my_uid() -> u32 {
     // SAFETY: no arguments, can't fail.
     unsafe { libc::geteuid() }
@@ -109,6 +155,7 @@ pub fn my_uid() -> u32 {
 
 /// Where a Trek process keeps its socket: `preferred` (in its data folder) when the path fits a
 /// socket address, else a folder of this user's own under /tmp. Made only its user can enter.
+#[cfg(unix)]
 pub fn socket_dir(preferred: &Path, name: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
     // sockaddr_un holds 104 bytes on macOS, the terminating NUL included.
@@ -128,6 +175,7 @@ pub fn socket_dir(preferred: &Path, name: &str) -> std::io::Result<PathBuf> {
 /// What a `trek-mcp` server needs to reach the Trek that started its agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Client {
+    /// The socket's path, or the pipe's name on Windows.
     pub socket: PathBuf,
     pub token: String,
     pub session: String,
@@ -149,7 +197,7 @@ impl Client {
     /// Connect and introduce ourselves. The stream can be shut down from another thread (a
     /// clone of it) to give up on a call.
     pub fn connect(&self) -> Result<Connection, String> {
-        let stream = UnixStream::connect(&self.socket).map_err(|e| format!("Trek isn't reachable ({e}). Is it still running?"))?;
+        let stream = Stream::connect(&self.socket).map_err(|e| format!("Trek isn't reachable ({e}). Is it still running?"))?;
         let mut conn = Connection { reader: BufReader::new(stream.try_clone().map_err(|e| e.to_string())?), writer: stream, next: 0 };
         conn.send(&hello(&self.token, &self.session))?;
         let answer = conn.receive()?;
@@ -167,15 +215,15 @@ impl Client {
 }
 
 pub struct Connection {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<Stream>,
+    writer: Stream,
     next: u64,
 }
 
 impl Connection {
-    /// A handle to the same socket, to shut it down from elsewhere.
-    pub fn handle(&self) -> std::io::Result<UnixStream> {
-        self.writer.try_clone()
+    /// A handle to the same connection, to shut it down from elsewhere.
+    pub fn handle(&self) -> std::io::Result<Handle> {
+        handle_of(&self.writer)
     }
 
     fn send(&mut self, v: &Value) -> Result<(), String> {
@@ -315,6 +363,7 @@ mod tests {
         assert_eq!(delegate["properties"]["mode"]["enum"], json!(["advise", "implement"]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn long_socket_paths_move_to_a_short_private_folder() {
         let deep = std::env::temp_dir().join("trek-ipc-test").join("x".repeat(90));
@@ -327,6 +376,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(short);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_client_talks_to_a_server_over_a_socket() {
         use std::os::unix::net::UnixListener;
