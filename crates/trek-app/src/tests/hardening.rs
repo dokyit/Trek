@@ -94,7 +94,7 @@ fn quitting_ends_the_process_groups_trek_started() {
     use std::os::unix::process::CommandExt as _;
     run(async |cx| {
         let trek = open(cx);
-        let mut child = std::process::Command::new("/bin/sleep").arg("30").process_group(0).spawn().unwrap();
+        let mut child = std::process::Command::new(trek_test_fixtures::bin("fixture")).args(["sleep", "30"]).process_group(0).spawn().unwrap();
         GROUP.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
         trek.update(cx, |ws, _| ws.end_children_on_quit = Some(end_the_tests_group));
         // Quit as the Dock or a logout does: no Quit action first, straight to shutdown.
