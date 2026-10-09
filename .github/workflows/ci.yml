@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows-port]
   pull_request:
   workflow_dispatch:
 
@@ -61,3 +61,28 @@ jobs:
       # `-D warnings` above doesn't turn them into errors).
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+  # The Windows port (branch windows-port) is in progress. Until the workspace builds there this
+  # job may fail without failing the run; once it's green it becomes a full test job like the
+  # macOS one and the allowance goes.
+  check-windows:
+    name: Check (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    continue-on-error: true
+    steps:
+      # Deep build paths under the runner's workspace can pass MAX_PATH.
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
+
+      - name: Check
+        run: cargo check --workspace --locked
