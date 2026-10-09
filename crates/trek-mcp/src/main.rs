@@ -28,6 +28,8 @@ USAGE:
     trek-mcp --version
 ";
 
+// Off macOS only `orchestrate` runs, and it serves inside the match: the loop after it is macOS's.
+#[cfg_attr(not(target_os = "macos"), allow(unreachable_code, unused_variables, unused_mut))]
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
     let mut tools: Box<dyn rpc::ToolSet> = match arg.as_str() {

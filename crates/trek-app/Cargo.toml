@@ -17,7 +17,7 @@ shots = ["gpui-kit/test-support"]
 tokio.workspace = true
 trek-core.workspace = true
 trek-agents.workspace = true
-trek-ipc.workspace = true
+trek-ipc = { workspace = true, features = ["server"] }
 trek-remote = { path = "../trek-remote" }
 reqwest.workspace = true
 # The pairing QR code in Settings › Phone, drawn as squares.

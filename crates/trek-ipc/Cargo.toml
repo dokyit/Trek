@@ -5,6 +5,32 @@ edition.workspace = true
 license.workspace = true
 description = "The local channel between a running Trek and the trek-mcp servers its agents start"
 
+[features]
+# The listening end (`server`), on tokio, for Trek itself; trek-mcp needs only the client.
+server = ["dep:tokio"]
+
 [dependencies]
 serde_json.workspace = true
+# The same version the workspace already locks; reads the system's generator on every platform.
+getrandom = "0.3"
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# Reads a pipe's security descriptor back in the tests.
+windows-sys = { version = "0.60", features = ["Win32_Security_Authorization"] }
