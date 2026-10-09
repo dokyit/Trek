@@ -112,6 +112,14 @@ impl Agent {
         Ok(Agent { child, rpc, lines, stderr, name, bin, db_notice: db.notice, _own_db: db.own, stand_in })
     }
 
+    /// End the agent: its stdin first, the cue to exit and on Windows the only gentle one (see
+    /// `GroupChild::terminate`), then the group.
+    async fn stop(self) {
+        let Agent { mut child, rpc, .. } = self;
+        drop(rpc);
+        child.terminate().await;
+    }
+
     fn exited(&self) -> anyhow::Error {
         match crate::opencode::exit_reason(&self.stderr.lines()) {
             Some(why) => anyhow!(why),
@@ -1179,7 +1187,7 @@ pub async fn run(
             }
         }
     }
-    agent.child.terminate().await;
+    agent.stop().await;
     Ok(())
 }
 
@@ -1385,7 +1393,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
             Err(e) if is_auth_error(&e) => info.needs_auth = true,
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
-        agent.child.terminate().await;
+        agent.stop().await;
         if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
             info.models = copilot_models().await;
         }

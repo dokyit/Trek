@@ -97,6 +97,13 @@ const UNUSED_NOTIFICATIONS: &[&str] = &[
     "thread/status/changed",
 ];
 
+/// End an app-server: its stdin first, the cue to exit and on Windows the only gentle one (see
+/// `GroupChild::terminate`), then the group.
+async fn stop(mut child: GroupChild, rpc: Rpc) {
+    drop(rpc);
+    child.terminate().await;
+}
+
 /// Spawn `codex app-server` in `cwd` and complete the initialize handshake. Messages that
 /// arrive before the handshake completes are left in `backlog`. The experimental API is on
 /// for Plan mode (`collaborationMode`).
@@ -128,7 +135,7 @@ pub(crate) async fn start_app_server(
         )
         .await?;
     if let Err(e) = startup_response(&mut lines, id, backlog, "initialize").await {
-        child.terminate().await;
+        stop(child, rpc).await;
         return Err(if e.to_string().contains("exited") { stderr.exited("Codex") } else { e });
     }
     rpc.send(&json!({ "method": "initialized" })).await?;
@@ -1314,7 +1321,7 @@ pub async fn run(
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
     let mut backlog = Vec::new();
-    let (mut child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
+    let (child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
     // Which login the session uses (ChatGPT plan or API key); answered alongside thread/start.
     let account_req = rpc.request("account/read", json!({})).await?;
 
@@ -1341,7 +1348,7 @@ pub async fn run(
                     match cut_back(&mut rpc, &mut lines, &mut backlog, &thread, &at).await {
                         Ok(()) => Some(r),
                         Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
-                            child.terminate().await;
+                            stop(child, rpc).await;
                             return Err(e);
                         }
                         Err(e) => {
@@ -1353,7 +1360,7 @@ pub async fn run(
                 }
                 Ok(r) => Some(r),
                 Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
-                    child.terminate().await;
+                    stop(child, rpc).await;
                     return Err(e);
                 }
                 // Codex no longer has the thread (its rollout was deleted): carry on in a new one.
@@ -1379,7 +1386,7 @@ pub async fn run(
             match startup_response(&mut lines, id, &mut backlog, "thread/start").await {
                 Ok(r) => r,
                 Err(e) => {
-                    child.terminate().await;
+                    stop(child, rpc).await;
                     return Err(e);
                 }
             }
@@ -1413,7 +1420,7 @@ pub async fn run(
         }
         for ev in std::mem::take(&mut out.events) {
             if events.send(ev).await.is_err() {
-                child.terminate().await;
+                stop(child, rpc).await;
                 return Ok(());
             }
         }
@@ -1436,7 +1443,7 @@ pub async fn run(
             }
         }
     }
-    child.terminate().await;
+    stop(child, rpc).await;
     Ok(())
 }
 
@@ -1512,7 +1519,8 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, _) = start_app_server(&trek_core::paths::home(), &[], &mut backlog).await?;
     let out = fetch_models(&mut rpc, &mut lines, &mut backlog).await;
-    child.terminate().await;
+    // A probe that opened no thread: Codex has nothing to save.
+    child.kill_now().await;
     out
 }
 

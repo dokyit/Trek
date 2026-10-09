@@ -13,6 +13,8 @@ pub mod mcp_check;
 pub mod mock;
 mod opencode;
 mod status;
+#[cfg(test)]
+mod tests_stop;
 
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
@@ -678,7 +680,8 @@ pub(crate) async fn output_group(command: &mut tokio::process::Command, input: O
 
 impl GroupChild {
     /// End the child and everything it started: the gentle stop, up to 2 s for the child to
-    /// exit, then the whole group (or job) is killed.
+    /// exit, then the whole group (or job) is killed. For an agent that may have something to
+    /// save (a session's transcript, its state); a probe that has its answer uses `kill_now`.
     ///
     /// On Windows the gentle stop is the end of the child's stdin, so it only works when the
     /// caller has dropped any stdin writer it took from the child (`child.stdin.take()`) first;
@@ -689,6 +692,21 @@ impl GroupChild {
         finish_group(child, self.group).await;
         #[cfg(windows)]
         finish_group(child, self.group, self.job.take()).await;
+    }
+
+    /// End the group at once, with no grace: KILL (the job's, on Windows), then reap. For a
+    /// read-only probe that has what it came for, where the process has nothing to save and
+    /// waiting for it to wind down only keeps the caller waiting.
+    pub(crate) async fn kill_now(&mut self) {
+        let Some(mut child) = self.child.take() else { return };
+        #[cfg(unix)]
+        signal_group(self.group, libc::SIGKILL);
+        // While the child is still held, so its id is still its own.
+        #[cfg(windows)]
+        end_job_or_tree(self.job.take().as_ref(), self.group);
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
+        trek_core::procs::unregister(self.group);
     }
 }
 
