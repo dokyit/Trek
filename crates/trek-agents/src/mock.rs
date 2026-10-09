@@ -1051,7 +1051,7 @@ impl Session {
                 cmd = self.commands.recv() => {
                     if let Err(stop) = self.handle_midturn(cmd) {
                         if let Ok(h) = handle_rx.try_recv() {
-                            let _ = h.shutdown(std::net::Shutdown::Both);
+                            let _ = h.shutdown();
                         }
                         return Err(stop);
                     }
