@@ -257,7 +257,27 @@ pub fn order_back(window: &Window) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Whether a window that isn't to take focus (`focus: false`, a launch in the background) is
+/// still opened shown. On macOS it's opened hidden and `order_back` shows it; GPUI on Windows
+/// keeps a window opened with `show: false` hidden until it's activated, and shows one opened
+/// with `show: true, focus: false` without activating it.
+pub const SHOW_BEHIND: bool = cfg!(windows);
+
+/// Send `window` to the bottom of the stack without activating it, behind every other app's
+/// windows (it's been opened shown, see `SHOW_BEHIND`).
+#[cfg(windows)]
+pub fn order_back(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: `hwnd` is the live window GPUI created for this `window`, and this is its thread;
+    // the call changes only the z-order, and doesn't activate it.
+    unsafe { SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn order_back(_: &Window) {}
 
 /// Liquid glass from the system (macOS 26 and later): an `NSGlassEffectView` under the window's
