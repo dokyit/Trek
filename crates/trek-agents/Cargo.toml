@@ -34,3 +34,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 ctor = "1"
 # Trek's side of the IPC socket (a pipe on Windows) in the mock agent's tests.
 trek-ipc = { workspace = true, features = ["server"] }
+trek-test-fixtures.workspace = true
