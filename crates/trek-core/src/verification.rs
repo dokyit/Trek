@@ -664,7 +664,7 @@ mod tests {
         let dir = skill(&p, ".agents/skills", "control-app", "name: control-app");
         let v = Verification { skill: dir.display().to_string(), name: "control-app".into(), cli: Some("./.agents/skills/control-app/scripts/app".into()), ..Default::default() };
         let text = instructions(&v, &p, &p);
-        assert!(text.contains("“control-app”, in `.agents/skills/control-app` in your working folder") && text.contains("(`./.agents/skills/control-app/scripts/app`, run from your working folder)") && text.contains("references/features/README.md"), "{text}");
+        assert!(text.contains(&format!("“control-app”, in `{}` in your working folder", Path::new(".agents/skills").join("control-app").display())) && text.contains("(`./.agents/skills/control-app/scripts/app`, run from your working folder)") && text.contains("references/features/README.md"), "{text}");
         assert!(!instructions(&Verification { cli: None, ..v.clone() }, &p, &p).contains("CLI"));
         // A worktree with the skill committed uses its own copy.
         let wt = project("tell-wt");
