@@ -835,8 +835,10 @@ mod tests {
         {
             let bin = dir.join(format!("gh-{id}.cmd"));
             // One argument per line, as the shell version prints them (`%~1` drops the quotes).
+            // Only for `pr create`: cmd.exe expands an argument into the line it parses, so the
+            // `--jq` filter of `pr view` (quotes, `|`) would run as commands.
             let script = format!(
-                "@echo off\r\ntype nul > \"{args}.args\"\r\n:next\r\nif \"%~1\"==\"\" goto done\r\n>> \"{args}.args\" echo %~1\r\nshift\r\ngoto next\r\n:done\r\n{body}\r\n",
+                "@echo off\r\ntype nul > \"{args}.args\"\r\nif not \"%~2\"==\"create\" goto done\r\n:next\r\nif \"%~1\"==\"\" goto done\r\n>> \"{args}.args\" echo %~1\r\nshift\r\ngoto next\r\n:done\r\n{body}\r\n",
                 args = bin.display(),
                 body = cmd.replace('\n', "\r\n"),
             );
