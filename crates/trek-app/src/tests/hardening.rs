@@ -4,6 +4,7 @@
 use super::harness::{new_project, open, run};
 use crate::workspace::Route;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 fn editing(path: &PathBuf) -> impl Fn(&Route) -> bool + '_ {
@@ -51,7 +52,10 @@ fn a_link_that_climbs_out_of_a_project_asks_too() {
 
         // A symlink inside the project that leads out of it.
         let link = trek.project.join("out");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&elsewhere, &link).unwrap();
         let url = format!("trek://edit?path={}", link.join("b.rs").display());
         cx.update(|cx| crate::deep_link::open(&url, cx));
         trek.render(cx);
@@ -79,16 +83,19 @@ fn a_link_into_a_project_opens_without_asking() {
 }
 
 /// The group `quitting_ends_the_process_groups_trek_started` started.
+#[cfg(unix)]
 static GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// `trek_core::procs::end_all` for that test alone: the registry is the whole process's, and other
-/// tests' children run in it too.
+/// tests' children run in it too. Process groups are a Unix thing; Windows ends trees by job.
+#[cfg(unix)]
 fn end_the_tests_group(_: Duration) {
     let group = GROUP.load(std::sync::atomic::Ordering::SeqCst);
     // SAFETY: a negative pid signals the test's own process group.
     unsafe { libc::kill(-group, libc::SIGTERM) };
 }
 
+#[cfg(unix)]
 #[test]
 fn quitting_ends_the_process_groups_trek_started() {
     use std::os::unix::process::CommandExt as _;
