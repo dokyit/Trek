@@ -635,7 +635,7 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         window_min_size: Some(size(px(760.), px(520.))),
         app_id: Some("dev.trek.Trek".into()),
         focus,
-        show: focus,
+        show: focus || crate::system::SHOW_BEHIND,
         ..TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {

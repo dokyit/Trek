@@ -71,6 +71,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # The adapters and their addresses for the phone pairing screen (getifaddrs has no Windows twin).
 if-addrs = "0.13"

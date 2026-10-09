@@ -40,7 +40,7 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
         window_min_size: Some(size(px(520.), px(440.))),
         app_id: Some("dev.trek.Trek".into()),
         focus,
-        show: focus,
+        show: focus || crate::system::SHOW_BEHIND,
         ..TitleBar::window_options()
     };
     let thread_id = id.to_string();
