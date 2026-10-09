@@ -52,7 +52,15 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// The user's home folder. `HOME` wins when it's set, on every platform: the Unix resolver reads it
+/// anyway, and it lets a test or a capture run point Trek at a throwaway home on Windows too, where
+/// the profile folder would otherwise be used whatever the environment says.
 pub fn home() -> PathBuf {
+    // Only a real, absolute folder: a POSIX-style `/c/Users/x` from an MSYS shell is left to the
+    // resolver, as is a value that names nothing.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h.is_dir()) {
+        return home;
+    }
     directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/"))

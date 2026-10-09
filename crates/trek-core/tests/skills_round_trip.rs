@@ -1,9 +1,6 @@
 //! Create → turn off → turn on, against a throwaway home folder.
 use trek_core::skills::{self, SkillHome, SkillSource};
 
-// Windows resolves the home folder from the profile, not `HOME`, so this would create and move
-// skills in the real `~/.codex`.
-#[cfg_attr(windows, ignore = "paths::home() ignores HOME on Windows: it would touch the real ~/.codex")]
 #[test]
 fn skill_lifecycle() {
     let home = std::env::temp_dir().join(format!("trek-home-{}", std::process::id()));
