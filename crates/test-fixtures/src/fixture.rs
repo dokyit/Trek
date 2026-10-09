@@ -1,6 +1,7 @@
 //! `fixture <verb> …` — the small utilities tests used to get from shell tools:
 //!   sleep <secs>           wait, then exit 0
-//!   cat [--stderr <text>]  stdin to stdout, then `text` on stderr
+//!   cat [--delay <secs>] [--stderr <text>]
+//!                          wait, then stdin to stdout, then `text` on stderr
 //!   echo <text…>           args joined by spaces on stdout, with a newline
 //!   print <text…>          the same without the newline
 //!   stderr <text…>         the same on stderr
@@ -19,15 +20,17 @@ pub fn run() -> i32 {
             0
         }
         Some("cat") => {
+            let rest: Vec<String> = args.collect();
+            let flag = |name: &str| rest.iter().position(|a| a == name).and_then(|i| rest.get(i + 1));
+            if let Some(secs) = flag("--delay") {
+                std::thread::sleep(std::time::Duration::from_secs_f64(secs.parse().unwrap_or(0.0)));
+            }
             let mut buf = Vec::new();
             std::io::stdin().lock().read_to_end(&mut buf).unwrap();
             let mut out = std::io::stdout().lock();
             out.write_all(&buf).unwrap();
             out.flush().unwrap();
-            let rest: Vec<String> = args.collect();
-            if let Some(i) = rest.iter().position(|a| a == "--stderr")
-                && let Some(text) = rest.get(i + 1)
-            {
+            if let Some(text) = flag("--stderr") {
                 eprintln!("{text}");
             }
             0
