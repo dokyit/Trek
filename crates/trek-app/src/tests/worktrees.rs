@@ -407,6 +407,8 @@ fn the_git_tool_keeps_its_place_and_a_turned_down_commit_message() {
         let hook = trek.project.join(".git/hooks/pre-commit");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+        // Git for Windows runs a hook with a shebang through its own sh: no executable bit needed.
+        #[cfg(unix)]
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         trek.click(cx, "git-message");
         trek.type_text(cx, "Add a note");
