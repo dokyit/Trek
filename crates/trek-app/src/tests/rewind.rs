@@ -96,7 +96,7 @@ async fn files(trek: &Trek, cx: &mut TestAppContext, what: &str, f: impl Fn(&Pat
     let deadline = Instant::now() + Duration::from_secs(20);
     while !f(&trek.project) {
         cx.run_until_parked();
-        assert!(Instant::now() < deadline, "timed out waiting for {what}: notes.txt={:?} dir={:?}", std::fs::read(trek.project.join("notes.txt")).ok().map(|b| String::from_utf8_lossy(&b).to_string()), std::fs::read_dir(&trek.project).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
         cx.background_executor.timer(Duration::from_millis(5)).await;
     }
 }
