@@ -17,7 +17,7 @@ use trek_core::worktree::{self, git};
 /// in it again (so the project's defaults and git state are read anew).
 pub(super) fn make_repo(trek: &Trek, cx: &mut TestAppContext) {
     let dir = &trek.project;
-    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
         git(dir, args).expect("git");
     }
     std::fs::write(dir.join("README.md"), "hello\n").unwrap();

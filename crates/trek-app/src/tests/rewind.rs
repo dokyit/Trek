@@ -21,6 +21,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// Make the project a git repo with one commit: `notes.txt` saying "v1".
 fn git_project(dir: &Path) {
     git(dir, &["init", "-q", "-b", "main"]);
+    // Git for Windows defaults to autocrlf=true: a restore would write CRLF over the tests' LF files.
+    git(dir, &["config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("notes.txt"), "v1\n").unwrap();
     git(dir, &["add", "-A"]);
     git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
@@ -94,7 +96,7 @@ async fn files(trek: &Trek, cx: &mut TestAppContext, what: &str, f: impl Fn(&Pat
     let deadline = Instant::now() + Duration::from_secs(20);
     while !f(&trek.project) {
         cx.run_until_parked();
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(Instant::now() < deadline, "timed out waiting for {what}: notes.txt={:?} dir={:?}", std::fs::read(trek.project.join("notes.txt")).ok().map(|b| String::from_utf8_lossy(&b).to_string()), std::fs::read_dir(&trek.project).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
         cx.background_executor.timer(Duration::from_millis(5)).await;
     }
 }

@@ -164,14 +164,15 @@ fn notes_undo_and_redo_typing_and_formatting() {
         trek.press(cx, "secondary-a");
         trek.click(cx, "note-bold");
         assert_eq!(saved(cx), "**milk**");
-        // ⌘Z takes it back, then the typing; ⇧⌘Z puts them back.
+        // ⌘Z takes it back, then the typing; ⇧⌘Z puts them back (Ctrl+Y outside macOS).
+        let redo = if cfg!(target_os = "macos") { "cmd-shift-z" } else { "ctrl-y" };
         trek.press(cx, "secondary-z");
         assert_eq!(saved(cx), "milk");
         trek.press(cx, "secondary-z");
         assert_eq!(saved(cx), "");
-        trek.press(cx, "secondary-shift-z");
+        trek.press(cx, redo);
         assert_eq!(saved(cx), "milk");
-        trek.press(cx, "secondary-shift-z");
+        trek.press(cx, redo);
         assert_eq!(saved(cx), "**milk**");
         // The toolbar's buttons do the same.
         trek.click(cx, "note-undo");
