@@ -31,7 +31,7 @@ pub(crate) fn list_files(root: &std::path::Path) -> Vec<String> {
     let walk = ignore::WalkBuilder::new(root).hidden(false).parents(true).ignore(false).git_ignore(true).git_exclude(true).git_global(true).follow_links(false).filter_entry(|e| e.file_name() != ".git").build();
     walk.flatten()
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-        .filter_map(|e| e.path().strip_prefix(root).ok().map(|r| r.to_string_lossy().to_string()))
+        .filter_map(|e| e.path().strip_prefix(root).ok().map(crate::mentions::rel_string))
         .filter(|r| !r.is_empty() && !r.ends_with(".DS_Store"))
         .take(MAX_FILES)
         .collect()
