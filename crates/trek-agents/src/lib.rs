@@ -987,14 +987,35 @@ mod tests {
         assert_eq!(l.next_line().await.unwrap(), None);
     }
 
+    /// A shell that runs `unix` under `sh -c`, or `windows` under `cmd /c`.
+    fn echo_to_stderr(unix: &str, windows: &str) -> tokio::process::Command {
+        if cfg!(windows) {
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.args(["/d", "/c", windows]);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", unix]);
+            c
+        }
+    }
+
     #[tokio::test]
     async fn stderr_tail_keeps_draining_after_invalid_utf8() {
         use std::process::Stdio;
-        let mut child = tokio::process::Command::new("sh")
-            .args(["-c", "printf '\\377\\nvalid\\n' >&2"])
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut command = if cfg!(windows) {
+            // cmd has no printf: `type` a file holding the same bytes.
+            let file = std::env::temp_dir().join(format!("trek-stderr-bytes-{}.bin", std::process::id()));
+            std::fs::write(&file, b"\xff\nvalid\n").unwrap();
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.args(["/d", "/c", "type"]).arg(file).arg("1>&2");
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", "printf '\\377\\nvalid\\n' >&2"]);
+            c
+        };
+        let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
         let tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
         child.wait().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1007,7 +1028,7 @@ mod tests {
         let log = SessionLog::default();
         SESSION_LOG
             .scope(log.clone(), async {
-                let mut child = tokio::process::Command::new("sh").args(["-c", "echo 'warning: slow' >&2; echo done >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+                let mut child = echo_to_stderr("echo 'warning: slow' >&2; echo done >&2", "(echo warning: slow)>&2 & (echo done)>&2").stderr(Stdio::piped()).spawn().unwrap();
                 let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
                 child.wait().await.unwrap();
             })
@@ -1020,7 +1041,7 @@ mod tests {
         }
         assert_eq!(log.lines(), ["warning: slow", "done"]);
         // Outside a session nothing is kept but the tail.
-        let mut child = tokio::process::Command::new("sh").args(["-c", "echo stray >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+        let mut child = echo_to_stderr("echo stray >&2", "(echo stray)>&2").stderr(Stdio::piped()).spawn().unwrap();
         let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
         child.wait().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
