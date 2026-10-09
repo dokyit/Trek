@@ -6,11 +6,9 @@ use std::process::{Command, Stdio};
 
 /// Settings a repository's own config can't override in Trek's read-only calls: nothing from the
 /// folder runs (fsmonitor, hooks), and diffs keep the `a/` `b/` prefixes Trek parses.
-const READ_ONLY_CONFIG: [&str; 10] = [
+const READ_ONLY_CONFIG: [&str; 8] = [
     "-c",
     "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
     "-c",
     "diff.noprefix=false",
     "-c",
@@ -18,6 +16,23 @@ const READ_ONLY_CONFIG: [&str; 10] = [
     "-c",
     "core.splitIndex=false",
 ];
+
+/// The `core.hooksPath` setting that keeps every hook from running. Where there is a null device
+/// to point at, that; on Windows git doesn't take `/dev/null` for a folder, so an empty folder of
+/// Trek's own in the temp dir (made once per process; no files in it, so no hook to run).
+fn no_hooks() -> &'static str {
+    static SETTING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SETTING.get_or_init(|| {
+        let dir = std::env::temp_dir().join("trek-no-hooks");
+        let value = if cfg!(windows) && std::fs::create_dir_all(&dir).is_ok() {
+            // Forward slashes: backslashes in a `-c` value are escapes to git.
+            dir.to_string_lossy().replace('\\', "/")
+        } else {
+            "/dev/null".to_string()
+        };
+        format!("core.hooksPath={value}")
+    })
+}
 
 /// A git command for questions that change nothing, run in `dir`: no lock an agent's own git
 /// would then wait on (`GIT_OPTIONAL_LOCKS=0`), no prompt, no fsmonitor or hook from the folder's
@@ -41,6 +56,7 @@ pub fn read_only(dir: &Path) -> Command {
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_EXTERNAL_DIFF")
+        .args(["-c", no_hooks()])
         .args(READ_ONLY_CONFIG)
         .stdin(Stdio::null());
     c
@@ -219,6 +235,26 @@ mod tests {
         assert!(!marker.exists(), "fsmonitor ran");
         let diff = read(&dir, &["diff"]).unwrap();
         assert!(diff.contains("--- a/first.txt"), "{diff}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_only_calls_run_none_of_the_folders_hooks() {
+        let dir = repo("hooks");
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        // The hook does turn a plain commit down...
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        run(&dir, &["add", "."]);
+        let plain = Command::new("git").args(["commit", "-q", "-m", "a"]).current_dir(&dir).output().unwrap();
+        assert!(!plain.status.success(), "the hook didn't run for a plain commit");
+        // ...and doesn't through Trek's wrapper.
+        let out = read_only(&dir).args(["commit", "-q", "-m", "a"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(read(&dir, &["log", "-1", "--format=%s"]).as_deref(), Some("a"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
