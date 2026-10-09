@@ -1699,8 +1699,11 @@ impl Render for Sidebar {
         }
         self.ghosts.retain(|g| g.left.moving(now) && layout.iter().any(|l| l.pid == g.pid));
         let mut last_rows: HashMap<String, (Thread, String, bool)> = HashMap::new();
+        // Each project's header and rows move as one (`flip_stack`).
+        let mut live_groups: Vec<(SharedString, AnyElement)> = vec![];
         for g in layout {
             let pid = g.pid;
+            let mut group = v_flex().w_full();
             let i = info.remove(&pid).unwrap_or_else(|| GroupInfo { name: names.get(&pid).cloned().unwrap_or_else(|| "No project".into()), ..GroupInfo::default() });
             let extra = h_flex()
                 .gap_2()
@@ -1709,7 +1712,7 @@ impl Render for Sidebar {
                 .when(i.unread > 0, |el| el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("{} new", i.unread))))
                 .child(div().text_xs().child(i.total.to_string()))
                 .into_any_element();
-            list = list.child(crate::motion::flip_row(&flip, format!("live-h-{pid}"), self.group_header("live", &pid, i.name.clone(), Some(extra), Some(i.folded), &paths, &looks, cx), now, window));
+            group = group.child(crate::motion::flip_row(&flip, format!("live-h-{pid}"), self.group_header("live", &pid, i.name.clone(), Some(extra), Some(i.folded), &paths, &looks, cx), now, window));
             // The group's rows top to bottom, with what's fading away where it was.
             let mut seq: Vec<Result<&String, usize>> = g.rows.iter().map(Ok).collect();
             for (gx, ghost) in self.ghosts.iter().enumerate().filter(|(_, x)| x.pid == pid) {
@@ -1727,16 +1730,16 @@ impl Render for Sidebar {
                         let card = attention(t);
                         last_rows.insert(id.clone(), (t.clone(), pid.clone(), card));
                         let row = if card { self.card(t, &i.name, false, sel, cx) } else { self.live_line(t, sel, cx) };
-                        list = list.child(crate::motion::flip_row(&flip, id.clone(), row, now, window));
+                        group = group.child(crate::motion::flip_row(&flip, id.clone(), row, now, window));
                     }
                     Err(gx) => {
                         let ghost = &self.ghosts[gx];
                         let left = ghost.left.frame(now, window).clamp(0., 1.);
                         let row = if ghost.card { self.card(&ghost.thread, &i.name, false, false, cx) } else { self.live_line(&ghost.thread, false, cx) };
                         // Out of the layout at once (the rows under it slide up to close the gap),
-                        // it fades where it was, under them.
-                        let row = div().h(px(0.)).child(div().absolute().top_0().left_0().w_full().h(px(ghost.height)).opacity(left).child(row));
-                        list = list.child(crate::motion::flip_row(&flip, ghost.id.clone(), row, now, window));
+                        // it fades where it was, under them, inert: a click on it does nothing.
+                        let row = div().h(px(0.)).child(crate::motion::inert(div().absolute().top_0().left_0().w_full().h(px(ghost.height)).opacity(left).child(row)));
+                        group = group.child(crate::motion::flip_row(&flip, ghost.id.clone(), row, now, window));
                     }
                 }
             }
@@ -1747,7 +1750,7 @@ impl Render for Sidebar {
                     false if i.more > 0 => (format!("live-more-{pid}"), format!("Show {} more", i.more)),
                     false => (format!("live-more-{pid}"), "Show more".to_string()),
                 };
-                list = list.child(crate::motion::flip_row(
+                group = group.child(crate::motion::flip_row(
                     &flip,
                     format!("live-f-{pid}"),
                     div()
@@ -1773,7 +1776,9 @@ impl Render for Sidebar {
                     window,
                 ));
             }
+            live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
         }
+        list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
         self.last_rows = last_rows;
         if !live_shown && !searching && !named_sections_busy {
             list = list.child(
@@ -1835,17 +1840,18 @@ impl Render for Sidebar {
                 window,
             ));
             if settled_open {
+                let mut settled_groups: Vec<(SharedString, AnyElement)> = vec![];
                 for (pid, name, items) in groups {
                     let open = self.open_projects.contains(&pid);
                     let shown = if open || searching { items.len() } else { items.len().min(5) };
                     let pid2 = pid.clone();
                     let folded = self.collapsed_settled.contains(&pid) && !searching;
-                    history = history.child(crate::motion::flip_row(&flip, format!("settled-h-{pid}"), self.group_header("settled", &pid, name.clone(), None, Some(folded), &paths, &looks, cx), now, window));
+                    let mut group = v_flex().w_full().child(crate::motion::flip_row(&flip, format!("settled-h-{pid}"), self.group_header("settled", &pid, name.clone(), None, Some(folded), &paths, &looks, cx), now, window));
                     for t in items.iter().take(if folded { 0 } else { shown }) {
-                        history = history.child(crate::motion::flip_row(&flip, t.id.clone(), self.line(t, selected.as_deref() == Some(&t.id), cx), now, window));
+                        group = group.child(crate::motion::flip_row(&flip, t.id.clone(), self.line(t, selected.as_deref() == Some(&t.id), cx), now, window));
                     }
                     if items.len() > 5 && !searching && !folded {
-                        history = history.child(
+                        group = group.child(
                             div()
                                 .id(SharedString::from(format!("more-{pid}")))
                                 .mx_2()
@@ -1866,7 +1872,9 @@ impl Render for Sidebar {
                                 })),
                         );
                     }
+                    settled_groups.push((format!("settled-g-{pid}").into(), group.into_any_element()));
                 }
+                history = history.child(crate::motion::flip_stack(&flip, settled_groups, now));
             }
         }
 

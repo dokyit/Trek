@@ -263,6 +263,7 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         })
         .child(
             ui::menu_row("mm-effort", sub == Some(Sub::Effort), cx)
+                .test_support()
                 .child(Icon::new(crate::assets::Lucide::Sparkle).small().text_color(muted))
                 .child(div().flex_1().child("Effort"))
                 .child(div().text_color(muted).child(prefs.effort.label()))
@@ -314,6 +315,7 @@ fn effort_panel<H: PickerHost>(prefs: &Prefs, model: Option<&ModelInfo>, cx: &mu
         .w(px(200.))
         .children(efforts.into_iter().map(|e| {
             ui::menu_row(SharedString::from(format!("eff-{}", e.as_str())), e == current, cx)
+                .test_support()
                 .child(div().flex_1().child(e.label()))
                 .when(e == current, |el| el.child(Icon::new(IconName::Check).small()))
                 .on_click(cx.listener(move |this: &mut H, _, _, cx| {

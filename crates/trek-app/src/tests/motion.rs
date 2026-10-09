@@ -370,3 +370,314 @@ fn basecamps_bars_grow_in_one_after_another() {
         assert_eq!(height(&trek, cx), full);
     });
 }
+
+/// A frame as the platform draws one: the clock moves on, the frames asked for come, and only
+/// what changed is drawn again (cached views replay their last painting, unlike `Trek::render`).
+fn live_frame(trek: &Trek, cx: &mut TestAppContext, ms: u64) {
+    cx.executor().advance_clock(Duration::from_millis(ms));
+    trek.window(cx, |window, cx| {
+        window.simulate_next_frame(cx);
+    });
+    cx.run_until_parked();
+}
+
+/// The opacity of the fill painted over exactly `b` (an element's own background) in the last
+/// frame, if one was.
+fn fill_alpha(trek: &Trek, cx: &mut TestAppContext, b: gpui_kit::Bounds<gpui_kit::Pixels>) -> Option<f32> {
+    trek.window(cx, |window, _| {
+        let k = window.scale_factor();
+        let near = |a: f32, b: f32| (a - b * k).abs() < 1.;
+        window
+            .painted_quads()
+            .iter()
+            .filter(|q| near(q.bounds.origin.x.0, b.origin.x.as_f32()) && near(q.bounds.origin.y.0, b.origin.y.as_f32()) && near(q.bounds.size.width.0, b.size.width.as_f32()) && near(q.bounds.size.height.0, b.size.height.as_f32()))
+            .filter_map(|q| q.background.as_solid().map(|c| c.a))
+            .reduce(f32::max)
+    })
+}
+
+/// While the window crosses between modes, `b`'s fill (in a cached view on the side that's
+/// going) fades with it, frame by frame, as the platform draws them.
+fn fades_with_the_crossing(trek: &Trek, cx: &mut TestAppContext, b: gpui_kit::Bounds<gpui_kit::Pixels>, full: f32, going: impl Fn(f32) -> f32) {
+    let mut frames = 0;
+    for _ in 0..60 {
+        live_frame(trek, cx, 16);
+        let shown = going(editor_in(trek, cx));
+        if shown == 0. {
+            break;
+        }
+        frames += 1;
+        let alpha = fill_alpha(trek, cx, b).unwrap_or(0.);
+        assert!((alpha - full * shown).abs() < 0.01, "frame {frames}: drawn at {alpha}, the rest of its side at {}", full * shown);
+    }
+    assert!(frames > 5, "it took a few frames: {frames}");
+}
+
+#[test]
+fn the_editor_fades_out_whole_on_the_way_back_to_agents() {
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("one.rs");
+        std::fs::write(&file, "1\n").unwrap();
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
+        trek.render(cx);
+        // The file's row in the Explorer (a cached view) is highlighted: a fill to follow.
+        trek.click(cx, file.display().to_string());
+        moving(cx);
+        frame(&trek, cx, 1_000);
+        let row = trek.bounds(cx, file.display().to_string()).expect("the file's row");
+        let full = fill_alpha(&trek, cx, row).expect("its highlight");
+
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Agents, cx));
+        fades_with_the_crossing(&trek, cx, row, full, |e| e);
+        // Across: nothing of the editor is drawn, without a refresh to clear it.
+        live_frame(&trek, cx, 500);
+        live_frame(&trek, cx, 16);
+        assert_eq!(fill_alpha(&trek, cx, row), None, "the tree is gone with the rest of the editor");
+        assert!(!trek.visible(cx, "ide-workbench") && !trek.visible(cx, "explorer-tree"));
+    });
+}
+
+#[test]
+fn agents_fade_out_whole_on_the_way_to_the_editor() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        moving(cx);
+        frame(&trek, cx, 1_000);
+        // The open thread's row in the sidebar (a cached view) is highlighted.
+        let row = trek.bounds(cx, format!("live-line-{id}")).expect("its row");
+        let full = fill_alpha(&trek, cx, row).expect("its highlight");
+
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
+        fades_with_the_crossing(&trek, cx, row, full, |e| 1. - e);
+        live_frame(&trek, cx, 500);
+        live_frame(&trek, cx, 16);
+        assert_eq!(fill_alpha(&trek, cx, row), None);
+        assert!(!trek.visible(cx, "sidebar"));
+    });
+}
+
+/// A seen, unsettled thread in a project of its own, `older_by` ms old.
+fn elsewhere(trek: &Trek, cx: &mut TestAppContext, title: &str, older_by: i64) -> String {
+    trek.update(cx, |ws, cx| {
+        let other = super::harness::new_project("elsewhere");
+        ws.store.ensure_project(&other).unwrap();
+        let mut t = ws.store.create_thread(Some(&other), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+        t.title = title.into();
+        t.updated_at = now_ms() - older_by;
+        t.last_seen_at = t.updated_at;
+        ws.store.save_thread(&t).expect("save");
+        ws.reload(cx);
+        t.id
+    })
+}
+
+fn pid(trek: &Trek, cx: &TestAppContext, id: &str) -> String {
+    trek.read(cx, |ws, _| ws.thread(id).unwrap().project_id.clone().unwrap())
+}
+
+#[test]
+fn groups_trading_places_pass_whole_the_one_going_up_over_the_other() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        let a = quiet(&trek, cx, "Here", 60_000);
+        let b = elsewhere(&trek, cx, "There", 120_000);
+        let (pa, pb) = (pid(&trek, cx, &a), pid(&trek, cx, &b));
+        // `a` open: its row has a fill to follow.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
+        frame(&trek, cx, 1_000);
+        let head = |trek: &Trek, cx: &mut TestAppContext, p: &str| trek.bounds(cx, format!("live-proj-head-{p}")).expect("a header");
+        let (ha, hb) = (head(&trek, cx, &pa), head(&trek, cx, &pb));
+        assert!(ha.origin.y < hb.origin.y, "the newer project first");
+        let row_a = trek.bounds(cx, format!("live-line-{a}")).unwrap();
+
+        // News in `b`: its project goes first. Each group slides as one; the rows in them don't
+        // move against their headers.
+        bump(&trek, cx, &b);
+        trek.render(cx);
+        let group = |trek: &Trek, cx: &mut TestAppContext, p: &str| offset(trek, cx, &format!("live-g-{p}")).unwrap();
+        assert!(group(&trek, cx, &pb) > 20. && group(&trek, cx, &pa) < -20., "{} {}", group(&trek, cx, &pb), group(&trek, cx, &pa));
+        for key in [a.clone(), b.clone(), format!("live-h-{pa}"), format!("live-h-{pb}")] {
+            assert_eq!(offset(&trek, cx, &key), Some(0.), "{key} rides with its group");
+        }
+        assert_eq!(head(&trek, cx, &pb).origin.y, hb.origin.y, "drawn where it was");
+
+        // Passing: `a`'s row isn't painted under `b`'s group, and `b` takes the click there.
+        let mut passed = false;
+        for _ in 0..50 {
+            frame(&trek, cx, 8);
+            let (top, row_b) = (head(&trek, cx, &pb), trek.bounds(cx, format!("live-line-{b}")).unwrap());
+            let band = (top.origin.y.as_f32(), row_b.bottom().as_f32());
+            let k = trek.window(cx, |w, _| w.scale_factor());
+            let fills: Vec<(f32, f32, f32, f32)> = trek.window(cx, |w, _| {
+                w.painted_quads()
+                    .iter()
+                    .filter(|q| (q.bounds.size.height.0 - row_a.size.height.as_f32() * k).abs() < 1. && (q.bounds.size.width.0 - row_a.size.width.as_f32() * k).abs() < 1.)
+                    .filter(|q| q.background.as_solid().is_some_and(|c| c.a > 0.))
+                    .map(|q| (q.bounds.origin.y.0 / k, q.bounds.bottom().0 / k, q.content_mask.bounds.origin.y.0 / k, q.content_mask.bounds.bottom().0 / k))
+                    .collect()
+            });
+            let Some(&(y0, y1, m0, m1)) = fills.first() else { continue };
+            for (_, _, m0, m1) in &fills {
+                let painted = (m0.max(band.0), m1.min(band.1));
+                assert!(painted.1 - painted.0 < 0.5, "`a` painted under `b`'s group: mask {m0}..{m1}, group {band:?}");
+            }
+            let mid = row_b.center().y.as_f32();
+            if !passed && y0 < mid && mid < y1 && band.0 < band.1 {
+                assert!(m1 <= band.0 + 0.5 || m0 >= band.1 - 0.5);
+                passed = true;
+                trek.click(cx, format!("live-line-{b}"));
+                assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(b.clone()), "the click lands on the group on top");
+                break;
+            }
+        }
+        assert!(passed, "they passed each other");
+        frame(&trek, cx, 1_000);
+        assert!(head(&trek, cx, &pb).origin.y < head(&trek, cx, &pa).origin.y);
+        assert_eq!(group(&trek, cx, &pa), 0.);
+    });
+}
+
+#[test]
+fn a_click_on_a_row_as_it_fades_away_does_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        let ids: Vec<String> = (0..3).map(|i| quiet(&trek, cx, &format!("Quiet {i}"), (i + 1) * 60_000)).collect();
+        frame(&trek, cx, 1_000);
+        let route = trek.read(cx, |ws, _| ws.route.clone());
+        trek.update(cx, |ws, cx| ws.archive(&ids[2], cx));
+        frame(&trek, cx, 60);
+        assert_eq!(ghosts(&trek, cx), [ids[2].clone()]);
+        trek.click(cx, format!("live-line-{}", ids[2]));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), route, "the archived thread doesn't open");
+
+        // The sidebar folding away (⌘B) is out of reach too.
+        trek.press(cx, "cmd-b");
+        frame(&trek, cx, 60);
+        assert!(trek.visible(cx, "sidebar"));
+        trek.click(cx, format!("live-line-{}", ids[0]));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), route);
+    });
+}
+
+#[test]
+fn a_click_on_the_palette_as_it_goes_does_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        quiet(&trek, cx, "Recent", 60_000);
+        let route = trek.read(cx, |ws, _| ws.route.clone());
+        trek.press(cx, "cmd-k");
+        frame(&trek, cx, 1_000);
+        trek.press(cx, "escape");
+        frame(&trek, cx, 40);
+        assert!(trek.visible(cx, ("palette-row", 0usize)), "still drawn as it leaves");
+        trek.click(cx, ("palette-row", 0usize));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), route, "nothing ran");
+        assert!(!cx.read(|cx| trek.root.read(cx).palette.read(cx).open));
+    });
+}
+
+#[test]
+fn a_click_as_the_preview_shrinks_back_goes_to_what_is_under_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        let id = quiet(&trek, cx, "Under the preview", 60_000);
+        // Bigger than the stage at 2x: a press zooms it.
+        let image = png(&trek, "big.png", 4000, 2500);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        composer.update(cx, |c, cx| c.attach_image(image.clone(), cx));
+        trek.render(cx);
+        trek.click(cx, ("attachment", 0usize));
+        frame(&trek, cx, 1_000);
+        trek.press(cx, "escape");
+        frame(&trek, cx, 40);
+        let preview = cx.read(|cx| trek.root.read(cx).preview.clone());
+        assert!(preview.read_with(cx, |p, _| !p.is_open() && p.is_mounted()));
+        // A press on the image would zoom it to actual pixels; going, it doesn't.
+        trek.click(cx, "preview-image");
+        assert!(preview.read_with(cx, |p, _| !p.is_actual()));
+        // The sidebar's row, under the preview's backdrop.
+        trek.click(cx, format!("live-line-{id}"));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(id));
+        assert!(preview.read_with(cx, |p, _| !p.is_open()), "and the preview didn't take it");
+    });
+}
+
+#[test]
+fn a_click_on_a_sheet_as_it_leaves_does_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        let ws = trek.ws.clone();
+        trek.window(cx, |window, cx| crate::add_agent::open(ws, crate::add_agent::Tab::Command, window, cx));
+        frame(&trek, cx, 1_000);
+        trek.click(cx, "command-cancel");
+        trek.render(cx);
+        assert!(trek.visible(cx, "sheet-leaving"));
+        // "Add agent" on the empty form would complain; on its way out it does nothing.
+        trek.click(cx, "command-add");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "command-error"));
+        assert!(trek.window(cx, |window, cx| !window.has_active_dialog(cx)));
+    });
+}
+
+#[test]
+fn undo_on_a_toast_as_it_goes_does_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
+        trek.window(cx, |window, _| window.activate_window());
+        cx.run_until_parked();
+        trek.press(cx, "cmd-e");
+        let settled = |trek: &Trek, cx: &mut TestAppContext| trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some()));
+        assert!(settled(&trek, cx));
+        std::thread::sleep(Duration::from_millis(450));
+        trek.render(cx);
+        trek.click(cx, "undo");
+        assert!(!settled(&trek, cx), "Undo brings it back");
+        // Settled again some other way while the toast goes: its Undo is spent.
+        trek.update(cx, |ws, cx| {
+            ws.store.update_thread(&id, |t| t.settled_at = Some(now_ms())).unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "undo"), "still drawn as it goes");
+        trek.click(cx, "undo");
+        assert!(settled(&trek, cx), "a second Undo as it goes does nothing");
+    });
+}
+
+#[test]
+fn a_row_leaving_its_group_for_another_goes_from_where_it_was() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.update(cx, |ws, cx| {
+            ws.settled_open = true;
+            cx.notify();
+        });
+        quiet(&trek, cx, "Stays", 60_000);
+        // Alone in the second project's group: settling it takes the group away.
+        let a = elsewhere(&trek, cx, "Settles", 120_000);
+        frame(&trek, cx, 1_000);
+        let before = row_y(&trek, cx, &a).unwrap();
+        trek.update(cx, |ws, cx| ws.settle(&a, cx));
+        trek.render(cx);
+        let title = |trek: &Trek, cx: &mut TestAppContext| trek.bounds(cx, format!("line-{a}")).expect("in the history").origin.y.as_f32();
+        let first = title(&trek, cx);
+        frame(&trek, cx, 1_000);
+        let after = title(&trek, cx);
+        assert!((first - before).abs() < 8., "drawn where it was: {before} → {first}");
+        assert!(after > first + 20., "then down into the history: {after}");
+    });
+}

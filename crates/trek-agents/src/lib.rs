@@ -17,7 +17,7 @@ mod status;
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
 pub use limits::{Limit, LimitScope};
-pub use status::{AgentStatus, CommandKind, ResetCredit, SlashCommand, UsageLimit, claude_status, codex_consume_reset, codex_status, devin_status};
+pub use status::{AgentStatus, CommandKind, ResetCredit, SlashCommand, UsageLimit, claude_commands, claude_status, codex_commands, codex_consume_reset, codex_status, devin_status};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -251,6 +251,9 @@ pub enum AgentEvent {
     TaskOutput { id: String, output: String },
     /// The slash commands the agent offers in this session (replaces any earlier list).
     Commands(Vec<SlashCommand>),
+    /// The effort levels the session's `model` offers (they can change with the model: OpenCode
+    /// 2's do), and the one it's on. Sent as the session starts and after a model switch.
+    Efforts { model: String, efforts: Vec<Effort>, effort: Option<Effort> },
     /// Something the user should know that isn't an error (the transcript shows it as a note).
     Notice(String),
     /// The latest point the session can be taken back to, for `SessionConfig::resume_at`: the

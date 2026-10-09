@@ -225,6 +225,12 @@ impl ImagePreview {
         self.showing.is_mounted()
     }
 
+    /// Whether the image is drawn at actual pixels (open or going).
+    #[cfg(test)]
+    pub fn is_actual(&self) -> bool {
+        self.showing.item().is_some_and(|s| s.actual)
+    }
+
     /// The thumbnail it grows from and shrinks back to, if there is one on screen.
     #[cfg(test)]
     pub fn source(&self) -> Option<Bounds<Pixels>> {
@@ -714,7 +720,7 @@ impl Render for ImagePreview {
             let y = px(HEADER) + (window.viewport_size().height - px(HEADER + FILMSTRIP)) / 2. - px(18.);
             [self.chevron("preview-prev", -1, y, cx), self.chevron("preview-next", 1, y, cx)]
         });
-        div()
+        let preview = div()
             .id("attachment-preview")
             .test_support()
             .group("preview")
@@ -722,7 +728,7 @@ impl Render for ImagePreview {
             .top_0()
             .left_0()
             .size_full()
-            .occlude()
+            .when(!closing, |el| el.occlude())
             .when(!zoom, |el| el.opacity(t))
             .when(!closing, |el| {
                 el.track_focus(&self.focus)
@@ -740,8 +746,9 @@ impl Render for ImagePreview {
             .child(image)
             .child(div().absolute().top_0().left_0().w_full().when(zoom, |el| el.opacity(t)).child(header))
             .children(chevrons.map(|c| div().absolute().top_0().left_0().size_full().when(zoom, |el| el.opacity(t)).children(c)))
-            .children(film.map(|f| div().absolute().bottom_0().left_0().size_full().when(zoom, |el| el.opacity(t)).child(f)))
-            .into_any_element()
+            .children(film.map(|f| div().absolute().bottom_0().left_0().size_full().when(zoom, |el| el.opacity(t)).child(f)));
+        // Going, it's inert: a click reaches what's under it.
+        if closing { crate::motion::inert(preview).into_any_element() } else { preview.into_any_element() }
     }
 }
 

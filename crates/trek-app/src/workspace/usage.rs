@@ -3,7 +3,8 @@
 //! on it ends, and kept across launches so the card has numbers from the first frame (marked
 //! with when they were read until they're read again). Also the tokens Trek recorded for each
 //! agent today, for the agents with no plan limits to show, and which agents the card shows
-//! (`Settings::usage`, up to three).
+//! (`Settings::usage`, up to three). Only those have their usage read: the others' commands and
+//! models are read once, without it.
 
 use super::{Workspace, devin_agent};
 use gpui_kit::Context;
@@ -17,22 +18,26 @@ use trek_core::basecamp::Range;
 use trek_core::pricing::Spend;
 use trek_core::settings::USAGE_SHOWN_MAX;
 
-/// Reads an agent's account, plan, limits and commands, answering on the channel. Claude Code's
-/// and Codex's own report (`claude_status`, `codex_status`) by default; tests answer for any agent.
-pub type UsageFetch = Rc<dyn Fn(&AgentId, &Path) -> async_channel::Receiver<Result<AgentStatus, String>>>;
+/// Reads an agent's account, plan, commands and models, and its limits when the flag is set,
+/// answering on the channel. Claude Code's and Codex's own report (`claude_status`,
+/// `codex_status`, or `claude_commands`, `codex_commands` without the usage) by default; tests
+/// answer for any agent.
+pub type UsageFetch = Rc<dyn Fn(&AgentId, &Path, bool) -> async_channel::Receiver<Result<AgentStatus, String>>>;
 
 /// The shortest time between two reads of one agent's usage, unless one is asked for (`/usage`,
 /// a limit hit with no reset known).
 const READ_EVERY_MS: i64 = 30_000;
 
-/// Claude Code's or Codex's own usage report, read on Trek's tokio runtime.
-fn read_agent(agent: &AgentId, cwd: &Path) -> async_channel::Receiver<Result<AgentStatus, String>> {
+/// Claude Code's or Codex's own report, with its usage or without, read on Trek's tokio runtime.
+fn read_agent(agent: &AgentId, cwd: &Path, with_usage: bool) -> async_channel::Receiver<Result<AgentStatus, String>> {
     let (tx, rx) = async_channel::bounded(1);
     let (agent, cwd) = (agent.clone(), cwd.to_path_buf());
     trek_core::runtime().spawn(async move {
-        let status = match agent {
-            AgentId::ClaudeCode => trek_agents::claude_status(&cwd).await,
-            _ => trek_agents::codex_status(&cwd).await,
+        let status = match (agent, with_usage) {
+            (AgentId::ClaudeCode, true) => trek_agents::claude_status(&cwd).await,
+            (AgentId::ClaudeCode, false) => trek_agents::claude_commands(&cwd).await,
+            (_, true) => trek_agents::codex_status(&cwd).await,
+            (_, false) => trek_agents::codex_commands(&cwd).await,
         };
         let _ = tx.send(status.map_err(|e| e.to_string())).await;
     });
@@ -107,10 +112,19 @@ impl Workspace {
         out
     }
 
-    /// Whether there's anything to show of `agent`'s usage.
+    /// Whether there's anything to show of `agent`'s usage. Claude Code and Codex report their
+    /// plan's: once found, before it's read.
     fn has_usage(&self, agent: &AgentId) -> bool {
         let key = agent.key();
-        self.agent_status.contains_key(&key) || self.usage_cached.contains_key(&key) || self.usage_today.get(&key).is_some_and(|(n, _)| *n > 0)
+        self.usage_status(&key).is_some()
+            || self.usage_cached.contains_key(&key)
+            || self.usage_today.get(&key).is_some_and(|(n, _)| *n > 0)
+            || (matches!(agent, AgentId::ClaudeCode | AgentId::Codex) && self.agent_ready(agent))
+    }
+
+    /// What `key`'s agent said this run, if that included its usage.
+    pub(crate) fn usage_status(&self, key: &str) -> Option<&AgentStatus> {
+        self.agent_status.get(key).filter(|_| !self.usage_unread.contains(key))
     }
 
     /// The providers the Usage card shows: the ones picked (`Settings::usage`), else the first
@@ -142,17 +156,23 @@ impl Workspace {
         }
         self.settings.usage.shown = Some(keys);
         self.save_settings(cx);
-        // Devin's plan is read only while something shows it.
-        if *agent == devin_agent() && self.usage_shown().contains(agent) {
-            self.refresh_devin_usage(cx);
+        // Usage is read only while the card shows it: now, what was kept shows meanwhile.
+        if self.usage_shown().contains(agent) {
+            if *agent == devin_agent() {
+                self.refresh_devin_usage(cx);
+            } else {
+                self.fetch_usage(agent.clone(), false, cx);
+            }
         }
         true
     }
 
-    /// Leave it to Trek again: the first few providers with usage to show.
+    /// Leave it to Trek again: the first few providers with usage to show (read now, if not
+    /// lately).
     pub fn show_usage_automatically(&mut self, cx: &mut Context<Self>) {
         self.settings.usage.shown = None;
         self.save_settings(cx);
+        self.refresh_usage(cx);
     }
 
     /// The Usage card's rows, for the providers it shows. What an agent said this run is shown
@@ -165,7 +185,7 @@ impl Workspace {
             .map(|agent| {
                 let key = agent.key();
                 let today = self.usage_today.get(&key).filter(|(n, _)| *n > 0).cloned();
-                if let Some(st) = self.agent_status.get(&key) {
+                if let Some(st) = self.usage_status(&key) {
                     return UsageRow {
                         no_limits: st.limits.is_empty() && st.error.is_none(),
                         plan: st.plan.clone(),
@@ -204,38 +224,60 @@ impl Workspace {
 
     /// Re-read account, plan, usage limits and commands from the installed vendor CLIs, each on
     /// its own and at once, off the main thread. Free: no prompt is sent. Each agent at most
-    /// every 30 seconds. Devin is asked on its own (`refresh_devin_usage`).
+    /// every 30 seconds, and only those the Usage card shows: the others' commands and models
+    /// are read once, without their usage. Devin is asked on its own (`refresh_devin_usage`).
     pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
-        self.read_usage(false, cx);
+        self.read_usage(false, false, cx);
     }
 
-    /// `refresh_usage` now, however recently the agents were read (`/usage`, a reset used, a
-    /// limit with no reset known).
+    /// `refresh_usage` now, however recently the agents on the card were read (`/usage`, a
+    /// reset used).
     pub fn refresh_usage_now(&mut self, cx: &mut Context<Self>) {
-        self.read_usage(true, cx);
+        self.read_usage(true, false, cx);
     }
 
-    fn read_usage(&mut self, force: bool, cx: &mut Context<Self>) {
+    /// The agents' commands changed (a skill added or turned off): read them all again, those
+    /// the Usage card shows with their usage.
+    pub fn refresh_commands(&mut self, cx: &mut Context<Self>) {
+        self.read_usage(true, true, cx);
+    }
+
+    fn read_usage(&mut self, force: bool, commands: bool, cx: &mut Context<Self>) {
         let mut agents = vec![AgentId::ClaudeCode, AgentId::Codex];
         if self.usage_fetch.is_some() {
             let more: Vec<AgentId> = self.usage_providers().into_iter().filter(|a| !agents.contains(a) && *a != devin_agent()).collect();
             agents.extend(more);
         }
+        let shown = self.usage_shown();
         for agent in agents {
-            self.fetch_usage(agent, force, cx);
+            if shown.contains(&agent) {
+                self.fetch_usage(agent, force, cx);
+            } else {
+                self.read_status(agent, false, commands, cx);
+            }
         }
     }
 
     /// Read `agent`'s usage, unless it was read in the last 30 seconds (or is being read) and
     /// `force` isn't set. Its answer lands when it comes, whatever the others are doing.
     pub(super) fn fetch_usage(&mut self, agent: AgentId, force: bool, cx: &mut Context<Self>) {
+        self.read_status(agent, true, force, cx);
+    }
+
+    /// Read `agent`'s account, commands and models, and its usage if `with_usage`. Without it,
+    /// once a run unless `force` is set.
+    fn read_status(&mut self, agent: AgentId, with_usage: bool, force: bool, cx: &mut Context<Self>) {
         let key = agent.key();
         let fetch: UsageFetch = match &self.usage_fetch {
             Some(f) => f.clone(),
             None if trek_core::paths::isolated() => return,
             None => Rc::new(read_agent),
         };
-        if !self.usage_readable(&agent) || (!force && (self.usage_inflight.contains(&key) || self.now() - self.usage_fetched.get(&key).copied().unwrap_or(0) < READ_EVERY_MS)) {
+        let fresh = match with_usage {
+            true => self.usage_inflight.contains(&key) || self.now() - self.usage_fetched.get(&key).copied().unwrap_or(0) < READ_EVERY_MS,
+            false => self.commands_read.contains(&key),
+        };
+        if !self.usage_readable(&agent) || (!force && fresh) {
             return;
         }
         // Not of a CLI being replaced: asked again once it's back (`agent_released`). Before any
@@ -247,23 +289,28 @@ impl Workspace {
         if !ready || self.agent_updating(&key) {
             return;
         }
-        self.usage_inflight.insert(key.clone());
-        self.usage_loading = true;
+        self.commands_read.insert(key.clone());
+        if with_usage {
+            self.usage_inflight.insert(key.clone());
+            self.usage_loading = true;
+        }
         let folder = self.current_cwd().unwrap_or_else(trek_core::paths::home);
-        let rx = fetch(&agent, &folder);
+        let rx = fetch(&agent, &folder, with_usage);
         let task = cx.spawn(async move |this, cx| {
             let res = rx.recv().await.unwrap_or_else(|_| Err("the read was dropped".into()));
-            let _ = this.update(cx, |this, cx| this.usage_read(agent, folder, res, cx));
+            let _ = this.update(cx, |this, cx| this.status_read(agent, folder, with_usage, res, cx));
         });
         self.keep(task);
         cx.notify();
     }
 
     /// `agent` said what its usage is (or failed to): the card, the limits Trek keeps to and the
-    /// commands follow, and what it said is kept for the next launch.
-    fn usage_read(&mut self, agent: AgentId, folder: PathBuf, res: Result<AgentStatus, String>, cx: &mut Context<Self>) {
+    /// commands follow, and what it said is kept for the next launch. Read without its usage,
+    /// only its account, commands and models follow: any usage read before stays as it was.
+    fn status_read(&mut self, agent: AgentId, folder: PathBuf, with_usage: bool, res: Result<AgentStatus, String>, cx: &mut Context<Self>) {
         let key = agent.key();
         let now = self.now();
+        let had_usage = self.usage_status(&key).is_some();
         match res {
             Ok(st) => {
                 if agent == AgentId::Codex && !st.models.is_empty() {
@@ -271,14 +318,28 @@ impl Workspace {
                 }
                 // Its commands include the folder's own (project commands, skills).
                 self.agent_commands.insert((key.clone(), folder), st.commands.clone());
-                self.keep_snapshot(&key, Snapshot::of(&st, now), cx);
-                self.agent_status.insert(key.clone(), st);
+                if with_usage {
+                    self.keep_snapshot(&key, Snapshot::of(&st, now), cx);
+                    self.agent_status.insert(key.clone(), st);
+                } else if let Some(old) = self.agent_status.get_mut(&key).filter(|_| had_usage) {
+                    *old = AgentStatus { limits: std::mem::take(&mut old.limits), resets: std::mem::take(&mut old.resets), note: old.note.take(), ..st };
+                } else {
+                    self.agent_status.insert(key.clone(), st);
+                }
             }
             Err(e) => {
                 let st = self.agent_status.entry(key.clone()).or_default();
                 st.error = Some(e);
             }
         }
+        if !with_usage {
+            if !had_usage {
+                self.usage_unread.insert(key);
+            }
+            cx.notify();
+            return;
+        }
+        self.usage_unread.remove(&key);
         self.usage_inflight.remove(&key);
         self.usage_fetched.insert(key, now);
         if self.usage_inflight.is_empty() {
@@ -307,13 +368,15 @@ impl Workspace {
     }
 
     /// A turn on `agent` ended: what it used shows on the card shortly. Its plan's usage is read
-    /// again (at most every 30 seconds; Devin's, only while the card shows it, at most every ten
+    /// again while the card shows it (at most every 30 seconds; Devin's, at most every ten
     /// minutes), and today's tokens are summed again.
     pub(super) fn usage_after_turn(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
-        if self.usage_readable(agent) && *agent != devin_agent() {
-            self.fetch_usage(agent.clone(), false, cx);
-        } else if *agent == devin_agent() && self.usage_shown().contains(agent) {
-            self.refresh_devin_usage(cx);
+        if self.usage_shown().contains(agent) {
+            if *agent == devin_agent() {
+                self.refresh_devin_usage(cx);
+            } else {
+                self.fetch_usage(agent.clone(), false, cx);
+            }
         }
         self.refresh_usage_today(cx);
     }

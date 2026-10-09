@@ -62,6 +62,11 @@ impl Spring {
         self.state(now).position
     }
 
+    /// Where it's going.
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
     pub fn moving(&self, now: Instant) -> bool {
         self.state(now) != SpringState { position: self.target, velocity: 0. }
     }
@@ -116,6 +121,14 @@ pub fn now(cx: &App) -> Instant {
         }
     }
     now
+}
+
+/// Ask for the next frame and have it drawn whole, cached views included. A cached view that
+/// hasn't changed replays its last painting as it was, opacity and all, while its place and size
+/// hold, so a fade over one needs this every frame it runs (or the view holds still until the
+/// fade has gone, then vanishes).
+pub fn redraw_whole(window: &Window) {
+    window.on_next_frame(|window, _| window.refresh());
 }
 
 /// AnimatePresence: `T` (what a surface shows) stays mounted while it animates out, and comes
@@ -203,29 +216,48 @@ pub fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixel
 /// One list's FLIP bookkeeping: where each row was laid out last, and the spring carrying it
 /// from there. Held by the view that draws the list; rows are keyed by what they show (a
 /// thread's id), not by their place, so a row that moves is the same row.
+///
+/// Rows may be gathered into groups (`flip_stack`): a group moves as one, its rows placed
+/// against it, so groups trading places slide past each other whole.
 #[derive(Default)]
 pub struct Flip {
     /// The scope's top left as last laid out. Rows are placed against it, so scrolling the
     /// list (which moves the scope with them) isn't movement.
     origin: Point<Pixels>,
+    /// The group whose rows are being placed, and its top left as drawn: they're placed
+    /// against that instead.
+    group: Option<(SharedString, Point<Pixels>)>,
     rows: HashMap<SharedString, Placed>,
     /// Rows may move this frame. Off without motion, and for changes that shouldn't animate (a
     /// search narrowing the list): rows take their new places as they are.
     animate: bool,
     /// A frame has been drawn: a row with no entry is new rather than first.
     primed: bool,
-    /// Rows drawn this frame (`begin` to `end`).
+    /// Rows drawn this frame (from `begin`; kept till the next, as placing them comes after
+    /// `end`).
     drawn: Vec<SharedString>,
+    /// While a group that's going down is painted: the bands (top, bottom) of the groups going
+    /// up past it. Its rows aren't painted under them.
+    over: Vec<(f32, f32)>,
 }
 
 struct Placed {
-    /// Where it was laid out last frame, against the scope; `None` before it has been.
+    /// Where it was laid out last frame, against its group (or the scope); `None` before it
+    /// has been.
     y: Option<f32>,
+    /// The group it was laid out in.
+    group: Option<SharedString>,
     height: f32,
     /// How far it's drawn from where it's laid out.
     offset: Spring,
     /// Fading in, while it's new.
     enter: Option<Spring>,
+}
+
+impl Placed {
+    fn new(now: Instant) -> Self {
+        Placed { y: None, group: None, height: 0., offset: Spring::new(ROW, PIXEL, 0., now), enter: None }
+    }
 }
 
 pub type FlipStore = Rc<RefCell<Flip>>;
@@ -234,9 +266,15 @@ pub type FlipStore = Rc<RefCell<Flip>>;
 const ENTER_RISE: f32 = -6.;
 
 impl Flip {
-    /// A frame starts drawing the list.
+    /// A frame starts drawing the list: forget the rows the last one didn't draw. (Not at its
+    /// `end`: its rows are placed after that, and one leaving a group goes from where the group
+    /// was drawn, even a group that's gone.)
     pub fn begin(&mut self, animate: bool) {
         self.animate = animate;
+        if self.primed {
+            let drawn: std::collections::HashSet<SharedString> = self.drawn.drain(..).collect();
+            self.rows.retain(|k, _| drawn.contains(k));
+        }
         self.drawn.clear();
         if !animate {
             for p in self.rows.values_mut() {
@@ -245,10 +283,8 @@ impl Flip {
         }
     }
 
-    /// The frame has drawn its rows: forget the ones it didn't.
+    /// The frame has drawn its rows.
     pub fn end(&mut self) {
-        let drawn: std::collections::HashSet<SharedString> = self.drawn.drain(..).collect();
-        self.rows.retain(|k, _| drawn.contains(k));
         self.primed = true;
     }
 
@@ -268,7 +304,7 @@ impl Flip {
         self.drawn.push(key.clone());
         let fresh = !self.rows.contains_key(key);
         let (animate, primed) = (self.animate, self.primed);
-        let p = self.rows.entry(key.clone()).or_insert_with(|| Placed { y: None, height: 0., offset: Spring::new(ROW, PIXEL, 0., now), enter: None });
+        let p = self.rows.entry(key.clone()).or_insert_with(|| Placed::new(now));
         // New to a list already on screen: it fades in and settles into its place.
         if fresh && animate && primed {
             let mut e = Spring::new(SURFACE, UNIT, 0., now);
@@ -284,6 +320,60 @@ impl Flip {
                 1.
             }
         }
+    }
+
+    /// Where `group`'s top is drawn against the scope at `now` (the scope's own top for none).
+    fn group_top(&self, group: &Option<SharedString>, now: Instant) -> f32 {
+        group.as_ref().and_then(|g| self.rows.get(g)).map_or(0., |p| p.y.unwrap_or(0.) + p.offset.value(now))
+    }
+
+    /// `key` is laid out at `bounds` this frame: carry it from where it was drawn to there, and
+    /// say how far from there it's drawn now. A row that changed groups goes from where it was
+    /// drawn in the old one.
+    fn place(&mut self, key: &SharedString, bounds: Bounds<Pixels>, now: Instant, window: &Window) -> f32 {
+        let (group, origin) = match &self.group {
+            Some((g, o)) => (Some(g.clone()), *o),
+            None => (None, self.origin),
+        };
+        let y = (bounds.origin.y - origin.y).as_f32();
+        let animate = self.animate;
+        let moved = match self.rows.get(key) {
+            Some(Placed { y: Some(was), group: from, .. }) if animate => Some(was + self.group_top(from, now) - y - self.group_top(&group, now)),
+            _ => None,
+        };
+        let p = self.rows.entry(key.clone()).or_insert_with(|| Placed::new(now));
+        match moved {
+            Some(d) if d.abs() > 0.5 => p.offset.shift(d, now),
+            _ if !animate => p.offset.snap(0., now),
+            _ => {}
+        }
+        p.y = Some(y);
+        p.group = group;
+        p.height = bounds.size.height.as_f32();
+        p.offset.frame(now, window)
+    }
+
+    /// Where a row drawn over `top..bottom` may be painted, kept off the groups going up over
+    /// its own (`over`): above one, if its middle is above that one's, else below it. `None`:
+    /// anywhere.
+    fn clip(&self, top: f32, bottom: f32) -> Option<(f32, f32)> {
+        if bottom <= top {
+            return None;
+        }
+        let mid = (top + bottom) / 2.;
+        let (mut from, mut to) = (top, bottom);
+        let mut clipped = false;
+        for &(a, b) in &self.over {
+            if a < bottom && b > top {
+                clipped = true;
+                if mid < (a + b) / 2. {
+                    to = to.min(a);
+                } else {
+                    from = from.max(b);
+                }
+            }
+        }
+        clipped.then_some((from, to.max(from)))
     }
 }
 
@@ -306,6 +396,18 @@ pub fn flip_row(store: &FlipStore, key: impl Into<SharedString>, child: impl Int
     FlipRow { store: store.clone(), key, child }
 }
 
+/// Groups of FLIP rows (a project's header and threads), stacked: each group moves as one, its
+/// rows placed against it, and groups trading places pass whole. The ones going up are drawn
+/// (and take clicks) over the ones going down, which aren't painted under them.
+pub fn flip_stack(store: &FlipStore, groups: Vec<(SharedString, AnyElement)>, now: Instant) -> FlipStack {
+    let mut flip = store.borrow_mut();
+    for (key, _) in &groups {
+        flip.drawn.push(key.clone());
+        flip.rows.entry(key.clone()).or_insert_with(|| Placed::new(now));
+    }
+    FlipStack { store: store.clone(), groups }
+}
+
 pub struct FlipScope {
     store: FlipStore,
     child: AnyElement,
@@ -317,6 +419,11 @@ pub struct FlipRow {
     child: AnyElement,
 }
 
+pub struct FlipStack {
+    store: FlipStore,
+    groups: Vec<(SharedString, AnyElement)>,
+}
+
 impl IntoElement for FlipScope {
     type Element = Self;
     fn into_element(self) -> Self {
@@ -325,6 +432,13 @@ impl IntoElement for FlipScope {
 }
 
 impl IntoElement for FlipRow {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl IntoElement for FlipStack {
     type Element = Self;
     fn into_element(self) -> Self {
         self
@@ -360,7 +474,8 @@ impl Element for FlipScope {
 
 impl Element for FlipRow {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// Where it may be painted, if not anywhere (`Flip::clip`).
+    type PrepaintState = Option<ContentMask<Pixels>>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -376,32 +491,149 @@ impl Element for FlipRow {
 
     /// The layout is done: compare where the row is now with where it was, and draw it offset
     /// by what's left of the difference (its hitboxes go with it, so a click lands on what's
-    /// under the pointer).
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
-        let now = now(cx);
-        let offset = {
-            let mut flip = self.store.borrow_mut();
-            let (origin, animate) = (flip.origin, flip.animate);
-            let y = (bounds.origin.y - origin.y).as_f32();
-            let p = flip.rows.entry(self.key.clone()).or_insert_with(|| Placed { y: None, height: 0., offset: Spring::new(ROW, PIXEL, 0., now), enter: None });
-            match p.y {
-                Some(was) if animate && (was - y).abs() > 0.5 => p.offset.shift(was - y, now),
-                _ if !animate => p.offset.snap(0., now),
-                _ => {}
+    /// under the pointer). Where a group going up covers it, it takes no clicks either.
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Option<ContentMask<Pixels>> {
+        let offset = self.store.borrow_mut().place(&self.key, bounds, now(cx), window);
+        let (top, bottom) = (bounds.top() + px(offset), bounds.bottom() + px(offset));
+        let mask = self.store.borrow().clip(top.as_f32(), bottom.as_f32()).map(|(top, bottom)| ContentMask { bounds: Bounds::from_corners(point(bounds.left(), px(top)), point(bounds.right(), px(bottom))) });
+        window.with_content_mask(mask.clone(), |window| {
+            if offset == 0. {
+                self.child.prepaint(window, cx);
+            } else {
+                window.with_element_offset(point(px(0.), px(offset)), |window| self.child.prepaint(window, cx));
             }
-            p.y = Some(y);
-            p.height = bounds.size.height.as_f32();
-            p.offset.frame(now, window)
-        };
-        if offset == 0. {
-            self.child.prepaint(window, cx);
-        } else {
-            window.with_element_offset(point(px(0.), px(offset)), |window| self.child.prepaint(window, cx));
+        });
+        mask
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), mask: &mut Option<ContentMask<Pixels>>, window: &mut Window, cx: &mut App) {
+        window.with_content_mask(mask.clone(), |window| self.child.paint(window, cx));
+    }
+}
+
+/// A group in a stack as laid out this frame.
+pub struct Stacked {
+    bounds: Bounds<Pixels>,
+    offset: f32,
+}
+
+impl Stacked {
+    /// Drawn below its place: on its way up.
+    fn rising(&self) -> bool {
+        self.offset > PIXEL
+    }
+}
+
+/// A stack's groups as laid out this frame, the order they're drawn in, and the bands of the
+/// ones going up.
+pub struct StackFrame {
+    groups: Vec<Stacked>,
+    order: Vec<usize>,
+    rising: Vec<(f32, f32)>,
+}
+
+impl Element for FlipStack {
+    type RequestLayoutState = Vec<LayoutId>;
+    type PrepaintState = StackFrame;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Vec<LayoutId>) {
+        let ids: Vec<LayoutId> = self.groups.iter_mut().map(|(_, g)| g.request_layout(window, cx)).collect();
+        let mut style = Style::default();
+        style.display = Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.size.width = relative(1.).into();
+        (window.request_layout(style, ids.iter().copied(), cx), ids)
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, ids: &mut Vec<LayoutId>, window: &mut Window, cx: &mut App) -> StackFrame {
+        let now = now(cx);
+        let groups: Vec<Stacked> = self
+            .groups
+            .iter()
+            .zip(ids.iter())
+            .map(|((key, _), id)| {
+                let bounds = window.layout_bounds(*id);
+                Stacked { bounds, offset: self.store.borrow_mut().place(key, bounds, now, window) }
+            })
+            .collect();
+        // Groups going up last: drawn, and taking clicks, over the ones they pass.
+        let mut order: Vec<usize> = (0..groups.len()).collect();
+        order.sort_by_key(|i| groups[*i].rising());
+        let rising: Vec<(f32, f32)> = groups.iter().filter(|g| g.rising()).map(|g| (g.bounds.top().as_f32() + g.offset, g.bounds.bottom().as_f32() + g.offset)).collect();
+        for &i in &order {
+            let (key, group) = &mut self.groups[i];
+            let g = &groups[i];
+            let top = point(g.bounds.origin.x, g.bounds.origin.y + px(g.offset));
+            let outer = {
+                let mut flip = self.store.borrow_mut();
+                flip.over = if g.rising() { vec![] } else { rising.clone() };
+                flip.group.replace((key.clone(), top))
+            };
+            window.with_element_offset(point(px(0.), px(g.offset)), |window| group.prepaint(window, cx));
+            let mut flip = self.store.borrow_mut();
+            flip.group = outer;
+            flip.over.clear();
         }
+        StackFrame { groups, order, rising }
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut Vec<LayoutId>, frame: &mut StackFrame, window: &mut Window, cx: &mut App) {
+        for &i in &frame.order {
+            self.store.borrow_mut().over = if frame.groups[i].rising() { vec![] } else { frame.rising.clone() };
+            self.groups[i].1.paint(window, cx);
+        }
+        self.store.borrow_mut().over.clear();
+    }
+}
+
+// ---------- leaving ----------
+
+/// Something on its way out: drawn as it is, but out of reach of the pointer. Its hitboxes are
+/// laid under an empty mask, so nothing in it is hovered, pressed or scrolled, and it blocks
+/// nothing: a click goes to whatever is under it.
+pub fn inert(child: impl IntoElement) -> Inert {
+    Inert(child.into_any_element())
+}
+
+pub struct Inert(AnyElement);
+
+impl IntoElement for Inert {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Inert {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+        window.with_content_mask(Some(ContentMask { bounds: Bounds::default() }), |window| self.0.prepaint(window, cx));
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
-        self.child.paint(window, cx);
+        self.0.paint(window, cx);
     }
 }
 
@@ -455,33 +687,36 @@ pub fn leaving_sheet(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let t = leaving.left.frame(now, window).clamp(0., 1.);
     let (view, b) = (leaving.view.clone(), leaving.bounds);
     let theme = gpui_kit::component::ActiveTheme::theme(cx);
+    // Inert: a click as it goes reaches what's under it, not the sheet.
     Some(
-        div()
-            .id("sheet-leaving")
-            .test_support()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .bg(theme.overlay.opacity(t))
-            .child(
-                // The dialog's own face, as gpui-component draws it round the view.
-                div()
-                    .absolute()
-                    .left(b.origin.x - px(1.))
-                    .top(b.origin.y - px(1.) - px(10. * (1. - t)))
-                    .w(b.size.width + px(2.))
-                    .h(b.size.height + px(2.))
-                    .opacity(t)
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(theme.radius_lg)
-                    .overflow_hidden()
-                    .shadow_xl()
-                    .child(view),
-            )
-            .into_any_element(),
+        inert(
+            div()
+                .id("sheet-leaving")
+                .test_support()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(theme.overlay.opacity(t))
+                .child(
+                    // The dialog's own face, as gpui-component draws it round the view.
+                    div()
+                        .absolute()
+                        .left(b.origin.x - px(1.))
+                        .top(b.origin.y - px(1.) - px(10. * (1. - t)))
+                        .w(b.size.width + px(2.))
+                        .h(b.size.height + px(2.))
+                        .opacity(t)
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius_lg)
+                        .overflow_hidden()
+                        .shadow_xl()
+                        .child(view),
+                )
+        )
+        .into_any_element(),
     )
 }
 

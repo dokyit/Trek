@@ -73,13 +73,17 @@ struct Agent {
 }
 
 impl Agent {
-    fn spawn(agent: &AgentId, cwd: &Path, extra: &[String]) -> Result<Agent> {
+    async fn spawn(agent: &AgentId, cwd: &Path, extra: &[String]) -> Result<Agent> {
         let (bin, mut args, name) = launch_spec(agent)?;
         args.extend(extra.iter().cloned());
+        let mut env = launch_env(agent, cwd);
+        if *agent == AgentId::OpenCode {
+            env.extend(crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await);
+        }
         let mut command = tokio::process::Command::new(&bin);
         command
             .args(&args)
-            .envs(launch_env(agent, cwd))
+            .envs(env)
             .current_dir(cwd)
             .env("PATH", detect::login_path())
             .stdin(Stdio::piped())
@@ -93,7 +97,10 @@ impl Agent {
     }
 
     fn exited(&self) -> anyhow::Error {
-        self.stderr.exited(&self.name)
+        match crate::opencode::exit_reason(&self.stderr.lines()) {
+            Some(why) => anyhow!(why),
+            None => self.stderr.exited(&self.name),
+        }
     }
 
     /// Send a request and read until its response, answering `fs/*` requests inline and
@@ -713,6 +720,8 @@ struct Controls {
     switch: ModelSwitch,
     /// Config option id and values for reasoning effort.
     effort: Option<(String, Vec<String>)>,
+    /// The effort value the session is on.
+    effort_current: Option<String>,
     plan_mode: Option<PlanSwitch>,
     /// The session is in plan mode right now.
     planning: bool,
@@ -747,9 +756,9 @@ fn sorted_efforts(values: impl Iterator<Item = Effort>) -> Vec<Effort> {
 fn controls(result: &Value) -> Controls {
     let config: Vec<&Value> = result["configOptions"].as_array().into_iter().flatten().collect();
     let by_category = |c: &str| config.iter().find(|o| o["category"] == c || o["id"] == c).copied();
-    let effort = by_category("thought_level")
-        .or_else(|| by_category("reasoning_effort"))
-        .and_then(|o| Some((o["id"].as_str()?.to_string(), select_options(o).into_iter().map(|(v, _)| v).collect::<Vec<_>>())));
+    let effort_option = by_category("thought_level").or_else(|| by_category("reasoning_effort"));
+    let effort = effort_option.and_then(|o| Some((o["id"].as_str()?.to_string(), select_options(o).into_iter().map(|(v, _)| v).collect::<Vec<_>>())));
+    let effort_current = effort_option.and_then(|o| o["currentValue"].as_str()).map(String::from);
     let shared_efforts = sorted_efforts(effort.iter().flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))));
 
     let (models, current_model, switch) = if let Some(list) = result["models"]["availableModels"].as_array() {
@@ -811,7 +820,48 @@ fn controls(result: &Value) -> Controls {
         (None, false)
     };
 
-    Controls { models, current_model, switch, effort, plan_mode, planning }
+    Controls { models, current_model, switch, effort, effort_current, plan_mode, planning }
+}
+
+impl Controls {
+    /// The session's options as a `session/set_config_option` response or a `config_option_update`
+    /// has them now. Effort levels can depend on the model (OpenCode 2 offers each model's own), so
+    /// a model switch brings new ones.
+    fn refresh(&mut self, options: &Value) {
+        if !options["configOptions"].is_array() {
+            return;
+        }
+        let now = controls(options);
+        self.effort = now.effort;
+        self.effort_current = now.effort_current;
+        if now.current_model.is_some() {
+            self.current_model = now.current_model;
+        }
+        // Models listed as a config option share its levels; now they're the current model's.
+        if matches!(self.switch, ModelSwitch::Config(_)) {
+            let efforts = self.efforts();
+            if let Some(m) = self.models.iter_mut().find(|m| Some(&m.id) == self.current_model.as_ref()) {
+                m.efforts = efforts;
+            }
+        }
+    }
+
+    /// The levels the effort option offers now.
+    fn efforts(&self) -> Vec<Effort> {
+        sorted_efforts(self.effort.iter().flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))))
+    }
+
+    /// The session's model, the levels it offers and the one it's on, for the UI. Only for models
+    /// listed as a config option: the effort option's levels are the current model's then.
+    fn efforts_event(&self) -> Option<AgentEvent> {
+        if !matches!(self.switch, ModelSwitch::Config(_)) {
+            return None;
+        }
+        let model = self.current_model.clone()?;
+        let values = self.effort.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
+        let effort = self.effort_current.as_deref().and_then(|c| effort_level(c, values));
+        Some(AgentEvent::Efforts { model, efforts: self.efforts(), effort })
+    }
 }
 
 /// Request params that turn plan mode on or off.
@@ -837,13 +887,42 @@ fn model_request(c: &Controls, session_id: &str, model: &str) -> Option<(&'stati
     }
 }
 
-/// Request params that set reasoning effort to the agent's nearest level.
+/// Request params that set reasoning effort: the model's own level for it where it has one, else
+/// the model's "default" where it offers that, else its nearest level.
 fn effort_request(c: &Controls, session_id: &str, effort: Effort) -> Option<(&'static str, Value)> {
     let (id, values) = c.effort.as_ref()?;
     let levels: Vec<(Effort, &String)> = values.iter().filter_map(|v| effort_level(v, values).map(|e| (e, v))).collect();
-    let want = effort.clamp_to(&sorted_efforts(levels.iter().map(|(e, _)| *e)));
-    let (_, value) = levels.iter().find(|(e, _)| *e == want)?;
+    let value = match levels.iter().find(|(e, _)| *e == effort) {
+        Some((_, v)) => *v,
+        None => match values.iter().find(|v| *v == "default") {
+            Some(v) => v,
+            None => {
+                let want = effort.clamp_to(&sorted_efforts(levels.iter().map(|(e, _)| *e)));
+                levels.iter().find(|(e, _)| *e == want)?.1
+            }
+        },
+    };
     Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": value })))
+}
+
+/// `effort_request`, unless the session is on that level already.
+fn effort_change(c: &Controls, session_id: &str, effort: Effort) -> Option<(&'static str, Value)> {
+    effort_request(c, session_id, effort).filter(|(_, p)| p["value"].as_str() != c.effort_current.as_deref())
+}
+
+/// The session's efforts, when they aren't what the UI was last told.
+fn efforts_news(ctl: &Controls, told: &mut Option<AgentEvent>) -> Option<AgentEvent> {
+    let ev = ctl.efforts_event()?;
+    (told.as_ref() != Some(&ev)).then(|| {
+        *told = Some(ev.clone());
+        ev
+    })
+}
+
+/// A `config_option_update` for this session: its options as they are now.
+fn config_update<'a>(v: &'a Value, session_id: &str) -> Option<&'a Value> {
+    let p = &v["params"];
+    (v["method"] == "session/update" && p["sessionId"] == session_id && p["update"]["sessionUpdate"] == "config_option_update").then(|| &p["update"])
 }
 
 /// Run an ACP session for `config.agent` until shutdown or the agent exits.
@@ -852,7 +931,7 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
-    let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config))?;
+    let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config)).await?;
     let mut hand_holding = config.hand_holding;
     let mut fs = FsPolicy { cwd: config.cwd.clone(), full_access: hand_holding == HandHolding::FullAccess, read_only: config.read_only };
     let mut backlog = Vec::new();
@@ -897,22 +976,33 @@ pub async fn run(
         },
     };
 
-    let ctl = controls(&result);
-    // What this session reports is what the next launch's probe would learn.
-    ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+    let mut ctl = controls(&result);
     let mut model = ctl.current_model.clone();
+    let mut switched = None;
     if let Some(want) = config.model.as_ref().filter(|m| model.as_ref() != Some(*m))
         && let Some((method, params)) = model_request(&ctl, &session_id, want)
     {
-        if let Ok(Ok(_)) = agent.call(method, params, &fs, &mut backlog, setup).await {
+        if let Ok(Ok(r)) = agent.call(method, params, &fs, &mut backlog, setup).await {
             model = Some(want.clone());
+            switched = Some(r);
         }
     }
-    if config.effort != Effort::Off
-        && let Some((method, params)) = effort_request(&ctl, &session_id, config.effort)
-    {
-        let _ = agent.call(method, params, &fs, &mut backlog, setup).await?;
+    // The effort levels are the model's, so they're read after it's chosen: what the agent said
+    // before its answer, then the answer.
+    for u in backlog.iter().filter_map(|v| config_update(v, &session_id)) {
+        ctl.refresh(u);
     }
+    if let Some(r) = switched {
+        ctl.refresh(&r);
+    }
+    if config.effort != Effort::Off
+        && let Some((method, params)) = effort_change(&ctl, &session_id, config.effort)
+        && let Ok(r) = agent.call(method, params, &fs, &mut backlog, setup).await?
+    {
+        ctl.refresh(&r);
+    }
+    // What this session reports is what the next launch's probe would learn.
+    ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
     // Into plan mode, or out of it when a resumed session was left there. A read-only session
     // works in plan mode too: the agent's own tools edit files without asking Trek.
     let plan = config.plan || config.read_only;
@@ -926,6 +1016,10 @@ pub async fn run(
     // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
     let no_plan = (plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
     events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
+    let mut told_efforts = None;
+    if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
+        events.send(ev).await?;
+    }
     if let Some(notice) = skipped_notice {
         events.send(AgentEvent::Notice(notice)).await?;
     }
@@ -977,11 +1071,55 @@ pub async fn run(
                         fs.full_access = h == HandHolding::FullAccess;
                     }
                     Command::SetModel { model, effort } => {
+                        // Answered before the effort is set: the new model's levels come with it.
+                        let wait = Duration::from_secs(30);
+                        let mut backlog = vec![];
+                        let mut refused = None;
+                        // The last answer that had the options: newer than any update sent before it.
+                        let mut latest = None;
                         if let Some((method, params)) = model_request(&ctl, &s.session_id, &model) {
-                            agent.rpc.request(method, params).await?;
+                            match agent.call(method, params, &fs, &mut backlog, wait).await? {
+                                Ok(r) => {
+                                    ctl.refresh(&r);
+                                    latest = Some(r).filter(|r| r["configOptions"].is_array());
+                                }
+                                Err(e) => refused = Some(AgentEvent::Error(format!("{} didn't switch to {model}: {}", agent.name, rpc_message(&e)))),
+                            }
                         }
-                        if let Some((method, params)) = effort_request(&ctl, &s.session_id, effort) {
-                            agent.rpc.request(method, params).await?;
+                        if let Some((method, params)) = effort_change(&ctl, &s.session_id, effort)
+                            && let Ok(r) = agent.call(method, params, &fs, &mut backlog, wait).await?
+                        {
+                            ctl.refresh(&r);
+                            latest = Some(r).filter(|r| r["configOptions"].is_array()).or(latest);
+                        }
+                        if let Some(ev) = refused
+                            && events.send(ev).await.is_err()
+                        {
+                            break;
+                        }
+                        // What came in meanwhile.
+                        let mut gone = false;
+                        for v in backlog {
+                            if let Some(u) = config_update(&v, &s.session_id) {
+                                ctl.refresh(u);
+                            } else if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
+                                gone = true;
+                                break;
+                            }
+                        }
+                        if gone {
+                            break;
+                        }
+                        if let Some(r) = latest {
+                            ctl.refresh(&r);
+                        }
+                        // Told even when nothing changed: the thread may be on a level the model hasn't.
+                        told_efforts = None;
+                        if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
+                            ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+                            if events.send(ev).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     Command::Respond { request_id, decision } => {
@@ -1002,6 +1140,15 @@ pub async fn run(
                     break;
                 };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if let Some(u) = config_update(&v, &s.session_id) {
+                    ctl.refresh(u);
+                    if let Some(ev) = efforts_news(&ctl, &mut told_efforts)
+                        && events.send(ev).await.is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
                     break;
                 }
@@ -1193,7 +1340,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     // The session the probe opened, as soon as the agent says: it's deleted however the probe ends.
     let mut opened: Option<String> = None;
     let probe = async {
-        let mut agent = Agent::spawn(&agent_id, &home, &[])?;
+        let mut agent = Agent::spawn(&agent_id, &home, &[]).await?;
         let fs = FsPolicy { cwd: home.clone(), full_access: false, read_only: false };
         let mut backlog = Vec::new();
         let init = agent.handshake(&fs, &mut backlog).await?;
@@ -1244,8 +1391,9 @@ async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
         _ => return,
     };
     let Some(bin) = bin else { return };
+    let db = crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await;
     let mut command = tokio::process::Command::new(bin);
-    command.args(args).arg(session).current_dir(cwd).env("PATH", detect::login_path());
+    command.args(args).arg(session).current_dir(cwd).envs(db).env("PATH", detect::login_path());
     match crate::output_group(&mut command, None, Duration::from_secs(20)).await {
         Ok(out) if out.status.success() => {}
         Ok(out) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
@@ -1481,6 +1629,76 @@ mod tests {
         let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
         assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
         assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { error: None }), "the turn ends with the first prompt, cleanly");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_models_rereads_their_efforts() {
+        let dir = std::env::temp_dir().join(format!("trek-acp-efforts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trek_core::paths::isolate(dir.join("data"));
+        // Levels per model, as OpenCode 2 has them: "default" among some, none for others.
+        let models = r#"{"models":{"a":["low","medium","high"],"b":["high","default"],"c":[]},"current":"c"}"#;
+        std::fs::write(dir.join("fake-acp-config.json"), models).unwrap();
+        let config = SessionConfig {
+            agent: AgentId::Acp(FAKE.into()),
+            cwd: dir.clone(),
+            model: Some("a".into()),
+            effort: Effort::High,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            read_only: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
+        };
+        let h = crate::start(config);
+        let efforts = |model: &str, efforts: &[Effort], effort: Option<Effort>| AgentEvent::Efforts { model: model.into(), efforts: efforts.to_vec(), effort };
+        let told = trek_core::runtime().block_on(async {
+            let next = async || loop {
+                match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited") {
+                    ev @ AgentEvent::Efforts { .. } => return ev,
+                    AgentEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            };
+            // Started on its model, at the effort asked for: the levels are that model's.
+            let mut told = vec![next().await];
+            for (model, effort) in [("b", Effort::High), ("b", Effort::Low), ("c", Effort::Low), ("a", Effort::Max)] {
+                h.commands.send(Command::SetModel { model: model.into(), effort }).await.unwrap();
+                told.push(next().await);
+            }
+            h.commands.send(Command::Shutdown).await.unwrap();
+            told
+        });
+        assert_eq!(
+            told,
+            vec![
+                efforts("a", &[Effort::Low, Effort::Medium, Effort::High], Some(Effort::High)),
+                // Kept where the new model has it.
+                efforts("b", &[Effort::Medium, Effort::High], Some(Effort::High)),
+                // Not there: the model's default.
+                efforts("b", &[Effort::Medium, Effort::High], Some(Effort::Medium)),
+                // No levels at all.
+                efforts("c", &[], None),
+                // No default either: the nearest.
+                efforts("a", &[Effort::Low, Effort::Medium, Effort::High], Some(Effort::High)),
+            ]
+        );
+        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let sets: Vec<String> = log
+            .iter()
+            .filter(|m| m["method"] == "session/set_config_option")
+            .map(|m| format!("{}={}", m["params"]["configId"].as_str().unwrap(), m["params"]["value"].as_str().unwrap()))
+            .collect();
+        // B starts on its default, so going back to it at Low needs no effort change.
+        assert_eq!(sets, ["model=a", "effort=high", "model=b", "effort=high", "model=b", "model=c", "model=a", "effort=high"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1888,7 +2106,11 @@ mod tests {
         assert_eq!(c.models[0].efforts, vec![Effort::Medium, Effort::High], "default stands for medium");
         let value = |e| effort_request(&c, "s", e).unwrap().1["value"].clone();
         assert_eq!((value(Effort::Medium), value(Effort::High)), (json!("default"), json!("high")));
-        assert_eq!((value(Effort::Low), value(Effort::Max)), (json!("default"), json!("high")));
+        // A level the model hasn't: its default.
+        assert_eq!((value(Effort::Low), value(Effort::Max)), (json!("default"), json!("default")));
+        // Already there: nothing to send.
+        assert_eq!(effort_change(&c, "s", Effort::Medium), None);
+        assert!(effort_change(&c, "s", Effort::High).is_some());
         assert_eq!(c.plan_mode, Some(PlanSwitch::Config { id: "mode".into(), plan: "plan".into(), off: "build".into() }));
         // A named medium is that, and "default" isn't a level then.
         assert_eq!(effort_level("default", &["medium".into(), "default".into()]), None);

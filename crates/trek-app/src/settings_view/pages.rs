@@ -1253,7 +1253,7 @@ impl SettingsView {
     fn skills_changed(&mut self, cx: &mut Context<Self>) {
         self.skills.invalidate();
         self.workspace.update(cx, |ws, cx| {
-            ws.refresh_usage_now(cx);
+            ws.refresh_commands(cx);
         });
         cx.notify();
     }

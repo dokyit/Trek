@@ -7,6 +7,10 @@
 # of stdio servers {name, command, args, env: [{name, value}]}, plus {type: "http", name, url,
 # headers: [{name, value}]} only when the agent said it takes HTTP. It says so when its working
 # folder has a fake-acp-mcp.json, which becomes its `mcpCapabilities` (e.g. {"http": true}).
+# With a fake-acp-config.json ({"models": {id: [effort values]}, "current": id}) it offers a model
+# select and the current model's effort select as OpenCode 2 does: a model switch brings that
+# model's levels (none: no effort select), on "default" if it has one, else its first. Like
+# OpenCode 1.x, it also sends them as a `config_option_update` after `session/new`'s answer.
 use strict;
 use warnings;
 use JSON::PP;
@@ -22,6 +26,27 @@ if (open(my $caps, '<', 'fake-acp-mcp.json')) {
     local $/;
     $mcp_caps = $json->decode(<$caps>);
 }
+my ($config, $effort);
+if (open(my $c, '<', 'fake-acp-config.json')) {
+    local $/;
+    $config = $json->decode(<$c>);
+}
+
+# The model's levels, on "default" if it has one, else its first.
+sub reset_effort {
+    my @levels = @{ $config->{models}{ $config->{current} } };
+    ($effort) = (grep({ $_ eq 'default' } @levels), @levels);
+}
+
+sub config_options {
+    my @options = ({ id => 'model', category => 'model', type => 'select', currentValue => $config->{current},
+        options => [map { +{ value => $_, name => uc $_ } } sort keys %{ $config->{models} }] });
+    my @levels = @{ $config->{models}{ $config->{current} } };
+    push @options, { id => 'effort', category => 'thought_level', type => 'select', currentValue => $effort,
+        options => [map { +{ value => $_, name => ucfirst $_ } } @levels] } if @levels;
+    return \@options;
+}
+reset_effort() if $config;
 
 # Why `servers` isn't a valid `mcpServers`, or undef.
 sub bad_mcp {
@@ -63,6 +88,19 @@ while (my $line = <STDIN>) {
     } elsif ($method eq 'session/new') {
         $sessions++;
         $result = { sessionId => "fake-$sessions" };
+        $result->{configOptions} = config_options() if $config;
+    } elsif ($method eq 'session/set_config_option' && $config) {
+        my ($id, $value) = @{ $m->{params} }{qw(configId value)};
+        if ($id eq 'model' && exists $config->{models}{$value}) {
+            $config->{current} = $value;
+            reset_effort();
+        } elsif ($id eq 'effort' && grep { $_ eq $value } @{ $config->{models}{ $config->{current} } }) {
+            $effort = $value;
+        } else {
+            print $json->encode({ jsonrpc => '2.0', id => $m->{id}, error => { code => -32602, message => "Invalid params: no $id $value" } }), "\n";
+            next;
+        }
+        $result = { configOptions => config_options() };
     } elsif ($method eq 'session/prompt') {
         my @texts = grep { $_->{type} eq 'text' } @{ $m->{params}{prompt} };
         my $text = $texts[0]{text} // '';
@@ -82,4 +120,8 @@ while (my $line = <STDIN>) {
         $result = { stopReason => 'end_turn' };
     }
     print $json->encode({ jsonrpc => '2.0', id => $m->{id}, result => $result }), "\n";
+    if ($method eq 'session/new' && $config) {
+        my $update = { sessionUpdate => 'config_option_update', configOptions => config_options() };
+        print $json->encode({ jsonrpc => '2.0', method => 'session/update', params => { sessionId => $result->{sessionId}, update => $update } }), "\n";
+    }
 }

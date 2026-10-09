@@ -1053,8 +1053,9 @@ pub(crate) fn tile_data(recap: &Recap, ws: &Workspace) -> Vec<TileData> {
         };
         tiles.push(tile(TileKind::AgentTime, "Your agents worked for", basecamp::duration(recap.agent_secs), note));
     }
-    // Plan limits, for each agent that reports them: the one closest to running out.
-    let mut agents: Vec<(&String, &trek_agents::AgentStatus)> = ws.agent_status.iter().filter(|(_, s)| !s.limits.is_empty()).collect();
+    // Plan limits, for each agent on the Usage card that reports them: the one closest to running out.
+    let shown: Vec<String> = ws.usage_shown().iter().map(AgentId::key).collect();
+    let mut agents: Vec<(&String, &trek_agents::AgentStatus)> = ws.agent_status.iter().filter(|(k, s)| !s.limits.is_empty() && shown.contains(k)).collect();
     agents.sort_by_key(|(k, _)| k.as_str());
     for (key, status) in agents {
         let Some(limit) = status.limits.iter().max_by(|a, b| a.percent.total_cmp(&b.percent)) else { continue };

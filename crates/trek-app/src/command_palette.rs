@@ -452,6 +452,10 @@ impl CommandPalette {
         if let Some(h) = self.restore.take() {
             h.focus(window, cx);
         }
+        // Keys mustn't reach it while it goes.
+        if self.input.read(cx).focus_handle(cx).contains_focused(window, cx) {
+            window.blur(cx);
+        }
         self.set_overlay(false, cx);
         cx.notify();
     }
@@ -896,7 +900,7 @@ impl CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Dismissed, it stays (inert) while it fades and lifts away.
+        // Dismissed, it stays (inert: clicks go to what's under it) while it fades and lifts away.
         let Some(t) = self.presence.sample(crate::motion::now(cx), window) else { return div().into_any_element() };
         let leaving = !self.open;
         let theme = cx.theme().clone();
@@ -918,7 +922,7 @@ impl Render for CommandPalette {
         if empty {
             list = list.child(div().px(px(15.)).py(px(12.)).text_size(px(13.)).text_color(theme.muted_foreground).child(if pending { "Searching…" } else { "No matches" }));
         }
-        div()
+        let overlay = div()
             .id("palette-overlay")
             .absolute()
             .top_0()
@@ -997,8 +1001,8 @@ impl Render for CommandPalette {
                             .text_color(theme.muted_foreground.opacity(0.8))
                             .children(footer_keys(jump).into_iter().map(|(key, what)| h_flex().gap(px(6.)).child(keycap(key, cx)).child(what))),
                     ),
-            )
-            .into_any_element()
+            );
+        if leaving { crate::motion::inert(overlay).into_any_element() } else { overlay.into_any_element() }
     }
 }
 

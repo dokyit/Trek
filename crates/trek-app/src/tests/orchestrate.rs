@@ -75,7 +75,7 @@ fn consulting_waits_for_the_sub_agent_and_uses_its_answer() {
 fn a_sub_agent_that_runs_on_its_own_wakes_its_parent() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:delegate mock:long 300ms");
+        let id = trek.send(cx, "mock:delegate mock:long 2s");
         trek.wait_done(cx, &id, RunState::Idle).await;
         let child = children(&trek, cx, &id).pop().expect("a sub-agent");
         assert!(trek.answers(cx, &id).contains("pick its answer up when it reports back"));
