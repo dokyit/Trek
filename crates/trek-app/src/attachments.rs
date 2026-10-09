@@ -421,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "convert_file shells out to macOS's sips; converting image files on Windows is a product gap")]
     fn converts_image_files_agents_cant_read() {
         let dir = temp_dir("convert");
         std::fs::create_dir_all(&dir).unwrap();
