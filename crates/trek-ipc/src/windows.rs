@@ -3,7 +3,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::windows::fs::OpenOptionsExt as _;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
@@ -99,18 +99,18 @@ fn same_user(pid: u32) -> io::Result<bool> {
 
 /// Whether the client connected to `pipe` (the server's end) runs as this process's user: the
 /// pipe's counterpart of comparing a Unix socket's peer uid with ours. Any doubt says no.
-pub fn client_is_me(pipe: RawHandle) -> bool {
+pub fn client_is_me(pipe: BorrowedHandle<'_>) -> bool {
     let mut pid = 0;
-    // SAFETY: `pipe` is the caller's open pipe handle.
-    let known = unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) != 0 };
+    // SAFETY: `pipe` is an open pipe handle (borrowed for the call).
+    let known = unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) != 0 };
     known && same_user(pid).unwrap_or(false)
 }
 
 /// Whether the server of a pipe we connected to (`pipe`, our end) runs as this process's user.
-fn server_is_me(pipe: RawHandle) -> bool {
+fn server_is_me(pipe: BorrowedHandle<'_>) -> bool {
     let mut pid = 0;
-    // SAFETY: `pipe` is our open pipe handle.
-    let known = unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) != 0 };
+    // SAFETY: `pipe` is an open pipe handle (borrowed for the call).
+    let known = unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) != 0 };
     known && same_user(pid).unwrap_or(false)
 }
 
@@ -214,7 +214,7 @@ impl PipeStream {
         };
         let pipe = OwnedHandle::from(file);
         // Anyone could name a pipe this: make sure it's this user's before saying the token.
-        if !server_is_me(pipe.as_raw_handle()) {
+        if !server_is_me(pipe.as_handle()) {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the pipe belongs to another user"));
         }
         Ok(PipeStream { pipe: Arc::new(pipe), shut: Arc::new(event()?), done: event()? })
