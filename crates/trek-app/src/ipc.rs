@@ -1,8 +1,9 @@
 //! Trek's end of the local channel its agents' `trek-mcp orchestrate` servers call (see
 //! `trek_ipc` for the protocol). One socket per Trek process, in a folder only the user can
 //! enter (on Windows a named pipe only the user can open); a connection must come from the same
-//! user, carry this process's token and name a session Trek started. Calls go to the workspace (`Workspace::handle_call`) on the main thread;
-//! their answers come back here. Nothing that passes through is logged.
+//! user, carry this process's token and name a session Trek started. Calls go to the workspace
+//! (`Workspace::handle_call`) on the main thread; their answers come back here. Nothing that
+//! passes through is logged.
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
