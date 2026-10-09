@@ -8,7 +8,7 @@
 //! only migrates one that has its `session` table), so Trek adds 1.x's tables to it (`share`).
 //! When that can't be done, 1.x keeps `opencode-1x.db` beside it, and both files are read.
 
-use super::{Evidence, ImportedThread, Transcript, classify, clip, source_title, title_from, user_text};
+use super::{Evidence, ImportedThread, Transcript, classify, clip, recorded_path, source_title, title_from, user_text};
 use crate::store::{Item, ToolStatus};
 use super::UsageEntry;
 use crate::types::{Effort, ThreadSource, TokenUsage};
@@ -216,7 +216,7 @@ fn scan_rows(conn: &Connection, tables: Tables, min_updated: i64, held: &str) ->
 }
 
 fn thread_from(conn: &Connection, row: Row) -> ImportedThread {
-    let cwd = row.dir.as_deref().map(PathBuf::from);
+    let cwd = row.dir.as_deref().map(recorded_path);
     let own_title = source_title(&row.title);
     // The first message names untitled sessions and tells title generators apart.
     let first = (!row.child && row.prompts > 0 && (row.prompts == 1 || own_title.is_none())).then(|| first_prompt(conn, row.tables, &row.id)).flatten();
