@@ -1324,6 +1324,79 @@ mod tests {
         assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its group");
     }
 
+    /// A Trek that dies without cleaning up (killed: no destructors, no atexit) takes its agents
+    /// along: the job's last handle closes with it. The test binary runs itself as that Trek: it
+    /// starts a ping in a group, says the ping's pid, and waits to be killed.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_killed_trek_takes_its_jobs_along() {
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        if std::env::var_os("TREK_TEST_KILLED_TREK").is_some() {
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let child = spawn_group(&mut command).unwrap();
+            println!("PING PID {}", child.id().unwrap());
+            tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+            return;
+        }
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::a_killed_trek_takes_its_jobs_along", "--nocapture", "--test-threads=1"])
+            .env("TREK_TEST_KILLED_TREK", "1")
+            .stdout(std::process::Stdio::piped());
+        let mut trek = command.spawn().unwrap();
+        let mut lines = BufReader::new(trek.stdout.take().unwrap()).lines();
+        let pid: u32 = loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(60), lines.next_line()).await.unwrap().unwrap().expect("the stand-in Trek ended before saying the ping's pid");
+            // After libtest's "test … ... " on the same line.
+            if let Some((_, pid)) = line.split_once("PING PID ") {
+                break pid.trim().parse().unwrap();
+            }
+        };
+        let ping = Held::open(pid);
+        assert!(!ping.exits_within(std::time::Duration::from_millis(500)), "the ping runs while its Trek does");
+        trek.start_kill().unwrap();
+        let _ = trek.wait().await;
+        let ended = ping.exits_within(std::time::Duration::from_secs(10));
+        if !ended {
+            let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+        }
+        assert!(ended, "the agent outlived a Trek that was killed");
+    }
+
+    /// Trek run inside a job of its own (a CI runner's, a terminal's) still gets its agents into
+    /// theirs, nested, and ending that ends the tree. The test binary re-runs itself as that Trek.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_job_works_inside_the_job_trek_runs_in() {
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        if std::env::var_os("TREK_TEST_NESTED_JOB").is_some() {
+            // SAFETY: plain calls. This stand-in Trek joins a job of its own first (not ended on
+            // close; it's left open until the process exits).
+            let outer = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!outer.is_null());
+            assert_ne!(unsafe { AssignProcessToJobObject(outer, GetCurrentProcess()) }, 0, "{}", std::io::Error::last_os_error());
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let mut child = spawn_group(&mut command).unwrap();
+            assert!(child.job.is_some(), "the child is in a job of its own, inside Trek's");
+            let ping = Held::open(child.id().unwrap());
+            assert!(!ping.exits_within(std::time::Duration::from_millis(300)));
+            child.terminate().await;
+            assert!(ping.exits_within(std::time::Duration::from_secs(10)), "the nested job didn't end the ping");
+            println!("NESTED JOB OK");
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::a_job_works_inside_the_job_trek_runs_in", "--nocapture", "--test-threads=1"])
+            .env("TREK_TEST_NESTED_JOB", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("NESTED JOB OK"), "{text}");
+    }
+
     #[test]
     fn a_command_s_output_keeps_its_end() {
         let mut out = String::new();
