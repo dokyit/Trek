@@ -44,13 +44,17 @@ raw-window-handle = "0.6.2"
 # flock on the data folder (one Trek per folder closes the turns it left open).
 libc = "0.2"
 lsp-types = "0.97"
+# The editor's Explorer: folders read as git would list them (.gitignore respected), and kept
+# up to date by FSEvents, as are open files an agent edits.
+ignore = "0.4"
+notify = "7"
 ropey = "2.0.0-beta.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Same versions tray-icon already pulls in; used for the Dock badge.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage"] }
 # Dictation: AVAudioRecorder takes the mic, Speech transcribes the take (src/dictate.rs).
 objc2-avf-audio = "0.3"
 objc2-speech = "0.3"

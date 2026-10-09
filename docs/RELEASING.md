@@ -24,11 +24,17 @@ the user picked, and installs a release only if its archive matches that key.
    codesign.p12.password)" -T /usr/bin/codesign`) instead of creating a new identity.
    With an Apple Developer ID you'd set `TREK_SIGN_IDENTITY` and add notarization; neither is done yet.
 3. **Update signing key**: `~/.trek-signing/minisign.key` (mode 600), created with
-   `minisign -G -W -p ~/.trek-signing/minisign.pub -s ~/.trek-signing/minisign.key`.
-   `-W` means no password, so `release.sh` can sign unattended; the file permissions and FileVault are
-   its protection, so keep it off shared machines and out of backups you don't control. Only the public
-   half is in the repository (`assets/update/minisign.pub`), compiled into every build by
-   `trek-core/src/update.rs`.
+   `minisign -G -p ~/.trek-signing/minisign.pub -s ~/.trek-signing/minisign.key`, which asks for a
+   password. Only the public half is in the repository (`assets/update/minisign.pub`), compiled into
+   every build by `trek-core/src/update.rs`.
+
+   **Give the key a password.** Every installed Trek accepts an update signed with it, and this Mac
+   runs coding agents as you: one with Full access (or a prompt injection that reaches a shell) can
+   read any file you can, and file permissions and FileVault don't stop that. `release.sh` asks for
+   the password at the signing step and warns when the key has none. To add one to an existing key
+   without changing it: `minisign -C -s ~/.trek-signing/minisign.key` (the public key stays the
+   same). Better still, sign on a machine that runs no agents, or keep the key on a hardware token.
+   An older key made with `-W` has no password; `release.sh` still signs with it, after the warning.
 
    **Back up both files in `~/.trek-signing/`.** If the minisign secret key is lost, installed copies of
    Trek can't verify anything newer: publish a release signed with a new key, and users have to download

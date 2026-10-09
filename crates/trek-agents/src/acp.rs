@@ -36,10 +36,15 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
     let (binary, args, name, hint): (&str, Vec<&str>, String, &str) = match agent {
         AgentId::OpenCode => ("opencode", vec!["acp"], "OpenCode".into(), "curl -fsSL https://opencode.ai/install | bash"),
         AgentId::Droid => ("droid", vec!["exec", "--output-format", "acp"], "Droid".into(), "curl -fsSL https://app.factory.ai/cli | sh"),
-        AgentId::Acp(id) => {
-            let a = ACP_AGENTS.iter().find(|a| a.id == id).ok_or_else(|| anyhow!("Unknown ACP agent: {id}"))?;
-            (a.binary, a.args.to_vec(), a.name.into(), a.install_hint)
-        }
+        AgentId::Acp(id) => match ACP_AGENTS.iter().find(|a| a.id == id) {
+            Some(a) => (a.binary, a.args.to_vec(), a.name.into(), a.install_hint),
+            // One the user added: its own command, as a path or a name on PATH.
+            None => {
+                let a = trek_core::catalog::added_agent(id).ok_or_else(|| anyhow!("Unknown ACP agent: {id}"))?;
+                let path = a.resolve().ok_or_else(|| anyhow!("{} can't start: {}", a.name, a.missing()))?;
+                return Ok((path, a.args, a.name));
+            }
+        },
         other => bail!("{} doesn't speak ACP", other.display_name()),
     };
     let path = detect::which(binary).with_context(|| format!("{name} isn't installed ({hint})"))?;
@@ -51,6 +56,8 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
 fn launch_env(agent: &AgentId, cwd: &Path) -> Vec<(String, String)> {
     match agent {
         AgentId::OpenCode => crate::opencode::launch_env(cwd),
+        // An added agent's own variables, secrets from the Keychain.
+        AgentId::Acp(id) => trek_core::catalog::added_agent(id).map(|a| a.launch_env()).unwrap_or_default(),
         _ => vec![],
     }
 }
@@ -834,7 +841,11 @@ pub async fn run(
     let mut backlog = Vec::new();
     let init = agent.handshake(&fs, &mut backlog).await?;
     let cwd = config.cwd.display().to_string();
-    let mcp = mcp_servers_json(&config.mcp_servers);
+    let (mcp, skipped) = acp_mcp_servers(&config.mcp_servers, &init);
+    if !skipped.is_empty() {
+        tracing::info!("{}: no HTTP MCP support, leaving out {}", agent.name, skipped.join(", "));
+    }
+    let skipped_notice = skipped_mcp_notice(&config.agent, &agent.name, &skipped);
     let setup = Duration::from_secs(120);
 
     let mut opened = None;
@@ -898,6 +909,9 @@ pub async fn run(
     // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
     let no_plan = (plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
     events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
+    if let Some(notice) = skipped_notice {
+        events.send(AgentEvent::Notice(notice)).await?;
+    }
     if lost {
         events.send(crate::lost_session(&agent.name)).await?;
     }
@@ -1201,12 +1215,12 @@ async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
         _ => return,
     };
     let Some(bin) = detect::which(binary) else { return };
-    let run = tokio::process::Command::new(bin).args(args).arg(session).current_dir(cwd).env("PATH", detect::login_path()).stdin(Stdio::null()).output();
-    match tokio::time::timeout(Duration::from_secs(20), run).await {
-        Ok(Ok(out)) if out.status.success() => {}
-        Ok(Ok(out)) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
-        Ok(Err(e)) => tracing::warn!("couldn't delete probe session {session}: {e}"),
-        Err(_) => tracing::warn!("deleting probe session {session} timed out"),
+    let mut command = tokio::process::Command::new(bin);
+    command.args(args).arg(session).current_dir(cwd).env("PATH", detect::login_path());
+    match crate::output_group(&mut command, None, Duration::from_secs(20)).await {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        Err(e) => tracing::warn!("couldn't delete probe session {session}: {e}"),
     }
 }
 
@@ -1334,6 +1348,67 @@ mod tests {
     }
 
     #[test]
+    fn an_added_agent_starts_with_its_own_command_and_environment() {
+        use trek_core::registry::{AddedAgent, EnvVar};
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-acp.pl");
+        let perl = AddedAgent {
+            id: "perl-agent".into(),
+            name: "Perl agent".into(),
+            command: "/usr/bin/perl".into(),
+            args: vec![script.into()],
+            env: vec![EnvVar { name: "PERL_AGENT_MODE".into(), value: "quiet".into(), secret: false }],
+            ..Default::default()
+        };
+        let on_path = AddedAgent { id: "on-path".into(), name: "On PATH".into(), command: "sh".into(), ..Default::default() };
+        let gone = AddedAgent { id: "gone".into(), name: "Gone".into(), command: "trek-no-such-agent".into(), ..Default::default() };
+        trek_core::catalog::set_added_agents(&[perl, on_path, gone]);
+        let agent = AgentId::Acp("perl-agent".into());
+        let (bin, args, name) = launch_spec(&agent).unwrap();
+        assert_eq!((bin, args, name.as_str()), (PathBuf::from("/usr/bin/perl"), vec![script.to_string()], "Perl agent"));
+        assert_eq!(launch_env(&agent, Path::new("/")), [("PERL_AGENT_MODE".to_string(), "quiet".to_string())]);
+        assert_eq!(agent.display_name(), "Perl agent");
+        assert!(launch_spec(&AgentId::Acp("on-path".into())).unwrap().0.ends_with("sh"), "a name is looked up on PATH");
+        let err = launch_spec(&AgentId::Acp("gone".into())).unwrap_err().to_string();
+        assert!(err.contains("trek-no-such-agent isn't on your PATH"), "{err}");
+        assert!(launch_spec(&AgentId::Acp("never-added".into())).is_err());
+
+        // And it runs a turn like any ACP agent.
+        let dir = std::env::temp_dir().join(format!("trek-acp-added-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = SessionConfig {
+            agent,
+            cwd: dir.clone(),
+            model: None,
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            read_only: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
+        };
+        let h = crate::start(config);
+        trek_core::runtime().block_on(async {
+            h.commands.send(Command::Prompt { text: "hello".into(), images: vec![] }).await.unwrap();
+            loop {
+                match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited") {
+                    AgentEvent::TurnComplete { error, .. } => break assert_eq!(error, None),
+                    AgentEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            h.commands.send(Command::Shutdown).await.unwrap();
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_message_turned_down_mid_turn_leaves_the_turn_running() {
         let dir = std::env::temp_dir().join(format!("trek-acp-steer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1377,6 +1452,129 @@ mod tests {
         let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
         assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
         assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { error: None }), "the turn ends with the first prompt, cleanly");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run one fake-agent session with `servers` (resuming `resume` if given), the agent taking
+    /// remote MCP servers when `http`; returns what the agent was sent and the session's events.
+    fn mcp_session(tag: &str, servers: Vec<crate::McpServer>, http: bool, resume: Option<&str>) -> (Vec<Value>, Vec<AgentEvent>) {
+        let dir = std::env::temp_dir().join(format!("trek-acp-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trek_core::paths::isolate(dir.join("data"));
+        if http {
+            std::fs::write(dir.join("fake-acp-mcp.json"), r#"{"http":true}"#).unwrap();
+        }
+        let config = SessionConfig {
+            agent: AgentId::Acp(FAKE.into()),
+            cwd: dir.clone(),
+            model: None,
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            read_only: false,
+            resume: resume.map(String::from),
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: servers,
+            instructions: None,
+            read_dirs: vec![],
+        };
+        let h = crate::start(config);
+        let seen = trek_core::runtime().block_on(async {
+            let mut seen = vec![];
+            h.commands.send(Command::Prompt { text: "hi".into(), images: vec![] }).await.unwrap();
+            loop {
+                let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await else { break };
+                let done = matches!(ev, AgentEvent::TurnComplete { .. } | AgentEvent::Exited);
+                seen.push(ev);
+                if done {
+                    break;
+                }
+            }
+            let _ = h.commands.send(Command::Shutdown).await;
+            seen
+        });
+        let log = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        (log, seen)
+    }
+
+    fn sent_mcp<'a>(log: &'a [Value], method: &str) -> &'a Value {
+        &log.iter().find(|m| m["method"] == method).unwrap_or_else(|| panic!("no {method}: {log:?}"))["params"]["mcpServers"]
+    }
+
+    fn trek_servers() -> Vec<crate::McpServer> {
+        vec![
+            crate::McpServer::stdio("trek-computer", "/Applications/Trek.app/Contents/MacOS/trek-mcp", vec!["computer".into()], vec![("TREK_SOCKET".into(), "/tmp/s".into())]),
+            crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]),
+            crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
+        ]
+    }
+
+    #[test]
+    fn mcp_servers_go_to_acp_agents_as_the_spec_array() {
+        // An agent that takes only stdio servers (the default): the remote ones are left out,
+        // and the user is told once.
+        let (log, seen) = mcp_session("stdio", trek_servers(), false, None);
+        assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Error(_))), "the fake agent accepted the servers: {seen:?}");
+        assert_eq!(
+            *sent_mcp(&log, "session/new"),
+            json!([{"name":"trek-computer","command":"/Applications/Trek.app/Contents/MacOS/trek-mcp","args":["computer"],"env":[{"name":"TREK_SOCKET","value":"/tmp/s"}]}])
+        );
+        let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
+        assert!(matches!(&notices[..], [n] if n.contains("figma-desktop, linear")), "{seen:?}");
+        let (_, again) = mcp_session("stdio-again", trek_servers(), false, None);
+        assert!(!again.iter().any(|e| matches!(e, AgentEvent::Notice(_))), "told once, not every session: {again:?}");
+
+        // One that said `mcpCapabilities.http`: every server, the remote ones typed.
+        let (log, seen) = mcp_session("http", trek_servers(), true, None);
+        assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::Notice(_))), "{seen:?}");
+        let sent = sent_mcp(&log, "session/new");
+        assert_eq!(sent.as_array().map(Vec::len), Some(3));
+        assert_eq!(sent[1], json!({"type":"http","name":"figma-desktop","url":"http://127.0.0.1:3845/mcp","headers":[]}));
+        assert_eq!(sent[2], json!({"type":"http","name":"linear","url":"https://mcp.linear.app/mcp","headers":[{"name":"Authorization","value":"Bearer t"}]}));
+
+        // A resumed session sends the same on session/load.
+        let (log, seen) = mcp_session("load", trek_servers(), true, Some("fake-9"));
+        assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Error(_))), "{seen:?}");
+        assert_eq!(sent_mcp(&log, "session/load").as_array().map(Vec::len), Some(3));
+        assert!(!log.iter().any(|m| m["method"] == "session/new"), "it was loaded, not started over");
+    }
+
+    #[test]
+    fn the_fake_agent_turns_down_servers_in_the_wrong_shape() {
+        // What the test above relies on: the stand-in checks `mcpServers` as the spec has it.
+        // Claude's `{name: {command…}}` map is refused, as is an HTTP server it didn't ask for.
+        let dir = std::env::temp_dir().join(format!("trek-acp-shape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ask = |servers: Value| -> Value {
+            let input = [json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}), json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/","mcpServers":servers}})]
+                .iter()
+                .map(|m| format!("{m}\n"))
+                .collect::<String>();
+            let mut child = std::process::Command::new("/usr/bin/perl")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-acp.pl"))
+                .current_dir(&dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
+            let out = child.wait_with_output().unwrap();
+            serde_json::from_str(String::from_utf8_lossy(&out.stdout).lines().last().unwrap()).unwrap()
+        };
+        let servers = trek_servers();
+        let refused = |r: &Value, why: &str| r["error"]["message"].as_str().is_some_and(|m| m.contains(why));
+        assert!(refused(&ask(crate::mcp_servers_json(&servers[..1])), "must be an array"));
+        let (http, _) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
+        assert!(refused(&ask(http), "http isn't supported"));
+        let (stdio, skipped) = acp_mcp_servers(&servers, &json!({}));
+        assert_eq!(skipped, ["figma-desktop", "linear"], "HTTP is off unless the agent says");
+        assert_eq!(ask(stdio)["result"]["sessionId"], "fake-1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1835,21 +2033,37 @@ mod tests {
     }
 }
 
-/// ACP stdio MCP server descriptors.
-fn mcp_servers_json(servers: &[crate::McpServer]) -> Value {
-    Value::Array(
-        servers
-            .iter()
-            .map(|m| {
-                json!({
-                    "name": m.name,
-                    "command": m.command,
-                    "args": m.args,
-                    "env": m.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
-                })
-            })
-            .collect(),
-    )
+/// `mcpServers` for session/new and session/load: an array, unlike Claude's and Codex's maps.
+/// Stdio servers are `{name, command, args, env: [{name, value}]}`; remote ones `{type: "http",
+/// name, url, headers: [{name, value}]}`, sent only to an agent whose `initialize` said it takes
+/// them (`agentCapabilities.mcpCapabilities.http`, false unless said). Returns the names of the
+/// remote servers it left out.
+fn acp_mcp_servers<'a>(servers: &'a [crate::McpServer], init: &Value) -> (Value, Vec<&'a str>) {
+    let pairs = |p: &[(String, String)]| p.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>();
+    let http = init["agentCapabilities"]["mcpCapabilities"]["http"] == true;
+    let mut skipped = vec![];
+    let mut out = vec![];
+    for m in servers {
+        match &m.transport {
+            crate::McpTransport::Stdio { command, args, env } => out.push(json!({ "name": m.name, "command": command, "args": args, "env": pairs(env) })),
+            crate::McpTransport::Http { url, headers } if http => out.push(json!({ "type": "http", "name": m.name, "url": url, "headers": pairs(headers) })),
+            crate::McpTransport::Http { .. } => skipped.push(m.name.as_str()),
+        }
+    }
+    (Value::Array(out), skipped)
+}
+
+/// What the user is told about remote MCP servers `agent` couldn't be given: once per agent and
+/// server each time Trek runs, not at every session. `None` when there's nothing new to say.
+fn skipped_mcp_notice(agent: &AgentId, name: &str, skipped: &[&str]) -> Option<String> {
+    static TOLD: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+    let mut told = TOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let new: Vec<&str> = skipped.iter().copied().filter(|s| told.insert(format!("{}/{s}", agent.key()))).collect();
+    if new.is_empty() {
+        return None;
+    }
+    let (list, them) = if new.len() == 1 { (new[0].to_string(), "it") } else { (new.join(", "), "them") };
+    Some(format!("{name} can't connect to remote MCP servers, so this session runs without {list}. Claude Code and Codex can use {them}."))
 }
 
 /// Agents that take their model on the command line rather than over ACP.
@@ -1876,7 +2090,9 @@ fn launch_flags(config: &SessionConfig) -> Vec<String> {
 /// Copilot doesn't list models over ACP; its `help config` does.
 async fn copilot_models() -> Vec<ModelInfo> {
     let Some(bin) = detect::which("copilot") else { return vec![] };
-    let Ok(out) = tokio::process::Command::new(bin).args(["help", "config"]).env("PATH", detect::login_path()).output().await else {
+    let mut command = tokio::process::Command::new(bin);
+    command.args(["help", "config"]).env("PATH", detect::login_path());
+    let Ok(out) = crate::output_group(&mut command, None, Duration::from_secs(20)).await else {
         return vec![];
     };
     parse_copilot_models(&String::from_utf8_lossy(&out.stdout))

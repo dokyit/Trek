@@ -7,7 +7,6 @@ use crate::panels::git::{self as panel, FileChange};
 use crate::workspace::Workspace;
 use gpui_kit::Context;
 use std::path::{Path, PathBuf};
-use trek_core::RunState;
 use trek_core::worktree::{self, Worktree};
 use trek_remote as tr;
 
@@ -26,9 +25,9 @@ fn other(e: impl std::fmt::Display) -> tr::HostError {
     tr::HostError::other(format!("{e:#}"))
 }
 
-/// What git said went wrong: its first `error:`/`fatal:` line, else all of it.
+/// What git said went wrong (`workspace::git_error`), else all of it.
 fn git_error(e: &str) -> String {
-    e.lines().find(|l| l.starts_with("error") || l.starts_with("fatal")).unwrap_or(e).trim().to_string()
+    crate::workspace::git_error(e, e.trim())
 }
 
 fn status_of(code: &str) -> tr::FileStatus {
@@ -144,7 +143,7 @@ fn local_diff(cwd: &Path, file: &FileChange) -> String {
             Err(_) => "Binary or unreadable file".into(),
         };
     }
-    panel::git(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|_| panel::git(cwd, &["diff", "--", &file.path])).unwrap_or_default()
+    trek_core::git::read(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|| trek_core::git::read(cwd, &["diff", "--", &file.path])).unwrap_or_default()
 }
 
 impl Workspace {
@@ -161,13 +160,11 @@ impl Workspace {
     }
 
     /// Why another branch can't be checked out in `place` now, if it can't.
-    fn switch_blocked(&self, place: &Place) -> Option<String> {
+    fn place_switch_blocked(&self, place: &Place) -> Option<String> {
         if let Some((_, wt)) = &place.worktree {
             return Some(format!("This thread works in a worktree: {} stays checked out there. Merge it into {} instead.", wt.branch, wt.base));
         }
-        // Switching under a working agent changes its files mid-turn.
-        let busy = self.threads.iter().any(|t| t.cwd.as_deref() == Some(place.cwd.as_path()) && (t.run_state == RunState::Working || self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some())));
-        busy.then(|| "A thread is working in this folder: switch once it's done.".to_string())
+        self.switch_blocked(&place.cwd)
     }
 
     /// Run `work` on `place` off the main thread and reply with it; the folder's git state is
@@ -193,7 +190,7 @@ impl Workspace {
             Ok(p) => p,
             Err(e) => return drop(reply.send(Err(e))),
         };
-        let blocked = self.switch_blocked(&place);
+        let blocked = self.place_switch_blocked(&place);
         self.git_job(place, reply, cx, move |place| read_status(place, blocked));
     }
 
@@ -246,24 +243,41 @@ impl Workspace {
     }
 
     /// Check out another local branch: not in a worktree thread (its branch is the point of it),
-    /// nor under an agent that's working.
+    /// nor under an agent that's working. While it runs, the checkout counts as switching, as for
+    /// the Mac's own switch: nothing else switches it or starts a turn in it.
     pub(super) fn remote_git_switch(&mut self, req: tr::GitSwitchRequest, reply: tr::Reply<()>, cx: &mut Context<Self>) {
         let place = match self.git_place(&req.target) {
             Ok(p) => p,
             Err(e) => return drop(reply.send(Err(e))),
         };
-        if let Some(why) = self.switch_blocked(&place) {
+        if let Some(why) = self.place_switch_blocked(&place) {
             return drop(reply.send(Err(tr::HostError::conflict(why))));
         }
-        self.git_job(place, reply, cx, move |place| {
+        let root = trek_core::worktree::checkout_root(&place.cwd);
+        self.switching.insert(root.clone());
+        cx.notify();
+        let (done, switched) = tokio::sync::oneshot::channel();
+        self.git_job(place, done, cx, move |place| {
             // Only a branch the switch menu would list: never an option, never a remote ref.
             let info = crate::workspace::read_git_info(&place.cwd);
             let listed = git_lines(&place.cwd, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
             if !info.branches.contains(&req.branch) && !listed.contains(&req.branch) {
                 return Err(tr::HostError::not_found(format!("There's no local branch called {}", req.branch)));
             }
-            panel::git(&place.cwd, &["switch", &req.branch]).map(|_| ()).map_err(|e: String| tr::HostError::conflict(git_error(&e)))
+            panel::git(&place.cwd, &["switch", "--no-guess", "--", &req.branch]).map(|_| ()).map_err(|e: String| tr::HostError::conflict(git_error(&e)))
         });
+        cx.spawn(async move |this, cx| {
+            let result = switched.await.unwrap_or_else(|_| Err(tr::HostError::other("Trek is closing")));
+            let _ = this.update(cx, |ws, cx| {
+                ws.switching.remove(&root);
+                if result.is_ok() {
+                    ws.files_epoch += 1;
+                }
+                cx.notify();
+            });
+            let _ = reply.send(result);
+        })
+        .detach();
     }
 
     /// Merge a worktree thread's branch into its base in the project folder, as the panel's
@@ -322,5 +336,5 @@ impl Workspace {
 }
 
 fn git_lines(cwd: &Path, args: &[&str]) -> Vec<String> {
-    panel::git(cwd, args).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+    trek_core::git::read(cwd, args).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
 }

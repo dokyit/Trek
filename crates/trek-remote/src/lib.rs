@@ -17,9 +17,14 @@
 //! - Every connection must send `pair` (with the code shown on the Mac) or `hello` (with its
 //!   device token) first, within `auth_timeout`; anything else closes it.
 //! - Upgrade requests with an `Origin` header (browsers) are refused with 403.
-//! - Codes are single use, expire, and burn after 5 wrong attempts. Tokens are 32 random bytes;
+//! - At most [`server::PRE_AUTH_TOTAL`] connections are unauthenticated at once,
+//!   [`server::PRE_AUTH_PER_ADDRESS`] from one address, and each may send
+//!   [`server::MAX_PRE_AUTH`] (4 KiB) before it has authenticated.
+//! - Codes are single use and expire; an address that types a wrong one backs off (1 s, doubling,
+//!   up to 5 min), and 100 wrong attempts from everyone burn it. Tokens are 32 random bytes;
 //!   only their SHA-256 is stored, compared in constant time; revoking drops live connections.
-//! - Messages are capped at `max_message` (1 MiB). One connection per device.
+//! - Messages from authenticated phones are capped at `max_message` (8 MiB). One connection per
+//!   device.
 //! - The server never answers an approval, question or plan by itself and has no timeouts on them.
 //!
 //! ## Integrating with Trek

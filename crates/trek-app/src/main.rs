@@ -1,6 +1,7 @@
 //! Trek — every agent, one trail.
 
 mod activity;
+mod add_agent;
 mod agent_updates;
 mod assets;
 mod attachments;
@@ -13,9 +14,12 @@ mod composer;
 mod cost;
 mod deep_link;
 mod dictate;
+mod logging;
 mod lsp_client;
 mod editor;
 mod file_icon;
+mod ide;
+mod image_preview;
 mod integrations;
 mod ipc;
 mod mascot;
@@ -37,7 +41,6 @@ mod tabs;
 mod thread_view;
 mod thread_window;
 mod time;
-mod trail_path;
 mod tray;
 mod ui;
 mod updater;
@@ -81,7 +84,14 @@ actions!(
         PreviousTab,
         OpenNotes,
         ToggleIde,
-        ToggleIdeSearch
+        ToggleIdeSearch,
+        SwitchMode,
+        QuickOpen,
+        ToggleAiBar,
+        ToggleTerminal,
+        FocusScm,
+        AddSelectionToChat,
+        AddSelectionToNewChat
     ]
 );
 
@@ -157,6 +167,8 @@ fn menus() -> Vec<Menu> {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Search and Commands…", OpenPalette),
+                MenuItem::action("Go to File…", QuickOpen),
+                MenuItem::action("Switch Agents / Editor", SwitchMode),
                 MenuItem::action("Basecamp", OpenBasecamp),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
@@ -177,6 +189,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", HideApp, None),
         KeyBinding::new("cmd-m", Minimize, None),
+        // ⌘N only ever makes something new: never an undo, whatever has focus.
         KeyBinding::new("cmd-n", NewThread, None),
         KeyBinding::new("cmd-o", OpenFolder, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
@@ -187,13 +200,34 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
         KeyBinding::new("cmd-.", Interrupt, None),
         KeyBinding::new("cmd-j", ToggleRightPanel, None),
-        KeyBinding::new("cmd-k", OpenPalette, None),
+        // Not in the editor's text, where ⌘K is an inline edit (below).
+        KeyBinding::new("cmd-k", OpenPalette, Some("!IdeEditor")),
         KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
         KeyBinding::new("cmd-shift-h", OpenBasecamp, None),
         KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
         KeyBinding::new("cmd-shift-j", OpenNotes, None),
-        KeyBinding::new("cmd-shift-e", ToggleIde, None),
+        // ⌥⌘E switches Agents ⇄ Editor. ⌘⇧E is the Explorer, in the editor only (as in VS Code).
+        KeyBinding::new("alt-cmd-e", SwitchMode, None),
+        KeyBinding::new("cmd-shift-e", ToggleIde, Some("TrekIde")),
         KeyBinding::new("cmd-shift-f", ToggleIdeSearch, Some("TrekWindow")),
+        KeyBinding::new("cmd-p", QuickOpen, None),
+        KeyBinding::new("alt-cmd-b", ToggleAiBar, None),
+        KeyBinding::new("ctrl-`", ToggleTerminal, None),
+        KeyBinding::new("ctrl-shift-g", FocusScm, None),
+        // The editor's selection to the AI side bar: ⌘⇧L the chat in front, ⌘L a new one.
+        KeyBinding::new("cmd-shift-l", AddSelectionToChat, Some("TrekIde")),
+        KeyBinding::new("cmd-l", AddSelectionToNewChat, Some("TrekIde")),
+        // In the editor's text: ⌘K edits the picked lines inline (elsewhere it's the palette);
+        // with a review's hunks in the file, ⌘Y keeps the one the bar is on and ⌥⌘⌫ undoes it
+        // (its toast takes that back), ⌥⌘↑/↓ step between them.
+        KeyBinding::new("cmd-k", editor::InlineEdit, Some("IdeEditor")),
+        KeyBinding::new("cmd-y", editor::KeepHunk, Some("IdeEditor && hunks")),
+        KeyBinding::new("alt-cmd-backspace", editor::UndoHunk, Some("IdeEditor && hunks")),
+        KeyBinding::new("alt-cmd-down", editor::NextHunk, Some("IdeEditor && hunks")),
+        KeyBinding::new("alt-cmd-up", editor::PreviousHunk, Some("IdeEditor && hunks")),
+        // In the AI input: undo every pending change, or stop the turn (⌘↩, its pair, comes
+        // through the input's Enter).
+        KeyBinding::new("cmd-shift-backspace", ide::ai::UndoAllOrStop, Some("AiInput")),
         // Only thread windows close with ⌘W; the main window stays put.
         KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
         // In the main window ⌘W closes the tab in front; the window stays put.
@@ -204,9 +238,7 @@ fn key_bindings() -> Vec<KeyBinding> {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,trek=info".into()))
-        .init();
+    logging::init();
 
     // `trek://` links (editors, browsers) arrive as bare strings with no App context;
     // they wait on a channel until the app's update loop picks them up.
@@ -297,6 +329,7 @@ fn app_actions(cx: &mut App) {
     cx.on_action(|_: &OpenPalette, cx| root::show_palette(workspace::workspace_global(cx), cx));
     cx.on_action(|_: &OpenBasecamp, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Basecamp, cx)));
     cx.on_action(|_: &OpenNotes, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Notes, cx)));
+    cx.on_action(|_: &SwitchMode, cx| in_main(cx, |ws, cx| ws.toggle_ide(cx)));
     cx.on_action(|_: &CheckForUpdates, cx| {
         in_main(cx, |ws, cx| {
             ws.check_for_updates(true, cx);

@@ -285,15 +285,22 @@ fn package_version(resolved: &Path) -> Option<String> {
 
 /// The version in a CLI's `--version` output: "2.1.289 (Claude Code)", "codex-cli 0.160.0",
 /// "GitHub Copilot CLI 1.0.91.", "grok 1.0.46 (2765805b9442) [stable]" → the dotted number, with
-/// any pre-release or build suffix ("2026.10.01-e373342").
+/// any pre-release or build suffix ("2026.10.01-e373342"). Only `[0-9A-Za-z.+-]`: a version
+/// goes into a shell line (`update_command`).
 pub fn parse_version(text: &str) -> Option<String> {
     text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''))
         .map(|t| t.trim_start_matches(['v', 'V']).trim_end_matches(['.', ':']))
         .find(|t| {
             let core = t.split(['-', '+']).next().unwrap_or_default();
+            safe_version(t) &&
             core.contains('.') && core.split('.').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
         .map(String::from)
+}
+
+/// `v` is made of `[0-9A-Za-z.+-]` only, so it's safe in a shell line as it is.
+fn safe_version(v: &str) -> bool {
+    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 
 fn numbers(v: &str) -> Option<(Vec<u64>, bool)> {
@@ -470,7 +477,8 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
     // put back, from the package manager's cache if need be: never no agent at all.
     let moving = |remove: &str, add: &str, offline: &str, old: &str| {
         let new = h.npm?;
-        let back = installed.map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
+        // Into a shell line: only a version that can't run anything.
+        let back = installed.filter(|v| safe_version(v)).map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
         let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
         let shown = format!("{remove} {old} && {add} {new}@latest");
         let name = h.name();
@@ -834,6 +842,20 @@ mod tests {
         }
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version("build 2765805b9442"), None);
+        // Nothing a shell would run: such a token isn't a version.
+        assert_eq!(parse_version("1.2.3-$(touch x)"), None);
+        assert_eq!(parse_version("1.2.3-`id`"), None);
+        assert_eq!(parse_version("1.2.3-a$b 1.2.4"), Some("1.2.4".into()));
+        assert_eq!(version_in_package_json(r#"{"version": "1.2.3-`id`"}"#), None);
+    }
+
+    #[test]
+    fn an_unsafe_installed_version_stays_out_of_the_shell_line() {
+        let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: "/opt/homebrew".into() };
+        let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1-$(id)")).unwrap();
+        assert!(cmd.args.iter().all(|a| !a.contains("$(id)")), "{:?}", cmd.args);
+        let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1")).unwrap();
+        assert!(cmd.args[1].contains("@mariozechner/pi-coding-agent@0.73.1"));
     }
 
     #[test]

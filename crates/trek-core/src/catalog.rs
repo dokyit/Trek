@@ -1,6 +1,7 @@
 //! Built-in knowledge about agents, providers and models. Live data (Codex `model/list`,
 //! ACP config options, models.dev) refines this at runtime; these are the offline defaults.
 
+use crate::registry::AddedAgent;
 use crate::types::{AgentId, Effort};
 use serde::{Deserialize, Serialize};
 
@@ -156,7 +157,7 @@ pub fn provider_display_name(id: &str) -> String {
     direct_provider(id).map(|p| p.name.to_string()).unwrap_or_else(|| id.to_string())
 }
 
-/// ACP agents Trek knows how to launch. The registry adds more at runtime.
+/// ACP agents Trek knows how to launch. The user adds more (`added_agent`).
 #[derive(Debug, Clone, Copy)]
 pub struct AcpAgent {
     pub id: &'static str,
@@ -214,7 +215,27 @@ pub fn agent_setup(key: &str) -> Option<AgentSetup> {
 }
 
 pub fn acp_display_name(id: &str) -> String {
-    ACP_AGENTS.iter().find(|a| a.id == id).map(|a| a.name.to_string()).unwrap_or_else(|| id.to_string())
+    match ACP_AGENTS.iter().find(|a| a.id == id) {
+        Some(a) => a.name.to_string(),
+        None => added_agent(id).map_or_else(|| id.to_string(), |a| a.name),
+    }
+}
+
+/// The agents the user added (Settings › Agents › Add agent), as settings last said. Set at
+/// launch and whenever they change, so launching, detection and names know them everywhere.
+static ADDED: std::sync::RwLock<Vec<AddedAgent>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_added_agents(agents: &[AddedAgent]) {
+    *ADDED.write().unwrap_or_else(|e| e.into_inner()) = agents.to_vec();
+}
+
+pub fn added_agents() -> Vec<AddedAgent> {
+    ADDED.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// An added agent by its id (`AgentId::Acp(id)`). Built-in ids are never added ones.
+pub fn added_agent(id: &str) -> Option<AddedAgent> {
+    ADDED.read().unwrap_or_else(|e| e.into_inner()).iter().find(|a| a.id == id).cloned()
 }
 
 #[cfg(test)]

@@ -2,12 +2,58 @@
 //! branch has been merged (`inbox.auto_settle_on_merge`).
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+/// Settings a repository's own config can't override in Trek's read-only calls: nothing from the
+/// folder runs (fsmonitor, hooks), and diffs keep the `a/` `b/` prefixes Trek parses.
+const READ_ONLY_CONFIG: [&str; 10] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+    "-c",
+    "core.splitIndex=false",
+];
+
+/// A git command for questions that change nothing, run in `dir`: no lock an agent's own git
+/// would then wait on (`GIT_OPTIONAL_LOCKS=0`), no prompt, no fsmonitor or hook from the folder's
+/// config, English output, the login shell's PATH, and no `GIT_*` from Trek's environment
+/// pointing it at another repository. Add the subcommand and its arguments; use
+/// `tokio::process::Command::from` for an async one.
+pub fn read_only(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.current_dir(dir)
+        .env("PATH", crate::detect::login_path())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_NAMESPACE")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .args(READ_ONLY_CONFIG)
+        .stdin(Stdio::null());
+    c
+}
+
+/// `git <args>` through [`read_only`]: its trimmed output, when it succeeds.
+pub fn read(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = read_only(dir).args(args).stderr(Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    // Read-only questions: never a lock an agent's own git would then wait on, never a prompt.
-    let out = Command::new("git").args(args).current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0").output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    read(cwd, args)
 }
 
 /// The repository's default branch: origin's HEAD, else a local main, master or trunk.
@@ -157,6 +203,22 @@ mod tests {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         assert_eq!(branch_committed_since(&dir, now - 60).as_deref(), Some("feature"));
         assert_eq!(branch_committed_since(&dir, now + 60), None, "on the branch, but nothing committed since");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_only_calls_ignore_the_folders_fsmonitor_and_prefix_settings() {
+        let dir = repo("untrusted");
+        let marker = dir.join("fsmonitor-ran");
+        // A repository whose config would run a command on every status, and drop diff prefixes.
+        run(&dir, &["config", "core.fsmonitor", &format!("touch {}; false", marker.display())]);
+        run(&dir, &["config", "diff.noprefix", "true"]);
+        std::fs::write(dir.join("first.txt"), "changed").unwrap();
+        let status = read(&dir, &["status", "--porcelain"]).unwrap();
+        assert!(status.contains("first.txt"));
+        assert!(!marker.exists(), "fsmonitor ran");
+        let diff = read(&dir, &["diff"]).unwrap();
+        assert!(diff.contains("--- a/first.txt"), "{diff}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

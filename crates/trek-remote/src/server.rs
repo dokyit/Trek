@@ -4,12 +4,16 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::WebSocketStream;
@@ -22,7 +26,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use crate::host::{HostError, HostEvent, HostResult, RemoteHost};
 use crate::pairing::{
     DeviceInfo, DeviceRegistry, MAX_DEVICE_FIELD, Pairing, PairingOffer, generate_code, now_ms,
-    pairing_url,
+    pairing_url, source,
 };
 use crate::protocol::{
     ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION, ServerEnvelope, ServerMessage,
@@ -32,7 +36,7 @@ use crate::protocol::{
 /// How the server listens and behaves.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Where to listen (`0.0.0.0:7420` by default; a `100.x` address for "Tailscale only").
+    /// Where to listen (`0.0.0.0:7420` by default; Trek binds the address it advertises).
     pub bind: SocketAddr,
     /// The Mac, as phones see it.
     pub host: HostInfo,
@@ -45,7 +49,8 @@ pub struct ServerConfig {
     pub auth_timeout: Duration,
     /// How long a pairing code stays valid.
     pub pairing_ttl: Duration,
-    /// The largest message accepted from a phone.
+    /// The largest message accepted from an authenticated phone (before that,
+    /// [`MAX_PRE_AUTH`]).
     pub max_message: usize,
     /// How often the server pings phones (a phone silent for three intervals is dropped).
     pub ping_interval: Duration,
@@ -57,9 +62,20 @@ pub struct ServerConfig {
 /// The default port.
 pub const DEFAULT_PORT: u16 = 7420;
 
+/// Connections that haven't authenticated yet, at most.
+pub const PRE_AUTH_TOTAL: usize = 16;
+/// ...and from one address (an IPv6 one by its /64), so one device on the network can't take
+/// every place.
+pub const PRE_AUTH_PER_ADDRESS: usize = 4;
+/// What a connection may send after the upgrade before it has authenticated (`pair` and `hello`
+/// take a few hundred bytes); more closes it.
+pub const MAX_PRE_AUTH: usize = 4 << 10;
+/// The most of an upgrade request read (with anything the phone sends right behind it).
+const MAX_UPGRADE: usize = 8 << 10;
+
 impl ServerConfig {
     /// The defaults from `docs/MOBILE.md`: `0.0.0.0:7420`, 10 s to authenticate, 10 min codes,
-    /// 1 MiB messages, pings every 20 s, devices kept in memory.
+    /// 8 MiB messages once authenticated, pings every 20 s, devices kept in memory.
     pub fn new(host: HostInfo) -> Self {
         Self {
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
@@ -115,7 +131,7 @@ impl RemoteServer {
             events,
             notices,
             shutdown,
-            unauthenticated: Arc::new(Semaphore::new(16)),
+            pre_auth: PreAuthSlots::new(PRE_AUTH_TOTAL, PRE_AUTH_PER_ADDRESS),
             watchers: Watchers { counts: Mutex::new(HashMap::new()), unwatch },
             state: Mutex::new(State { registry, pairing: Pairing::default(), connections: HashMap::new(), next_conn: 0 }),
         });
@@ -225,7 +241,7 @@ struct Inner {
     events: broadcast::Sender<HostEvent>,
     notices: broadcast::Sender<ServerNotice>,
     shutdown: watch::Sender<bool>,
-    unauthenticated: Arc<Semaphore>,
+    pre_auth: PreAuthSlots,
     watchers: Watchers,
     state: Mutex<State>,
 }
@@ -303,6 +319,121 @@ enum Kick {
 // Accepting
 // ---------------------------------------------------------------------------------------------
 
+type Counts = Arc<Mutex<HashMap<IpAddr, usize>>>;
+
+fn counts(counts: &Counts) -> MutexGuard<'_, HashMap<IpAddr, usize>> {
+    counts.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Places for connections that haven't authenticated yet: `total` in all, `per_address` for one
+/// address.
+struct PreAuthSlots {
+    total: Arc<Semaphore>,
+    per_address: usize,
+    by_address: Counts,
+}
+
+/// A connection's place among the unauthenticated, given back when dropped.
+struct PreAuth {
+    _permit: OwnedSemaphorePermit,
+    address: IpAddr,
+    by_address: Counts,
+}
+
+impl PreAuthSlots {
+    fn new(total: usize, per_address: usize) -> Self {
+        Self { total: Arc::new(Semaphore::new(total)), per_address, by_address: Counts::default() }
+    }
+
+    /// A place for a connection from `ip`, unless its address or everyone has used them up.
+    fn take(&self, ip: IpAddr) -> Option<PreAuth> {
+        let address = source(ip);
+        let mut by_address = counts(&self.by_address);
+        if by_address.get(&address).is_some_and(|n| *n >= self.per_address) {
+            return None;
+        }
+        let permit = self.total.clone().try_acquire_owned().ok()?;
+        *by_address.entry(address).or_default() += 1;
+        Some(PreAuth { _permit: permit, address, by_address: self.by_address.clone() })
+    }
+}
+
+impl Drop for PreAuth {
+    fn drop(&mut self) {
+        let mut by_address = counts(&self.by_address);
+        if let Some(n) = by_address.get_mut(&self.address) {
+            *n -= 1;
+            if *n == 0 {
+                by_address.remove(&self.address);
+            }
+        }
+    }
+}
+
+/// How much more a connection may send before it authenticates; `usize::MAX` once it has.
+#[derive(Clone)]
+struct Allowance(Arc<AtomicUsize>);
+
+impl Allowance {
+    fn new(bytes: usize) -> Self {
+        Self(Arc::new(AtomicUsize::new(bytes)))
+    }
+
+    fn set(&self, bytes: usize) {
+        self.0.store(bytes, Ordering::Relaxed);
+    }
+}
+
+/// A stream that reads no more than its [`Allowance`]: past it, reading fails. It caps what an
+/// unauthenticated phone can make the server hold, whatever the WebSocket limits.
+struct Capped<S> {
+    inner: S,
+    allowance: Allowance,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Capped<S> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let left = this.allowance.0.load(Ordering::Relaxed);
+        if left == usize::MAX {
+            return Pin::new(&mut this.inner).poll_read(cx, buf);
+        }
+        if left == 0 {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, "too much sent before authenticating")));
+        }
+        let n = left.min(buf.remaining());
+        let mut limited = ReadBuf::new(&mut buf.initialize_unfilled()[..n]);
+        ready!(Pin::new(&mut this.inner).poll_read(cx, &mut limited))?;
+        let read = limited.filled().len();
+        buf.advance(read);
+        // Only this connection's task reads, and it lifts the cap between reads.
+        this.allowance.set(left - read);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Capped<S> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, host: Arc<H>) {
     let mut shutdown = inner.shutdown.subscribe();
     loop {
@@ -310,11 +441,11 @@ async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, ho
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
                     let _ = stream.set_nodelay(true);
-                    let Ok(permit) = inner.unauthenticated.clone().try_acquire_owned() else {
+                    let Some(slot) = inner.pre_auth.take(peer.ip()) else {
                         tracing::debug!(%peer, "too many unauthenticated connections");
                         continue;
                     };
-                    tokio::spawn(serve(stream, peer, inner.clone(), host.clone(), permit));
+                    tokio::spawn(serve(stream, peer, inner.clone(), host.clone(), slot));
                 }
                 Err(err) => {
                     tracing::warn!(%err, "accept failed");
@@ -349,7 +480,7 @@ fn refuse_browsers(req: &Request, resp: Response) -> Result<Response, ErrorRespo
     Ok(resp)
 }
 
-async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<Inner>, host: Arc<H>, unauthenticated: OwnedSemaphorePermit) {
+async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<Inner>, host: Arc<H>, unauthenticated: PreAuth) {
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(inner.config.max_message))
         .max_frame_size(Some(inner.config.max_message));
@@ -369,6 +500,8 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
         },
         None => Box::new(stream),
     };
+    let allowance = Allowance::new(MAX_UPGRADE);
+    let stream: Box<dyn Io> = Box::new(Capped { inner: stream, allowance: allowance.clone() });
     let handshake = tokio_tungstenite::accept_hdr_async_with_config(stream, refuse_browsers, Some(ws_config));
     let mut ws = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(ws)) => ws,
@@ -381,7 +514,9 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
             return;
         }
     };
+    allowance.set(MAX_PRE_AUTH);
     let Some(auth) = authenticate(&mut ws, peer, &inner, deadline).await else { return };
+    allowance.set(usize::MAX);
     drop(unauthenticated);
     let device_id = auth.device_id.clone();
     let conn_id = auth.conn_id;
@@ -436,7 +571,11 @@ async fn authenticate(
             }
         };
         let text = match frame {
-            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return None,
+            None | Some(Ok(Message::Close(_))) => return None,
+            Some(Err(err)) => {
+                tracing::debug!(%peer, %err, "connection failed before authenticating");
+                return None;
+            }
             Some(Ok(Message::Text(text))) => text,
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
             Some(Ok(Message::Binary(_))) => {
@@ -483,7 +622,7 @@ async fn authenticate(
                 let name = clean_name(&device_name);
                 let outcome: HostResult<(String, u64)> = {
                     let mut state = inner.lock();
-                    state.pairing.check(&code).map_err(|err| HostError::new(ErrorCode::PairingFailed, err.to_string())).and_then(|()| {
+                    state.pairing.check(&code, peer.ip()).map_err(|err| HostError::new(ErrorCode::PairingFailed, err.to_string())).and_then(|()| {
                         let token = state.registry.register(&device_id, &name, now_ms()).map_err(|err| HostError::other(format!("Couldn't save the paired device: {err}")))?;
                         state.pairing.cancel();
                         Ok((token, register_conn(&mut state, &device_id, kick_tx)))
@@ -1071,6 +1210,41 @@ async fn session_loop<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn pre_auth_places_are_capped_per_address() {
+        let slots = PreAuthSlots::new(6, 4);
+        let (a, b) = (IpAddr::from([192, 168, 1, 66]), IpAddr::from([192, 168, 1, 7]));
+        let held: Vec<PreAuth> = (0..4).map(|_| slots.take(a).expect("a place")).collect();
+        assert!(slots.take(a).is_none(), "a fifth from one address waits");
+        // Another device still gets in, up to the total.
+        let b1 = slots.take(b).expect("another address isn't held up");
+        let _b2 = slots.take(b).expect("another address isn't held up");
+        assert!(slots.take(IpAddr::from([10, 0, 0, 1])).is_none(), "six in all");
+        drop(b1);
+        assert!(slots.take(IpAddr::from([10, 0, 0, 1])).is_some());
+        // An IPv6 device is one address, however many it has in its /64.
+        let v6 = PreAuthSlots::new(16, 1);
+        let _one = v6.take("fd00::1".parse().unwrap()).unwrap();
+        assert!(v6.take("fd00::2:3".parse().unwrap()).is_none());
+        drop(held);
+        assert!(slots.take(a).is_some());
+        assert_eq!(counts(&slots.by_address).get(&a), None, "places given back are forgotten");
+    }
+
+    #[tokio::test]
+    async fn capped_reads_stop_at_the_allowance() {
+        let (mut phone, server) = tokio::io::duplex(1 << 16);
+        let allowance = Allowance::new(10);
+        let mut capped = Capped { inner: server, allowance: allowance.clone() };
+        phone.write_all(&[7; 32]).await.unwrap();
+        let mut buf = [0; 64];
+        assert_eq!(capped.read(&mut buf).await.unwrap(), 10);
+        assert_eq!(capped.read(&mut buf).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        allowance.set(usize::MAX);
+        assert_eq!(capped.read(&mut buf).await.unwrap(), 22);
+    }
 
     #[tokio::test]
     async fn socket_write_deadline_expires() {

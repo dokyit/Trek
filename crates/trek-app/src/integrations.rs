@@ -35,7 +35,7 @@ pub const AXE_INSTALL: &str = "brew install cameroncooke/axe/axe";
 
 /// MCP servers each agent already loads from its own config: `(agent, server names)`.
 pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
-    let home = trek_core::paths::home();
+    let home = trek_core::paths::agents_home();
     let mut out = vec![];
     // Claude Code: user-level `mcpServers` plus per-project ones in ~/.claude.json.
     if let Ok(text) = std::fs::read_to_string(home.join(".claude.json")) {
@@ -69,7 +69,7 @@ pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
 
 /// Claude Code plugins the user has installed (`name@marketplace`).
 pub fn claude_plugins() -> Vec<String> {
-    let path = trek_core::paths::home().join(".claude/plugins/installed_plugins.json");
+    let path = trek_core::paths::agents_home().join(".claude/plugins/installed_plugins.json");
     let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
     let mut names: Vec<String> = v["plugins"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();

@@ -58,6 +58,13 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// The home folder whose agent setup (skills, MCP servers, plugins) Trek's settings read and
+/// change: the user's, or `home` in the data folder in an isolated process, so a test or capture
+/// run never sees or edits theirs.
+pub fn agents_home() -> PathBuf {
+    if isolated() { data_dir().join("home") } else { home() }
+}
+
 /// Where threads without a project run: each in a folder of its own under here, so an agent has
 /// somewhere to work that isn't the user's home or one of their projects. `~/Trek/Chats`: easy to
 /// find, and no space in the path for an agent's shell commands to trip on. Under the data folder

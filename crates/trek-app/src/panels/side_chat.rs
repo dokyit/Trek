@@ -111,6 +111,7 @@ impl Render for SideChatPanel {
         let ws = self.workspace.read(cx);
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
         let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
+        let streaming = live.and_then(|l| l.streaming);
         // While it answers, a trail word ("Breaking trail…") rather than a plain "Working…".
         let working = live.and_then(|l| l.turn_started).map(|t| crate::working_bar::trail_word(self.thread_id.as_deref().unwrap_or_default(), Some(t.elapsed())));
         let now = ws.now();
@@ -185,8 +186,22 @@ impl Render for SideChatPanel {
                                         .items_end()
                                         .gap_1()
                                         .when(!images.is_empty(), |el| {
-                                            el.child(h_flex().gap_1().flex_wrap().justify_end().children(images.into_iter().map(|p| {
-                                                img(PathBuf::from(p)).h(px(72.)).max_w(px(140.)).rounded(px(8.)).object_fit(ObjectFit::Contain)
+                                            // A click previews them here, from that one.
+                                            let all: Vec<PathBuf> = images.iter().map(PathBuf::from).collect();
+                                            el.child(h_flex().gap_1().flex_wrap().justify_end().children(images.into_iter().enumerate().map(|(j, p)| {
+                                                let all = all.clone();
+                                                let path = PathBuf::from(p);
+                                                div()
+                                                    .id(("side-img", i * 100 + j))
+                                                    .test_support()
+                                                    .h(px(72.))
+                                                    .w(crate::image_preview::tile_width(&path, px(72.), px(40.), px(140.)))
+                                                    .rounded(px(8.))
+                                                    .overflow_hidden()
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.opacity(0.85))
+                                                    .child(img(path).size_full().object_fit(ObjectFit::Cover))
+                                                    .on_click(move |_, window, cx| crate::image_preview::open(all.clone(), j, window, cx))
                                             })))
                                         })
                                         .when(!text.trim().is_empty(), |el| {
@@ -198,7 +213,7 @@ impl Render for SideChatPanel {
                                     div()
                                         .id(("side-answer", i))
                                         .test_support()
-                                        .child(crate::md::keyed(SharedString::from(format!("side-{id}-{i}")), text, cwd.clone(), folder, text_size, true, cx))
+                                        .child(crate::md::keyed(SharedString::from(format!("side-{id}-{i}")), text, cwd.clone(), folder, text_size, true, streaming == Some(i), cx))
                                         .into_any_element(),
                                 ),
                                 Item::Tool { title, detail, .. } => Some(
@@ -257,11 +272,9 @@ impl Render for SideChatPanel {
                         }))
                         .when(!self.outbox.paths.is_empty() || self.outbox.saving > 0, |el| {
                             let me = cx.entity().downgrade();
-                            let remove = move |i: usize, _: &mut Window, cx: &mut App| {
+                            let remove = move |path: &std::path::Path, _: &mut Window, cx: &mut App| {
                                 let _ = me.update(cx, |this, cx| {
-                                    if i < this.outbox.paths.len() {
-                                        this.outbox.paths.remove(i);
-                                    }
+                                    this.outbox.remove(path);
                                     cx.notify();
                                 });
                             };

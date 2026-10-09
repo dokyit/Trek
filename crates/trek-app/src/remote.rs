@@ -159,16 +159,10 @@ pub struct Addresses {
 }
 
 impl Addresses {
+    /// Off the main thread: it may ask Tailscale.
     pub fn find() -> Self {
-        let mut out = Self::default();
-        for ip in interface_addresses() {
-            let [a, b, ..] = ip.octets();
-            if a == 100 && (64..128).contains(&b) {
-                out.tailscale.get_or_insert(ip);
-            } else if ip.is_private() && out.lan.is_none() {
-                out.lan = Some(ip);
-            }
-        }
+        let interfaces = interface_addresses();
+        let mut out = Self::from_interfaces(&interfaces, tailscale_ip());
         // The address the default route leaves from, when the interface list didn't say.
         if out.lan.is_none() {
             out.lan = std::net::UdpSocket::bind("0.0.0.0:0")
@@ -176,29 +170,68 @@ impl Addresses {
                 .and_then(|s| s.local_addr())
                 .ok()
                 .and_then(|a| match a.ip() {
-                    IpAddr::V4(v4) if !v4.is_unspecified() && !v4.is_loopback() => Some(v4),
+                    IpAddr::V4(v4) if !v4.is_unspecified() && !v4.is_loopback() && Some(v4) != out.tailscale => Some(v4),
                     _ => None,
                 });
         }
         out
     }
-}
 
-pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<(SocketAddr, String)> {
-    match reach {
-        trek_core::settings::Reach::Tailscale => {
-            let ip = addresses.tailscale.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Tailscale isn't connected; choose Wi-Fi or connect Tailscale"))?;
-            Ok((SocketAddr::from((ip, port)), format!("{ip}:{port}")))
-        }
-        trek_core::settings::Reach::Wifi => {
-            let ip = addresses.lan.or(addresses.tailscale).unwrap_or(Ipv4Addr::LOCALHOST);
-            Ok((SocketAddr::from(([0, 0, 0, 0], port)), format!("{ip}:{port}")))
-        }
+    /// Which of `interfaces` (name, address) phones reach this Mac at. Tailscale's is the one its
+    /// CLI names (`asked`), else a 100.64/10 address on a tunnel (`utun…`): that range alone is
+    /// also carrier-grade NAT, which hotspots and some ISPs hand out on Wi-Fi.
+    pub(crate) fn from_interfaces(interfaces: &[(String, Ipv4Addr)], asked: Option<Ipv4Addr>) -> Self {
+        let tunnel = |name: &str| name.starts_with("utun");
+        let shared = |ip: &Ipv4Addr| {
+            let [a, b, ..] = ip.octets();
+            a == 100 && (64..128).contains(&b)
+        };
+        let tailscale = asked
+            .filter(|ip| interfaces.iter().any(|(_, a)| a == ip))
+            .or_else(|| interfaces.iter().find(|(name, ip)| tunnel(name) && shared(ip)).map(|(_, ip)| *ip));
+        let lan = interfaces.iter().find(|(name, ip)| !tunnel(name) && ip.is_private()).map(|(_, ip)| *ip);
+        Self { lan, tailscale }
     }
 }
 
-/// The IPv4 addresses of the interfaces that are up (not loopback).
-fn interface_addresses() -> Vec<Ipv4Addr> {
+/// This Mac's tailnet address as Tailscale gives it (`tailscale ip -4`), when it's running.
+/// Waits two seconds at most.
+fn tailscale_ip() -> Option<Ipv4Addr> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    let app = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+    let cli = trek_core::detect::which("tailscale").or_else(|| app.is_file().then_some(app))?;
+    let mut child = Command::new(cli).args(["ip", "-4"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(Some(_)) => return None,
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    out.lines().find_map(|l| l.trim().parse().ok())
+}
+
+/// Where the server listens and what the pairing code tells phones to dial: the same address,
+/// so nothing answers on interfaces phones weren't pointed at.
+pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<(SocketAddr, String)> {
+    let ip = match reach {
+        trek_core::settings::Reach::Tailscale => addresses.tailscale.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Tailscale isn't connected; choose Wi-Fi or connect Tailscale"))?,
+        trek_core::settings::Reach::Wifi => addresses.lan.or(addresses.tailscale).unwrap_or(Ipv4Addr::LOCALHOST),
+    };
+    Ok((SocketAddr::from((ip, port)), format!("{ip}:{port}")))
+}
+
+/// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
+fn interface_addresses() -> Vec<(String, Ipv4Addr)> {
     let mut out = vec![];
     // SAFETY: getifaddrs hands back a list we only read, then free with freeifaddrs.
     unsafe {
@@ -212,7 +245,8 @@ fn interface_addresses() -> Vec<Ipv4Addr> {
             let up = ifa.ifa_flags & libc::IFF_UP as u32 != 0 && ifa.ifa_flags & libc::IFF_LOOPBACK as u32 == 0;
             if up && !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET {
                 let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                out.push(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)));
+                let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
+                out.push((name, Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))));
             }
             cur = ifa.ifa_next;
         }
@@ -921,7 +955,7 @@ impl Workspace {
         let mut settled = 0;
         let mut out = vec![];
         let mut threads: Vec<&Thread> = self.threads.iter().filter(|t| t.section(now).is_some() && t.import_hidden.is_none()).collect();
-        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
         for t in threads {
             if t.section(now) == Some(Section::Settled) {
                 settled += 1;

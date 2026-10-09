@@ -5,6 +5,8 @@ use gpui_kit::*;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 const FONT_SIZE: f32 = 12.5;
 const LINE_HEIGHT: f32 = 18.;
@@ -17,8 +19,33 @@ fn terminal_font(window: &Window, fallback: SharedString) -> SharedString {
     PREFERRED.iter().find(|p| names.iter().any(|n| n == *p)).map(|p| SharedString::from(*p)).unwrap_or(fallback)
 }
 
+/// The screen, shared with the thread that reads the shell's output: output is parsed there, so a
+/// flood of it (`yes`, `cat` of a big file) never queues up for or stalls the main thread. The
+/// view only hears that the screen changed, at most once per frame.
+type Screen = Arc<Mutex<vt100::Parser>>;
+
+/// Repaints at most this often while output streams in.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// Feed the shell's output into `screen` until it ends, waking the view after each read. `wake`
+/// holds one wake-up at most: while one is waiting, more output only changes the screen.
+fn pump(mut reader: impl Read, screen: &Screen, wake: &async_channel::Sender<()>) {
+    let mut buf = [0u8; 16384];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                screen.lock().unwrap_or_else(|e| e.into_inner()).process(&buf[..n]);
+                if let Err(async_channel::TrySendError::Closed(_)) = wake.try_send(()) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 pub struct TerminalPanel {
-    parser: vt100::Parser,
+    parser: Screen,
     writer: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn MasterPty + Send>>,
     size: (u16, u16),
@@ -69,7 +96,7 @@ impl TerminalPanel {
     pub fn with_command(cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> Self {
         let size = (30u16, 90u16);
         let mut this = Self {
-            parser: vt100::Parser::new(size.0, size.1, 2000),
+            parser: Arc::new(Mutex::new(vt100::Parser::new(size.0, size.1, 2000))),
             writer: None,
             master: None,
             size,
@@ -82,13 +109,17 @@ impl TerminalPanel {
         // An isolated (test) process starts no shell: one would run the user's login profile,
         // and the command (a project's tests, an agent's sign-in) for real.
         if trek_core::paths::isolated() {
-            this.parser.process(format!("$ {}\r\n(no shell in tests)\r\n", command.unwrap_or_default()).as_bytes());
+            this.screen().process(format!("$ {}\r\n(no shell in tests)\r\n", command.unwrap_or_default()).as_bytes());
             return this;
         }
         if let Err(e) = this.spawn(cwd, command, cx) {
-            this.parser.process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
+            this.screen().process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
         }
         this
+    }
+
+    fn screen(&self) -> MutexGuard<'_, vt100::Parser> {
+        self.parser.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn spawn(&mut self, cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> anyhow::Result<()> {
@@ -108,39 +139,21 @@ impl TerminalPanel {
         cmd.env("TERM_PROGRAM", "Trek");
         cmd.cwd(cwd.unwrap_or_else(trek_core::paths::home));
         let mut child = pty.slave.spawn_command(cmd)?;
-        let mut reader = pty.master.try_clone_reader()?;
+        let reader = pty.master.try_clone_reader()?;
         self.writer = Some(pty.master.take_writer()?);
         self.master = Some(pty.master);
-        let (tx, rx) = async_channel::unbounded::<Vec<u8>>();
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        let screen = self.parser.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 16384];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if tx.send_blocking(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
+            pump(reader, &screen, &tx);
             let _ = child.wait();
         });
         self._reader = Some(cx.spawn(async move |this, cx| {
-            while let Ok(first) = rx.recv().await {
-                let mut bytes = first;
-                while let Ok(more) = rx.try_recv() {
-                    bytes.extend(more);
-                }
-                if this
-                    .update(cx, |this, cx| {
-                        this.parser.process(&bytes);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
+            while rx.recv().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
                     return;
                 }
+                cx.background_executor().timer(FRAME).await;
             }
             let _ = this.update(cx, |this, cx| {
                 this.exited = true;
@@ -170,7 +183,7 @@ impl TerminalPanel {
             return;
         }
         self.size = (rows, cols);
-        self.parser.screen_mut().set_size(rows, cols);
+        self.screen().screen_mut().set_size(rows, cols);
         if let Some(m) = &self.master {
             let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         }
@@ -183,7 +196,7 @@ impl TerminalPanel {
             match k.key.as_str() {
                 "v" => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                        let paste = if self.parser.screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text };
+                        let paste = if self.screen().screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text };
                         self.write(paste.as_bytes());
                     }
                 }
@@ -195,7 +208,7 @@ impl TerminalPanel {
             cx.stop_propagation();
             return;
         }
-        let app = self.parser.screen().application_cursor();
+        let app = self.screen().screen().application_cursor();
         let seq: Option<Vec<u8>> = match k.key.as_str() {
             "enter" => Some(b"\r".to_vec()),
             "backspace" => Some(if m.alt { b"\x1b\x7f".to_vec() } else { b"\x7f".to_vec() }),
@@ -234,6 +247,15 @@ impl TerminalPanel {
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }
+
+    /// The last `n` lines with something on them, as the screen shows them ("Add to Chat":
+    /// the terminal has no selection of its own).
+    pub fn recent_output(&self, n: usize) -> String {
+        let text = self.screen().screen().contents();
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+        let end = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+        lines[..end].iter().skip(end.saturating_sub(n)).copied().collect::<Vec<_>>().join("\n")
+    }
 }
 
 impl Render for TerminalPanel {
@@ -248,7 +270,9 @@ impl Render for TerminalPanel {
                 (family, w)
             })
             .clone();
-        let screen = self.parser.screen();
+        let parser = self.parser.clone();
+        let parser = parser.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = parser.screen();
         let (rows, cols) = screen.size();
         let (cur_row, cur_col) = screen.cursor_position();
         let show_cursor = !screen.hide_cursor() && !self.exited;
@@ -336,5 +360,37 @@ impl Render for TerminalPanel {
                 .size_full(),
             )
             .children(lines)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Screen, pump};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_flood_of_output_is_parsed_off_the_main_thread_with_one_wake_up() {
+        // 8 MB of `yes`, with nobody draining the wake-ups: the reader never blocks on the view,
+        // nothing queues up but the one wake-up, and the screen holds the latest output.
+        let flood = "y\r\n".repeat(2 << 20) + "done\r\n";
+        let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        pump(std::io::Cursor::new(flood.into_bytes()), &screen, &tx);
+        assert_eq!(rx.len(), 1, "one wake-up stands for every read");
+        let text = screen.lock().unwrap().screen().contents();
+        assert!(text.trim_end().ends_with("done"), "{text}");
+        // Scrollback stays at its cap however much went by.
+        let mut parser = screen.lock().unwrap();
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(parser.screen().scrollback(), 2000);
+    }
+
+    #[test]
+    fn the_reader_stops_once_the_view_is_gone() {
+        let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        drop(rx);
+        // An endless stream: `pump` returns because nothing listens any more.
+        pump(std::io::repeat(b'y'), &screen, &tx);
     }
 }

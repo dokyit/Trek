@@ -95,8 +95,9 @@ fn a_new_thread_can_run_in_a_worktree_of_its_own() {
         let own = trek.open_thread_window(cx, &id);
         assert!(trek.visible_in(cx, own, "title-branch"));
 
-        // The next new thread from here starts in the project folder again, not in this worktree.
-        trek.update(cx, |ws, cx| ws.new_thread(cx));
+        // The strip's + from here starts in the project folder again, not in this worktree.
+        trek.render(cx);
+        trek.click(cx, "tab-new");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
     });
 }
@@ -426,6 +427,8 @@ fn the_git_tool_keeps_its_place_and_a_turned_down_commit_message() {
         trek.wait(cx, "the commit", |_| clean(&dir)).await;
         trek.wait(cx, "the box to empty", |_| true).await;
         assert_eq!(message(&trek, cx).as_deref(), Some(""));
+        // The composer's branch chip reads the same checkout: it catches up with the commit.
+        trek.wait(cx, "the changed count to clear", move |ws| ws.git_info.get(&dir).is_some_and(|g| g.changed == 0)).await;
     });
 }
 
@@ -435,7 +438,8 @@ fn threads_editing_one_folder_are_warned_and_offered_a_worktree() {
         let trek = open(cx);
         make_repo(&trek, cx);
         let first = trek.send(cx, "mock:long 20s");
-        trek.update(cx, |ws, cx| ws.new_thread(cx));
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
         let second = trek.send(cx, "mock:long 20s");
         assert_ne!(first, second);
         trek.render(cx);
@@ -516,9 +520,11 @@ fn a_worktree_thread_checkpoints_rewinds_and_forks_in_its_worktree() {
         trek.wait_done(cx, &id, RunState::Idle).await;
         let notes = || std::fs::read_to_string(wt.path.join("NOTES.md")).unwrap();
         assert_eq!(notes(), "# Notes\n\n- Note 1\n- Note 2\n");
-        // Checkpoints of the worktree, their refs in the repository it shares with the project.
-        assert!(trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap()).len() == 2);
-        assert_eq!(checkpoint_refs(&trek.project), 2);
+        // Checkpoints of the worktree (as each turn started and ended), their refs in the
+        // repository it shares with the project.
+        let id2 = id.clone();
+        trek.wait(cx, "the second turn's end checkpoint", move |ws| ws.store.checkpoints(&id2).unwrap().len() == 4).await;
+        assert_eq!(checkpoint_refs(&trek.project), 4);
 
         // Rewinding puts the worktree's files back; the project folder is untouched.
         let second = trek.read(cx, |ws, _| {
@@ -533,12 +539,12 @@ fn a_worktree_thread_checkpoints_rewinds_and_forks_in_its_worktree() {
 
         // A fork stays in the worktree, with the checkpoints of the messages it copied.
         let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, crate::workspace::ForkAt::End, &Scope::Main, cx)).expect("a fork");
-        trek.wait(cx, "the fork's checkpoints", |ws| ws.live[&fork].checkpointed.len() == 1).await;
+        trek.wait(cx, "the fork's checkpoints", |ws| ws.live[&fork].checkpointed.len() == 2).await;
         let f = trek.read(cx, |ws, _| ws.thread(&fork).cloned()).unwrap();
         assert_eq!((f.worktree.as_ref(), f.cwd.as_ref()), (Some(&wt), Some(&wt.path)));
         assert_eq!(trek.read(cx, |ws, _| ws.project_dir(&f)), Some(trek.project.clone()));
         assert_eq!(trek.read(cx, |ws, _| ws.worktree_sharers(&id)), [fork.clone()]);
-        assert_eq!(checkpoint_refs(&trek.project), 2);
+        assert_eq!(checkpoint_refs(&trek.project), 4);
 
         // Removing the worktree moves both threads to the project folder. Their checkpoints were
         // of the worktree, so they go.
@@ -582,7 +588,9 @@ fn a_thread_whose_worktree_is_missing_rewinds_only_the_conversation() {
         trek.wait(cx, "the second note", |ws| ws.live[&id].items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() == 2).await;
         trek.wait_done(cx, &id, RunState::Idle).await;
         worktree::commit(&wt.path, "Add notes").unwrap();
-        assert_eq!(checkpoint_refs(&trek.project), 2);
+        let id2 = id.clone();
+        trek.wait(cx, "the second turn's end checkpoint", move |ws| ws.store.checkpoints(&id2).unwrap().len() == 4).await;
+        assert_eq!(checkpoint_refs(&trek.project), 4);
         std::fs::remove_dir_all(&wt.path).unwrap();
         trek.render(cx);
         let toasts = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| gpui_kit::component::WindowExt::notifications(window, cx).len());
@@ -600,11 +608,11 @@ fn a_thread_whose_worktree_is_missing_rewinds_only_the_conversation() {
         trek.click(cx, "confirm-go");
         assert_eq!(trek.items(cx, &id).iter().filter(|i| matches!(i, Item::User { .. })).count(), 1);
         assert_eq!(trek.composer_text(cx), "mock:write");
-        // The undone message's checkpoint goes, from the repository the worktree shared; the
-        // first one's stays for when the worktree is back.
+        // The undone turn's checkpoints go, from the repository the worktree shared; the first
+        // turn's stay for when the worktree is back.
         let tid = id.clone();
-        trek.wait(cx, "the undone checkpoint to go", move |ws| ws.store.checkpoints(&tid).unwrap().len() == 1).await;
-        assert_eq!(checkpoint_refs(&trek.project), 1);
+        trek.wait(cx, "the undone checkpoints to go", move |ws| ws.store.checkpoints(&tid).unwrap().len() == 2).await;
+        assert_eq!(checkpoint_refs(&trek.project), 2);
         assert_eq!(toasts(&trek, cx), before, "no failed restore");
 
         // Recreated from its branch, the first message's files can be put back again.

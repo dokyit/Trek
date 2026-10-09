@@ -235,8 +235,10 @@ pub struct SearchHit {
 }
 
 /// The FTS5 query for what someone typed: every word must appear, each as a prefix, so
-/// "stad light" finds "stadium lighting". `None` when there's nothing to look for.
+/// "stad light" finds "stadium lighting". `None` when there's nothing to look for. Control
+/// characters separate words: SQLite rejects a NUL even inside quotes.
 pub fn fts_query(input: &str) -> Option<String> {
+    let input: String = input.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     let terms: Vec<String> = input
         .split_whitespace()
         .filter(|w| w.chars().any(char::is_alphanumeric))
@@ -346,7 +348,7 @@ impl Store {
     /// bulk), one short transaction per call. Returns true while more remain; call it from a
     /// background thread until false.
     pub fn backfill_search(&self, chunk: usize) -> Result<bool> {
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = super::lock(&self.conn);
         let tx = conn.transaction()?;
         let titles = backfill(
             &tx,
@@ -393,7 +395,7 @@ impl Store {
             let rows = st.query_map([], |r| r.get(0))?;
             rows.collect()
         })?;
-        let _one = self.indexer.lock().expect("indexer lock");
+        let _one = super::lock(&self.indexer);
         for thread_id in stale {
             self.drop_imported(&thread_id)?;
         }
@@ -536,7 +538,7 @@ impl Store {
     /// was indexed already. Works a chunk per transaction; searches meanwhile may see part of it.
     pub fn index_imported(&self, thread_id: &str, items: Option<&[Item]>, updated_at: i64) -> Result<bool> {
         // One indexer at a time, so chunks for the same thread can't interleave.
-        let _one = self.indexer.lock().expect("indexer lock");
+        let _one = super::lock(&self.indexer);
         if self.import_state(thread_id)?.is_some_and(|(at, complete)| at >= updated_at && (complete || items.is_none())) {
             return Ok(false);
         }
@@ -632,6 +634,17 @@ mod tests {
         assert_eq!(fts_query("stad light").as_deref(), Some("\"stad\"* \"light\"*"));
         assert_eq!(fts_query(r#"say "hi" NOT -x"#).as_deref(), Some(r#""say"* """hi"""* "NOT"* "-x"*"#));
         assert_eq!(fts_query("  - ** "), None);
+        assert_eq!(fts_query("\0").as_deref(), None);
+        assert_eq!(fts_query("stad\0light\u{1}").as_deref(), Some("\"stad\"* \"light\"*"));
+    }
+
+    #[test]
+    fn a_nul_in_a_query_finds_rather_than_fails() {
+        let s = Store::in_memory().unwrap();
+        thread(&s, "Stadium lighting");
+        let hits = s.search("stad\0", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(s.search("\0", 10).unwrap().is_empty());
     }
 
     #[test]

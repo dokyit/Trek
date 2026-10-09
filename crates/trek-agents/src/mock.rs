@@ -14,7 +14,12 @@
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
 //! | `mock:prose`                 | a long answer using all of markdown: headings, bold, lists,  |
 //! |                              | a table, code, paths and a link (for reviewing typography)   |
-//! | `mock:visualization`         | prose with a data visualization and UI treatment comparison  |
+//! | `mock:visualization` [type]  | prose with native visualizations (stats, a line chart, a      |
+//! |                              | heatmap, a phone mockup); with a type (`line`, `flow`, …) one |
+//! |                              | example of just that type                                     |
+//! | `mock:visualization stream`  | the same, a few characters at a time, slowly, so the card's   |
+//! | [type]                       | frame and then its marks can be watched arriving              |
+//! | `mock:visualization invalid` | a block that closes but can't be drawn (an unknown field)     |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `mock:history` [n]           | a long history in one go, at once: `n` rounds (default 100,   |
@@ -23,10 +28,11 @@
 //! |                              | round (for long transcripts: `mock:history 500` is 2500)      |
 //! | `error`                      | a turn that fails                                             |
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
-//! | `mock:write`                 | adds a line to `NOTES.md` in the session's folder (for real)  |
+//! | `mock:write [file]`          | adds a line to `NOTES.md` (or `file`) in its folder (for real) |
 //! | `recall`                     | the messages it remembers from this conversation             |
 //! | `mock:told`                  | what Trek told the session besides its messages (its          |
 //! |                              | `SessionConfig::instructions`)                                |
+//! | `mock:mcp`                   | the MCP servers the session was given, with their transport   |
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
@@ -135,7 +141,7 @@ fn paced(ms: u64) -> Duration {
 
 const WINDOW: u64 = 200_000;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Script {
     Answer,
     Tools,
@@ -149,16 +155,25 @@ enum Script {
     Stream(Duration),
     /// A long answer with every kind of block, for reviewing how answers read.
     Prose,
-    /// An answer with native visualization blocks.
-    Visualization,
+    /// An answer with native visualization blocks: the showcase, or one `type`'s example.
+    Visualization(Option<&'static str>),
+    /// `Visualization`, slowly: the block arrives over a few seconds.
+    VisualizationStream(Option<&'static str>),
+    /// An answer whose visualization block closes invalid.
+    VisualizationInvalid,
     Explore(Duration),
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
     Error,
-    Write,
+    /// Add a note to a file in the session's folder: `NOTES.md`, or the file named after it.
+    Write(Option<String>),
+    /// Edit lines of a file in place, as Trek's ⌘K inline edit asks (`trek_core::inline_edit`).
+    InlineEdit { path: String, lines: (u32, u32) },
     Recall,
     /// Say what Trek told the session (`SessionConfig::instructions`).
     Told,
+    /// List the MCP servers the session was given (`SessionConfig::mcp_servers`).
+    Mcp,
     Limit(Duration),
     /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
     NearLimit(Duration),
@@ -208,12 +223,17 @@ impl Script {
         if trek_core::orchestrate::split_consult(text).1.is_some_and(|c| c.style == trek_core::orchestrate::Style::Arena) {
             return Script::Arena;
         }
+        if let Some((path, lines)) = trek_core::inline_edit::parse(text) {
+            return Script::InlineEdit { path, lines };
+        }
         if text.contains(trek_core::skills::CREATE_VERIFICATION) {
             return Script::SetupVerification;
         }
         if text.contains(trek_core::skills::MAINTAIN_VERIFICATION) {
             return Script::MaintainVerification;
         }
+        // As written (a file name keeps its case), and lowercased for the keywords.
+        let raw: Vec<&str> = text.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '-' && c != '.' && c != '_' && c != '/')).collect();
         let words: Vec<String> = text
             .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '-').to_lowercase())
@@ -226,11 +246,18 @@ impl Script {
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "prose" if w.starts_with("mock:") => Script::Prose,
-                "visualization" if w.starts_with("mock:") => Script::Visualization,
+                "visualization" if w.starts_with("mock:") => {
+                    let kind = |j: usize| words.get(j).and_then(|t| VIZ_GALLERY.iter().find(|(kind, _)| *kind == t.as_str())).map(|(kind, _)| *kind);
+                    match words.get(i + 1).map(String::as_str) {
+                        Some("stream") => Script::VisualizationStream(kind(i + 2)),
+                        Some("invalid") => Script::VisualizationInvalid,
+                        _ => Script::Visualization(kind(i + 1)),
+                    }
+                }
                 "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "history" if w.starts_with("mock:") => Script::History(words.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(100).clamp(1, MAX_HISTORY)),
                 // The one script that changes files: only when asked for by its full name.
-                "write" if w.starts_with("mock:") => Script::Write,
+                "write" if w.starts_with("mock:") => Script::Write(raw.get(i + 1).map(|n| n.trim_end_matches('.')).filter(|n| n.contains('.') && in_folder(n)).map(str::to_string)),
                 "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
                 "nearlimit" if w.starts_with("mock:") => Script::NearLimit(duration_after(i).unwrap_or(Duration::from_secs(60))),
                 "deaf" if w.starts_with("mock:") => Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60))),
@@ -253,6 +280,7 @@ impl Script {
                 "tools" => Script::Tools,
                 "recall" => Script::Recall,
                 "told" if w.starts_with("mock:") => Script::Told,
+                "mcp" if w.starts_with("mock:") => Script::Mcp,
                 _ => return None,
             })
         });
@@ -262,6 +290,18 @@ impl Script {
             None => Script::Answer,
         }
     }
+}
+
+/// `path` is relative and stays in the session's folder: no `..`, not absolute.
+fn in_folder(path: &str) -> bool {
+    !path.contains("..") && std::path::Path::new(path).is_relative() && !path.starts_with('~')
+}
+
+/// What follows the first of `keys` found in `text` (in any case), when there's something.
+fn after_keyword<'a>(text: &'a str, keys: &[&str]) -> Option<&'a str> {
+    // ASCII lowercase keeps byte offsets, so a match points into `text` too.
+    let lower = text.to_ascii_lowercase();
+    keys.iter().find_map(|k| lower.find(k).map(|at| text[at + k.len()..].trim())).filter(|t| !t.is_empty())
 }
 
 /// The title a thread gets after its first turn: the mock names it after its script instead of
@@ -278,13 +318,15 @@ pub fn title(request: &str) -> String {
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
-        Script::Visualization => "Compare release health dashboards",
+        Script::Visualization(_) | Script::VisualizationStream(_) | Script::VisualizationInvalid => "Compare release health dashboards",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
-        Script::Write => "Add a note",
+        Script::Write(_) => "Add a note",
+        Script::InlineEdit { .. } => "Edit the selection",
         Script::Recall => "What was said",
         Script::Told => "What Trek said",
+        Script::Mcp => "List the MCP servers",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
@@ -363,6 +405,8 @@ struct Session {
     orchestrate: Option<trek_ipc::Client>,
     /// What Trek told it about the project (`SessionConfig::instructions`).
     instructions: Option<String>,
+    /// The MCP servers it was given, one line each (`mock:mcp` lists them).
+    mcp: Vec<String>,
 }
 
 /// Background work's news, for a turn the agent takes on its own (as Claude Code does on a
@@ -490,8 +534,16 @@ pub async fn run(
         native_id: native_id.clone(),
         mark: String::new(),
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
-        orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(&m.env)),
+        orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(m.env())),
         instructions: config.instructions.clone(),
+        mcp: config
+            .mcp_servers
+            .iter()
+            .map(|m| match &m.transport {
+                crate::McpTransport::Stdio { command, .. } => format!("{} (stdio: {command})", m.name),
+                crate::McpTransport::Http { url, .. } => format!("{} (http: {url})", m.name),
+            })
+            .collect(),
     };
     // What it left running ends with it, however it ends: the loops printing for its shells
     // stop once they're off the list.
@@ -640,14 +692,26 @@ impl Session {
                 // At reading pace, so the answer can be watched (and captured) as it grows.
                 self.say_at(PROSE, 45).await?;
             }
-            Script::Visualization => self.say(VISUALIZATION).await?,
+            Script::Visualization(None) => self.say(VISUALIZATION).await?,
+            Script::Visualization(Some(kind)) => self.say(VIZ_GALLERY.iter().find(|(k, _)| *k == kind).map_or(VISUALIZATION, |(_, answer)| answer)).await?,
+            // Slow enough to watch (and capture) a card's frame and then its marks arrive.
+            Script::VisualizationStream(kind) => self.say_at(kind.and_then(|kind| VIZ_GALLERY.iter().find(|(k, _)| *k == kind)).map_or(VISUALIZATION, |(_, answer)| answer), 90).await?,
+            Script::VisualizationInvalid => self.say(VIZ_INVALID).await?,
             Script::Explore(total) => self.explore(total).await?,
             Script::History(rounds) => self.history(rounds).await?,
-            Script::Write => self.write().await?,
+            Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
+            Script::InlineEdit { path, lines } => self.inline_edit(&path, lines).await?,
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
                 said.pop();
                 let text = if said.is_empty() { "I don't remember anything from before this message.".to_string() } else { format!("I remember: {}", said.join(" | ")) };
+                self.say(&text).await?;
+            }
+            Script::Mcp => {
+                let text = match &self.mcp[..] {
+                    [] => "No MCP servers.".to_string(),
+                    servers => format!("MCP servers:\n\n{}", servers.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")),
+                };
                 self.say(&text).await?;
             }
             Script::Told => {
@@ -943,11 +1007,7 @@ impl Session {
 
     /// Ask a mock sub-agent, through Trek, for a second opinion on whatever follows the keyword.
     async fn delegate(&mut self, text: &str, wait: bool) -> Step {
-        let lower = text.to_lowercase();
-        let task = ["mock:consult", "mock:delegate"]
-            .iter()
-            .find_map(|k| lower.find(k).map(|at| text[at + k.len()..].trim()))
-            .filter(|t| !t.is_empty())
+        let task = after_keyword(text, &["mock:consult", "mock:delegate"])
             .unwrap_or("Review how the app starts and say what you'd change.")
             .to_string();
         self.say("I'll get a second opinion from another model.").await?;
@@ -1177,7 +1237,10 @@ impl Session {
     /// Change `src/notes.rs` in the session's folder (`broken`: leaving a `todo!()` in it), then
     /// check the change with the verification CLI Trek named for the project. Both for real.
     async fn verify(&mut self, broken: bool) -> Step {
-        let cli = self.instructions.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
+        // The verification note names its CLI in "(`…`)"; the visualization note every session
+        // carries comes first and is no place to look.
+        let notes = self.instructions.as_deref().map(|i| i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, ""));
+        let cli = notes.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
         let Some(cli) = cli else { return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await };
         let body = if broken { "pub fn load() -> Vec<String> {\n    todo!()\n}\n" } else { "pub fn load() -> Vec<String> {\n    Vec::new()\n}\n" };
         let path = self.cwd.join("src/notes.rs");
@@ -1202,7 +1265,9 @@ impl Session {
     async fn run(&mut self, command: &str) -> Step<bool> {
         let id = self.id("tool");
         self.tool_start(&id, "Run command", command).await?;
-        let out = tokio::process::Command::new("/bin/sh").arg("-c").arg(command).current_dir(&self.cwd).stdin(std::process::Stdio::null()).output().await;
+        let mut sh = tokio::process::Command::new("/bin/sh");
+        sh.arg("-c").arg(command).current_dir(&self.cwd);
+        let out = crate::output_group(&mut sh, None, std::time::Duration::from_secs(600)).await;
         let (output, ok) = match out {
             Ok(o) => (format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim_end().to_string(), o.status.success()),
             Err(e) => (format!("Couldn't run it: {e}"), false),
@@ -1212,18 +1277,29 @@ impl Session {
         Ok(ok)
     }
 
-    /// Add a line to `NOTES.md` in the session's folder: a real change, for worktree reviews.
-    async fn write(&mut self) -> Step {
-        let path = self.cwd.join("NOTES.md");
-        let before = std::fs::read_to_string(&path).unwrap_or_default();
+    /// Add a line to `file` (`NOTES.md` unless named) in the session's folder: a real change,
+    /// for worktree reviews and Keep / Undo.
+    async fn write(&mut self, file: &str) -> Step {
+        let path = self.cwd.join(file);
+        // A file it can't read is left alone, not overwritten.
+        let before = match in_folder(file).then(|| std::fs::read_to_string(&path)) {
+            None => Err(format!("{file} isn't in the session's folder")),
+            Some(Ok(t)) => Ok(t),
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Some(Err(e)) => Err(format!("Couldn't read {file}: {e}")),
+        };
+        let id = self.id("tool");
+        self.tool_start(&id, "Edit", file).await?;
+        self.pause(paced(150)).await?;
+        let before = match before {
+            Ok(b) => b,
+            Err(output) => return self.edit_failed(id, output).await,
+        };
         let n = before.lines().filter(|l| l.starts_with("- ")).count() + 1;
         let text = if before.is_empty() { format!("# Notes\n\n- Note {n}\n") } else { format!("{before}- Note {n}\n") };
-        let id = self.id("tool");
-        self.tool_start(&id, "Edit", "NOTES.md").await?;
-        self.pause(paced(150)).await?;
         let (output, ok) = match std::fs::write(&path, &text) {
-            Ok(()) => (format!("Wrote note {n} to NOTES.md"), true),
-            Err(e) => (format!("Couldn't write NOTES.md: {e}"), false),
+            Ok(()) => (format!("Wrote note {n} to {file}"), true),
+            Err(e) => (format!("Couldn't write {file}: {e}"), false),
         };
         let added = (text.lines().count() - before.lines().count()) as i64;
         if ok {
@@ -1231,7 +1307,59 @@ impl Session {
         }
         self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         self.emit(AgentEvent::DiffStat { additions: added, deletions: 0 }).await?;
-        self.say(&format!("Added note {n} to `NOTES.md`.")).await
+        self.say(&format!("Added note {n} to `{file}`.")).await
+    }
+
+    /// Edit `lines` (1-based, inclusive) of `path` in place, as ⌘K asks: each line gets a
+    /// `// edited` mark. A real change, for inline edits' pending hunks.
+    async fn inline_edit(&mut self, path: &str, lines: (u32, u32)) -> Step {
+        let file = self.cwd.join(path);
+        let before = match in_folder(path).then(|| std::fs::read_to_string(&file)) {
+            None => Err(format!("{path} isn't in the session's folder")),
+            Some(Ok(t)) => Ok(t),
+            Some(Err(e)) => Err(format!("Couldn't read {path}: {e}")),
+        };
+        let before = match before {
+            Ok(b) => b,
+            Err(output) => {
+                let id = self.id("tool");
+                self.tool_start(&id, "Edit", path).await?;
+                return self.edit_failed(id, output).await;
+            }
+        };
+        let (a, b) = (lines.0.max(1) as usize, lines.1.max(lines.0) as usize);
+        let text: String = before
+            .split_inclusive('\n')
+            .enumerate()
+            .map(|(i, l)| {
+                if (a..=b).contains(&(i + 1)) {
+                    let (body, end) = l.strip_suffix('\n').map_or((l, ""), |b| (b, "\n"));
+                    format!("{body} // edited{end}")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        let id = self.id("tool");
+        self.tool_start(&id, "Edit", path).await?;
+        self.pause(paced(150)).await?;
+        let (output, ok) = match std::fs::write(&file, &text) {
+            Ok(()) => (format!("Edited {path}"), true),
+            Err(e) => (format!("Couldn't edit {path}: {e}"), false),
+        };
+        let n = (b + 1 - a) as u32;
+        if ok {
+            self.emit(AgentEvent::ToolLines { id: id.clone(), added: n, removed: n }).await?;
+        }
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        let which = if a == b { format!("line {a}") } else { format!("lines {a}–{b}") };
+        self.say(&format!("Edited {which} of `{path}`.")).await
+    }
+
+    /// An edit that didn't happen: the tool fails with `output`, and the turn says so.
+    async fn edit_failed(&mut self, id: String, output: String) -> Step {
+        self.emit(AgentEvent::ToolFinished { id, output: output.clone(), ok: false }).await?;
+        self.say(&format!("I left it alone: {output}.")).await
     }
 
     async fn agents(&mut self, after: Option<Duration>) -> Step {
@@ -1308,8 +1436,7 @@ impl Session {
 
     /// `mock:pair`: two sub-agents on the same task, through Trek; the turn ends while they work.
     async fn pair(&mut self, text: &str) -> Step {
-        let lower = text.to_lowercase();
-        let task = lower.find("mock:pair").map(|at| text[at + "mock:pair".len()..].trim()).filter(|t| !t.is_empty()).unwrap_or("Review how the app starts.").to_string();
+        let task = after_keyword(text, &["mock:pair"]).unwrap_or("Review how the app starts.").to_string();
         self.say("I'll ask two models at once.").await?;
         for title in ["First opinion", "Second opinion"] {
             let id = self.id("tool");
@@ -1650,21 +1777,97 @@ const PROSE_THOUGHT: &str = "**Mapping the startup path**\n\nThe flags are parse
 
 const PROSE: &str = "## How the app starts\n\nStartup lives in `src/main.rs`. It does three things, in order: it **parses the flags**, it **loads the settings**, and only then does it **open the window**, so a bad config fails before anything is drawn.\n\n### Flags and settings\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`. Unknown flags are an error, not a warning.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults in `src/settings.rs`.\n  - Paths in it may start with `~/`.\n  - A setting that fails to parse names its line.\n- The **window** is created last, from `src/app.rs`.\n\n### What each setting does\n\n| Setting | Default | What it does |\n| --- | --- | --- |\n| `theme` | `night` | Night or Paper |\n| `font_size` | `14.5` | Transcript text, in points |\n| `telemetry` | `false` | Never sent unless you turn it on |\n\n## The entry point\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\n> The order matters: a window opened before the settings load would flash the default theme.\n\n1. Read `src/cli.rs` first: it is short.\n2. Then `src/settings.rs`, which is where most changes land.\n3. Finally `src/app.rs`, for the window itself.\n\nThe folder `src/` holds all of it. For the config format itself, see [the TOML spec](https://toml.io).";
 
-const VISUALIZATION: &str = r#"## Release health at a glance
+pub const VISUALIZATION: &str = r#"## Release health at a glance
 
-The API is stable through the week, while the worker queue is the one clear hotspot on Thursday. That makes queue saturation the best first investigation—not a broad rollback.
-
-```trek-viz
-{"version":1,"title":"Release health by service","summary":"Incidents per service and weekday; the worker queue peaks on Thursday.","type":"heatmap","x_labels":["Mon","Tue","Wed","Thu","Fri"],"y_labels":["API","Web","Workers","Database"],"values":[[1,0,1,1,0],[0,1,0,1,1],[1,2,2,7,3],[0,0,1,1,0]]}
-```
-
-Here are two compact treatments for the same release status. The first favors fast scanning; the second adds the next action and is better when the dashboard must guide a decision.
+The release is healthy overall: success rate is up and p95 latency fell after Tuesday's deploy. The one hotspot is the worker queue on Thursday, so queue saturation is the first thing to look at—not a broad rollback.
 
 ```trek-viz
-{"version":1,"title":"Release status treatments","summary":"A side-by-side comparison of a scan-first card and an action-oriented card.","type":"mockup","nodes":[{"kind":"row","children":[{"kind":"card","text":"Scan first","children":[{"kind":"badge","text":"Healthy","tone":"positive"},{"kind":"metric","text":"Success rate","value":"99.94%","tone":"positive"},{"kind":"text","text":"3 services reporting"}]},{"kind":"card","text":"Action oriented","children":[{"kind":"badge","text":"Watch workers","tone":"warning"},{"kind":"metric","text":"Queue depth","value":"1,284","tone":"warning"},{"kind":"button","text":"Inspect worker queue","tone":"accent"}]}]}]}
+{"version":1,"title":"This week's release","summary":"Headline figures against last week.","type":"stats","tiles":[{"label":"Success rate","value":"99.94%","delta":"+0.12 pts","trend":[99.71,99.78,99.8,99.86,99.9,99.93,99.94],"tone":"positive"},{"label":"p95 latency","value":"182 ms","delta":"-23%","trend":[240,236,251,228,204,190,182],"tone":"positive"},{"label":"Queue depth","value":"1,284","delta":"+340","trend":[610,640,700,690,1210,1420,1284],"tone":"warning"}]}
 ```
 
-I’d ship the action-oriented treatment for an operational view and keep the scan-first version for an executive summary."#;
+```trek-viz
+{"version":1,"title":"p95 latency by service","summary":"Latency fell for the API and web after Tuesday's deploy; the workers spiked on Thursday.","type":"line","x_labels":["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],"series":[{"label":"API","values":[212,205,168,171,160,158,152]},{"label":"Web","values":[248,240,201,196,190,184,181]},{"label":"Workers","values":[310,302,296,488,371,322,305]}],"y_label":"p95","unit":"ms"}
+```
+
+```trek-viz
+{"version":1,"title":"Incidents by service and weekday","summary":"The worker queue peaks on Thursday; everything else stays quiet.","type":"heatmap","x_labels":["Mon","Tue","Wed","Thu","Fri"],"y_labels":["API","Web","Workers","Database"],"values":[[1,0,1,1,0],[0,1,0,1,1],[1,2,2,7,3],[0,0,1,1,0]]}
+```
+
+Here is the on-call view I'd ship for it: the status first, the one thing to act on second.
+
+```trek-viz
+{"version":1,"title":"On-call status screen","summary":"A phone view that leads with health and puts the worker queue one tap away.","type":"mockup","nodes":[{"kind":"frame","device":"phone","text":"Release","children":[{"kind":"tabs","value":"Health","children":[{"kind":"text","text":"Health"},{"kind":"text","text":"Deploys"},{"kind":"text","text":"Alerts"}]},{"kind":"row","children":[{"kind":"metric","text":"Success","value":"99.94%","tone":"positive"},{"kind":"metric","text":"Queue","value":"1,284","tone":"warning"}]},{"kind":"progress","text":"Rollout","value":"64%","tone":"info"},{"kind":"list","text":"Services","children":[{"kind":"text","text":"API · healthy"},{"kind":"text","text":"Web · healthy"},{"kind":"text","text":"Workers · saturated"}]},{"kind":"toggle","text":"Auto-rollback","value":"on","tone":"positive"},{"kind":"button","text":"Inspect worker queue"}]}]}
+```
+
+I'd keep the phone view for on-call and leave the full dashboard for the weekly review."#;
+
+/// A visualization block that closes but can't be drawn: `color` isn't a field of a bar chart.
+pub const VIZ_INVALID: &str = r#"Here are the build times, though this block won't draw:
+
+```trek-viz
+{"version":1,"title":"Build time by crate","summary":"Clean release build, seconds per crate.","type":"bar","bars":[{"label":"trek-app","value":142},{"label":"trek-core","value":48}],"color":"ember"}
+```
+
+The app crate is still the slow one."#;
+
+/// One example of each visualization type, by its `type`: `mock:visualization flow`.
+pub const VIZ_GALLERY: &[(&str, &str)] = &[
+    ("bar", r#"Build time is dominated by the app crate; the rest are small.
+
+```trek-viz
+{"version":1,"title":"Build time by crate","summary":"Clean release build, seconds per crate.","type":"bar","bars":[{"label":"trek-app","value":142},{"label":"trek-core","value":48},{"label":"trek-agents","value":31},{"label":"gpui-kit","value":96,"tone":"info"},{"label":"vendor/gpui-base","value":22,"tone":"neutral"}],"x_label":"seconds"}
+```"#),
+    ("line", r#"Latency fell after Tuesday's deploy everywhere but the workers.
+
+```trek-viz
+{"version":1,"title":"p95 latency by service","summary":"Daily p95; the workers spike on Thursday.","type":"line","x_labels":["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],"series":[{"label":"API","values":[212,205,168,171,160,158,152]},{"label":"Web","values":[248,240,201,196,190,184,181]},{"label":"Workers","values":[310,302,296,488,371,322,305]}],"area":true,"y_label":"p95","unit":"ms"}
+```"#),
+    ("donut", r#"Most of the bundle is the editor.
+
+```trek-viz
+{"version":1,"title":"Where the bundle's bytes go","summary":"Release binary by component.","type":"donut","parts":[{"label":"Editor & LSP","value":18.4},{"label":"GPUI","value":12.1},{"label":"Tree-sitter grammars","value":9.6},{"label":"Agents","value":4.2},{"label":"Everything else","value":3.1,"tone":"neutral"}],"unit":"MB"}
+```"#),
+    ("stats", r#"The week in four numbers.
+
+```trek-viz
+{"version":1,"title":"This week","summary":"Against last week.","type":"stats","tiles":[{"label":"Threads","value":"184","delta":"+22%","trend":[20,24,22,31,28,30,29],"tone":"positive"},{"label":"Tokens","value":"12.9M","delta":"+8%","trend":[1.6,1.9,1.7,2.1,1.8,2.0,1.8]},{"label":"Spend","value":"$41.20","delta":"-6%","tone":"positive"},{"label":"Failed turns","value":"3","delta":"+2","trend":[0,0,1,0,0,2,0],"tone":"negative"}]}
+```"#),
+    ("table", r#"Three services need attention; workers most of all.
+
+```trek-viz
+{"version":1,"title":"Service health","summary":"Last 24 hours.","type":"table","columns":["Service","Requests","p95 (ms)","Errors","Owner"],"rows":[["API",1284000,152,0.02,"Platform"],["Web",842300,181,0.04,"Frontend"],{"cells":["Workers",96400,488,1.8,"Data"],"tone":"warning"},["Database",3120000,12,0,"Platform"],{"cells":["Search",44100,920,4.1,"Discovery"],"tone":"negative"}]}
+```"#),
+    ("heatmap", r#"Incidents cluster on Thursday.
+
+```trek-viz
+{"version":1,"title":"Incidents by service and weekday","summary":"The worker queue peaks on Thursday.","type":"heatmap","x_labels":["Mon","Tue","Wed","Thu","Fri"],"y_labels":["API","Web","Workers","Database"],"values":[[1,0,1,1,0],[0,1,0,1,1],[1,2,2,7,3],[0,0,1,1,0]]}
+```"#),
+    ("treemap", r#"Where the code lives.
+
+```trek-viz
+{"version":1,"title":"Lines of Rust by module","summary":"trek-app, by top-level module.","type":"treemap","items":[{"label":"workspace","weight":6400},{"label":"thread_view","weight":3900},{"label":"ide","weight":3600},{"label":"root","weight":2100},{"label":"settings_view","weight":1900},{"label":"remote","weight":1500},{"label":"composer","weight":1400},{"label":"panels","weight":1300},{"label":"sidebar","weight":900},{"label":"visualization","weight":1700,"tone":"info"},{"label":"md","weight":600},{"label":"shots","weight":850}]}
+```"#),
+    ("timeline", r#"The plan fits the quarter with two weeks to spare.
+
+```trek-viz
+{"version":1,"title":"Q4 plan","summary":"Phases by team; GA lands in the first week of January.","type":"timeline","ticks":["Oct","Nov","Dec","Jan"],"events":[{"label":"Design review","start":"Oct","end":"Oct","lane":"Design","tone":"info"},{"label":"Prototype","start":"Oct","end":"Nov","lane":"Engineering"},{"label":"Hardening","start":"Dec","end":"Dec","lane":"Engineering","tone":"warning"},{"label":"Beta","start":"Nov","end":"Dec","lane":"Release","tone":"positive"},{"label":"GA","start":"Jan","lane":"Release","tone":"positive"}]}
+```"#),
+    ("flow", r#"A message takes this path from the composer to the transcript.
+
+```trek-viz
+{"version":1,"title":"How a turn flows","summary":"From the composer to the agent and back, with the parts that can stop it.","type":"flow","nodes":[{"id":"composer","label":"Composer","detail":"text, images, mode","group":"App"},{"id":"workspace","label":"Workspace","detail":"routes the turn","group":"App","tone":"accent"},{"id":"session","label":"Agent session","detail":"ACP or direct","group":"Agents"},{"id":"permission","label":"Permission card","detail":"Supervised only","group":"App","tone":"warning"},{"id":"tools","label":"Tools","detail":"edits, commands","group":"Agents"},{"id":"transcript","label":"Transcript","detail":"streamed answer","group":"App","tone":"positive"}],"edges":[{"from":"composer","to":"workspace","label":"send"},{"from":"workspace","to":"session"},{"from":"session","to":"permission","label":"asks"},{"from":"session","to":"tools"},{"from":"permission","to":"tools","label":"allowed"},{"from":"tools","to":"transcript"},{"from":"session","to":"transcript","label":"answer"}]}
+```"#),
+    ("layers", r#"Trek's stack, top to bottom.
+
+```trek-viz
+{"version":1,"title":"Trek's architecture","summary":"Each layer only calls the one beneath it.","type":"layers","layers":[{"label":"Views","detail":"GPUI windows, panels and the transcript","items":["Sidebar","Transcript","IDE","Settings"],"tone":"accent"},{"label":"Workspace","detail":"threads, routing, settings, the remote","items":["Router","Store","Remote"],"tone":"info"},{"label":"Agents","detail":"ACP and direct sessions behind one trait","items":["Claude","Codex","Mock"],"tone":"positive"},{"label":"Core","detail":"storage, transcripts, schemas","items":["SQLite","Paths","trek-viz"],"tone":"neutral"}]}
+```"#),
+    ("mockup", r#"Two ways to show a release in the browser.
+
+```trek-viz
+{"version":1,"title":"Release dashboard","summary":"A browser view with a nav, a search field and the rollout status.","type":"mockup","nodes":[{"kind":"frame","device":"browser","text":"releases.internal","children":[{"kind":"nav","text":"Trek Ops","children":[{"kind":"text","text":"Deploys"},{"kind":"text","text":"Incidents"},{"kind":"avatar","text":"Ada Lovelace"}]},{"kind":"row","children":[{"kind":"card","text":"Rollout","children":[{"kind":"progress","text":"Canary to 100%","value":"64","tone":"info"},{"kind":"badge","text":"Healthy","tone":"positive"}]},{"kind":"card","text":"Search","children":[{"kind":"input","text":"Filter services"},{"kind":"toggle","text":"Only failing","value":"off"}]}]},{"kind":"image","text":"Latency chart","value":"wide"},{"kind":"row","children":[{"kind":"button","text":"Promote"},{"kind":"button","text":"Roll back","tone":"negative"}]}]}]}
+```"#),
+];
 
 const PLAN: &str = "## Require a session on every route\n\n1. Add `require_session` middleware in `src/auth.rs`.\n2. Wrap the router in `src/routes.rs` with it, keeping `/health` public.\n3. Return `401` with a JSON body when the session is missing or expired.\n4. Add tests for an authenticated and an anonymous request.\n\nNo database changes.";
 
@@ -1693,8 +1896,19 @@ mod tests {
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("mock:prose", false), Script::Prose);
-        assert_eq!(Script::parse("mock:visualization", false), Script::Visualization);
+        assert_eq!(Script::parse("mock:visualization", false), Script::Visualization(None));
+        assert_eq!(Script::parse("mock:visualization flow", false), Script::Visualization(Some("flow")));
+        assert_eq!(Script::parse("mock:visualization nonsense", false), Script::Visualization(None));
+        assert_eq!(Script::parse("mock:visualization stream bar", false), Script::VisualizationStream(Some("bar")));
+        assert_eq!(Script::parse("mock:visualization stream", false), Script::VisualizationStream(None));
+        assert_eq!(Script::parse("mock:visualization invalid", false), Script::VisualizationInvalid);
         assert_eq!(Script::parse("show a visualization", false), Script::Answer, "only by its full name");
+        assert_eq!(Script::parse("mock:write CHANGELOG.md", false), Script::Write(Some("CHANGELOG.md".into())), "the file's name as written");
+        assert_eq!(Script::parse("Start one: mock:write docs/Notes.md.", false), Script::Write(Some("docs/Notes.md".into())));
+        assert_eq!(
+            Script::parse(&trek_core::inline_edit::with_block("make it loud", "src/a.rs", (2, 3)), false),
+            Script::InlineEdit { path: "src/a.rs".into(), lines: (2, 3) }
+        );
         assert_eq!(Script::parse("mock:history", false), Script::History(100));
         assert_eq!(Script::parse("mock:history 500", false), Script::History(500));
         assert_eq!(Script::parse("mock:history 999999", false), Script::History(MAX_HISTORY));
@@ -1718,6 +1932,7 @@ mod tests {
         assert_eq!(Script::parse("mock:design an error budget", false), Script::Design, "the first keyword decides");
         assert_eq!(Script::parse("mock:judge these: Design A has an error path", false), Script::Judge);
         assert_eq!(Script::parse("mock:told", false), Script::Told);
+        assert_eq!(Script::parse("mock:mcp", false), Script::Mcp);
         assert_eq!(Script::parse("what were you told", false), Script::Answer, "bare `told` is just a word");
     }
 
@@ -1759,6 +1974,38 @@ mod tests {
     }
 
     #[test]
+    fn mock_edits_stay_in_the_session_s_folder() {
+        assert!(in_folder("NOTES.md") && in_folder("docs/a.md"));
+        assert!(!in_folder("../x.md") && !in_folder("a/../../x.md") && !in_folder("/etc/hosts") && !in_folder("~/x.md"));
+        assert_eq!(Script::parse("mock:write ../escape.md", false), Script::Write(None));
+        // Byte offsets of a lowercased "İ" don't match the original's.
+        assert_eq!(after_keyword("İİ MOCK:PAIR review İt", &["mock:pair"]), Some("review İt"));
+        assert_eq!(after_keyword("İ mock:consult", &["mock:consult"]), None);
+    }
+
+    #[test]
+    fn mock_edits_leave_files_they_cant_read_alone() {
+        let dir = std::env::temp_dir().join(format!("trek-mock-unreadable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = [0xffu8, 0xfe, b'\n', 0x80];
+        std::fs::write(dir.join("bin.rs"), binary).unwrap();
+        std::fs::write(dir.join("NOTES.md"), binary).unwrap();
+        trek_core::runtime().block_on(async {
+            let mut c = config(None, None, false, None);
+            c.cwd = dir.clone();
+            let m = Live::of(c);
+            for prompt in [trek_core::inline_edit::with_block("loud", "bin.rs", (1, 1)), trek_core::inline_edit::with_block("loud", "../bin.rs", (1, 1)), "mock:write".into()] {
+                m.prompt(&prompt).await;
+                let events = m.turn().await;
+                assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. })), "{prompt}: {events:?}");
+            }
+        });
+        assert_eq!(std::fs::read(dir.join("bin.rs")).unwrap(), binary);
+        assert_eq!(std::fs::read(dir.join("NOTES.md")).unwrap(), binary);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn tokens_rebuild_the_text() {
         for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, VISUALIZATION, "short", "ünïcödé words stream fine"] {
             assert_eq!(tokens(text).concat(), text);
@@ -1767,18 +2014,30 @@ mod tests {
     }
 
     #[test]
-    fn visualization_script_streams_two_valid_native_blocks() {
+    fn visualization_script_streams_valid_native_blocks() {
+        fn blocks(text: &str) -> Vec<trek_core::visualization::Visualization> {
+            text.split("```trek-viz\n")
+                .skip(1)
+                .map(|tail| tail.split_once("\n```").expect("closed visualization fence").0)
+                .map(|block| trek_core::visualization::parse(block).expect("mock emits a valid visualization"))
+                .collect()
+        }
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Supervised, false);
             m.prompt("mock:visualization").await;
             let events = m.turn().await;
             assert_eq!(text(&events), VISUALIZATION);
-            let blocks = VISUALIZATION.split("```trek-viz\n").skip(1).map(|tail| tail.split_once("\n```").expect("closed visualization fence").0).collect::<Vec<_>>();
-            assert_eq!(blocks.len(), 2);
-            for block in blocks {
-                trek_core::visualization::parse(block).expect("mock emits a valid visualization");
-            }
+            assert_eq!(blocks(VISUALIZATION).len(), 4);
+            m.prompt("mock:visualization layers").await;
+            let events = m.turn().await;
+            assert_eq!(blocks(&text(&events)).iter().map(|v| v.content.kind()).collect::<Vec<_>>(), vec!["layers"]);
         });
+        // One example of every type, each exactly one block of that type.
+        assert_eq!(VIZ_GALLERY.iter().map(|(k, _)| *k).collect::<Vec<_>>(), trek_core::visualization::TYPES);
+        for (kind, answer) in VIZ_GALLERY {
+            assert_eq!(blocks(answer).iter().map(|v| v.content.kind()).collect::<Vec<_>>(), vec![*kind]);
+            assert_eq!(tokens(answer).concat(), *answer);
+        }
     }
 
     struct Live {
@@ -2271,7 +2530,7 @@ mod tests {
         trek_core::runtime().block_on(async {
             set_pace(0.);
             let env = vec![(trek_ipc::ENV_SOCKET.to_string(), path.display().to_string()), (trek_ipc::ENV_TOKEN.into(), "tok".into()), (trek_ipc::ENV_SESSION.into(), "ses".into())];
-            let server = crate::McpServer { name: ORCHESTRATE_SERVER.into(), command: "trek-mcp".into(), args: vec!["orchestrate".into()], env, tool_timeout_secs: None };
+            let server = crate::McpServer::stdio(ORCHESTRATE_SERVER, "trek-mcp", vec!["orchestrate".into()], env);
             let h = crate::start(SessionConfig { mcp_servers: vec![server], ..config(None, None, false, None) });
             let m = Live { commands: h.commands, events: h.events };
             m.prompt("mock:consult check the cache").await;

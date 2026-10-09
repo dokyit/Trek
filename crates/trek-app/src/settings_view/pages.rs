@@ -70,6 +70,13 @@ fn key(label: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// The About page's trademark note, one paragraph.
+pub(super) const LEGAL: &str = concat!(
+    "Trek isn't affiliated with or endorsed by the makers of the agents it runs. ",
+    "Agent and provider names and logos are trademarks of their respective owners, ",
+    "shown only to identify which agent a thread uses."
+);
+
 fn effort_label(e: Effort) -> &'static str {
     e.label()
 }
@@ -184,7 +191,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Messages sent while an agent works",
-                        "Steer slips your message in at the agent's next step. Queue holds it until the turn ends.",
+                        "Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way.",
                         ui::segmented(
                             "follow-up",
                             vec![(FollowUp::Steer, "Steer"), (FollowUp::Queue, "Queue")],
@@ -258,6 +265,36 @@ impl SettingsView {
     }
 
     /// Three small window previews instead of a word list.
+    /// The Dock icon: the bundle's cairn, or one of its alternatives.
+    fn app_icon_tiles(&self, current: trek_core::settings::AppIcon, cx: &mut Context<Self>) -> AnyElement {
+        use trek_core::settings::AppIcon;
+        let theme = cx.theme().clone();
+        let set = self.setter(|s, v| s.appearance.app_icon = v);
+        h_flex()
+            .gap(px(18.))
+            .children([(AppIcon::Ember, "Ember"), (AppIcon::Night, "Night"), (AppIcon::Glass, "Glass")].into_iter().map(|(choice, label)| {
+                let selected = choice == current;
+                let set = set.clone();
+                v_flex()
+                    .id(SharedString::from(format!("app-icon-{label}")))
+                    .test_support()
+                    .items_center()
+                    .gap(px(6.))
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .p(px(4.))
+                            .rounded(px(18.))
+                            .border_1()
+                            .border_color(if selected { theme.foreground.opacity(0.9) } else { gpui_kit::transparent_black() })
+                            .child(img(crate::system::app_icon_image(choice)).size(px(72.))),
+                    )
+                    .child(div().text_size(px(12.5)).text_color(if selected { theme.foreground } else { theme.muted_foreground }).child(label))
+                    .on_click(move |_, window, cx| set(choice, window, cx))
+            }))
+            .into_any_element()
+    }
+
     fn theme_tiles(&self, current: ThemeChoice, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mock = |bg: u32, side: u32, line: u32, accent: u32| {
@@ -331,6 +368,9 @@ impl SettingsView {
         let covered = s.appearance.background_placement == trek_core::settings::BackgroundPlacement::Everywhere && s.appearance.background.is_some();
         vec![
             self.theme_tiles(s.appearance.theme, cx),
+            Self::heading("App icon", cx),
+            Self::note("Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed.", cx),
+            self.app_icon_tiles(s.appearance.app_icon, cx),
             Self::heading("Material", cx),
             ui::group(
                 vec![
@@ -389,48 +429,53 @@ impl SettingsView {
                 cx,
             ),
             Self::heading("Background", cx),
-            Self::note("Art behind the composer on a new thread, or tinted behind the whole window.", cx),
+            Self::note("Off by default. Pick art to show behind the composer on a new thread, or tinted behind the whole window.", cx),
             self.background_gallery(s, cx),
             div().h(px(16.)).into_any_element(),
-            ui::group(
-                vec![
-                    Self::row(
-                        "Show on",
-                        "",
-                        ui::segmented(
-                            "bg-place",
-                            vec![(trek_core::settings::BackgroundPlacement::NewThread, "New thread"), (trek_core::settings::BackgroundPlacement::Everywhere, "Everywhere")],
-                            s.appearance.background_placement,
-                            self.setter(|s, v| s.appearance.background_placement = v),
+            // Where the art shows and how dim it is only mean something once there's art.
+            if s.appearance.background.is_none() {
+                div().into_any_element()
+            } else {
+                ui::group(
+                    vec![
+                        Self::row(
+                            "Show on",
+                            "",
+                            ui::segmented(
+                                "bg-place",
+                                vec![(trek_core::settings::BackgroundPlacement::NewThread, "New thread"), (trek_core::settings::BackgroundPlacement::Everywhere, "Everywhere")],
+                                s.appearance.background_placement,
+                                self.setter(|s, v| s.appearance.background_placement = v),
+                                cx,
+                            ),
                             cx,
                         ),
-                        cx,
-                    ),
-                    Self::row(
-                        "Dim",
-                        "Darkens the art so text stays readable.",
-                        ui::segmented(
-                            "bg-dim",
-                            vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
-                            match s.appearance.background_dim {
-                                d if d < 0.1 => 0u8,
-                                d if d < 0.3 => 1,
-                                d if d < 0.5 => 2,
-                                _ => 3,
-                            },
-                            self.setter(|s, v: u8| s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]),
+                        Self::row(
+                            "Dim",
+                            "Darkens the art so text stays readable.",
+                            ui::segmented(
+                                "bg-dim",
+                                vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
+                                match s.appearance.background_dim {
+                                    d if d < 0.1 => 0u8,
+                                    d if d < 0.3 => 1,
+                                    d if d < 0.5 => 2,
+                                    _ => 3,
+                                },
+                                self.setter(|s, v: u8| s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]),
+                                cx,
+                            ),
                             cx,
                         ),
-                        cx,
-                    ),
-                ],
-                cx,
-            ),
+                    ],
+                    cx,
+                )
+            },
             Self::heading("Motion", cx),
             ui::group(
                 vec![Self::row(
                     "Reduce motion",
-                    "Fades instead of slides, and no trail drawing.",
+                    "Fades instead of slides, and the working animations hold still.",
                     self.switch("reduce-motion", s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v),
                     cx,
                 )],
@@ -503,6 +548,20 @@ impl SettingsView {
             (
                 "Composer",
                 &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Attach a copied image", &["⌘", "V"]), ("Take a snapshot", &["⌘", "⇧", "S"])],
+            ),
+            (
+                "Editor",
+                &[
+                    ("Go to file", &["⌘", "P"]),
+                    ("Edit the picked lines", &["⌘", "K"]),
+                    ("Keep a change", &["⌘", "Y"]),
+                    ("Undo a change", &["⌥", "⌘", "⌫"]),
+                    ("Next or previous change", &["⌥", "⌘", "↓ ↑"]),
+                    ("Keep all changes", &["⌘", "↩"]),
+                    ("Undo all changes (press twice)", &["⌘", "⇧", "⌫"]),
+                    ("New chat", &["⌘", "N"]),
+                    ("Switch to Agents", &["⌥", "⌘", "E"]),
+                ],
             ),
             ("Window", &[("Basecamp", &["⌘", "⇧", "H"]), ("Leave Basecamp", &["esc"]), ("Toggle the sidebar", &["⌘", "B"]), ("Toggle the tools panel", &["⌘", "J"]), ("Settings", &["⌘", ","]), ("Close a thread window", &["⌘", "W"]), ("Hide Trek", &["⌘", "H"]), ("Minimize", &["⌘", "M"]), ("Quit", &["⌘", "Q"])]),
         ];
@@ -828,8 +887,8 @@ impl SettingsView {
 
     pub(super) fn about_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        let data_dir = trek_core::paths::data_dir();
-        let settings_file = trek_core::paths::settings_file();
+        let data_dir = self.data_dir.clone();
+        let settings_file = data_dir.join("settings.toml");
         let channel = format!("{:?}", s.updates.channel);
         let header = h_flex()
             .gap(px(16.))
@@ -851,24 +910,34 @@ impl SettingsView {
             let f = settings_file.clone();
             Button::new("open-settings-file").small().outline().label("Open").on_click(move |_, _, cx| cx.open_with_system(&f))
         };
-        let copy = Button::new("copy-diag").small().outline().label("Copy").on_click(cx.listener(|this, _, window, cx| {
+        let shown_settings = settings_file.clone();
+        let copy = Button::new("copy-diag").small().outline().label("Copy").on_click(cx.listener(move |this, _, window, cx| {
             let ws = this.workspace.read(cx);
-            let mut lines = vec![format!("Trek {}", trek_core::VERSION)];
-            if let Ok(o) = std::process::Command::new("sw_vers").arg("-productVersion").output() {
-                lines.push(format!("macOS {}", String::from_utf8_lossy(&o.stdout).trim()));
-            }
-            for a in &ws.agents {
-                lines.push(format!("{}: {:?}{}", a.name, a.availability, a.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default()));
-            }
-            lines.push(format!("Settings: {}", trek_core::paths::settings_file().display()));
-            cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
-            window.push_notification("Diagnostics copied", cx);
+            let agents: Vec<String> =
+                ws.agents.iter().map(|a| format!("{}: {:?}{}", a.name, a.availability, a.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default())).collect();
+            let settings = shown_settings.clone();
+            // `sw_vers` runs off the main thread; the copy lands when it's answered.
+            cx.spawn_in(window, async move |_, cx| {
+                let macos = cx
+                    .background_executor()
+                    .spawn(async { std::process::Command::new("sw_vers").arg("-productVersion").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) })
+                    .await;
+                let mut lines = vec![format!("Trek {}", trek_core::VERSION)];
+                lines.extend(macos.map(|v| format!("macOS {v}")));
+                lines.extend(agents);
+                lines.push(format!("Settings: {}", settings.display()));
+                let _ = cx.update(|window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
+                    window.push_notification("Diagnostics copied", cx);
+                });
+            })
+            .detach();
         }));
         let trademarks = div()
             .text_size(px(12.))
             .text_color(theme.muted_foreground)
             .pt(px(18.))
-            .child("Trek isn't affiliated with or endorsed by the makers of the agents it runs.                     Agent and provider names and logos are trademarks of their respective owners,                     shown only to identify which agent a thread uses.")
+            .child(LEGAL)
             .into_any_element();
         vec![
             header,
@@ -893,14 +962,15 @@ impl SettingsView {
         use trek_core::settings::{SnapshotFormat, SnapshotMode};
         let theme = cx.theme().clone();
         let p = &s.snapshots;
-        let (count, bytes) = crate::mentions::snapshot_usage();
+        // Counted off the main thread when the page opens (`probe_page`).
+        let probe = self.snapshots.value.clone();
+        let (count, bytes) = probe.as_ref().map_or((0, 0), |p| (p.count, p.bytes));
         let size = match bytes {
             b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
             b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
             b => format!("{} KB", b / 1024),
         };
-        let folder = trek_core::paths::data_dir().join("snapshots");
-        let sr = crate::integrations::screen_recording_allowed();
+        let folder = self.data_dir.join("snapshots");
         let reveal = {
             let f = folder.clone();
             Button::new("snap-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| {
@@ -908,19 +978,30 @@ impl SettingsView {
                 cx.open_with_system(&f)
             })
         };
-        let clear = Button::new("snap-clear").small().ghost().label("Clear").disabled(count == 0).on_click(cx.listener(|_, _, window, cx| {
-            if let Ok(entries) = std::fs::read_dir(trek_core::paths::data_dir().join("snapshots")) {
-                for e in entries.flatten() {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-            window.push_notification("Snapshots cleared", cx);
-            cx.notify();
+        let clear = Button::new("snap-clear").small().ghost().label("Clear").disabled(count == 0).on_click(cx.listener(move |_, _, window, cx| {
+            let folder = folder.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .spawn(async move {
+                        for e in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+                            let _ = std::fs::remove_file(e.path());
+                        }
+                    })
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.snapshots.invalidate();
+                    window.push_notification("Snapshots cleared", cx);
+                    cx.notify();
+                });
+            })
+            .detach();
         }));
-        let permission: AnyElement = if sr {
-            Self::status_dot(palette::emerald(cx), "Allowed")
-        } else {
-            Button::new("snap-perm").small().outline().label("Allow Screen Recording").on_click(|_, _, cx| cx.open_url(crate::integrations::SCREEN_RECORDING_PANE)).into_any_element()
+        let permission: AnyElement = match probe.as_ref().map(|p| p.screen_recording) {
+            None => div().text_size(px(12.5)).text_color(theme.muted_foreground).child("Checking…").into_any_element(),
+            Some(true) => Self::status_dot(palette::emerald(cx), "Allowed"),
+            Some(false) => {
+                Button::new("snap-perm").small().outline().label("Allow Screen Recording").on_click(|_, _, cx| cx.open_url(crate::integrations::SCREEN_RECORDING_PANE)).into_any_element()
+            }
         };
         vec![
             ui::group(
@@ -966,7 +1047,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Snapshot folder",
-                        if count == 0 { "Empty".to_string() } else { format!("{count} snapshot{} · {size}", if count == 1 { "" } else { "s" }) },
+                        if probe.is_none() { "Counting…".to_string() } else if count == 0 { "Empty".to_string() } else { format!("{count} snapshot{} · {size}", if count == 1 { "" } else { "s" }) },
                         h_flex().gap(px(6.)).child(clear).child(reveal),
                         cx,
                     ),
@@ -980,13 +1061,11 @@ impl SettingsView {
     }
 
     pub(super) fn skills_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        use trek_core::skills::{self, SkillHome, SkillSource};
+        use trek_core::skills::{SkillHome, SkillSource};
         let theme = cx.theme().clone();
-        if self.skills.is_none() {
-            let project = self.workspace.read(cx).current_cwd();
-            self.skills = Some(skills::discover(project.as_deref()));
-        }
-        let all = self.skills.clone().unwrap_or_default();
+        // Scanned off the main thread when the page opens (`probe_page`).
+        let scanning = self.skills.value.is_none();
+        let all = self.skills.value.clone().unwrap_or_default();
         let q = self.skill_filter.read(cx).value().to_lowercase();
         let shown: Vec<_> = all.iter().filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)).cloned().collect();
         let off = all.iter().filter(|s| !s.enabled).count();
@@ -1011,6 +1090,14 @@ impl SettingsView {
             .into_any_element();
 
         let mut out = vec![toolbar];
+        // A test or capture run has a home folder of its own: say so, the skills here aren't the user's.
+        if trek_core::paths::isolated() {
+            out.push(Self::note(&format!("Isolated profile: these skills live in {}, not in your own home folder.", trek_core::paths::tildify(&self.data_dir.join("home"))), cx));
+        }
+        if scanning {
+            out.push(div().py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child("Looking for skills…").into_any_element());
+            return out;
+        }
         out.push(
             div()
                 .pb(px(4.))
@@ -1107,7 +1194,7 @@ impl SettingsView {
 
     /// Rescan, and have the agents' command lists (the `$` picker) pick the change up.
     fn skills_changed(&mut self, cx: &mut Context<Self>) {
-        self.skills = None;
+        self.skills.invalidate();
         self.workspace.update(cx, |ws, cx| {
             ws.status_fetched_at = 0;
             ws.refresh_usage(cx);
@@ -1197,6 +1284,8 @@ impl SettingsView {
         };
         let prefs = ws.project_prefs(&project.path);
         let general = ws.settings.general.clone();
+        let icon_there = prefs.icon.clone().and_then(|spec| self.icon_file_exists(&spec, cx));
+        let ws = self.workspace.read(cx);
         let agents = ws.ready_agents();
         let unlocked = ws.settings.permissions.full_access_unlocked;
         let agent = prefs.agent.as_deref().map(AgentId::from_key).filter(|a| agents.contains(a));
@@ -1472,8 +1561,8 @@ impl SettingsView {
                         "Icon",
                         match prefs.icon.as_deref() {
                             None => "Automatic: two letters from the name.",
-                            Some(s) if s.strip_prefix("file:").is_some_and(|f| std::path::Path::new(f).exists()) => "Your image.",
-                            Some(s) if s.starts_with("file:") => "Your image is gone, so the two letters stand in. Choose another.",
+                            Some(s) if s.starts_with("file:") && icon_there == Some(false) => "Your image is gone, so the two letters stand in. Choose another.",
+                            Some(s) if s.starts_with("file:") => "Your image.",
                             Some(_) => "One of Trek's icons.",
                         },
                         h_flex().gap(px(6.)).child(ui::project_badge(&project.name, &ui::ProjectLook::of(&prefs), cx)).child(div().w(px(4.))).children(icon_reset).child(icon_menu).child(icon_file),

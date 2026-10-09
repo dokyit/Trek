@@ -1,6 +1,6 @@
 //! Tabs along the top of the chat, threads in no project, and the Notes screen.
 
-use super::harness::{new_project, open, run};
+use super::harness::{launch, new_project, open, run, settings};
 use crate::workspace::{NO_PROJECT, Route};
 use trek_core::RunState;
 
@@ -14,7 +14,13 @@ fn threads_open_as_tabs_in_their_projects_strip() {
         let trek = open(cx);
         let a = trek.send(cx, "first");
         trek.wait_done(cx, &a, RunState::Idle).await;
+        // ⌘N starts in no project; the strip's + starts another thread in this one.
         trek.update(cx, |ws, cx| ws.new_thread(cx));
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: None });
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
+        trek.render(cx);
+        trek.click(cx, "tab-new");
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
         trek.render(cx);
         assert!(trek.visible(cx, "tab-strip"), "a draft beside an open tab shows the strip");
         assert!(trek.visible(cx, "tab-draft"), "with the draft as a tab of its own");
@@ -48,7 +54,8 @@ fn threads_open_as_tabs_in_their_projects_strip() {
         // A full strip lets go of the tab looked at longest ago.
         let mut extra = vec![];
         for i in 0..crate::workspace::MAX_TABS {
-            trek.update(cx, |ws, cx| ws.new_thread(cx));
+            let project = trek.project.clone();
+            trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
             let id = trek.send(cx, &format!("more {i}"));
             trek.wait_done(cx, &id, RunState::Idle).await;
             extra.push(id);
@@ -171,5 +178,92 @@ fn notes_undo_and_redo_typing_and_formatting() {
         assert_eq!(saved(cx), "milk");
         trek.click(cx, "note-redo");
         assert_eq!(saved(cx), "**milk**");
+    });
+}
+
+#[test]
+fn a_full_tab_strip_scrolls_fades_and_lists_every_tab() {
+    run(async |cx| {
+        let trek = open(cx);
+        let ids: Vec<String> = (0..crate::workspace::MAX_TABS)
+            .map(|i| {
+                trek.update(cx, |ws, cx| {
+                    let mut t = ws.store.create_thread(Some(&trek.project), super::harness::mock(), None, trek_core::Effort::Medium, trek_core::HandHolding::Auto).expect("thread");
+                    t.title = format!("Thread {i}: fix the flaky integration test in the payments service");
+                    ws.store.save_thread(&t).expect("save");
+                    ws.reload(cx);
+                    ws.navigate(Route::Thread(t.id.clone()), cx);
+                    t.id
+                })
+            })
+            .collect();
+        // Laid out once, the strip knows it overflows.
+        trek.render(cx);
+        trek.render(cx);
+        assert_eq!(tab_ids(&trek, cx).len(), ids.len());
+        assert!(trek.visible(cx, "tab-overflow"), "a menu lists the tabs that don't fit");
+        let strip = trek.bounds(cx, "tab-strip-tabs").expect("the strip");
+        let inside = |trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, id: &str| {
+            let tab = trek.bounds(cx, format!("tab-{id}")).expect("the tab");
+            tab.left() >= strip.left() - gpui_kit::px(0.5) && tab.right() <= strip.right() + gpui_kit::px(0.5)
+        };
+        let last = ids.last().unwrap();
+        assert!(inside(&trek, cx, last), "the tab in front is scrolled into view");
+        assert!(trek.visible(cx, "tab-fade-start"), "tabs cut off at the start fade out there");
+        // No tab is squeezed below its minimum.
+        for id in &ids {
+            let w = trek.bounds(cx, format!("tab-{id}")).map(|b| b.size.width);
+            assert!(w.is_none_or(|w| w >= gpui_kit::px(crate::tabs::TAB_MIN_WIDTH - 0.5)), "{w:?}");
+        }
+        // Bringing the first tab forward scrolls back to it.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(ids[0].clone()), cx));
+        trek.render(cx);
+        trek.render(cx);
+        assert!(inside(&trek, cx, &ids[0]));
+        assert!(trek.visible(cx, "tab-fade-end") && !trek.visible(cx, "tab-fade-start"));
+    });
+}
+
+#[test]
+fn the_tools_panel_opens_on_a_grid_of_tools_and_never_clips_a_tab() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.press(cx, "cmd-j");
+        trek.render(cx);
+        for tool in crate::workspace::PanelTool::ALL {
+            assert!(trek.visible(cx, format!("tool-tile-{}", tool.label())), "{}", tool.label());
+        }
+        trek.click(cx, "tool-tile-Terminal");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "tool-tile-Terminal"), "the tool opened in a tab");
+        // Many tools at the panel's default width: the tabs not in front drop to their icons,
+        // then the strip scrolls with a menu of every tab; the one in front stays whole.
+        for tool in [crate::workspace::PanelTool::Git, crate::workspace::PanelTool::Explorer, crate::workspace::PanelTool::SideChat, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal] {
+            trek.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::OpenTool(tool)));
+        }
+        // The frames the panel asks for once it has measured its strip.
+        for _ in 0..3 {
+            trek.render(cx);
+            trek.window(cx, |window, cx| window.simulate_next_frame(cx));
+        }
+        trek.render(cx);
+        let strip = trek.bounds(cx, "panel-tabs").expect("the tab strip");
+        let front = cx.read(|cx| trek.root.read(cx).right_panel.read(cx).active_id()).expect("a tab in front");
+        let tab = trek.bounds(cx, ("panel-tab", front as usize)).expect("the tab in front");
+        assert!(tab.left() >= strip.left() - gpui_kit::px(0.5) && tab.right() <= strip.right() + gpui_kit::px(0.5), "{tab:?} in {strip:?}");
+        assert!(trek.visible(cx, "panel-tabs-all"), "a menu lists every tab");
+    });
+}
+
+#[test]
+fn trek_opens_on_a_thread_in_no_project() {
+    run(async |cx| {
+        let project = new_project("first");
+        let mut s = settings();
+        s.user_projects.push(project.display().to_string());
+        let store = trek_core::store::Store::in_memory().expect("store");
+        store.ensure_project(&project).expect("project");
+        let (ws, _, _) = launch(cx, store, s);
+        assert_eq!(ws.read_with(cx, |ws, _| ws.route.clone()), Route::Draft { project: None }, "not whichever project is first");
     });
 }

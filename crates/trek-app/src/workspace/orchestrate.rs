@@ -102,8 +102,9 @@ const TOOL_TIMEOUT_SECS: u64 = 1900;
 /// "running", and the answer comes in a wake-up message instead.
 const ACP_WAIT: Duration = Duration::from_secs(50);
 /// How long a report waits for others before it wakes its parent: sub-agents that finish
-/// together wake it once, with all their answers.
-const GATHER: Duration = Duration::from_millis(120);
+/// together wake it once, with all their answers. Longer in tests: on a loaded CI runner, two
+/// mock sub-agents started together can finish a few hundred milliseconds apart.
+const GATHER: Duration = Duration::from_millis(if cfg!(test) { 600 } else { 120 });
 /// After a launch, reports held from before it wait this long: Trek finds its feet first.
 const LAUNCH_WAKE: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 3 });
 /// How long a sub-agent whose agent's own sub-agents have all ended gets to take the turn their
@@ -173,11 +174,13 @@ impl Workspace {
         let Some(ipc) = self.ipc.as_ref().filter(|_| self.settings.tools.orchestration && (mock || bin.is_some())) else { return (servers, None) };
         let key = ipc.open_session(thread);
         servers.push(McpServer {
-            name: trek_agents::mock::ORCHESTRATE_SERVER.into(),
-            command: bin.map(|b| b.display().to_string()).unwrap_or_else(|| "trek-mcp".into()),
-            args: vec!["orchestrate".into()],
-            env: ipc.env(&key),
             tool_timeout_secs: Some(TOOL_TIMEOUT_SECS),
+            ..McpServer::stdio(
+                trek_agents::mock::ORCHESTRATE_SERVER,
+                bin.map(|b| b.display().to_string()).unwrap_or_else(|| "trek-mcp".into()),
+                vec!["orchestrate".into()],
+                ipc.env(&key),
+            )
         });
         (servers, Some(key))
     }

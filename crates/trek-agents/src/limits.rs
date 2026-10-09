@@ -132,10 +132,10 @@ fn reset_in(message: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Optio
     const AT: &[&str] = &["resets at ", "reset at ", "try again at ", "retry after ", "available again at ", "resets on ", "resets "];
     const IN: &[&str] = &["try again in ", "retry in ", "resets in ", "reset in ", "available in "];
     for lead in IN {
-        if let Some(i) = lower.find(lead) {
-            if let Some(ms) = parse_span(&lower[i + lead.len()..]) {
-                return Some(now + ms);
-            }
+        if let Some(i) = lower.find(lead)
+            && let Some(at) = parse_span(&lower[i + lead.len()..]).and_then(|ms| now.checked_add(ms))
+        {
+            return Some(at);
         }
     }
     for lead in AT {
@@ -283,7 +283,7 @@ fn parse_clock(w: &str, next: Option<&str>) -> Option<(NaiveTime, usize)> {
         Some("am") if h == 12 => 0,
         Some("am") => h,
         Some(_) if h == 12 => 12,
-        Some(_) => h + 12,
+        Some(_) => h.checked_add(12)?,
         None => h,
     };
     Some((NaiveTime::from_hms_opt(h, m, 0)?, used))
@@ -429,14 +429,14 @@ pub(crate) fn from_response(headers: &reqwest::header::HeaderMap, message: Strin
             }
         }
         // OpenAI and compatible servers: spans like "6m0s".
-        if header(&format!("x-ratelimit-remaining-{kind}")) == Some("0") {
-            if let Some(ms) = header(&format!("x-ratelimit-reset-{kind}")).and_then(parse_span) {
-                resets.push(now + ms);
-            }
+        if header(&format!("x-ratelimit-remaining-{kind}")) == Some("0")
+            && let Some(at) = header(&format!("x-ratelimit-reset-{kind}")).and_then(parse_span).and_then(|ms| now.checked_add(ms))
+        {
+            resets.push(at);
         }
     }
     if let Some(at) = header("retry-after").and_then(|v| match v.parse::<f64>() {
-        Ok(secs) => Some(now + (secs * 1000.).round() as i64),
+        Ok(secs) => now.checked_add((secs * 1000.).round() as i64),
         Err(_) => chrono::DateTime::parse_from_rfc2822(v).ok().map(|d| d.timestamp_millis()),
     }) {
         resets.push(at);
@@ -465,6 +465,18 @@ mod tests {
 
     // 2026-10-02 18:15:47 in New York: when the recorded limit below was hit.
     const HIT: &str = "2026-10-02T22:15:47Z";
+
+    #[test]
+    fn absurd_numbers_give_no_reset_rather_than_overflow() {
+        let now = ms(HIT);
+        assert_eq!(reset_in("try again in 99999999999999999999 days", now, &zones), None);
+        assert_eq!(reset_in("resets 4294967295pm", now, &zones), None);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "1e300".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-requests", "0".parse().unwrap());
+        headers.insert("x-ratelimit-reset-requests", "99999999999999999999d".parse().unwrap());
+        assert_eq!(from_response(&headers, "rate limited".into(), now).resets_at, None);
+    }
 
     #[test]
     fn claude_limit_messages_give_their_reset() {

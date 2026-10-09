@@ -28,8 +28,8 @@ cargo build --release -p trek-app -p trek-mcp
 echo "• icon"
 ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
-  resvg -w $s -h $s assets/brand/trek-icon-dark.svg "$ICONSET/icon_${s}x${s}.png"
-  resvg -w $((s*2)) -h $((s*2)) assets/brand/trek-icon-dark.svg "$ICONSET/icon_${s}x${s}@2x.png"
+  resvg -w $s -h $s assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}.png"
+  resvg -w $((s*2)) -h $((s*2)) assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}@2x.png"
 done
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"

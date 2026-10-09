@@ -4,17 +4,47 @@
 //! - `trek://ask?path=…&line=…&end=…&selection=…` — draft a thread on the file's project
 //!   with the selection quoted into the composer.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
-use gpui_kit::App;
+use gpui_kit::{App, PromptLevel};
 
-use crate::workspace::{self, Route, WorkspaceEvent};
+use crate::workspace::{self, Route, Workspace, WorkspaceEvent};
 
+/// Any web page can open a `trek://` link. A file in one of the user's projects (or the IDE's
+/// folder) opens straight away; anything else asks first, as opening it runs git there and may
+/// start a language server, which a folder's own config can turn into running its code.
 pub fn open(url: &str, cx: &mut App) {
     let Some(link) = parse(url) else { return };
+    // Relative to what? Trek's own working folder isn't anything the user meant.
+    if !link.path().is_absolute() {
+        return;
+    }
     if !cx.has_global::<workspace::GlobalWorkspace>() {
         return;
     }
+    let ws = workspace::workspace_global(cx);
+    if trusted(ws.read(cx), link.path()) {
+        return follow(link, cx);
+    }
+    // The window has to exist before it can ask.
+    crate::root::show_main(ws.clone(), cx);
+    let Some(main) = ws.read(cx).main_window else { return };
+    let detail = format!(
+        "{}\n\nThis isn't in one of your projects. Opening it reads the folder with git and may start a language server there. Only open files from folders you trust.",
+        link.path().display()
+    );
+    let answer = main.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, "Open a file from a link?", Some(&detail), &["Open", "Cancel"], cx));
+    let Ok(answer) = answer else { return };
+    cx.spawn(async move |cx| {
+        if answer.await == Ok(0) {
+            cx.update(|cx| follow(link, cx));
+        }
+    })
+    .detach();
+}
+
+/// Act on a link the user trusts.
+fn follow(link: Link, cx: &mut App) {
     let ws = workspace::workspace_global(cx);
     match link {
         Link::Edit { path, line } => {
@@ -26,7 +56,7 @@ pub fn open(url: &str, cx: &mut App) {
             });
         }
         Link::Ask { path, line, end, selection } => {
-            let project = path.parent().map(|d| trek_core::store::project_root(d));
+            let project = path.parent().map(trek_core::store::project_root);
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
             let where_ = match (line, end) {
                 (Some(l), Some(e)) if e > l => format!("L{l}-L{e}"),
@@ -45,9 +75,44 @@ pub fn open(url: &str, cx: &mut App) {
     }
 }
 
+/// `path` is inside a folder the user works in: a project of theirs, a folder they added, or the
+/// IDE's. Never the home folder itself (an agent once run there makes it a "project"), nor a path
+/// that climbs out with `..` or through a symlink.
+fn trusted(ws: &Workspace, path: &Path) -> bool {
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+        return false;
+    }
+    let home = trek_core::paths::home();
+    let roots: Vec<PathBuf> = ws
+        .projects
+        .iter()
+        .map(|p| p.path.clone())
+        .chain(ws.settings.user_projects.iter().map(PathBuf::from))
+        .chain(ws.ide_root.clone())
+        .filter(|r| r.is_absolute() && !home.starts_with(r))
+        .collect();
+    let real = std::fs::canonicalize(path).ok();
+    roots.iter().any(|r| {
+        path.starts_with(r)
+            && match &real {
+                // Where a symlink in the project leads counts, not where the link sits.
+                Some(real) => std::fs::canonicalize(r).is_ok_and(|r| real.starts_with(r)),
+                None => true,
+            }
+    })
+}
+
 enum Link {
     Edit { path: PathBuf, line: Option<u32> },
     Ask { path: PathBuf, line: Option<u32>, end: Option<u32>, selection: String },
+}
+
+impl Link {
+    fn path(&self) -> &Path {
+        match self {
+            Link::Edit { path, .. } | Link::Ask { path, .. } => path,
+        }
+    }
 }
 
 fn parse(url: &str) -> Option<Link> {

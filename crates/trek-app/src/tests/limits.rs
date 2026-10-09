@@ -937,3 +937,47 @@ fn granted_reset_credits_show_in_usage_with_a_use_action() {
         assert!(trek.visible(cx, "use-reset-RateLimitResetCredit_two"));
     });
 }
+
+#[test]
+fn using_a_reset_credit_spends_it_off_the_main_thread_and_drops_it_from_usage() {
+    run(async |cx| {
+        let trek = open(cx);
+        let spent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        trek.update(cx, |ws, _| {
+            let now = ws.now();
+            ws.agent_status.insert(
+                trek_core::AgentId::Codex.key(),
+                trek_agents::AgentStatus {
+                    resets: vec![trek_agents::ResetCredit {
+                        id: "RateLimitResetCredit_one".into(),
+                        title: "Full reset (Weekly + 5 hr)".into(),
+                        description: None,
+                        expires_at: Some(now + 86400_000 * 14),
+                    }],
+                    ..Default::default()
+                },
+            );
+            let spent = spent.clone();
+            // Like Codex's app-server call, this needs a tokio runtime: awaited on gpui's
+            // executor it panics, which is what crashed the app.
+            ws.reset_consumer = Some(std::sync::Arc::new(move |id| {
+                let spent = spent.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    spent.lock().unwrap().push(id);
+                    Ok(())
+                })
+            }));
+        });
+        trek.update(cx, |ws, cx| {
+            ws.use_reset_credit("RateLimitResetCredit_one".into(), cx);
+            // A second press while the first is out does nothing.
+            ws.use_reset_credit("RateLimitResetCredit_one".into(), cx);
+            assert!(ws.reset_credit_in_flight("RateLimitResetCredit_one"));
+        });
+        trek.wait(cx, "the reset to be spent", |ws| !ws.reset_credit_in_flight("RateLimitResetCredit_one")).await;
+        assert_eq!(*spent.lock().unwrap(), vec!["RateLimitResetCredit_one".to_string()], "spent exactly once");
+        let left = trek.read(cx, |ws, _| ws.agent_status[&trek_core::AgentId::Codex.key()].resets.len());
+        assert_eq!(left, 0, "a spent reset leaves the list right away");
+    });
+}

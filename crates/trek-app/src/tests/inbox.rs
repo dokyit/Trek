@@ -63,13 +63,14 @@ fn threads_rename_pin_snooze_settle_and_archive() {
         assert!(!trek.read(cx, |ws, _| ws.thread(&id).unwrap().should_auto_settle(month_later, 3)));
         assert!(trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().never_settle), "saved");
 
-        // Archiving the open thread leaves it for a new draft; undo brings it back.
+        // Archiving the open thread leaves it for a new draft (in no project, as ⌘N's are); undo
+        // brings it back.
         trek.update(cx, |ws, cx| ws.archive(&id, cx));
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_none()));
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: None });
         trek.update(cx, |ws, cx| ws.undo(UndoAction::Unarchive(id.clone()), cx));
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some()));
-        assert_eq!(*toasts.borrow(), ["Snoozed for 3 h", "Settled", "Archived"]);
+        assert_eq!(*toasts.borrow(), ["Snoozed for 3 h", "Settled “Startup notes”", "Archived"]);
     });
 }
 
@@ -152,7 +153,7 @@ fn removing_a_project_archives_its_threads() {
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
         let a = trek.send(cx, "first");
         trek.wait_done(cx, &a, RunState::Idle).await;
-        trek.update(cx, |ws, cx| ws.new_thread(cx));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
         let b = trek.send(cx, "second");
         trek.wait_done(cx, &b, RunState::Idle).await;
         trek.wait_done(cx, &other, RunState::Idle).await;
@@ -166,7 +167,7 @@ fn removing_a_project_archives_its_threads() {
             assert!(ws.thread(&other).is_some(), "other projects keep theirs");
             assert!(ws.settings.hidden_projects.contains(&key) && !ws.settings.user_projects.contains(&key));
             assert!(ws.live.get(&b).is_none(), "sessions closed");
-            assert_eq!(ws.route, Route::Draft { project: Some(kept.clone()) }, "moved off the removed project");
+            assert_eq!(ws.route, Route::Draft { project: None }, "moved off the removed project, to no project");
             assert!(!ws.workspace_projects().iter().any(|p| p.id == pid));
         });
         assert_eq!(toasts.borrow().last().map(String::as_str), Some(format!("Removed {} from Trek", trek.project.file_name().unwrap().to_string_lossy()).as_str()));

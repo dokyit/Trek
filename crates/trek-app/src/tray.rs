@@ -99,17 +99,17 @@ impl Tray {
             }
         });
         let subscription = cx.observe(&workspace, |this, ws, cx| {
-            let state = Self::read_state(ws.read(cx));
+            let state = Self::read_state(ws.read(cx), cx);
             this.sync(state, cx)
         });
         let mut this = Self { icon, status, glyph: Glyph::Idle, blink: None, _subscription: subscription, _events: events };
-        let state = Self::read_state(workspace.read(cx));
+        let state = Self::read_state(workspace.read(cx), cx);
         this.sync(state, cx);
         this
     }
 
     /// (threads needing you, threads with a live turn, reduce motion)
-    fn read_state(ws: &Workspace) -> (usize, usize, bool) {
+    fn read_state(ws: &Workspace, cx: &App) -> (usize, usize, bool) {
         // The same count as the Dock badge: archived threads don't call for the user.
         let needs = ws.needs_you_count();
         let working = if ws.any_turn_running() {
@@ -117,7 +117,7 @@ impl Tray {
         } else {
             0
         };
-        (needs, working, ws.settings.appearance.reduce_motion)
+        (needs, working, !ws.motion(cx))
     }
 
     fn sync(&mut self, (needs, working, reduce): (usize, usize, bool), cx: &mut Context<Self>) {

@@ -10,7 +10,7 @@ use crate::types::{Effort, ThreadSource, TokenUsage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 fn db() -> Option<Connection> {
@@ -110,7 +110,7 @@ fn is_interactive(source: &str, originator: &str) -> bool {
 
 /// The client that started a rollout, from its first (`session_meta`) line.
 fn rollout_originator(path: &Path) -> Option<String> {
-    let line = BufReader::new(std::fs::File::open(path).ok()?).lines().next()?.ok()?;
+    let line = super::jsonl_lines(BufReader::new(std::fs::File::open(path).ok()?)).next()?;
     let v: Value = serde_json::from_str(&line).ok()?;
     (v["type"] == "session_meta").then(|| v["payload"]["originator"].as_str().map(String::from)).flatten()
 }
@@ -177,7 +177,7 @@ fn thread_from(row: &Row) -> ImportedThread {
 fn count_prompts(path: &Path) -> Option<usize> {
     let reader = BufReader::new(std::fs::File::open(path).ok()?);
     let mut n = 0;
-    for line in reader.lines().map_while(Result::ok) {
+    for line in super::jsonl_lines(reader) {
         if !line.contains("\"role\":\"user\"") {
             continue;
         }
@@ -274,7 +274,7 @@ pub fn last_turn(id: &str) -> Option<String> {
 fn last_turn_in(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut last = None;
-    for line in BufReader::new(file).lines().map_while(Result::ok).filter(|l| l.contains("\"turn_id\"")) {
+    for line in super::jsonl_lines(BufReader::new(file)).filter(|l| l.contains("\"turn_id\"")) {
         if let Some(turn) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(ended_turn) {
             last = Some(turn.to_string());
         }
@@ -308,7 +308,7 @@ fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
     let mut out = Vec::new();
     let mut total: Option<TokenUsage> = None;
     let mut model: Option<String> = None;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in super::jsonl_lines(BufReader::new(file)) {
         if !line.contains("\"token_count\"") && !line.contains("\"turn_context\"") {
             continue;
         }
@@ -357,7 +357,7 @@ fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
     // A turn is under way (started, not yet complete or aborted), and its message is shown: a
     // message now steers it rather than starting another.
     let (mut running, mut has_message) = (false, false);
-    for line in reader.lines().map_while(Result::ok) {
+    for line in super::jsonl_lines(reader) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         let at = v["timestamp"].as_str().and_then(ms_from_rfc3339);
         let p = &v["payload"];
@@ -827,6 +827,19 @@ mod tests {
         assert_eq!(items.len(), 6, "the aborted turn has no footer: {items:?}");
         // A message sent now drops nothing: it goes after the last turn that said it ended.
         assert_eq!(last_turn_in(&path).as_deref(), Some("turn-1"));
+    }
+
+    #[test]
+    fn a_line_that_isnt_utf8_keeps_the_lines_after_it() {
+        let dir = Scratch::new();
+        let path = dir.write("rollout.jsonl", "");
+        let mut bytes = said("user", "first", "2026-09-06T22:15:24Z").into_bytes();
+        bytes.extend_from_slice(b"\n{\"type\":\"event_msg\",\"payload\":\"\xff\"}\n");
+        bytes.extend_from_slice(said("user", "second", "2026-09-06T22:16:24Z").as_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let items = load_rollout(&path, "t").unwrap();
+        let texts: Vec<_> = items.iter().filter_map(|i| match i { Item::User { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(texts, ["first", "second"]);
     }
 
     #[test]

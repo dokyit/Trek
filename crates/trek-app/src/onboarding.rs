@@ -10,7 +10,7 @@ use crate::ui;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
@@ -27,7 +27,47 @@ pub struct Onboarding {
     /// The project picked on the Project step; opened when onboarding finishes.
     project: Option<std::path::PathBuf>,
     last_step_change: std::time::Instant,
+    /// The agents step lists every agent that isn't installed, not just the first few.
+    all_missing: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Agents the agents step always lists before the rest that aren't installed.
+const MISSING_SHOWN: usize = 4;
+
+/// Where an agent stands on this Mac, as the agents step shows it.
+#[derive(Debug, Clone, PartialEq)]
+enum AgentState {
+    Connected,
+    NotSignedIn,
+    NotInstalled,
+}
+
+/// Every coding agent Trek can run, in the order the agents step lists them: what detection
+/// found, else what Trek knows of (detection doesn't run in an isolated process).
+fn known_agents(detected: &[trek_core::detect::DetectedAgent]) -> Vec<(AgentId, String, Option<trek_core::detect::DetectedAgent>)> {
+    let mut ids = vec![AgentId::ClaudeCode, AgentId::Codex, AgentId::OpenCode, AgentId::Droid];
+    ids.extend(trek_core::catalog::ACP_AGENTS.iter().map(|a| AgentId::Acp(a.id.into())));
+    for a in detected.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))) {
+        if !ids.contains(&a.agent) {
+            ids.push(a.agent.clone());
+        }
+    }
+    ids.into_iter()
+        .map(|id| {
+            let found = detected.iter().find(|a| a.agent == id).cloned();
+            let name = found.as_ref().map(|a| a.name.clone()).unwrap_or_else(|| id.display_name());
+            (id, name, found)
+        })
+        .collect()
+}
+
+/// `catalog::agent_setup` is keyed by the ACP id alone.
+fn setup_for(agent: &AgentId) -> Option<trek_core::catalog::AgentSetup> {
+    match agent {
+        AgentId::Acp(id) => trek_core::catalog::agent_setup(id),
+        other => trek_core::catalog::agent_setup(&other.key()),
+    }
 }
 
 /// "2.1.287 (Claude Code)" / "grok 1.0.46 (…) [stable]" → "2.1.287" / "1.0.46".
@@ -40,7 +80,7 @@ fn clean_version(v: &str) -> Option<String> {
 impl Onboarding {
     pub fn new(workspace: Entity<Workspace>, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
-        Self { workspace, step: 0, imported: false, project: None, last_step_change: std::time::Instant::now(), _subscriptions: subs }
+        Self { workspace, step: 0, imported: false, project: None, last_step_change: std::time::Instant::now(), all_missing: false, _subscriptions: subs }
     }
 
     fn go(&mut self, step: usize, cx: &mut Context<Self>) {
@@ -146,7 +186,7 @@ impl Onboarding {
                 )
         };
         v_flex()
-            .child(div().pb(px(24.)).child(brand::trail_draw("welcome-trail", px(64.), reduce)))
+            .child(div().pb(px(24.)).child(brand::cairn_draw("welcome-cairn", px(64.), reduce)))
             .child(Self::header("Welcome to Trek", "One native app for every coding agent you use. A minute of setup and you're in.", cx))
             .child(
                 v_flex()
@@ -158,47 +198,155 @@ impl Onboarding {
             .into_any_element()
     }
 
-    fn agents_step(&self, cx: &App) -> AnyElement {
+    /// A command to paste into a terminal, with a button that copies it.
+    fn command_chip(id: &str, label: &str, command: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let copied = command.to_string();
+        h_flex()
+            .pt(px(6.))
+            .gap(px(8.))
+            .min_w_0()
+            .child(div().flex_none().text_size(px(12.)).text_color(theme.muted_foreground).child(label.to_string()))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .h(px(26.))
+                    .pl(px(8.))
+                    .pr(px(2.))
+                    .gap(px(4.))
+                    .rounded(px(6.))
+                    .bg(theme.foreground.opacity(0.05))
+                    .child(div().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_size(px(12.)).child(command.to_string()))
+                    .child(
+                        Button::new(SharedString::from(format!("ob-copy-{id}")))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Copy).text_color(theme.muted_foreground))
+                            .tooltip("Copy the command")
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                                window.push_notification("Command copied", cx);
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// One agent: logo, name and what's known of it, its state, and the command that installs it
+    /// or signs in to it when it needs one.
+    fn agent_row(&self, agent: &AgentId, name: &str, detail: String, state: AgentState, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let id = agent.key().replace(':', "-");
+        let setup = setup_for(agent);
+        let (label, color, icon) = match state {
+            AgentState::Connected => ("Connected", palette::emerald(cx), Some(Icon::new(IconName::Check))),
+            AgentState::NotSignedIn => ("Not signed in", palette::amber(cx), None),
+            AgentState::NotInstalled => ("Not installed", theme.muted_foreground, None),
+        };
+        let fix = match state {
+            AgentState::Connected => None,
+            AgentState::NotSignedIn => setup.map(|s| Self::command_chip(&id, "Sign in", s.login, cx)),
+            AgentState::NotInstalled => setup.map(|s| Self::command_chip(&id, "Install", s.install, cx)),
+        };
+        h_flex()
+            .id(SharedString::from(format!("ob-agent-{id}")))
+            .test_support()
+            .min_h(px(52.))
+            .py(px(10.))
+            .gap(px(12.))
+            .items_start()
+            .border_b_1()
+            .border_color(theme.foreground.opacity(0.07))
+            .child(div().pt(px(1.)).w(px(22.)).flex_none().flex().justify_center().child(ui::agent_logo(agent, px(18.), cx)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        h_flex()
+                            .gap(px(12.))
+                            .child(div().flex_1().min_w_0().truncate().text_size(px(13.5)).font_medium().child(name.to_string()))
+                            .child(Self::state_label(label, color, icon)),
+                    )
+                    .when(!detail.is_empty(), |el| el.child(div().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(detail)))
+                    .children(fix),
+            )
+            .into_any_element()
+    }
+
+    /// Every agent Trek can run and where it stands here: connected, not signed in, or not
+    /// installed, with the command that fixes the last two.
+    fn agents_step(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
         let theme = cx.theme().clone();
-        let (found, missing): (Vec<_>, Vec<_>) =
-            ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().partition(|a| a.availability != Availability::NotInstalled);
-        let detecting = ws.detecting && found.is_empty();
-        let rows: Vec<AnyElement> = found
-            .iter()
-            .map(|a| {
-                let status = ws.agent_status.get(&a.agent.key());
-                let acp = ws.acp_info.get(&a.agent.key());
-                let needs_login = a.availability == Availability::NeedsLogin
-                    || status.is_some_and(|st| !st.logged_in && st.account.is_none())
-                    || acp.is_some_and(|i| i.as_ref().map_or(true, |i| i.needs_auth));
-                let version = a.version.as_deref().and_then(clean_version).map(|v| format!("Version {v}"));
-                let detail = match (status, acp) {
-                    (Some(st), _) if st.account.is_some() || st.plan.is_some() => [st.account.clone(), st.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · "),
-                    (_, Some(Ok(i))) if !i.needs_auth && !i.models.is_empty() => {
-                        [Some(format!("{} models", i.models.len())), version.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")
-                    }
-                    _ => version.unwrap_or_default(),
-                };
-                let trail = match a.availability {
-                    _ if needs_login => Self::state_label("Sign in later", palette::amber(cx), None),
-                    Availability::Ready => Self::state_label("Ready", palette::emerald(cx), Some(Icon::new(IconName::Check))),
-                    _ => Self::state_label("Not running", theme.muted_foreground, None),
-                };
-                Self::list_row(ui::agent_logo(&a.agent, px(18.), cx), a.name.clone(), detail, trail, cx).into_any_element()
-            })
-            .collect();
+        let detecting = ws.detecting;
+        let known = known_agents(&ws.agents);
+        let mut found: Vec<(AgentId, String, String, AgentState)> = vec![];
+        let mut missing: Vec<(AgentId, String)> = vec![];
+        for (agent, name, detected) in known {
+            let Some(a) = detected.filter(|a| a.availability != Availability::NotInstalled) else {
+                // Not found yet while a scan runs: it may still turn up.
+                if !detecting {
+                    missing.push((agent, name));
+                }
+                continue;
+            };
+            let status = ws.agent_status.get(&a.agent.key());
+            let acp = ws.acp_info.get(&a.agent.key());
+            let needs_login = a.availability == Availability::NeedsLogin
+                || status.is_some_and(|st| !st.logged_in && st.account.is_none())
+                || acp.is_some_and(|i| i.as_ref().map_or(true, |i| i.needs_auth));
+            let version = a.version.as_deref().and_then(clean_version).map(|v| format!("Version {v}"));
+            let detail = match (status, acp) {
+                (Some(st), _) if st.account.is_some() || st.plan.is_some() => [st.account.clone(), st.plan.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · "),
+                (_, Some(Ok(i))) if !i.needs_auth && !i.models.is_empty() => {
+                    [Some(format!("{} models", i.models.len())), version.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+                }
+                _ => version.unwrap_or_default(),
+            };
+            found.push((agent, name, detail, if needs_login { AgentState::NotSignedIn } else { AgentState::Connected }));
+        }
+        let none = found.is_empty() && !detecting;
+        let body = if none {
+            "Trek drives each vendor's own agent with the login you already have. None is installed on this Mac yet: install one below, sign in to it, then scan again."
+        } else {
+            "Trek drives each vendor's own agent with the login you already have. Your credentials never pass through Trek."
+        };
+        let found_rows: Vec<AnyElement> = found.into_iter().map(|(agent, name, detail, state)| self.agent_row(&agent, &name, detail, state, cx)).collect();
+        let more = missing.len().saturating_sub(MISSING_SHOWN);
+        let shown = if self.all_missing { missing.len() } else { missing.len().min(MISSING_SHOWN) };
+        let missing_rows: Vec<AnyElement> = missing.iter().take(shown).map(|(agent, name)| self.agent_row(agent, name, String::new(), AgentState::NotInstalled, cx)).collect();
+        let section = |text: &str| div().pt(px(22.)).pb(px(8.)).text_size(px(12.5)).font_medium().text_color(theme.muted_foreground).child(text.to_string());
         v_flex()
-            .child(Self::header("Your agents", "Trek drives each vendor's own agent with the login you already have. Your credentials never pass through Trek.", cx))
-            .when(detecting, |el| el.child(h_flex().gap(px(10.)).py(px(16.)).text_size(px(13.)).text_color(theme.muted_foreground).child(Spinner::new().small()).child("Looking for agents on this Mac…")))
-            .when(!rows.is_empty(), |el| el.child(Self::list(rows, cx)))
-            .when(!missing.is_empty(), |el| {
-                el.child(div().pt(px(14.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(format!(
-                    "{} more, including {}, can be installed later from Settings → Agents.",
-                    missing.len(),
-                    missing.iter().take(2).map(|a| a.name.clone()).collect::<Vec<_>>().join(" and ")
-                )))
+            .child(Self::header("Your agents", body, cx))
+            .when(detecting && found_rows.is_empty(), |el| {
+                el.child(h_flex().gap(px(10.)).py(px(16.)).text_size(px(13.)).text_color(theme.muted_foreground).child(Spinner::new().small()).child("Looking for agents on this Mac…"))
             })
+            .when(!found_rows.is_empty(), |el| el.child(Self::list(found_rows, cx)))
+            .when(!missing_rows.is_empty(), |el| {
+                el.when(!none, |el| el.child(section("Not installed"))).child(Self::list(missing_rows, cx))
+            })
+            .child(
+                h_flex()
+                    .pt(px(14.))
+                    .gap(px(8.))
+                    .when(more > 0 && !self.all_missing, |el| {
+                        el.child(Button::new("ob-agents-more").small().ghost().label(format!("Show {more} more")).on_click(cx.listener(|this, _, _, cx| {
+                            this.all_missing = true;
+                            cx.notify();
+                        })))
+                    })
+                    .when(!missing.is_empty() && !detecting, |el| {
+                        el.child(Button::new("ob-rescan").small().outline().icon(IconName::RefreshCw).label("Scan again").on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| ws.detect_agents(cx))
+                        })))
+                    })
+                    // An agent Trek doesn't list: from the ACP Registry, or its own command.
+                    .child(Button::new("ob-add-agent").small().ghost().icon(IconName::Plus).label("Add another agent…").on_click(cx.listener(|this, _, window, cx| {
+                        crate::add_agent::open(this.workspace.clone(), crate::add_agent::Tab::Registry, window, cx)
+                    }))),
+            )
             .into_any_element()
     }
 
@@ -315,7 +463,7 @@ impl Onboarding {
             ("First project", project),
         ];
         v_flex()
-            .child(div().pb(px(24.)).child(brand::trail_draw("ready-trail", px(64.), reduce)))
+            .child(div().pb(px(24.)).child(brand::cairn_draw("ready-cairn", px(64.), reduce)))
             .child(Self::header("You're ready", "Threads that need a decision rise to the top of your inbox. Everything here can be changed in Settings.", cx))
             .child(Self::list(
                 summary.into_iter().map(|(k, v)| {
@@ -337,7 +485,7 @@ impl Render for Onboarding {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let step = self.step;
         let theme = cx.theme().clone();
-        let reduce = self.workspace.read(cx).settings.appearance.reduce_motion;
+        let reduce = !self.workspace.read(cx).motion(cx);
         let content = match step {
             0 => self.welcome(reduce, cx),
             1 => self.agents_step(cx),

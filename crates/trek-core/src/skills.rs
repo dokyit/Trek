@@ -74,7 +74,7 @@ pub enum SkillHome {
 
 impl SkillHome {
     pub fn dir(self) -> PathBuf {
-        let home = paths::home();
+        let home = paths::agents_home();
         match self {
             SkillHome::ClaudeCode => home.join(".claude/skills"),
             SkillHome::Codex => home.join(".codex/skills"),
@@ -163,7 +163,7 @@ fn scan(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
 
 /// Every skill Trek can see, enabled and disabled, for the given project.
 pub fn discover(project: Option<&Path>) -> Vec<Skill> {
-    let home = paths::home();
+    let home = paths::agents_home();
     let mut out = vec![];
     scan(&home.join(".claude/skills"), SkillSource::ClaudeCode, &mut out);
     scan(&home.join(".codex/skills"), SkillSource::Codex, &mut out);
@@ -203,7 +203,7 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
 }
 
 fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
-    let home = paths::home();
+    let home = paths::agents_home();
     if origin.starts_with(home.join(".claude/skills")) {
         SkillSource::ClaudeCode
     } else if origin.starts_with(home.join(".codex/skills")) {
@@ -219,7 +219,7 @@ fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
 
 /// Installed Claude Code plugins: `(name, install folder)`.
 fn plugin_dirs() -> Vec<(String, PathBuf)> {
-    let file = paths::home().join(".claude/plugins/installed_plugins.json");
+    let file = paths::agents_home().join(".claude/plugins/installed_plugins.json");
     let Ok(text) = std::fs::read_to_string(file) else { return vec![] };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
     let mut out = vec![];
@@ -364,6 +364,26 @@ mod tests {
         assert_eq!(listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), [CREATE_VERIFICATION, MAINTAIN_VERIFICATION]);
         assert!(!SkillSource::Trek.editable(), "read-only");
         assert!(shipped("nope").is_err());
+    }
+
+    #[test]
+    fn an_isolated_process_keeps_to_its_own_skills() {
+        let data = std::env::temp_dir().join(format!("trek-isolated-skills-{}", std::process::id()));
+        crate::paths::isolate_thread(data.clone());
+        let real = crate::paths::home();
+        for h in [SkillHome::ClaudeCode, SkillHome::Codex, SkillHome::Shared] {
+            assert!(h.dir().starts_with(&data) && !h.dir().starts_with(real.join(".claude")), "{}", h.dir().display());
+        }
+        // Created, listed, turned off and on again: all of it inside the data folder.
+        let md = create("Isolated check", "", SkillHome::ClaudeCode).unwrap();
+        assert!(md.starts_with(&data), "{}", md.display());
+        let found = discover(None).into_iter().find(|s| s.name == "isolated-check").expect("listed");
+        assert_eq!(found.source, SkillSource::ClaudeCode);
+        let off = set_enabled(&found, false).unwrap();
+        assert!(off.starts_with(&data));
+        let off = discover(None).into_iter().find(|s| s.name == "isolated-check").expect("listed off");
+        assert!(set_enabled(&off, true).unwrap().starts_with(&data));
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]

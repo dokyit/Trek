@@ -91,6 +91,24 @@ fn a_turn_that_changed_nothing_has_no_card() {
 }
 
 #[test]
+fn a_turns_count_stops_where_it_ended() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        let id = trek.send(cx, "mock:write");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        settled(&trek, cx, &id).await;
+        assert_eq!(change_rows(&trek, cx), ["changes (1): +3 −0", "  NOTES.md new +3 −0"]);
+        // After it: the user edits its file and makes another, as another thread might.
+        std::fs::write(trek.project.join("NOTES.md"), "# Notes\n\n- Note 1\n- mine\n").unwrap();
+        std::fs::write(trek.project.join("user.txt"), "mine\n").unwrap();
+        trek.update(cx, |ws, cx| ws.forget_turn_changes(&id, true, cx));
+        settled(&trek, cx, &id).await;
+        assert_eq!(change_rows(&trek, cx), ["changes (1): +3 −0", "  NOTES.md new +3 −0"], "the latest turn doesn't take in what came after it");
+    });
+}
+
+#[test]
 fn outside_git_the_agents_edits_are_counted() {
     run(async |cx| {
         let trek = open(cx);
@@ -116,13 +134,13 @@ fn a_rewind_counts_the_latest_turn_again() {
         trek.update(cx, |ws, cx| ws.send_to(&id, "mock:write".into(), vec![], cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
         settled(&trek, cx, &id).await;
-        // Taking the second turn back without its files: the first is the latest again, and runs
-        // to the files as they are now (its note and the second's).
+        // Taking the second turn back without its files: the first is the latest again, and is
+        // counted again, still up to where it ended (its note, not the second's still on disk).
         let second = trek.items(cx, &id).iter().enumerate().filter(|(_, i)| matches!(i, Item::User { .. })).map(|(ix, _)| ix).nth(1).unwrap();
         let item = trek.read(cx, |ws, _| ws.live.get(&id).and_then(|l| l.items.id_at(second).map(str::to_string))).unwrap();
         trek.update(cx, |ws, cx| _ = ws.rewind(&id, &item, false, cx));
         settled(&trek, cx, &id).await;
-        assert_eq!(change_rows(&trek, cx), ["changes (1): +4 −0", "  NOTES.md new +4 −0"]);
+        assert_eq!(change_rows(&trek, cx), ["changes (1): +3 −0", "  NOTES.md new +3 −0"]);
     });
 }
 
@@ -260,11 +278,16 @@ fn history_from_the_store_has_its_cards() {
             store.save_transcript(&thread.id, &mut transcript).expect("items");
             let repo = trek_core::checkpoint::Repo::find(&project).expect("repo");
             let checkpoint = |item: &str| store.add_checkpoint(&thread.id, item, &repo.top, &repo.snapshot(&thread.id, item).unwrap()).unwrap();
+            // The first turn is from before Trek checkpointed turns' ends: it runs to the next
+            // turn's checkpoint.
             checkpoint(&ids[0]);
             std::fs::write(project.join("NOTES.md"), "# Notes\n\n- Note 1\n").unwrap();
             checkpoint(&ids[4]);
-            // The second turn ran a command: README.md went.
+            // The second turn ran a command: README.md went. Its end was checkpointed.
             std::fs::remove_file(project.join("README.md")).unwrap();
+            checkpoint(&ids[6]);
+            // Since then the user made a file of their own: no turn's.
+            std::fs::write(project.join("mine.txt"), "mine\n").unwrap();
             thread.id
         };
         let mut s = settings();

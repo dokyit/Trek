@@ -12,7 +12,19 @@ pub mod opencode;
 use crate::store::{Item, Store};
 use crate::types::{Effort, ThreadSource};
 use std::collections::{BTreeMap, HashSet};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+
+/// The lines of a JSONL session file, each converted lossily: a line that isn't valid UTF-8
+/// doesn't end the read as it does with `BufRead::lines`. Stops at a read error.
+pub(crate) fn jsonl_lines(reader: impl BufRead) -> impl Iterator<Item = String> {
+    reader.split(b'\n').map_while(Result::ok).map(|mut line| {
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        String::from_utf8(line).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportedThread {

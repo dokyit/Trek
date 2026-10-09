@@ -116,9 +116,6 @@ pub fn nav_row(
         .when_some(hint, |el, h| el.child(div().text_xs().text_color(theme.muted_foreground.opacity(0.7)).child(h)))
 }
 
-pub fn status_text(text: &'static str, color: Hsla) -> AnyElement {
-    div().text_xs().font_weight(FontWeight::MEDIUM).text_color(color).child(text).into_any_element()
-}
 
 /// How a project shows: the icon and colour chosen for it, if any (its `ProjectPrefs`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -267,14 +264,46 @@ pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
     KEYS.iter().find(|k| **k == key).copied()
 }
 
-/// The agent's real logo, theme-aware, falling back to a neutral glyph.
+/// The agent's real logo, theme-aware, falling back to a neutral glyph. An agent the user added
+/// shows its registry icon, or its monogram.
 pub fn agent_logo(agent: &AgentId, size: Pixels, cx: &App) -> AnyElement {
-    match logo_key(agent) {
-        Some(key) => {
+    match (logo_key(agent), agent) {
+        (Some(key), _) => {
             let theme = if cx.theme().mode.is_dark() { "dark" } else { "light" };
             img(SharedString::from(format!("logos/{theme}/{key}.png"))).size(size).flex_none().rounded(size * 0.22).into_any_element()
         }
-        None => Icon::new(IconName::Cpu).size(size).text_color(cx.theme().muted_foreground).into_any_element(),
+        (None, AgentId::Acp(id)) if let Some(a) = trek_core::catalog::added_agent(id) => registry_logo(&a.name, a.icon.as_deref().map(std::path::Path::new), size, cx),
+        (None, _) => Icon::new(IconName::Cpu).size(size).text_color(cx.theme().muted_foreground).into_any_element(),
+    }
+}
+
+/// An ACP Registry agent's mark: its icon, a monochrome SVG drawn in the text colour as the
+/// registry intends, else a monogram of its name.
+pub fn registry_logo(name: &str, icon: Option<&std::path::Path>, size: Pixels, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    match icon {
+        Some(path) => svg().external_path(path.display().to_string()).size(size).flex_none().text_color(theme.foreground).into_any_element(),
+        None => {
+            let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+            let letters: String = match words.as_slice() {
+                [] => "·".into(),
+                [one] => one.chars().take(1).collect(),
+                [a, b, ..] => a.chars().take(1).chain(b.chars().take(1)).collect(),
+            };
+            div()
+                .flex_none()
+                .size(size)
+                .rounded(size * 0.22)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.foreground.opacity(0.08))
+                .text_color(theme.foreground.opacity(0.75))
+                .text_size(size * if letters.chars().count() > 1 { 0.4 } else { 0.5 })
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(letters.to_uppercase())
+                .into_any_element()
+        }
     }
 }
 
@@ -413,13 +442,20 @@ pub struct Pill {
     selected: bool,
     ghost: bool,
     flexible: bool,
+    small: bool,
     tooltip: Option<SharedString>,
     on_click: Option<std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
 }
 
 impl Pill {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { id: id.into(), children: vec![], selected: false, ghost: false, flexible: false, tooltip: None, on_click: None }
+        Self { id: id.into(), children: vec![], selected: false, ghost: false, flexible: false, small: false, tooltip: None, on_click: None }
+    }
+
+    /// A side bar's size: shorter, with smaller text.
+    pub fn small(mut self, small: bool) -> Self {
+        self.small = small;
+        self
     }
 
     /// May shrink (its text truncating) when the row runs out of room.
@@ -474,6 +510,7 @@ impl RenderOnce for Pill {
             .text_sm()
             .cursor_pointer()
             .when(self.ghost, |el| el.px(px(7.)))
+            .when(self.small, |el| el.h(px(22.)).px(px(7.)).gap(px(4.)).rounded(px(6.)).text_size(px(12.)))
             .bg(theme.foreground.opacity(match (self.selected, self.ghost) {
                 (true, _) => 0.12,
                 (false, true) => 0.0,
@@ -728,6 +765,8 @@ mod tests {
     }
 
     #[test]
+    // One match, as a list of one range: what search results pass.
+    #[allow(clippy::single_range_in_vec_init)]
     fn excerpts_lead_with_the_match() {
         let text = "…the long preamble before anything useful and then the stadium lights";
         let start = text.find("stadium").unwrap();

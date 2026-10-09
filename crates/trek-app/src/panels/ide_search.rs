@@ -1,5 +1,8 @@
-//! The IDE's project search (⌘⇧F): a query over every file under `ide_root`,
-//! results as file:line rows that open the editor right there.
+//! The IDE's project search (⌘⇧F): a query over every file under `ide_root` that git doesn't
+//! ignore (every `.gitignore`, the repository's excludes and the user's), results as file:line
+//! rows that open the editor right there. The folder is listed and searched off the main
+//! thread; the list is kept until files change, and a search runs again only when the query,
+//! the folder or the files do (not on every redraw of the workspace).
 
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -20,12 +23,29 @@ struct Hit {
     text: String,
 }
 
+/// Files listed at most.
+const MAX_FILES: usize = 30_000;
+
+/// The files under `root` git doesn't ignore, relative to it (folders left out).
+pub(crate) fn list_files(root: &std::path::Path) -> Vec<String> {
+    let walk = ignore::WalkBuilder::new(root).hidden(false).parents(true).ignore(false).git_ignore(true).git_exclude(true).git_global(true).follow_links(false).filter_entry(|e| e.file_name() != ".git").build();
+    walk.flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter_map(|e| e.path().strip_prefix(root).ok().map(|r| r.to_string_lossy().to_string()))
+        .filter(|r| !r.is_empty() && !r.ends_with(".DS_Store"))
+        .take(MAX_FILES)
+        .collect()
+}
+
 pub struct IdeSearch {
     workspace: Entity<Workspace>,
     input: Entity<InputState>,
     hits: Vec<Hit>,
-    files: Vec<String>,
+    /// The folder's files, as last listed (`None`: to list again before the next search).
+    files: Option<Arc<Vec<String>>>,
     file_root: Option<PathBuf>,
+    /// What the folder was last searched at: (root, files changed count, query).
+    searched: Option<(Option<PathBuf>, u64, String)>,
     query: String,
     searching: bool,
     epoch: Arc<AtomicU64>,
@@ -39,20 +59,18 @@ impl IdeSearch {
         let mut subs = vec![];
         subs.push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                this.searching = true;
                 this.search(cx);
             }
         }));
-        subs.push(cx.observe(&workspace, |this, _, cx| {
-            this.searching = true;
-            this.search(cx);
-        }));
+        // Only when the folder or its files changed: not for every token a thread streams.
+        subs.push(cx.observe(&workspace, |this, _, cx| this.search(cx)));
         Self {
             workspace,
             input,
             hits: vec![],
-            files: vec![],
+            files: None,
             file_root: None,
+            searched: None,
             query: String::new(),
             searching: false,
             epoch: Arc::new(AtomicU64::new(0)),
@@ -66,33 +84,46 @@ impl IdeSearch {
         self.input.update(cx, |i, cx| i.focus(window, cx));
     }
 
-    /// Scan the folder off the main thread; stale generations drop on the floor.
+    /// Search the folder off the main thread (listing it first when it isn't yet); stale
+    /// generations drop on the floor. Nothing to do when neither the query nor the folder's
+    /// files changed since the last search.
     fn search(&mut self, cx: &mut Context<Self>) {
         let query = self.input.read(cx).value().to_string().trim().to_lowercase();
-        self.query = query.clone();
-        let root = self.workspace.read(cx).ide_root.clone();
-        if root != self.file_root {
-            self.file_root = root.clone();
-            self.files = root.as_ref().map(|r| crate::mentions::index_files(r)).unwrap_or_default();
-        }
-        self.hits.clear();
-        cx.notify();
-        if query.len() < 2 || root.is_none() {
-            self.searching = false;
+        let (root, epoch) = {
+            let ws = self.workspace.read(cx);
+            (ws.ide_root.clone(), ws.files_epoch + ws.turns_finished + ws.agent_edits)
+        };
+        let key = (root.clone(), epoch, query.clone());
+        if self.searched.as_ref() == Some(&key) {
             return;
         }
-        let root = root.unwrap();
-        let files: Vec<String> = self.files.iter().filter(|f| !f.ends_with('/')).cloned().collect();
+        // Files come and go with turns, checkouts and the folder: list them again then.
+        if self.searched.as_ref().is_none_or(|(r, e, _)| *r != root || *e != epoch) {
+            self.files = None;
+        }
+        self.searched = Some(key);
+        self.query = query.clone();
+        self.file_root = root.clone();
+        self.hits.clear();
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let (Some(root), true) = (root, query.len() >= 2) else {
+            self.searching = false;
+            cx.notify();
+            return;
+        };
+        self.searching = true;
+        cx.notify();
+        let listed = self.files.clone();
         let watch = self.epoch.clone();
-        let (tx, rx) = async_channel::bounded::<Vec<Hit>>(1);
+        let (tx, rx) = async_channel::bounded::<(Arc<Vec<String>>, Vec<Hit>)>(1);
         std::thread::spawn(move || {
+            let files = listed.unwrap_or_else(|| Arc::new(list_files(&root)));
             let mut hits = Vec::new();
-            'outer: for rel in files {
+            'outer: for rel in files.iter() {
                 if watch.load(Ordering::SeqCst) != epoch {
                     return;
                 }
-                let path = root.join(&rel);
+                let path = root.join(rel);
                 let Ok(meta) = std::fs::metadata(&path) else { continue };
                 if meta.len() > 1_000_000 {
                     continue;
@@ -111,13 +142,14 @@ impl IdeSearch {
                     }
                 }
             }
-            let _ = tx.try_send(hits);
+            let _ = tx.try_send((files, hits));
         });
         let watch = self.epoch.clone();
         self._wait = Some(cx.spawn(async move |this, cx| {
-            if let Ok(hits) = rx.recv().await {
+            if let Ok((files, hits)) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
                     if watch.load(Ordering::SeqCst) == epoch {
+                        this.files = Some(files);
                         this.hits = hits;
                         this.searching = false;
                         cx.notify();
@@ -125,6 +157,16 @@ impl IdeSearch {
                 });
             }
         }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hits(&self) -> Vec<String> {
+        self.hits.iter().map(|h| format!("{}:{}", h.rel, h.line)).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn searching(&self) -> bool {
+        self.searching
     }
 }
 

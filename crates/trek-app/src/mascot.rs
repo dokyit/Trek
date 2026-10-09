@@ -1,65 +1,18 @@
-//! While an agent works: a trail word that changes every few seconds ("Breaking trail…") and a
-//! little hiker walking back and forth along a dotted trail above the composer (`working_bar`).
+//! While an agent works: a plain "Working…" and a little hiker walking back and forth along a
+//! dotted trail above the composer (`working_bar`).
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use std::time::Duration;
 
-/// What Trek says an agent is doing while it works, instead of a plain "Working…".
-pub const WORDS: &[&str] = &[
-    "Trailblazing",
-    "Switchbacking",
-    "Summiting",
-    "Scrambling",
-    "Bushwhacking",
-    "Route-finding",
-    "Stacking cairns",
-    "Reading the map",
-    "Checking the compass",
-    "Fording the creek",
-    "Gaining elevation",
-    "Traversing",
-    "Acclimatizing",
-    "Scouting ahead",
-    "Marking the trail",
-    "Crossing the ridge",
-    "Breaking trail",
-    "Boulder-hopping",
-    "Topping out",
-    "Following the cairns",
-    "Charting a course",
-    "Wayfinding",
-    "Lighting the beacon",
-    "Refilling canteens",
-    "Taking the scenic route",
-    "Contouring",
-    "Peak-bagging",
-    "Setting up base camp",
-    "Lacing boots",
-    "Checking the forecast",
-    "Glissading",
-    "Hiking it out",
-];
+/// What Trek says an agent is doing while it works. Plain status text: the hiker beside it is
+/// the brand, the words aren't.
+pub const WORDS: &[&str] = &["Working"];
 
-/// How long each trail word stays before the next.
-pub const WORD_EVERY: u64 = 4;
-
-/// The trail word for a turn that has run `secs` seconds ("Breaking trail"): it changes every
-/// [`WORD_EVERY`] seconds, and `seed` (the thread) keeps threads from moving in lockstep.
-pub fn word(seed: &str, secs: u64) -> &'static str {
-    let n = WORDS.len() as u64;
-    let h = seed.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-    // Each thread strides through the list from its own start, by a stride that shares no factor
-    // with its length: every word comes round once a lap, never twice in a row.
-    let gcd = |mut a: u64, mut b: u64| {
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        a
-    };
-    let stride = (1..n).map(|k| (h >> 7).wrapping_add(k) % n).find(|&s| s > 1 && gcd(s, n) == 1).unwrap_or(1);
-    let i = (h % n + (secs / WORD_EVERY) % n * stride) % n;
-    WORDS[i as usize]
+/// The word for a turn in thread `seed` that has run `secs` seconds. One word for now; the
+/// arguments keep callers ready should it ever say more.
+pub fn word(_seed: &str, _secs: u64) -> &'static str {
+    WORDS[0]
 }
 
 /// The hiker's walk: one lap there and back in `LAP`.
@@ -178,17 +131,6 @@ fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, win
     sprite(left, ground - 1., PX, frame, right, window);
 }
 
-/// The hiker standing still with its feet on `ground` and its left edge at `left`, drawn with
-/// `cell`-point pixels (Basecamp marks "now" on its profile with it).
-pub fn stand(left: f32, ground: f32, cell: f32, window: &mut Window) {
-    sprite((left / cell).round() * cell, ground, cell, 1, true, window);
-}
-
-/// Width and height of the hiker drawn with `cell`-point pixels.
-pub fn size_at(cell: f32) -> (f32, f32) {
-    (SPRITE_W as f32 * cell, SPRITE_H as f32 * cell)
-}
-
 fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
     let top = ground - SPRITE_H as f32 * cell_px;
     let cell = |x: f32, y: f32, rgb: u32, window: &mut Window| {
@@ -212,27 +154,15 @@ fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, windo
 
 #[cfg(test)]
 mod tests {
-    use super::{WORD_EVERY, WORDS, word};
+    use super::{WORDS, word};
 
     #[test]
-    fn trail_words_hold_then_move_on() {
-        // The same word for the whole step, from its first second to its last.
-        assert_eq!(word("thread-a", 0), word("thread-a", WORD_EVERY - 1));
-        assert_eq!(word("thread-a", 8), word("thread-a", 8 + WORD_EVERY - 1));
-        // Over a few minutes it changes often, and never stays on one word for long.
-        let steps: Vec<&str> = (0..60).map(|i| word("thread-a", i * WORD_EVERY)).collect();
-        let changes = steps.windows(2).filter(|w| w[0] != w[1]).count();
-        assert_eq!(changes, 59, "a new word every step: {steps:?}");
-        // The whole list comes round in a lap, and threads don't move in lockstep.
-        let mut lap: Vec<&str> = steps[..WORDS.len()].to_vec();
-        lap.sort();
-        lap.dedup();
-        assert_eq!(lap.len(), WORDS.len());
-        let other: Vec<&str> = (0..60).map(|i| word("thread-b", i * WORD_EVERY)).collect();
-        assert_ne!(steps, other);
-        // Deterministic: a redraw shows the same word.
-        assert_eq!(word("thread-a", 123), word("thread-a", 123));
+    fn the_working_word_is_plain() {
+        assert_eq!(word("thread-a", 0), "Working");
+        assert_eq!(word("thread-b", 123), word("thread-a", 0), "the same in every thread, all turn long");
+        assert!(WORDS.iter().all(|w| !w.to_lowercase().contains("trail") && !w.to_lowercase().contains("cairn")));
     }
+
     #[test]
     fn the_hike_crosses_the_trail_there_and_back() {
         // Working or pacing while it waits, the hiker goes end to end and back a lap.

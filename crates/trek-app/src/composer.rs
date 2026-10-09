@@ -6,60 +6,40 @@ use crate::attachments::{self, Attaching, Outbox};
 use crate::dictate;
 use crate::palette;
 use crate::ui::{self, Pill};
-use crate::workspace::{PanelTool, Prefs, Route, Scope, Workspace, WorkspaceEvent};
+use crate::workspace::{PanelTool, Route, Scope, Workspace, WorkspaceEvent};
 use crate::TogglePlan;
 use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
+use crate::mentions::{self, PickKind};
 use std::path::PathBuf;
-use std::sync::Arc;
 use trek_core::catalog::ModelInfo;
 use trek_core::orchestrate::{Consult, Consultant, Style};
+use trek_core::settings::FollowUp;
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
-#[derive(Clone, Copy, PartialEq)]
-enum Sub {
-    Effort,
-    Model,
-}
+pub(crate) mod pickers;
 
-#[derive(Clone, PartialEq)]
-enum Rail {
-    Favorites,
-    Agent(AgentId),
-}
+pub(crate) use pickers::{PickerHost, Pickers};
 
 pub struct Composer {
     workspace: Entity<Workspace>,
     /// The main window's composer follows its route; a thread window's is bound to one thread.
     scope: Scope,
     input: Entity<TextareaState>,
-    model_search: Entity<InputState>,
     clone_input: Entity<InputState>,
-    model_open: bool,
-    access_open: bool,
-    sub: Option<Sub>,
-    rail: Option<Rail>,
+    /// The model and access menus, and the `/`, `@` and `$` picker (shared with the editor's AI
+    /// input, `pickers`).
+    pickers: Pickers,
     /// Images going out with the next message.
     outbox: Outbox,
-    /// The `/`, `@` or `$` token being completed, and the highlighted row.
-    trigger: Option<Trigger>,
-    picked: usize,
-    /// Project files for `@`, indexed once per folder.
-    file_index: Option<(PathBuf, Arc<Vec<String>>)>,
-    indexing: Option<Task<()>>,
     snapshotting: bool,
-    /// Set when Enter picked a row, so the same keypress doesn't also send.
-    swallow_enter: Option<std::time::Instant>,
     /// `general.send_with_cmd_enter`: ↩ inserts a newline and ⌘↩ sends (else ↩ sends, ⇧↩ newline).
     cmd_enter: bool,
-    picker_scroll: ScrollHandle,
     /// Width of the composer card at last layout; narrow cards get compact pills.
     width: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// Height of the whole composer at last layout. The window caches this view at that height
@@ -85,7 +65,21 @@ pub struct Composer {
     restate: bool,
     /// A dictation take in flight: recording while `recording()`, transcribing after.
     dictation: Option<dictate::Dictation>,
+    /// Where the text on screen belongs (`Attaching::target`): a thread, or a new one in a project.
+    draft_key: String,
+    /// The prompt's placeholder as last set (`placeholder`).
+    placeholder: &'static str,
+    /// What was typed for the threads and drafts not on screen, by `draft_key`.
+    drafts: std::collections::HashMap<String, Draft>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A message in progress for a thread or draft the composer isn't showing.
+struct Draft {
+    text: String,
+    cursor: usize,
+    images: Vec<PathBuf>,
+    restate: bool,
 }
 
 /// A message of yours the composer holds to send again in its place.
@@ -208,20 +202,20 @@ impl Composer {
     pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder("Ask or build · / commands · @ files")
+            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder(placeholder(None))
         });
-        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search models"));
+        let pickers = Pickers::new(window, cx);
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift, secondary } = event {
                     let send = if this.cmd_enter { *secondary } else { !*shift };
-                    let swallowed = this.swallow_enter.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250));
-                    if send && this.trigger.is_none() && !swallowed {
+                    let swallowed = this.pickers.swallowed();
+                    if send && this.pickers.trigger.is_none() && !swallowed {
                         this.submit(state.clone(), window, cx);
                     }
                 } else if matches!(event, InputEvent::Change) {
-                    this.update_trigger(cx);
+                    pickers::update_trigger(this, cx);
                     // The user has started typing: get the agent process up before they hit Return.
                     // Not while editing: sending that starts a session of its own, after the rewind.
                     let typing = { let v = state.read(cx).value(); v.trim().len() >= 2 && !v.starts_with('/') } && this.editing.is_none();
@@ -246,13 +240,25 @@ impl Composer {
                 if stale {
                     this.cancel_edit(window, cx);
                 }
+                // Another thread or draft on screen: what was typed stays with the one it was typed for.
+                this.follow_route(window, cx);
+                // Mid-turn the prompt says where a message goes.
+                let placeholder = {
+                    let ws = ws.read(cx);
+                    let running = ws.thread_id_in(&this.scope).is_some_and(|id| ws.turn_running(id));
+                    placeholder(running.then_some(ws.settings.general.follow_up))
+                };
+                if this.placeholder != placeholder {
+                    this.placeholder = placeholder;
+                    this.input.update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+                }
                 // An open @ picker follows the folder on screen.
-                if this.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
-                    this.ensure_file_index(cx);
+                if this.pickers.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
+                    pickers::ensure_file_index(this, cx);
                 }
                 cx.notify()
             }),
-            cx.observe(&model_search, |_, _, cx| cx.notify()),
+            cx.observe(pickers.model_search(), |_, _, cx| cx.notify()),
             // The cursor blinks and moves without an input event; this view is cached, so redraw.
             cx.observe(&input, |_, _, cx| cx.notify()),
         ];
@@ -260,21 +266,11 @@ impl Composer {
             workspace,
             scope,
             input,
-            model_search,
             clone_input,
-            model_open: false,
-            access_open: false,
-            sub: None,
-            rail: None,
+            pickers,
             outbox: Outbox::default(),
-            trigger: None,
-            picked: 0,
-            file_index: None,
-            indexing: None,
             snapshotting: false,
-            swallow_enter: None,
             cmd_enter,
-            picker_scroll: ScrollHandle::new(),
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
@@ -287,8 +283,12 @@ impl Composer {
             consult_judge: false,
             restate: false,
             dictation: None,
+            draft_key: String::new(),
+            placeholder: placeholder(None),
+            drafts: Default::default(),
             _subscriptions: subscriptions,
         };
+        this.draft_key = this.target(cx);
         // TREK_REVIEW_COMPOSER=restate (Restate first on) or arena (the Consult menu open on an
         // arena): states a click reaches, for design review of a window that isn't in front.
         match std::env::var("TREK_REVIEW_COMPOSER").as_deref() {
@@ -311,6 +311,12 @@ impl Composer {
     }
 
     fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_as(state, None, window, cx);
+    }
+
+    /// Send what's typed. `follow`: how it goes if a turn is running (`None`: as Settings ›
+    /// General has it; ⌥↩ sends it the other way).
+    fn submit_as(&mut self, state: Entity<TextareaState>, follow: Option<FollowUp>, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.target(cx);
         if self.outbox.hold_send(target) {
             cx.notify();
@@ -325,7 +331,7 @@ impl Composer {
             Some(Ok(Some(message))) => message,
             Some(Ok(None)) => {
                 state.update(cx, |s, cx| s.set_value("", window, cx));
-                self.trigger = None;
+                self.pickers.trigger = None;
                 self.consult_open = true;
                 self.sync_overlay(cx);
                 cx.notify();
@@ -348,7 +354,7 @@ impl Composer {
             }
             Some(None) => {
                 state.update(cx, |s, cx| s.set_value("", window, cx));
-                self.trigger = None;
+                self.pickers.trigger = None;
                 self.restate = !self.restate;
                 self.sync_overlay(cx);
                 cx.notify();
@@ -403,7 +409,7 @@ impl Composer {
             }
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
-        self.trigger = None;
+        self.pickers.trigger = None;
         self.sync_overlay(cx);
         let images = std::mem::take(&mut self.outbox.paths);
         let scope = self.scope.clone();
@@ -422,7 +428,13 @@ impl Composer {
                 sent
             }
             None => {
-                self.workspace.update(cx, |ws, cx| ws.send_in(&scope, text, images, cx));
+                self.workspace.update(cx, |ws, cx| {
+                    let running = ws.thread_id_in(&scope).map(str::to_string).filter(|id| ws.turn_running(id));
+                    match (follow, running) {
+                        (Some(follow), Some(id)) => ws.send_as(&id, text, images, Some(follow), cx),
+                        _ => ws.send_in(&scope, text, images, cx),
+                    }
+                });
                 true
             }
         };
@@ -446,6 +458,7 @@ impl Composer {
     /// A message comes back into the composer: put back by a rewind, or (`edit`: its item id) to
     /// edit and send again in its place.
     pub fn compose(&mut self, thread: &str, text: &str, images: &[PathBuf], edit: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_route(window, cx);
         // A message sent with consultants comes back as it was written, its consultants picked
         // (and asking for a restatement again, if it did).
         let (text, consult) = trek_core::orchestrate::split_consult(text);
@@ -463,19 +476,13 @@ impl Composer {
             None => (self.input.read(cx).value().to_string(), std::mem::take(&mut self.outbox.paths)),
         };
         let ws = self.workspace.read(cx);
-        let checkpoint = ws.restorable_checkpoint(thread, &item);
+        let checkpoint = ws.rewind_files(thread, &item);
         let why_not = ws.no_checkpoint(thread, &item).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain();
-        // Which files sending it would put back, found off the main thread.
-        let check = checkpoint.as_ref().map(|c| {
-            let (repo, sha) = (c.repo.clone(), c.sha.clone());
+        // Which files sending it would put back (those its turns changed), found off the main thread.
+        let check = checkpoint.as_ref().map(|_| {
+            let files = ws.rewind_files(thread, &item);
             cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let r = trek_core::checkpoint::Repo::find(&repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display()))?;
-                        r.changes_since(&sha)
-                    })
-                    .await;
+                let result = cx.background_executor().spawn(async move { files.map_or(Ok(vec![]), |f| f.changes()) }).await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(e) = this.editing.as_mut() {
                         e.files = match result {
@@ -501,10 +508,47 @@ impl Composer {
             s.set_value(text, window, cx);
             s.set_selected_range(text.len()..text.len(), cx);
         });
-        self.trigger = None;
+        self.pickers.trigger = None;
         self.sync_overlay(cx);
         self.focus(window, cx);
         cx.notify();
+    }
+
+    /// Swap drafts if the thread or draft on screen has changed since the text was typed.
+    fn follow_route(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.target(cx);
+        if key != self.draft_key {
+            self.switch_draft(key, window, cx);
+        }
+    }
+
+    /// Put away what's typed for the thread or draft that was on screen and bring back what was
+    /// typed for `key`'s (nothing, if nothing was).
+    fn switch_draft(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        // A message being edited belongs to its thread: leaving it puts the draft it replaced back first.
+        if self.editing.as_ref().is_some_and(|e| format!("thread:{}", e.thread) != key) {
+            self.cancel_edit(window, cx);
+        }
+        let text = self.input.read(cx).value().to_string();
+        let cursor = self.input.read(cx).cursor();
+        let images = std::mem::take(&mut self.outbox.paths);
+        let restate = std::mem::take(&mut self.restate);
+        let old = std::mem::replace(&mut self.draft_key, key.clone());
+        if !text.is_empty() || !images.is_empty() || restate {
+            self.drafts.insert(old, Draft { text, cursor, images, restate });
+        } else {
+            self.drafts.remove(&old);
+        }
+        let next = self.drafts.remove(&key).unwrap_or(Draft { text: String::new(), cursor: 0, images: Vec::new(), restate: false });
+        self.outbox.paths = next.images;
+        self.restate = next.restate;
+        self.pickers.trigger = None;
+        let cursor = next.cursor.min(next.text.len());
+        self.input.update(cx, |s, cx| {
+            s.set_value(next.text, window, cx);
+            s.set_selected_range(cursor..cursor, cx);
+        });
+        self.sync_overlay(cx);
     }
 
     /// Stop editing: what the composer held before comes back.
@@ -533,7 +577,7 @@ impl Composer {
                     EditFiles::Failed(why) => ("Restore files".to_string(), format!("Couldn't check the files: {why}")),
                     EditFiles::Changes(changes) => {
                         let mut tip = String::from("Put the files back as they were when this message was first sent:");
-                        for f in changes.iter().filter(|f| f.change != trek_core::checkpoint::Change::Nested).take(FILES_LISTED) {
+                        for f in changes.iter().filter(|f| !matches!(f.change, trek_core::checkpoint::Change::Nested | trek_core::checkpoint::Change::Kept)).take(FILES_LISTED) {
                             let what = match f.change {
                                 trek_core::checkpoint::Change::Added => "delete",
                                 trek_core::checkpoint::Change::Deleted => "bring back",
@@ -541,7 +585,7 @@ impl Composer {
                             };
                             tip.push_str(&format!("\n{what} {}", f.path));
                         }
-                        let n = changes.iter().filter(|f| f.change != trek_core::checkpoint::Change::Nested).count();
+                        let n = changes.iter().filter(|f| !matches!(f.change, trek_core::checkpoint::Change::Nested | trek_core::checkpoint::Change::Kept)).count();
                         if n > FILES_LISTED {
                             tip.push_str(&format!("\nand {} more", n - FILES_LISTED));
                         }
@@ -658,9 +702,7 @@ impl Composer {
         actions.push(
             action("limit-switch", if compact { "Switch…" } else { "Switch agent…" }, false)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.model_open = true;
-                    this.sync_overlay(cx);
-                    cx.notify();
+                    pickers::open_model_menu(this, cx);
                 }))
                 .into_any_element(),
         );
@@ -724,7 +766,7 @@ impl Composer {
         if self.scope != Scope::Main {
             return;
         }
-        let open = self.model_open || self.access_open || self.consult_open || self.trigger.is_some();
+        let open = self.pickers.open() || self.consult_open;
         self.workspace.update(cx, |ws, cx| {
             if ws.overlay_open != open {
                 ws.overlay_open = open;
@@ -741,7 +783,7 @@ impl Composer {
     /// The open picker's rows, by label.
     #[cfg(test)]
     pub(crate) fn picks(&self, cx: &App) -> Vec<String> {
-        self.picker_items(cx).into_iter().map(|i| i.label).collect()
+        pickers::picker_items(self, cx).into_iter().map(|i| i.label).collect()
     }
 
     /// The consultants picked for the next message (`agent/model/effort`), and whether they stay.
@@ -796,6 +838,7 @@ impl Composer {
 
     /// Insert text at the cursor (on its own line if the cursor is mid-text) and focus the composer.
     pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_route(window, cx);
         self.input.update(cx, |s, cx| {
             let value = s.value().to_string();
             let cursor = s.cursor().min(value.len());
@@ -895,6 +938,7 @@ impl Composer {
 
     /// Put follow-ups that never went out back into the composer.
     pub fn restore(&mut self, text: &str, images: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_route(window, cx);
         let (text, consult) = trek_core::orchestrate::split_consult(text);
         if let Some(c) = consult {
             self.consult = c;
@@ -909,14 +953,6 @@ impl Composer {
         }
     }
 
-    fn update_prefs(&self, cx: &mut App, f: impl FnOnce(&mut Prefs)) {
-        let scope = self.scope.clone();
-        self.workspace.update(cx, |ws, cx| {
-            let mut p = ws.prefs_in(&scope);
-            f(&mut p);
-            ws.set_prefs_in(&scope, p, cx);
-        });
-    }
 
     /// Attach files by inserting @-references into the prompt.
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1016,164 +1052,25 @@ impl Composer {
         cx.notify();
     }
 
-    fn insert_trigger(&mut self, ch: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |s, cx| {
-            let v = s.value().to_string();
-            let cursor = s.cursor();
-            let needs_space = ch != "/" && cursor > 0 && !v[..cursor].ends_with(char::is_whitespace);
-            if ch == "/" {
-                s.set_value("/", window, cx);
-                s.set_selected_range(1..1, cx);
-            } else {
-                s.insert(if needs_space { format!(" {ch}") } else { ch.to_string() }, window, cx);
-            }
-        });
-        self.focus(window, cx);
-        self.update_trigger(cx);
-    }
-
     // ---------- pickers ----------
 
-    fn update_trigger(&mut self, cx: &mut Context<Self>) {
-        let state = self.input.read(cx);
-        let next = mentions::trigger_at(&state.value(), state.cursor());
-        if next.as_ref().map(|t| (&t.kind, &t.query)) != self.trigger.as_ref().map(|t| (&t.kind, &t.query)) {
-            self.picked = 0;
-        }
-        if next.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
-            self.ensure_file_index(cx);
-        }
-        self.trigger = next;
-        self.sync_overlay(cx);
-    }
-
-    fn ensure_file_index(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.workspace.read(cx).cwd_in(&self.scope) else { return };
-        if self.file_index.as_ref().is_some_and(|(r, _)| *r == root) || self.indexing.is_some() {
-            return;
-        }
-        let r = root.clone();
-        self.indexing = Some(cx.spawn(async move |this, cx| {
-            let files = cx.background_executor().spawn(async move { mentions::index_files(&r) }).await;
-            let _ = this.update(cx, |this, cx| {
-                this.file_index = Some((root, Arc::new(files)));
-                this.indexing = None;
-                // The folder on screen changed meanwhile: index that one too.
-                if this.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
-                    this.ensure_file_index(cx);
-                }
-                cx.notify();
-            });
-        }));
-    }
-
-    fn picker_items(&self, cx: &App) -> Vec<PickItem> {
-        let Some(t) = &self.trigger else { return vec![] };
-        let ws = self.workspace.read(cx);
-        let agent = ws.prefs_in(&self.scope).agent;
-        let q = t.query.to_lowercase();
-        let commands = ws.slash_commands(&self.scope, &agent);
-        let matches = |name: &str, desc: &str| q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q);
-        let rank = |name: &str| if name.to_lowercase().starts_with(&q) { 0 } else { 1 };
-        let mut items: Vec<PickItem> = match t.kind {
-            PickKind::Slash => {
-                let mut v: Vec<_> = commands.iter().filter(|c| c.kind != trek_agents::CommandKind::Agent && matches(&c.name, &c.description)).collect();
-                v.sort_by_key(|c| rank(&c.name));
-                v.into_iter()
-                    .map(|c| PickItem {
-                        label: format!("/{}", c.name),
-                        detail: c.description.clone(),
-                        insert: format!("/{}", c.name),
-                        icon: if c.kind == trek_agents::CommandKind::Skill { PickIcon::Skill } else { PickIcon::Command },
-                    })
-                    .collect()
-            }
-            PickKind::Skill => {
-                let codex = agent == AgentId::Codex;
-                let mut v: Vec<_> = commands.iter().filter(|c| c.kind == trek_agents::CommandKind::Skill && matches(&c.name, &c.description)).collect();
-                v.sort_by_key(|c| rank(&c.name));
-                v.into_iter()
-                    .map(|c| PickItem {
-                        label: c.name.clone(),
-                        detail: c.description.clone(),
-                        // Codex invokes skills as $name; Claude Code as /name.
-                        insert: if codex { format!("${}", c.name) } else { format!("/{}", c.name) },
-                        icon: PickIcon::Skill,
-                    })
-                    .collect()
-            }
-            PickKind::Mention => {
-                let mut v: Vec<PickItem> = commands
-                    .iter()
-                    .filter(|c| c.kind == trek_agents::CommandKind::Agent && matches(&c.name, &c.description))
-                    .take(6)
-                    .map(|c| PickItem { label: format!("agent-{}", c.name), detail: c.description.clone(), insert: format!("@agent-{}", c.name), icon: PickIcon::Agent })
-                    .collect();
-                // Another folder's files (the window moved to a thread elsewhere) aren't offered.
-                if let Some((_, files)) = self.file_index.as_ref().filter(|(root, _)| ws.cwd_in(&self.scope).as_ref() == Some(root)) {
-                    v.extend(mentions::match_files(files, &t.query, 40).into_iter().map(|f| {
-                        let dir = f.ends_with('/');
-                        let trimmed = f.trim_end_matches('/');
-                        let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
-                        PickItem {
-                            label: if dir { format!("{name}/") } else { name.to_string() },
-                            detail: parent.to_string(),
-                            insert: format!("@{f}"),
-                            icon: if dir { PickIcon::Folder } else { PickIcon::File },
-                        }
-                    }));
-                }
-                v
-            }
-        };
-        items.truncate(60);
-        items
-    }
-
-    fn accept_pick(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.trigger.clone() else { return };
-        let Some(item) = self.picker_items(cx).into_iter().nth(ix) else { return };
-        let folder = item.icon == PickIcon::Folder;
-        self.input.update(cx, |s, cx| {
-            let cursor = s.cursor();
-            s.set_selected_range(t.start..cursor, cx);
-            // Folders keep the picker open so you can keep drilling down.
-            s.replace(if folder { item.insert.clone() } else { format!("{} ", item.insert) }, window, cx);
-        });
-        self.picked = 0;
-        self.update_trigger(cx);
-        cx.notify();
+    fn insert_trigger(&mut self, ch: &str, window: &mut Window, cx: &mut Context<Self>) {
+        pickers::insert_trigger(self, ch, window, cx);
     }
 
     fn picker_action(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if key == "escape" && self.trigger.is_none() && self.editing.is_some() {
+        if key == "escape" && self.pickers.trigger.is_none() && self.editing.is_some() {
             self.cancel_edit(window, cx);
             cx.stop_propagation();
             return;
         }
-        let n = self.picker_items(cx).len();
-        if self.trigger.is_none() || (n == 0 && key != "escape") {
-            cx.propagate();
-            return;
-        }
-        match key {
-            "escape" => {
-                self.trigger = None;
-                self.sync_overlay(cx);
-            }
-            "up" => self.picked = (self.picked + n - 1) % n,
-            "down" => self.picked = (self.picked + 1) % n,
-            _ => self.accept_pick(self.picked.min(n - 1), window, cx),
-        }
-        self.picker_scroll.scroll_to_item(self.picked);
-        cx.stop_propagation();
-        cx.notify();
+        pickers::picker_action(self, key, window, cx);
     }
 
     /// Enter reaches us before the textarea: it picks a row while a picker is open, and sends on
     /// ⌘↩ in "send with ⌘↩" mode (the textarea would otherwise insert a newline first).
     fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.trigger.is_some() && !action.shift && !action.secondary {
+        if self.pickers.trigger.is_some() && !action.shift && !action.secondary {
             self.picker_action("enter", window, cx);
         } else if self.cmd_enter && action.secondary && !action.shift {
             cx.stop_propagation();
@@ -1182,94 +1079,16 @@ impl Composer {
         }
     }
 
-    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.trigger.is_none() {
-            return;
-        }
-        let n = self.picker_items(cx).len();
-        let ks = &ev.keystroke;
-        if ks.modifiers.modified() && !ks.modifiers.shift {
-            return;
-        }
-        match ks.key.as_str() {
-            "escape" => {
-                self.trigger = None;
-                self.sync_overlay(cx);
-            }
-            "up" if n > 0 => self.picked = (self.picked + n - 1) % n,
-            "down" if n > 0 => self.picked = (self.picked + 1) % n,
-            "enter" | "tab" if n > 0 && !ks.modifiers.shift => {
-                if ks.key == "enter" {
-                    self.swallow_enter = Some(std::time::Instant::now());
-                }
-                self.accept_pick(self.picked.min(n - 1), window, cx)
-            }
-            _ => return,
-        }
-        cx.stop_propagation();
-        cx.notify();
-    }
 
-    fn picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = self.trigger.as_ref()?;
-        let items = self.picker_items(cx);
-        let theme = cx.theme().clone();
-        let title = match t.kind {
-            PickKind::Slash => "Commands",
-            PickKind::Mention => "Files and agents",
-            PickKind::Skill => "Skills",
-        };
-        let empty = match t.kind {
-            PickKind::Mention if self.indexing.is_some() => "Indexing project files…",
-            PickKind::Mention => "No matching files",
-            PickKind::Skill => "No matching skills",
-            PickKind::Slash => "No matching commands",
-        };
-        let picked = self.picked.min(items.len().saturating_sub(1));
-        Some(
-            ui::menu_surface(cx)
-                .w_full()
-                .child(
-                    h_flex()
-                        .px(px(10.))
-                        .pt(px(4.))
-                        .pb(px(6.))
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(div().flex_1().child(title))
-                        .child("↑↓ to move · ↩ to pick · esc"),
-                )
-                .when(items.is_empty(), |el| el.child(div().px(px(10.)).py(px(8.)).text_sm().text_color(theme.muted_foreground).child(empty)))
-                .child(v_flex().id("picker-list").test_support().max_h(px(280.)).overflow_y_scroll().track_scroll(&self.picker_scroll).children(items.into_iter().enumerate().map(|(i, item)| {
-                    let icon = match item.icon {
-                        PickIcon::Command => Icon::new(IconName::SquareTerminal),
-                        PickIcon::Skill => Icon::new(crate::assets::Lucide::Sparkle),
-                        PickIcon::Agent => Icon::new(IconName::Bot),
-                        PickIcon::File => Icon::new(IconName::File),
-                        PickIcon::Folder => Icon::new(IconName::Folder),
-                    };
-                    ui::menu_row(("pick", i), false, cx)
-                        .min_h(px(30.))
-                        .when(i == picked, |el| el.bg(theme.foreground.opacity(0.09)))
-                        .child(icon.small().text_color(theme.muted_foreground))
-                        .child(div().flex_none().max_w(px(260.)).truncate().child(item.label))
-                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(item.detail))
-                        .on_click(cx.listener(move |this, _, window, cx| this.accept_pick(i, window, cx)))
-                })))
-                .into_any_element(),
-        )
-    }
 
     fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.outbox.paths.is_empty() && !self.snapshotting && self.outbox.saving == 0 {
             return None;
         }
         let me = cx.entity().downgrade();
-        let remove = move |i: usize, _: &mut Window, cx: &mut App| {
+        let remove = move |path: &std::path::Path, _: &mut Window, cx: &mut App| {
             let _ = me.update(cx, |this, cx| {
-                if i < this.outbox.paths.len() {
-                    this.outbox.paths.remove(i);
-                }
+                this.outbox.remove(path);
                 cx.notify();
             });
         };
@@ -1309,290 +1128,6 @@ impl Composer {
                         })
                     }))
             })
-    }
-
-    /// MonoCode-style context meter: a ring that fills as the context window does.
-    fn context_ring(&self, used: u64, window: u64, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let frac = (used as f32 / window.max(1) as f32).clamp(0.0, 1.0);
-        let color = if frac >= 0.9 { palette::red(cx) } else if frac >= 0.75 { palette::amber(cx) } else { theme.foreground.opacity(0.75) };
-        let track = theme.foreground.opacity(0.14);
-        let tip_title = format!("{:.0}% context used", frac * 100.);
-        let tip_detail = format!("{} / {} tokens", crate::workspace::fmt_tokens(used), crate::workspace::fmt_tokens(window));
-        div()
-            .id("context-ring")
-            .size(px(30.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.))
-            .hover(|s| s.bg(theme.foreground.opacity(0.065)))
-            .tooltip(move |window, cx| {
-                let (t, d) = (tip_title.clone(), tip_detail.clone());
-                gpui_kit::component::tooltip::Tooltip::element(move |_, cx| {
-                    v_flex().gap(px(2.)).child(div().text_sm().font_medium().child(t.clone())).child(div().text_xs().text_color(cx.theme().muted_foreground).child(d.clone()))
-                })
-                .build(window, cx)
-            })
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let c = bounds.center();
-                        let r = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
-                        let ring = |from: f32, to: f32, color: Hsla, window: &mut Window| {
-                            let steps = ((to - from) * 96.).ceil().max(2.) as usize;
-                            let mut path = PathBuilder::stroke(px(2.));
-                            for i in 0..=steps {
-                                let t = from + (to - from) * i as f32 / steps as f32;
-                                let a = t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                                let p = point(c.x + r * a.cos(), c.y + r * a.sin());
-                                if i == 0 { path.move_to(p) } else { path.line_to(p) }
-                            }
-                            if let Ok(p) = path.build() {
-                                window.paint_path(p, color);
-                            }
-                        };
-                        ring(0.0, 1.0, track, window);
-                        if frac > 0.004 {
-                            ring(0.0, frac, color, window);
-                        }
-                    },
-                )
-                .size(px(16.)),
-            )
-            .into_any_element()
-    }
-
-    // ---------- model menu ----------
-
-    fn model_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let ws = self.workspace.read(cx);
-        let prefs = ws.prefs_in(&self.scope);
-        let models = ws.models_for(&prefs.agent);
-        let current = prefs.model.clone().or_else(|| default_model(&models).map(|m| m.id.clone()));
-        let current_info = current.as_ref().and_then(|c| models.iter().find(|m| same_model(c, &m.id))).cloned();
-        let fast_ok = current_info.as_ref().is_some_and(|m| m.fast.is_some());
-        let theme = cx.theme().clone();
-        let muted = theme.muted_foreground;
-
-        let main = ui::menu_surface(cx)
-            .w(px(260.))
-            .when(fast_ok, |el| {
-                el.child(
-                    ui::menu_row("mm-fast", false, cx)
-                        .child(Icon::new(crate::assets::Lucide::Zap).small().text_color(muted))
-                        .child(div().flex_1().child("Fast"))
-                        .child(Switch::new("mm-fast-switch").small().checked(prefs.fast).on_click(cx.listener(|this, v: &bool, _, cx| {
-                            let v = *v;
-                            this.update_prefs(cx, |p| p.fast = v);
-                        }))),
-                )
-            })
-            .child(
-                ui::menu_row("mm-effort", self.sub == Some(Sub::Effort), cx)
-                    .child(Icon::new(crate::assets::Lucide::Sparkle).small().text_color(muted))
-                    .child(div().flex_1().child("Effort"))
-                    .child(div().text_color(muted).child(prefs.effort.label()))
-                    .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.sub = Some(Sub::Effort);
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sub = Some(Sub::Effort);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                ui::menu_row("mm-model", self.sub == Some(Sub::Model), cx)
-                    .child(ui::agent_glyph(&prefs.agent, cx))
-                    .child(div().flex_1().child("Model"))
-                    .child(div().text_color(muted).max_w(px(120.)).truncate().child(current.as_deref().map(|c| model_name(&models, c)).unwrap_or_default()))
-                    .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.sub = Some(Sub::Model);
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sub = Some(Sub::Model);
-                        cx.notify();
-                    })),
-            );
-
-        let sub = match self.sub {
-            Some(Sub::Effort) => Some(self.effort_panel(&prefs, current_info.as_ref(), cx)),
-            Some(Sub::Model) => Some(self.model_panel(&prefs, current.as_deref(), cx)),
-            None => None,
-        };
-        h_flex().id("model-menu-body").test_support().items_end().gap(px(6.)).child(main).children(sub).into_any_element()
-    }
-
-    fn effort_panel(&mut self, prefs: &Prefs, model: Option<&ModelInfo>, cx: &mut Context<Self>) -> AnyElement {
-        let efforts: Vec<Effort> = model
-            .map(|m| m.efforts.clone())
-            .filter(|e| !e.is_empty())
-            .unwrap_or_else(|| vec![Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]);
-        let current = prefs.effort;
-        ui::menu_surface(cx)
-            .w(px(200.))
-            .children(efforts.into_iter().map(|e| {
-                ui::menu_row(SharedString::from(format!("eff-{}", e.as_str())), e == current, cx)
-                    .child(div().flex_1().child(e.label()))
-                    .when(e == current, |el| el.child(Icon::new(IconName::Check).small()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.update_prefs(cx, |p| p.effort = e);
-                        this.model_open = false;
-                        this.sync_overlay(cx);
-                        this.sub = None;
-                        cx.notify();
-                    }))
-            }))
-            .into_any_element()
-    }
-
-    fn model_panel(&mut self, prefs: &Prefs, current: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
-        let ws = self.workspace.read(cx);
-        let agents = ws.ready_agents();
-        let favorites = ws.settings.general.favorite_models.clone();
-        let rail = self.rail.clone().unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
-        let query = self.model_search.read(cx).value().to_lowercase();
-        let theme = cx.theme().clone();
-
-        // (agent, model) pairs for the selected rail entry.
-        let list: Vec<(AgentId, ModelInfo)> = match &rail {
-            Rail::Agent(a) => ws.models_for(a).into_iter().map(|m| (a.clone(), m)).collect(),
-            Rail::Favorites => agents
-                .iter()
-                .flat_map(|a| ws.models_for(a).into_iter().map(move |m| (a.clone(), m)))
-                .filter(|(a, m)| favorites.contains(&format!("{}/{}", a.key(), m.id)))
-                .collect(),
-        };
-        let list: Vec<(AgentId, ModelInfo)> =
-            list.into_iter().filter(|(_, m)| query.is_empty() || m.name.to_lowercase().contains(&query) || m.id.to_lowercase().contains(&query)).collect();
-
-        let rail_button = |id: SharedString, active: bool, icon: AnyElement, tip: SharedString, target: Rail, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .size(px(32.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(8.))
-                .cursor_pointer()
-                .when(active, |el| el.bg(theme.list_active))
-                .hover(|s| s.bg(theme.list_active))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                .child(icon)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.rail = Some(target.clone());
-                    cx.notify();
-                }))
-        };
-        let mut rail_col = v_flex().gap_1().p(px(5.)).border_r_1().border_color(theme.border).child(rail_button(
-            "rail-fav".into(),
-            rail == Rail::Favorites,
-            Icon::new(IconName::Star).small().text_color(theme.muted_foreground).into_any_element(),
-            "Favorites".into(),
-            Rail::Favorites,
-            cx,
-        ));
-        for a in &agents {
-            rail_col = rail_col.child(rail_button(
-                SharedString::from(format!("rail-{}", a.key())),
-                rail == Rail::Agent(a.clone()),
-                ui::agent_glyph(a, cx).into_any_element(),
-                a.display_name().into(),
-                Rail::Agent(a.clone()),
-                cx,
-            ));
-        }
-
-        let rows = list.into_iter().map(|(agent, m)| {
-            let selected = agent == prefs.agent && current.is_some_and(|c| same_model(c, &m.id));
-            let fav_key = format!("{}/{}", agent.key(), m.id);
-            let is_fav = favorites.contains(&fav_key);
-            let id = m.id.clone();
-            let agent2 = agent.clone();
-            ui::menu_row(SharedString::from(format!("m-{}-{}", agent.key(), m.id)), selected, cx)
-                .group("model-row")
-                .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("fav-{fav_key}")))
-                        .when(!is_fav, |el| el.invisible().group_hover("model-row", |s| s.visible()))
-                        .child(Icon::new(if is_fav { IconName::StarFill } else { IconName::Star }).xsmall().text_color(theme.muted_foreground))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            let key = fav_key.clone();
-                            this.workspace.update(cx, |ws, cx| {
-                                let favs = &mut ws.settings.general.favorite_models;
-                                if let Some(i) = favs.iter().position(|f| *f == key) {
-                                    favs.remove(i);
-                                } else {
-                                    favs.push(key);
-                                }
-                                ws.save_settings(cx);
-                            });
-                        })),
-                )
-                .when(selected, |el| el.child(Icon::new(IconName::Check).small()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let (agent, id) = (agent2.clone(), id.clone());
-                    this.update_prefs(cx, |p| {
-                        p.agent = agent;
-                        p.model = Some(id);
-                    });
-                    this.model_open = false;
-                        this.sync_overlay(cx);
-                    this.sub = None;
-                    cx.notify();
-                }))
-        });
-
-        ui::menu_surface(cx)
-            .p_0()
-            .w(px(360.))
-            .child(
-                h_flex()
-                    .items_start()
-                    .child(rail_col)
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().p(px(6.)).border_b_1().border_color(theme.border).child(
-                                Input::new(&self.model_search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)),
-                            ))
-                            .child(
-                                v_flex()
-                                    .id("model-list")
-                                    .p(px(5.))
-                                    .max_h(px(360.))
-                                    .overflow_y_scroll()
-                                    .children(rows)
-                                    .when(self.list_is_empty(&rail, cx), |el| {
-                                        el.child(div().p_3().text_sm().text_color(theme.muted_foreground).child(match rail {
-                                            Rail::Favorites => "Hover a model and press the star to keep it here.",
-                                            _ => "No models match.",
-                                        }))
-                                    }),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn list_is_empty(&self, rail: &Rail, cx: &App) -> bool {
-        let ws = self.workspace.read(cx);
-        match rail {
-            Rail::Agent(a) => ws.models_for(a).is_empty(),
-            Rail::Favorites => ws.settings.general.favorite_models.is_empty(),
-        }
     }
 
     // ---------- consult ----------
@@ -2059,61 +1594,11 @@ impl Composer {
             .into_any_element()
     }
 
-    // ---------- access menu ----------
-
-    fn access_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let ws = self.workspace.read(cx);
-        let current = ws.prefs_in(&self.scope).hand_holding;
-        let unlocked = ws.settings.permissions.full_access_unlocked;
-        let theme = cx.theme().clone();
-        ui::menu_surface(cx)
-            .w(px(340.))
-            .children(HandHolding::ALL.into_iter().map(|level| {
-                let locked = level == HandHolding::FullAccess && !unlocked;
-                let tint = if level == HandHolding::FullAccess { palette::amber(cx) } else { theme.muted_foreground };
-                ui::menu_row(SharedString::from(format!("hh-{level:?}")), level == current, cx)
-                    .items_start()
-                    .py(px(9.))
-                    .child(div().pt(px(2.)).child(hand_icon(level).small().text_color(tint)))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(3.))
-                            .child(div().font_medium().child(level.label()))
-                            .child(div().text_xs().whitespace_normal().line_height(relative(1.4)).text_color(theme.muted_foreground).child(if locked {
-                                "Turn on in Settings → Permissions to use it."
-                            } else {
-                                level.description()
-                            })),
-                    )
-                    .when(locked, |el| el.opacity(0.55))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if locked {
-                            let route = Route::Settings(crate::workspace::SettingsPage::Permissions);
-                            let main = this.scope == Scope::Main;
-                            this.workspace.update(cx, |ws, cx| if main { ws.navigate(route, cx) } else { ws.show_in_main(route, cx) });
-                        } else {
-                            this.update_prefs(cx, |p| p.hand_holding = level);
-                        }
-                        this.access_open = false;
-                        this.sync_overlay(cx);
-                        cx.notify();
-                    }))
-            }))
-            .id("access-menu-body")
-            .test_support()
-            .into_any_element()
-    }
-
     // ---------- project + clone ----------
 
     fn project_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
-        let project = match &ws.route {
-            Route::Draft { project } => project.clone(),
-            _ => None,
-        };
+        let project = ws.draft_project_in(&self.scope);
         let label = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "No project".into());
         // The project's colour on its folder, as on its badge in the sidebar.
         let tint = project.as_ref().and_then(|p| ws.project_tint_at(p, cx));
@@ -2170,6 +1655,7 @@ impl Composer {
     fn place_chip(&self, worktree: bool, blocked: Option<&'static str>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.clone();
+        let scope = self.scope.clone();
         let (icon, label) = if worktree { (crate::assets::Lucide::GitBranchPlus, "New worktree") } else { (crate::assets::Lucide::Laptop, "Local") };
         gpui_kit::component::button::Button::new("env-place")
             .ghost()
@@ -2184,12 +1670,12 @@ impl Composer {
             )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let pick = |label: &'static str, on: bool| {
-                    let ws = ws.clone();
+                    let (ws, scope) = (ws.clone(), scope.clone());
                     PopupMenuItem::new(label).checked(worktree == on).on_click(move |_, _, cx| {
                         ws.update(cx, |ws, cx| {
-                            let mut p = ws.prefs_in(&Scope::Main);
+                            let mut p = ws.prefs_in(&scope);
                             p.worktree = on;
-                            ws.set_prefs_in(&Scope::Main, p, cx);
+                            ws.set_prefs_in(&scope, p, cx);
                         })
                     })
                 };
@@ -2241,12 +1727,15 @@ impl Composer {
                 .child("Worktree")
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
                 .into_any_element()
-        } else {
+        } else if is_draft {
             chip("env-local")
                 .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
                 .child("Local")
                 .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Runs on this Mac, in the project folder").build(window, cx))
                 .into_any_element()
+        } else {
+            // A thread in the project folder is the usual case: only a worktree is worth a chip.
+            div().into_any_element()
         };
         let branch: Option<AnyElement> = match git {
             // The thread's own branch, off its base.
@@ -2273,6 +1762,7 @@ impl Composer {
                 let on_default = g.on_default();
                 let ws_entity = self.workspace.clone();
                 let branches = g.branches.clone();
+                let elsewhere = g.elsewhere.clone();
                 let current = g.branch.clone();
                 let default = g.default_branch.clone();
                 let status = match (g.changed, g.ahead) {
@@ -2290,18 +1780,25 @@ impl Composer {
                                 .gap(px(6.))
                                 .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(if on_default { theme.muted_foreground } else { palette::indigo(cx) }))
                                 .child(div().text_color(theme.foreground.opacity(0.9)).child(name))
-                                .when(on_default, |el| {
-                                    el.child(div().px(px(5.)).rounded(px(4.)).text_xs().bg(theme.foreground.opacity(0.08)).text_color(theme.muted_foreground).child("default"))
-                                })
-                                .when_some(status, |el, s| el.child(div().text_xs().text_color(palette::amber(cx)).child(s)))
+                                // Uncommitted work is normal, not a warning: quiet, like the branch's other details.
+                                .when_some(status, |el, s| el.child(div().text_xs().text_color(theme.muted_foreground).child(s)))
                                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
                         )
-                        .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
-                            menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Switch branch");
+                        .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, cx| {
+                            // Read as the menu opens: an agent may have started since the chip drew.
+                            let blocked = cwd.as_deref().and_then(|c| ws_entity.read(cx).switch_blocked(c));
+                            menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label(blocked.clone().unwrap_or_else(|| "Switch branch".into()));
                             for b in branches.clone() {
                                 let (ws, cwd) = (ws_entity.clone(), cwd.clone());
-                                let label = if Some(&b) == default.as_ref() { format!("{b}  (default)") } else { b.clone() };
-                                menu = menu.item(PopupMenuItem::new(label).checked(Some(&b) == current.as_ref()).on_click(move |_, _, cx| {
+                                let is_current = Some(&b) == current.as_ref();
+                                // Git won't check out a branch another worktree has (a worktree thread's).
+                                let taken = elsewhere.contains(&b);
+                                let label = match (Some(&b) == default.as_ref(), taken) {
+                                    (_, true) => format!("{b}  (in another worktree)"),
+                                    (true, false) => format!("{b}  (default)"),
+                                    (false, false) => b.clone(),
+                                };
+                                menu = menu.item(PopupMenuItem::new(label).checked(is_current).disabled(!is_current && (taken || blocked.is_some())).on_click(move |_, _, cx| {
                                     let b = b.clone();
                                     if let Some(cwd) = cwd.clone() {
                                         ws.update(cx, |ws, cx| ws.switch_branch(cwd, b, cx))
@@ -2385,6 +1882,32 @@ impl Composer {
     }
 }
 
+impl PickerHost for Composer {
+    fn pickers(&mut self) -> &mut Pickers {
+        &mut self.pickers
+    }
+
+    fn pickers_ref(&self) -> &Pickers {
+        &self.pickers
+    }
+
+    fn workspace(&self) -> &Entity<Workspace> {
+        &self.workspace
+    }
+
+    fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    fn input(&self) -> &Entity<TextareaState> {
+        &self.input
+    }
+
+    fn overlay_changed(&mut self, cx: &mut Context<Self>) {
+        self.sync_overlay(cx);
+    }
+}
+
 impl Attaching for Composer {
     fn outbox(&mut self) -> &mut Outbox {
         &mut self.outbox
@@ -2392,10 +1915,10 @@ impl Attaching for Composer {
 
     fn target(&self, cx: &App) -> String {
         let ws = self.workspace.read(cx);
-        match (ws.thread_id_in(&self.scope), &ws.route) {
-            (Some(id), _) => format!("thread:{id}"),
-            (None, Route::Draft { project }) => format!("draft:{}", project.as_deref().map(|p| p.display().to_string()).unwrap_or_default()),
-            (None, _) => String::new(),
+        match ws.thread_id_in(&self.scope) {
+            Some(id) => format!("thread:{id}"),
+            None if ws.is_draft_in(&self.scope) => format!("draft:{}", ws.draft_project_in(&self.scope).map(|p| p.display().to_string()).unwrap_or_default()),
+            None => String::new(),
         }
     }
 
@@ -2404,6 +1927,9 @@ impl Attaching for Composer {
         self.submit(input, window, cx);
     }
 }
+
+/// Below this card width the composer's pills get their narrowest form.
+const NARROW: f32 = 440.;
 
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2414,6 +1940,7 @@ impl Render for Composer {
         let thread = ws.thread_in(&self.scope).cloned();
         let is_draft = ws.is_draft_in(&self.scope);
         let main = self.scope == Scope::Main;
+        let follow_up = ws.settings.general.follow_up;
         let own_turn = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
         // Its turn is over but it waits on sub-agents (Trek's, or its agent's own in the background).
         let children_working = thread.as_ref().is_some_and(|t| !ws.running_children(&t.id).is_empty() || ws.waiting(&t.id));
@@ -2424,13 +1951,6 @@ impl Render for Composer {
         let cost_label = crate::cost::label(billing.as_ref(), &spend);
         let billing_tip = crate::cost::billing_note(billing.as_ref());
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
-        let models = ws.models_for(&prefs.agent);
-        let model_label = prefs
-            .model
-            .as_deref()
-            .map(|m| model_name(&models, m))
-            .or_else(|| default_model(&models).map(|m| m.name.clone()))
-            .unwrap_or_else(|| prefs.agent.display_name());
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty() && self.outbox.paths.is_empty() && self.outbox.saving == 0;
         // Stop also ends sub-agents still at work after their parent's turn, unless there's a
@@ -2439,6 +1959,9 @@ impl Render for Composer {
         let thread_id = thread.as_ref().map(|t| t.id.clone());
         let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
         let compact = self.width.get() < px(600.);
+        // A side bar's width (the editor's AI side bar): the model pill drops its effort and
+        // cuts its name shorter, so the send button stays in view.
+        let narrow = self.width.get() < px(NARROW);
         let plan = prefs.plan;
         let preparing = live.is_some_and(|l| l.preparing);
         // Its agent's CLI is being updated: messages wait for the new version.
@@ -2449,65 +1972,22 @@ impl Render for Composer {
         // The way out is a worktree, for git projects.
         let crowded_repo = crowded.clone().flatten().filter(|p| crate::system::lately::exists(&p.join(".git")));
 
-        // Model pill + menu.
-        let model_open = self.model_open;
-        let model_pill = Popover::new("model-menu")
-            .anchor(Anchor::BottomLeft)
-            .appearance(false)
-            .open(model_open)
-            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
-                this.model_open = *open;
-                this.sync_overlay(cx);
-                if !*open {
-                    this.sub = None;
-                    this.rail = None;
-                }
-                cx.notify();
-            }))
-            .trigger(
-                Pill::new("model-pill")
-                    .flexible()
-                    .child(ui::agent_glyph(&prefs.agent, cx))
-                    .child(div().min_w_0().max_w(px(if compact { 120. } else { 240. })).truncate().child(model_label))
-                    .child(div().flex_none().text_color(theme.muted_foreground).child(prefs.effort.label()))
-                    .when(prefs.fast, |el| el.child(Icon::new(crate::assets::Lucide::Zap).xsmall().text_color(palette::amber(cx))))
-                    .child(Icon::new(if model_open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall().text_color(theme.muted_foreground)),
-            );
-        let model_menu_entity = cx.entity();
-        let model_pill = model_pill.content({
-            let c = model_menu_entity.clone();
-            move |_, _, cx| c.update(cx, |c, cx| c.model_menu(cx))
-        });
-
-        let access_open = self.access_open;
-        let access_entity = cx.entity();
+        // Model pill + menu, access pill + menu (`pickers`). Short labels (Consult, Plan) stay
+        // until the card is side-bar narrow; the access level's long one goes first.
+        let model_pill = pickers::model_pill(self, narrow, compact, false, cx);
+        let access_pill = pickers::access_pill(self, compact, false, cx);
         let hh = prefs.hand_holding;
-        let access_tint = if hh == HandHolding::FullAccess { palette::amber(cx) } else { theme.muted_foreground };
-        let access_pill = Popover::new("access-menu")
-            .anchor(Anchor::BottomLeft)
-            .appearance(false)
-            .open(access_open)
-            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
-                this.access_open = *open;
-                this.sync_overlay(cx);
-                cx.notify();
-            }))
-            .trigger(
-                Pill::new("access-pill")
-                    .when(compact, |p| p.tooltip(hh.label()))
-                    .child(hand_icon(hh).small().text_color(access_tint))
-                    .when(!compact, |p| p.child(hh.label()))
-                    .child(Icon::new(if access_open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall().text_color(theme.muted_foreground)),
-            )
-            .content(move |_, _, cx| access_entity.update(cx, |c, cx| c.access_menu(cx)));
 
         let square = |id: &'static str| {
             div().id(id).size(px(30.)).flex_none().rounded(px(8.)).flex().items_center().justify_center()
         };
+        // What the keys do, on the button: sending, a new line, and steer or queue mid-turn.
+        let hint = delivery_hint(self.cmd_enter, follow_up, own_turn);
         let send = if running {
             square("stop")
                 .test_support()
                 .cursor_pointer()
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Stop ⌘. · {hint}")).build(window, cx))
                 .bg(palette::red(cx))
                 .child(div().size(px(10.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2519,6 +1999,7 @@ impl Render for Composer {
         } else {
             square("send")
                 .test_support()
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
                 .bg(if empty { theme.foreground.opacity(0.08) } else { theme.foreground })
                 .when(!empty, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
                 .child(Icon::new(IconName::ArrowUp).small().text_color(if empty { theme.muted_foreground } else { theme.background }))
@@ -2563,7 +2044,8 @@ impl Render for Composer {
             move |bounds, _, cx| {
                 let before = width_cell.get();
                 width_cell.set(bounds.size.width);
-                if (before < px(600.)) != (bounds.size.width < px(600.)) {
+                let crossed = |at: f32| (before < px(at)) != (bounds.size.width < px(at));
+                if crossed(600.) || crossed(NARROW) {
                     let me = me.clone();
                     cx.defer(move |cx| {
                         let _ = me.update(cx, |_, cx| cx.notify());
@@ -2596,7 +2078,6 @@ impl Render for Composer {
                         .text_sm()
                         .text_color(theme.muted_foreground)
                         .child(self.env_chips(false, cx))
-                        .when(plan, |el| el.child(h_flex().gap(px(6.)).text_color(palette::indigo(cx)).child(Icon::new(crate::assets::Lucide::ListChecks).small()).child("Plan mode")))
                         .when(preparing, |el| {
                             el.child(h_flex().gap(px(6.)).child(gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground)).child("Creating the worktree…"))
                         })
@@ -2638,14 +2119,14 @@ impl Render for Composer {
                     .overflow_hidden()
                     .child(self.plus_button(cx))
                     .child(model_pill)
-                    .child(self.consult_pill(compact, cx))
+                    .child(self.consult_pill(narrow, cx))
                     .when(self.restate, |el| {
                         el.child(
                             Pill::new("restate-pill")
                                 .selected(true)
                                 .tooltip("The agent says back what you asked, in its own words, before it does anything. Click to turn off.")
                                 .child(Icon::new(crate::assets::Lucide::MessageSquareQuote).small().text_color(theme.foreground.opacity(0.85)))
-                                .when(!compact, |p| p.child("Restate first"))
+                                .when(!narrow, |p| p.child("Restate first"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.restate = false;
                                     cx.notify();
@@ -2653,26 +2134,26 @@ impl Render for Composer {
                         )
                     })
                     .child(access_pill)
-                    .when(is_draft, |el| {
-                        el.child(
-                            Pill::new("plan-pill")
-                                .selected(plan)
-                                .when(compact, |p| p.tooltip(if plan { "Plan mode on" } else { "Plan mode" }))
-                                .child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
-                                .when(!compact, |p| p.child("Plan"))
-                                .on_click(cx.listener(|this, _, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan))),
-                        )
-                    })
+                    // The same pill on a new thread and in one under way (⇧⇥ either way).
+                    .child(
+                        Pill::new("plan-pill")
+                            .selected(plan)
+                            .tooltip(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" })
+                            .child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
+                            .when(!narrow, |p| p.child("Plan"))
+                            .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
+                    )
                     .child(div().flex_1().min_w(px(4.)))
-                    .when_some(context, |el, (used, window)| el.child(self.context_ring(used, window, cx)))
+                    .when_some(context, |el, (used, window)| el.child(pickers::context_ring(used, window, cx)))
                     .children(mic)
                     .child(send),
             );
 
         let limit_bar = thread.as_ref().and_then(|t| self.limit_bar(&t.id, compact, cx));
         // Capy-style context chips above the card on a new thread.
-        let chips = is_draft.then(|| div().pb(px(8.)).child(self.env_chips(true, cx)));
-        let picker = self.picker(cx);
+        // The AI side bar's new chat works in the IDE folder: it has no project to pick.
+        let chips = is_draft.then(|| div().pb(px(8.)).child(self.env_chips(self.scope != Scope::Ide, cx)));
+        let picker = pickers::picker(self, cx);
         let drop_tint = palette::ember(cx);
         let card = div()
             .relative()
@@ -2764,19 +2245,58 @@ impl Render for Composer {
             .relative()
             .w_full()
             .justify_center()
-            .px_6()
+            // Less room around it in the editor's side bar, where every point counts.
+            .when(self.scope == Scope::Ide, |el| el.px_3())
+            .when(self.scope != Scope::Ide, |el| el.px_6())
             .pb(px(if is_draft { 0. } else { 12. }))
             .child(measure_height)
             .key_context("Composer")
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.on_key(ev, window, cx)))
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // ⌥↩ sends the other way from the default while a turn runs (steer ⇄ queue).
+                let k = &ev.keystroke;
+                if k.key == "enter" && k.modifiers.alt && !k.modifiers.platform && !k.modifiers.shift && this.pickers.trigger.is_none() {
+                    cx.stop_propagation();
+                    let other = match this.workspace.read(cx).settings.general.follow_up {
+                        FollowUp::Steer => FollowUp::Queue,
+                        FollowUp::Queue => FollowUp::Steer,
+                    };
+                    let input = this.input.clone();
+                    this.submit_as(input, Some(other), window, cx);
+                    return;
+                }
+                pickers::picker_key(this, ev, window, cx)
+            }))
             // The textarea binds these keys to actions, which never reach key listeners.
             .capture_action(cx.listener(|this, _: &MoveUp, window, cx| this.picker_action("up", window, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| this.picker_action("down", window, cx)))
             .capture_action(cx.listener(|this, _: &Escape, window, cx| this.picker_action("escape", window, cx)))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.picker_action("tab", window, cx)))
             .capture_action(cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)))
-            .on_action(cx.listener(|this, _: &TogglePlan, _, cx| this.update_prefs(cx, |p| p.plan = !p.plan)))
+            .on_action(cx.listener(|this, _: &TogglePlan, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan)))
             .child(v_flex().w_full().max_w(self.workspace.read(cx).column()).children(chips).children(limit_bar).child(card).children(status))
+    }
+}
+
+/// The prompt's placeholder: what to type, or mid-turn (`running`: the default way a message
+/// goes), where a message sent now goes.
+fn placeholder(running: Option<FollowUp>) -> &'static str {
+    match running {
+        None => "Ask or build · / commands · @ files",
+        Some(FollowUp::Steer) => "Steer the running turn · ⌥↩ queues for after it",
+        Some(FollowUp::Queue) => "Queue a follow-up · ⌥↩ steers the running turn",
+    }
+}
+
+/// The send button's tooltip: which keys send and add a line, and while a turn runs (`running`),
+/// which key steers it and which queues for after it.
+pub(crate) fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
+    let (send, line) = if cmd_enter { ("⌘↩", "↩") } else { ("↩", "⇧↩") };
+    if !running {
+        return format!("Send {send} · New line {line}");
+    }
+    match follow {
+        FollowUp::Steer => format!("{send} steers the running turn · ⌥↩ queues for after it"),
+        FollowUp::Queue => format!("{send} queues for after the turn · ⌥↩ steers it now"),
     }
 }
 

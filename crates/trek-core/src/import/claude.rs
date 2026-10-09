@@ -9,7 +9,7 @@ use super::UsageEntry;
 use crate::types::{Effort, ThreadSource, TokenUsage};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
@@ -147,9 +147,9 @@ fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String
     // Head: the first real prompt and its context. Bounded so huge files stay cheap.
     let mut read = 0usize;
     let mut whole = false;
-    let mut lines = BufReader::new(file).lines();
+    let mut lines = super::jsonl_lines(BufReader::new(file));
     for _ in 0..400 {
-        let Some(Ok(line)) = lines.next() else {
+        let Some(line) = lines.next() else {
             whole = true;
             break;
         };
@@ -375,7 +375,7 @@ pub fn find_session(id: &str) -> Option<PathBuf> {
 pub fn has_message(id: &str, uuid: &str) -> bool {
     let Some(file) = find_session(id).and_then(|p| std::fs::File::open(p).ok()) else { return false };
     let needle = format!("\"uuid\":\"{uuid}\"");
-    BufReader::new(file).lines().map_while(Result::ok).any(|l| l.contains(&needle))
+    super::jsonl_lines(BufReader::new(file)).any(|l| l.contains(&needle))
 }
 
 /// The id of a line of the conversation that `--resume-session-at` can cut it after: a user or
@@ -392,7 +392,7 @@ pub fn last_message(id: &str) -> Option<String> {
 fn last_message_in(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut last = None;
-    for line in BufReader::new(file).lines().map_while(Result::ok).filter(|l| l.contains("\"uuid\"")) {
+    for line in super::jsonl_lines(BufReader::new(file)).filter(|l| l.contains("\"uuid\"")) {
         if let Some(uuid) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(message_uuid) {
             last = Some(uuid.to_string());
         }
@@ -430,7 +430,7 @@ fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
     let Ok(file) = std::fs::File::open(path) else { return vec![] };
     let mut out: Vec<UsageEntry> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in super::jsonl_lines(BufReader::new(file)) {
         // Most lines aren't responses; skip them without parsing.
         if !line.contains("\"usage\"") || !line.contains("\"assistant\"") {
             continue;
@@ -483,7 +483,7 @@ fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
     let point = |after: Option<String>| Some(ResumePoint { session: session.clone(), after });
     // A message typed mid-turn and shown already, in case it's also written as a user line.
     let mut queued: Option<String> = None;
-    for line in reader.lines().map_while(Result::ok) {
+    for line in super::jsonl_lines(reader) {
         // Background tasks report back as a user line when the agent is idle, or queued into
         // the running turn; either way the task is done.
         if line.contains("<task-notification>") {
@@ -891,6 +891,24 @@ mod tests {
         assert!(matches!(&items[6], Item::User { resume: r, .. } if *r == resume(Some("l9"))));
         // A message sent now goes after the last one.
         assert_eq!(last_message_in(&path).as_deref(), Some("l10"));
+    }
+
+    #[test]
+    fn a_line_that_isnt_utf8_keeps_the_lines_after_it() {
+        let dir = Scratch::new();
+        let path = session(&dir, "a", REPO, "cli", &[
+            user("first", "2026-10-01T10:00:00Z"),
+            reply("one", "2026-10-01T10:00:01Z"),
+            user("second", "2026-10-01T10:01:00Z"),
+            reply("two", "2026-10-01T10:01:01Z"),
+        ]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (head, tail) = text.split_at(text.find('\n').unwrap() + 1);
+        let mut bytes = head.as_bytes().to_vec();
+        bytes.extend_from_slice(b"{\"type\":\"progress\",\"text\":\"\xff\xfe\"}\r\n");
+        bytes.extend_from_slice(tail.as_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(kinds(&load_file(&path).unwrap()), ["user first", "assistant", "end 1s", "user second", "assistant", "end 1s"]);
     }
 
     /// Each item's kind, with a user message's first word and a footer's duration.

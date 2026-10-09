@@ -1,10 +1,10 @@
 //! App-wide behaviour driven by settings and workspace state: keeping the Mac awake while agents
-//! run, the Dock badge, the menu bar item, the UI font size, and the notification sound.
+//! run, the Dock badge and icon, the menu bar item, the UI font size, and the notification sound.
 
 use crate::workspace::Workspace;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
-use trek_core::settings::NotifyMode;
+use trek_core::settings::{AppIcon, NotifyMode};
 
 /// What has been applied to the system so far; the observer only acts on differences.
 struct Applied {
@@ -14,6 +14,8 @@ struct Applied {
     badge: usize,
     menu_bar_icon: bool,
     ui_font_size: f32,
+    /// `None` until the first sync, so the chosen icon is put up at launch.
+    app_icon: Option<AppIcon>,
 }
 
 /// Watch the workspace and keep the system in step. The check is a few comparisons per notify,
@@ -25,9 +27,33 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         badge: 0,
         menu_bar_icon: ws.settings.notifications.menu_bar_icon,
         ui_font_size: 0.,
+        app_icon: None,
     };
     sync(&workspace, &mut applied, cx);
     cx.observe(&workspace, move |workspace, cx| sync(&workspace, &mut applied, cx)).detach();
+    follow_reduce_motion(cx);
+}
+
+/// macOS's Reduce motion (Accessibility › Display) stills Trek's animations as Trek's own setting
+/// does: gpui's animations and `Workspace::motion` read it from the app. Nothing tells gpui when
+/// it changes, so it's asked every couple of seconds.
+fn follow_reduce_motion(cx: &mut App) {
+    if cfg!(test) {
+        return;
+    }
+    cx.set_reduce_motion(reduce_motion());
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+            let on = reduce_motion();
+            cx.update(|cx| {
+                if cx.reduce_motion() != on {
+                    cx.set_reduce_motion(on)
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
@@ -36,6 +62,7 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     let badge = if ws.settings.notifications.dock_badge { ws.needs_you_count() } else { 0 };
     let menu_bar_icon = ws.settings.notifications.menu_bar_icon;
     let ui_font_size = ws.settings.appearance.ui_font_size();
+    let app_icon = ws.settings.appearance.app_icon;
 
     if awake != applied.awake.is_some() {
         applied.awake = awake.then(|| cx.prevent_idle_sleep("Agents are working in Trek"));
@@ -48,6 +75,10 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     if ui_font_size != applied.ui_font_size {
         applied.ui_font_size = ui_font_size;
         apply_ui_font_size(ui_font_size, cx);
+    }
+    if applied.app_icon != Some(app_icon) {
+        applied.app_icon = Some(app_icon);
+        set_app_icon(app_icon);
     }
     if menu_bar_icon != applied.menu_bar_icon {
         applied.menu_bar_icon = menu_bar_icon;
@@ -77,12 +108,47 @@ fn set_dock_badge(count: usize) {
 #[cfg(all(not(target_os = "macos"), not(test)))]
 fn set_dock_badge(_: usize) {}
 
+/// The rendered icon for `icon` (`assets/brand`).
+pub fn app_icon_image(icon: AppIcon) -> &'static str {
+    match icon {
+        AppIcon::Ember => "brand/icon.png",
+        AppIcon::Night => "brand/icon-night.png",
+        AppIcon::Glass => "brand/icon-glass.png",
+    }
+}
+
+/// Show `icon` in the Dock while Trek runs. The bundle's own icon (Ember) is what Finder and a
+/// quit app's Dock tile show: macOS only lets a running app change its tile.
+#[cfg(all(target_os = "macos", not(test)))]
+fn set_app_icon(icon: AppIcon) {
+    use objc2::{AllocAnyThread as _, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else { return };
+    let data = NSData::with_bytes(&bytes);
+    let image = NSImage::initWithData(NSImage::alloc(), &data);
+    // SAFETY: on the main thread (`mtm`), with an image AppKit retains; `None` puts the bundle's
+    // icon back.
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image.as_deref()) };
+}
+
+#[cfg(all(not(target_os = "macos"), not(test)))]
+fn set_app_icon(_: AppIcon) {}
+
+#[cfg(test)]
+fn set_app_icon(icon: AppIcon) {
+    APP_ICON.with(|i| i.set(Some(icon)));
+}
+
 #[cfg(test)]
 thread_local! {
     /// What tests would have shown on the Dock tile (each GPUI test runs on its own thread).
     pub static DOCK_BADGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Alert sounds tests would have played.
     pub static SOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The Dock icon tests would have shown.
+    pub static APP_ICON: std::cell::Cell<Option<AppIcon>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -112,6 +178,17 @@ pub fn reduce_transparency() -> bool {
     false
 }
 
+/// macOS's Reduce motion is on (Accessibility › Display).
+#[cfg(target_os = "macos")]
+fn reduce_motion() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reduce_motion() -> bool {
+    false
+}
+
 /// Move `path` to the Trash, where the user can still get it back.
 #[cfg(all(target_os = "macos", not(test)))]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
@@ -123,7 +200,7 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
 /// Tests' folders are their own: gone for good, not into the user's Trash.
 #[cfg(any(not(target_os = "macos"), test))]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
-    std::fs::remove_dir_all(path).map_err(Into::into)
+    if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(Into::into)
 }
 
 /// Whether Trek is the frontmost app (a relaunch after an update comes back to the front only then).

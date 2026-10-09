@@ -7,7 +7,8 @@
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, h_flex, v_flex};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::ops::Range;
@@ -124,6 +125,37 @@ pub enum Mode {
     Preview,
 }
 
+/// Toolbar widths below which it gives up room (see `NotesView::toolbar`): the view switcher's
+/// words, then the formats of tier 2, then those of tier 1.
+const TOOLBAR_FULL: f32 = 640.;
+const TOOLBAR_SOME: f32 = 520.;
+const TOOLBAR_FEW: f32 = 400.;
+
+/// A formatting command on the toolbar. Tier 0 stays at any width; 1 and 2 move into the "More"
+/// menu as the toolbar narrows. A divider goes between groups.
+struct Format {
+    id: &'static str,
+    icon: crate::assets::Lucide,
+    tip: &'static str,
+    act: fn(&mut NotesView, &mut Window, &mut Context<NotesView>),
+    tier: u8,
+    group: u8,
+}
+
+const FORMATS: [Format; 11] = [
+    Format { id: "note-bold", icon: crate::assets::Lucide::Bold, tip: "Bold (⌘B)", act: |t, w, cx| t.wrap("**", "**", w, cx), tier: 0, group: 0 },
+    Format { id: "note-italic", icon: crate::assets::Lucide::Italic, tip: "Italic (⌘I)", act: |t, w, cx| t.wrap("*", "*", w, cx), tier: 0, group: 0 },
+    Format { id: "note-underline", icon: crate::assets::Lucide::Underline, tip: "Underline (⌘U)", act: |t, w, cx| t.wrap("<u>", "</u>", w, cx), tier: 2, group: 0 },
+    Format { id: "note-strike", icon: crate::assets::Lucide::Strikethrough, tip: "Strikethrough (⌘⇧X)", act: |t, w, cx| t.wrap("~~", "~~", w, cx), tier: 2, group: 0 },
+    Format { id: "note-h1", icon: crate::assets::Lucide::Heading1, tip: "Heading (⌘⌥1)", act: |t, w, cx| t.block(Block::Heading(1), w, cx), tier: 1, group: 1 },
+    Format { id: "note-h2", icon: crate::assets::Lucide::Heading2, tip: "Subheading (⌘⌥2)", act: |t, w, cx| t.block(Block::Heading(2), w, cx), tier: 2, group: 1 },
+    Format { id: "note-bullets", icon: crate::assets::Lucide::List, tip: "Bullet list (⌘⇧8)", act: |t, w, cx| t.block(Block::Bullets, w, cx), tier: 1, group: 2 },
+    Format { id: "note-numbers", icon: crate::assets::Lucide::ListOrdered, tip: "Numbered list (⌘⇧7)", act: |t, w, cx| t.block(Block::Numbers, w, cx), tier: 2, group: 2 },
+    Format { id: "note-checks", icon: crate::assets::Lucide::ListTodo, tip: "Checklist (⌘⇧9) · tick with ⌘↩", act: |t, w, cx| t.block(Block::Checklist, w, cx), tier: 1, group: 2 },
+    Format { id: "note-quote", icon: crate::assets::Lucide::Quote, tip: "Quote (⌘⇧.)", act: |t, w, cx| t.block(Block::Quote, w, cx), tier: 2, group: 2 },
+    Format { id: "note-code", icon: crate::assets::Lucide::Code, tip: "Code (⌘E)", act: |t, w, cx| t.wrap("`", "`", w, cx), tier: 2, group: 2 },
+];
+
 pub struct NotesView {
     workspace: Entity<Workspace>,
     notes: Vec<Note>,
@@ -131,6 +163,8 @@ pub struct NotesView {
     editor: Entity<TextareaState>,
     mode: Mode,
     colors_open: bool,
+    /// The toolbar's width as last laid out (0 before): it gives up room below `TOOLBAR_*`.
+    toolbar_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// The note's text changed and isn't saved yet.
     dirty: bool,
     /// Undo and redo for the note on screen.
@@ -183,6 +217,7 @@ impl NotesView {
             editor,
             mode: Mode::Split,
             colors_open: false,
+            toolbar_width: Default::default(),
             dirty: false,
             history: History::default(),
             epoch,
@@ -437,6 +472,13 @@ impl NotesView {
     fn toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let this = cx.entity();
+        // Narrow (the tools panel open beside it, a small window), the toolbar gives up room
+        // rather than run past its edge: first the view switcher's words (icons, named on hover),
+        // then the less-used formats, then the rest, into a "More" menu.
+        let width = self.toolbar_width.get();
+        let narrow = |below: f32| width > 0. && width < below;
+        let tier = if narrow(TOOLBAR_FEW) { 0 } else if narrow(TOOLBAR_SOME) { 1 } else { 2 };
+        let shown = |t: u8| t <= tier;
         let colors = Popover::new("note-colors")
             .anchor(Anchor::TopLeft)
             .appearance(false)
@@ -448,10 +490,11 @@ impl NotesView {
             .trigger(crate::ui::icon_button("note-color", crate::assets::Lucide::Palette, "Colour and highlight"))
             .content(move |_, _, cx| this.update(cx, |this, cx| this.colors(cx)));
         let mode = self.mode;
-        let me = cx.entity();
         h_flex()
             .id("note-toolbar")
             .test_support()
+            .relative()
+            .overflow_hidden()
             .flex_none()
             .h(px(44.))
             .px(px(10.))
@@ -460,43 +503,107 @@ impl NotesView {
             .border_color(theme.foreground.opacity(0.06))
             .child(crate::ui::icon_button("note-undo", crate::assets::Lucide::Undo2, "Undo (⌘Z)").disabled(self.history.past.is_empty()).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))))
             .child(crate::ui::icon_button("note-redo", crate::assets::Lucide::Redo2, "Redo (⇧⌘Z)").disabled(self.history.future.is_empty()).on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))))
-            .child(Self::divider(cx))
-            .child(self.tool("note-bold", crate::assets::Lucide::Bold, "Bold (⌘B)", cx, |t, w, cx| t.wrap("**", "**", w, cx)))
-            .child(self.tool("note-italic", crate::assets::Lucide::Italic, "Italic (⌘I)", cx, |t, w, cx| t.wrap("*", "*", w, cx)))
-            .child(self.tool("note-underline", crate::assets::Lucide::Underline, "Underline (⌘U)", cx, |t, w, cx| t.wrap("<u>", "</u>", w, cx)))
-            .child(self.tool("note-strike", crate::assets::Lucide::Strikethrough, "Strikethrough (⌘⇧X)", cx, |t, w, cx| t.wrap("~~", "~~", w, cx)))
-            .child(Self::divider(cx))
-            .child(self.tool("note-h1", crate::assets::Lucide::Heading1, "Heading (⌘⌥1)", cx, |t, w, cx| t.block(Block::Heading(1), w, cx)))
-            .child(self.tool("note-h2", crate::assets::Lucide::Heading2, "Subheading (⌘⌥2)", cx, |t, w, cx| t.block(Block::Heading(2), w, cx)))
-            .child(Self::divider(cx))
-            .child(self.tool("note-bullets", crate::assets::Lucide::List, "Bullet list (⌘⇧8)", cx, |t, w, cx| t.block(Block::Bullets, w, cx)))
-            .child(self.tool("note-numbers", crate::assets::Lucide::ListOrdered, "Numbered list (⌘⇧7)", cx, |t, w, cx| t.block(Block::Numbers, w, cx)))
-            .child(self.tool("note-checks", crate::assets::Lucide::ListTodo, "Checklist (⌘⇧9) · tick with ⌘↩", cx, |t, w, cx| t.block(Block::Checklist, w, cx)))
-            .child(self.tool("note-quote", crate::assets::Lucide::Quote, "Quote (⌘⇧.)", cx, |t, w, cx| t.block(Block::Quote, w, cx)))
-            .child(self.tool("note-code", crate::assets::Lucide::Code, "Code (⌘E)", cx, |t, w, cx| t.wrap("`", "`", w, cx)))
+            .children(FORMATS.iter().enumerate().flat_map(|(i, f)| {
+                // A divider before each group that has a tool showing.
+                let starts_group = i == 0 || FORMATS[i - 1].group != f.group;
+                let group_shown = FORMATS.iter().any(|g| g.group == f.group && shown(g.tier));
+                let divider = (starts_group && group_shown).then(|| Self::divider(cx));
+                let tool = shown(f.tier).then(|| self.tool(f.id, f.icon, f.tip, cx, f.act));
+                divider.into_iter().chain(tool)
+            }))
+            .when(tier < 2, |el| {
+                let me = cx.entity().downgrade();
+                let hidden: Vec<&'static Format> = FORMATS.iter().filter(|f| !shown(f.tier)).collect();
+                el.child(crate::ui::icon_button("note-more", gpui_kit::component::IconName::Ellipsis, "More formatting").dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
+                    menu = menu.min_w(px(200.));
+                    for f in &hidden {
+                        let (me, act) = (me.clone(), f.act);
+                        menu = menu.item(PopupMenuItem::new(f.tip).icon(Icon::new(f.icon)).on_click(move |_, window, cx| {
+                            let _ = me.update(cx, |this, cx| act(this, window, cx));
+                        }));
+                    }
+                    menu
+                }))
+            })
             .child(Self::divider(cx))
             .child(colors)
-            .child(div().flex_1())
-            .child(crate::ui::segmented(
-                "note-mode",
-                vec![(Mode::Write, "Write"), (Mode::Split, "Split"), (Mode::Preview, "Preview")],
-                mode,
-                move |m, window, cx| {
-                    me.update(cx, |this, cx| {
-                        this.mode = m;
-                        if m != Mode::Preview {
-                            this.focus(window, cx);
-                        }
-                        cx.notify();
-                    })
-                },
-                cx,
-            ))
+            .child(div().flex_1().min_w(px(6.)))
+            .child(self.modes(mode, width > 0. && width < TOOLBAR_FULL, cx))
             .when(self.current.is_some(), |el| {
                 el.child(div().w(px(6.))).child(
                     div().id("note-delete-zone").test_support().child(self.tool("note-delete", crate::assets::Lucide::Trash, "Delete note", cx, |t, w, cx| t.delete_current(w, cx))),
                 )
             })
+            .child({
+                // Measured after layout: a width that crosses a step draws the toolbar again.
+                let cell = self.toolbar_width.clone();
+                canvas(
+                    move |bounds, window, _| {
+                        let w = f32::from(bounds.size.width);
+                        let step = |w: f32| [TOOLBAR_FULL, TOOLBAR_SOME, TOOLBAR_FEW].iter().filter(|b| w > 0. && w < **b).count();
+                        let before = cell.replace(w);
+                        if step(before) != step(w) {
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+            })
+            .into_any_element()
+    }
+
+    /// Write / Split / Preview. Short of room, icons named on hover instead of words.
+    fn modes(&self, mode: Mode, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity();
+        let pick = move |m: Mode, window: &mut Window, cx: &mut App| {
+            me.update(cx, |this, cx| {
+                this.mode = m;
+                if m != Mode::Preview {
+                    this.focus(window, cx);
+                }
+                cx.notify();
+            })
+        };
+        if !compact {
+            return crate::ui::segmented("note-mode", vec![(Mode::Write, "Write"), (Mode::Split, "Split"), (Mode::Preview, "Preview")], mode, pick, cx);
+        }
+        let theme = cx.theme().clone();
+        let options: [(Mode, Icon, &'static str); 3] = [
+            (Mode::Write, Icon::new(crate::assets::Lucide::Pencil), "Write"),
+            (Mode::Split, Icon::new(gpui_kit::component::IconName::PanelRight), "Split: writing beside how it reads"),
+            (Mode::Preview, Icon::new(gpui_kit::component::IconName::Eye), "Preview"),
+        ];
+        h_flex()
+            .flex_none()
+            .h(px(30.))
+            .p(px(2.))
+            .gap(px(2.))
+            .rounded(px(8.))
+            .bg(theme.foreground.opacity(0.05))
+            .border_1()
+            .border_color(theme.foreground.opacity(0.06))
+            .children(options.into_iter().enumerate().map(|(i, (value, icon, tip))| {
+                let selected = value == mode;
+                let pick = pick.clone();
+                div()
+                    .id(("note-mode", i))
+                    .test_support()
+                    .h_full()
+                    .w(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(theme.foreground.opacity(0.12)))
+                    .child(icon.small().text_color(if selected { theme.foreground } else { theme.muted_foreground }))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                    .on_click(move |_, window, cx| pick(value, window, cx))
+            }))
             .into_any_element()
     }
 
@@ -577,7 +684,7 @@ impl Render for NotesView {
         let preview = div().id("note-preview").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(32.)).py(px(22.)).child(if body.trim().is_empty() {
             div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
         } else {
-            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, None, None, size, false, cx).into_any_element()
+            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, None, None, size, false, false, cx).into_any_element()
         });
         let main = match self.mode {
             Mode::Write => write.into_any_element(),

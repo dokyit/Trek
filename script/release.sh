@@ -22,7 +22,8 @@
 # and beta), and not older than the workspace version (the last stable).
 #
 # Environment:
-#   TREK_MINISIGN_KEY          secret key (default ~/.trek-signing/minisign.key, no password)
+#   TREK_MINISIGN_KEY          secret key (default ~/.trek-signing/minisign.key); one with a
+#                              password is asked for it at the signing step
 #   TREK_RELEASE_REPO          GitHub repository (default dokyit/Trek)
 #   TREK_RELEASE_DOWNLOAD_URL  where the manifest says the archive lives (default: the GitHub
 #                              release); for testing against a local server
@@ -71,6 +72,12 @@ OUT="dist/release/$VERSION"
 
 command -v minisign >/dev/null || die "minisign isn't installed (brew install minisign)"
 [[ -f $KEY ]] || die "no minisign secret key at $KEY (docs/RELEASING.md)"
+# Whether the key has a password: minisign's key names its KDF ("Sc", scrypt) or none (zeros).
+KEY_LOCKED=$(python3 -c 'import base64,sys; l=open(sys.argv[1]).read().splitlines(); print(int(base64.b64decode(l[1])[2:4] == b"Sc"))' "$KEY" 2>/dev/null || echo 0)
+if (( ! KEY_LOCKED )); then
+  echo "! $KEY has no password: anything running as you (an agent with full access, say) can read it" >&2
+  echo "  and sign updates every installed Trek accepts. Give it one: docs/RELEASING.md, \"Update signing key\"." >&2
+fi
 if (( ! DRY )); then
   # Tags others pushed, and where the channel tags moved: the version checks below read them.
   git fetch -q --force origin 'refs/tags/*:refs/tags/*' || die "couldn't fetch tags from origin"
@@ -138,7 +145,12 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$OUT/$NAME" -C dist Trek.app
 SHA=$(shasum -a 256 "$OUT/$NAME" | cut -d' ' -f1)
 # The trusted comment is signed too; the updater requires it to name this version.
-minisign -S -s "$KEY" -m "$OUT/$NAME" -x "$OUT/$NAME.minisig" -t "Trek $VERSION $PLATFORM" </dev/null >/dev/null
+if (( KEY_LOCKED )); then
+  echo "• signing with $KEY (its password, please)"
+  minisign -S -s "$KEY" -m "$OUT/$NAME" -x "$OUT/$NAME.minisig" -t "Trek $VERSION $PLATFORM" >/dev/null
+else
+  minisign -S -s "$KEY" -m "$OUT/$NAME" -x "$OUT/$NAME.minisig" -t "Trek $VERSION $PLATFORM" </dev/null >/dev/null
+fi
 minisign -V -q -p assets/update/minisign.pub -m "$OUT/$NAME" -x "$OUT/$NAME.minisig" \
   || die "$KEY doesn't match assets/update/minisign.pub; Trek would refuse this release"
 echo "• $NAME  sha256 $SHA  (signature verified with assets/update/minisign.pub)"

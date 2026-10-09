@@ -5,7 +5,7 @@ use crate::{AgentEvent, Billing, Command, Decision, GroupChild, SessionConfig, S
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncWriteExt, BufReader};
 use trek_core::{Effort, TokenUsage, UsageCost, detect};
@@ -135,9 +135,11 @@ fn respond(ctl: &mut Control, request_id: &str, request: &Value, decision: Decis
 
 /// Answers to an AskUserQuestion prompt: `(question, chosen labels or the user's own words)`.
 fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> Value {
-    let mut input = request["input"].clone();
-    // AskUserQuestion reads its answers from the input it gets back.
-    input["answers"] = Value::Object(answers.into_iter().map(|(q, a)| (q, Value::String(a))).collect());
+    // AskUserQuestion reads its answers from the input it gets back. Indexing a non-object to
+    // set a key panics, so anything else is replaced by an object.
+    let mut input = request["input"].as_object().cloned().unwrap_or_default();
+    input.insert("answers".into(), Value::Object(answers.into_iter().map(|(q, a)| (q, Value::String(a))).collect()));
+    let input = Value::Object(input);
     control_response(request_id, json!({ "behavior": "allow", "updatedInput": input }))
 }
 
@@ -1061,15 +1063,33 @@ fn context_event(r: &Value) -> Option<AgentEvent> {
     Some(AgentEvent::Context { used: body["totalTokens"].as_u64()?, window: body["maxTokens"].as_u64()? })
 }
 
-/// A temp file removed on drop.
+/// A temp file removed on drop. Only its owner can read it (it can hold a socket token), and
+/// it's always a new file: never one someone else put there first.
 struct TempFile(PathBuf);
 
 impl TempFile {
     fn write(tag: &str, contents: &str) -> Result<Self> {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("trek-{tag}-{}-{nanos}.json", std::process::id()));
-        std::fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
-        Ok(Self(path))
+        Self::write_in(&std::env::temp_dir(), tag, contents)
+    }
+
+    fn write_in(dir: &Path, tag: &str, contents: &str) -> Result<Self> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut tries = 0;
+        loop {
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let path = dir.join(format!("trek-{tag}-{}-{nanos}-{tries}.json", std::process::id()));
+            match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+                Ok(mut file) => {
+                    // Removed on failure too.
+                    let made = Self(path);
+                    file.write_all(contents.as_bytes()).with_context(|| format!("writing {}", made.0.display()))?;
+                    return Ok(made);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 => tries += 1,
+                Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+            }
+        }
     }
 }
 
@@ -1236,6 +1256,32 @@ fn translate(v: &Value, pending: &mut HashMap<String, Value>, streamed_text: &mu
 mod tests {
     use super::*;
     use trek_core::HandHolding;
+
+    #[test]
+    fn answers_go_into_any_input() {
+        for input in [json!({ "questions": [] }), json!("text"), Value::Null, json!([1])] {
+            let msg = answer("r1", &json!({ "input": input }), vec![("Color?".into(), "teal".into())]);
+            let updated = &msg["response"]["response"]["updatedInput"];
+            assert_eq!(updated["answers"]["Color?"], "teal", "{input}");
+        }
+    }
+
+    #[test]
+    fn mcp_config_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("trek-mcp-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = TempFile::write_in(&dir, "mcp", "{\"token\":1}").unwrap();
+        let b = TempFile::write_in(&dir, "mcp", "{}").unwrap();
+        assert_ne!(a.0, b.0);
+        assert_eq!(std::fs::metadata(&a.0).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&a.0).unwrap(), "{\"token\":1}");
+        let path = a.0.clone();
+        drop(a);
+        assert!(!path.exists());
+        drop(b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn edits_report_the_lines_they_change() {
@@ -1685,12 +1731,22 @@ mod tests {
 
     #[test]
     fn mcp_config_shape() {
-        let servers = [crate::McpServer { name: "fs".into(), command: "npx".into(), args: vec!["-y".into(), "srv".into()], env: vec![("K".into(), "v".into())], tool_timeout_secs: None }];
+        let servers = [crate::McpServer::stdio("fs", "npx", vec!["-y".into(), "srv".into()], vec![("K".into(), "v".into())])];
         assert_eq!(
             json!({ "mcpServers": mcp_servers_json(&servers) }),
             json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})
         );
-        let trek = crate::McpServer { name: "trek-orchestrate".into(), command: "trek-mcp".into(), args: vec![], env: vec![], tool_timeout_secs: Some(1900) };
+        // A remote server: Claude Code's own `--transport http` shape.
+        let figma = crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]);
+        let linear = crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]);
+        assert_eq!(
+            claude_mcp_servers(&[figma, linear]),
+            json!({
+                "figma-desktop": {"type":"http","url":"http://127.0.0.1:3845/mcp","headers":{}},
+                "linear": {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer t"}},
+            })
+        );
+        let trek = crate::McpServer { tool_timeout_secs: Some(1900), ..crate::McpServer::stdio("trek-orchestrate", "trek-mcp", vec![], vec![]) };
         let out = claude_mcp_servers(&[trek, servers[0].clone()]);
         assert_eq!(out["trek-orchestrate"]["timeout"], 1_900_000, "Trek's tools may wait long on a sub-agent");
         assert!(out["fs"].get("timeout").is_none(), "others keep Claude Code's default");

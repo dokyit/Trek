@@ -55,8 +55,8 @@ advise, or discuss until they agree; then implement, or just report. Stop ends t
 
 **Tools next to the thread** (⌘J): a real terminal, an embedded browser with element picking, screenshots
 and devtools, a live iOS Simulator mirror with touch and typing, a file explorer, source control (diff,
-commit, push) and a side chat. Agents get Trek's own MCP server (`trek-mcp`) for computer use and the iOS
-Simulator, plus any MCP servers you add.
+commit, push) and a side chat. Agents get Trek's own MCP server (`trek-mcp`) for the iOS Simulator and,
+once you turn it on in Settings › Tools, computer use, plus any MCP servers you add.
 
 **A good Mac citizen.** Menu bar icon (idle / working / needs you), notifications and Dock badge when an
 agent finishes or needs a decision, keeps the Mac awake while agents work, Night and Paper themes, and

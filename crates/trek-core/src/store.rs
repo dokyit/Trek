@@ -19,7 +19,17 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+
+/// Lock `m` even if a panic poisoned it: a transaction a panic cut short rolls back as it's
+/// dropped, so the connection is as good as before, and one panic doesn't fail every later call.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The schema this build writes, kept in `PRAGMA user_version`. Bump it when older builds would
+/// lose data they can't read: a new `Item` kind, say, which they leave out of transcripts.
+pub const SCHEMA_VERSION: u32 = 1;
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -343,6 +353,8 @@ pub struct Store {
     /// search ranking a big history never holds up a save on the main thread. `None` in memory
     /// (a second connection would open another, empty, database): searches share `conn`.
     reader: Option<Arc<Mutex<Connection>>>,
+    /// The database's schema version, when a newer Trek wrote it (see `newer_schema`).
+    newer_schema: Option<u32>,
 }
 
 const SCHEMA: &str = r#"
@@ -441,7 +453,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
            thread_id TEXT NOT NULL, tool_id TEXT NOT NULL, added INTEGER NOT NULL, removed INTEGER NOT NULL,
            PRIMARY KEY (thread_id, tool_id)
          );
-         CREATE TABLE IF NOT EXISTS told_notes (thread_id TEXT PRIMARY KEY, notes TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS told_notes (thread_id TEXT PRIMARY KEY, notes TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS reviews (thread_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS ide_chats (root TEXT PRIMARY KEY, data TEXT NOT NULL);",
     )?;
     usage::migrate(conn)?;
     migrate_items(conn)?;
@@ -523,21 +537,46 @@ impl Store {
         // IMMEDIATE takes the write lock up front: with another Trek migrating the same database,
         // this waits for it (or fails whole) instead of applying half the steps.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let found: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         tx.execute_batch(SCHEMA)?;
         migrate(&tx)?;
+        if found < SCHEMA_VERSION as i64 {
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         tx.commit()?;
-        Ok(Store { conn: Arc::new(Mutex::new(conn)), indexer: Arc::default(), reader: None })
+        let newer_schema = (found > SCHEMA_VERSION as i64).then(|| u32::try_from(found).unwrap_or(u32::MAX));
+        if let Some(v) = newer_schema {
+            tracing::warn!("database schema {v} is newer than this build's {SCHEMA_VERSION}: transcript rows are kept as they are");
+        }
+        Ok(Store { conn: Arc::new(Mutex::new(conn)), indexer: Arc::default(), reader: None, newer_schema })
+    }
+
+    /// The database's schema version when a newer Trek build wrote it (`PRAGMA user_version`
+    /// above [`SCHEMA_VERSION`]), else `None`. Its transcripts may hold rows this build can't
+    /// read and leaves out, so writes that would remove transcript rows are refused while it's
+    /// set; the app should say that this database belongs to a newer Trek.
+    pub fn newer_schema(&self) -> Option<u32> {
+        self.newer_schema
+    }
+
+    /// Fails while the database is from a newer Trek (`newer_schema`): removing transcript rows
+    /// then could drop or misplace ones this build doesn't show.
+    fn may_remove_items(&self) -> Result<()> {
+        match self.newer_schema {
+            Some(v) => anyhow::bail!("this database is from a newer Trek (schema {v}, this build knows {SCHEMA_VERSION}): not removing transcript rows"),
+            None => Ok(()),
+        }
     }
 
     fn with<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> Result<R> {
-        let conn = self.conn.lock().expect("store lock");
+        let conn = lock(&self.conn);
         Ok(f(&conn)?)
     }
 
     /// `with`, for reads that may take a while: on the read-only connection where there is one.
     fn reading<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> Result<R> {
         let Some(reader) = &self.reader else { return self.with(f) };
-        let conn = reader.lock().expect("store reader lock");
+        let conn = lock(reader);
         Ok(f(&conn)?)
     }
 
@@ -677,12 +716,17 @@ impl Store {
     }
 
     pub fn save_thread(&self, t: &Thread) -> Result<()> {
-        self.with(|c| Self::save_thread_in(c, t))
+        let mut conn = lock(&self.conn);
+        let tx = conn.transaction()?;
+        Self::save_thread_in(&tx, t)?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn save_thread_in(c: &Connection, t: &Thread) -> rusqlite::Result<()> {
         // An upsert, not INSERT OR REPLACE: the row stays put instead of being deleted and inserted
-        // again on every save. Another thread holding the same agent session is replaced, as before.
+        // again on every save. Another thread holding the same agent session is merged into it.
+        // Call inside a transaction.
         static SQL: LazyLock<String> = LazyLock::new(|| {
             let cols: Vec<&str> = Store::THREAD_COLS.split(", ").collect();
             let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
@@ -690,13 +734,13 @@ impl Store {
             format!("INSERT INTO threads ({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}", cols.join(", "), marks.join(", "), set.join(", "))
         });
         if let Some(native) = &t.native_id {
-            let replaced = "SELECT id FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3";
-            let args = params![t.source.key(), native, t.id];
-            c.execute(&format!("DELETE FROM items WHERE thread_id IN ({replaced})"), args)?;
-            c.execute(&format!("DELETE FROM checkpoints WHERE thread_id IN ({replaced})"), args)?;
-            c.execute(&format!("DELETE FROM token_usage WHERE thread_id IN ({replaced})"), args)?;
-            c.execute(&format!("DELETE FROM turn_stops WHERE thread_id IN ({replaced})"), args)?;
-            c.execute("DELETE FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3", args)?;
+            let replaced: Vec<String> = c
+                .prepare_cached("SELECT id FROM threads WHERE source = ?1 AND native_id = ?2 AND id <> ?3")?
+                .query_map(params![t.source.key(), native, t.id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for gone in &replaced {
+                Self::merge_thread_in(c, gone, &t.id)?;
+            }
         }
         c.execute(
             &SQL,
@@ -739,6 +783,25 @@ impl Store {
         Ok(())
     }
 
+    /// Fold thread `gone` into `into`, which holds the same agent session now: its side chats,
+    /// sub-agents, awaited reports and retired sessions move over, and the rest of it goes (its
+    /// own copy of the transcript, notes, review, usage). Its checkpoints stay for
+    /// `checkpoint::prune_stale`, which drops their refs with them as it does any gone thread's.
+    /// Not archived: `(source, native_id)` is unique, and a second thread of one session would
+    /// be a duplicate anywhere it showed.
+    fn merge_thread_in(c: &Connection, gone: &str, into: &str) -> rusqlite::Result<()> {
+        c.execute("UPDATE threads SET side_of = ?2 WHERE side_of = ?1 AND id <> ?2", params![gone, into])?;
+        c.execute("UPDATE threads SET parent_id = ?2 WHERE parent_id = ?1 AND id <> ?2", params![gone, into])?;
+        c.execute("DELETE FROM wakes WHERE child_id = ?1 OR (parent_id = ?1 AND child_id = ?2)", params![gone, into])?;
+        c.execute("UPDATE wakes SET parent_id = ?2 WHERE parent_id = ?1", params![gone, into])?;
+        c.execute("UPDATE retired_sessions SET thread_id = ?2 WHERE thread_id = ?1", params![gone, into])?;
+        for table in ["items", "tool_lines", "told_notes", "reviews", "token_usage", "turn_stops"] {
+            c.execute(&format!("DELETE FROM {table} WHERE thread_id = ?1"), [gone])?;
+        }
+        c.execute("DELETE FROM threads WHERE id = ?1", [gone])?;
+        Ok(())
+    }
+
     pub fn update_thread(&self, id: &str, f: impl FnOnce(&mut Thread)) -> Result<Option<Thread>> {
         let Some(mut t) = self.thread(id)? else { return Ok(None) };
         f(&mut t);
@@ -763,7 +826,10 @@ impl Store {
             // a lone notice would hide it.
             if !rows.is_empty() {
                 let mut t = Transcript::stored(rows);
-                t.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
+                // Not under a newer schema: removing rows is refused there.
+                if self.newer_schema.is_none() {
+                    t.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
+                }
                 for ix in 0..t.len() {
                     if matches!(t[ix], Item::Tool { status: ToolStatus::Running, .. }) {
                         if let Some(Item::Tool { status, .. }) = t.get_mut(ix) {
@@ -845,7 +911,7 @@ impl Store {
     /// so it doesn't flood the Inbox. Sessions that aren't conversations are never added, and
     /// threads imported before a rule matched them are archived.
     pub fn upsert_imported(&self, found: &[ImportedThread]) -> Result<Vec<Upserted>> {
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let out = found.iter().map(|imp| Self::upsert_one(&tx, imp)).collect::<rusqlite::Result<Vec<_>>>()?;
         tx.commit()?;
@@ -968,7 +1034,7 @@ impl Store {
     /// Show a session the import left out after all: its thread is added, or brought back if an
     /// import archived it, and later imports leave it in the sidebar.
     pub fn keep_imported(&self, imp: &ImportedThread) -> Result<Thread> {
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let existing = tx
             .query_row(
@@ -996,7 +1062,7 @@ impl Store {
         if source == ThreadSource::Trek {
             return Ok(0);
         }
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let candidates: Vec<(String, String)> = {
             let mut st = tx.prepare(
@@ -1023,7 +1089,7 @@ impl Store {
     /// sessions they ran stay in the agents' own history; they're retired, so no import brings
     /// the conversation back.
     pub fn delete_thread(&self, id: &str) -> Result<()> {
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         // The thread, its side chats and its sub-agents, theirs too, all the way down.
         let ids: Vec<String> = {
@@ -1043,6 +1109,7 @@ impl Store {
             tx.execute("DELETE FROM checkpoints WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM tool_lines WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM told_notes WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM reviews WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM token_usage WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM turn_stops WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM wakes WHERE child_id = ?1 OR parent_id = ?1", [gone])?;
@@ -1105,7 +1172,7 @@ impl Store {
 
     /// Add items after the last one, under the given ids.
     pub fn append_items<'a>(&self, thread_id: &str, items: impl IntoIterator<Item = (&'a str, &'a Item)>) -> Result<()> {
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         append_rows(&tx, thread_id, items)?;
         tx.commit()?;
@@ -1119,19 +1186,23 @@ impl Store {
 
     /// Delete items by id; returns how many rows went.
     pub fn delete_items(&self, ids: &[String]) -> Result<usize> {
-        let mut conn = self.conn.lock().expect("store lock");
+        self.may_remove_items()?;
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let n = delete_rows(&tx, ids)?;
         tx.commit()?;
         Ok(n)
     }
 
-    /// Keep the first `len` items of a thread; returns how many rows went.
+    /// Keep the first `len` items of a thread (as `items` lists them); returns how many rows went.
+    /// Rows `items` leaves out (unreadable) before the cut stay.
     pub fn truncate_items(&self, thread_id: &str, len: usize) -> Result<usize> {
+        self.may_remove_items()?;
         self.with(|c| {
-            let cut: Option<i64> = c
-                .query_row("SELECT seq FROM items WHERE thread_id = ?1 ORDER BY seq LIMIT 1 OFFSET ?2", params![thread_id, len as i64], |r| r.get(0))
-                .optional()?;
+            let mut st = c.prepare_cached("SELECT seq, data FROM items WHERE thread_id = ?1 ORDER BY seq")?;
+            let rows = st.query_map([thread_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let mut known = rows.filter_map(|r| r.ok()).filter(|(_, data)| serde_json::from_str::<Item>(data).is_ok());
+            let cut = known.nth(len).map(|(seq, _)| seq);
             match cut {
                 Some(seq) => c.execute("DELETE FROM items WHERE thread_id = ?1 AND seq >= ?2", params![thread_id, seq]),
                 None => Ok(0),
@@ -1142,6 +1213,7 @@ impl Store {
     /// Delete everything after the item with this id (it stays); returns how many rows went.
     /// The basis for editing a message, retrying a turn or forking from a point.
     pub fn truncate_after(&self, thread_id: &str, id: &str) -> Result<usize> {
+        self.may_remove_items()?;
         let removed = self.with(|c| {
             let seq: Option<i64> = c.query_row("SELECT seq FROM items WHERE thread_id = ?1 AND id = ?2", params![thread_id, id], |r| r.get(0)).optional()?;
             seq.map(|seq| c.execute("DELETE FROM items WHERE thread_id = ?1 AND seq > ?2", params![thread_id, seq])).transpose()
@@ -1151,6 +1223,7 @@ impl Store {
 
     /// Delete a thread's whole transcript.
     pub fn clear_items(&self, thread_id: &str) -> Result<usize> {
+        self.may_remove_items()?;
         self.with(|c| c.execute("DELETE FROM items WHERE thread_id = ?1", [thread_id]))
     }
 
@@ -1163,6 +1236,38 @@ impl Store {
                 "INSERT OR REPLACE INTO checkpoints (thread_id, item_id, repo, sha, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![thread_id, item_id, repo.display().to_string(), sha, now_ms()],
             )?;
+            Ok(())
+        })
+    }
+
+    /// Every open review (Keep / Undo) as the app saved it: (thread, its data).
+    pub fn reviews(&self) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT thread_id, data FROM reviews")?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Keep `thread_id`'s review (`data`, the app's own), or forget it with `None`.
+    pub fn set_review(&self, thread_id: &str, data: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            match data {
+                Some(d) => c.execute("INSERT OR REPLACE INTO reviews (thread_id, data) VALUES (?1, ?2)", params![thread_id, d])?,
+                None => c.execute("DELETE FROM reviews WHERE thread_id = ?1", [thread_id])?,
+            };
+            Ok(())
+        })
+    }
+
+    /// The editor's chat tabs as last left in folder `root` (the app's own data).
+    pub fn ide_chats(&self, root: &str) -> Result<Option<String>> {
+        self.with(|c| c.query_row("SELECT data FROM ide_chats WHERE root = ?1", [root], |r| r.get(0)).optional())
+    }
+
+    pub fn set_ide_chats(&self, root: &str, data: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("INSERT OR REPLACE INTO ide_chats (root, data) VALUES (?1, ?2)", params![root, data])?;
             Ok(())
         })
     }
@@ -1241,7 +1346,7 @@ impl Store {
 
     /// Forget checkpoints by message.
     pub fn delete_checkpoints(&self, thread_id: &str, item_ids: &[String]) -> Result<usize> {
-        let mut conn = self.conn.lock().expect("store lock");
+        let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         let mut n = 0;
         for id in item_ids {
@@ -1260,9 +1365,12 @@ impl Store {
         if changes.is_empty() {
             return Ok(false);
         }
+        if !changes.removed.is_empty() {
+            self.may_remove_items()?;
+        }
         let defer = search::defer_indexing(changes.appended.iter().map(|(_, item)| *item));
         {
-            let mut conn = self.conn.lock().expect("store lock");
+            let mut conn = lock(&self.conn);
             let tx = conn.transaction()?;
             delete_rows(&tx, changes.removed)?;
             for (id, item) in &changes.changed {
@@ -1628,6 +1736,119 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_holding_the_lock_leaves_the_store_usable() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let held = s.clone();
+        let id = t.id.clone();
+        let _ = std::thread::spawn(move || {
+            let mut conn = lock(&held.conn);
+            let tx = conn.transaction().unwrap();
+            tx.execute("UPDATE threads SET title = 'half done' WHERE id = ?1", [&id]).unwrap();
+            panic!("mid-write");
+        })
+        .join();
+        assert!(s.conn.is_poisoned());
+        // The cut-short write rolled back, and later calls go on.
+        assert_eq!(s.thread(&t.id).unwrap().unwrap().title, t.title);
+        s.update_thread(&t.id, |t| t.title = "Still here".into()).unwrap();
+        assert_eq!(s.thread(&t.id).unwrap().unwrap().title, "Still here");
+    }
+
+    #[test]
+    fn a_thread_taking_over_a_session_absorbs_the_other_leaving_no_orphans() {
+        let s = Store::in_memory().unwrap();
+        let new = || s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let (mut a, boss) = (new(), new());
+        a.native_id = Some("sess".into());
+        s.save_thread(&a).unwrap();
+        s.append_items(&a.id, [("i1", &said("hi"))]).unwrap();
+        s.add_checkpoint(&a.id, "i1", Path::new("/repo"), "abc").unwrap();
+        s.set_review(&a.id, Some("{}")).unwrap();
+        s.set_told_notes(&a.id, "notes").unwrap();
+        s.set_tool_lines(&a.id, "e1", Some((1, 1))).unwrap();
+        s.record_usage(&a.id, 1, &AgentId::ClaudeCode, None, &crate::types::TokenUsage { input: 5, ..Default::default() }, None).unwrap();
+        s.record_stop(&a.id, 1, 2, true).unwrap();
+        s.retire_session("older", &a.id).unwrap();
+        s.await_report(&boss.id, &a.id).unwrap();
+        let mut side = new();
+        side.side_of = Some(a.id.clone());
+        s.save_thread(&side).unwrap();
+        let mut child = new();
+        child.parent_id = Some(a.id.clone());
+        s.save_thread(&child).unwrap();
+        s.await_report(&a.id, &child.id).unwrap();
+
+        let mut b = new();
+        b.native_id = Some("sess".into());
+        s.save_thread(&b).unwrap();
+        assert!(s.thread(&a.id).unwrap().is_none());
+        // Its side chats, sub-agents and awaited reports are b's now; its retired session stays retired.
+        assert_eq!(s.thread(&side.id).unwrap().unwrap().side_of.as_deref(), Some(b.id.as_str()));
+        assert_eq!(s.thread(&child.id).unwrap().unwrap().parent_id.as_deref(), Some(b.id.as_str()));
+        assert_eq!(s.held_reports().unwrap(), vec![(b.id.clone(), child.id.clone(), None)]);
+        assert!(s.trek_native_ids().unwrap().contains("older"));
+        let refs = |sql: &str| -> i64 { s.with(|c| c.query_row(sql, [&a.id], |r| r.get(0))).unwrap() };
+        for table in ["items", "tool_lines", "told_notes", "reviews", "token_usage", "turn_stops", "retired_sessions", "title_docs"] {
+            assert_eq!(refs(&format!("SELECT COUNT(*) FROM {table} WHERE thread_id = ?1")), 0, "{table}");
+        }
+        assert_eq!(refs("SELECT COUNT(*) FROM wakes WHERE child_id = ?1 OR parent_id = ?1"), 0);
+        // Its checkpoints are left to the sweep, which drops their refs too.
+        assert!(s.stale_checkpoints(0).unwrap().iter().any(|(t, _)| *t == a.id));
+    }
+
+    #[test]
+    fn the_schema_version_is_kept_and_a_newer_one_keeps_transcripts_whole() {
+        let dir = std::env::temp_dir().join(format!("trek-user-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        let version = |path: &Path| -> u32 { Connection::open(path).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap() };
+        let t = {
+            let s = Store::open(&path).unwrap();
+            assert_eq!(s.newer_schema(), None);
+            let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+            s.append_items(&t.id, [("a", &said("a")), ("b", &said("b"))]).unwrap();
+            t
+        };
+        assert_eq!(version(&path), SCHEMA_VERSION);
+        // A newer build wrote it, with a kind this build can't read.
+        let c = Connection::open(&path).unwrap();
+        c.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        c.execute("UPDATE items SET data = '{\"kind\":\"future\"}' WHERE id = 'b'", []).unwrap();
+        drop(c);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.newer_schema(), Some(SCHEMA_VERSION + 1));
+        assert_eq!(version(&path), SCHEMA_VERSION + 1);
+        assert_eq!(texts(&s, &t.id), ["a"]);
+        assert!(s.clear_items(&t.id).is_err());
+        assert!(s.truncate_items(&t.id, 0).is_err());
+        assert!(s.truncate_after(&t.id, "a").is_err());
+        assert!(s.delete_items(&["a".into()]).is_err());
+        let mut tr = Transcript::stored(s.items_with_ids(&t.id).unwrap());
+        tr.truncate(0);
+        assert!(s.save_transcript(&t.id, &mut tr).is_err());
+        // Adding to a transcript loses nothing.
+        let mut tr = Transcript::stored(s.items_with_ids(&t.id).unwrap());
+        tr.push(said("c"));
+        s.save_transcript(&t.id, &mut tr).unwrap();
+        let rows: i64 = s.with(|c| c.query_row("SELECT COUNT(*) FROM items WHERE thread_id = ?1", [&t.id], |r| r.get(0))).unwrap();
+        assert_eq!(rows, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncating_keeps_rows_it_cant_read() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        s.append_items(&t.id, [("a", &said("a")), ("b", &said("b")), ("c", &said("c"))]).unwrap();
+        s.with(|c| c.execute("UPDATE items SET data = '{\"kind\":\"future\"}' WHERE id = 'b'", [])).unwrap();
+        // `items` shows [a, c]: keeping one keeps a, and the row between a and c.
+        assert_eq!(s.truncate_items(&t.id, 1).unwrap(), 1);
+        let ids: Vec<String> = s.with(|c| c.prepare("SELECT id FROM items ORDER BY seq")?.query_map([], |r| r.get(0))?.collect()).unwrap();
+        assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[test]
     fn a_pause_and_its_queued_messages_survive_a_relaunch() {
         use crate::limit::{LimitScope, Pause, Queued};
         let dir = std::env::temp_dir().join(format!("trek-migrate-pause-{}", uuid::Uuid::new_v4()));
@@ -1989,6 +2210,23 @@ mod tests {
         assert_eq!(by_native(&s, "a").model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
         // A model that isn't raw JSON is the thread's own (possibly picked in Trek): it stays.
         assert_eq!(by_native(&s, "b").model.as_deref(), Some("picked-in-trek"));
+    }
+
+    #[test]
+    fn reviews_and_editor_chats_are_kept_until_they_go() {
+        let s = Store::in_memory().unwrap();
+        let t = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        s.set_review(&t.id, Some("{\"start\":\"u1\"}")).unwrap();
+        assert_eq!(s.reviews().unwrap(), vec![(t.id.clone(), "{\"start\":\"u1\"}".to_string())]);
+        s.set_review(&t.id, None).unwrap();
+        assert!(s.reviews().unwrap().is_empty());
+        s.set_review(&t.id, Some("{}")).unwrap();
+        s.delete_thread(&t.id).unwrap();
+        assert!(s.reviews().unwrap().is_empty(), "a deleted thread's review goes with it");
+        assert_eq!(s.ide_chats("/p").unwrap(), None);
+        s.set_ide_chats("/p", "[1]").unwrap();
+        s.set_ide_chats("/p", "[2]").unwrap();
+        assert_eq!(s.ide_chats("/p").unwrap().as_deref(), Some("[2]"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Settings. A nav column replaces the thread sidebar (as in Codex). Pages are flat sections of
 //! hairline-separated rows: a label and one-line explanation on the left, the control on the right.
 
+mod connections;
 mod mobile;
 mod pages;
 
@@ -165,8 +166,14 @@ pub struct SettingsView {
     saved_keys: HashMap<&'static str, bool>,
     mcp_name: Entity<InputState>,
     mcp_command: Entity<InputState>,
-    /// Skills page: the last scan (None = scan on next render), filter, and new-skill fields.
-    skills: Option<Vec<trek_core::skills::Skill>>,
+    /// A header for a remote MCP server being added (shown once the command is a URL); the
+    /// value goes to the Keychain.
+    mcp_header_name: Entity<InputState>,
+    mcp_header_value: Entity<InputState>,
+    /// The MCP server loaded into the add row to be edited (its name before the edit).
+    mcp_editing: Option<String>,
+    /// Skills page: the last scan, filter, and new-skill fields.
+    skills: Probe<Vec<trek_core::skills::Skill>>,
     skill_filter: Entity<InputState>,
     skill_name: Entity<InputState>,
     skill_desc: Entity<InputState>,
@@ -182,7 +189,89 @@ pub struct SettingsView {
     left_out_open: HashSet<Skip>,
     /// Appearance › Material: how frosted liquid glass is, 0 (clear) to 100 (frosted).
     pub(super) glass_slider: Entity<gpui_kit::component::slider::SliderState>,
+    /// What the Tools and Snapshots pages show from the Mac's setup, and whether the project's
+    /// image icon is still there, each read off the main thread.
+    tools: Probe<ToolsProbe>,
+    /// Whether the Figma desktop app's MCP server answers (Tools › Connections).
+    figma_desktop: Probe<bool>,
+    snapshots: Probe<SnapshotsProbe>,
+    icon_file: Probe<(String, bool)>,
+    /// Trek's data folder, found once (finding it makes sure it exists).
+    pub(super) data_dir: std::path::PathBuf,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Something a page shows that takes the disk, a process or a system call to learn. It's read on a
+/// background thread when the page opens (and again when it may have changed); the page draws what
+/// was last read, or a loading state before the first read. Never read from `render`.
+pub(super) struct Probe<T> {
+    pub(super) value: Option<T>,
+    fresh: bool,
+    task: Option<Task<()>>,
+}
+
+impl<T> Default for Probe<T> {
+    fn default() -> Self {
+        Self { value: None, fresh: false, task: None }
+    }
+}
+
+impl<T> Probe<T> {
+    /// Read again next time the page is drawn; a read in flight is dropped (it may be out of date).
+    pub(super) fn invalidate(&mut self) {
+        self.fresh = false;
+        self.task = None;
+    }
+
+    pub(super) fn loading(&self) -> bool {
+        self.task.is_some()
+    }
+}
+
+/// The Tools page's view of the Mac: privacy permissions, AXe, Trek's MCP server, and what each
+/// agent already loads.
+#[derive(Clone, Default)]
+pub(super) struct ToolsProbe {
+    accessibility: bool,
+    screen_recording: bool,
+    axe: bool,
+    mcp_bundled: bool,
+    agent_mcp: Vec<(&'static str, Vec<String>)>,
+    plugins: Vec<String>,
+    /// Claude Code's and Codex's link to Figma's remote server.
+    figma: Vec<(AgentId, connections::FigmaLink)>,
+}
+
+impl ToolsProbe {
+    fn read() -> Self {
+        let agent_mcp = crate::integrations::agent_mcp_servers();
+        let plugins = crate::integrations::claude_plugins();
+        let figma = connections::figma_links(&agent_mcp, &plugins, |a| trek_core::detect::which(if *a == AgentId::Codex { "codex" } else { "claude" }).is_some());
+        Self {
+            accessibility: crate::integrations::accessibility_allowed(),
+            screen_recording: crate::integrations::screen_recording_allowed(),
+            axe: crate::integrations::axe_path().is_some(),
+            mcp_bundled: crate::workspace::trek_mcp_binary().is_some(),
+            agent_mcp,
+            plugins,
+            figma,
+        }
+    }
+}
+
+/// The Snapshots page: how many are kept and their size, and the Screen Recording permission.
+#[derive(Clone, Default)]
+pub(super) struct SnapshotsProbe {
+    pub(super) count: usize,
+    pub(super) bytes: u64,
+    pub(super) screen_recording: bool,
+}
+
+impl SnapshotsProbe {
+    fn read() -> Self {
+        let (count, bytes) = crate::mentions::snapshot_usage();
+        Self { count, bytes, screen_recording: crate::integrations::screen_recording_allowed() }
+    }
 }
 
 /// Liquid glass's tint at frost `percent` (the slider), and back.
@@ -204,16 +293,57 @@ impl SettingsView {
         }
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
-        let mcp_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. npx -y @modelcontextprotocol/server-github"));
+        let mcp_command = cx.new(|cx| InputState::new(window, cx).placeholder("A command, a URL, or a server's JSON config"));
+        let mcp_header_name = cx.new(|cx| InputState::new(window, cx).placeholder("Header name"));
+        let mcp_header_value = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Value, kept in your Keychain (optional)"));
         let skill_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter skills"));
         let skill_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Review pull requests"));
         let skill_desc = cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
         let mut subs = subs;
         subs.push(cx.observe(&skill_filter, |_, _, cx| cx.notify()));
-        // Rescan skills whenever the Skills page is opened.
+        // A URL shows the header fields.
+        subs.push(cx.observe(&mcp_command, |_, _, cx| cx.notify()));
+        // Return in the add row adds (or saves) the server.
+        for input in [&mcp_name, &mcp_command, &mcp_header_value] {
+            subs.push(cx.subscribe_in(input, window, |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                    this.add_mcp_server(window, cx);
+                }
+            }));
+        }
+        // Each page reads the Mac again whenever it's opened.
         subs.push(cx.observe(&workspace, |this: &mut Self, ws, cx| {
-            if ws.read(cx).route != Route::Settings(SettingsPage::Skills) {
-                this.skills = None;
+            let route = ws.read(cx).route.clone();
+            if route != Route::Settings(SettingsPage::Skills) {
+                this.skills.invalidate();
+            }
+            if route != Route::Settings(SettingsPage::Tools) {
+                this.tools.invalidate();
+                this.figma_desktop.invalidate();
+            }
+            if route != Route::Settings(SettingsPage::Snapshots) {
+                this.snapshots.invalidate();
+            }
+            if route != Route::Settings(SettingsPage::Project) {
+                this.icon_file.invalidate();
+            }
+            // Registry agents' rows offer the registry's newer versions: its index is read once.
+            if route == Route::Settings(SettingsPage::Agents) {
+                ws.update(cx, |ws, cx| {
+                    let listed = ws.settings.added_agents.iter().any(|a| a.source == trek_core::registry::AgentSource::Registry);
+                    if listed && ws.added_agents.registry.is_none() && ws.added_agents.error.is_none() {
+                        ws.load_registry(false, cx);
+                    }
+                });
+            }
+        }));
+        // Permissions are granted in System Settings: coming back from there reads them again.
+        subs.push(cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            if window.is_window_active() {
+                this.tools.invalidate();
+                this.figma_desktop.invalidate();
+                this.snapshots.invalidate();
+                cx.notify();
             }
         }));
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
@@ -266,20 +396,75 @@ impl SettingsView {
             saved_keys,
             mcp_name,
             mcp_command,
+            mcp_header_name,
+            mcp_header_value,
+            mcp_editing: None,
             project_name,
             project_name_for: None,
             worktree_copy,
             action_name,
             action_command,
-            skills: None,
+            skills: Probe::default(),
             skill_filter,
             skill_name,
             skill_desc,
             skill_home: trek_core::skills::SkillHome::ClaudeCode,
             left_out_open: HashSet::new(),
             glass_slider,
+            tools: Probe::default(),
+            figma_desktop: Probe::default(),
+            snapshots: Probe::default(),
+            icon_file: Probe::default(),
+            data_dir: trek_core::paths::data_dir(),
             _subscriptions: subs,
         }
+    }
+
+    /// Read `slot` on a background thread unless it's fresh or already being read; the page
+    /// redraws when it's in.
+    fn probe<T: Send + 'static>(&mut self, slot: fn(&mut Self) -> &mut Probe<T>, read: impl FnOnce() -> T + Send + 'static, cx: &mut Context<Self>) {
+        let p = slot(self);
+        if p.fresh || p.task.is_some() {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            let value = cx.background_executor().spawn(async move { read() }).await;
+            let _ = this.update(cx, |this, cx| {
+                let p = slot(this);
+                p.value = Some(value);
+                p.fresh = true;
+                p.task = None;
+                cx.notify();
+            });
+        });
+        slot(self).task = Some(task);
+    }
+
+    /// Start reading what `page` shows from the Mac, if it isn't fresh.
+    fn probe_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        match page {
+            SettingsPage::Tools => {
+                self.probe(|this| &mut this.tools, ToolsProbe::read, cx);
+                self.probe_figma_desktop(cx);
+            }
+            SettingsPage::Snapshots => self.probe(|this| &mut this.snapshots, SnapshotsProbe::read, cx),
+            SettingsPage::Skills => {
+                let project = self.workspace.read(cx).current_cwd();
+                self.probe(|this| &mut this.skills, move || trek_core::skills::discover(project.as_deref()), cx)
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the project's image icon (`file:` spec) is still on disk; `None` until it's known.
+    pub(super) fn icon_file_exists(&mut self, spec: &str, cx: &mut Context<Self>) -> Option<bool> {
+        let file = spec.strip_prefix("file:")?.to_string();
+        if self.icon_file.value.as_ref().is_some_and(|(s, _)| s != spec) {
+            self.icon_file = Probe::default();
+        }
+        let spec = spec.to_string();
+        self.probe(|this| &mut this.icon_file, move || (spec, std::path::Path::new(&file).exists()), cx);
+        self.icon_file.value.as_ref().map(|(_, exists)| *exists)
     }
 
     fn page(&self, cx: &App) -> SettingsPage {
@@ -301,6 +486,11 @@ impl SettingsView {
     }
 
     fn row(title: impl IntoElement, description: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> AnyElement {
+        Self::row_with(title, description, None, control, cx)
+    }
+
+    /// `row`, with a line of its own under the description (a server's status).
+    fn row_with(title: impl IntoElement, description: impl Into<SharedString>, extra: Option<AnyElement>, control: impl IntoElement, cx: &App) -> AnyElement {
         let description: SharedString = description.into();
         h_flex()
             .w_full()
@@ -315,7 +505,8 @@ impl SettingsView {
                     .child(div().text_size(px(13.5)).font_medium().child(title))
                     .when(!description.is_empty(), |el| {
                         el.child(div().max_w(px(460.)).text_size(px(12.5)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(description))
-                    }),
+                    })
+                    .children(extra),
             )
             .child(div().flex_none().child(control))
             .into_any_element()
@@ -333,6 +524,31 @@ impl SettingsView {
 
     fn note(text: &str, cx: &App) -> AnyElement {
         div().pb(px(16.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.55)).text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
+    }
+
+    /// What checking MCP server `i` found: its tools, or why it didn't answer.
+    fn mcp_status(i: usize, check: &crate::workspace::McpCheck, cx: &App) -> AnyElement {
+        use crate::workspace::McpCheck;
+        let muted = cx.theme().muted_foreground;
+        let line = h_flex().id(SharedString::from(format!("mcp-status-{i}"))).test_support().max_w(px(460.)).gap(px(7.)).pt(px(2.)).text_size(px(12.5));
+        let dot = |color: Hsla| div().flex_none().size(px(6.)).rounded_full().bg(color);
+        match check {
+            McpCheck::Checking(_) => line.text_color(muted).child(dot(muted.opacity(0.5))).child("Checking…").into_any_element(),
+            McpCheck::Works(tools) => {
+                let count = match tools.len() {
+                    0 => "Works, no tools".to_string(),
+                    1 => "Works · 1 tool".to_string(),
+                    n => format!("Works · {n} tools"),
+                };
+                let all: SharedString = tools.join(", ").into();
+                line.child(dot(palette::emerald(cx)))
+                    .child(div().flex_none().child(count))
+                    .when(!tools.is_empty(), |el| el.child(div().min_w_0().text_color(muted).text_ellipsis().whitespace_nowrap().overflow_hidden().child(all.clone())))
+                    .when(!tools.is_empty(), |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(all.clone()).build(window, cx)))
+                    .into_any_element()
+            }
+            McpCheck::Failed(why) => line.items_start().child(div().mt(px(6.)).child(dot(palette::red(cx)))).child(div().min_w_0().line_height(relative(1.5)).child(why.clone())).into_any_element(),
+        }
     }
 
     fn status_dot(color: Hsla, label: &'static str) -> AnyElement {
@@ -440,6 +656,8 @@ impl SettingsView {
                 (_, _, Some(Err(e))) => (e.lines().next().unwrap_or("Couldn't start").to_string(), true),
                 // Agents that are off aren't asked (asking starts them).
                 (_, None, None) if !on => ("Off".into(), false),
+                // One the user added says where it came from until it's been asked.
+                (agent, None, None) if crate::workspace::is_added(agent) => (crate::add_agent::source_line(agent).unwrap_or_default(), false),
                 (AgentId::ClaudeCode | AgentId::Codex, None, None) if ws.usage_loading => ("Checking account…".into(), false),
                 (_, None, None) if a.availability == Availability::NeedsLogin => ("Not signed in".into(), true),
                 _ => ("Checking account…".into(), false),
@@ -482,6 +700,10 @@ impl SettingsView {
                             .item(PopupMenuItem::new("Manage plan").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(url)))
                     })
             });
+            let more = match more {
+                Some(b) => Some(b.into_any_element()),
+                None => self.added_menu(&a.agent, cx),
+            };
             let k2 = key.clone();
             let toggle = Switch::new(SharedString::from(format!("enable-{key}"))).checked(on).on_click(cx.listener(move |this, v: &bool, _, cx| {
                 let (k, v) = (k2.clone(), *v);
@@ -509,7 +731,7 @@ impl SettingsView {
             if detecting {
                 "Looking for agents on this Mac…"
             } else {
-                "No agents found. Install an agent's CLI — Claude Code, Codex or another — and press Scan again; it joins with the login it already has."
+                "No agents found. Install an agent's CLI — Claude Code, Codex or another — and press Scan again; it joins with the login it already has. Or add one from the ACP Registry."
             },
             cx,
         );
@@ -537,6 +759,10 @@ impl SettingsView {
                     let key = a.agent.key();
                     let install = trek_core::catalog::agent_setup(&setup_key(&a.agent)).map(|s| s.install.to_string()).or(a.install_hint.clone()).unwrap_or_default();
                     let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(22.), cx)).child(div().text_size(px(14.)).font_medium().child(a.name.clone()));
+                    // One the user added: what's missing, and its menu (update, remove).
+                    if let Some(menu) = self.added_menu(&a.agent, cx) {
+                        return Self::row(title, install, menu, cx);
+                    }
                     let cmd = install.clone();
                     let button = Button::new(SharedString::from(format!("install-{key}"))).small().outline().icon(IconName::ArrowDown).label("Install").on_click(
                         cx.listener(move |this, _, _, cx| {
@@ -552,6 +778,10 @@ impl SettingsView {
         out.push(
             h_flex()
                 .pt_3()
+                .gap_2()
+                .child(Button::new("add-agent").small().outline().icon(IconName::Plus).label("Add agent…").on_click(cx.listener(|this, _, window, cx| {
+                    crate::add_agent::open(this.workspace.clone(), crate::add_agent::Tab::Registry, window, cx)
+                })))
                 .child(
                     Button::new("rescan")
                         .small()
@@ -564,6 +794,33 @@ impl SettingsView {
                 .into_any_element(),
         );
         out
+    }
+
+    /// The ⋯ menu of an agent the user added: the registry's newer version, its website, and
+    /// Remove (which asks first). `None` for built-in agents.
+    fn added_menu(&self, agent: &AgentId, cx: &App) -> Option<AnyElement> {
+        let AgentId::Acp(id) = agent else { return None };
+        let added = self.workspace.read(cx).settings.added_agents.iter().find(|a| a.id == *id).cloned()?;
+        let update = self.workspace.read(cx).registry_update(id);
+        let muted = cx.theme().muted_foreground;
+        let ws = self.workspace.clone();
+        let menu = Button::new(SharedString::from(format!("more-{}", agent.key())))
+            .ghost()
+            .small()
+            .icon(Icon::new(IconName::Ellipsis).text_color(muted))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let mut menu = menu.min_w(px(180.));
+                if let Some(v) = update.clone() {
+                    let (ws, id) = (ws.clone(), added.id.clone());
+                    menu = menu.item(PopupMenuItem::new(format!("Update to {v}")).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.install_registry_agent(&id, cx))));
+                }
+                if let Some(url) = added.website.clone() {
+                    menu = menu.item(PopupMenuItem::new("Website").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&url)));
+                }
+                let (ws, added) = (ws.clone(), added.clone());
+                menu.item(PopupMenuItem::new("Remove…").on_click(move |_, window, cx| confirm_remove(ws.clone(), &added, window, cx)))
+            });
+        Some(menu.into_any_element())
     }
 
     /// Agent CLI updates: the setting, when Trek last looked, and each update out.
@@ -615,26 +872,163 @@ impl SettingsView {
         out
     }
 
+    /// Add what's in the add row: a command line (with any `KEY=value` before it), a remote
+    /// server's URL with an optional header, or a pasted JSON config or `claude mcp add` line,
+    /// which may hold several servers. Tokens go to the Keychain, and each new server is checked.
+    /// While a server is being edited, it's replaced instead.
+    fn add_mcp_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use trek_core::settings::McpHeader;
+        let name = self.mcp_name.read(cx).value().trim().to_string();
+        let text = self.mcp_command.read(cx).value().to_string();
+        let mut servers = match trek_core::mcp::read_servers(&name, &text) {
+            Ok(servers) => servers,
+            Err(e) => return window.push_notification(SharedString::from(e), cx),
+        };
+        let header = self.mcp_header_name.read(cx).value().trim().trim_end_matches(':').to_string();
+        let value = self.mcp_header_value.read(cx).value().trim().to_string();
+        if let [server] = &mut servers[..]
+            && server.is_http()
+            && !header.is_empty()
+            && !value.is_empty()
+        {
+            if header.contains(char::is_whitespace) {
+                return window.push_notification("A header name has no spaces, e.g. Authorization.", cx);
+            }
+            server.headers.retain(|h| !h.name.eq_ignore_ascii_case(&header));
+            server.headers.push(McpHeader { name: header, value, secret: false });
+        }
+        let existing = self.workspace.read(cx).settings.tools.mcp_servers.clone();
+        let mut notes: Vec<String> = vec![];
+        for s in &servers {
+            let stand_ins = trek_core::mcp::placeholders(s);
+            if !stand_ins.is_empty() {
+                notes.push(format!("{}: {} still holds the README's stand-in, not a real value. Edit the server to put yours in.", s.name, stand_ins.join(", ")));
+            }
+        }
+        let mut added = vec![];
+        if let Some(was) = self.mcp_editing.clone() {
+            let Some(at) = existing.iter().position(|m| m.name == was) else {
+                self.mcp_editing = None;
+                return window.push_notification(SharedString::from(format!("{was} was removed meanwhile; nothing was saved.")), cx);
+            };
+            if servers.len() != 1 {
+                return window.push_notification(SharedString::from(format!("That's {} servers. Edit one at a time, or cancel and add them.", servers.len())), cx);
+            }
+            let mut server = servers.remove(0);
+            let old = &existing[at];
+            if server.name != was && existing.iter().any(|m| m.name == server.name) {
+                return window.push_notification(SharedString::from(format!("There's already a server named {}.", server.name)), cx);
+            }
+            server.enabled = old.enabled;
+            // A header not typed again stays as it was (its token in the Keychain).
+            if server.is_http() && old.is_http() {
+                for h in &old.headers {
+                    if !server.headers.iter().any(|n| n.name.eq_ignore_ascii_case(&h.name)) {
+                        server.headers.push(h.clone());
+                    }
+                }
+            }
+            if let Err(e) = server.stash_secrets(Some(&was)) {
+                return window.push_notification(SharedString::from(format!("Not saved: {e}.")), cx);
+            }
+            old.forget_secrets(Some(&server));
+            let checked = server.name.clone();
+            self.workspace.update(cx, |ws, cx| {
+                ws.mcp_checks.remove(&was);
+                if let Some(slot) = ws.settings.tools.mcp_servers.get_mut(at) {
+                    *slot = server;
+                }
+                ws.save_settings(cx);
+            });
+            added.push(checked);
+        } else {
+            let mut taken: HashSet<String> = existing.iter().map(|m| m.name.clone()).collect();
+            let mut skipped = vec![];
+            for mut server in servers {
+                if !taken.insert(server.name.clone()) {
+                    skipped.push(server.name);
+                    continue;
+                }
+                if let Err(e) = server.stash_secrets(None) {
+                    notes.push(format!("{} wasn't added: its tokens couldn't be saved to your Keychain ({e}).", server.name));
+                    continue;
+                }
+                added.push(server.name.clone());
+                self.workspace.update(cx, |ws, _| ws.settings.tools.mcp_servers.push(server));
+            }
+            if !skipped.is_empty() {
+                let why = if skipped.len() == 1 { "there's already a server by that name" } else { "there are already servers by those names" };
+                notes.insert(0, format!("Skipped {}: {why}. Edit or remove it to change it.", skipped.join(", ")));
+            }
+            if added.len() > 1 {
+                notes.insert(0, format!("Added {} servers: {}.", added.len(), added.join(", ")));
+            }
+            self.workspace.update(cx, |ws, cx| ws.save_settings(cx));
+        }
+        for note in notes {
+            window.push_notification(SharedString::from(note), cx);
+        }
+        if added.is_empty() {
+            return;
+        }
+        self.mcp_editing = None;
+        for input in [&self.mcp_name, &self.mcp_command, &self.mcp_header_name, &self.mcp_header_value] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        // Each one is tried straight away, so a missing token or a typo shows now, not mid-task.
+        self.workspace.update(cx, |ws, cx| {
+            for name in &added {
+                ws.check_mcp_server(name, cx);
+            }
+        });
+    }
+
+    /// Load server `name` into the add row to be edited: its command line with its environment
+    /// in front (saved values shown as …, kept unless typed over), or its URL.
+    fn edit_mcp_server(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(server) = self.workspace.read(cx).settings.tools.mcp_servers.iter().find(|m| m.name == name).cloned() else { return };
+        self.mcp_editing = Some(server.name.clone());
+        self.mcp_name.update(cx, |s, cx| s.set_value(server.name.clone(), window, cx));
+        self.mcp_command.update(cx, |s, cx| s.set_value(server.command_line(), window, cx));
+        for input in [&self.mcp_header_name, &self.mcp_header_value] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    fn cancel_mcp_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mcp_editing = None;
+        for input in [&self.mcp_name, &self.mcp_command, &self.mcp_header_name, &self.mcp_header_value] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
     fn tools_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = self.workspace.read(cx).settings.clone();
         let muted = cx.theme().muted_foreground;
         let mono = cx.theme().mono_font_family.clone();
         let mut out = vec![];
-        let bundled = crate::workspace::trek_mcp_binary().is_some();
-        let permission = |id: &'static str, label: &'static str, ok: bool, pane: &'static str, cx: &mut Context<Self>| -> AnyElement {
-            if ok {
-                Self::status_dot(palette::emerald(cx), "Allowed")
-            } else {
-                Button::new(id).small().outline().label(format!("Allow {label}")).on_click(move |_, _, cx| cx.open_url(pane)).into_any_element()
+        // Read off the main thread when the page opens; until then each check says so.
+        let probe = self.tools.value.clone();
+        let checking = |id: &str| div().id(SharedString::from(format!("{id}-checking"))).test_support().text_size(px(12.5)).text_color(muted).child("Checking…").into_any_element();
+        let bundled = probe.as_ref().is_none_or(|p| p.mcp_bundled);
+        let permission = |id: &'static str, label: &'static str, ok: Option<bool>, pane: &'static str, cx: &mut Context<Self>| -> AnyElement {
+            match ok {
+                None => checking(id),
+                Some(true) => Self::status_dot(palette::emerald(cx), "Allowed"),
+                Some(false) => Button::new(id).small().outline().label(format!("Allow {label}")).on_click(move |_, _, cx| cx.open_url(pane)).into_any_element(),
             }
         };
-        let ax = crate::integrations::accessibility_allowed();
-        let sr = crate::integrations::screen_recording_allowed();
+        let ax = probe.as_ref().map(|p| p.accessibility);
+        let sr = probe.as_ref().map(|p| p.screen_recording);
+        out.extend(self.connections(cx));
+        out.push(Self::heading("Computer use", cx));
         out.push(ui::group(
             vec![
                 Self::row(
-                    "Computer use",
-                    "Agents can see the screen, click, type and switch apps through Trek's MCP tools. They still follow your hand-holding level.",
+                    "Computer use tools",
+                    "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
                     self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
                     cx,
                 ),
@@ -649,10 +1043,10 @@ impl SettingsView {
             cx,
         ));
         out.push(Self::heading("iOS Simulator", cx));
-        let axe = crate::integrations::axe_path();
-        let axe_control: AnyElement = match &axe {
-            Some(_) => Self::status_dot(palette::emerald(cx), "Installed"),
-            None => Button::new("install-axe")
+        let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
+            None => checking("install-axe"),
+            Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
+            Some(false) => Button::new("install-axe")
                 .small()
                 .outline()
                 .icon(IconName::ArrowDown)
@@ -689,25 +1083,44 @@ impl SettingsView {
         }
 
         out.push(Self::heading("Your MCP servers", cx));
-        out.push(Self::note("Passed to every new session, on top of what each agent already loads.", cx));
+        out.push(Self::note(
+            "Passed to every new session, on top of what each agent already loads. Type a command Trek starts or a remote server's URL, or paste the JSON config or claude mcp add line from a server's README.",
+            cx,
+        ));
+        let checks = self.workspace.read(cx).mcp_checks.clone();
+        let editing = self.mcp_editing.clone();
         let mut rows: Vec<AnyElement> = s
             .tools
             .mcp_servers
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let line = std::iter::once(m.command.clone()).chain(m.args.iter().cloned()).collect::<Vec<_>>().join(" ");
+                let name = m.name.clone();
                 let controls = h_flex()
-                    .gap_2()
+                    .gap_1()
+                    .child(ui::icon_button(SharedString::from(format!("mcp-check-{i}")), IconName::RefreshCw, "Check it works").on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_mcp_server(&name, cx))
+                    })))
+                    .child(ui::icon_button(SharedString::from(format!("mcp-edit-{i}")), crate::assets::Lucide::Pencil, "Edit").on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, window, cx| this.edit_mcp_server(&name, window, cx)
+                    })))
                     .child(ui::icon_button(SharedString::from(format!("mcp-del-{i}")), IconName::Delete, "Remove").on_click(cx.listener(move |this, _, _, cx| {
+                        if this.mcp_editing.as_deref() == Some(name.as_str()) {
+                            this.mcp_editing = None;
+                        }
                         this.workspace.update(cx, |ws, cx| {
                             if i < ws.settings.tools.mcp_servers.len() {
-                                ws.settings.tools.mcp_servers.remove(i);
+                                let gone = ws.settings.tools.mcp_servers.remove(i);
+                                // Its tokens go with it.
+                                gone.forget_secrets(None);
+                                ws.mcp_checks.remove(&gone.name);
                             }
                             ws.save_settings(cx);
                         })
                     })))
-                    .child(Switch::new(SharedString::from(format!("mcp-on-{i}"))).checked(m.enabled).on_click(cx.listener(move |this, v: &bool, _, cx| {
+                    .child(div().pl_2().child(Switch::new(SharedString::from(format!("mcp-on-{i}"))).checked(m.enabled).on_click(cx.listener(move |this, v: &bool, _, cx| {
                         let v = *v;
                         this.workspace.update(cx, |ws, cx| {
                             if let Some(m) = ws.settings.tools.mcp_servers.get_mut(i) {
@@ -715,33 +1128,76 @@ impl SettingsView {
                             }
                             ws.save_settings(cx);
                         })
-                    })));
-                Self::row(m.name.clone(), line, controls, cx)
+                    }))));
+                let transport = if m.is_http() { "Remote" } else { "Command" };
+                let title = h_flex()
+                    .gap(px(8.))
+                    .child(m.name.clone())
+                    .child(div().id(SharedString::from(format!("mcp-transport-{i}"))).test_support().px(px(6.)).rounded_full().bg(cx.theme().foreground.opacity(0.07)).text_size(px(11.)).font_normal().text_color(muted).child(transport))
+                    .when(editing.as_deref() == Some(m.name.as_str()), |el| el.child(div().text_size(px(11.)).font_normal().text_color(muted).child("Editing below")));
+                let mut line = m.summary();
+                let headers: Vec<&str> = m.headers.iter().map(|h| h.name.as_str()).collect();
+                if !headers.is_empty() {
+                    line = format!("{line} · sends {}", headers.join(", "));
+                }
+                let env: Vec<&str> = m.env.iter().map(|e| e.name.as_str()).collect();
+                if !env.is_empty() {
+                    line = format!("{line} · with {}", env.join(", "));
+                }
+                let status = checks.get(&m.name).map(|c| Self::mcp_status(i, c, cx));
+                Self::row_with(title, line, status, controls, cx)
             })
             .collect();
+        let remote = trek_core::settings::is_mcp_url(&self.mcp_command.read(cx).value());
+        let add_label = if editing.is_some() { "Save" } else { "Add" };
         rows.push(
-            h_flex()
+            v_flex()
                 .w_full()
                 .py(px(12.))
                 .gap_2()
-                .child(div().w(px(150.)).child(Input::new(&self.mcp_name).small()))
-                .child(div().flex_1().child(Input::new(&self.mcp_command).small()))
-                .child(Button::new("mcp-add").small().outline().icon(IconName::Plus).label("Add").on_click(cx.listener(|this, _, window, cx| {
-                    let name = this.mcp_name.read(cx).value().trim().to_string();
-                    let line = this.mcp_command.read(cx).value().trim().to_string();
-                    let mut parts = line.split_whitespace().map(String::from);
-                    let Some(command) = parts.next().filter(|_| !name.is_empty()) else {
-                        window.push_notification("Give the server a name and a command.", cx);
-                        return;
-                    };
-                    let args: Vec<String> = parts.collect();
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.settings.tools.mcp_servers.push(trek_core::settings::McpServerConfig { name, command, args, enabled: true });
-                        ws.save_settings(cx);
-                    });
-                    this.mcp_name.update(cx, |s, cx| s.set_value("", window, cx));
-                    this.mcp_command.update(cx, |s, cx| s.set_value("", window, cx));
-                })))
+                .when_some(editing.clone(), |el, name| {
+                    el.child(
+                        div()
+                            .id("mcp-editing")
+                            .test_support()
+                            .text_size(px(12.5))
+                            .text_color(muted)
+                            .child(format!("Editing {name}. A value shown as … stays as saved unless you type over it.")),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(div().w(px(150.)).child(Input::new(&self.mcp_name).id("mcp-name").small()))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.mcp_command).id("mcp-command").small()))
+                        .when(editing.is_some(), |el| {
+                            el.child(Button::new("mcp-cancel").small().ghost().label("Cancel").on_click(cx.listener(|this, _, window, cx| this.cancel_mcp_edit(window, cx))))
+                        })
+                        .child(
+                            Button::new("mcp-add")
+                                .small()
+                                .outline()
+                                .when(editing.is_none(), |b| b.icon(IconName::Plus))
+                                .label(add_label)
+                                .on_click(cx.listener(|this, _, window, cx| this.add_mcp_server(window, cx))),
+                        ),
+                )
+                // A remote server may want a token: its header goes along, its value to the Keychain.
+                .when(remote, |el| {
+                    el.child(
+                        h_flex()
+                            .id("mcp-header-row")
+                            .test_support()
+                            .w_full()
+                            .gap_2()
+                            .child(div().w(px(150.)).child(Input::new(&self.mcp_header_name).small()))
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.mcp_header_value).small()))
+                            // Lines the fields up with the ones above.
+                            .when(editing.is_some(), |el| el.child(div().invisible().child(Button::new("mcp-cancel-spacer").small().ghost().label("Cancel"))))
+                            .child(div().invisible().child(Button::new("mcp-add-spacer").small().outline().when(editing.is_none(), |b| b.icon(IconName::Plus)).label(add_label))),
+                    )
+                })
                 .into_any_element(),
         );
         out.push(ui::group(rows, cx));
@@ -749,7 +1205,10 @@ impl SettingsView {
         out.push(Self::heading("Already set up in your agents", cx));
         let ws = self.workspace.read(cx);
         let mut rows = vec![];
-        for (agent, names) in crate::integrations::agent_mcp_servers() {
+        if probe.is_none() {
+            rows.push(div().id("tools-reading").test_support().py(px(16.)).text_size(px(12.5)).text_color(muted).child("Reading your agents' setup…").into_any_element());
+        }
+        for (agent, names) in probe.as_ref().map(|p| p.agent_mcp.clone()).unwrap_or_default() {
             rows.push(Self::row(
                 format!("{agent} MCP servers"),
                 if names.is_empty() { "None".to_string() } else { names.join(", ") },
@@ -770,19 +1229,38 @@ impl SettingsView {
                 }
             }
         }
-        let plugins = crate::integrations::claude_plugins();
-        rows.push(Self::row(
-            "Claude Code plugins",
-            if plugins.is_empty() { "None installed".to_string() } else { plugins.join(", ") },
-            div().font_family(mono).text_xs().text_color(muted).child(plugins.len().to_string()),
-            cx,
-        ));
+        if let Some(plugins) = probe.map(|p| p.plugins) {
+            rows.push(Self::row(
+                "Claude Code plugins",
+                if plugins.is_empty() { "None installed".to_string() } else { plugins.join(", ") },
+                div().font_family(mono).text_xs().text_color(muted).child(plugins.len().to_string()),
+                cx,
+            ));
+        }
         out.push(ui::group(rows, cx));
+        out.push(
+            h_flex()
+                .pt_3()
+                .child(
+                    Button::new("tools-refresh")
+                        .small()
+                        .outline()
+                        .loading(self.tools.loading())
+                        .icon(IconName::RefreshCw)
+                        .label("Check again")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.tools.invalidate();
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
         out
     }
 
     fn content(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let page = self.page(cx);
+        self.probe_page(page, cx);
         let s = self.workspace.read(cx).settings.clone();
         let muted = cx.theme().muted_foreground;
         let mut out: Vec<AnyElement> = vec![];
@@ -903,6 +1381,27 @@ impl SettingsView {
         }
         out
     }
+}
+
+/// Ask before removing an added agent: its download goes, and its threads can't continue.
+fn confirm_remove(ws: Entity<Workspace>, agent: &trek_core::registry::AddedAgent, window: &mut Window, cx: &mut App) {
+    let (id, name) = (agent.id.clone(), agent.name.clone());
+    let what = match agent.source {
+        trek_core::registry::AgentSource::Registry if agent.distribution.as_deref() == Some("binary") => "Its download is deleted. ",
+        _ => "",
+    };
+    let body = format!("{what}Its threads stay in the sidebar, and continue once it's added again.");
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let (ws, id) = (ws.clone(), id.clone());
+        use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+        alert.title(format!("Remove {name}?")).description(body.clone()).footer(
+            DialogFooter::new().child(DialogClose::new().child(Button::new("remove-agent-cancel").outline().label("Cancel"))).child(DialogAction::new().child(
+                Button::new("remove-agent-ok").with_variant(gpui_kit::component::button::ButtonVariant::Danger).label("Remove").on_click(move |_, _, cx| {
+                    ws.update(cx, |ws, cx| ws.remove_added_agent(&id, cx))
+                }),
+            )),
+        )
+    });
 }
 
 /// When something happened, in a sentence: "just now", "3h ago", "on Sep 12".
@@ -1041,6 +1540,11 @@ impl Render for SettingsView {
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
     use super::{SettingsPage, page_named};
+
+    #[test]
+    fn the_legal_note_reads_as_one_paragraph() {
+        assert!(!super::pages::LEGAL.contains("  ") && !super::pages::LEGAL.contains('\n'), "{}", super::pages::LEGAL);
+    }
 
     #[test]
     fn pages_resolve_by_label() {

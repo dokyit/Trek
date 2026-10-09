@@ -548,7 +548,7 @@ fn keyboard_shortcuts_reach_their_actions() {
         trek.press(cx, "cmd-b");
 
         trek.press(cx, "cmd-n");
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(trek.project.clone()) });
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: None });
 
         trek.press(cx, "cmd-,");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(SettingsPage::General));

@@ -176,10 +176,13 @@ fn the_file_picker_follows_the_folder_on_screen() {
         trek.type_text(cx, "@");
         trek.wait(cx, "project A's files", |_| true).await;
         assert!(picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
-        // The window moves to a thread in project B with the picker still open.
+        // The window moves to a thread in project B: the "@" stays with A's draft, and B's own
+        // picker lists B's files.
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(b), cx));
         assert!(!picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
+        trek.type_text(cx, "@");
         trek.wait(cx, "project B's files", |_| true).await;
         assert!(picks(&trek, cx).contains(&"beta_only.rs".to_string()), "{:?}", picks(&trek, cx));
+        assert!(!picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
     });
 }
