@@ -193,6 +193,40 @@ mod tests {
         assert!(good.call("echo", &json!({})).unwrap_err().contains("isn't reachable"), "gone with its listener");
     }
 
+    #[test]
+    fn a_client_takes_a_frame_up_to_the_limit_and_refuses_a_longer_one() {
+        let rt = runtime();
+        let address = address("frames");
+        let mut listener = {
+            let _enter = rt.enter();
+            Listener::bind(&address).unwrap()
+        };
+        // Answers the hello, then a first request with a result exactly MAX_FRAME long (a JSON
+        // string of `x`s), a second with one a byte longer.
+        rt.spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (rd, mut w) = tokio::io::split(stream);
+            let mut r = tokio::io::BufReader::new(rd);
+            let mut line = String::new();
+            let _ = r.read_line(&mut line).await;
+            let _ = w.write_all(encode(&json!({"ok": true})).as_bytes()).await;
+            for extra in [0, 1] {
+                line.clear();
+                let _ = r.read_line(&mut line).await;
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let frame = encode(&reply(&req["id"], Ok(json!(""))));
+                let fill = crate::MAX_FRAME + extra - (frame.len() - 1);
+                let frame = encode(&reply(&req["id"], Ok(json!("x".repeat(fill)))));
+                assert_eq!(frame.len() - 1, crate::MAX_FRAME + extra);
+                let _ = w.write_all(frame.as_bytes()).await;
+            }
+        });
+        let mut conn = Client { socket: address, token: "t".into(), session: "s".into() }.connect().unwrap();
+        assert_eq!(conn.call("big", &json!({})).unwrap().as_str().unwrap().len(), crate::MAX_FRAME - r#"{"id":1,"result":""}"#.len());
+        let err = conn.call("bigger", &json!({})).unwrap_err();
+        assert!(err.contains(&format!("frame longer than {} bytes", crate::MAX_FRAME)), "{err}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn only_this_user_may_open_the_pipe_and_no_one_can_take_its_name() {

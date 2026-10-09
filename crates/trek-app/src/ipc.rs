@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
-/// How long a new connection has to say hello.
-const HELLO_WITHIN: Duration = Duration::from_secs(5);
+/// How long a new connection has to say hello. Shorter in tests, so the one that waits it out
+/// doesn't hold them up.
+const HELLO_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
 /// How long `delegate_task` with `wait` waits unless asked otherwise, and the bounds it may ask for.
 pub const WAIT_DEFAULT: Duration = Duration::from_secs(600);
 /// Shorter in tests, so a wait that runs out doesn't hold them up.
@@ -384,6 +385,18 @@ mod tests {
         assert!(line.contains("Bad request"), "{line}");
         line.clear();
         assert_eq!(r.read_line(&mut line).unwrap_or(0), 0, "closed");
+    }
+
+    #[test]
+    fn a_connection_that_says_nothing_is_closed_after_a_while() {
+        use std::io::Read as _;
+        let (server, _calls) = IpcServer::start(&dir()).unwrap();
+        let mut s = trek_ipc::Stream::connect(&server.path).unwrap();
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 64];
+        assert_eq!(s.read(&mut buf).unwrap_or(0), 0, "closed without a word");
+        let waited = started.elapsed();
+        assert!(waited >= HELLO_WITHIN - Duration::from_millis(100) && waited < HELLO_WITHIN + Duration::from_secs(5), "{waited:?}");
     }
 
     #[test]
