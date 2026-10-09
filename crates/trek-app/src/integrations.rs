@@ -3,28 +3,51 @@
 
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
 }
 
 /// Accessibility permission: needed to click and type for the agent.
+#[cfg(target_os = "macos")]
 pub fn accessibility_allowed() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
 /// Screen Recording permission: needed for screenshots of other apps.
+#[cfg(target_os = "macos")]
 pub fn screen_recording_allowed() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
 
+/// Windows has no such permissions: any app may read the screen and send input (to windows
+/// that aren't elevated), so there's nothing to ask for.
+#[cfg(not(target_os = "macos"))]
+pub fn accessibility_allowed() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn screen_recording_allowed() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
 pub const ACCESSIBILITY_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+#[cfg(target_os = "macos")]
 pub const SCREEN_RECORDING_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+// The "Allow…" buttons that open these never show where the check above is always true.
+#[cfg(not(target_os = "macos"))]
+pub const ACCESSIBILITY_PANE: &str = "ms-settings:easeofaccess";
+#[cfg(not(target_os = "macos"))]
+pub const SCREEN_RECORDING_PANE: &str = "ms-settings:privacy";
 
 /// AXe drives simulator touches (taps, swipes, typing).
 pub fn axe_path() -> Option<PathBuf> {
