@@ -27,7 +27,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextViewState;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -1097,7 +1097,7 @@ impl Render for AiTranscript {
                                         })
                                         .child(action("ai-copy", Icon::new(IconName::Copy), "Copy").on_click(move |_, window, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                            window.push_notification("Copied", cx);
+                                            crate::toast::push(window, "Copied", cx);
                                         })),
                                 ),
                         )

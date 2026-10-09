@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::Value;
@@ -850,7 +850,7 @@ impl SimulatorPanel {
                 this.busy = None;
                 this.unchanged = 0;
                 match result {
-                    Ok(msg) if !msg.is_empty() => window.push_notification(msg, cx),
+                    Ok(msg) if !msg.is_empty() => crate::toast::push(window, msg, cx),
                     Ok(_) => {}
                     Err(e) => this.error = Some(format!("{label}: {e}").into()),
                 }
@@ -885,7 +885,7 @@ impl SimulatorPanel {
             match result {
                 Ok(path) => {
                     let _ = ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::AttachImage(path)));
-                    window.push_notification("Screenshot attached to your next message", cx);
+                    crate::toast::push(window, "Screenshot attached to your next message", cx);
                 }
                 Err(e) => this.error = Some(format!("Screenshot: {e}").into()),
             }

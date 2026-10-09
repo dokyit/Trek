@@ -71,7 +71,8 @@ shot_run() {
   local batch=$1 timeout=${SHOT_TIMEOUT:-900}
   [[ -f $batch ]] || die "no such batch file: $batch"
   rm -f "$SHOT_DIR/done"
-  grep -vE '^[[:space:]]*(#|$)' "$batch" > "$SHOT_DIR/.cmd.tmp" || true
+  # `@REPO@` in a manifest stands for the repository's root (a real project to open).
+  grep -vE '^[[:space:]]*(#|$)' "$batch" | sed "s|@REPO@|${SHOT_REPO:-$PWD}|g" > "$SHOT_DIR/.cmd.tmp" || true
   mv "$SHOT_DIR/.cmd.tmp" "$SHOT_DIR/cmd"
   local waited=0 ticks=$((timeout * 4))
   while [[ ! -f $SHOT_DIR/done ]]; do

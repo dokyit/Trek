@@ -414,7 +414,7 @@ fn the_git_tool_keeps_its_place_and_a_turned_down_commit_message() {
         let message = |trek: &Trek, cx: &TestAppContext| cx.read(|cx| trek.root.read(cx).right_panel.read(cx).git_message(cx));
         trek.wait(cx, "the commit to be turned down", |_| true).await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while trek.window(cx, |window, cx| gpui_kit::component::WindowExt::notifications(window, cx).len()) == 0 {
+        while trek.window(cx, |window, cx| crate::toast::count(window, cx)) == 0 {
             assert!(std::time::Instant::now() < deadline, "no word on the commit");
             settle_real_time(cx, 20);
         }
@@ -593,7 +593,7 @@ fn a_thread_whose_worktree_is_missing_rewinds_only_the_conversation() {
         assert_eq!(checkpoint_refs(&trek.project), 4);
         std::fs::remove_dir_all(&wt.path).unwrap();
         trek.render(cx);
-        let toasts = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| gpui_kit::component::WindowExt::notifications(window, cx).len());
+        let toasts = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| crate::toast::count(window, cx));
         let before = toasts(&trek, cx);
 
         // Undoing the last turn says the files can't come back, and doesn't try.

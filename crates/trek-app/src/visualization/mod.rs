@@ -845,7 +845,7 @@ fn copy_button(id: SharedString, icon: Lucide, tip: &'static str, text: String, 
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
         .on_click(move |_, window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            gpui_kit::component::WindowExt::push_notification(window, done, cx);
+            crate::toast::push(window, done, cx);
         })
         .when_some(label, |el, label| el.child(div().text_size(px(11.)).text_color(muted).child(label)))
         .into_any_element()

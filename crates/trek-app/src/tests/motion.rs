@@ -263,7 +263,7 @@ fn a_toast_stays_mounted_through_its_exit_then_unmounts() {
         cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
         trek.window(cx, |window, _| window.activate_window());
         cx.run_until_parked();
-        let toasts = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| window.notifications(cx).len());
+        let toasts = |trek: &Trek, cx: &mut TestAppContext| trek.window(cx, |window, cx| crate::toast::count(window, cx));
         trek.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: "Saved".into(), undo: None }));
         trek.render(cx);
         assert_eq!(toasts(&trek, cx), 1);
@@ -634,6 +634,7 @@ fn a_click_on_a_sheet_as_it_leaves_does_nothing() {
 fn undo_on_a_toast_as_it_goes_does_nothing() {
     run(async |cx| {
         let trek = open(cx);
+        moving(cx);
         let id = trek.quiet_thread(cx);
         cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
         trek.window(cx, |window, _| window.activate_window());
@@ -641,8 +642,7 @@ fn undo_on_a_toast_as_it_goes_does_nothing() {
         trek.press(cx, "cmd-e");
         let settled = |trek: &Trek, cx: &mut TestAppContext| trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some()));
         assert!(settled(&trek, cx));
-        std::thread::sleep(Duration::from_millis(450));
-        trek.render(cx);
+        frame(&trek, cx, 1_000);
         trek.click(cx, "undo");
         assert!(!settled(&trek, cx), "Undo brings it back");
         // Settled again some other way while the toast goes: its Undo is spent.
@@ -654,6 +654,176 @@ fn undo_on_a_toast_as_it_goes_does_nothing() {
         assert!(trek.visible(cx, "undo"), "still drawn as it goes");
         trek.click(cx, "undo");
         assert!(settled(&trek, cx), "a second Undo as it goes does nothing");
+    });
+}
+
+/// Something under the toasts that counts what reaches it.
+#[derive(Default)]
+struct Probe {
+    clicks: usize,
+    hovered: bool,
+    scrolls: usize,
+}
+
+impl gpui_kit::Render for Probe {
+    fn render(&mut self, _: &mut gpui_kit::Window, cx: &mut gpui_kit::Context<Self>) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _};
+        gpui_kit::div()
+            .id("probe")
+            .test_support()
+            .size_full()
+            .on_click(cx.listener(|p, _, _, _| p.clicks += 1))
+            .on_hover(cx.listener(|p, on: &bool, _, _| p.hovered = *on))
+            .on_scroll_wheel(cx.listener(|p, _, _, _| p.scrolls += 1))
+    }
+}
+
+/// A window of its own with only `Probe` in it, and the toast layer over that.
+fn probe_window(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<Probe>) {
+    use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, point, size};
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(800.), px(600.)) })), ..Default::default() };
+    cx.update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Probe::default()))).expect("probe window")
+}
+
+fn in_window<R>(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, f: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App) -> R) -> R {
+    let r = gpui_kit::AppContext::update_window(cx, window, |_, window, cx| f(window, cx)).expect("window");
+    cx.run_until_parked();
+    r
+}
+
+/// Move the clock on `ms` and draw `window`.
+fn frame_in(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, ms: u64) {
+    use gpui_kit::test::TestWindowExt as _;
+    cx.executor().advance_clock(Duration::from_millis(ms));
+    cx.run_until_parked();
+    in_window(cx, window, |w, cx| w.render_frame(cx));
+}
+
+#[test]
+fn a_toast_on_its_way_out_lets_the_pointer_through() {
+    use crate::toast::{Toast, count};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{ScrollDelta, point};
+    run(async |cx| {
+        let _trek = open(cx);
+        moving(cx);
+        let (window, probe) = probe_window(cx);
+        let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = opened.clone();
+        in_window(cx, window, |w, cx| crate::toast::push(w, Toast::new("Finished: Fix the login bug").on_click(move |_, _, _| seen.set(seen.get() + 1)), cx));
+        frame_in(cx, window, 1_000);
+        // Up: it takes the pointer, and a click on it does what it says.
+        in_window(cx, window, |w, cx| w.hover("notification", cx));
+        let close = in_window(cx, window, |w, cx| {
+            w.render_frame(cx);
+            let (face, close) = (w.find("notification"), w.find("toast-close"));
+            assert!(close.visible(), "the pointer on it shows its close button");
+            close.bounds().center() - face.bounds().origin
+        });
+        assert!(!probe.read_with(cx, |p, _| p.hovered));
+        in_window(cx, window, |w, cx| w.click("notification", cx));
+        assert_eq!((opened.get(), probe.read_with(cx, |p, _| p.clicks)), (1, 0));
+
+        // On its way out (clicked away): still drawn, but out of reach.
+        frame_in(cx, window, 40);
+        assert_eq!(in_window(cx, window, |w, cx| count(w, cx)), 1, "still mounted as it goes");
+        assert!(in_window(cx, window, |w, _| w.find("notification").visible()));
+        in_window(cx, window, |w, cx| w.hover("notification", cx));
+        assert!(probe.read_with(cx, |p, _| p.hovered), "the pointer on it hovers what's under it");
+        in_window(cx, window, |w, cx| w.click("notification", cx));
+        assert_eq!((opened.get(), probe.read_with(cx, |p, _| p.clicks)), (1, 1), "a click reaches what's under it");
+        in_window(cx, window, |w, cx| w.scroll("notification", ScrollDelta::Pixels(point(px(0.), px(-40.))), cx));
+        assert_eq!(probe.read_with(cx, |p, _| p.scrolls), 1, "and so does the wheel");
+        // Where its close button was: what's under it gets the click.
+        in_window(cx, window, |w, cx| w.click_at("notification", close, cx));
+        assert_eq!(probe.read_with(cx, |p, _| p.clicks), 2);
+        assert!(!in_window(cx, window, |w, _| w.find("toast-close").visible()));
+        frame_in(cx, window, 1_000);
+        assert_eq!(in_window(cx, window, |w, cx| count(w, cx)), 0, "gone once it has left");
+    });
+}
+
+#[test]
+fn a_live_toast_closes_and_times_out_and_reduce_motion_takes_it_at_once() {
+    use crate::toast::{Toast, count};
+    use gpui_kit::test::TestWindowExt as _;
+    run(async |cx| {
+        let _trek = open(cx);
+        moving(cx);
+        let (window, probe) = probe_window(cx);
+        let toasts = |cx: &mut TestAppContext| in_window(cx, window, |w, cx| count(w, cx));
+        // Its close button takes it down, and the click goes no further.
+        in_window(cx, window, |w, cx| crate::toast::push(w, "Saved", cx));
+        frame_in(cx, window, 1_000);
+        in_window(cx, window, |w, cx| w.hover("notification", cx));
+        in_window(cx, window, |w, cx| w.click("toast-close", cx));
+        assert_eq!(probe.read_with(cx, |p, _| p.clicks), 0);
+        frame_in(cx, window, 20);
+        assert_eq!(toasts(cx), 1, "on its way out");
+        frame_in(cx, window, 1_000);
+        assert_eq!(toasts(cx), 0);
+
+        // Left alone, it goes once its time is up.
+        in_window(cx, window, |w, cx| crate::toast::push(w, Toast::new("Saved").lifetime(Duration::from_secs(3)), cx));
+        frame_in(cx, window, 2_900);
+        assert_eq!(toasts(cx), 1);
+        frame_in(cx, window, 200);
+        assert_eq!(toasts(cx), 1, "still drawn as it goes");
+        assert!(in_window(cx, window, |w, _| w.find("notification").visible()));
+        frame_in(cx, window, 1_000);
+        assert_eq!(toasts(cx), 0, "gone after its time");
+
+        // With Reduce Motion it's gone the moment it's taken down.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let key = Toast::new_key();
+        in_window(cx, window, |w, cx| crate::toast::push(w, Toast::new("Saved").key(key.clone()), cx));
+        frame_in(cx, window, 0);
+        assert!(in_window(cx, window, |w, _| w.find("notification").visible()), "in at once");
+        in_window(cx, window, |w, cx| crate::toast::dismiss(w, &key, cx));
+        assert_eq!(toasts(cx), 0, "out at once");
+        frame_in(cx, window, 0);
+        assert!(in_window(cx, window, |w, _| w.try_find("notification").is_none_or(|t| !t.visible())));
+    });
+}
+
+#[test]
+fn a_click_on_a_toast_as_it_goes_opens_the_row_under_it() {
+    use crate::toast::{Toast, count};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{Point, point, size};
+    run(async |cx| {
+        let trek = open(cx);
+        // Narrow and short: the toast, centred at the bottom, is over the sidebar's rows.
+        cx.simulate_window_resize(trek.window, size(px(600.), px(290.)));
+        let ids: Vec<String> = (0..4).map(|i| quiet(&trek, cx, &format!("Thread {i}"), 60_000 * (i + 1))).collect();
+        moving(cx);
+        let key = Toast::new_key();
+        trek.window(cx, |w, cx| crate::toast::push(w, Toast::new("Saved").key(key.clone()), cx));
+        frame(&trek, cx, 1_000);
+        let face = trek.bounds(cx, "notification").expect("the toast");
+        // A row under the toast's left end, and a point on both.
+        let (id, at): (String, Point<gpui_kit::Pixels>) = ids
+            .iter()
+            .find_map(|id| {
+                let row = trek.bounds(cx, format!("live-line-{id}"))?;
+                let at = point(face.left() + px(24.), row.center().y);
+                (row.contains(&at) && face.contains(&at) && (at.y - face.top()).abs() > px(4.)).then(|| (id.clone(), at))
+            })
+            .unwrap_or_else(|| panic!("no row under the toast at {face:?}: {:?}", ids.iter().map(|id| trek.bounds(cx, format!("live-line-{id}"))).collect::<Vec<_>>()));
+        let before = trek.read(cx, |ws, _| ws.route.clone());
+        // Up, it covers the row.
+        trek.window(cx, |w, cx| w.click_at("notification", at - face.origin, cx));
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), before);
+        // On its way out, the row takes the click.
+        trek.window(cx, |w, cx| crate::toast::dismiss(w, &key, cx));
+        frame(&trek, cx, 30);
+        assert_eq!(trek.window(cx, |w, cx| count(w, cx)), 1, "still drawn as it goes");
+        let face = trek.bounds(cx, "notification").expect("still drawn");
+        assert!(face.contains(&at), "still over the row");
+        trek.window(cx, |w, cx| w.click_at("notification", at - face.origin, cx));
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(id));
     });
 }
 

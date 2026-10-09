@@ -10,7 +10,7 @@ use crate::ui;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
@@ -225,7 +225,7 @@ impl Onboarding {
                             .tooltip("Copy the command")
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                                window.push_notification("Command copied", cx);
+                                crate::toast::push(window, "Command copied", cx);
                             }),
                     ),
             )

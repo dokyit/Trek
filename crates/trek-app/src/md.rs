@@ -219,7 +219,7 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
             } else if is_url(url) {
                 cx.open_url(url);
             } else {
-                gpui_kit::component::WindowExt::push_notification(window, format!("No file or URL at {url}"), cx);
+                crate::toast::push(window, format!("No file or URL at {url}"), cx);
             }
         });
     // Liveness is read only when rendering, so the answer finishing doesn't reparse it.
@@ -249,7 +249,7 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
                         .tooltip("Copy")
                         .on_click(move |_, window, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                            gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
+                            crate::toast::push(window, "Copied", cx);
                         }),
                 )
         })

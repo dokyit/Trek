@@ -28,7 +28,7 @@ SHOT_TIMEOUT=${SHOT_TIMEOUT:-900}
 
 say() { print -r -- "$(date +%H:%M:%S)  $*"; }
 
-VERBS="route send project diff pair push new settled glass tint theme tools range pace wait record shot quit"
+VERBS="route send attach project diff pair push new settled glass tint theme tools range usage-demo pace wait record editor agent-install toast click rclick hover elements type key scroll resize approve deny answer rewind shot quit"
 
 check_cmds() {
   local file=$1 bad=0
@@ -79,7 +79,7 @@ encode() {
     "$outdir/$base.mp4"
   ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i "$concat" \
     -vf "fps=12,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
-    "$outdir/$base.gif"
+    "$outdir/$base.gif" || { rm -f "$outdir/$base.gif"; say "  no gif for $base (too few frames); the mp4 has them"; }
   cp "$SHOT_DIR/$base.frames/f00000.png" "$outdir/$base-poster.png" 2>/dev/null || true
 }
 

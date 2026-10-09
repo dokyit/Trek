@@ -42,6 +42,7 @@ mod tabs;
 mod thread_view;
 mod thread_window;
 mod time;
+mod toast;
 mod tray;
 mod ui;
 mod updater;
@@ -266,6 +267,7 @@ fn main() {
     });
     app.run(|cx| {
         gpui_kit::init(cx);
+        toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
         cx.bind_keys(key_bindings());

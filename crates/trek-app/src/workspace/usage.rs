@@ -29,7 +29,7 @@ pub type UsageFetch = Rc<dyn Fn(&AgentId, &Path, bool) -> async_channel::Receive
 const READ_EVERY_MS: i64 = 30_000;
 
 /// Claude Code's or Codex's own report, with its usage or without, read on Trek's tokio runtime.
-fn read_agent(agent: &AgentId, cwd: &Path, with_usage: bool) -> async_channel::Receiver<Result<AgentStatus, String>> {
+pub(crate) fn read_agent(agent: &AgentId, cwd: &Path, with_usage: bool) -> async_channel::Receiver<Result<AgentStatus, String>> {
     let (tx, rx) = async_channel::bounded(1);
     let (agent, cwd) = (agent.clone(), cwd.to_path_buf());
     trek_core::runtime().spawn(async move {

@@ -7,7 +7,7 @@ use crate::palette;
 use crate::ui;
 use crate::workspace::WorkspaceEvent;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::AgentId;
@@ -167,7 +167,7 @@ impl SettingsView {
                             |this, _, window, cx| {
                                 this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: CLAUDE_PLUGIN.into(), cwd: None }));
                                 this.tools.invalidate();
-                                window.push_notification("Then, in Claude Code, type /mcp, choose figma, and Authenticate.", cx);
+                                crate::toast::push(window, "Then, in Claude Code, type /mcp, choose figma, and Authenticate.", cx);
                             },
                         )))
                     })
@@ -179,7 +179,7 @@ impl SettingsView {
                             // It's set up once the command has run: the page reads it again when shown.
                             this.tools.invalidate();
                             if agent == AgentId::ClaudeCode {
-                                window.push_notification("Then, in Claude Code, type /mcp, choose figma, and Authenticate.", cx);
+                                crate::toast::push(window, "Then, in Claude Code, type /mcp, choose figma, and Authenticate.", cx);
                             }
                         }
                     })))

@@ -111,7 +111,7 @@ impl SettingsView {
                                 .child(Button::new("push-test").small().outline().label("Send a test").on_click(move |_, _, cx| test.update(cx, |ws, cx| ws.test_push(cx))))
                                 .child(Button::new("push-copy").small().ghost().label("Copy topic").on_click(move |_, window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copy_topic.clone()));
-                                    gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
+                                    crate::toast::push(window, "Copied", cx);
                                 }))
                                 .child(Button::new("push-new-topic").small().ghost().label("New topic").on_click(move |_, _, cx| {
                                     fresh.update(cx, |ws, cx| {

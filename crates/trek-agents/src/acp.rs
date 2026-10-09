@@ -70,16 +70,32 @@ struct Agent {
     stderr: StderrTail,
     name: String,
     bin: PathBuf,
+    /// What to tell the user about where OpenCode keeps this session (see `opencode::db_env`).
+    db_notice: Option<String>,
+    _own_db: Option<crate::opencode::OwnInUse>,
+    /// Not the install Trek normally starts (OpenCode 2 beside 1.x, for a session only 2 has).
+    stand_in: bool,
 }
 
 impl Agent {
-    async fn spawn(agent: &AgentId, cwd: &Path, extra: &[String]) -> Result<Agent> {
-        let (bin, mut args, name) = launch_spec(agent)?;
+    /// Start `agent`; `resume`: the session it will be asked to reopen.
+    async fn spawn(agent: &AgentId, cwd: &Path, extra: &[String], resume: Option<&str>) -> Result<Agent> {
+        let (mut bin, mut args, name) = launch_spec(agent)?;
         args.extend(extra.iter().cloned());
-        let mut env = launch_env(agent, cwd);
-        if *agent == AgentId::OpenCode {
-            env.extend(crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await);
+        let mut stand_in = false;
+        if *agent == AgentId::OpenCode
+            && let Some(id) = resume
+            && let Some(other) = crate::opencode::bin_for(&bin, id).await
+        {
+            bin = other;
+            stand_in = true;
         }
+        let mut env = launch_env(agent, cwd);
+        let db = match agent {
+            AgentId::OpenCode => crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await,
+            _ => Default::default(),
+        };
+        env.extend(db.env);
         let mut command = tokio::process::Command::new(&bin);
         command
             .args(&args)
@@ -93,7 +109,7 @@ impl Agent {
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
         let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
         let lines = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
-        Ok(Agent { child, rpc, lines, stderr, name, bin })
+        Ok(Agent { child, rpc, lines, stderr, name, bin, db_notice: db.notice, _own_db: db.own, stand_in })
     }
 
     fn exited(&self) -> anyhow::Error {
@@ -931,7 +947,7 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
-    let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config)).await?;
+    let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config), config.resume.as_deref()).await?;
     let mut hand_holding = config.hand_holding;
     let mut fs = FsPolicy { cwd: config.cwd.clone(), full_access: hand_holding == HandHolding::FullAccess, read_only: config.read_only };
     let mut backlog = Vec::new();
@@ -1001,8 +1017,11 @@ pub async fn run(
     {
         ctl.refresh(&r);
     }
-    // What this session reports is what the next launch's probe would learn.
-    ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+    // What this session reports is what the next launch's probe would learn (of the install it
+    // probes).
+    if !agent.stand_in {
+        ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+    }
     // Into plan mode, or out of it when a resumed session was left there. A read-only session
     // works in plan mode too: the agent's own tools edit files without asking Trek.
     let plan = config.plan || config.read_only;
@@ -1021,6 +1040,9 @@ pub async fn run(
         events.send(ev).await?;
     }
     if let Some(notice) = skipped_notice {
+        events.send(AgentEvent::Notice(notice)).await?;
+    }
+    if let Some(notice) = agent.db_notice.take() {
         events.send(AgentEvent::Notice(notice)).await?;
     }
     if lost {
@@ -1116,7 +1138,9 @@ pub async fn run(
                         // Told even when nothing changed: the thread may be on a level the model hasn't.
                         told_efforts = None;
                         if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
-                            ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+                            if !agent.stand_in {
+                                ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+                            }
                             if events.send(ev).await.is_err() {
                                 break;
                             }
@@ -1340,7 +1364,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     // The session the probe opened, as soon as the agent says: it's deleted however the probe ends.
     let mut opened: Option<String> = None;
     let probe = async {
-        let mut agent = Agent::spawn(&agent_id, &home, &[]).await?;
+        let mut agent = Agent::spawn(&agent_id, &home, &[], None).await?;
         let fs = FsPolicy { cwd: home.clone(), full_access: false, read_only: false };
         let mut backlog = Vec::new();
         let init = agent.handshake(&fs, &mut backlog).await?;
@@ -1391,14 +1415,20 @@ async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
         _ => return,
     };
     let Some(bin) = bin else { return };
+    // Held until it's done: the session is in the file this names.
     let db = crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await;
     let mut command = tokio::process::Command::new(bin);
-    command.args(args).arg(session).current_dir(cwd).envs(db).env("PATH", detect::login_path());
+    command.args(args).arg(session).current_dir(cwd).envs(db.env).env("PATH", detect::login_path());
     match crate::output_group(&mut command, None, Duration::from_secs(20)).await {
         Ok(out) if out.status.success() => {}
         Ok(out) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
         Err(e) => tracing::warn!("couldn't delete probe session {session}: {e}"),
     }
+}
+
+/// Which install of an agent `bin` is (see `ProbeCache`).
+pub(crate) fn stamp(bin: &Path) -> String {
+    ProbeCache::stamp(bin)
 }
 
 /// The last thing each ACP agent reported, one file per agent under Trek's data folder. It's

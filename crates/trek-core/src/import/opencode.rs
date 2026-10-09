@@ -5,8 +5,8 @@
 //! in both: the copy that changed last is the one read.
 //!
 //! 1.x won't open a database 2.0 created ("Database is not empty and has no session table": it
-//! only migrates one that has its `session` table), so Trek starts 1.x on `opencode-1x.db` beside
-//! it then (`db_for_1x`). Both files are read.
+//! only migrates one that has its `session` table), so Trek adds 1.x's tables to it (`share`).
+//! When that can't be done, 1.x keeps `opencode-1x.db` beside it, and both files are read.
 
 use super::{Evidence, ImportedThread, Transcript, classify, clip, source_title, title_from, user_text};
 use crate::store::{Item, ToolStatus};
@@ -17,15 +17,17 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub mod share;
+
 /// OpenCode's data folder (`$XDG_DATA_HOME/opencode`, as OpenCode finds it).
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
     xdg.unwrap_or_else(|| crate::paths::home().join(".local/share")).join("opencode")
 }
 
 /// The database OpenCode uses unless told otherwise.
 const MAIN_DB: &str = "opencode.db";
-/// The one Trek gives OpenCode 1.x when 2.0 has made `opencode.db` (see the top of this file).
+/// The one Trek gives OpenCode 1.x when 2.0 made `opencode.db` and it can't be shared (see `share`).
 const DB_1X: &str = "opencode-1x.db";
 
 fn open(path: &Path) -> Option<Connection> {
@@ -45,32 +47,6 @@ fn dbs_in(dir: &Path) -> Vec<Connection> {
 /// The database session `id` is in.
 fn db_of(id: &str) -> Option<Connection> {
     dbs().into_iter().find(|c| tables_of(c, id).is_some())
-}
-
-/// Where OpenCode 1.x should keep its sessions, when that isn't `opencode.db`: 2.0 made that
-/// one (it has tables, none of them 1.x's `session`), or it's gone and 1.x already has its own.
-/// `None`: 1.x opens `opencode.db` as usual (it's 1.x's, or there's none yet).
-pub fn db_for_1x() -> Option<PathBuf> {
-    db_for_1x_in(&data_dir())
-}
-
-fn db_for_1x_in(dir: &Path) -> Option<PathBuf> {
-    let (main, own) = (dir.join(MAIN_DB), dir.join(DB_1X));
-    let names: Vec<String> = match main.is_file().then(|| open(&main)).flatten() {
-        Some(conn) => conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-            .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
-            // Unreadable: leave it to 1.x.
-            .ok()?,
-        None => vec![],
-    };
-    if names.iter().any(|n| n == "session") {
-        None
-    } else if !names.is_empty() || own.is_file() {
-        Some(own)
-    } else {
-        None
-    }
 }
 
 /// Which of OpenCode's tables a session is read from.
@@ -307,6 +283,20 @@ fn is_cli_run(permission: &str) -> bool {
 /// `0.0.0-beta-…`), not that of the 1.x it was copied from.
 fn made_by_2(version: &str) -> bool {
     version.starts_with("0.0.0-") || version.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 2)
+}
+
+/// Whether only OpenCode 2 can open session `id`: it's in 2.0's tables, and not in 1.x's (1.x
+/// reads only those; 2.0 copies 1.x's sessions once, so a 1.x session started after that is in
+/// 1.x's alone).
+pub fn only_2_opens(id: &str) -> bool {
+    only_2_opens_in(&dbs(), id)
+}
+
+fn only_2_opens_in(dbs: &[Connection], id: &str) -> bool {
+    let has = |table: &str| {
+        dbs.iter().any(|c| tables(c).iter().any(|t| t.session() == table) && c.query_row(&format!("SELECT 1 FROM {table} WHERE id = ?1"), [id], |_| Ok(())).is_ok())
+    };
+    has(Tables::V2.session()) && !has(Tables::V1.session())
 }
 
 /// Every session OpenCode has; `None` when its database can't be read.
@@ -928,26 +918,6 @@ mod tests {
     }
 
     #[test]
-    fn opencode_1x_gets_a_database_of_its_own_beside_2s() {
-        let dir = temp_dir("db-1x");
-        let own = dir.join(DB_1X);
-        // Nothing yet, or 1.x's own (2.0 may have added its tables to it since): 1.x opens it.
-        assert_eq!(db_for_1x_in(&dir), None);
-        Connection::open(dir.join(MAIN_DB)).unwrap().execute_batch("CREATE TABLE session (id TEXT); CREATE TABLE session_v2 (id TEXT);").unwrap();
-        assert_eq!(db_for_1x_in(&dir), None);
-        // Made by 2.0: 1.x would refuse it.
-        std::fs::remove_file(dir.join(MAIN_DB)).unwrap();
-        Connection::open(dir.join(MAIN_DB)).unwrap().execute_batch("CREATE TABLE migration (id TEXT); CREATE TABLE session_v2 (id TEXT);").unwrap();
-        assert_eq!(db_for_1x_in(&dir), Some(own.clone()));
-        // And once 1.x has its own, it stays there while 2.0's is away.
-        std::fs::rename(dir.join(MAIN_DB), dir.join("opencode.db.bak")).unwrap();
-        assert_eq!(db_for_1x_in(&dir), None);
-        Connection::open(&own).unwrap().execute_batch("CREATE TABLE session (id TEXT);").unwrap();
-        assert_eq!(db_for_1x_in(&dir), Some(own));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn both_databases_are_read() {
         let dir = temp_dir("both");
         // 2.0's, as recorded, and 1.x's own beside it.
@@ -977,6 +947,9 @@ mod tests {
         let of = |id: &str| dbs.iter().position(|c| tables_of(c, id).is_some());
         assert_eq!((of("ses_1x"), of(V2), of("ses_none")), (Some(1), Some(0), None));
         assert!(matches!(&load_conn(&dbs[1], "ses_1x").unwrap()[..], [Item::User { .. }]));
+        // 2.0's own sessions need 2.0 to resume them; the ones it copied, either.
+        assert!(only_2_opens_in(&dbs, V2) && !only_2_opens_in(&dbs, "ses_1x"));
+        assert!(!only_2_opens_in(&dbs, "ses_none"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

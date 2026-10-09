@@ -1,0 +1,136 @@
+# media/mac/parity.cmds — reference frames for porting: every main screen in both themes,
+# so another platform's build can be compared frame for frame (animations: parity-motion.cmds).
+# Run: script/capture.sh mac/parity     (SIZE=1280x820 TREK_SHOT_UNDER=assets/backgrounds/night.png)
+# `@REPO@` is the repository's root (script/lib/shot.sh), opened as a real project.
+
+pace 0
+theme night
+glass off
+
+# The empty app and a project.
+route no-project
+shot p01-draft-no-project-night
+project @REPO@
+shot p02-draft-project-night
+
+# A turn, its tools, and the cards that wait on a person.
+send tools
+wait idle 30000
+shot p03-tools-turn-night
+route draft
+send subagents 2s
+wait idle 30000
+shot p04-subagents-night
+route draft
+send error
+wait idle 30000
+shot p05-error-night
+
+# Basecamp, notes, palette.
+route basecamp
+range today
+shot p06-basecamp-today-night
+range all
+shot p07-basecamp-all-night
+usage-demo
+wait 400
+shot p08-usage-night
+route notes
+shot p09-notes-night
+route first
+key cmd-k
+wait 500
+shot p10-palette-night
+key escape
+wait 500
+
+# Side tools.
+tools git
+wait 600
+shot p11-tool-git-night
+tools explorer
+wait 600
+shot p12-tool-explorer-night
+tools terminal
+wait 1500
+shot p13-tool-terminal-night
+tools sidechat
+wait 600
+shot p14-tool-sidechat-night
+tools off
+
+# Every settings page.
+route settings:general
+shot p20-settings-general-night
+route settings:appearance
+shot p21-settings-appearance-night
+route settings:notifications
+shot p22-settings-notifications-night
+route settings:keyboard-shortcuts
+shot p23-settings-shortcuts-night
+route settings:agents-&-subscriptions
+shot p24-settings-agents-night
+route settings:tools-&-mcp
+shot p25-settings-tools-night
+route settings:phone
+shot p26-settings-phone-night
+route settings:api-keys
+shot p27-settings-apikeys-night
+route settings:local-models
+shot p28-settings-localmodels-night
+route settings:permissions
+shot p29-settings-permissions-night
+route settings:import-threads
+shot p30-settings-import-night
+route settings:updates
+shot p31-settings-updates-night
+route settings:about
+shot p32-settings-about-night
+
+# The editor (Trek Code).
+route first
+editor on
+editor root @REPO@
+editor view explorer
+editor open @REPO@/crates/trek-app/src/motion.rs 40
+wait 1200
+shot p40-editor-explorer-night
+editor view scm
+wait 600
+shot p41-editor-scm-night
+editor panel terminal
+wait 1500
+shot p42-editor-terminal-night
+editor panel off
+editor ai on
+wait 600
+shot p43-editor-ai-night
+editor ai off
+editor off
+wait 800
+
+# Glass.
+glass on
+tint 0.5
+route first
+wait 600
+shot p50-glass-night
+glass off
+
+# The lighter theme: the same main screens.
+theme paper
+route first
+shot p60-thread-paper
+route basecamp
+shot p61-basecamp-paper
+route settings:appearance
+shot p62-settings-appearance-paper
+route first
+editor on
+wait 1000
+shot p63-editor-paper
+editor off
+wait 800
+theme night
+
+quit

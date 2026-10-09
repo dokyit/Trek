@@ -339,9 +339,9 @@ impl ImagePreview {
         match std::fs::read(&path) {
             Ok(bytes) => {
                 cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(format_of(&path), bytes)));
-                gpui_kit::component::WindowExt::push_notification(window, "Image copied", cx);
+                crate::toast::push(window, "Image copied", cx);
             }
-            Err(e) => gpui_kit::component::WindowExt::push_notification(window, format!("Couldn't copy the image: {e}"), cx),
+            Err(e) => crate::toast::push(window, format!("Couldn't copy the image: {e}"), cx),
         }
     }
 

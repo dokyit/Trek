@@ -701,9 +701,9 @@ impl SettingsView {
                                     }
                                     ws.save_settings(cx);
                                 });
-                                window.push_notification("Saved to your Keychain", cx);
+                                crate::toast::push(window, "Saved to your Keychain", cx);
                             }
-                            Err(e) => window.push_notification(format!("Couldn't save the key: {e}"), cx),
+                            Err(e) => crate::toast::push(window, format!("Couldn't save the key: {e}"), cx),
                         }
                     })))
                     .into_any_element()
@@ -985,7 +985,7 @@ impl SettingsView {
                 lines.push(format!("Settings: {}", settings.display()));
                 let _ = cx.update(|window, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(lines.join("\n")));
-                    window.push_notification("Diagnostics copied", cx);
+                    crate::toast::push(window, "Diagnostics copied", cx);
                 });
             })
             .detach();
@@ -1047,7 +1047,7 @@ impl SettingsView {
                     .await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.snapshots.invalidate();
-                    window.push_notification("Snapshots cleared", cx);
+                    crate::toast::push(window, "Snapshots cleared", cx);
                     cx.notify();
                 });
             })
@@ -1221,8 +1221,8 @@ impl SettingsView {
                                 .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
                                 .on_ok(move |_, window, cx| {
                                     match trek_core::skills::trash(&s4) {
-                                        Ok(()) => window.push_notification(format!("Moved {} to the Trash", s4.name), cx),
-                                        Err(e) => window.push_notification(format!("{e}"), cx),
+                                        Ok(()) => crate::toast::push(window, format!("Moved {} to the Trash", s4.name), cx),
+                                        Err(e) => crate::toast::push(window, format!("{e}"), cx),
                                     }
                                     view.update(cx, |this, cx| this.skills_changed(cx));
                                     true
@@ -1238,7 +1238,7 @@ impl SettingsView {
                 .checked(skill.enabled)
                 .on_click(cx.listener(move |this, v: &bool, window, cx| {
                     if let Err(e) = trek_core::skills::set_enabled(&s2, *v) {
-                        window.push_notification(format!("{e}"), cx);
+                        crate::toast::push(window, format!("{e}"), cx);
                     }
                     this.skills_changed(cx);
                 }))
@@ -1316,7 +1316,7 @@ impl SettingsView {
                                     name2.update(cx, |s, cx| s.set_value("", window, cx));
                                     desc2.update(cx, |s, cx| s.set_value("", window, cx));
                                 }
-                                Err(e) => window.push_notification(format!("{e}"), cx),
+                                Err(e) => crate::toast::push(window, format!("{e}"), cx),
                             }
                             view2.update(cx, |this, cx| this.skills_changed(cx));
                         }))),
@@ -1577,7 +1577,7 @@ impl SettingsView {
                     let name = this.action_name.read(cx).value().trim().to_string();
                     let command = this.action_command.read(cx).value().trim().to_string();
                     if name.is_empty() || command.is_empty() {
-                        window.push_notification("Give the action a name and a command.", cx);
+                        crate::toast::push(window, "Give the action a name and a command.", cx);
                         return;
                     }
                     let p = p2.clone();
@@ -1719,7 +1719,7 @@ impl SettingsView {
                 .child(short);
             let copy = Button::new("verify-cli-copy").ghost().xsmall().icon(Icon::new(IconName::Copy).text_color(muted)).tooltip("Copy the command").on_click(move |_, window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                window.push_notification("Command copied", cx);
+                crate::toast::push(window, "Command copied", cx);
             });
             rows.push(Self::row(
                 "Its CLI",

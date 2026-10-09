@@ -19,7 +19,8 @@
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
 //! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `agent-install <id> <percent>|fail <message>|clear`
-//! (an ACP Registry install's row, without downloading), `shot <name>`, `quit`.
+//! (an ACP Registry install's row, without downloading), `toast [undo|error] <message>` (a toast, with
+//! an Undo or the error icon), `shot <name>`, `quit`.
 //!
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
@@ -239,6 +240,19 @@ fn quit(ws: &Entity<Workspace>, cx: &mut AsyncApp) -> anyhow::Result<()> {
 fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::Result<()> {
     if verb == "usage-demo" {
         usage_demo(ws, cx);
+        return Ok(());
+    }
+    if verb == "toast" {
+        anyhow::ensure!(!arg.is_empty(), "toast [undo|error] <message>");
+        let (kind, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+        match kind {
+            "undo" => ws.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: rest.into(), undo: Some(crate::workspace::UndoAction::Unsettle(String::new())) })),
+            "error" => {
+                let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                main.update(cx, |_, window, cx| crate::toast::push(window, crate::toast::Toast::error(rest.to_string()), cx))?;
+            }
+            _ => ws.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: arg.into(), undo: None })),
+        }
         return Ok(());
     }
     if verb == "range" {
