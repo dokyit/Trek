@@ -1,5 +1,9 @@
 //! Trek — every agent, one trail.
 
+// A release build on Windows is a GUI program: no console window behind it. (A dev build keeps
+// its console, where the log goes.)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod activity;
 mod add_agent;
 mod agent_updates;
@@ -22,6 +26,8 @@ mod ide;
 mod image_preview;
 mod integrations;
 mod ipc;
+#[cfg(windows)]
+mod job;
 mod mascot;
 mod md;
 mod mentions;
@@ -266,6 +272,9 @@ fn main() {
         }
     });
     app.run(|cx| {
+        // Windows toasts need an identity (the AppUserModelID) set before any window opens.
+        #[cfg(windows)]
+        cx.set_app_identity("dev.trek.Trek", "Trek");
         gpui_kit::init(cx);
         toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());

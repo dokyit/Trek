@@ -127,17 +127,24 @@ impl Client {
         Self::spawn(command, &root, language_id)
     }
 
-    /// Run `command` as a server, in a process group of its own.
+    /// Run `command` as a server, in a process group of its own (on Windows, a job object).
     fn spawn(mut command: Command, root: &Path, language_id: &'static str) -> Option<Arc<Self>> {
-        use std::os::unix::process::CommandExt as _;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        crate::job::prepare(&mut command);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .process_group(0)
             .spawn()
             .map_err(|e| tracing::info!("lsp: {:?} failed to spawn: {e}", command.get_program()))
             .ok()?;
+        #[cfg(windows)]
+        crate::job::adopt(&child);
         trek_core::procs::register(child.id() as i32);
         let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
             end_child(child, Duration::ZERO);
@@ -487,10 +494,13 @@ fn end_child(mut child: Child, grace: Duration) {
     while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
         std::thread::sleep(Duration::from_millis(20));
     }
+    #[cfg(unix)]
     if group > 1 {
         // SAFETY: a negative pid asks kill(2) to signal that process group.
         unsafe { libc::kill(-group, libc::SIGKILL) };
     }
+    #[cfg(windows)]
+    crate::job::terminate(child.id());
     let _ = child.kill();
     let _ = child.wait();
     trek_core::procs::unregister(group);

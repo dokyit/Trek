@@ -1738,18 +1738,24 @@ impl Workspace {
     /// Plain-text report for "Copy diagnostics": versions, detected agents, where settings live.
     #[allow(dead_code)] // for the settings / composer UI
     pub fn diagnostics(&self) -> String {
-        let sw = |flag: &str| {
-            std::process::Command::new("/usr/bin/sw_vers")
-                .arg(flag)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|| "unknown".into())
+        #[cfg(windows)]
+        let os = format!("{} · {}", crate::system::windows_version(), std::env::consts::ARCH);
+        #[cfg(not(windows))]
+        let os = {
+            let sw = |flag: &str| {
+                std::process::Command::new("/usr/bin/sw_vers")
+                    .arg(flag)
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            };
+            format!("macOS {} ({}) · {}", sw("-productVersion"), sw("-buildVersion"), std::env::consts::ARCH)
         };
         let mut out = vec![
             format!("Trek {}", env!("CARGO_PKG_VERSION")),
-            format!("macOS {} ({}) · {}", sw("-productVersion"), sw("-buildVersion"), std::env::consts::ARCH),
+            os,
             format!("Settings: {}", trek_core::paths::settings_file().display()),
             format!("Data: {}", trek_core::paths::data_dir().display()),
             String::new(),
@@ -6198,6 +6204,26 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
 /// Lock `dir` for this process (an advisory `flock` on a file in it, released when the process
 /// ends): `Ok(Some(lock))` to keep while the folder is ours, `Ok(None)` when another process
 /// holds it.
+#[cfg(windows)]
+fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx};
+    // Opened with the default sharing: another Trek opens the file too, and its lock is what says no.
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
+    // SAFETY: LockFileEx on a handle this function owns; an all-zero OVERLAPPED locks from offset 0.
+    let mut overlapped = unsafe { std::mem::zeroed() };
+    // The lock goes when the handle closes, which the system does when the process ends.
+    if unsafe { LockFileEx(file.as_raw_handle(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut overlapped) } != 0 {
+        return Ok(Some(file));
+    }
+    match std::io::Error::last_os_error() {
+        e if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(None),
+        e => Err(e),
+    }
+}
+
+#[cfg(unix)]
 fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd as _;
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
@@ -6423,7 +6449,9 @@ pub fn fmt_tokens(n: u64) -> String {
 pub fn trek_mcp_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    [dir.join("trek-mcp"), dir.join("../Resources/trek-mcp")].into_iter().find(|p| p.exists())
+    let name = format!("trek-mcp{}", std::env::consts::EXE_SUFFIX);
+    // `../Resources` is inside the macOS app bundle; Windows keeps it beside `trek.exe`.
+    [dir.join(&name), dir.join("../Resources").join(&name)].into_iter().find(|p| p.exists())
 }
 
 /// Whether merging a thread's work settles it: only one sitting idle in the inbox. Merged while
