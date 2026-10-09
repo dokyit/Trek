@@ -62,14 +62,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
 
-  # The Windows port (branch windows-port) is in progress. Until the workspace builds there this
-  # job may fail without failing the run; once it's green it becomes a full test job like the
-  # macOS one and the allowance goes.
+  # The Windows port: the workspace must check warning-free there. Tests and clippy join once
+  # the suite passes on Windows (Phase 5 of the port).
   check-windows:
     name: Check (Windows)
     runs-on: windows-latest
     timeout-minutes: 75
-    continue-on-error: true
     steps:
       # Deep build paths under the runner's workspace can pass MAX_PATH.
       - name: Long paths
