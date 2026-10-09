@@ -1,6 +1,11 @@
 //! Every process group Trek starts (agent CLIs, language servers, status probes), in one place:
 //! signalled when Trek quits by any path, and recorded in the data folder so the next launch can
 //! end the ones a crash left running.
+//!
+//! On Windows a "group" is a job object (`trek_agents::spawn_group`) whose id here is its first
+//! process's pid. The job is made to end everything in it when its last handle closes, so a Trek
+//! that crashes takes its agents with it and the records rarely find anything; what's here ends
+//! a process and the tree under it by walking parent ids, as the job handles are the agents'.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -20,7 +25,8 @@ static LIVE: Mutex<Vec<Group>> = Mutex::new(Vec::new());
 /// been handed out again.
 const STALE_AFTER_SECS: i64 = 3 * 24 * 3600;
 
-/// Track the process group `group` (a child started with `process_group(0)`; its pid).
+/// Track the process group `group` (a child started with `process_group(0)`, or on Windows put in
+/// a job object of its own; its pid).
 pub fn register(group: i32) {
     if group <= 0 {
         return;
@@ -50,6 +56,7 @@ pub fn live() -> Vec<i32> {
 
 /// End every tracked group: TERM, up to `grace` for them to go, then KILL whatever is left.
 /// Blocks the caller for at most `grace`. For quitting.
+#[cfg(not(windows))]
 pub fn end_all(grace: Duration) {
     let groups = live();
     if groups.is_empty() {
@@ -68,6 +75,27 @@ pub fn end_all(grace: Duration) {
     }
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.retain(|g| !groups.contains(&g.id));
+    write_record(&live);
+}
+
+/// End every tracked group: each first process that still runs with the start time recorded, and
+/// everything under it. For quitting.
+///
+/// Windows has no TERM to send from here (the gentle stop, closing stdin, belongs to whoever holds
+/// the child), so there's nothing to wait `grace` out for: the trees are ended at once. A tree
+/// whose first process is gone is left to its job, which ends it as Trek exits.
+#[cfg(windows)]
+pub fn end_all(_grace: Duration) {
+    let groups = LIVE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if groups.is_empty() {
+        return;
+    }
+    tracing::info!("ending {} child process group(s)", groups.len());
+    for g in &groups {
+        win::end_tree(*g);
+    }
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    live.retain(|l| !groups.iter().any(|g| g.id == l.id));
     write_record(&live);
 }
 
@@ -95,7 +123,7 @@ fn reap_stale_in(dir: &Path) -> usize {
         if record.owner > 0 && alive_since(record.owner, record.owner_started) {
             continue;
         }
-        if record.boot == boot_time() && now - record.written < STALE_AFTER_SECS {
+        if same_boot(record.boot, boot_time()) && now - record.written < STALE_AFTER_SECS {
             for g in &record.groups {
                 if end_stale(*g) {
                     ended += 1;
@@ -113,6 +141,7 @@ fn reap_stale_in(dir: &Path) -> usize {
 /// End a group an earlier run recorded, when it can be told apart from an unrelated one: its
 /// leader still runs with the start time recorded, or (the leader gone) its members started
 /// after the leader did.
+#[cfg(not(windows))]
 fn end_stale(g: Group) -> bool {
     if !group_exists(g.id) {
         return false;
@@ -130,6 +159,28 @@ fn end_stale(g: Group) -> bool {
     }
     signal(g.id, Signal::Kill);
     true
+}
+
+/// End a group an earlier run recorded when its first process still runs with the start time
+/// recorded, and everything under it. With that process gone there's nothing to tell the tree from
+/// an unrelated one by (Windows hands ids out again quickly), and nothing to do: its job ended it
+/// when the Trek that held the job went.
+#[cfg(windows)]
+fn end_stale(g: Group) -> bool {
+    win::end_tree(g)
+}
+
+/// The boot recorded and this one are the same. Windows gives the boot time only as now less the
+/// time since, which wanders a little between readings (the clock's tick, its corrections), so
+/// a few seconds apart is the same boot: no machine reboots and runs Trek again that quickly.
+#[cfg(windows)]
+fn same_boot(recorded: i64, now: i64) -> bool {
+    (recorded - now).abs() <= 10
+}
+
+#[cfg(not(windows))]
+fn same_boot(recorded: i64, now: i64) -> bool {
+    recorded == now
 }
 
 /// What a Trek wrote about its live groups.
@@ -197,6 +248,7 @@ fn write_record(live: &[Group]) {
     }
 }
 
+#[cfg(not(windows))]
 enum Signal {
     Term,
     Kill,
@@ -214,7 +266,7 @@ fn signal(group: i32, s: Signal) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn signal(_group: i32, _s: Signal) {}
 
 /// Some process is still in `group`.
@@ -224,7 +276,7 @@ fn group_exists(group: i32) -> bool {
     group > 1 && (unsafe { libc::kill(-group, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn group_exists(_group: i32) -> bool {
     false
 }
@@ -239,7 +291,12 @@ fn start_time(pid: i32) -> Option<i64> {
     (n == size).then_some(info.pbi_start_tvsec as i64)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn start_time(pid: i32) -> Option<i64> {
+    win::Proc::open(pid).map(|p| win::unix_secs(p.created))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn start_time(_pid: i32) -> Option<i64> {
     None
 }
@@ -265,7 +322,7 @@ fn members(group: i32) -> Vec<i32> {
     pids
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn members(_group: i32) -> Vec<i32> {
     vec![]
 }
@@ -281,18 +338,169 @@ fn boot_time() -> i64 {
     if r == 0 { tv.tv_sec } else { 0 }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// When Windows booted (unix seconds): now less the time since boot, so it can come out a second
+/// apart between readings (see `same_boot`). Ids from before a reboot mean nothing.
+#[cfg(windows)]
+fn boot_time() -> i64 {
+    // SAFETY: takes nothing; reads a counter.
+    let up = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    (now.as_millis() as i64 - up as i64) / 1000
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn boot_time() -> i64 {
     0
 }
 
-#[cfg(all(test, target_os = "macos"))]
+/// Windows processes, told apart by when they were created: Windows hands a process's id out
+/// again soon after it exits, and a child keeps its parent's id after the parent has gone.
+#[cfg(windows)]
+mod win {
+    use super::Group;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE, STILL_ACTIVE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess};
+
+    /// FILETIME ticks (100 ns since 1601) at the unix epoch, and in a second.
+    const UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+    const TICKS_PER_SEC: u64 = 10_000_000;
+
+    pub(super) fn unix_secs(ticks: u64) -> i64 {
+        (ticks.saturating_sub(UNIX_EPOCH) / TICKS_PER_SEC) as i64
+    }
+
+    /// A running process, held open: while it is, its id can't go to another process.
+    pub(super) struct Proc {
+        pub(super) pid: u32,
+        /// When it was created, in FILETIME ticks.
+        pub(super) created: u64,
+        handle: OwnedHandle,
+    }
+
+    impl Proc {
+        /// Process `pid`, if it runs and Trek may look at it.
+        pub(super) fn open(pid: i32) -> Option<Proc> {
+            // 0 and 4 are the idle and system processes.
+            let pid = u32::try_from(pid).ok().filter(|p| *p > 4)?;
+            // SAFETY: plain calls; a null handle is checked before it's used.
+            let mut h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid) };
+            if h.is_null() {
+                // One Trek can't end (elevated, say) can still be looked at.
+                h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            }
+            if h.is_null() {
+                return None;
+            }
+            // SAFETY: `h` was just opened, and is owned from here on.
+            let mut p = Proc { pid, created: 0, handle: unsafe { OwnedHandle::from_raw_handle(h) } };
+            if !p.running() {
+                return None;
+            }
+            let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+            // SAFETY: four writable FILETIMEs, and a handle with query rights.
+            if unsafe { GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+                return None;
+            }
+            p.created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            Some(p)
+        }
+
+        /// It hasn't exited. (A process that has stays around while a handle to it is open.) One
+        /// that exited with code 259, STILL_ACTIVE, would look as if it runs; nothing Trek starts
+        /// does that.
+        pub(super) fn running(&self) -> bool {
+            let mut code = 0u32;
+            // SAFETY: a handle with query rights, and a writable u32.
+            let ok = unsafe { GetExitCodeProcess(self.handle.as_raw_handle(), &mut code) } != 0;
+            ok && code == STILL_ACTIVE as u32
+        }
+
+        fn terminate(&self) {
+            // SAFETY: a handle this owns. Fails harmlessly without PROCESS_TERMINATE, or once it's exited.
+            unsafe { TerminateProcess(self.handle.as_raw_handle(), 1) };
+        }
+    }
+
+    /// Every process: its id and its parent's.
+    fn snapshot() -> Vec<(u32, u32)> {
+        // SAFETY: plain call; the handle is checked, then owned.
+        let h = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if h == INVALID_HANDLE_VALUE {
+            return vec![];
+        }
+        let snap = unsafe { OwnedHandle::from_raw_handle(h) };
+        // SAFETY: all zeroes is a valid PROCESSENTRY32W (integers and a u16 array).
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut out = vec![];
+        // SAFETY: `entry` is writable, with its size set.
+        let mut more = unsafe { Process32FirstW(snap.as_raw_handle(), &mut entry) } != 0;
+        while more {
+            out.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            more = unsafe { Process32NextW(snap.as_raw_handle(), &mut entry) } != 0;
+        }
+        out
+    }
+
+    /// What runs under `root`, held open. A process counts when its parent does and was created
+    /// no later than it was: one whose parent id belonged to an earlier process is passed over. A
+    /// process whose parent has exited can't be found this way; its job ends it.
+    pub(super) fn descendants(root: &Proc) -> Vec<Proc> {
+        let all = snapshot();
+        let mut found: Vec<Proc> = vec![];
+        let mut parents = vec![(root.pid, root.created)];
+        while let Some((parent, created)) = parents.pop() {
+            for &(pid, ppid) in &all {
+                if ppid != parent || pid == root.pid || found.iter().any(|p| p.pid == pid) {
+                    continue;
+                }
+                let Some(p) = Proc::open(pid as i32).filter(|p| p.created >= created) else { continue };
+                parents.push((p.pid, p.created));
+                found.push(p);
+            }
+        }
+        found
+    }
+
+    /// End `g`'s first process and everything under it, when that process still runs with the
+    /// start time recorded. Twice over, for anything started while the first pass ran.
+    pub(super) fn end_tree(g: Group) -> bool {
+        let Some(root) = Proc::open(g.id).filter(|p| g.started > 0 && unix_secs(p.created) == g.started) else { return false };
+        for _ in 0..2 {
+            let tree = descendants(&root);
+            root.terminate();
+            for p in &tree {
+                p.terminate();
+            }
+        }
+        true
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", windows)))]
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     fn sleeper() -> std::process::Child {
         use std::os::unix::process::CommandExt as _;
         std::process::Command::new("/bin/sleep").arg("30").process_group(0).spawn().unwrap()
+    }
+
+    #[cfg(windows)]
+    fn sleeper() -> std::process::Child {
+        quiet("ping", &["-n", "30", "127.0.0.1"])
+    }
+
+    /// `program` started with no console window, its output thrown away.
+    #[cfg(windows)]
+    fn quiet(program: &str, args: &[&str]) -> std::process::Child {
+        use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        std::process::Command::new(program).args(args).stdout(std::process::Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn().unwrap()
     }
 
     #[test]
@@ -351,5 +559,56 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tree_is_ended_with_its_first_process() {
+        // cmd waits for the ping it starts: a child under the group's first process.
+        let mut child = quiet("cmd.exe", &["/d", "/c", "ping -n 60 127.0.0.1 >nul"]);
+        let id = child.id() as i32;
+        let root = win::Proc::open(id).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut tree = win::descendants(&root);
+        while tree.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            tree = win::descendants(&root);
+        }
+        assert!(!tree.is_empty(), "cmd started its ping");
+        // Recorded with another start time, it's someone else's: left alone.
+        assert!(!win::end_tree(Group { id, started: 12345 }));
+        assert!(tree.iter().all(win::Proc::running));
+        assert!(win::end_tree(Group { id, started: start_time(id).unwrap() }));
+        assert!(!child.wait().unwrap().success());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while tree.iter().any(win::Proc::running) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!tree.iter().any(win::Proc::running), "the ping under cmd was ended too");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_finished_process_is_gone_while_its_handle_is_open() {
+        let mut child = quiet("cmd.exe", &["/d", "/c", "exit 0"]);
+        let id = child.id() as i32;
+        assert!(child.wait().unwrap().success());
+        // `child` still holds the process open, so the id is still its own.
+        assert_eq!(start_time(id), None);
+        assert!(!alive_since(id, 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_process_and_boot_are_dated() {
+        let now = chrono::Utc::now().timestamp();
+        let me = std::process::id() as i32;
+        let started = start_time(me).unwrap();
+        assert!(started <= now && now - started < 3600, "{started} vs {now}");
+        assert!(alive_since(me, started));
+        let boot = boot_time();
+        assert!(boot > 0 && boot <= started, "booted {boot}, started {started}");
+        assert!(same_boot(boot, boot_time()));
+        assert!(!same_boot(boot, boot - 600));
     }
 }
