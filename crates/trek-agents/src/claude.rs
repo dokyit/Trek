@@ -318,6 +318,14 @@ impl Cli {
         write_line(&mut self.stdin, &init).await?;
         Ok(init["request_id"].as_str().unwrap_or_default().to_string())
     }
+
+    /// End the process: its stdin first, the cue to exit and on Windows the only gentle one
+    /// (see `GroupChild::terminate`), then the group.
+    async fn stop(self) {
+        let Cli { mut child, stdin, .. } = self;
+        drop(stdin);
+        child.terminate().await;
+    }
 }
 
 /// Which `result` ends the turn the app sees. A message sent while a turn runs joins that turn
@@ -873,7 +881,7 @@ pub async fn run(
                     config.resume_at = None;
                     config.fork = false;
                     resumed_at = None;
-                    cli.child.terminate().await;
+                    cli.stop().await;
                     cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
                     init_id = cli.initialize(&mut ctl).await?;
                     context_requests.clear();
@@ -969,7 +977,7 @@ pub async fn run(
             }
         }
     }
-    cli.child.terminate().await;
+    cli.stop().await;
     Ok(())
 }
 
