@@ -637,7 +637,7 @@ impl CommandPalette {
         }
         let Some(root) = &self.file_root else { return vec![] };
         let ws = self.workspace.read(cx);
-        let recent = ws.settings.ide.recent_files.iter().map(PathBuf::from).filter(|p| p.starts_with(root)).filter_map(|p| p.strip_prefix(root).ok().map(|r| r.display().to_string()));
+        let recent = ws.settings.ide.recent_files.iter().map(PathBuf::from).filter(|p| p.starts_with(root)).filter_map(|p| p.strip_prefix(root).ok().map(crate::mentions::rel_string));
         let mut seen = std::collections::HashSet::new();
         recent
             .chain(self.file_index.iter().filter(|f| !f.ends_with('/')).cloned())
