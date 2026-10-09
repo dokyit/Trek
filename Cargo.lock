@@ -8944,6 +8944,7 @@ dependencies = [
  "ctor",
  "gpui-kit",
  "gpui-pre-macos",
+ "gpui-pre-windows",
  "gpui-wry",
  "if-addrs",
  "ignore",
