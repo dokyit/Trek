@@ -301,6 +301,7 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
         std::fs::write(skill.join("SKILL.md"), "---\nname: verify-app\nmetadata:\n  trek: verification\n  cli: ./.agents/skills/verify-app/scripts/app\n---\n").unwrap();
         std::fs::write(skill.join("references/features/README.md"), "# Features\n").unwrap();
         std::fs::write(skill.join("scripts/app"), "#!/bin/sh\necho ok\n").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(skill.join("scripts/app"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         trek.update(cx, |ws, cx| ws.refresh_verification(&project, cx));
         assert!(trek.read(cx, |ws, _| ws.verification(&project)).is_some());
