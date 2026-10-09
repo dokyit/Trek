@@ -185,8 +185,8 @@ pub fn error_response(id: Value, code: i64, message: &str) -> Value {
 
 // ---- argument helpers shared by tool families ----
 // Only the macOS families take points and images today; Windows computer use (Phase 4) will.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn arg_f64(args: &Value, key: &str) -> Result<f64, String> {
     args.get(key)
         .and_then(Value::as_f64)
