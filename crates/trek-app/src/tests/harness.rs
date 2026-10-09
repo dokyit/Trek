@@ -68,11 +68,22 @@ fn isolate_process() {
     // On Windows the user's folders come from these, not HOME: an agent CLI, a git subprocess or a
     // shell would otherwise find the real `.claude`, `.codex`, `AppData\Roaming` and the rest.
     #[cfg(windows)]
-    for (name, sub) in [("USERPROFILE", "."), ("APPDATA", "AppData\\Roaming"), ("LOCALAPPDATA", "AppData\\Local")] {
-        let dir = home.join(sub);
-        let _ = std::fs::create_dir_all(&dir);
+    {
+        let (roaming, local) = (home.join("AppData").join("Roaming"), home.join("AppData").join("Local"));
+        let _ = std::fs::create_dir_all(&roaming);
+        let _ = std::fs::create_dir_all(&local);
         // SAFETY: as above.
-        unsafe { std::env::set_var(name, &dir) };
+        unsafe {
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var("APPDATA", &roaming);
+            std::env::set_var("LOCALAPPDATA", &local);
+            // Git for Windows ships `core.autocrlf=true`: every checkout the tests make (a branch
+            // switch, a restore) would write CRLF where they compare against "\n". The repos are
+            // theirs to configure, so every git started from here sees autocrlf off.
+            std::env::set_var("GIT_CONFIG_COUNT", "1");
+            std::env::set_var("GIT_CONFIG_KEY_0", "core.autocrlf");
+            std::env::set_var("GIT_CONFIG_VALUE_0", "false");
+        }
     }
 }
 
@@ -162,6 +173,17 @@ pub fn settings() -> Settings {
 
 pub fn mock() -> AgentId {
     AgentId::Direct(trek_core::catalog::MOCK_PROVIDER.into())
+}
+
+/// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
+/// Trek can't replace itself yet (Windows).
+pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "isn't available on Windows" } else { "not running from an app bundle" };
+
+/// `root` with `rel` (written with `/`, as the tests write paths) under it, with the platform's
+/// separators throughout: a path joined as `root.join("a/b")` mixes them on Windows, and so isn't
+/// the string the app builds from its own components.
+pub fn join(root: &std::path::Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 /// A fresh, empty folder to use as a project.
