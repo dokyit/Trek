@@ -2732,7 +2732,14 @@ impl Workspace {
     /// system allows it: macOS isn't set to Reduce transparency; Windows has Mica, with
     /// Transparency effects on).
     pub fn glass(&self) -> Option<f32> {
-        if self.backdrop().is_some() || (!cfg!(test) && crate::system::reduce_transparency()) {
+        self.glass_unless(!cfg!(test) && crate::system::reduce_transparency())
+    }
+
+    /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency;
+    /// Windows 10, or 11 with Transparency effects off: `winlook::glass_available`): then the
+    /// window stays opaque.
+    pub fn glass_unless(&self, reduced: bool) -> Option<f32> {
+        if self.backdrop().is_some() || reduced {
             return None;
         }
         self.settings.appearance.glass_tint()
