@@ -249,7 +249,10 @@ fn command(install: &Path, args: &[OsString]) -> Command {
 /// Start Trek and leave it be; the exit code to end with.
 fn start(install: &Path, args: &[OsString], log: &mut dyn FnMut(&str)) -> i32 {
     match command(install, args).spawn() {
-        Ok(_) => 0,
+        Ok(_) => {
+            log(&format!("started {}", install.join("trek.exe").display()));
+            0
+        }
         Err(e) => {
             log(&format!("couldn't start {} ({e})", install.join("trek.exe").display()));
             1
