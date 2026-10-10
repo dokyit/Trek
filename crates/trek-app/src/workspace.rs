@@ -2718,8 +2718,9 @@ impl Workspace {
         (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere).then(|| a.background.clone().map(|b| (b, a.background_dim))).flatten()
     }
 
-    /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and macOS
-    /// isn't set to reduce transparency).
+    /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and the
+    /// system allows it: macOS isn't set to Reduce transparency; Windows has Mica, with
+    /// Transparency effects on).
     pub fn glass(&self) -> Option<f32> {
         if self.backdrop().is_some() || (!cfg!(test) && crate::system::reduce_transparency()) {
             return None;
