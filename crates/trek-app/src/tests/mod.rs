@@ -36,6 +36,7 @@ mod render;
 mod rewind;
 mod screens;
 mod sidebar;
+mod snapshots;
 mod tabs;
 mod titlebar;
 mod upkeep;

@@ -43,6 +43,7 @@ mod palette;
 mod push;
 mod remote;
 mod root;
+mod screenclip;
 mod settings_view;
 #[cfg(feature = "shots")]
 mod shots;
