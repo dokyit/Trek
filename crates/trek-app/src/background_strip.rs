@@ -465,11 +465,32 @@ impl BackgroundStrip {
 
 /// Where an agent writes a background command's whole output, as the call's result says
 /// (Claude Code: "Command running in background with ID: b1x2. Output is being written to:
-/// /private/tmp/claude-501/…/tasks/b1x2.output").
+/// /private/tmp/claude-501/…/tasks/b1x2.output"; Trek's mock agent says it the same way).
 fn output_file(result: &str) -> Option<std::path::PathBuf> {
-    let rest = result.split("Output is being written to").nth(1)?;
-    let path = rest.trim_start_matches(':').trim_start().split(|c: char| c.is_whitespace() || c == ';').next()?.trim_end_matches('.');
+    let path = output_path(result, cfg!(windows))?;
     (path.starts_with('/') || std::path::Path::new(path).is_absolute()).then(|| std::path::PathBuf::from(path))
+}
+
+/// The path the sentence "Output is being written to[:] <path>[.|;…]" names. It runs to a `;` or
+/// the end of the line; the path itself ends at the first space, except that a Windows one
+/// (`C:\Users\Toby J\…`, `\\server\share\…`) may hold spaces and ends where the sentence does,
+/// at its closing ". " or the end. `windows` is whether to read paths that way.
+fn output_path(result: &str, windows: bool) -> Option<&str> {
+    const MARK: &str = "Output is being written to";
+    let rest = result.split(MARK).nth(1)?.trim_start_matches(':').trim_start();
+    let sentence = rest.lines().next()?.split(';').next()?;
+    let path = if windows && is_windows_path(sentence) {
+        sentence.split_once(". ").map_or(sentence, |(path, _)| path)
+    } else {
+        sentence.split_whitespace().next()?
+    };
+    Some(path.trim_end().trim_end_matches('.'))
+}
+
+/// `C:\…`, `C:/…` or `\\server\…`.
+fn is_windows_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.starts_with(r"\\") || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
 }
 
 /// The icon a task's kind wears.
@@ -545,7 +566,7 @@ pub fn cached(strip: &Entity<BackgroundStrip>, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::output_file;
+    use super::{output_file, output_path};
     use std::path::PathBuf;
 
     #[test]
@@ -556,6 +577,35 @@ mod tests {
         assert_eq!(output_file(monitor), Some(PathBuf::from("/tmp/claude-501/x/tasks/m7.output")));
         assert_eq!(output_file("Command running in background with ID: b1x2."), None);
         assert_eq!(output_file("Output is being written to: somewhere"), None, "only a path");
+    }
+
+    #[test]
+    fn a_unix_path_stops_at_its_first_space_or_semicolon() {
+        let said = "Output is being written to: /tmp/claude-501/x/tasks/b1.output. Read it later.";
+        assert_eq!(output_path(said, false), Some("/tmp/claude-501/x/tasks/b1.output"));
+        assert_eq!(output_path("Output is being written to /tmp/a b/c.output; see it", false), Some("/tmp/a"));
+        // Where a Windows path can't be one, nothing about it changes.
+        assert_eq!(output_path(r"Output is being written to: C:\Temp\a b\c.output.", false), Some(r"C:\Temp\a"));    }
+
+    #[test]
+    fn a_windows_path_keeps_its_spaces() {
+        let said = r"Command running in background with ID: b1x2. Output is being written to: C:\Users\Toby J\AppData\Local\Temp\claude\tasks\b1x2.output.";
+        assert_eq!(output_path(said, true), Some(r"C:\Users\Toby J\AppData\Local\Temp\claude\tasks\b1x2.output"));
+        let monitor = r"Monitor started. Output is being written to D:/My Tasks/m7.output; use Read on that path for interim output.";
+        assert_eq!(output_path(monitor, true), Some("D:/My Tasks/m7.output"));
+        let unc = r"Output is being written to: \\nas\team share\tasks\b.output. It is still running.";
+        assert_eq!(output_path(unc, true), Some(r"\\nas\team share\tasks\b.output"));
+        assert_eq!(output_path(r"Output is being written to C:\a b.output", true), Some(r"C:\a b.output"), "the end of the line ends it");
+        // A Unix path on Windows is still cut at the first space, and a bare word isn't a drive.
+        assert_eq!(output_path("Output is being written to: /tmp/x.output. Done.", true), Some("/tmp/x.output"));
+        assert_eq!(output_path("Output is being written to: c:foo bar", true), Some("c:foo"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_spaced_path_comes_back_whole() {
+        let said = r"Output is being written to: C:\Users\Toby J\Temp\b1x2.output.";
+        assert_eq!(output_file(said), Some(PathBuf::from(r"C:\Users\Toby J\Temp\b1x2.output")));
     }
 }
 
