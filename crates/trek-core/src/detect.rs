@@ -80,7 +80,7 @@ fn registry_path(machine: bool) -> Option<String> {
 /// `value` with each `%NAME%` that `lookup` knows replaced (what a `REG_EXPAND_SZ` value means);
 /// the rest, a lone `%` included, is left as written.
 #[cfg(any(windows, test))]
-fn expand_env_refs(value: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+pub(crate) fn expand_env_refs(value: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(open) = rest.find('%') {
