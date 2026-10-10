@@ -1046,6 +1046,7 @@ impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("TrekWindow");
+        crate::perf::frame_begins();
         let route = self.workspace.read(cx).route.clone();
         // A window too narrow for the sidebar, the chat and the tools panel: the sidebar steps aside.
         let in_settings = matches!(route, Route::Settings(_));
@@ -1305,6 +1306,8 @@ impl Render for TrekWindow {
             .children(crate::motion::leaving_sheet(window, cx))
             // Windows: the caption buttons stay reachable over what covers the title bar.
             .children((self.palette.read(cx).open || self.preview.read(cx).is_open()).then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
+            // TREK_PERF: painted last, it times the frame.
+            .children(crate::perf::probe())
             .into_any_element()
     }
 }
