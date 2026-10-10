@@ -47,7 +47,7 @@ fn a_turn_that_changed_files_lists_them_under_its_answer() {
         let first = ends(&trek, cx, &id)[0];
         assert!(trek.visible(cx, ("turn-changes", first)) && trek.visible(cx, row(first, 0)));
         let card = trek.read(cx, |ws, _| ws.turn_changes(&id, first)).expect("the bridge sees it too");
-        assert_eq!(card.root, trek.project.canonicalize().unwrap());
+        assert_eq!(card.root, super::harness::canonical(&trek.project));
 
         // A second turn counts only its own change; the first still counts its own, now up to
         // the second's checkpoint rather than the files as they are.
@@ -252,7 +252,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 fn history_from_the_store_has_its_cards() {
     run(async |cx| {
         let project = new_project("history");
-        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
             git(&project, args);
         }
         std::fs::write(project.join("README.md"), "hello\n").unwrap();

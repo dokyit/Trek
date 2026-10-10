@@ -791,7 +791,7 @@ async fn download_and_unpack(t: &BinaryTarget, home: &Path, root: &Path, segment
 }
 
 /// Unpack `archive` into `into` (a raw binary is the command itself) and make the command
-/// executable. Every entry is checked first: none may land outside `into`.
+/// executable. Every entry is checked as it is read: none may land outside `into`.
 async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[String]) -> Result<()> {
     std::fs::create_dir_all(into)?;
     let exe = segments.iter().fold(into.to_path_buf(), |p, s| p.join(s));
@@ -803,20 +803,9 @@ async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[Stri
             std::fs::copy(archive, &exe)?;
         }
         ArchiveKind::Tar | ArchiveKind::Zip => {
-            // bsdtar reads tar (any compression) and zip alike, and by itself refuses absolute
-            // paths, `..` and writing through symlinks; the listing is checked as well.
-            let list = tokio::process::Command::new("/usr/bin/tar").arg("-tf").arg(archive).output().await?;
-            if !list.status.success() {
-                bail!("The download isn't an archive Trek can open");
-            }
-            let entries = String::from_utf8_lossy(&list.stdout);
-            if let Some(bad) = entries.lines().map(str::trim).filter(|e| !e.is_empty() && *e != "./").find(|e| command_segments(e).is_none()) {
-                bail!("The archive has a file outside its folder ({bad}), so it wasn't installed");
-            }
-            let out = tokio::process::Command::new("/usr/bin/tar").arg("-xf").arg(archive).arg("-C").arg(into).output().await?;
-            if !out.status.success() {
-                bail!("Couldn't unpack the download: {}", String::from_utf8_lossy(&out.stderr).trim());
-            }
+            // On a blocking thread: the archive can be large, and the readers aren't async.
+            let (archive, into) = (archive.to_path_buf(), into.to_path_buf());
+            tokio::task::spawn_blocking(move || if kind == ArchiveKind::Zip { unpack_zip(&archive, &into) } else { unpack_tar(&archive, &into) }).await??;
         }
     }
     if !exe.is_file() {
@@ -828,6 +817,112 @@ async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[Stri
         let mut perms = std::fs::metadata(&exe)?.permissions();
         perms.set_mode(perms.mode() | 0o755);
         std::fs::set_permissions(&exe, perms)?;
+    }
+    Ok(())
+}
+
+fn outside(name: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("The archive has a file outside its folder ({name}), so it wasn't installed")
+}
+
+/// Unpack a `.tar.gz`, `.tgz` or `.tar` into `into`. An entry that is absolute, climbs out with
+/// `..`, or links (symbolically or hard) to something outside `into` refuses the whole archive;
+/// the install folder is a staging one that is discarded then. On Windows symlinks are skipped
+/// (making one needs a privilege), and a file's mode is what the archive says elsewhere.
+fn unpack_tar(archive: &Path, into: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let not_an_archive = |_| anyhow!("The download isn't an archive Trek can open");
+    let mut file = std::fs::File::open(archive)?;
+    let mut magic = [0u8; 6];
+    let n = file.read(&mut magic)?;
+    std::io::Seek::rewind(&mut file)?;
+    let reader: Box<dyn std::io::Read> = match &magic[..n] {
+        [0x1f, 0x8b, ..] => Box::new(flate2::read::GzDecoder::new(file)),
+        [b'B', b'Z', b'h', ..] | [0xfd, b'7', b'z', b'X', b'Z', 0] => bail!("Trek opens .tar.gz, .tgz, .tar and .zip downloads, and this one is compressed another way"),
+        _ => Box::new(file),
+    };
+    let mut tar = tar::Archive::new(reader);
+    for entry in tar.entries().map_err(not_an_archive)? {
+        let mut entry = entry.map_err(not_an_archive)?;
+        let path = entry.path()?.into_owned();
+        let name = path.to_string_lossy().into_owned();
+        let Some(segments) = command_segments(&name) else {
+            // `./` is the archive's own folder.
+            if name.trim_start_matches("./").trim_matches('/').is_empty() {
+                continue;
+            }
+            return Err(outside(name));
+        };
+        let kind = entry.header().entry_type();
+        if kind.is_symlink() || kind.is_hard_link() {
+            let target = entry.link_name()?.map(|t| t.into_owned()).ok_or_else(|| outside(&name))?;
+            let inside = if kind.is_hard_link() {
+                command_segments(&target.to_string_lossy()).is_some()
+            } else {
+                // Relative to the folder the link is in.
+                link_stays_inside(&segments[..segments.len() - 1], &target)
+            };
+            if !inside {
+                return Err(outside(format!("{name} → {}", target.display())));
+            }
+            if cfg!(windows) && kind.is_symlink() {
+                continue;
+            }
+        }
+        if !entry.unpack_in(into)? {
+            return Err(outside(name));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a symlink in the folder `dir` (path segments inside the install) pointing at `target`
+/// resolves, by its spelling alone, to somewhere inside it.
+fn link_stays_inside(dir: &[String], target: &Path) -> bool {
+    use std::path::Component;
+    let mut at = dir.len();
+    for part in target.components() {
+        match part {
+            Component::Normal(_) => at += 1,
+            Component::CurDir => {}
+            Component::ParentDir if at > 0 => at -= 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Unpack a `.zip` into `into`. Names that aren't safe (`enclosed_name`: absolute, or reaching out
+/// with `..`) refuse the archive. A symlink entry is skipped, never created. On Unix a file keeps
+/// the permission bits its entry has.
+fn unpack_zip(archive: &Path, into: &Path) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(archive)?)).map_err(|_| anyhow!("The download isn't an archive Trek can open"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| anyhow!("Couldn't unpack the download: {e}"))?;
+        // The name as written is held to the same rule as a tar's, as well as `enclosed_name`.
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            return Err(outside("a name that isn't text"));
+        };
+        if name.trim_start_matches("./").trim_matches('/').is_empty() {
+            continue; // the archive's own folder
+        }
+        let Some(rel) = entry.enclosed_name().filter(|_| command_segments(&name).is_some()) else {
+            return Err(outside(name));
+        };
+        let dest = into.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else if entry.is_file() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::io::copy(&mut entry, &mut std::fs::File::create(&dest)?)?;
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode & 0o777))?;
+            }
+        }
     }
     Ok(())
 }
@@ -944,37 +1039,127 @@ mod tests {
         assert_eq!(archive_kind("https://x/agent"), ArchiveKind::Raw);
     }
 
-    // Unix only: it packs with `/usr/bin/tar`; Phase 2 unpacks with the `tar`/`zip` crates and un-gates it.
+    /// A tar entry named `name` whatever the name is: the `tar` crate's own `set_path` refuses the
+    /// hostile ones these tests need.
+    fn tar_entry(b: &mut tar::Builder<Vec<u8>>, name: &str, kind: tar::EntryType, mode: u32, link: Option<&str>, data: &[u8]) {
+        let mut h = tar::Header::new_gnu();
+        h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+        if let Some(link) = link {
+            h.as_gnu_mut().unwrap().linkname[..link.len()].copy_from_slice(link.as_bytes());
+        }
+        h.set_entry_type(kind);
+        h.set_mode(mode);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+
+    fn tar_gz(path: &Path, build: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
+        let mut b = tar::Builder::new(Vec::new());
+        build(&mut b);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &b.into_inner().unwrap()).unwrap();
+        std::fs::write(path, gz.finish().unwrap()).unwrap();
+    }
+
+    fn zip_of(path: &Path, files: &[(&str, u32)]) {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, mode) in files {
+            let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).unix_permissions(*mode);
+            z.start_file(*name, options).unwrap();
+            std::io::Write::write_all(&mut z, b"#!/bin/sh\necho hi\n").unwrap();
+        }
+        z.finish().unwrap();
+    }
+
     #[test]
-    #[cfg(unix)]
     fn archives_unpack_inside_their_folder_and_nowhere_else() {
         let dir = std::env::temp_dir().join(format!("trek-registry-unpack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let src = dir.join("src");
-        std::fs::create_dir_all(src.join("bin")).unwrap();
-        std::fs::write(src.join("bin/agent"), "#!/bin/sh\necho hi\n").unwrap();
-        let tar = |name: &str, extra: &[&str]| {
-            let archive = dir.join(name);
-            let ok = std::process::Command::new("/usr/bin/tar").arg("-czf").arg(&archive).args(extra).arg("-C").arg(&src).arg("bin").status().unwrap().success();
-            assert!(ok);
-            archive
-        };
+        std::fs::create_dir_all(&dir).unwrap();
         let rt = crate::runtime();
-        let good = tar("good.tar.gz", &[]);
+        let cmd = ["bin".to_string(), "agent".to_string()];
+        let script: &[u8] = b"#!/bin/sh\necho hi\n";
+        let refused = |archive: &Path, kind: ArchiveKind, out: &str| {
+            let err = rt.block_on(unpack(archive, kind, &dir.join(out), &cmd)).expect_err(&format!("{out} was accepted"));
+            assert!(err.to_string().contains("outside its folder"), "{out}: {err}");
+        };
+
+        // A tar.gz: the folder, then the command in it (no exec bit in the archive).
+        let good = dir.join("good.tar.gz");
+        tar_gz(&good, |b| {
+            tar_entry(b, "./", tar::EntryType::Directory, 0o755, None, &[]);
+            tar_entry(b, "./bin/", tar::EntryType::Directory, 0o755, None, &[]);
+            tar_entry(b, "./bin/agent", tar::EntryType::Regular, 0o644, None, script);
+            tar_entry(b, "./bin/alias", tar::EntryType::Symlink, 0o777, Some("agent"), &[]);
+        });
         let into = dir.join("out");
-        rt.block_on(unpack(&good, ArchiveKind::Tar, &into, &["bin".into(), "agent".into()])).unwrap();
+        rt.block_on(unpack(&good, ArchiveKind::Tar, &into, &cmd)).unwrap();
         let exe = into.join("bin/agent");
-        assert!(exe.is_file());
+        assert_eq!(std::fs::read(&exe).unwrap(), script);
         #[cfg(unix)]
-        assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&exe).unwrap().permissions()) & 0o111, 0);
+        {
+            assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&exe).unwrap().permissions()) & 0o111, 0);
+            assert_eq!(std::fs::read_link(into.join("bin/alias")).unwrap(), Path::new("agent"), "a link that stays inside is kept");
+        }
         // The command must be in it.
         let missing = rt.block_on(unpack(&good, ArchiveKind::Tar, &dir.join("out2"), &["agent".into()]));
         assert!(missing.unwrap_err().to_string().contains("no agent"));
-        // An entry that climbs out is refused before anything is written.
-        let evil = tar("evil.tar.gz", &["-s", "|^bin|../escaped|"]);
-        let err = rt.block_on(unpack(&evil, ArchiveKind::Tar, &dir.join("out3"), &["bin".into(), "agent".into()])).unwrap_err();
-        assert!(err.to_string().contains("outside its folder"), "{err}");
+        // A plain, uncompressed tar is read too.
+        let plain = dir.join("plain.tar");
+        let mut b = tar::Builder::new(Vec::new());
+        tar_entry(&mut b, "bin/agent", tar::EntryType::Regular, 0o755, None, script);
+        std::fs::write(&plain, b.into_inner().unwrap()).unwrap();
+        rt.block_on(unpack(&plain, ArchiveKind::Tar, &dir.join("out-plain"), &cmd)).unwrap();
+
+        // An entry that climbs out, is absolute, or links out is refused, and nothing lands outside.
+        let hostile: [(&str, &str, tar::EntryType, Option<&str>); 6] = [
+            ("up", "../escaped/agent", tar::EntryType::Regular, None),
+            ("deep", "bin/../../escaped/agent", tar::EntryType::Regular, None),
+            ("abs", "/escaped/agent", tar::EntryType::Regular, None),
+            ("drive", "C:/escaped/agent", tar::EntryType::Regular, None),
+            ("symlink", "bin/out", tar::EntryType::Symlink, Some("../../escaped")),
+            ("hardlink", "bin/out", tar::EntryType::Link, Some("../escaped/agent")),
+        ];
+        for (name, entry, kind, link) in hostile {
+            let archive = dir.join(format!("{name}.tar.gz"));
+            tar_gz(&archive, |b| {
+                tar_entry(b, "bin/agent", tar::EntryType::Regular, 0o755, None, script);
+                tar_entry(b, entry, kind, 0o644, link, script);
+            });
+            refused(&archive, ArchiveKind::Tar, &format!("out-{name}"));
+        }
+        // An absolute symlink too, and nothing was written through a link that was refused.
+        let absolute = dir.join("absolute.tar.gz");
+        tar_gz(&absolute, |b| tar_entry(b, "bin/out", tar::EntryType::Symlink, 0o777, Some("/etc"), &[]));
+        refused(&absolute, ArchiveKind::Tar, "out-absolute");
+        assert!(!dir.join("escaped").exists() && !into.join("..").join("escaped").exists());
+
+        // A zip: the same.
+        let zip = dir.join("good.zip");
+        zip_of(&zip, &[("bin/agent", 0o644), ("bin/readme.txt", 0o644)]);
+        let zout = dir.join("zout");
+        rt.block_on(unpack(&zip, ArchiveKind::Zip, &zout, &cmd)).unwrap();
+        assert_eq!(std::fs::read(zout.join("bin/agent")).unwrap(), script);
+        assert!(zout.join("bin/readme.txt").is_file());
+        #[cfg(unix)]
+        assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(zout.join("bin/agent")).unwrap().permissions()) & 0o111, 0);
+        assert!(rt.block_on(unpack(&zip, ArchiveKind::Zip, &dir.join("zout2"), &["agent".into()])).unwrap_err().to_string().contains("no agent"));
+        for (name, entry) in [("zup", "../escaped/agent"), ("zdeep", "bin/../../escaped/agent"), ("zabs", "/escaped/agent")] {
+            let archive = dir.join(format!("{name}.zip"));
+            zip_of(&archive, &[("bin/agent", 0o755), (entry, 0o644)]);
+            refused(&archive, ArchiveKind::Zip, &format!("out-{name}"));
+        }
         assert!(!dir.join("escaped").exists());
+
+        // Not an archive, or one compressed in a way Trek doesn't read.
+        let junk = dir.join("junk");
+        std::fs::write(&junk, vec![b'x'; 2000]).unwrap();
+        assert!(rt.block_on(unpack(&junk, ArchiveKind::Tar, &dir.join("out-junk"), &cmd)).unwrap_err().to_string().contains("isn't an archive"));
+        assert!(rt.block_on(unpack(&junk, ArchiveKind::Zip, &dir.join("out-junk-zip"), &cmd)).unwrap_err().to_string().contains("isn't an archive"));
+        let xz = dir.join("a.tar.xz");
+        std::fs::write(&xz, [0xfd, b'7', b'z', b'X', b'Z', 0, 1, 2, 3]).unwrap();
+        assert!(rt.block_on(unpack(&xz, ArchiveKind::Tar, &dir.join("out-xz"), &cmd)).unwrap_err().to_string().contains("compressed another way"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

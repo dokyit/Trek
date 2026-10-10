@@ -16,6 +16,10 @@ async-channel.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+# Named zones in usage-limit messages ("resets 7:40pm (America/New_York)"): the bundled IANA database,
+# and the machine's own zone name (the registry on Windows).
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 base64 = "0.22"
 # Devin shows its quota only in its terminal UI (`status::devin_status`).
 portable-pty = "0.9"

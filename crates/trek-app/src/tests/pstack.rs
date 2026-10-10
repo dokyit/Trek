@@ -302,6 +302,7 @@ fn a_skill_without_a_cli_says_why_no_turn_is_verified() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "the mock's verification CLI is a /bin/sh script (trek-agents mock.rs); a Windows one comes with the Phase 2 verification work")]
 fn a_thread_in_a_worktree_verifies_its_own_folder() {
     run(async |cx| {
         let trek = open(cx);
@@ -349,6 +350,7 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "the mock's verification CLI is a /bin/sh script (trek-agents mock.rs); a Windows one comes with the Phase 2 verification work")]
 fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
     run(async |cx| {
         let trek = open(cx);

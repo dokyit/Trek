@@ -7,13 +7,15 @@ description = "The local channel between a running Trek and the trek-mcp servers
 
 [features]
 # The listening end (`server`), on tokio, for Trek itself; trek-mcp needs only the client.
-server = ["dep:tokio"]
+server = ["dep:tokio", "dep:tracing"]
 
 [dependencies]
 serde_json.workspace = true
 # The same version the workspace already locks; reads the system's generator on every platform.
 getrandom = "0.3"
 tokio = { workspace = true, optional = true }
+# Says when Trek refuses a connection (never what passed over one).
+tracing = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -29,6 +31,7 @@ windows-sys = { version = "0.60", features = [
 ] }
 
 [dev-dependencies]
+tracing.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]

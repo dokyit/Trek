@@ -241,9 +241,21 @@ fn config_sources(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> (Vec<Path
     for dir in dirs.iter().filter(|d| d.ends_with(".opencode") || Some(*d) == config_dir.as_ref()) {
         files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| dir.join(f)));
     }
-    let managed = PathBuf::from("/Library/Application Support/opencode");
+    let managed = managed_dir(env);
     files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| managed.join(f)));
     (files, dirs)
+}
+
+/// The folder an administrator's config goes in: `%ProgramData%\opencode` on Windows,
+/// `/Library/Application Support/opencode` on macOS. The global config and the data folder are
+/// `~/.config/opencode` and `~/.local/share/opencode` on Windows too: OpenCode finds them from the
+/// home folder, not from `%APPDATA%`.
+fn managed_dir(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    if cfg!(windows) {
+        env("ProgramData").filter(|p| !p.is_empty()).map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from).join("opencode")
+    } else {
+        PathBuf::from("/Library/Application Support/opencode")
+    }
 }
 
 /// Markdown agents under `dir`: `(name, text)`.
@@ -805,6 +817,24 @@ mod tests {
         assert!(files.contains(&root.join("app/opencode.json")));
         assert!(!files.contains(&root.parent().unwrap().join("opencode.json")), "stops at the repository root");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn managed_config_is_where_the_system_keeps_it() {
+        let set = |_: &str| Some(r"D:\Data".to_string());
+        let unset = |_: &str| None;
+        let blank = |_: &str| Some(String::new());
+        if cfg!(windows) {
+            assert_eq!(managed_dir(&set), PathBuf::from(r"D:\Data").join("opencode"));
+            assert_eq!(managed_dir(&unset), PathBuf::from(r"C:\ProgramData\opencode"));
+            assert_eq!(managed_dir(&blank), PathBuf::from(r"C:\ProgramData\opencode"));
+        } else {
+            assert_eq!(managed_dir(&set), PathBuf::from("/Library/Application Support/opencode"));
+        }
+        let (files, _) = config_sources(Path::new("/Users/me/app"), &unset);
+        assert!(files.contains(&managed_dir(&unset).join("opencode.json")));
+        // The user's own config is under their home on every platform.
+        assert!(files.contains(&trek_core::paths::home().join(".config/opencode/opencode.json")));
     }
 
     #[test]

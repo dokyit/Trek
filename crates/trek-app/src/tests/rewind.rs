@@ -21,6 +21,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// Make the project a git repo with one commit: `notes.txt` saying "v1".
 fn git_project(dir: &Path) {
     git(dir, &["init", "-q", "-b", "main"]);
+    // Git for Windows defaults to autocrlf=true: a restore would write CRLF over the tests' LF files.
+    git(dir, &["config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("notes.txt"), "v1\n").unwrap();
     git(dir, &["add", "-A"]);
     git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);

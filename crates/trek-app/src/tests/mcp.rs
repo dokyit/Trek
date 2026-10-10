@@ -61,7 +61,7 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         trek.click(cx, "mcp-add");
         assert_eq!(trek.read(cx, |ws, _| ws.settings.tools.mcp_servers.len()), 2, "duplicates are skipped");
         trek.click(cx, "mcp-command");
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.press(cx, "backspace");
 
         // Edited: renamed, its token left as it was (shown as …), it keeps it under the new name.
@@ -69,7 +69,7 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         trek.render(cx);
         assert!(trek.visible(cx, "mcp-editing"));
         trek.click(cx, "mcp-name");
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.type_text(cx, "fake2");
         trek.click(cx, "mcp-add");
         trek.render(cx);
