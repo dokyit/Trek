@@ -87,8 +87,10 @@ pub fn glass_sheen(glass: Option<f32>, cx: &App) -> Option<AnyElement> {
 }
 
 /// Square ghost icon button with a tooltip.
-pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tooltip: &'static str) -> Button {
-    Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
+pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tooltip: impl Into<SharedString>) -> Button {
+    // Tooltips are written for a Mac ("Settings (⌘,)"); `keys::shared` spells them for the platform.
+    let tooltip: SharedString = tooltip.into();
+    Button::new(id).ghost().small().icon(icon).tooltip(crate::keys::shared(&tooltip))
 }
 
 /// A plain sidebar row: icon, label, optional shortcut hint.

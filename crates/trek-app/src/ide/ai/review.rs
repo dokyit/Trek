@@ -21,7 +21,7 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let ember = palette::ember(cx);
-    let kbd = |k: &'static str, color: Hsla| div().text_size(px(10.)).text_color(color).child(k);
+    let kbd = |k: String, color: Hsla| div().text_size(px(10.)).text_color(color).child(k);
     let link = |id: &'static str| {
         h_flex()
             .id(id)
@@ -66,10 +66,10 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
                 el.child(
                     link("ai-undo-all")
                         .when(busy, |el| el.opacity(0.45).cursor_default())
-                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if busy { "Stop the running turn to undo" } else { "Undo all (⌘⇧⌫, twice)" }).build(window, cx))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if busy { "Stop the running turn to undo" } else { "Undo all (⌘⇧⌫, twice)" })).build(window, cx))
                         .when(armed, |el| el.text_color(palette::red(cx)))
                         .child(if armed { "Undo all? Again to confirm" } else { "Undo all" })
-                        .child(kbd("⌘⇧⌫", muted.opacity(0.7)))
+                        .child(kbd(crate::keys::hint(crate::keys::Id::UndoAllOrStop), muted.opacity(0.7)))
                         .on_click(move |_, _, cx| ws_undo.update(cx, |ws, cx| ws.undo_files(&id_undo, None, cx))),
                 )
             })
@@ -88,7 +88,7 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
                     .text_color(gpui_kit::white())
                     .hover(|s| s.opacity(0.9))
                     .child("Keep all")
-                    .child(kbd("⌘↵", gpui_kit::white().opacity(0.75)))
+                    .child(kbd(crate::keys::localize("⌘↵").into_owned(), gpui_kit::white().opacity(0.75)))
                     .on_click(move |_, _, cx| ws_keep.update(cx, |ws, cx| ws.keep_files(&id_keep, None, cx))),
             )
             .into_any_element(),

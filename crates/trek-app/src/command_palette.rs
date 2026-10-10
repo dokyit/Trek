@@ -5,6 +5,7 @@
 //! ⌘P in the editor opens the same palette on the IDE folder's files only (Quick Open); `>`
 //! there lists the commands.
 
+use crate::keys::{self, Id};
 use crate::panels::RightPanel;
 use crate::ui;
 use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, Workspace, WorkspaceEvent};
@@ -224,13 +225,13 @@ pub(crate) fn age(ms: i64, now: i64) -> String {
 }
 
 /// The footer's keys and what they do; ⌘1–9 only while the recent threads are listed.
-fn footer_keys(jump: bool) -> Vec<(&'static str, &'static str)> {
-    let mut keys = vec![("↑↓", "Navigate"), ("↵", "Open")];
+fn footer_keys(jump: bool) -> Vec<(String, &'static str)> {
+    let mut out = vec![("↑↓".to_string(), "Navigate"), (keys::localize("↵").into_owned(), "Open")];
     if jump {
-        keys.push(("⌘1–9", "Jump"));
+        out.push((keys::localize("⌘1–9").into_owned(), "Jump"));
     }
-    keys.push(("Esc", "Close"));
-    keys
+    out.push(("Esc".to_string(), "Close"));
+    out
 }
 
 /// A key as the footer and the rows show it: small, in a hairline box.
@@ -665,19 +666,19 @@ impl CommandPalette {
         };
         let icon = |i: Icon| Glyph::Icon(i);
         let c = Group::Commands;
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint(if ws.ide() { "" } else { "⌘N" }), "create start chat compose");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint(if ws.ide() { String::new() } else { keys::hint(Id::NewThread) }), "create start chat compose");
         // Agents ⇄ Editor, and the editor's layout.
         if ws.ide() {
-            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquare)), "Switch to Agents", Action::SwitchMode(crate::workspace::Mode::Agents)).hint("⌥⌘E"), "harness inbox chat threads mode layout");
-            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New chat", Action::Dispatch(IdeCommand::NewChat)).hint("⌘N"), "agent ai side bar conversation");
-            add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle primary side bar", Action::Dispatch(IdeCommand::PrimaryBar)).hint("⌘B"), "explorer files hide show layout");
-            add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle AI side bar", Action::Dispatch(IdeCommand::AiBar)).hint("⌥⌘B"), "agent chat hide show layout");
-            add(Entry::new(c, icon(Icon::new(IconName::PanelBottom)), "Toggle panel", Action::Dispatch(IdeCommand::Panel)).hint("⌘J"), "terminal problems output bottom hide show layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquare)), "Switch to Agents", Action::SwitchMode(crate::workspace::Mode::Agents)).hint(keys::hint(Id::SwitchMode)), "harness inbox chat threads mode layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New chat", Action::Dispatch(IdeCommand::NewChat)).hint(keys::hint(Id::NewThread)), "agent ai side bar conversation");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle primary side bar", Action::Dispatch(IdeCommand::PrimaryBar)).hint(keys::hint(Id::ToggleSidebar)), "explorer files hide show layout");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle AI side bar", Action::Dispatch(IdeCommand::AiBar)).hint(keys::hint(Id::ToggleAiBar)), "agent chat hide show layout");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelBottom)), "Toggle panel", Action::Dispatch(IdeCommand::Panel)).hint(keys::hint(Id::ToggleRightPanel)), "terminal problems output bottom hide show layout");
         } else {
-            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Switch to Editor", Action::SwitchMode(crate::workspace::Mode::Editor)).hint("⌥⌘E"), "ide code files workbench mode layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Switch to Editor", Action::SwitchMode(crate::workspace::Mode::Editor)).hint(keys::hint(Id::SwitchMode)), "ide code files workbench mode layout");
         }
-        add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint("⌘O"), "project add repository");
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week all time summary inbox review usage tokens stats");
+        add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint(keys::hint(Id::OpenFolder)), "project add repository");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint(keys::hint(Id::OpenBasecamp)), "recap today week all time summary inbox review usage tokens stats");
         // On Basecamp, the span its recap covers.
         if ws.route == Route::Basecamp {
             let current = self.basecamp.read(cx).range();
@@ -686,7 +687,7 @@ impl CommandPalette {
                 add(e, "recap range span today week all time ever history");
             }
         }
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint("⌘⇧J"), "jot write todo checklist scratch pad memo");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint(keys::hint(Id::OpenNotes)), "jot write todo checklist scratch pad memo");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New thread without a project", Action::NewChat), "chat scratch no project question");
         let glass = ws.settings.appearance.glass;
         add(
@@ -696,7 +697,7 @@ impl CommandPalette {
         // The thread on screen: the harness's, or the editor's AI side bar chat.
         let thread = ws.focused_thread().and_then(|id| ws.thread(id)).cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
-            add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint("⌘E"), "done finish inbox archive");
+            add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint(keys::hint(Id::SettleThread)), "done finish inbox archive");
         }
         if let Some(t) = thread.as_ref() {
             add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::GitFork)), "Fork thread", Action::Fork(t.id.clone())), "branch copy duplicate conversation");
@@ -713,8 +714,8 @@ impl CommandPalette {
                 add(e, "permissions access mode approval supervise autonomy");
             }
         }
-        add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle sidebar", Action::ToggleSidebar).hint("⌘B"), "hide show inbox");
-        add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle tools panel", Action::ToggleTools).hint("⌘J"), "right panel hide show");
+        add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle sidebar", Action::ToggleSidebar).hint(keys::hint(Id::ToggleSidebar)), "hide show inbox");
+        add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle tools panel", Action::ToggleTools).hint(keys::hint(Id::ToggleRightPanel)), "right panel hide show");
         for tool in PanelTool::ALL {
             add(Entry::new(c, icon(crate::panels::tool_icon(tool)), format!("Open {}", tool.label()), Action::OpenTool(tool)), "tools panel");
         }
@@ -729,9 +730,9 @@ impl CommandPalette {
         for page in crate::settings_view::pages() {
             let mut e = Entry::new(c, icon(crate::settings_view::page_icon(page)), format!("Settings: {}", page.label()), Action::Settings(page));
             if page == SettingsPage::General {
-                e = e.hint("⌘,");
+                e = e.hint(keys::hint(Id::OpenSettings));
             }
-            add(e, crate::settings_view::page_blurb(page));
+            add(e, &crate::settings_view::page_blurb(page));
         }
         add(Entry::new(c, icon(Icon::new(IconName::RefreshCw)), "Check for updates", Action::CheckForUpdates), "update version release upgrade");
         out
@@ -885,7 +886,7 @@ impl CommandPalette {
             .children(project)
             // A message match has its excerpt under the title: the age sits on the right.
             .when_some(e.age.filter(|_| age_in_text), |el, age| el.child(div().flex_none().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.8)).child(age)))
-            .when_some(e.jump, |el, n| el.child(keycap(format!("⌘{n}"), cx)))
+            .when_some(e.jump, |el, n| el.child(keycap(keys::label(&format!("secondary-{n}")), cx)))
             .when(e.checked, |el| el.child(Icon::new(IconName::Check).size(px(14.)).text_color(theme.muted_foreground)))
             .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                 if this.selected != ix {
@@ -969,7 +970,8 @@ impl Render for CommandPalette {
                     // ⌘1–⌘9: the recent thread with that number.
                     .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                         let m = ev.keystroke.modifiers;
-                        if !m.platform || m.control || m.alt || m.shift || m.function {
+                        // ⌘ (Ctrl on Windows) alone: with the other of the two held it's not this key.
+                        if !m.secondary() || (m.platform && m.control) || m.alt || m.shift || m.function {
                             return;
                         }
                         let Some(n) = ev.keystroke.key.parse::<usize>().ok().filter(|n| (1..=9).contains(n)) else { return };
@@ -1129,8 +1131,12 @@ mod tests {
 
     #[test]
     fn the_footer_names_the_keys_and_jumping_only_with_recents() {
-        assert_eq!(footer_keys(true), [("↑↓", "Navigate"), ("↵", "Open"), ("⌘1–9", "Jump"), ("Esc", "Close")]);
-        assert!(!footer_keys(false).iter().any(|(k, _)| *k == "⌘1–9"));
+        use crate::keys;
+        let on_a_mac = |jump| keys::with_mac(true, || footer_keys(jump));
+        assert_eq!(on_a_mac(true), [("↑↓".to_string(), "Navigate"), ("↵".to_string(), "Open"), ("⌘1–9".to_string(), "Jump"), ("Esc".to_string(), "Close")]);
+        assert!(!on_a_mac(false).iter().any(|(k, _)| k == "⌘1–9"));
+        let on_windows = keys::with_mac(false, || footer_keys(true));
+        assert_eq!(on_windows.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["↑↓", "Enter", "Ctrl+1–9", "Esc"]);
     }
 
     #[test]

@@ -150,7 +150,7 @@ fn every_screen_renders_in_both_themes() {
             // The palette over it, then the right panel's tools. The terminal (a shell), the
             // browser (a native web view) and the simulator (Xcode's tools) reach outside the
             // test, so only the panels drawn by Trek alone are opened here.
-            trek.press(cx, "cmd-k");
+            trek.press(cx, "secondary-k");
             trek.render(cx);
             assert!(trek.visible(cx, "palette"));
             trek.press(cx, "escape");
@@ -177,7 +177,7 @@ fn the_palette_moves_by_keyboard_and_keeps_the_selection_in_view() {
             populate(&ws.store, 30);
             ws.reload(cx);
         });
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         assert!(trek.visible(cx, "palette"));
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
@@ -217,7 +217,7 @@ fn the_palette_moves_by_keyboard_and_keeps_the_selection_in_view() {
         assert!(!trek.visible(cx, "palette"));
 
         // Escape closes it and gives the keyboard back to the composer.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         assert!(trek.visible(cx, "palette"));
         trek.press(cx, "escape");
         assert!(!trek.visible(cx, "palette"));
@@ -398,7 +398,7 @@ fn image_icons_are_copied_in_and_fall_back_when_gone() {
         // Drawn in the settings row, the title bar, the sidebar and the palette.
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
         trek.render(cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         trek.press(cx, "escape");
         // The copy gone too: the monogram stands in, and nothing breaks.

@@ -41,7 +41,7 @@ fn a_second_toggle_turns_the_sidebar_round_where_it_is() {
         moving(cx);
         trek.render(cx);
         assert_eq!(sidebar(&trek, cx), 1.);
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         frame(&trek, cx, 60);
         let folding = sidebar(&trek, cx);
         assert!(folding > 0.1 && folding < 0.9, "part-way: {folding}");
@@ -50,7 +50,7 @@ fn a_second_toggle_turns_the_sidebar_round_where_it_is() {
         assert!(x < px(0.) && x > px(-crate::root::SIDEBAR_WIDTH), "{x:?}");
 
         // ⌘B again, mid-fold: it turns round from where it is, at the speed it had.
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         trek.render(cx);
         let turned = sidebar(&trek, cx);
         assert!((turned - folding).abs() < 0.01, "no jump at the turn: {folding} → {turned}");
@@ -99,10 +99,10 @@ fn reduce_motion_puts_everything_where_it_goes_at_once() {
         // Trek's own setting, with the system's off.
         let trek = open_with(cx, |s| s.appearance.reduce_motion = true);
         moving(cx);
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         assert_eq!(sidebar(&trek, cx), 0.);
         assert!(!trek.visible(cx, "sidebar"));
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         assert!(trek.visible(cx, "sidebar"));
 
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
@@ -112,7 +112,7 @@ fn reduce_motion_puts_everything_where_it_goes_at_once() {
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Agents, cx));
         trek.render(cx);
 
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         assert!(trek.visible(cx, "palette"));
         trek.press(cx, "escape");
         assert!(!trek.visible(cx, "palette"), "gone at once, nothing left to fade");
@@ -243,7 +243,7 @@ fn the_palette_stays_while_it_fades_then_goes() {
     run(async |cx| {
         let trek = open(cx);
         moving(cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         frame(&trek, cx, 1_000);
         assert!(trek.visible(cx, "palette"));
         trek.press(cx, "escape");
@@ -558,7 +558,7 @@ fn a_click_on_a_row_as_it_fades_away_does_nothing() {
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), route, "the archived thread doesn't open");
 
         // The sidebar folding away (⌘B) is out of reach too.
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         frame(&trek, cx, 60);
         assert!(trek.visible(cx, "sidebar"));
         trek.click(cx, format!("live-line-{}", ids[0]));
@@ -573,7 +573,7 @@ fn a_click_on_the_palette_as_it_goes_does_nothing() {
         moving(cx);
         quiet(&trek, cx, "Recent", 60_000);
         let route = trek.read(cx, |ws, _| ws.route.clone());
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         frame(&trek, cx, 1_000);
         trek.press(cx, "escape");
         frame(&trek, cx, 40);
@@ -639,7 +639,7 @@ fn undo_on_a_toast_as_it_goes_does_nothing() {
         cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
         trek.window(cx, |window, _| window.activate_window());
         cx.run_until_parked();
-        trek.press(cx, "cmd-e");
+        trek.press(cx, "secondary-e");
         let settled = |trek: &Trek, cx: &mut TestAppContext| trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some()));
         assert!(settled(&trek, cx));
         frame(&trek, cx, 1_000);

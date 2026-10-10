@@ -62,13 +62,20 @@ pub fn page_named(name: &str) -> Option<SettingsPage> {
     pages().find(|p| p.label().to_lowercase().replace(' ', "-") == name)
 }
 
-pub(crate) fn page_blurb(p: SettingsPage) -> &'static str {
+pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
+    match p {
+        SettingsPage::Snapshots => crate::keys::localize("Screenshots you attach from the composer’s + menu or with ⌘⇧S."),
+        _ => page_blurb_text(p).into(),
+    }
+}
+
+fn page_blurb_text(p: SettingsPage) -> &'static str {
     match p {
         SettingsPage::Project => "",
         SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.",
         SettingsPage::Appearance => "Theme, text size, background art and motion.",
         SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.",
-        SettingsPage::Snapshots => "Screenshots you attach from the composer’s + menu or with ⌘⇧S.",
+        SettingsPage::Snapshots => "",
         SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.",
         SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.",
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
@@ -1527,7 +1534,7 @@ impl Render for SettingsView {
                     .pb(px(80.))
                     .child(div().text_size(px(20.)).font_semibold().child(page.label()))
                     .when(!page_blurb(page).is_empty(), |el| {
-                        el.child(div().pt(px(6.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(page_blurb(page)))
+                        el.child(div().pt(px(6.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(page_blurb(page).into_owned()))
                     })
                     .child(div().h(px(28.)))
                     .children(body),
