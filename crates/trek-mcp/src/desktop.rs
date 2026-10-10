@@ -119,6 +119,9 @@ pub mod fake {
         pub windows: Result<Vec<WindowInfo>, String>,
         /// What `owner_at` says for every point.
         pub owner_at: Option<String>,
+        /// The window that takes the keys, where that isn't the front of the list (Windows: the
+        /// foreground window, which the always-on-top taskbar and overlays don't change).
+        pub key_window: Option<Result<Option<WindowInfo>, String>>,
     }
 
     impl Recording {
@@ -130,6 +133,7 @@ pub mod fake {
                 display: Display { width: 1512.0, height: 982.0, physical: None },
                 windows: Ok(vec![]),
                 owner_at: None,
+                key_window: None,
             }
         }
 
@@ -152,6 +156,12 @@ pub mod fake {
         }
         fn windows(&self) -> Result<Vec<WindowInfo>, String> {
             self.windows.clone()
+        }
+        fn key_window(&self) -> Result<Option<WindowInfo>, String> {
+            match &self.key_window {
+                Some(front) => front.clone(),
+                None => Ok(self.windows()?.into_iter().next()),
+            }
         }
         fn owner_at(&self, _x: f64, _y: f64) -> Option<String> {
             self.owner_at.clone()

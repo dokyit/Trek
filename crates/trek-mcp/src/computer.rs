@@ -672,6 +672,50 @@ mod tests {
     }
 
     #[test]
+    fn keys_go_by_the_window_that_takes_them_not_the_front_of_the_list() {
+        // On Windows an always-on-top window (the taskbar, an overlay) leads the list whichever
+        // app has the focus; the desktop says who does.
+        let taskbar = window("Explorer", 0.0, 940.0, 1512.0, 42.0);
+        let on_top = vec![taskbar.clone(), window("Notepad", 0.0, 0.0, 800.0, 900.0), window("trek", 0.0, 0.0, 1512.0, 982.0)];
+        // Trek has the focus: refused, though the list leads with the taskbar.
+        let fake = Recording { windows: Ok(on_top), key_window: Some(Ok(Some(window("trek", 0.0, 0.0, 1512.0, 982.0)))), ..Recording::new() };
+        let mut c = on(&fake);
+        assert_eq!(c.call("type_text", &json!({"text": "y"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(c.call("key", &json!({"combo": "return"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(fake.events(), vec![]);
+        // Trek is high in the list but another app has the focus: the keys go to that app.
+        let fake = Recording {
+            windows: Ok(vec![window("trek", 0.0, 0.0, 1512.0, 982.0), taskbar]),
+            key_window: Some(Ok(Some(window("Notepad", 0.0, 0.0, 800.0, 900.0)))),
+            ..Recording::new()
+        };
+        let mut c = on(&fake);
+        assert!(c.call("key", &json!({"combo": "ctrl+s"})).is_ok());
+        assert_eq!(fake.events(), vec![Event::Key(keys::parse("ctrl+s").unwrap())]);
+        // The focus can't be read: nothing is typed unchecked.
+        let blind = Recording { key_window: Some(Err("no foreground".into())), ..Recording::new() };
+        let mut c = on(&blind);
+        assert!(c.call("type_text", &json!({"text": "y"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert!(c.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert_eq!(blind.events(), vec![]);
+    }
+
+    #[test]
+    fn the_systems_hit_test_guards_every_pointer_action() {
+        // Whatever the window list says (nothing here), the system's own answer that the point
+        // is Trek's is enough to refuse a click, a scroll, or a drag starting or ending there.
+        let fake = Recording { owner_at: Some("Trek".into()), ..Recording::new() };
+        let mut c = on(&fake);
+        assert_eq!(c.call("click", &json!({"x": 100, "y": 100, "button": "right"})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(c.call("scroll", &json!({"x": 100, "y": 100, "dy": 3})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(c.call("drag", &json!({"from": {"x": 1, "y": 1}, "to": {"x": 100, "y": 100}})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(fake.events(), vec![]);
+        // Another app's answer lets them through.
+        let fake = Recording { owner_at: Some("Notepad".into()), ..Recording::new() };
+        assert!(on(&fake).call("click", &json!({"x": 100, "y": 100})).is_ok());
+    }
+
+    #[test]
     fn bad_arguments_are_refused_before_any_event() {
         // Trusted, but every call here fails its checks before posting anything.
         let fake = Recording::new();
