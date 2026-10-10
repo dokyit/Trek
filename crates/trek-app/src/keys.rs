@@ -286,6 +286,13 @@ pub enum Id {
     SaveFile,
     /// The text fields' own redo (the kit binds it): ⇧⌘Z on a Mac, Ctrl+Y on Windows.
     Redo,
+    /// The menu bar's keys, in its own context (Windows only: a Mac's menus are the system's).
+    MenuLeft,
+    MenuRight,
+    MenuUp,
+    MenuDown,
+    MenuEnter,
+    MenuEscape,
 }
 
 /// Which list of bindings a row goes into (each file binds its own).
@@ -422,6 +429,13 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         row(SaveFile, Editor, "cmd-s", Same, Some("TrekEditor"), act!(crate::editor::SaveFile)),
         // Not Trek's.
         row(Redo, System, "cmd-shift-z", Keys("ctrl-y"), None, None),
+        // The menu bar's keys: they reach it only while it has the keyboard. Windows only.
+        Binding { id: MenuLeft, group: App, mac: None, windows: Keys("left"), context: Some("MenuBar"), build: act!(crate::menu_bar::MenuLeft) },
+        Binding { id: MenuRight, group: App, mac: None, windows: Keys("right"), context: Some("MenuBar"), build: act!(crate::menu_bar::MenuRight) },
+        Binding { id: MenuUp, group: App, mac: None, windows: Keys("up"), context: Some("MenuBar"), build: act!(crate::menu_bar::MenuUp) },
+        Binding { id: MenuDown, group: App, mac: None, windows: Keys("down"), context: Some("MenuBar"), build: act!(crate::menu_bar::MenuDown) },
+        Binding { id: MenuEnter, group: App, mac: None, windows: Keys("enter"), context: Some("MenuBar"), build: act!(crate::menu_bar::MenuEnter) },
+        Binding { id: MenuEscape, group: App, mac: None, windows: Keys("escape"), context: Some("MenuBar"), build: act!(crate::menu_bar::MenuEscape) },
     ]
 });
 
@@ -842,6 +856,25 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_bar_keys_are_windows_only_and_in_its_own_context() {
+        for (id, keys) in [(Id::MenuLeft, "left"), (Id::MenuRight, "right"), (Id::MenuUp, "up"), (Id::MenuDown, "down"), (Id::MenuEnter, "enter"), (Id::MenuEscape, "escape")] {
+            let row = row_of(id).unwrap();
+            assert!(resolve(row, true).is_none(), "{id:?} is Windows only");
+            assert_eq!(resolve(row, false), Some(Resolved { keystroke: keys.into(), context: Some("MenuBar".into()) }), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn no_windows_shortcut_is_alt_alone_or_alt_with_a_letter() {
+        // The menu bar takes those from anywhere in the window (`intercept`), so nothing else may.
+        for b in TABLE.iter() {
+            let Some(s) = windows_stroke(b) else { continue };
+            let letter = s.key.len() == 1 && s.key.as_bytes()[0].is_ascii_alphabetic();
+            assert!(s.key != "alt" && !(s.alt && !s.ctrl && !s.shift && !s.cmd && letter), "{:?} is {}", b.id, s.keystroke());
+        }
+    }
+
+    #[test]
     fn terminal_gets_the_shell_keys_but_trek_keeps_its_own() {
         let ctx = |id: Id| resolve(row_of(id).unwrap(), false).unwrap().context;
         assert_eq!(ctx(Id::OpenPalette).as_deref(), Some("(!IdeEditor) && !Terminal"), "Ctrl+K is the shell's in the terminal");
@@ -1064,7 +1097,8 @@ mod tests {
     fn both_platforms_bindings_build() {
         for mac in both() {
             let n: usize = [Group::App, Group::Notes, Group::Editor].into_iter().map(|g| bindings_for(g, mac).len()).sum();
-            assert_eq!(n, if mac { 51 } else { 51 - 2 + 1 }, "mac: {mac}");
+            // Windows drops Hide and Minimize, adds Ctrl+Shift+P, and has the menu bar's six keys (Windows only).
+            assert_eq!(n, if mac { 51 } else { 51 - 2 + 1 + 6 }, "mac: {mac}");
         }
     }
 

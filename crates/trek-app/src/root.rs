@@ -1089,6 +1089,13 @@ impl Render for TrekWindow {
         v_flex()
             .id("trek-window")
             .key_context("TrekWindow")
+            // The menus hear Alt held, and a press anywhere in the window, from here: a focused
+            // element only gets the modifiers and presses it's in the path of.
+            .when_some(self.title.read(cx).menu_bar.clone(), |el, bar| {
+                let held = bar.clone();
+                el.on_modifiers_changed(move |ev, _, cx| held.update(cx, |bar, cx| bar.modifiers_changed(ev.modifiers, cx)))
+                    .capture_any_mouse_down(move |_, _, cx| bar.update(cx, |bar, _| bar.mouse_pressed()))
+            })
             // Panel resizing: follow the pointer anywhere in the window until the button is released.
             .when(dragging, |el| {
                 el.cursor(CursorStyle::ResizeLeftRight)

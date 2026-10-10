@@ -26,8 +26,9 @@
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
 //! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
-//! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
-//! right on both platforms), `scroll <element id> <px>`
+//! `down down enter`; on Windows `alt` alone takes the keyboard for the menu bar and `alt-f` opens
+//! the menu its F marks, then `down`, `enter` and `escape` work it; `cmd`/`win`/`super` modifiers
+//! are read as `secondary`, so one manifest is right on both platforms), `scroll <element id> <px>`
 //! (a wheel over that element, positive down the page), `resize <w> <h>` (the main window, logical
 //! px). The thread on screen: `approve` / `deny` its waiting permission, plan
 //! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
