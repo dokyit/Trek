@@ -179,6 +179,9 @@ impl NotesView {
             async {}
         })
         .detach();
+        // And when the main window goes, which takes this view and its pending save with it: a
+        // closed main window on macOS, or any quit on Windows, which closes the windows first.
+        cx.on_release(|this: &mut Self, _| this.flush()).detach();
         let mut subscriptions = vec![cx.subscribe_in(&editor, window, |this, state, event: &InputEvent, window, cx| match event {
             InputEvent::Change => {
                 let (body, selection) = Self::read(state, cx);
