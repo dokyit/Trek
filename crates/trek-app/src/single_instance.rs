@@ -321,7 +321,8 @@ pub(crate) fn classify(arg: &str) -> Arg {
         if arg.contains('\0') {
             return Arg::Ignored("a link with a NUL in it");
         }
-        return Arg::Link(arg.to_string());
+        // `deep_link` reads the scheme as `trek://`; Windows hands it on as it was written.
+        return Arg::Link(format!("trek://{}", &arg[7..]));
     }
     if arg.is_empty() || arg.contains('\0') {
         return Arg::Ignored("an empty or malformed argument");
@@ -406,9 +407,10 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "").unwrap();
         let s = |p: PathBuf| p.to_string_lossy().into_owned();
 
-        // Links, whatever the case of the scheme, as they came.
+        // Links, whatever the case of the scheme, with it as `deep_link` reads it.
         assert_eq!(classify("trek://edit?path=%2Fx"), Arg::Link("trek://edit?path=%2Fx".into()));
-        assert_eq!(classify("TREK://ask?path=%2Fx"), Arg::Link("TREK://ask?path=%2Fx".into()));
+        assert_eq!(classify("TREK://ask?path=%2FX"), Arg::Link("trek://ask?path=%2FX".into()));
+        assert_eq!(classify("Trek://edit"), Arg::Link("trek://edit".into()));
         // The folder, the file; a path that isn't there is not acted on.
         assert_eq!(classify(&s(dir.join("sub"))), Arg::Folder(dir.join("sub")));
         assert_eq!(classify(&s(dir.join("a.rs"))), Arg::File(dir.join("a.rs")));
