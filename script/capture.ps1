@@ -3,7 +3,7 @@
 # videos it declares. The PowerShell 7 port of script/capture.sh for the Windows build.
 #
 #   pwsh script/capture.ps1 list                 # the suites under media/
-#   pwsh script/capture.ps1 check                # lint every manifest without launching anything
+#   pwsh script/capture.ps1 check [suite|all]    # lint manifests without launching anything
 #   pwsh script/capture.ps1 all                  # every macOS suite (iOS needs a Mac)
 #   pwsh script/capture.ps1 mac/readme           # one suite (media/mac/readme.cmds)
 #   pwsh script/capture.ps1 mac/parity
@@ -322,7 +322,7 @@ under media/ against a headless, isolated Trek (mock agent only) and collect the
 videos it declares.
 
   pwsh script/capture.ps1 list                 # the suites under media/
-  pwsh script/capture.ps1 check                # lint manifests without launching anything
+  pwsh script/capture.ps1 check [suite|all]    # lint manifests without launching anything
   pwsh script/capture.ps1 all                  # every macOS suite (iOS needs a Mac)
   pwsh script/capture.ps1 mac/parity           # one suite (media/mac/parity.cmds)
 
