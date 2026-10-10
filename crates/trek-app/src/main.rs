@@ -47,6 +47,7 @@ mod settings_view;
 #[cfg(feature = "shots")]
 mod shots;
 mod sidebar;
+mod single_instance;
 mod system;
 mod tabs;
 mod thread_view;
@@ -57,6 +58,7 @@ mod tray;
 mod ui;
 mod updater;
 mod visualization;
+mod window_place;
 mod winlook;
 mod workspace;
 mod working_bar;
@@ -207,9 +209,21 @@ fn key_bindings() -> Vec<KeyBinding> {
 fn main() {
     logging::init();
 
+    // On Windows, one Trek per data folder: a second launch hands its links and paths to the
+    // running one and exits (macOS does this itself, through `on_open_urls` and `on_reopen`).
+    let single_instance::Primary { lock, forwarded, own } = match single_instance::claim() {
+        single_instance::Claim::Primary(primary) => primary,
+        single_instance::Claim::Forwarded => std::process::exit(0),
+        single_instance::Claim::Failed(why) => {
+            single_instance::tell(&why);
+            std::process::exit(1)
+        }
+    };
+
     // `trek://` links (editors, browsers) arrive as bare strings with no App context;
     // they wait on a channel until the app's update loop picks them up.
     let (links_tx, links_rx) = async_channel::unbounded::<String>();
+    let forwarded_links = links_tx.clone();
     let app = gpui_kit::application().with_assets(assets::Assets);
     #[cfg(all(feature = "shots", target_os = "macos"))]
     if std::env::var_os("TREK_SHOT_DIR").is_some() {
@@ -261,6 +275,9 @@ fn main() {
                 .unwrap_or_else(|| std::env::temp_dir().join(format!("trek-shots-{}", std::process::id())));
             trek_core::paths::isolate(dir);
         }
+        if let Some(lock) = lock {
+            workspace::keep_data_folder_lock(trek_core::paths::data_dir(), lock);
+        }
         let ws = workspace::init(cx);
         ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         tray::init(ws.clone(), cx);
@@ -275,6 +292,7 @@ fn main() {
         let background = std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1");
         root::init(ws.clone(), cx);
         root::open_main(ws.clone(), !background, cx).expect("open window");
+        single_instance::hear(forwarded, own, ws.clone(), forwarded_links, cx);
         #[cfg(feature = "shots")]
         shots::init(ws.clone(), cx);
         // TREK_OPEN_THREAD_WINDOW=<thread id> also opens that thread in a window of its own, for

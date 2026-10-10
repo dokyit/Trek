@@ -15,6 +15,16 @@ use crate::workspace::{self, Route, Workspace, WorkspaceEvent};
 /// start a language server, which a folder's own config can turn into running its code.
 pub fn open(url: &str, cx: &mut App) {
     let Some(link) = parse(url) else { return };
+    open_link(link, cx);
+}
+
+/// A file a launch was given (`trek.exe <path>` on Windows): opened in the editor as a
+/// `trek://edit` link to it would be, asking first in the same cases.
+pub fn open_file(path: PathBuf, cx: &mut App) {
+    open_link(Link::Edit { path, line: None }, cx);
+}
+
+fn open_link(link: Link, cx: &mut App) {
     // Relative to what? Trek's own working folder isn't anything the user meant.
     if !link.path().is_absolute() {
         return;

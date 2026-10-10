@@ -124,6 +124,8 @@ impl TrekWindow {
             ws.main_window = Some(handle);
             cx.notify();
         });
+        // The next launch opens the main window where this one is left.
+        cx.observe_window_bounds(window, |_, window, cx| crate::window_place::remember(window, cx)).detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -649,9 +651,18 @@ fn launch_size() -> Option<Size<Pixels>> {
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
+    let min = size(px(760.), px(520.));
+    // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
+    // window every time).
+    let (display_id, window_bounds) = match launch_size() {
+        Some(asked) => (None, WindowBounds::centered(asked, cx)),
+        None if std::env::var_os("TREK_SHOT_DIR").is_some() => (None, WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        None => crate::window_place::initial(size(px(1280.), px(820.)), min, focus, cx),
+    };
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(launch_size().unwrap_or(size(px(1280.), px(820.))), cx)),
-        window_min_size: Some(size(px(760.), px(520.))),
+        window_bounds: Some(window_bounds),
+        display_id,
+        window_min_size: Some(min),
         app_id: Some("dev.trek.Trek".into()),
         focus,
         show: focus || crate::system::SHOW_BEHIND,
@@ -685,7 +696,7 @@ fn database_error(error: &str, window: &mut Window, cx: &mut App) {
 /// Bring the main window forward, reopening it if it was closed.
 pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
     let main = workspace.read(cx).main_window;
-    if main.is_some_and(|m| m.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if main.is_some_and(|m| m.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     if let Err(e) = open_main(workspace, true, cx) {
@@ -842,7 +853,7 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
         return show_main(workspace.clone(), cx);
     }
     let own = workspace.read(cx).thread_windows.get(thread).copied();
-    if own.is_some_and(|w| w.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if own.is_some_and(|w| w.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     // In the editor it opens in the AI side bar.
