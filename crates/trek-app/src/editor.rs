@@ -154,6 +154,10 @@ pub struct EditorView {
     loading: bool,
     /// Where to put the caret once it's in (a deep link's line).
     pending_line: Option<u32>,
+    /// A line to bring into view (`goto_line`) once there's a layout to measure the viewport by,
+    /// and how far down the text was scrolled when it was asked for (the state's own
+    /// scroll-to-caret moves it by the time that's measured).
+    reveal: Option<(u32, Pixels)>,
     /// Not a file on disk (a Review's diff): read-only, never saved or reloaded.
     pub(crate) scratch: bool,
     /// The review the fills are against, while the AI side bar's chat has this file pending.
@@ -253,6 +257,7 @@ impl EditorView {
             overwrite_armed: None,
             loading: true,
             pending_line: None,
+            reveal: None,
             scratch: false,
             review: None,
             hunks: None,
@@ -305,13 +310,15 @@ impl EditorView {
         self._diag_watch = lsp.as_ref().map(|(client, uri)| {
             let rx = client.watch_diagnostics();
             let uri = uri.clone();
-            let state = state.clone();
-            let (ws, file) = (workspace.clone(), path.clone());
+            // Weak: the language server can speak for as long as the app lives.
+            let state = state.downgrade();
+            let (ws, file) = (workspace.downgrade(), path.clone());
             cx.spawn(async move |_, cx| {
                 while let Ok((u, diags)) = rx.recv().await {
                     if u != uri {
                         continue;
                     }
+                    let (Some(state), Some(ws)) = (state.upgrade(), ws.upgrade()) else { break };
                     cx.update_entity(&state, |s, cx| {
                         let rope = s.text().clone();
                         if let Some(set) = s.diagnostics_mut() {
@@ -367,6 +374,7 @@ impl EditorView {
             overwrite_armed: None,
             loading: false,
             pending_line: None,
+            reveal: None,
             scratch: true,
             review: None,
             hunks: None,
@@ -541,13 +549,47 @@ impl EditorView {
         }
     }
 
-    /// Put the caret on a line (deep links point here) and take the focus.
+    /// Put the caret on a line (deep links point here) and take the focus. The line is brought
+    /// into view too (`reveal_line`), however far along the editor is: left to the state's own
+    /// scroll-to-caret, a line asked for before the first layout stayed off screen, and one asked
+    /// for after it came up at the bottom edge, depending only on which came first.
     pub fn goto_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.pending_line = Some(line);
             return;
         }
+        let scrolled = -self.state.read(cx).scroll_offset().y;
         self.state.update(cx, |s, cx| s.set_cursor_position(Position::new(line.saturating_sub(1), 0), window, cx));
+        self.reveal = Some((line, scrolled));
+        cx.notify();
+    }
+
+    /// Scroll to the line `goto_line` was given, once the viewport is known: left where it is
+    /// when it's all on screen already, else centred (the top of the file when that's as high as
+    /// it goes, the end when that's as low).
+    fn reveal_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((line, shown)) = self.reveal else { return };
+        if self.loading {
+            return;
+        }
+        let state = self.state.read(cx);
+        let (Some(line_height), viewport) = (state.line_height(), state.input_bounds().size.height) else { return };
+        if viewport <= px(0.) || line_height <= px(0.) {
+            return;
+        }
+        self.reveal = None;
+        let row = line.saturating_sub(1) as usize;
+        let rows = state.text().lines_len().max(1);
+        let (top, bottom) = (line_height * row as f32, line_height * (row + 1) as f32);
+        if top >= shown && bottom <= shown + viewport {
+            return;
+        }
+        let farthest = (line_height * rows as f32 - viewport).max(px(0.));
+        let centred = (top + line_height / 2. - viewport / 2.).clamp(px(0.), farthest);
+        let to = point(px(0.), -centred);
+        // After this frame: the offset is taken up at the next layout. (Through `this`, so the
+        // closure holds no handle on the state to be left over if the app quits first.)
+        cx.defer_in(window, move |this, _, cx| this.state.update(cx, |s, cx| s.set_scroll_offset(to, cx)));
     }
 
     /// Take the window's focus (the deferred focus call lands here).
@@ -1124,6 +1166,7 @@ impl Render for EditorView {
         let dir = self.path.parent().map(trek_core::paths::tildify).unwrap_or_default();
         let dirty = self.dirty;
         let path = self.path.clone();
+        self.reveal_line(window, cx);
         // In the editor the tab, breadcrumbs and ⌘S stand in for this header; a read-only file
         // still says why, in a slim note.
         if self.workspace.read(cx).ide() {
