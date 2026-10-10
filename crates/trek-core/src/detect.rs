@@ -241,6 +241,13 @@ pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl As
     if !runs_through_cmd(program) {
         return None;
     }
+    batch_script_problem(program, args)
+}
+
+/// `batch_args_problem` without asking whether this platform runs `program` through cmd.exe: for a
+/// caller that has decided it will (a command handed to an agent as `cmd /c`), and for tests on
+/// every platform.
+pub fn batch_script_problem(program: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<String> {
     let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
     let mut len = program.as_os_str().to_string_lossy().encode_utf16().count();
     for (n, arg) in args.into_iter().enumerate() {
@@ -254,6 +261,18 @@ pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl As
         len += 1 + arg.encode_utf16().count();
     }
     (len > CMD_LINE_MAX).then(|| format!("{name} is a batch script, which Windows runs through cmd.exe, and its command line would be {len} characters, over cmd.exe's limit of {CMD_LINE_MAX}."))
+}
+
+/// Whether `command` is a bare name to look up on the PATH (`npx`, `my-agent`), rather than a path
+/// to use as written (`/opt/x/agent`, `.\agent.exe`, `C:\tools\agent.exe`, `D:/x/agent`). A
+/// backslash and a drive colon only make a path on Windows; on macOS they are file-name characters.
+pub fn is_bare_name(command: &str) -> bool {
+    is_bare_name_on(command, cfg!(windows))
+}
+
+/// `is_bare_name` for Windows (`windows`) or for macOS and Linux, whichever platform this is.
+pub fn is_bare_name_on(command: &str, windows: bool) -> bool {
+    !command.contains('/') && !(windows && command.contains(['\\', ':']))
 }
 
 /// The first file in `path`'s folders that is one of `candidate_names(binary, pathext)`.
@@ -629,6 +648,31 @@ mod tests_paths {
         assert_eq!(batch_args_problem(Path::new("claude.exe"), awkward), None);
         assert_eq!(batch_args_problem(Path::new("claude"), awkward), None);
         assert_eq!(batch_args_problem(Path::new("claude.cmd"), ["\" & %PATH% ^", "", "日本語"]), None);
+    }
+
+    #[test]
+    fn a_name_is_not_a_path() {
+        for name in ["npx", "my-agent", "agent.exe", "npx.cmd"] {
+            assert!(is_bare_name_on(name, true) && is_bare_name_on(name, false), "{name}");
+        }
+        for path in ["/opt/x/agent", "./agent", "bin/agent", "D:/x/agent"] {
+            assert!(!is_bare_name_on(path, true) && !is_bare_name_on(path, false), "{path}");
+        }
+        // These are paths only where `\` and a drive colon mean something.
+        for path in [r"C:\tools\agent.exe", r".\agent.exe", r"\\server\share\agent", r"C:agent", "C:agent.exe"] {
+            assert!(!is_bare_name_on(path, true), "{path}");
+        }
+        assert!(is_bare_name_on(r"odd\name", false));
+        assert_eq!(is_bare_name("npx"), true);
+        assert_eq!(is_bare_name(r"C:\x"), !cfg!(windows));
+    }
+
+    #[test]
+    fn the_batch_check_can_be_asked_on_any_platform() {
+        let said = batch_script_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).unwrap();
+        assert!(said.starts_with("npx.cmd is a batch script") && said.contains("argument 2"), "{said}");
+        assert_eq!(batch_script_problem(Path::new("npx.cmd"), ["-y", "ok"]), None);
+        assert_eq!(batch_args_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).is_some(), cfg!(windows));
     }
 
     #[cfg(windows)]
