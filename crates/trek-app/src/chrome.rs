@@ -5,6 +5,8 @@
 //! restore, close) at the right end of the row and Trek draws its menus in the window
 //! (`menu_bar`).
 
+use gpui_kit::*;
+
 /// Space the title bar leaves at its left before its content: the traffic lights on macOS, a small
 /// margin on Windows. It is `TitleBar`'s own left padding, which is private to it: this is the
 /// same number, for what Trek lines up with the title bar's content (the sidebar's width, Quick
@@ -29,9 +31,56 @@ pub const fn left_cluster(sidebar_width: f32) -> f32 {
     sidebar_width - LEFT_INSET
 }
 
+/// The caption buttons once more, last in the window so they're over everything: the title bar's
+/// own are under whatever fills the window (Quick Look, the palette's backdrop), which hides them
+/// and takes their clicks, so a window with one of those up couldn't be minimized or closed.
+/// Drawn only while something covers the title bar. `None` where the system draws the controls.
+pub fn caption_over_overlays(window: &Window, cx: &App) -> Option<AnyElement> {
+    use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
+    use gpui_kit::prelude::FluentBuilder as _;
+    if !cfg!(windows) {
+        return None;
+    }
+    let theme = cx.theme().clone();
+    let button = |id: &'static str, icon: IconName, area: WindowControlArea| {
+        let close = area == WindowControlArea::Close;
+        let (hover, active, fg) = if close { (theme.danger, theme.danger_active, theme.danger_foreground) } else { (theme.secondary_hover, theme.secondary_active, theme.secondary_foreground) };
+        div()
+            .id(id)
+            .test_support()
+            .flex()
+            .w(px(TITLE_BAR_HEIGHT_PX))
+            .h_full()
+            .flex_none()
+            .justify_center()
+            .items_center()
+            .text_color(theme.foreground)
+            .hover(move |s| s.bg(hover).text_color(fg))
+            .active(move |s| s.bg(active).text_color(fg))
+            .window_control_area(area)
+            .child(Icon::new(icon).small())
+    };
+    let supported = window.window_controls();
+    Some(
+        h_flex()
+            .id("caption-over-overlays")
+            .absolute()
+            .top_0()
+            .right_0()
+            .h(px(TITLE_BAR_HEIGHT_PX))
+            .when(supported.minimize, |el| el.child(button("caption-minimize", IconName::WindowMinimize, WindowControlArea::Min)))
+            .when(supported.maximize, |el| {
+                el.child(button("caption-maximize", if window.is_maximized() { IconName::WindowRestore } else { IconName::WindowMaximize }, WindowControlArea::Max))
+            })
+            .child(button("caption-close", IconName::WindowClose, WindowControlArea::Close))
+            .into_any_element(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: it carries gpui's `test` macro, which would take `#[test]`'s place.
+    use super::TITLE_BAR_HEIGHT_PX;
 
     #[test]
     fn the_title_bar_height_is_the_one_the_title_bar_draws() {

@@ -1216,6 +1216,8 @@ impl Render for TrekWindow {
             .child(self.palette.clone())
             .child(self.preview.clone())
             .children(crate::motion::leaving_sheet(window, cx))
+            // Windows: the caption buttons stay reachable over what covers the title bar.
+            .children((self.palette.read(cx).open || self.preview.read(cx).is_open()).then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
             .into_any_element()
     }
 }
