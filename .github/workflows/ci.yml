@@ -54,8 +54,9 @@ jobs:
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
 
       # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
+      # `--no-fail-fast`: one run reports every failing test binary, not just the first.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
       # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
       # `-D warnings` above doesn't turn them into errors).
@@ -93,8 +94,9 @@ jobs:
           }
 
       # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
+      # `--no-fail-fast`: one run reports every failing test binary, not just the first.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
       # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
       # `-D warnings` above doesn't turn them into errors).
