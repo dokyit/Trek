@@ -140,6 +140,23 @@ pub(crate) fn classify(e: &Evidence) -> Option<Skip> {
     }
 }
 
+/// A folder as an agent recorded it, in the form Trek and the user write it. Codex on Windows
+/// records `\\?\C:\Users\me\app` (and `\\?\UNC\server\share\app`): the same folder as `C:\Users\me\app`,
+/// but a different project to Trek, whose folders come from pickers and `cd`. Read by shape, not
+/// by the running system, so a history synced from another machine reads the same.
+pub(crate) fn recorded_path(text: &str) -> PathBuf {
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if let Some(share) = rest.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{share}"));
+        }
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    PathBuf::from(text)
+}
+
 /// System temp folders, where apps run title generators, scratch runs and tests.
 pub(crate) fn is_temp_dir(path: &Path) -> bool {
     in_temp_dir(path, &std::env::temp_dir())
@@ -1019,6 +1036,17 @@ mod tests {
         assert!(in_temp_dir(Path::new(r"D:\scratch\run"), Path::new(r"d:\Scratch")));
         assert!(in_temp_dir(Path::new("D:/scratch/run"), Path::new(r"D:\scratch")));
         assert!(!in_temp_dir(Path::new(r"D:\scratch2"), Path::new(r"D:\scratch")));
+    }
+
+    #[test]
+    fn recorded_folders_lose_the_verbatim_prefix_only() {
+        assert_eq!(recorded_path(r"\\?\C:\Users\me\app"), PathBuf::from(r"C:\Users\me\app"));
+        assert_eq!(recorded_path(r"\\?\c:/Users/me/app"), PathBuf::from("c:/Users/me/app"));
+        assert_eq!(recorded_path(r"\\?\UNC\nas\share\app"), PathBuf::from(r"\\nas\share\app"));
+        assert_eq!(recorded_path(r"\\?\Volume{0000}\app"), PathBuf::from(r"\\?\Volume{0000}\app"));
+        assert_eq!(recorded_path(r"C:\Users\me\app"), PathBuf::from(r"C:\Users\me\app"));
+        assert_eq!(recorded_path("/Users/me/app"), PathBuf::from("/Users/me/app"));
+        assert_eq!(recorded_path(""), PathBuf::new());
     }
 
     #[test]
