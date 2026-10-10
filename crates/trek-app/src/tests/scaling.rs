@@ -107,6 +107,27 @@ fn a_window_told_of_a_new_scale_cuts_its_icons_again_once() {
     });
 }
 
+/// A thread's own window has its own taskbar button: dragged to a display of another scale, its
+/// icons are cut again too, and the main window's aren't.
+#[test]
+fn a_thread_window_told_of_a_new_scale_cuts_its_icons_again_too() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, trek_core::RunState::Idle).await;
+        let own = trek.open_thread_window(cx, &id);
+        cx.run_until_parked();
+        let changes = || crate::system::SCALE_CHANGES.with(|n| n.get());
+        let before = changes();
+        cx.simulate_window_scale_factor_change(own, 1.5);
+        cx.run_until_parked();
+        assert_eq!(changes() - before, 1, "the thread window moved to 150 %");
+        cx.simulate_window_scale_factor_change(own, 1.5);
+        cx.run_until_parked();
+        assert_eq!(changes() - before, 1, "and no more at the same scale");
+    });
+}
+
 /// Windows tells a window its dark title and Mica tone from the system's colours when they change,
 /// which Trek's own theme (Paper chosen on a dark system) may not be: the window is told again.
 #[test]
