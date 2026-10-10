@@ -196,6 +196,15 @@ impl RightPanel {
         cx.notify();
     }
 
+    /// The Browser tool, if it's open (the shots harness's `browser` command).
+    #[cfg(any(test, feature = "shots"))]
+    pub fn browser(&self) -> Option<Entity<browser::BrowserPanel>> {
+        self.tabs.iter().find_map(|t| match &t.view {
+            View::Browser(b) => Some(b.clone()),
+            _ => None,
+        })
+    }
+
     /// The tab in front, by its id.
     #[cfg(test)]
     pub(crate) fn active_id(&self) -> Option<u64> {

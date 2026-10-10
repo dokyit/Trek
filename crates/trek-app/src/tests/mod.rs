@@ -9,6 +9,7 @@ mod alerts;
 mod background;
 mod basecamp;
 mod branches;
+mod browser;
 mod changes;
 mod composer;
 mod connections;

@@ -1,5 +1,6 @@
-//! Browser: tabbed embedded WebKit views with a themed start page that finds local dev servers,
-//! element picking and page screenshots for the composer, devtools, and zoom.
+//! Browser: tabbed embedded web views (WKWebView on macOS, WebView2 on Windows) with a themed
+//! start page that finds local dev servers, element picking and page screenshots for the
+//! composer, devtools, and zoom.
 
 use crate::assets::Lucide;
 use crate::ui;
@@ -13,7 +14,7 @@ use gpui_kit::*;
 use gpui_wry::WebView;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -125,6 +126,38 @@ const PICK_JS: &str = r#"(() => {
 
 const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
 
+/// Where to get the WebView2 runtime when a Windows system has none.
+const WEBVIEW2_DOWNLOAD: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
+
+/// WebView2 can't load a custom scheme, so on Windows wry serves `trek://newtab/…` as
+/// `http://trek.newtab/…`. Every `http://trek.*` request goes to Trek's handler, so nothing but
+/// Trek's pages can be at that address.
+const WEBVIEW2_TREK: &str = "http://trek.";
+
+fn to_webview2(url: &str) -> Cow<'_, str> {
+    match url.strip_prefix("trek://") {
+        Some(rest) => Cow::Owned(format!("{WEBVIEW2_TREK}{rest}")),
+        None => Cow::Borrowed(url),
+    }
+}
+
+fn from_webview2(url: String) -> String {
+    match url.strip_prefix(WEBVIEW2_TREK) {
+        Some(rest) => format!("trek://{rest}"),
+        None => url,
+    }
+}
+
+/// A URL on its way into a view, in the view's form (see `WEBVIEW2_TREK`).
+fn to_view(url: &str) -> Cow<'_, str> {
+    if cfg!(windows) { to_webview2(url) } else { Cow::Borrowed(url) }
+}
+
+/// A URL a view reported, in Trek's form.
+fn from_view(url: String) -> String {
+    if cfg!(windows) { from_webview2(url) } else { url }
+}
+
 /// Native WKWebView controls wry doesn't wrap.
 #[cfg(target_os = "macos")]
 mod native {
@@ -156,7 +189,119 @@ mod native {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Native WebView2 controls wry doesn't wrap. WebView2 has no loading flag to poll; it says
+/// itself when a load ends on its error page (`watch`), so `watch_load` doesn't run here.
+#[cfg(windows)]
+mod native {
+    use super::Msg;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, ICoreWebView2};
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler, ContentLoadingEventHandler, HistoryChangedEventHandler};
+    use windows_61::Win32::System::Com::{IStream, STREAM_SEEK_SET};
+    use windows_61::Win32::UI::Shell::SHCreateMemStream;
+    use windows_61::core::{BOOL, PWSTR, w};
+    use wry::WebViewExtWindows as _;
+
+    pub fn can_go_back(wv: &wry::WebView) -> bool {
+        let mut can = BOOL::default();
+        unsafe { wv.webview().CanGoBack(&mut can) }.is_ok() && can.as_bool()
+    }
+    pub fn can_go_forward(wv: &wry::WebView) -> bool {
+        let mut can = BOOL::default();
+        unsafe { wv.webview().CanGoForward(&mut can) }.is_ok() && can.as_bool()
+    }
+    pub fn is_loading(_: &wry::WebView) -> bool {
+        false
+    }
+    pub fn go_back(wv: &wry::WebView) {
+        let _ = unsafe { wv.webview().GoBack() };
+    }
+    pub fn go_forward(wv: &wry::WebView) {
+        let _ = unsafe { wv.webview().GoForward() };
+    }
+    pub fn stop(wv: &wry::WebView) {
+        let _ = unsafe { wv.webview().Stop() };
+    }
+    /// Reload past the cache, as WKWebView's `reloadFromOrigin` does.
+    pub fn hard_reload(wv: &wry::WebView) {
+        let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        if unsafe { wv.webview().CallDevToolsProtocolMethod(w!("Page.reload"), w!(r#"{"ignoreCache":true}"#), &done) }.is_err() {
+            let _ = wv.reload();
+        }
+    }
+
+    fn source(wv: &ICoreWebView2) -> String {
+        let mut url = PWSTR::null();
+        match unsafe { wv.Source(&mut url) } {
+            Ok(()) => webview2_com::take_pwstr(url),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// Report what the page-load handler doesn't: a load that ended on WebView2's own error page
+    /// (Trek shows its error page instead, as on macOS), and history moving within a page (a
+    /// fragment, `pushState`), which changes back and forward without a new load.
+    pub fn watch(wv: &wry::WebView, tab: u64, tx: &async_channel::Sender<Msg>) {
+        let webview = wv.webview();
+        let failed = tx.clone();
+        let on_error = ContentLoadingEventHandler::create(Box::new(move |wv, args| {
+            let (Some(wv), Some(args)) = (wv, args) else { return Ok(()) };
+            let mut error = BOOL::default();
+            unsafe { args.IsErrorPage(&mut error)? };
+            if error.as_bool() {
+                let _ = failed.try_send(Msg::Failed { tab, url: source(&wv) });
+            }
+            Ok(())
+        }));
+        let moved = tx.clone();
+        let on_history = HistoryChangedEventHandler::create(Box::new(move |_, _| {
+            let _ = moved.try_send(Msg::History(tab));
+            Ok(())
+        }));
+        let mut token = 0;
+        unsafe {
+            let _ = webview.add_ContentLoading(&on_error, &mut token);
+            let _ = webview.add_HistoryChanged(&on_history, &mut token);
+        }
+    }
+
+    /// The page as the view shows it: PNG bytes at the view's size in device pixels, which is what
+    /// the macOS crop of the window comes to. Answers once WebView2 has drawn it (on this thread's
+    /// message loop); a view closed first drops the sender, so the receiver ends instead of hanging.
+    pub fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
+        let (tx, rx) = async_channel::bounded(1);
+        let started = (|| -> Result<(), String> {
+            let stream = unsafe { SHCreateMemStream(None) }.ok_or("Couldn't make room for the screenshot.")?;
+            let (out, done) = (stream.clone(), tx.clone());
+            let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+                let png = result.map_err(|e| e.message()).and_then(|()| read_all(&out));
+                let _ = done.try_send(png);
+                Ok(())
+            }));
+            unsafe { wv.webview().CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler) }.map_err(|e| e.message())
+        })();
+        if let Err(e) = started {
+            let _ = tx.try_send(Err(e));
+        }
+        rx
+    }
+
+    fn read_all(stream: &IStream) -> Result<Vec<u8>, String> {
+        unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }.map_err(|e| e.message())?;
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let mut read = 0u32;
+            unsafe { stream.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut read)) }.ok().map_err(|e| e.message())?;
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read as usize]);
+        }
+        if out.is_empty() { Err("The page didn't draw.".into()) } else { Ok(out) }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod native {
     pub fn can_go_back(_: &wry::WebView) -> bool {
         true
@@ -190,11 +335,24 @@ enum Msg {
     Load { tab: u64, finished: bool, url: String },
     Ipc { tab: u64, origin: String, body: String },
     NewWindow(String),
+    /// WebView2 is showing its own error page for `url`: the load failed.
+    #[cfg(windows)]
+    Failed { tab: u64, url: String },
+    /// History moved without a load (a fragment, `pushState`): back and forward may have changed.
+    #[cfg(windows)]
+    History(u64),
 }
 
 struct Tab {
     id: u64,
     view: Entity<WebView>,
+    zoom: f64,
+    page: Page,
+}
+
+/// What a tab knows of its page, kept up to date from its view's events. Nothing here touches
+/// the view, so the bookkeeping is the same on every platform (and tested without one).
+struct Page {
     /// The page's URL (`trek://newtab/…` for internal pages).
     url: String,
     /// The address that failed to load, while the error page is showing.
@@ -205,7 +363,6 @@ struct Tab {
     loading: bool,
     can_back: bool,
     can_forward: bool,
-    zoom: f64,
     /// Hidden until the first page paints, so a new view never flashes white.
     ready: bool,
     /// Navigation bookkeeping for load-failure detection.
@@ -213,7 +370,71 @@ struct Tab {
     committed_seq: u64,
 }
 
-impl Tab {
+impl Page {
+    /// A view just created on `url`, its first load under way.
+    fn new(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            failed: None,
+            title: String::new(),
+            favicon: None,
+            favicon_url: None,
+            loading: true,
+            can_back: false,
+            can_forward: false,
+            ready: false,
+            nav_seq: 1,
+            committed_seq: 0,
+        }
+    }
+
+    /// The panel asked for a new load; its number, for `watch_load`.
+    fn navigating(&mut self) -> u64 {
+        self.nav_seq += 1;
+        self.loading = true;
+        self.failed = None;
+        self.nav_seq
+    }
+
+    /// The view started (`finished` false) or finished loading `url`.
+    fn loaded(&mut self, finished: bool, url: String) {
+        let internal = url.starts_with("trek://");
+        if finished {
+            self.loading = false;
+            self.ready = true;
+        } else {
+            if host_of(&url) != host_of(&self.url) {
+                self.favicon = None;
+                self.favicon_url = None;
+            }
+            self.committed_seq = self.nav_seq;
+            self.loading = true;
+            if !url.starts_with(ERROR_URL) {
+                self.failed = None;
+            }
+        }
+        self.url = url;
+        if internal {
+            self.title.clear();
+        }
+    }
+
+    /// Loading `url` failed: the error page takes over. Returns its address, for the view.
+    fn failed_to_load(&mut self, url: String) -> String {
+        let error_page = format!("{ERROR_URL}#{}", percent_encode(&url));
+        self.loading = false;
+        self.failed = Some(url);
+        self.nav_seq += 1;
+        self.ready = true;
+        error_page
+    }
+
+    /// The user stopped the load.
+    fn stopped(&mut self) {
+        self.loading = false;
+        self.nav_seq += 1;
+    }
+
     fn is_start(&self) -> bool {
         self.url.starts_with("trek://") && self.failed.is_none()
     }
@@ -376,15 +597,55 @@ fn probe_servers() -> Vec<(u16, Option<String>)> {
     found
 }
 
-fn fetch_favicon(url: &str) -> Option<Image> {
-    let out = std::process::Command::new("/usr/bin/curl")
-        .args(["-sfL", "--max-time", "6", "--max-filesize", "1000000", "-A", "Mozilla/5.0 Trek", "--", url])
-        .output()
-        .ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
+/// The largest icon Trek downloads.
+const FAVICON_MAX_BYTES: usize = 1_000_000;
+
+/// The icon to show for a page: the one it names, if that's on the web, else its site's
+/// `/favicon.ico`. None for Trek's own pages, and for icons only the page can reach (`data:`,
+/// `blob:`), which the page script never names anyway.
+fn favicon_url(icon: &str, page: &str) -> Option<String> {
+    if page.starts_with("trek://") {
         return None;
     }
-    let b = out.stdout;
+    if icon.starts_with("http://") || icon.starts_with("https://") {
+        return Some(icon.to_string());
+    }
+    if !icon.is_empty() {
+        return None;
+    }
+    let (scheme, rest) = page.split_once("://").filter(|(s, _)| *s == "http" || *s == "https")?;
+    let host = rest.split(['/', '?', '#']).next().filter(|h| !h.is_empty())?;
+    Some(format!("{scheme}://{host}/favicon.ico"))
+}
+
+/// Fetch an icon (six seconds, `FAVICON_MAX_BYTES` at most, redirects followed) on Trek's tokio
+/// runtime; the bytes come back over the channel.
+fn fetch_favicon(url: String) -> async_channel::Receiver<Option<Vec<u8>>> {
+    let (tx, rx) = async_channel::bounded(1);
+    trek_core::runtime().spawn(async move {
+        let _ = tx.send(download_favicon(&url).await).await;
+    });
+    rx
+}
+
+async fn download_favicon(url: &str) -> Option<Vec<u8>> {
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(6)).user_agent("Mozilla/5.0 Trek").build().ok()?;
+    let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    if response.content_length().is_some_and(|n| n > FAVICON_MAX_BYTES as u64) {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        body.extend_from_slice(&chunk);
+        if body.len() > FAVICON_MAX_BYTES {
+            return None;
+        }
+    }
+    (!body.is_empty()).then_some(body)
+}
+
+/// The image in an icon download, by its first bytes (servers often send the wrong type).
+fn decode_favicon(b: Vec<u8>) -> Option<Image> {
     let format = if b.starts_with(b"\x89PNG") {
         ImageFormat::Png
     } else if b.starts_with(&[0xFF, 0xD8]) {
@@ -424,8 +685,20 @@ fn extract_title(html: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+/// Where WebView2 keeps its profile (cookies, cache): `%LOCALAPPDATA%\Trek\WebView2`, beside the
+/// logs, or in the data folder a test or `TREK_DATA_DIR` moved. Left to itself it would write
+/// next to `trek.exe`, a folder an update replaces and that may not be writable.
+#[cfg(windows)]
+fn webview_data_dir() -> PathBuf {
+    if trek_core::paths::isolated() {
+        return trek_core::paths::data_dir().join("WebView2");
+    }
+    crate::logging::log_dir().with_file_name("WebView2")
+}
+
 /// Capture `rect` (window points) of a window by number into a PNG at `dest`.
-fn capture_window_rect(window_number: isize, window_width: f32, rect: Bounds<Pixels>, dest: &Path) -> Result<(), String> {
+#[cfg(not(windows))]
+fn capture_window_rect(window_number: isize, window_width: f32, rect: Bounds<Pixels>, dest: &std::path::Path) -> Result<(), String> {
     use std::io::BufReader;
     let tmp = dest.with_extension("full.png");
     let status = std::process::Command::new("/usr/sbin/screencapture")
@@ -519,6 +792,12 @@ impl BrowserPanel {
         this
     }
 
+    /// No web view could be made, so the tool says so (and on Windows offers WebView2).
+    #[cfg(test)]
+    pub(crate) fn unavailable(&self) -> bool {
+        self.unavailable && self.tabs.is_empty()
+    }
+
     /// The native view floats above GPUI; hide it whenever its tab isn't on screen.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
@@ -535,7 +814,7 @@ impl BrowserPanel {
     fn sync_views(&mut self, cx: &mut Context<Self>) {
         let show_active = self.visible && !self.menu_open;
         for tab in &self.tabs {
-            let show = show_active && tab.ready && tab.id == self.active;
+            let show = show_active && tab.page.ready && tab.id == self.active;
             tab.view.update(cx, |v, _| {
                 if show && !v.visible() {
                     v.show();
@@ -561,8 +840,16 @@ impl BrowserPanel {
             let handle = window.window_handle().ok()?;
             let (t1, t2, t3, t4) = (self.tx.clone(), self.tx.clone(), self.tx.clone(), self.tx.clone());
             let vars = self.page_vars.clone();
-            wry::WebViewBuilder::new()
-                .with_url(url)
+            #[cfg(windows)]
+            let mut context = wry::WebContext::new(Some(webview_data_dir()));
+            // A new view mustn't take the keys from Trek (WebView2 focuses it by default): it gets
+            // them when the page is clicked, or after the address bar sends it somewhere.
+            #[cfg(windows)]
+            let builder = wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
+            #[cfg(not(windows))]
+            let builder = wry::WebViewBuilder::new();
+            builder
+                .with_url(to_view(url))
                 .with_visible(false)
                 .with_devtools(true)
                 .with_accept_first_mouse(true)
@@ -587,8 +874,11 @@ impl BrowserPanel {
                     wry::NewWindowResponse::Deny
                 })
                 .build_as_child(&handle)
+                .inspect_err(|e| tracing::warn!("browser: no web view: {e}"))
                 .ok()?
         };
+        #[cfg(windows)]
+        native::watch(&built, id, &self.tx);
         Some(cx.new(|cx| WebView::new(built, window, cx)))
     }
 
@@ -601,29 +891,14 @@ impl BrowserPanel {
             return;
         };
         self.stop_picking(cx);
-        self.tabs.push(Tab {
-            id,
-            view,
-            url: url.to_string(),
-            failed: None,
-            title: String::new(),
-            favicon: None,
-            favicon_url: None,
-            loading: true,
-            can_back: false,
-            can_forward: false,
-            zoom: 1.0,
-            ready: false,
-            nav_seq: 1,
-            committed_seq: 0,
-        });
+        self.tabs.push(Tab { id, view, zoom: 1.0, page: Page::new(url) });
         self.active = id;
         // Reveal after a moment even if the first load never reports in.
         self._tasks.push(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(1500)).await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(tab) = this.tab_mut(id).filter(|t| !t.ready) {
-                    tab.ready = true;
+                if let Some(tab) = this.tab_mut(id).filter(|t| !t.page.ready) {
+                    tab.page.ready = true;
                     this.sync_views(cx);
                 }
             });
@@ -669,18 +944,30 @@ impl BrowserPanel {
     fn navigate(&mut self, url: String, cx: &mut Context<Self>) {
         self.stop_picking(cx);
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) else { return };
-        tab.nav_seq += 1;
-        tab.loading = true;
-        tab.failed = None;
-        let (id, seq) = (tab.id, tab.nav_seq);
-        let _ = tab.view.read(cx).raw().load_url(&url);
-        self.watch_load(id, seq, url, cx);
+        let (id, seq) = (tab.id, tab.page.navigating());
+        let sent = tab.view.read(cx).raw().load_url(&to_view(&url));
+        // WebView2 turns an address it can't parse down at once, and then reports nothing.
+        if sent.is_err() && cfg!(windows) {
+            self.show_load_error(id, url, cx);
+        } else {
+            self.watch_load(id, seq, url, cx);
+        }
         cx.notify();
     }
 
+    /// Loading `url` in tab `id` failed: Trek's error page takes over.
+    fn show_load_error(&mut self, id: u64, url: String, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tab_mut(id) {
+            let error_page = tab.page.failed_to_load(url);
+            let _ = tab.view.read(cx).raw().load_url(&to_view(&error_page));
+        }
+        self.sync_views(cx);
+    }
+
     /// WKWebView shows nothing when a load fails, so notice it and show Trek's error page.
+    /// (WebView2 shows an error page of its own, and says so: see `native::watch`.)
     fn watch_load(&mut self, id: u64, seq: u64, url: String, cx: &mut Context<Self>) {
-        if url.starts_with("trek://") {
+        if url.starts_with("trek://") || cfg!(windows) {
             return;
         }
         let task = cx.spawn(async move |this, cx| {
@@ -690,7 +977,7 @@ impl BrowserPanel {
                 cx.background_executor().timer(Duration::from_millis(150)).await;
                 let state = this.update(cx, |this, cx| {
                     let tab = this.tab_mut(id)?;
-                    if tab.nav_seq != seq || tab.committed_seq >= seq {
+                    if tab.page.nav_seq != seq || tab.page.committed_seq >= seq {
                         return None;
                     }
                     Some(native::is_loading(tab.view.read(cx).raw()))
@@ -700,16 +987,7 @@ impl BrowserPanel {
                 if loading && started.elapsed() < Duration::from_secs(90) || !seen_loading && started.elapsed() < Duration::from_millis(1500) {
                     continue;
                 }
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(tab) = this.tab_mut(id) {
-                        tab.loading = false;
-                        tab.failed = Some(url.clone());
-                        tab.nav_seq += 1;
-                        let _ = tab.view.read(cx).raw().load_url(&format!("{ERROR_URL}#{}", percent_encode(&url)));
-                        tab.ready = true;
-                    }
-                    this.sync_views(cx);
-                });
+                let _ = this.update(cx, |this, cx| this.show_load_error(id, url, cx));
                 return;
             }
         });
@@ -720,38 +998,20 @@ impl BrowserPanel {
     fn refresh_nav(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return };
         let raw = tab.view.read(cx).raw();
-        tab.can_back = native::can_go_back(raw);
-        tab.can_forward = native::can_go_forward(raw);
+        tab.page.can_back = native::can_go_back(raw);
+        tab.page.can_forward = native::can_go_forward(raw);
     }
 
     fn handle(&mut self, msg: Msg, window: &mut Window, cx: &mut Context<Self>) {
         match msg {
             Msg::Title(id, title) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.title = title;
+                    tab.page.title = title;
                 }
             }
             Msg::Load { tab: id, finished, url } => {
-                let internal = url.starts_with("trek://");
                 let Some(tab) = self.tab_mut(id) else { return };
-                if finished {
-                    tab.loading = false;
-                    tab.ready = true;
-                } else {
-                    if host_of(&url) != host_of(&tab.url) {
-                        tab.favicon = None;
-                        tab.favicon_url = None;
-                    }
-                    tab.committed_seq = tab.nav_seq;
-                    tab.loading = true;
-                    if !url.starts_with(ERROR_URL) {
-                        tab.failed = None;
-                    }
-                }
-                tab.url = url;
-                if internal {
-                    tab.title.clear();
-                }
+                tab.page.loaded(finished, from_view(url));
                 if !finished && self.active == id {
                     self.picking = false;
                 }
@@ -759,11 +1019,20 @@ impl BrowserPanel {
                 self.sync_views(cx);
             }
             Msg::NewWindow(url) => {
+                let url = from_view(url);
                 if !url.is_empty() && url != "about:blank" {
                     self.new_tab(&url, window, cx);
                 }
             }
-            Msg::Ipc { tab, origin, body } => self.handle_ipc(tab, origin, body, window, cx),
+            Msg::Ipc { tab, origin, body } => self.handle_ipc(tab, from_view(origin), body, window, cx),
+            #[cfg(windows)]
+            Msg::Failed { tab: id, url } => {
+                let Some(tab) = self.tab_mut(id) else { return };
+                let url = if url.is_empty() { tab.page.url.clone() } else { from_view(url) };
+                self.show_load_error(id, url, cx);
+            }
+            #[cfg(windows)]
+            Msg::History(id) => self.refresh_nav(id, cx),
         }
         cx.notify();
     }
@@ -774,14 +1043,13 @@ impl BrowserPanel {
         let internal = origin.starts_with("trek://");
         match msg.get("t").and_then(|v| v.as_str()).unwrap_or_default() {
             "meta" => {
-                let icon = str_of("icon");
-                if !internal && (icon.starts_with("http://") || icon.starts_with("https://")) {
+                if let Some(icon) = favicon_url(&str_of("icon"), &origin) {
                     self.load_favicon(id, icon, cx);
                 }
                 if let Some(tab) = self.tab_mut(id) {
                     let title = str_of("title");
                     if !title.is_empty() && !internal {
-                        tab.title = title;
+                        tab.page.title = title;
                     }
                 }
             }
@@ -789,7 +1057,7 @@ impl BrowserPanel {
                 let url = str_of("url");
                 if let Some(tab) = self.tab_mut(id) {
                     if !url.is_empty() && !internal {
-                        tab.url = url;
+                        tab.page.url = url;
                     }
                 }
                 self.refresh_nav(id, cx);
@@ -816,23 +1084,23 @@ impl BrowserPanel {
     /// GPUI has no HTTP client here, so fetch the icon ourselves and hand it over as image bytes.
     fn load_favicon(&mut self, id: u64, url: String, cx: &mut Context<Self>) {
         let Some(tab) = self.tab_mut(id) else { return };
-        if tab.favicon_url.as_deref() == Some(url.as_str()) {
+        if tab.page.favicon_url.as_deref() == Some(url.as_str()) {
             return;
         }
-        tab.favicon_url = Some(url.clone());
+        tab.page.favicon_url = Some(url.clone());
         if let Some(cached) = self.favicons.get(&url).cloned() {
             if let Some(tab) = self.tab_mut(id) {
-                tab.favicon = cached;
+                tab.page.favicon = cached;
             }
             return;
         }
+        let bytes = fetch_favicon(url.clone());
         cx.spawn(async move |this, cx| {
-            let fetch_url = url.clone();
-            let image = cx.background_executor().spawn(async move { fetch_favicon(&fetch_url) }).await.map(Arc::new);
+            let image = bytes.recv().await.ok().flatten().and_then(decode_favicon).map(Arc::new);
             let _ = this.update(cx, |this, cx| {
                 this.favicons.insert(url.clone(), image.clone());
-                for tab in this.tabs.iter_mut().filter(|t| t.favicon_url.as_deref() == Some(url.as_str())) {
-                    tab.favicon = image.clone();
+                for tab in this.tabs.iter_mut().filter(|t| t.page.favicon_url.as_deref() == Some(url.as_str())) {
+                    tab.page.favicon = image.clone();
                 }
                 cx.notify();
             });
@@ -849,7 +1117,7 @@ impl BrowserPanel {
                 let Some(tab) = this.tab_mut(id) else { return };
                 let raw = tab.view.read(cx).raw();
                 // Only hand the list to Trek's own page, never to a site the tab has since moved to.
-                if raw.url().map(|u| u.starts_with("trek://")).unwrap_or(false) {
+                if raw.url().map(|u| from_view(u).starts_with("trek://")).unwrap_or(false) {
                     let _ = raw.evaluate_script(&format!("window.__trekServers && window.__trekServers({json});"));
                 }
             });
@@ -859,7 +1127,7 @@ impl BrowserPanel {
     }
 
     fn start_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.active_tab().map(|t| t.address()).unwrap_or_default();
+        let value = self.active_tab().map(|t| t.page.address()).unwrap_or_default();
         self.editing = true;
         self.address.update(cx, |s, cx| {
             s.set_value(value, window, cx);
@@ -877,14 +1145,13 @@ impl BrowserPanel {
 
     fn reload_or_stop(&mut self, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else { return };
-        if tab.loading {
+        if tab.page.loading {
             native::stop(tab.view.read(cx).raw());
             let id = tab.id;
             if let Some(tab) = self.tab_mut(id) {
-                tab.loading = false;
-                tab.nav_seq += 1;
+                tab.page.stopped();
             }
-        } else if let Some(url) = tab.failed.clone() {
+        } else if let Some(url) = tab.page.failed.clone() {
             self.navigate(url, cx);
         } else {
             let _ = tab.view.read(cx).raw().reload();
@@ -895,7 +1162,7 @@ impl BrowserPanel {
     fn toggle_picking(&mut self, cx: &mut Context<Self>) {
         if self.picking {
             self.stop_picking(cx);
-        } else if self.active_tab().is_some_and(|t| !t.url.starts_with("trek://")) {
+        } else if self.active_tab().is_some_and(|t| !t.page.url.starts_with("trek://")) {
             self.picking = true;
             self.with_active(cx, |wv| {
                 let _ = wv.evaluate_script(PICK_JS);
@@ -914,6 +1181,41 @@ impl BrowserPanel {
         }
     }
 
+    /// WebView2 draws the page into a PNG itself, at the size the macOS window crop comes to.
+    #[cfg(windows)]
+    fn screenshot(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else { return };
+        if self.capturing || !self.visible || !tab.page.ready {
+            return;
+        }
+        let png = native::capture_png(tab.view.read(cx).raw());
+        self.capturing = true;
+        cx.notify();
+        let task = cx.spawn(async move |this, cx| {
+            let dest: PathBuf = crate::mentions::snapshot_path();
+            let result = match png.recv().await {
+                Ok(Ok(bytes)) => {
+                    let out = dest.clone();
+                    cx.background_executor().spawn(async move { std::fs::write(&out, bytes).map_err(|e| e.to_string()) }).await
+                }
+                Ok(Err(message)) => Err(format!("Couldn't capture the page: {message}")),
+                Err(_) => Err("The page closed before it was captured.".to_string()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.capturing = false;
+                let event = match result {
+                    Ok(()) => WorkspaceEvent::AttachImage(dest),
+                    Err(message) => WorkspaceEvent::Toast { message, undo: None },
+                };
+                this.workspace.update(cx, |_, cx| cx.emit(event));
+                cx.notify();
+            });
+        });
+        self._tasks.retain(|t| !t.is_ready());
+        self._tasks.push(task);
+    }
+
+    #[cfg(not(windows))]
     fn screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else { return };
         if self.capturing || !self.visible {
@@ -985,7 +1287,7 @@ impl BrowserPanel {
         *self.page_vars.borrow_mut() = vars.clone();
         for tab in &self.tabs {
             let raw = tab.view.read(cx).raw();
-            if raw.url().map(|u| u.starts_with("trek://")).unwrap_or(false) {
+            if raw.url().map(|u| from_view(u).starts_with("trek://")).unwrap_or(false) {
                 let _ = raw.evaluate_script(&format!("document.documentElement.style.cssText = {};", serde_json::Value::String(vars.clone())));
             }
         }
@@ -994,7 +1296,7 @@ impl BrowserPanel {
     fn more_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let (is_page, zoom) = self.active_tab().map(|t| (!t.url.starts_with("trek://"), t.zoom)).unwrap_or((false, 1.0));
+        let (is_page, zoom) = self.active_tab().map(|t| (!t.page.url.starts_with("trek://"), t.zoom)).unwrap_or((false, 1.0));
         let row = |id: &'static str, icon: Icon, label: &'static str, enabled: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Context<Self>)| {
             ui::menu_row(id, false, cx)
                 .child(icon.small().text_color(muted))
@@ -1055,7 +1357,7 @@ impl BrowserPanel {
             .w(px(250.))
             .child(row("browser-copy-url", Icon::new(Lucide::Copy), "Copy URL", is_page, cx, |this, cx| {
                 if let Some(tab) = this.active_tab() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(tab.address()));
+                    cx.write_to_clipboard(ClipboardItem::new_string(tab.page.address()));
                 }
             }))
             .child(row("browser-hard-reload", Icon::new(Lucide::RotateCw), "Hard reload", is_page, cx, |this, cx| {
@@ -1078,11 +1380,12 @@ impl BrowserPanel {
         let id = tab.id;
         let active = id == self.active;
         let muted = theme.muted_foreground;
-        let icon: AnyElement = if tab.loading && !tab.is_start() {
+        let page = &tab.page;
+        let icon: AnyElement = if page.loading && !page.is_start() {
             Spinner::new().xsmall().color(muted).into_any_element()
-        } else if tab.is_start() {
+        } else if page.is_start() {
             Icon::new(Lucide::Sparkle).xsmall().text_color(crate::palette::ember(cx)).into_any_element()
-        } else if let Some(image) = tab.favicon.clone() {
+        } else if let Some(image) = page.favicon.clone() {
             img(image)
                 .size(px(14.))
                 .flex_none()
@@ -1110,7 +1413,7 @@ impl BrowserPanel {
             .when(active, |el| el.bg(theme.popover).border_color(theme.border).text_color(theme.foreground).shadow_xs())
             .when(!active, |el| el.border_color(transparent_black()).text_color(muted).hover(|s| s.bg(theme.foreground.opacity(0.05)).text_color(theme.foreground)))
             .child(div().flex_none().size(px(14.)).flex().items_center().justify_center().child(icon))
-            .child(div().flex_1().min_w_0().truncate().child(tab.label()))
+            .child(div().flex_1().min_w_0().truncate().child(page.label()))
             .child(
                 div()
                     .id(("browser-tab-close", id as usize))
@@ -1162,7 +1465,7 @@ impl BrowserPanel {
                 }))
                 .into_any_element();
         }
-        let address = tab.map(|t| t.address()).unwrap_or_default();
+        let address = tab.map(|t| t.page.address()).unwrap_or_default();
         let content: AnyElement = if address.is_empty() {
             h_flex()
                 .gap(px(6.))
@@ -1171,7 +1474,7 @@ impl BrowserPanel {
                 .into_any_element()
         } else {
             let secure = address.starts_with("https://");
-            let failed = tab.is_some_and(|t| t.failed.is_some());
+            let failed = tab.is_some_and(|t| t.page.failed.is_some());
             let (host, rest) = match address.split_once("://") {
                 Some((_, after)) => match after.find(['/', '?', '#']) {
                     Some(i) => (after[..i].to_string(), after[i..].to_string()),
@@ -1236,6 +1539,92 @@ impl BrowserPanel {
     }
 }
 
+/// The shots harness's `browser` command (see `shots.rs`): the tool driven without a pointer,
+/// and where its native view sits, for checking it against the panel at any scale.
+#[cfg(feature = "shots")]
+impl BrowserPanel {
+    pub fn shots(&mut self, cmd: &str, arg: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        match cmd {
+            "go" => self.navigate(normalize(arg), cx),
+            "back" => self.with_active(cx, native::go_back),
+            "forward" => self.with_active(cx, native::go_forward),
+            "reload" => self.reload_or_stop(cx),
+            _ => anyhow::bail!("browser: unknown command {cmd:?} (go <address>|back|forward|reload|state|snap <name>)"),
+        }
+        Ok(())
+    }
+
+    /// The active page, the panel's area for the view (logical px), the native view's rectangle
+    /// (device px, from the OS), the window's scale, and which window has the keys.
+    pub fn shots_state(&self, window: &Window, cx: &App) -> serde_json::Value {
+        let scale = window.scale_factor() as f64;
+        let tab = self.active_tab();
+        let view = tab.map(|t| t.view.read(cx));
+        let area = view.map(|v| {
+            let b = v.bounds();
+            serde_json::json!([f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)])
+        });
+        let native = view.and_then(|v| v.raw().bounds().ok()).map(|r| {
+            let (p, s) = (r.position.to_physical::<i32>(scale), r.size.to_physical::<i32>(scale));
+            serde_json::json!([p.x, p.y, s.width, s.height])
+        });
+        serde_json::json!({
+            "tabs": self.tabs.len(),
+            "unavailable": self.unavailable,
+            "url": tab.map(|t| t.page.url.clone()),
+            "label": tab.map(|t| t.page.label()),
+            "failed": tab.and_then(|t| t.page.failed.clone()),
+            "loading": tab.map(|t| t.page.loading),
+            "can_back": tab.map(|t| t.page.can_back),
+            "can_forward": tab.map(|t| t.page.can_forward),
+            "ready": tab.map(|t| t.page.ready),
+            "favicon": tab.map(|t| t.page.favicon.is_some()),
+            "panel_visible": self.visible,
+            "view_shown": view.map(|v| v.visible()),
+            "scale": scale,
+            "area": area,
+            "native": native,
+            "focus": shots_focus(window),
+        })
+    }
+
+    /// The page as `screenshot` would capture it.
+    #[cfg(windows)]
+    pub fn shots_capture(&self, cx: &App) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
+        self.active_tab().map(|t| native::capture_png(t.view.read(cx).raw()))
+    }
+}
+
+/// Which window of this thread has the keys: Trek's own (`trek`), one inside it (the web view),
+/// or none.
+#[cfg(all(feature = "shots", windows))]
+fn shots_focus(window: &Window) -> String {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetClassNameW, GetGUIThreadInfo};
+    let main = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+        _ => 0,
+    };
+    unsafe {
+        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..std::mem::zeroed() };
+        GetGUIThreadInfo(windows_sys::Win32::System::Threading::GetCurrentThreadId(), &mut info);
+        if info.hwndFocus.is_null() {
+            return "none".into();
+        }
+        if info.hwndFocus as isize == main {
+            return "trek".into();
+        }
+        let mut class = [0u16; 128];
+        let n = GetClassNameW(info.hwndFocus, class.as_mut_ptr(), class.len() as i32);
+        format!("child:{}", String::from_utf16_lossy(&class[..n.max(0) as usize]))
+    }
+}
+
+#[cfg(all(feature = "shots", not(windows)))]
+fn shots_focus(_: &Window) -> String {
+    "unknown".into()
+}
+
 /// What the agent sees when an element is picked.
 fn describe_pick(msg: &serde_json::Value) -> String {
     let get = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or_default();
@@ -1253,19 +1642,31 @@ impl Render for BrowserPanel {
         self.sync_theme(cx);
         let theme = cx.theme().clone();
         if self.unavailable && self.tabs.is_empty() {
-            return super::empty("The embedded browser isn't available on this system.", cx).into_any_element();
+            // Windows 11 ships the WebView2 runtime, but it can be removed (and older systems lack it).
+            return super::empty(crate::words::words().browser_unavailable, cx)
+                .id("browser-unavailable")
+                .gap(px(12.))
+                .when(cfg!(windows), |el| {
+                    el.child(
+                        gpui_kit::component::button::Button::new("browser-get-webview2")
+                            .small()
+                            .label("Get WebView2")
+                            .on_click(|_, _, cx| cx.open_url(WEBVIEW2_DOWNLOAD)),
+                    )
+                })
+                .into_any_element();
         }
         let tab = self.active_tab();
-        let loading = tab.is_some_and(|t| t.loading && !t.is_start());
-        let can_back = tab.is_some_and(|t| t.can_back);
-        let can_forward = tab.is_some_and(|t| t.can_forward);
-        let is_page = tab.is_some_and(|t| !t.url.starts_with("trek://"));
-        let failed = tab.is_some_and(|t| t.failed.is_some());
+        let loading = tab.is_some_and(|t| t.page.loading && !t.page.is_start());
+        let can_back = tab.is_some_and(|t| t.page.can_back);
+        let can_forward = tab.is_some_and(|t| t.page.can_forward);
+        let is_page = tab.is_some_and(|t| !t.page.url.starts_with("trek://"));
+        let failed = tab.is_some_and(|t| t.page.failed.is_some());
         let ember = crate::palette::ember(cx);
         let active_view = tab.map(|t| t.view.clone());
         // The native view only draws once the first page paints; until then, a hint fills the
         // void. Hidden while a menu is open (or the panel is) is suppression, not empty.
-        let blank = tab.is_none_or(|t| !t.ready);
+        let blank = tab.is_none_or(|t| !t.page.ready);
 
         let strip = h_flex()
             .h(px(36.))
@@ -1335,7 +1736,7 @@ impl Render for BrowserPanel {
                 ui::icon_button("browser-external", Lucide::ExternalLink, "Open in default browser")
                     .disabled(!is_page && !failed)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(url) = this.active_tab().filter(|t| t.failed.is_some() || !t.url.starts_with("trek://")).map(|t| t.address()) {
+                        if let Some(url) = this.active_tab().filter(|t| t.page.failed.is_some() || !t.page.url.starts_with("trek://")).map(|t| t.page.address()) {
                             cx.open_url(&url);
                         }
                     })),
@@ -1387,7 +1788,261 @@ impl Render for BrowserPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{START_URL, extract_title, host_of, normalize};
+    // Named, not `super::*`: that would bring GPUI's `test` attribute over the standard one.
+    use super::{
+        ERROR_URL, FAVICON_MAX_BYTES, Page, START_URL, decode_favicon, download_favicon, extract_title, favicon_url, from_view, from_webview2, host_of, normalize, to_view,
+        to_webview2,
+    };
+    use gpui_kit::ImageFormat;
+    #[cfg(windows)]
+    use super::{Msg, native};
+    #[cfg(windows)]
+    use std::borrow::Cow;
+    #[cfg(windows)]
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn trek_pages_cross_into_webview2_and_back() {
+        assert_eq!(to_webview2("trek://newtab/"), "http://trek.newtab/");
+        assert_eq!(to_webview2("trek://newtab/error#http%3A%2F%2Fx"), "http://trek.newtab/error#http%3A%2F%2Fx");
+        assert_eq!(from_webview2("http://trek.newtab/mark.png".into()), "trek://newtab/mark.png");
+        // Everything else passes untouched, either way.
+        for url in ["https://example.com/", "http://localhost:3000/", "https://trek.dev/", "about:blank"] {
+            assert_eq!(to_webview2(url), url);
+            assert_eq!(from_webview2(url.into()), url);
+        }
+        // The platform's own form: a round trip always lands back on Trek's.
+        assert_eq!(from_view(to_view(START_URL).into_owned()), START_URL);
+        assert_eq!(to_view(START_URL) == START_URL, !cfg!(windows));
+    }
+
+    #[test]
+    fn a_new_tab_is_the_start_page_until_it_loads() {
+        let page = Page::new(START_URL);
+        assert!(page.is_start() && page.loading && !page.ready);
+        assert_eq!((page.address(), page.label()), (String::new(), "New Tab".to_string()));
+    }
+
+    #[test]
+    fn a_load_reports_its_url_title_and_progress() {
+        let mut page = Page::new(START_URL);
+        let seq = page.navigating();
+        assert_eq!(seq, 2);
+        page.loaded(false, "https://www.example.com/docs".into());
+        assert!(page.loading && page.committed_seq == seq, "the load committed");
+        assert_eq!(page.label(), "example.com", "the host until there's a title");
+        page.title = "Example Docs".into();
+        page.loaded(true, "https://www.example.com/docs".into());
+        assert!(!page.loading && page.ready);
+        assert_eq!((page.address(), page.label()), ("https://www.example.com/docs".to_string(), "Example Docs".to_string()));
+        // Back to an internal page: its title isn't the site's.
+        page.loaded(false, START_URL.into());
+        assert!(page.title.is_empty() && page.is_start());
+    }
+
+    #[test]
+    fn the_favicon_goes_when_the_site_changes() {
+        let mut page = Page::new("https://a.dev/");
+        page.loaded(false, "https://a.dev/".into());
+        page.favicon_url = Some("https://a.dev/favicon.ico".into());
+        page.loaded(false, "https://a.dev/next".into());
+        assert!(page.favicon_url.is_some(), "same site, same icon");
+        page.loaded(false, "https://b.dev/".into());
+        assert_eq!(page.favicon_url, None);
+    }
+
+    #[test]
+    fn a_failed_load_shows_the_error_page_with_the_address_kept() {
+        let mut page = Page::new(START_URL);
+        page.navigating();
+        let error_page = page.failed_to_load("http://localhost:9/app".into());
+        assert_eq!(error_page, format!("{ERROR_URL}#http%3A%2F%2Flocalhost%3A9%2Fapp"));
+        assert!(!page.loading && page.ready);
+        // The error page loading keeps the failure on show.
+        page.loaded(false, error_page.clone());
+        page.loaded(true, error_page);
+        assert!(!page.is_start());
+        assert_eq!((page.address(), page.label()), ("http://localhost:9/app".to_string(), "Can’t reach page".to_string()));
+        // A new address clears it.
+        page.navigating();
+        assert_eq!(page.failed, None);
+    }
+
+    #[test]
+    fn stopping_ends_the_load_and_its_watch() {
+        let mut page = Page::new("https://slow.dev/");
+        let seq = page.nav_seq;
+        page.stopped();
+        assert!(!page.loading && page.nav_seq > seq, "the load watcher sees a newer load and stands down");
+    }
+
+    #[test]
+    fn favicons_come_from_the_page_or_its_site() {
+        assert_eq!(favicon_url("https://cdn.x.dev/icon.svg", "https://x.dev/a"), Some("https://cdn.x.dev/icon.svg".into()));
+        assert_eq!(favicon_url("", "http://localhost:5173/app?x=1#y"), Some("http://localhost:5173/favicon.ico".into()));
+        assert_eq!(favicon_url("", "https://user@x.dev"), Some("https://user@x.dev/favicon.ico".into()));
+        assert_eq!(favicon_url("data:image/png;base64,AAAA", "https://x.dev/"), None, "not fetchable");
+        assert_eq!(favicon_url("https://x.dev/i.png", "trek://newtab/"), None, "Trek's own pages have none");
+        assert_eq!(favicon_url("", "about:blank"), None);
+        assert_eq!(favicon_url("", "file:///C:/a.html"), None);
+    }
+
+    #[test]
+    fn favicons_are_read_by_their_bytes() {
+        let png = decode_favicon(b"\x89PNG\r\n\x1a\n....".to_vec()).expect("a PNG");
+        assert_eq!(png.format, ImageFormat::Png);
+        let ico = decode_favicon(vec![0, 0, 1, 0, 1, 0]).expect("an ICO");
+        assert_eq!(ico.format, ImageFormat::Ico);
+        let svg = decode_favicon(b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()).expect("an SVG");
+        assert_eq!(svg.format, ImageFormat::Svg);
+        assert!(decode_favicon(b"<html>Not found</html>".to_vec()).is_none());
+    }
+
+    /// One HTTP answer on a loopback port; the URL to ask it at.
+    fn serve_once(status: &'static str, body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("its address").port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        format!("http://127.0.0.1:{port}/favicon.ico")
+    }
+
+    #[test]
+    fn favicons_download_over_http_within_their_limit() {
+        let png = b"\x89PNG\r\n\x1a\nicon".to_vec();
+        let got = trek_core::runtime().block_on(download_favicon(&serve_once("200 OK", png.clone())));
+        assert_eq!(got, Some(png));
+        let missing = trek_core::runtime().block_on(download_favicon(&serve_once("404 Not Found", b"nope".to_vec())));
+        assert_eq!(missing, None, "an error page isn't an icon");
+        let huge = trek_core::runtime().block_on(download_favicon(&serve_once("200 OK", vec![0; FAVICON_MAX_BYTES + 1])));
+        assert_eq!(huge, None, "too big to be an icon");
+    }
+
+    /// A real WebView2 in a real window (off screen, never activated): the native calls the
+    /// headless harness can't reach. Run by hand: `cargo test -p trek-app real_webview2 -- --ignored`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_loads_reports_captures_and_outlives_its_window() {
+        use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+        struct Parent(isize);
+        impl HasWindowHandle for Parent {
+            fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+                let hwnd = std::num::NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?;
+                Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(hwnd))) })
+            }
+        }
+        fn pump() {
+            unsafe {
+                let mut msg = std::mem::zeroed::<MSG>();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
+        fn wait_for<T>(what: &str, mut poll: impl FnMut() -> Option<T>) -> T {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                pump();
+                if let Some(v) = poll() {
+                    return v;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        // A plain STATIC window as the parent: off screen, no taskbar button, never activated.
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let parent = unsafe {
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.as_ptr(), std::ptr::null(), WS_POPUP | WS_CLIPCHILDREN, -32000, -32000, 640, 480, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null())
+        };
+        assert!(!parent.is_null(), "a parent window");
+        unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
+
+        let data = std::env::temp_dir().join(format!("trek-webview2-test-{}", std::process::id()));
+        let mut context = wry::WebContext::new(Some(data.clone()));
+        let (tx, rx) = async_channel::unbounded::<Msg>();
+        let (t1, t2) = (tx.clone(), tx.clone());
+        let wv = wry::WebViewBuilder::new_with_web_context(&mut context)
+            .with_focused(false)
+            .with_url("about:blank")
+            .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(0, 0).into(), size: wry::dpi::LogicalSize::new(400, 300).into() })
+            .with_custom_protocol("trek".into(), |_, _| {
+                wry::http::Response::builder().header("Content-Type", "text/html").body(Cow::Borrowed(&b"<title>Trek page</title>"[..])).unwrap_or_default()
+            })
+            .with_document_title_changed_handler(move |title| {
+                let _ = t1.try_send(Msg::Title(1, title));
+            })
+            .with_on_page_load_handler(move |event, url| {
+                let _ = t2.try_send(Msg::Load { tab: 1, finished: matches!(event, wry::PageLoadEvent::Finished), url });
+            })
+            .build_as_child(&Parent(parent as isize))
+            .expect("a WebView2 (is the runtime installed?)");
+        native::watch(&wv, 1, &tx);
+        let loaded = |want: &str| {
+            let want = want.to_string();
+            wait_for(&format!("{want} to load"), || match rx.try_recv() {
+                Ok(Msg::Load { finished: true, url, .. }) if from_view(url.clone()) == want => Some(()),
+                _ => None,
+            })
+        };
+        loaded("about:blank");
+        // Created without the keys: nothing in this thread took the focus.
+        let focus = unsafe {
+            let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..std::mem::zeroed() };
+            GetGUIThreadInfo(windows_sys::Win32::System::Threading::GetCurrentThreadId(), &mut info);
+            info.hwndFocus
+        };
+        assert!(focus.is_null() || focus == parent, "the new view took the focus");
+
+        // A titled page: the title arrives, and history now goes back.
+        wv.load_url("data:text/html,<title>Trek%20test</title><p>hello").expect("navigate");
+        wait_for("the title", || match rx.try_recv() {
+            Ok(Msg::Title(_, title)) if title == "Trek test" => Some(()),
+            _ => None,
+        });
+        wait_for("history", || native::can_go_back(&wv).then_some(()));
+        assert!(!native::can_go_forward(&wv));
+
+        // Trek's own pages, through wry's http://trek. stand-in, come back as trek://.
+        wv.load_url(&to_view(START_URL)).expect("navigate");
+        loaded(START_URL);
+
+        // The screenshot: a PNG the size of the view in device pixels.
+        let shot = native::capture_png(&wv);
+        let png = wait_for("the capture", || shot.try_recv().ok()).expect("a capture");
+        let info = png::Decoder::new(std::io::Cursor::new(&png)).read_info().expect("a PNG").info().clone();
+        let size = wv.bounds().expect("bounds").size.to_physical::<u32>(1.0);
+        assert_eq!((info.width, info.height), (size.width, size.height));
+
+        // A load that fails ends on WebView2's error page, which Trek is told of.
+        wv.load_url("http://127.0.0.1:9/").expect("navigate");
+        let failed = wait_for("the failure", || match rx.try_recv() {
+            Ok(Msg::Failed { url, .. }) => Some(url),
+            _ => None,
+        });
+        assert!(failed.starts_with("http://127.0.0.1:9"), "{failed}");
+
+        // The window goes first (a closed Trek window), then the view: no crash.
+        unsafe { DestroyWindow(parent) };
+        pump();
+        drop(wv);
+        pump();
+        drop(context);
+        let _ = std::fs::remove_dir_all(&data);
+    }
 
     #[test]
     fn normalizes_addresses() {
