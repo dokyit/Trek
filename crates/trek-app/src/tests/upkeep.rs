@@ -66,7 +66,8 @@ fn the_tools_page_reads_the_mac_off_the_main_thread() {
         // The first frame asks; it doesn't wait for the answer.
         let reading = trek.window(cx, |window, cx| {
             window.render_frame(cx);
-            window.try_find("ax-perm-checking").is_some_and(|e| e.visible()) && window.try_find("tools-reading").is_some()
+            // Windows has no permission to read, so a Mac's "Checking…" under it isn't there.
+            (cfg!(windows) || window.try_find("ax-perm-checking").is_some_and(|e| e.visible())) && window.try_find("tools-reading").is_some()
         });
         assert!(reading, "a loading state until it's read");
         cx.run_until_parked();
