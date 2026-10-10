@@ -24,7 +24,7 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
         (ws.thread_windows.get(id).copied(), ws.thread(id).is_some(), ws.thread_windows.len())
     };
     if let Some(handle) = existing {
-        if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+        if handle.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok() {
             return;
         }
     }

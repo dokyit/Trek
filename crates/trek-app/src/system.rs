@@ -351,6 +351,47 @@ pub fn order_back(window: &Window) {
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn order_back(_: &Window) {}
 
+/// Bring `window` to the front and give it focus, restoring it if it's minimized. On Windows
+/// without GPUI's `activate_window`, which presses and releases Alt through `SendInput` to win
+/// the foreground: a keystroke that lands in whatever app the user is in. Plain
+/// `SetForegroundWindow` works when Trek may take the foreground (the user just clicked Trek's
+/// tray icon or a banner, or a second launch passed its right on, see `single_instance`); when
+/// it may not, Windows flashes Trek's taskbar button instead, which is the polite outcome.
+///
+/// Deferred until the update that asked is over, as GPUI's own `activate_window` is (it spawns):
+/// restoring and activating a window send it `WM_SIZE`, `WM_ACTIVATE` and the like at once, and
+/// its callbacks can't reach the app (or this window) while they're being updated, so they'd be
+/// dropped.
+#[cfg(windows)]
+pub fn activate_window(window: &mut Window, cx: &mut App) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+    let hwnd = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(win32)) => win32.hwnd.get() as windows_sys::Win32::Foundation::HWND,
+        // GPUI's test platform: no system window behind it. (Never GPUI's own activation on a
+        // real one: that is the one that sends the Alt key.)
+        #[cfg(test)]
+        _ => return window.activate_window(),
+        #[cfg(not(test))]
+        _ => return,
+    };
+    cx.defer(move |_| {
+        // SAFETY: `hwnd` is the window GPUI created for the `window` above, and this is its thread;
+        // if it has closed since, both calls fail harmlessly.
+        unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn activate_window(window: &mut Window, _: &mut App) {
+    window.activate_window();
+}
+
 /// Liquid glass from the system (macOS 26 and later): an `NSGlassEffectView` under the window's
 /// content, which frosts whatever is behind the window. `on` adds it (once), off removes it.
 /// Returns false where the system has no Liquid Glass; GPUI's blurred background stands in.

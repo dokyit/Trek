@@ -6209,7 +6209,7 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
 /// ends): `Ok(Some(lock))` to keep while the folder is ours, `Ok(None)` when another process
 /// holds it.
 #[cfg(windows)]
-fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
     use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx};
@@ -6228,7 +6228,7 @@ fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> 
 }
 
 #[cfg(unix)]
-fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd as _;
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
     // SAFETY: flock on a descriptor this function owns.
@@ -6241,13 +6241,25 @@ fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> 
     }
 }
 
+/// The data folder's lock, and which folder it's for, held for as long as the process runs.
+static DATA_FOLDER_LOCK: std::sync::OnceLock<(PathBuf, std::fs::File)> = std::sync::OnceLock::new();
+
+/// Keep the lock on data folder `dir` a launch took before the workspace existed
+/// (`single_instance`). Locks are per open file, so taking it again would find it taken.
+pub fn keep_data_folder_lock(dir: PathBuf, lock: std::fs::File) {
+    let _ = DATA_FOLDER_LOCK.set((dir, lock));
+}
+
 /// Take the data folder for this process, for as long as it runs. False when another Trek has
 /// it (a dev build sharing the folder, say): what that one has open isn't this one's to close.
 fn hold_data_folder() -> bool {
-    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
-    match lock_folder(&trek_core::paths::data_dir()) {
+    let dir = trek_core::paths::data_dir();
+    if DATA_FOLDER_LOCK.get().is_some_and(|(held, _)| *held == dir) {
+        return true;
+    }
+    match lock_folder(&dir) {
         Ok(Some(lock)) => {
-            let _ = LOCK.set(lock);
+            let _ = DATA_FOLDER_LOCK.set((dir, lock));
             true
         }
         Ok(None) => {
