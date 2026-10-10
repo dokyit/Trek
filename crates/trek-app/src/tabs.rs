@@ -148,7 +148,7 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
                     .when(!active, |el| el.invisible().group_hover(SharedString::from(format!("tab-{id}")), |s| s.visible()))
                     .hover(|s| s.bg(theme.foreground.opacity(0.1)))
                     .child(Icon::new(IconName::Close).xsmall().text_color(theme.muted_foreground))
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Close tab (⌘W)").build(window, cx))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Close tab (⌘W)")).build(window, cx))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         let id = close_id.clone();

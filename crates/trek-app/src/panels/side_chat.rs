@@ -128,7 +128,7 @@ impl Render for SideChatPanel {
         let none_yet = items.is_empty();
         // The box says where to type: lit while the keys go to it, and plainly a box when not.
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let send_key = if self.cmd_enter { "⌘↩ to send" } else { "↩ to send, ⇧↩ for a new line" };
+        let send_key = crate::keys::shared(if self.cmd_enter { "⌘↩ to send" } else { "↩ to send, ⇧↩ for a new line" });
         v_flex()
             .size_full()
             .child(

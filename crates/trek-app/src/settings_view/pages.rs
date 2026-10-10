@@ -230,10 +230,11 @@ impl SettingsView {
                 vec![
                     Self::row(
                         "Send with",
-                        if s.general.send_with_cmd_enter { "↩ adds a new line; ⌘↩ sends." } else { "↩ sends; ⇧↩ adds a new line." },
+                        crate::keys::shared(if s.general.send_with_cmd_enter { "↩ adds a new line; ⌘↩ sends." } else { "↩ sends; ⇧↩ adds a new line." }),
                         ui::segmented(
                             "send-key",
-                            vec![(false, "↩ Return"), (true, "⌘↩ Command-Return")],
+                            // Windows has no Command key: its second key is Ctrl.
+                            if crate::keys::is_mac() { vec![(false, "↩ Return"), (true, "⌘↩ Command-Return")] } else { vec![(false, "Enter"), (true, "Ctrl+Enter")] },
                             s.general.send_with_cmd_enter,
                             self.setter(|s, v| s.general.send_with_cmd_enter = v),
                             cx,
@@ -242,7 +243,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Messages sent while an agent works",
-                        "Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way.",
+                        crate::keys::shared("Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way."),
                         ui::segmented(
                             "follow-up",
                             vec![(FollowUp::Steer, "Steer"), (FollowUp::Queue, "Queue")],
@@ -590,58 +591,28 @@ impl SettingsView {
     }
 
     pub(super) fn shortcuts_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        const GROUPS: &[(&str, &[(&str, &[&str])])] = &[
-            (
-                "Threads",
-                &[
-                    ("Search threads and commands", &["⌘", "K"]),
-                    ("New thread", &["⌘", "N"]),
-                    ("Open a folder", &["⌘", "O"]),
-                    ("Open the thread in a new window", &["⌘", "⇧", "↩"]),
-                    ("Settle the current thread", &["⌘", "E"]),
-                    ("Stop the agent", &["⌘", "."]),
-                ],
-            ),
-            (
-                "Composer",
-                &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Attach a copied image", &["⌘", "V"]), ("Take a snapshot", &["⌘", "⇧", "S"])],
-            ),
-            (
-                "Editor",
-                &[
-                    ("Go to file", &["⌘", "P"]),
-                    ("Edit the picked lines", &["⌘", "K"]),
-                    ("Keep a change", &["⌘", "Y"]),
-                    ("Undo a change", &["⌥", "⌘", "⌫"]),
-                    ("Next or previous change", &["⌥", "⌘", "↓ ↑"]),
-                    ("Keep all changes", &["⌘", "↩"]),
-                    ("Undo all changes (press twice)", &["⌘", "⇧", "⌫"]),
-                    ("New chat", &["⌘", "N"]),
-                    ("Switch to Agents", &["⌥", "⌘", "E"]),
-                ],
-            ),
-            ("Window", &[("Basecamp", &["⌘", "⇧", "H"]), ("Leave Basecamp", &["esc"]), ("Toggle the sidebar", &["⌘", "B"]), ("Toggle the tools panel", &["⌘", "J"]), ("Settings", &["⌘", ","]), ("Close a thread window", &["⌘", "W"]), ("Hide Trek", &["⌘", "H"]), ("Minimize", &["⌘", "M"]), ("Quit", &["⌘", "Q"])]),
-        ];
+        // The keys come from the table in `keys.rs`, spelled for the platform running.
         let send_cmd = self.workspace.read(cx).settings.general.send_with_cmd_enter;
+        let muted = cx.theme().muted_foreground;
         let mut out = vec![];
-        for (gi, (group, items)) in GROUPS.iter().enumerate() {
+        for (gi, (group, items)) in crate::keys::shortcut_groups(crate::keys::is_mac(), send_cmd).into_iter().enumerate() {
             if gi > 0 {
                 out.push(Self::heading(group, cx));
             } else {
                 out.push(div().pb(px(10.)).text_size(px(13.)).font_semibold().child(group.to_string()).into_any_element());
             }
             let rows = items
-                .iter()
-                .map(|(label, keys)| {
-                    let keys: Vec<&str> = match (*label, send_cmd) {
-                        ("Send", true) => vec!["⌘", "↩"],
-                        ("New line", true) => vec!["↩"],
-                        _ => keys.to_vec(),
-                    };
+                .into_iter()
+                .map(|(label, chips)| {
                     h_flex()
+                        .id(SharedString::from(format!("shortcut-{label}")))
+                        .test_support()
                         .h(px(42.))
                         .child(div().flex_1().text_size(px(13.)).child(label.to_string()))
-                        .child(h_flex().gap(px(4.)).children(keys.iter().map(|k| key(k, cx))))
+                        .child(h_flex().gap(px(4.)).children(chips.into_iter().map(|chip| match chip {
+                            crate::keys::Chip::Key(k) => key(&k, cx),
+                            crate::keys::Chip::Word(w) => div().text_size(px(12.)).text_color(muted).child(w).into_any_element(),
+                        })))
                         .into_any_element()
                 })
                 .collect();
@@ -1069,7 +1040,7 @@ impl SettingsView {
             ui::group(
                 vec![
                     Self::row(
-                        "⌘⇧S takes",
+                        crate::keys::localize("⌘⇧S takes").into_owned(),
                         "The + menu in the composer offers all three.",
                         ui::segmented(
                             "snap-mode",
