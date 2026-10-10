@@ -152,6 +152,12 @@ impl SettingsView {
             ));
         }
         let mut out = vec![ui::group(rows, cx)];
+        // Before the server runs, so it's read before the system asks (and still there if the
+        // question went unanswered or the answer was no).
+        if let (Some(firewall), None) = (words.firewall_note, &running) {
+            out.push(div().h(px(8.)).into_any_element());
+            out.push(Self::note(firewall, cx));
+        }
         if starting {
             out.push(Self::note("Starting…", cx));
         }
