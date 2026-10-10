@@ -312,7 +312,7 @@ impl SettingsView {
             Self::heading("System", cx),
             ui::group(
                 vec![Self::row(
-                    "Keep the Mac awake while agents work",
+                    crate::words::words().keep_awake_label,
                     "Stops idle sleep until every running turn has finished. The display can still sleep.",
                     self.switch("prevent-sleep", s.general.prevent_sleep_while_running, |s, v| s.general.prevent_sleep_while_running = v),
                     cx,
@@ -372,7 +372,7 @@ impl SettingsView {
                 .into_any_element()
         };
         let options = [
-            (ThemeChoice::System, "Match macOS"),
+            (ThemeChoice::System, crate::words::words().match_system_theme),
             (ThemeChoice::Night, "Night"),
             (ThemeChoice::Paper, "Paper"),
         ];
@@ -427,7 +427,7 @@ impl SettingsView {
         vec![
             self.theme_tiles(s.appearance.theme, cx),
             Self::heading("App icon", cx),
-            Self::note("Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed.", cx),
+            Self::note(crate::words::words().app_icon_note, cx),
             self.app_icon_tiles(s.appearance.app_icon, cx),
             Self::heading("Material", cx),
             ui::group(
@@ -437,7 +437,7 @@ impl SettingsView {
                         if covered {
                             "Your desktop shows through the window, blurred. Hidden while the background art fills the window."
                         } else {
-                            "Your desktop shows through the window, blurred, under translucent panels. Off while macOS reduces transparency."
+                            crate::words::words().glass_note
                         },
                         self.switch("glass", glass, |s, v| s.appearance.glass = v),
                         cx,
@@ -573,13 +573,13 @@ impl SettingsView {
             ui::group(
                 vec![
                     Self::row(
-                        "Dock badge",
-                        "Count of threads waiting on you, on Trek's Dock icon.",
+                        crate::words::words().badge_label,
+                        crate::words::words().badge_note,
                         self.switch("dock-badge", n.dock_badge, |s, v| s.notifications.dock_badge = v),
                         cx,
                     ),
                     Self::row(
-                        "Menu bar icon",
+                        crate::words::words().tray_label,
                         "The trail fills in while agents work and shows a dot when one needs you.",
                         self.switch("menu-bar-icon", n.menu_bar_icon, |s, v| s.notifications.menu_bar_icon = v),
                         cx,
@@ -630,7 +630,7 @@ impl SettingsView {
             let from_env = p.env_key.filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
             let id = p.id;
             let status: SharedString = match (saved, from_env) {
-                (true, _) => "Saved in your Keychain".into(),
+                (true, _) => format!("Saved in {}", crate::words::words().your_credential_store).into(),
                 (false, Some(k)) => format!("Using ${k} from your shell").into(),
                 (false, None) => "Not set".into(),
             };
@@ -672,7 +672,7 @@ impl SettingsView {
                                     }
                                     ws.save_settings(cx);
                                 });
-                                crate::toast::push(window, "Saved to your Keychain", cx);
+                                crate::toast::push(window, format!("Saved to {}", crate::words::words().your_credential_store), cx);
                             }
                             Err(e) => crate::toast::push(window, format!("Couldn't save the key: {e}"), cx),
                         }
@@ -756,7 +756,7 @@ impl SettingsView {
                 let view = view.clone();
                 alert
                     .title("Allow Full access?")
-                    .description("Agents will run commands and edit files anywhere on this Mac without asking. Use it only for work you'd trust to run unattended.")
+                    .description(format!("Agents will run commands and edit files anywhere on {} without asking. Use it only for work you'd trust to run unattended.", crate::words::words().this_computer))
                     .confirm()
                     .ok_text("Allow Full access")
                     .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
@@ -932,7 +932,7 @@ impl SettingsView {
             .into_any_element();
         let reveal = {
             let d = data_dir.clone();
-            Button::new("reveal-data").small().outline().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&d))
+            Button::new("reveal-data").small().outline().label(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&d))
         };
         let open_settings = {
             let f = settings_file.clone();
@@ -978,7 +978,7 @@ impl SettingsView {
                 vec![
                     Self::row("Data folder", trek_core::paths::tildify(&data_dir), reveal, cx),
                     Self::row("Settings file", trek_core::paths::tildify(&settings_file), open_settings, cx),
-                    Self::row("Diagnostics", "Version, macOS and agent details, for a bug report.", copy, cx),
+                    Self::row("Diagnostics", format!("Version, {} and agent details, for a bug report.", crate::words::words().os_name), copy, cx),
                 ],
                 cx,
             ),
@@ -1006,7 +1006,7 @@ impl SettingsView {
         let folder = self.data_dir.join("snapshots");
         let reveal = {
             let f = folder.clone();
-            Button::new("snap-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| {
+            Button::new("snap-reveal").small().outline().label(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| {
                 let _ = std::fs::create_dir_all(&f);
                 cx.open_with_system(&f)
             })
@@ -1052,7 +1052,7 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row("Hide Trek while capturing", "Trek steps aside so you can pick the window behind it.", self.switch("snap-hide", p.hide_trek, |s, v| s.snapshots.hide_trek = v), cx),
-                    Self::row("Window shadow", "Keep macOS's drop shadow around window snapshots.", self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
+                    Self::row("Window shadow", crate::words::words().window_shadow_note, self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
                     Self::row("Shutter sound", "", self.switch("snap-sound", p.sound, |s, v| s.snapshots.sound = v), cx),
                     Self::row(
                         "Format",
@@ -1088,7 +1088,7 @@ impl SettingsView {
                 cx,
             ),
             Self::heading("Permission", cx),
-            ui::group(vec![Self::row("Screen Recording", "macOS asks once; snapshots of other apps need it.", permission, cx)], cx),
+            ui::group(vec![Self::row(crate::words::words().screen_recording_label, crate::words::words().screen_recording_note, permission, cx)], cx),
             div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element(),
         ]
     }
@@ -1182,7 +1182,7 @@ impl SettingsView {
                 let mut menu = menu
                     .min_w(px(190.))
                     .item(PopupMenuItem::new("Open SKILL.md").on_click(move |_, _, cx| cx.open_with_system(&md)))
-                    .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&dir)));
+                    .item(PopupMenuItem::new(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&dir)));
                 if s2.source.editable() {
                     menu = menu.separator().item(PopupMenuItem::new("Move to Trash").icon(IconName::Delete).on_click(move |_, window, cx| {
                         let s3 = s2.clone();
@@ -1411,7 +1411,7 @@ impl SettingsView {
         };
         let reveal = {
             let p = path.clone();
-            Button::new("project-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p))
+            Button::new("project-reveal").small().outline().label(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&p))
         };
 
         // New-thread defaults; "Trek default" clears the override.

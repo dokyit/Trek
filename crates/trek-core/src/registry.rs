@@ -667,7 +667,7 @@ pub enum Progress {
 pub async fn install(agent: &RegistryAgent, progress: &(dyn Fn(Progress) + Send + Sync)) -> Result<AddedAgent> {
     // Downloads and package managers stay out of tests and design reviews.
     anyhow::ensure!(!crate::paths::isolated(), "Agents aren't installed from a test process.");
-    let plan = plan(agent, current_target()).ok_or_else(|| anyhow!("{} has no build for this Mac.", agent.name))?;
+    let plan = plan(agent, current_target()).ok_or_else(|| anyhow!("{} has no build for {}.", agent.name, if cfg!(windows) { "this PC" } else { "this Mac" }))?; // the app's `words` table, which core can't reach
     let home = agents_dir().join(&agent.id);
     std::fs::create_dir_all(&home)?;
     let mut added = AddedAgent {

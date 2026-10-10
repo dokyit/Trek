@@ -24,7 +24,7 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
         (ws.thread_windows.get(id).copied(), ws.thread(id).is_some(), ws.thread_windows.len())
     };
     if let Some(handle) = existing {
-        if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+        if handle.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok() {
             return;
         }
     }
@@ -69,8 +69,8 @@ pub struct ThreadWindow {
     composer_changed: bool,
     /// The window title as last set (the thread's title).
     title: String,
-    /// Whether the window was last told to blur what's behind it (liquid glass).
-    glass_applied: Option<bool>,
+    /// What the window was last told about its glass (`ui::apply_glass`).
+    glass_applied: Option<crate::ui::GlassState>,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `system::hidden_frames`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -198,7 +198,7 @@ impl Render for ThreadWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
-        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
         crate::root::place_toasts(self.composer.read(cx).height().max(px(120.)) + px(16.), window, cx);
         if self.workspace.read(cx).title_reveal(&self.id).is_some() {
             window.request_animation_frame();

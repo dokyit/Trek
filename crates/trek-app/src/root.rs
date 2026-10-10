@@ -54,8 +54,8 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
-    /// Whether the window was last told to blur what's behind it (liquid glass).
-    glass_applied: Option<bool>,
+    /// What the window was last told about its glass (`ui::apply_glass`).
+    glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
     /// second ⌘B mid-way turns it round where it is.
     pub(crate) sidebar_motion: SharedSpring,
@@ -119,7 +119,13 @@ impl TrekWindow {
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
         let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), Scope::Main, window, cx));
         let handle = window.window_handle();
-        workspace.update(cx, |ws, _| ws.main_window = Some(handle));
+        // Notified: what follows a window (the taskbar badge) is put on the new one.
+        workspace.update(cx, |ws, cx| {
+            ws.main_window = Some(handle);
+            cx.notify();
+        });
+        // The next launch opens the main window where this one is left.
+        cx.observe_window_bounds(window, |_, window, cx| crate::window_place::remember(window, cx)).detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -233,6 +239,9 @@ impl TrekWindow {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
                 }
+                // Windows announces its Transparency effects switch with the colours: glass asks again.
+                crate::winlook::forget();
+                this.workspace.update(cx, |_, cx| cx.notify());
             }),
         ];
         // TREK_OPEN_TOOL=browser (or terminal, explorer, git, side-chat) opens that tool at launch.
@@ -492,7 +501,7 @@ impl WindowTitle {
                                 .child(Icon::new(IconName::Search).size(px(13.)))
                                 .when_some(folder, |el, f| el.child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(f)).child("—"))
                                 .child(div().min_w_0().truncate().child("Go to file, command…"))
-                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child("⌘P"))
+                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child(crate::keys::shared("⌘P")))
                                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::QuickOpen), cx)),
                         ),
                     )
@@ -642,9 +651,18 @@ fn launch_size() -> Option<Size<Pixels>> {
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
+    let min = size(px(760.), px(520.));
+    // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
+    // window every time).
+    let (display_id, window_bounds) = match launch_size() {
+        Some(asked) => (None, WindowBounds::centered(asked, cx)),
+        None if std::env::var_os("TREK_SHOT_DIR").is_some() => (None, WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        None => crate::window_place::initial(size(px(1280.), px(820.)), min, focus, cx),
+    };
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(launch_size().unwrap_or(size(px(1280.), px(820.))), cx)),
-        window_min_size: Some(size(px(760.), px(520.))),
+        window_bounds: Some(window_bounds),
+        display_id,
+        window_min_size: Some(min),
         app_id: Some("dev.trek.Trek".into()),
         focus,
         show: focus || crate::system::SHOW_BEHIND,
@@ -678,7 +696,7 @@ fn database_error(error: &str, window: &mut Window, cx: &mut App) {
 /// Bring the main window forward, reopening it if it was closed.
 pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
     let main = workspace.read(cx).main_window;
-    if main.is_some_and(|m| m.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if main.is_some_and(|m| m.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     if let Err(e) = open_main(workspace, true, cx) {
@@ -784,6 +802,8 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         crate::system::play_alert_sound();
     }
     if alert.banner {
+        #[cfg(all(windows, not(test)))]
+        register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
         cx.show_system_notification(SystemNotification { tag: attention_tag(thread), title: message.clone().into(), body: SharedString::default(), actions: Vec::new() });
@@ -794,6 +814,18 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         let note = crate::toast::Toast::new(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
         let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
     }
+}
+
+/// Windows shows a toast under its AppUserModelID's name and icon, which Trek, being no installed
+/// app, registers itself: once a run, before the first toast.
+#[cfg(all(windows, not(test)))]
+fn register_toast_identity() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(png) = crate::assets::brand_bytes("brand/icon.png") {
+            crate::winsys::register_toast_identity(crate::winsys::APP_ID, crate::winsys::APP_NAME, &png);
+        }
+    });
 }
 
 const ATTENTION_TAG: &str = "trek-attention-";
@@ -821,7 +853,7 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
         return show_main(workspace.clone(), cx);
     }
     let own = workspace.read(cx).thread_windows.get(thread).copied();
-    if own.is_some_and(|w| w.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if own.is_some_and(|w| w.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     // In the editor it opens in the AI side bar.
@@ -914,7 +946,9 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, dir: std::path::
     })
 }
 
-/// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
+/// "Open in" menu for the project folder: the file manager, Terminal, and editors that are
+/// installed. The apps are launched through macOS's `open`, so on Windows the file manager is
+/// all it offers, opened through the shell.
 pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     gpui_kit::component::button::Button::new("open-in")
@@ -927,7 +961,7 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
             let mut menu = menu.min_w(px(180.));
             // Checked when the menu opens, not on every frame of the title bar.
             let apps = [
-                ("Finder", "Finder"),
+                (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
                 ("Terminal", "Terminal"),
                 ("Ghostty", "Ghostty"),
                 ("Zed", "Zed"),
@@ -936,11 +970,21 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
                 ("Xcode", "Xcode"),
             ]
             .into_iter()
-            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists());
+            .filter(|(_, app)| {
+                if cfg!(windows) {
+                    *app == "Finder" // words: ok, the file manager's entry, whatever it's called
+                } else {
+                    matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists() // words: ok
+                }
+            });
             for (label, app) in apps {
                 let dir = dir.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
-                    let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    if cfg!(windows) {
+                        cx.open_with_system(&dir);
+                    } else {
+                        let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
+                    }
                 }));
             }
             menu
@@ -990,7 +1034,7 @@ impl Render for TrekWindow {
         place_toasts(toast_bottom, window, cx);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
-        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
         let ide = self.workspace.read(cx).ide();
         let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
         let shown = sidebar_shown(&self.sidebar_motion, collapsed, motion, now, window);

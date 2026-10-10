@@ -201,7 +201,7 @@ impl Workspace {
         if m.push_topic.is_empty() {
             return;
         }
-        let mut note = note_for(&m.push_topic, "Notifications from this Mac will come here.", None, None, true);
+        let mut note = note_for(&m.push_topic, &format!("Notifications from {} will come here.", crate::words::words().this_computer), None, None, true);
         note.title = "Trek is connected".into();
         note.tags = vec!["tada".into()];
         // Once: the user is waiting to hear how it went.

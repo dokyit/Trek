@@ -148,10 +148,10 @@ mod imp {
         unsafe {
             // `init` is failable (no supported locale); `new` would hand nil to Retained.
             let Some(recognizer) = SFSpeechRecognizer::init(SFSpeechRecognizer::alloc()) else {
-                return Err("Speech recognition isn't available on this Mac.".into());
+                return Err(format!("Speech recognition isn't available on {}.", crate::words::words().this_computer));
             };
             if !recognizer.isAvailable() {
-                return Err("Speech recognition isn't available on this Mac.".into());
+                return Err(format!("Speech recognition isn't available on {}.", crate::words::words().this_computer));
             }
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
             let request = SFSpeechURLRecognitionRequest::initWithURL(SFSpeechURLRecognitionRequest::alloc(), &url);

@@ -161,9 +161,12 @@ fn titles_animate_in_only_when_they_change() {
         assert!(!trek.visible(cx, card.clone()));
 
         trek.update(cx, |ws, cx| ws.rename(&id, "Animate the title".into(), cx));
-        // The reveal is real time and short (TITLE_REVEAL): a loaded runner could let it end
-        // before a frame is drawn, so start it fresh, as the expired case below does.
-        trek.update(cx, |ws, _| ws.retitled.get_mut(&id).expect("retitled").1 = Instant::now());
+        // The reveal runs on the real clock and is short (TITLE_REVEAL, under half a second): a
+        // loaded runner can take longer than that to draw the frames below, so it starts in the
+        // future (an `Instant` not yet reached has no time elapsed) and is still at its first
+        // frame however long they take, as the expired case below is long over.
+        let at_its_start = || Instant::now() + Duration::from_secs(3600);
+        trek.update(cx, |ws, _| ws.retitled.get_mut(&id).expect("retitled").1 = at_its_start());
         assert_eq!(trek.read(cx, |ws, _| ws.title_reveal(&id).map(|(_, old)| old.to_string())), Some("New thread".to_string()));
         assert!(trek.visible(cx, card.clone()), "the sidebar card animates it");
         assert!(trek.visible(cx, "window-title"), "and the title bar");
@@ -180,7 +183,7 @@ fn titles_animate_in_only_when_they_change() {
         // A thread window's title animates too.
         let own = trek.open_thread_window(cx, &id);
         trek.update(cx, |ws, cx| ws.rename(&id, "Animate titles everywhere".into(), cx));
-        trek.update(cx, |ws, _| ws.retitled.get_mut(&id).expect("retitled").1 = Instant::now());
+        trek.update(cx, |ws, _| ws.retitled.get_mut(&id).expect("retitled").1 = at_its_start());
         assert!(trek.visible_in(cx, own, "window-title"));
         assert_eq!(trek.read(cx, |ws, _| ws.title_reveal(&id).map(|(_, old)| old.to_string())), Some("Animate the title".into()));
     });
