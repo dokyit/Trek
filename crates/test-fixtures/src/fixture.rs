@@ -2,6 +2,7 @@
 //!   sleep <secs>           wait, then exit 0
 //!   cat [--delay <secs>] [--stderr <text>]
 //!                          wait, then stdin to stdout, then `text` on stderr
+//!   ready-then-eof         "ready" on stdout, then read stdin to its end and exit 0
 //!   echo <text…>           args joined by spaces on stdout, with a newline
 //!   print <text…>          the same without the newline
 //!   stderr <text…>         the same on stderr
@@ -35,6 +36,14 @@ pub fn run() -> i32 {
             }
             0
         }
+        Some("ready-then-eof") => {
+            // A stdin-reading agent in miniature: says it started, then reads until the end of
+            // stdin and exits.
+            println!("ready");
+            std::io::stdout().flush().unwrap();
+            std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+            0
+        }
         Some("echo") => {
             println!("{}", args.collect::<Vec<_>>().join(" "));
             0
@@ -58,7 +67,7 @@ pub fn run() -> i32 {
             0
         }
         other => {
-            eprintln!("fixture: expected sleep, cat, echo, print, stderr, exit, fake-acp or fake-mcp, not {other:?}");
+            eprintln!("fixture: expected sleep, cat, ready-then-eof, echo, print, stderr, exit, fake-acp or fake-mcp, not {other:?}");
             2
         }
     }
