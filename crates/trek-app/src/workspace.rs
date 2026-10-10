@@ -781,6 +781,16 @@ pub enum PanelTool {
 
 impl PanelTool {
     pub const ALL: [PanelTool; 6] = [PanelTool::Terminal, PanelTool::Browser, PanelTool::Simulator, PanelTool::Explorer, PanelTool::SideChat, PanelTool::Git];
+
+    /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
+    /// Windows has no Simulator tab.
+    pub fn offered() -> Vec<PanelTool> {
+        Self::offered_on(crate::words::is_windows())
+    }
+
+    pub fn offered_on(windows: bool) -> Vec<PanelTool> {
+        Self::ALL.into_iter().filter(|t| !(windows && *t == PanelTool::Simulator)).collect()
+    }
     pub fn label(self) -> &'static str {
         match self {
             PanelTool::Git => "Git",
@@ -5723,10 +5733,8 @@ impl Workspace {
         let mut out = vec![];
         if let Some(bin) = trek_mcp_binary() {
             let bin = bin.display().to_string();
-            for (on, family) in [(tools.computer_use, "computer"), (tools.simulator, "simulator")] {
-                if on {
-                    out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], vec![]));
-                }
+            for family in trek_mcp_families(tools.computer_use, tools.simulator, crate::words::is_windows()) {
+                out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], vec![]));
             }
         }
         // Figma's own server in its desktop app: local and without a login, so every agent can
@@ -6470,6 +6478,12 @@ pub fn trek_mcp_binary() -> Option<PathBuf> {
     [dir.join(&name), dir.join("../Resources").join(&name)].into_iter().find(|p| p.exists())
 }
 
+/// Which of Trek's own MCP servers a session is given, by the name `trek-mcp` takes. The
+/// simulator's tools drive Xcode's `simctl`, so a Windows agent isn't offered them.
+fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<&'static str> {
+    [(computer_use, "computer"), (simulator && !windows, "simulator")].into_iter().filter(|(on, _)| *on).map(|(_, family)| family).collect()
+}
+
 /// Whether merging a thread's work settles it: only one sitting idle in the inbox. Merged while
 /// it was busy, pinned, kept or snoozed, it stays where the user put it. Shared by the merge
 /// watch (`settle_merged`) and the Git tool's "Merge into <base>".
@@ -6484,6 +6498,25 @@ mod tests {
 
     fn q(text: &str, secret: bool) -> Question {
         Question { question: text.into(), header: String::new(), options: vec![("Yes".into(), String::new())], multi: false, secret }
+    }
+
+    #[test]
+    fn the_simulator_is_handed_to_no_agent_on_windows() {
+        assert_eq!(trek_mcp_families(true, true, false), ["computer", "simulator"]);
+        assert_eq!(trek_mcp_families(false, true, false), ["simulator"]);
+        assert_eq!(trek_mcp_families(true, true, true), ["computer"], "its switch may still be on in settings that came from a Mac");
+        assert!(trek_mcp_families(false, true, true).is_empty());
+        assert!(trek_mcp_families(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn windows_has_no_simulator_tab() {
+        assert_eq!(PanelTool::offered_on(false), PanelTool::ALL);
+        let windows = PanelTool::offered_on(true);
+        assert!(!windows.contains(&PanelTool::Simulator));
+        assert_eq!(windows.len(), PanelTool::ALL.len() - 1);
+        // The others keep their order.
+        assert_eq!(windows, PanelTool::ALL.into_iter().filter(|t| *t != PanelTool::Simulator).collect::<Vec<_>>());
     }
 
     #[test]

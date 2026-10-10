@@ -51,6 +51,9 @@ use trek_core::import::{ImportedThread, Skip};
 use trek_core::settings::{Settings, secrets};
 use trek_core::AgentId;
 
+/// What the iOS Simulator section says where Windows has nothing to show.
+const SIMULATOR_NEEDS_A_MAC: &str = "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
+
 pub(crate) fn page_icon(p: SettingsPage) -> Icon {
     match p {
         SettingsPage::Project => Icon::new(crate::assets::Lucide::FolderCog),
@@ -110,6 +113,8 @@ pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.".into(),
         SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.".into(),
         SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.".into(),
+        // Windows has no iOS Simulator, so its blurb doesn't promise one.
+        SettingsPage::Tools if crate::words::is_windows() => "Computer use, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Permissions => "How much each agent may do without asking.".into(),
         SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.".into(),
@@ -1083,31 +1088,36 @@ impl SettingsView {
             cx,
         ));
         out.push(Self::heading("iOS Simulator", cx));
-        let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
-            None => checking("install-axe"),
-            Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
-            Some(false) => Button::new("install-axe")
-                .small()
-                .outline()
-                .icon(IconName::ArrowDown)
-                .label("Install AXe")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }))
-                }))
-                .into_any_element(),
-        };
-        out.push(ui::group(
-            vec![
-                Self::row(
-                    "Simulator tools",
-                    "Agents can boot simulators, install and launch your app, take screenshots and tap through it.",
-                    self.switch("sim-tools", s.tools.simulator, |s, v| s.tools.simulator = v),
-                    cx,
-                ),
-                Self::row("Touch input (AXe)", "Taps, swipes and typing in the simulator, for you and for agents.", axe_control, cx),
-            ],
-            cx,
-        ));
+        if crate::words::is_windows() {
+            // Xcode's tools are all it has to run on: nothing to switch, install or allow.
+            out.push(Self::note(SIMULATOR_NEEDS_A_MAC, cx));
+        } else {
+            let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
+                None => checking("install-axe"),
+                Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
+                Some(false) => Button::new("install-axe")
+                    .small()
+                    .outline()
+                    .icon(IconName::ArrowDown)
+                    .label("Install AXe")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }))
+                    }))
+                    .into_any_element(),
+            };
+            out.push(ui::group(
+                vec![
+                    Self::row(
+                        "Simulator tools",
+                        "Agents can boot simulators, install and launch your app, take screenshots and tap through it.",
+                        self.switch("sim-tools", s.tools.simulator, |s, v| s.tools.simulator = v),
+                        cx,
+                    ),
+                    Self::row("Touch input (AXe)", "Taps, swipes and typing in the simulator, for you and for agents.", axe_control, cx),
+                ],
+                cx,
+            ));
+        }
         out.push(Self::heading("Sub-agents", cx));
         out.push(ui::group(
             vec![Self::row(
