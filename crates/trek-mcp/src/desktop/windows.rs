@@ -181,8 +181,9 @@ fn shell_error(code: isize) -> String {
         0 | 8 => "Windows is out of memory".into(),
         2 | 3 => "there's no app, program or file by that name".into(),
         5 => "access is denied".into(),
-        26 | 32 => "a file it needs is in use".into(),
+        26 => "a file it needs is in use".into(),
         27 | 31 => "nothing is set to open it".into(),
+        32 => "a library it needs wasn't found".into(),
         _ => format!("Windows couldn't open it (ShellExecute error {code})"),
     }
 }
@@ -780,7 +781,9 @@ mod tests {
         assert_eq!(resolve_app("ms-settings:display", shortcut, app_path), "ms-settings:display");
         assert_eq!(resolve_app("https://example.com", shortcut, app_path), "https://example.com");
         assert!(shell_error(2).contains("no app"));
-        assert!(shell_error(31).contains("nothing is set to open it"));    }
+        assert!(shell_error(31).contains("nothing is set to open it"));
+        // SE_ERR_SHARE (26) is a file in use; SE_ERR_DLLNOTFOUND (32) a missing library.
+        assert!(shell_error(26).contains("in use") && shell_error(32).contains("library"));    }
 
     /// Lists the windows on screen and captures the primary display: nothing else, and no input.
     /// Run by hand: `cargo test -p trek-mcp -- --ignored --exact desktop::windows::tests::smoke_lists_windows_and_captures_the_screen --nocapture`.
