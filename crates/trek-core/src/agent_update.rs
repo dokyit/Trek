@@ -1062,7 +1062,7 @@ mod tests {
         let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1-$(id)")).unwrap();
         assert!(cmd.args.iter().all(|a| !a.contains("$(id)")), "{:?}", cmd.args);
         let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1")).unwrap();
-        assert!(cmd.args[1].contains("@mariozechner/pi-coding-agent@0.73.1"));
+        assert!(cmd.args.iter().any(|a| a.contains("@mariozechner/pi-coding-agent@0.73.1")), "{:?}", cmd.args);
     }
 
     #[test]
@@ -1098,21 +1098,25 @@ mod tests {
         assert_eq!(p("/usr/local/lib/node_modules/opencode-ai/bin/opencode"), Install::Npm { package: "opencode-ai".into(), prefix: "/usr/local".into() });
         assert_eq!(p("/Users/me/.bun/install/global/node_modules/@google/gemini-cli/dist/index.js"), Install::Bun { package: "@google/gemini-cli".into() });
         assert_eq!(p("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
-        assert_eq!(p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"), Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None });
-        assert_eq!(p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"), Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None });
-        assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
-        // Formulae that are npm packages installed into their keg: brew's, not npm's.
-        assert_eq!(
-            p("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"),
-            Install::Brew { formula: "gemini-cli".into(), prefix: "/opt/homebrew".into(), tap: None }
-        );
-        assert_eq!(
-            p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
-            Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
-        );
-        let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
-        assert!(h("acp:gemini").owns(&keg));
-        assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false, None).unwrap().shown(), "brew upgrade gemini-cli");
+        // Homebrew is macOS's: on Windows these are folders like any other (see
+        // `homebrew_is_not_looked_for_on_windows`).
+        if !cfg!(windows) {
+            assert_eq!(p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"), Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None });
+            assert_eq!(p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"), Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None });
+            assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
+            // Formulae that are npm packages installed into their keg: brew's, not npm's.
+            assert_eq!(
+                p("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"),
+                Install::Brew { formula: "gemini-cli".into(), prefix: "/opt/homebrew".into(), tap: None }
+            );
+            assert_eq!(
+                p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
+                Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
+            );
+            let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
+            assert!(h("acp:gemini").owns(&keg));
+            assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false, None).unwrap().shown(), "brew upgrade gemini-cli");
+        }
         // A global prefix of the user's own (npm's fix for EACCES).
         assert_eq!(
             p("/Users/me/.npm-global/lib/node_modules/@openai/codex/bin/codex.js"),
@@ -1272,27 +1276,27 @@ mod tests {
         assert_eq!(parse_latest(&Source::Feed(Feed::GrokStable), "<!DOCTYPE html>"), None);
     }
 
-    // Unix only for now: the search path and installer are `:`-separated paths and `/bin/sh`; Phase 2 ports agent updates to Windows.
     #[test]
-    #[cfg(unix)]
     fn updates_run_the_vendors_documented_command() {
         let bin = Path::new("/opt/homebrew/bin/x");
+        // Where an npm prefix keeps its programs, and how PATH strings are joined.
+        let (dir, sep) = (|prefix: &str| if cfg!(windows) { PathBuf::from(prefix) } else { Path::new(prefix).join("bin") }, if cfg!(windows) { ";" } else { ":" });
         let shown = |agent: &str, install: Install, auto: bool| update_command(h(agent), &install, bin, auto, None).map(|c| c.shown());
         let npm = |p: &str| Install::Npm { package: p.into(), prefix: "/opt/homebrew".into() };
         assert_eq!(shown("acp:kimi", npm("@moonshot-ai/kimi-code"), false).as_deref(), Some("npm install -g @moonshot-ai/kimi-code@latest"));
         // The npm (and node) of the prefix it's in first on PATH, and that prefix set outright.
         let cmd = update_command(h("codex"), &npm("@openai/codex"), bin, false, None).unwrap();
         assert_eq!(cmd.program, Path::new("npm"));
-        assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
+        assert_eq!(cmd.path, [dir("/opt/homebrew")]);
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
-        assert!(cmd.search_path().starts_with("/opt/homebrew/bin:"));
+        assert!(cmd.search_path().starts_with(&format!("{}{sep}", dir("/opt/homebrew").display())), "{}", cmd.search_path());
         // A prefix of the user's own has no npm in it: the one on PATH installs into it.
         let own = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.npm-global".into() };
         let cmd = update_command(h("codex"), &own, bin, false, None).unwrap();
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/Users/me/.npm-global".to_string())]);
         assert_eq!(cmd.shown(), "npm install -g @openai/codex@latest");
         let nvm = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.nvm/versions/node/v22.3.0".into() };
-        assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [Path::new("/Users/me/.nvm/versions/node/v22.3.0/bin")]);
+        assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [dir("/Users/me/.nvm/versions/node/v22.3.0")]);
         assert_eq!(shown("codex", Install::Volta, false).as_deref(), Some("volta install @openai/codex@latest"));
         assert_eq!(shown("acp:grok", Install::Volta, false), None, "no package to install");
         assert_eq!(shown("acp:gemini", Install::Bun { package: "@google/gemini-cli".into() }, false).as_deref(), Some("bun add -g @google/gemini-cli@latest"));
@@ -1308,8 +1312,15 @@ mod tests {
         assert_eq!(shown("claude-code", Install::Native, false).as_deref(), Some("x update"));
         assert_eq!(shown("opencode", Install::Native, false).as_deref(), Some("x upgrade"));
         let droid = update_command(h("droid"), &Install::Native, bin, false, None).unwrap();
-        assert_eq!(droid.program, Path::new("/bin/sh"));
-        assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
+        if cfg!(windows) {
+            // Factory's PowerShell installer, re-run: it's the update.
+            assert_eq!(droid.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
+            assert_eq!(droid.shown(), "irm https://app.factory.ai/cli/windows | iex");
+            assert_eq!(droid.args.last().unwrap(), "irm https://app.factory.ai/cli/windows | iex");
+        } else {
+            assert_eq!(droid.program, Path::new("/bin/sh"));
+            assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
+        }
         assert_eq!(shown("acp:pi", Install::Native, false).as_deref(), Some("x update"));
         assert_eq!(shown("acp:gemini", Install::Native, false), None, "no update command, no installer");
     }
@@ -1329,9 +1340,19 @@ mod tests {
         assert_eq!(update_command(pi, &new, bin, false, None).unwrap().shown(), "npm install -g @earendil-works/pi-coding-agent@latest");
         // The old package goes first: its `pi` would block the new one's.
         let cmd = update_command(pi, &old, bin, false, Some("0.73.1")).unwrap();
-        assert_eq!(cmd.program, Path::new("/bin/sh"));
+        if cfg!(windows) {
+            assert_eq!(cmd.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
+            // Each package is quoted for PowerShell, where a bare `@scope/name` is splatting.
+            let script = cmd.args.last().unwrap();
+            assert!(script.contains("npm uninstall -g '@mariozechner/pi-coding-agent'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), "{script}");
+            assert!(script.contains("npm install -g '@earendil-works/pi-coding-agent@latest'; if ($LASTEXITCODE -eq 0) { exit 0 }"), "{script}");
+            assert!(script.contains("npm install -g --prefer-offline '@mariozechner/pi-coding-agent@0.73.1'; if ($LASTEXITCODE -eq 0) { exit 75 }"), "{script}");
+            assert!(script.ends_with("; exit 76"), "{script}");
+        } else {
+            assert_eq!(cmd.program, Path::new("/bin/sh"));
+        }
         assert_eq!(cmd.shown(), "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest");
-        assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
+        assert_eq!(cmd.path, [if cfg!(windows) { PathBuf::from("/opt/homebrew") } else { PathBuf::from("/opt/homebrew/bin") }]);
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
         let pnpm = update_command(pi, &Install::Pnpm { package: "@mariozechner/pi-coding-agent".into() }, bin, false, None).unwrap();
         assert_eq!(pnpm.shown(), "pnpm remove -g @mariozechner/pi-coding-agent && pnpm add -g @earendil-works/pi-coding-agent@latest");
@@ -1350,8 +1371,27 @@ mod tests {
         assert!(v.update_available());
     }
 
-    // Unix only: npm on Windows is `npm.cmd`; Phase 2 ports agent updates.
-    #[cfg(unix)]
+    /// A fake `npm` in `root` (`root\npm.cmd` on Windows, where the prefix itself is on PATH;
+    /// `root/bin/npm` on Unix) that appends each line of arguments it's given to `log` and
+    /// fails with `npm error <line>` for each of `fail`, exiting 1.
+    fn fake_npm(root: &Path, log: &Path, fail: &[&str]) {
+        #[cfg(windows)]
+        {
+            // The redirection comes first: `echo 0.73.1>> log` would redirect handle 1.
+            let fails: String = fail.iter().map(|f| format!("if \"%*\"==\"{f}\" (>&2 echo npm error {f}& exit /b 1)\r\n")).collect();
+            let npm = format!("@echo off\r\n>> \"{}\" echo %*\r\n{fails}exit /b 0\r\n", log.display());
+            std::fs::write(root.join("npm.cmd"), npm).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            let fails: String = fail.iter().map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n")).collect();
+            let npm = format!("#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n", log.display());
+            let fake = root.join("bin/npm");
+            std::fs::write(&fake, npm).unwrap();
+            std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+    }
+
     /// Pi's move to its new package, run against a fake `npm` that logs what it's asked and fails
     /// at `fail` (each a line of arguments): the old package is never simply gone.
     fn move_pi(fail: &[&str]) -> (Outcome, Vec<String>) {
@@ -1359,11 +1399,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let log = root.join("npm.log");
-        let fails: String = fail.iter().map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n")).collect();
-        let npm = format!("#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n", log.display());
-        let fake = root.join("bin/npm");
-        std::fs::write(&fake, npm).unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fake_npm(&root, &log, fail);
         let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: root.clone() };
         let v = AgentVersion {
             id: "pi".into(),
@@ -1382,9 +1418,7 @@ mod tests {
         (outcome, ran)
     }
 
-    // Unix only: it runs a `#!/bin/sh` fake npm (npm on Windows is `npm.cmd`); Phase 2 ports agent updates.
     #[test]
-    #[cfg(unix)]
     fn a_failed_package_move_puts_the_old_package_back() {
         let (remove, add, back) = ("uninstall -g @mariozechner/pi-coding-agent", "install -g @earendil-works/pi-coding-agent@latest", "install -g --prefer-offline @mariozechner/pi-coding-agent@0.73.1");
         // Offline mid-update: the new package doesn't come, the old one goes back from the cache.
@@ -1440,8 +1474,21 @@ mod tests {
         let amp_acp = r#"{"name":"amp-acp","version":"0.9.0","type":"module","bin":{"amp-acp":"dist/index.js"}}"#;
         assert_eq!(version_in_package_json(amp_acp).as_deref(), Some("0.9.0"));
         assert_eq!(version_in_package_json("{}"), None);
-        // Read from disk, through the binary's link. Unix only: a symlink on Windows needs a
-        // privilege the tests can't count on; Phase 2 ports agent updates.
+        // Read from disk, through the binary's link (on Windows, through its `.cmd`: a symlink
+        // there needs a privilege the tests can't count on).
+        #[cfg(windows)]
+        {
+            let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
+            let pkg = root.join(r"node_modules\pi-acp");
+            std::fs::create_dir_all(pkg.join("dist")).unwrap();
+            std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
+            std::fs::write(pkg.join(r"dist\index.js"), "#!/usr/bin/env node\n").unwrap();
+            let shim = root.join("pi-acp.cmd");
+            std::fs::write(&shim, CODEX_CMD.replace(r"@openai\codex\bin\codex.js", r"pi-acp\dist\index.js")).unwrap();
+            let adapter = harness("pi-acp").unwrap();
+            assert_eq!(crate::runtime().block_on(installed_version(adapter, &shim)).as_deref(), Some("0.0.34"));
+            let _ = std::fs::remove_dir_all(&root);
+        }
         #[cfg(unix)]
         {
             let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
@@ -1457,6 +1504,260 @@ mod tests {
             assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    /// npm's `.cmd` shim for `@openai/codex`, as `npm i -g` writes it (copied from a real one).
+    #[cfg(windows)]
+    const CODEX_CMD: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n";
+
+    #[test]
+    #[cfg(windows)]
+    fn npm_on_windows_has_no_lib_folder() {
+        let p = |s: &str| install_of(Path::new(s));
+        let npm = |package: &str, prefix: &str| Install::Npm { package: package.into(), prefix: prefix.into() };
+        // The default prefix, `%APPDATA%\npm`.
+        let roaming = r"C:\Users\me\AppData\Roaming\npm";
+        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", roaming));
+        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode.exe"), npm("opencode-ai", roaming));
+        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@opencode\cli\bin\opencode.exe"), npm("@opencode/cli", roaming));
+        // `canonicalize` gives `\\?\C:\…`, which npm can't take as a prefix: it's the plain path.
+        assert_eq!(p(r"\\?\C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", roaming));
+        assert_eq!(p(r"\\?\UNC\server\share\npm\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"\\server\share\npm"));
+        // nvm for Windows (and Node's own folder) keep packages beside node.exe.
+        assert_eq!(p(r"C:\Users\me\AppData\Local\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", r"C:\Users\me\AppData\Local\nvm\v22.3.0"));
+        // A Unix-shaped prefix (npm in Git Bash or MSYS) still has its `lib`.
+        assert_eq!(p(r"C:\npm\lib\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"C:\npm"));
+        // Other package managers.
+        assert_eq!(p(r"C:\Users\me\AppData\Local\pnpm\global\5\node_modules\@qwen-code\qwen-code\cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
+        assert_eq!(p(r"C:\Users\me\.bun\install\global\node_modules\@google\gemini-cli\dist\index.js"), Install::Bun { package: "@google/gemini-cli".into() });
+        assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\bin\codex.exe"), Install::Volta);
+        assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\tools\image\packages\@openai\codex\node_modules\@openai\codex\bin\codex.js"), Install::Volta);
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe"),
+            Install::Winget { id: "Anthropic.ClaudeCode".into() }
+        );
+        // The vendors' own installers, where they put the CLIs.
+        for native in [
+            r"C:\Users\me\.local\bin\claude.exe",
+            r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe",
+            r"C:\Users\me\AppData\Local\devin\cli\_versions\3000.11.3\devin.exe",
+            r"C:\Users\me\.grok\bin\grok.exe",
+            r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe",
+            r"C:\Users\me\bin\droid.exe",
+            r"C:\Users\me\scoop\shims\opencode.exe",
+            r"C:\Users\me\.opencode\bin\opencode.exe",
+        ] {
+            assert_eq!(p(native), Install::Native, "{native}");
+        }
+    }
+
+    #[test]
+    fn homebrew_is_not_looked_for_on_windows() {
+        // The code stays; a Windows path just can't be Homebrew's, whatever its folders are called.
+        let keg = install_of(Path::new("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"));
+        let cask = install_of(Path::new("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"));
+        if cfg!(windows) {
+            assert_eq!((keg, cask), (Install::Native, Install::Native));
+        } else {
+            assert!(matches!(keg, Install::Brew { .. }) && matches!(cask, Install::Cask { .. }));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_cmd_shim_is_read_for_the_package_it_runs() {
+        let at = Path::new(r"C:\nvm\v22.3.0\codex.cmd");
+        let target = cmd_shim_target(at, CODEX_CMD).unwrap();
+        assert_eq!(target, Path::new(r"C:\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"));
+        assert_eq!(install_of(&target), Install::Npm { package: "@openai/codex".into(), prefix: r"C:\nvm\v22.3.0".into() });
+        // Older cmd-shim's `%~dp0\`, and a script reached through `..` (a prefix with `lib`).
+        let old = "@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\..\\lib\\node_modules\\pi-acp\\dist\\index.js\" %*\r\n)\r\n";
+        assert_eq!(cmd_shim_target(Path::new(r"C:\x\bin\pi-acp.cmd"), old).unwrap(), Path::new(r"C:\x\lib\node_modules\pi-acp\dist\index.js"));
+        // pnpm's global bin: its packages live under `global\5`.
+        let pnpm = "@ECHO off\r\n\"%_prog%\"  \"%dp0%\\global\\5\\node_modules\\@qwen-code\\qwen-code\\cli.js\" %*\r\n";
+        let target = cmd_shim_target(Path::new(r"C:\Users\me\AppData\Local\pnpm\qwen.cmd"), pnpm).unwrap();
+        assert_eq!(install_of(&target), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
+        // A batch file that runs no package isn't a shim.
+        assert_eq!(cmd_shim_target(at, "@echo off\r\necho \"%dp0%\\hello\"\r\n"), None);
+        assert!(cmd_shim_target(at, "@echo off\r\ncall \"%dp0%\\node_modules\\.bin\\x\"\r\n").is_some(), "any node_modules path counts");
+        // From disk: the shim in an npm prefix says what's installed there.
+        let root = std::env::temp_dir().join(format!("trek-cmd-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("codex.cmd"), CODEX_CMD).unwrap();
+        assert_eq!(detect_install(&root.join("codex.cmd")), Install::Npm { package: "@openai/codex".into(), prefix: root.clone() });
+        assert_eq!(script_of(&root.join("codex.cmd")), root.join(r"node_modules\@openai\codex\bin\codex.js"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_bun_shim_is_read_for_the_package_it_runs() {
+        // UNVERIFIED against a real Bun: the `.bunx` file is read as UTF-16 text holding the script's
+        // path, which is how Bun's source writes it; a layout that differs reads as the vendor's own.
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        let shim = Path::new(r"C:\Users\me\.bun\bin\gemini.exe");
+        let relative = utf16("..\\install\\global\\node_modules\\@google\\gemini-cli\\dist\\index.js\0");
+        let target = bunx_target(shim, &relative).unwrap();
+        assert_eq!(target, Path::new(r"C:\Users\me\.bun\install\global\node_modules\@google\gemini-cli\dist\index.js"));
+        assert_eq!(install_of(&target), Install::Bun { package: "@google/gemini-cli".into() });
+        let absolute = utf16("\\??\\C:\\Users\\me\\.bun\\install\\global\\node_modules\\qwen\\cli.js\0");
+        assert_eq!(install_of(&bunx_target(shim, &absolute).unwrap()), Install::Bun { package: "qwen".into() });
+        assert_eq!(bunx_target(shim, &utf16("not a script\0")), None);
+        assert_eq!(bunx_target(shim, &[1]), None);
+    }
+
+    #[test]
+    fn winget_installs_update_with_winget() {
+        let claude = h("claude-code");
+        let winget = Install::Winget { id: "Anthropic.ClaudeCode".into() };
+        assert!(claude.owns(&winget));
+        assert!(!h("codex").owns(&winget), "another agent's package id");
+        assert!(!claude.owns(&Install::Winget { id: "Other.Tool".into() }));
+        assert_eq!(winget.label(), "WinGet");
+        // Its versions are the vendor's own feed's.
+        assert_eq!(source(claude, &winget, None), Some(Source::Feed(Feed::ClaudeReleases)));
+        let cmd = update_command(claude, &winget, Path::new(r"C:\x\claude.exe"), false, Some("2.1.1")).unwrap();
+        assert_eq!(cmd.program, Path::new("winget"));
+        assert_eq!(cmd.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements");
+    }
+
+    #[test]
+    fn a_program_is_found_the_way_the_platform_runs_it() {
+        let root = std::env::temp_dir().join(format!("trek-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (first, second) = (root.join("first"), root.join("second"));
+        for dir in [&first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let search = std::env::join_paths([&first, &second]).unwrap().to_string_lossy().into_owned();
+        // On Windows the extensionless `tool` is a shell script, which Windows can't run: only
+        // `tool.cmd` (and `.exe`, …) count, in `PATHEXT` order, and the first folder's one first.
+        std::fs::write(first.join("tool"), "#!/bin/sh\n").unwrap();
+        assert_eq!(resolve_program(Path::new("tool"), &search), if cfg!(windows) { None } else { Some(first.join("tool")) });
+        if cfg!(windows) {
+            std::fs::write(second.join("tool.exe"), "").unwrap();
+            assert_eq!(resolve_program(Path::new("tool"), &search), Some(second.join("tool.exe")));
+            std::fs::write(first.join("tool.cmd"), "").unwrap();
+            assert_eq!(resolve_program(Path::new("tool"), &search), Some(first.join("tool.cmd")));
+            assert_eq!(resolve_program(Path::new("tool.exe"), &search), Some(second.join("tool.exe")), "a name with its extension is taken as it is");
+        }
+        assert_eq!(resolve_program(Path::new("nothing"), &search), None);
+        // An absolute path is the program, found or not (`run_update` says it isn't there).
+        assert_eq!(resolve_program(&first.join("tool"), &search), Some(first.join("tool")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_npm_update_runs_the_npm_of_its_prefix() {
+        let root = std::env::temp_dir().join(format!("trek-npm-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let log = root.join("npm.log");
+        fake_npm(&root, &log, &[]);
+        let install = Install::Npm { package: "@openai/codex".into(), prefix: root.clone() };
+        // An id no harness has: nothing real is asked its version afterwards.
+        let v = AgentVersion { command: update_command(h("codex"), &install, &root.join("codex"), false, None), install, ..version("fake", "0.159.2", Some("0.160.0")) };
+        let outcome = crate::runtime().block_on(run_update(&v));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(), ["install -g @openai/codex@latest"]);
+        assert!(matches!(outcome, Outcome::Failed { ref summary, .. } if summary.contains("didn't say its version")), "{outcome:?}");
+        // A program that isn't there is said so.
+        let v = AgentVersion { command: Some(UpdateCommand::new("trek-no-such-package-manager", &["update"])), ..version("fake", "1.0.0", None) };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else { panic!() };
+        assert_eq!(summary, "trek-no-such-package-manager isn't installed.");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `std::process::Command` runs a `.cmd` through `cmd.exe`, which splits its command line by
+    /// rules of its own. Rust quotes each argument for them (a space, `&`, `^` or `%` arrives as
+    /// one literal argument) and refuses what it can't quote safely (a line break), as an
+    /// `InvalidInput` error: "batch file arguments are invalid". Package names and flags need none
+    /// of this, but update commands are built from data (a package id, a path), so what happens to
+    /// the rest is pinned here.
+    #[test]
+    #[cfg(windows)]
+    fn a_cmd_files_arguments_arrive_whole_or_are_refused() {
+        let root = std::env::temp_dir().join(format!("trek-cmd-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("args.log");
+        // `%1`, quotes and all (`%~1` would put `a&b` into the line `echo` is parsed from).
+        // Redirection first: a digit before `>>` is a handle.
+        std::fs::write(root.join("fake.cmd"), format!("@echo off\r\n>> \"{}\" echo [%1][%2]\r\n", log.display())).unwrap();
+        let run = |args: &[&str]| std::process::Command::new(root.join("fake.cmd")).args(args).output();
+        for (args, logged) in [
+            (&["install", "-g"][..], "[install][-g]"),
+            (&["@openai/codex@latest"], "[@openai/codex@latest][]"),
+            (&["a b", "c"], r#"["a b"][c]"#),
+            (&["100%", "x"], r#"["100%"][x]"#),
+            (&["%PATH%"], r#"["%PATH%"][]"#),
+            (&["a&b"], r#"["a&b"][]"#),
+            (&["^x"], r#"["^x"][]"#),
+            (&[r"--prefix=C:\Program Files\x"], r#"["--prefix=C:\Program Files\x"][]"#),
+        ] {
+            let _ = std::fs::remove_file(&log);
+            assert!(run(args).unwrap().status.success(), "{args:?}");
+            assert_eq!(std::fs::read_to_string(&log).unwrap().trim_end(), logged, "{args:?}");
+        }
+        // Refused, not mangled: nothing runs.
+        let _ = std::fs::remove_file(&log);
+        for args in [&["a\nb"][..], &["a\r"]] {
+            let err = run(args).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{args:?}");
+            assert!(err.to_string().contains("batch file arguments are invalid"), "{err}");
+        }
+        assert!(!log.exists());
+        // So an update command with such an argument fails with that said, and runs nothing.
+        let bad = UpdateCommand::new(root.join("fake.cmd"), &["bad\nargument"]);
+        let v = AgentVersion { command: Some(bad), ..version("fake", "1.0.0", Some("1.1.0")) };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else { panic!() };
+        assert!(summary.starts_with("Couldn't run") && summary.contains("batch file arguments are invalid"), "{summary}");
+        assert!(!log.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn commands_on_windows_read_as_they_are_typed() {
+        // A binary found as `claude.exe` or `npm.cmd` is typed `claude`, `npm`.
+        assert_eq!(UpdateCommand::new(r"C:\Users\me\.local\bin\claude.exe", &["update"]).shown(), "claude update");
+        assert_eq!(UpdateCommand::new(r"C:\nvm\v22\codex.cmd", &["update"]).shown(), "codex update");
+        assert_eq!(UpdateCommand::new("npm", &["install", "-g", "x@latest"]).shown(), "npm install -g x@latest");
+        // PATH is `;`-separated, the login PATH last.
+        let cmd = UpdateCommand { path: vec![r"C:\nvm\v22".into(), r"C:\other".into()], ..UpdateCommand::new("npm", &[]) };
+        assert!(cmd.search_path().starts_with(r"C:\nvm\v22;C:\other;"), "{}", cmd.search_path());
+        // The vendor's PowerShell installers, run by Windows PowerShell with what's shown as typed.
+        for agent in ["droid"] {
+            let h = h(agent);
+            let line = h.installer_line().unwrap();
+            assert!(line.starts_with("irm https://") && line.ends_with(" | iex"), "{line}");
+            let cmd = update_command(h, &Install::Native, Path::new(r"C:\Users\me\bin\droid.exe"), false, None).unwrap();
+            assert_eq!((cmd.shown().as_str(), cmd.args.last().map(String::as_str)), (line, Some(line)));
+            assert!(cmd.args.windows(2).any(|w| w == ["-ExecutionPolicy", "Bypass"]) && cmd.args.contains(&"-NoProfile".to_string()), "{:?}", cmd.args);
+        }
+        // The CLIs with their own update command use it, not the installer.
+        for (agent, bin) in [("claude-code", r"C:\Users\me\.local\bin\claude.exe"), ("acp:grok", r"C:\Users\me\.grok\bin\grok.exe"), ("acp:devin", r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe"), ("acp:cursor", r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe")] {
+            let cmd = update_command(h(agent), &Install::Native, Path::new(bin), false, None).unwrap();
+            assert_eq!(cmd.program, Path::new(bin));
+            assert_eq!(cmd.args, ["update"], "{agent}");
+        }
+    }
+
+    #[test]
+    fn the_windows_install_scripts_of_cursor_and_factory_name_their_version_too() {
+        assert_eq!(urls(&Source::Feed(Feed::CursorInstaller)), ["https://cursor.com/install", "https://cursor.com/install?win32=true"]);
+        assert_eq!(urls(&Source::Feed(Feed::DroidInstaller)), ["https://app.factory.ai/cli", "https://app.factory.ai/cli/windows"]);
+        // Cursor's PowerShell script (`$downloadUrl = 'https://downloads.cursor.com/lab/<version>/'`).
+        let cursor = "$downloadUrl = 'https://downloads.cursor.com/lab/2026.10.01-e373342/'\r\n$agentPath = \"$env:LOCALAPPDATA\\cursor-agent\"\r\n";
+        assert_eq!(parse_latest(&Source::Feed(Feed::CursorInstaller), cursor).unwrap().version, "2026.10.01-e373342");
+        // Factory's: `$version = '0.237.0'`, where the shell one has `VER="0.233.0"`.
+        let droid = "$ErrorActionPreference = 'Stop'\r\n$version = '0.237.0'\r\n$baseUrl = \"https://downloads.factory.ai\"\r\n";
+        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), droid).unwrap().version, "0.237.0");
+        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), "VER=\"0.233.0\"\n").unwrap().version, "0.233.0");
+        // The feeds say a version, not a download per platform: Devin's manifest lists its
+        // Windows builds (`x86_64-pc-windows`, `aarch64-pc-windows`) beside the Mac's, and the
+        // version is the same for all.
+        let devin = r#"{"version":"3000.11.3","platforms":{"aarch64-pc-windows":{"url":"…"},"x86_64-pc-windows":{"url":"…"},"aarch64-apple-darwin":{"url":"…"}}}"#;
+        assert_eq!(parse_latest(&Source::Feed(Feed::DevinManifest), devin).unwrap().version, "3000.11.3");
     }
 
     fn version(agent: &str, installed: &str, latest: Option<&str>) -> AgentVersion {
@@ -1530,6 +1831,8 @@ mod tests {
             assert_ne!(h.name(), h.agent.trim_start_matches("acp:"), "{} has a display name", h.agent);
             assert!(h.feed != Feed::Npm || h.npm.is_some(), "{} needs its package for its feed", h.agent);
             assert!(h.self_update.is_some() || h.installer.is_some() || h.npm.is_some(), "{} can be updated somehow", h.agent);
+            // An installer to re-run is a line this platform's shell can run.
+            assert!(h.installer.is_none() || h.installer_line().is_some_and(|l| if cfg!(windows) { l.starts_with("irm https://") && l.ends_with(" | iex") } else { l.starts_with("curl ") }), "{} installer", h.agent);
             assert_eq!(harness(h.binary).map(|o| o.agent), Some(h.agent), "{} is one row", h.binary);
         }
     }
