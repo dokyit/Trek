@@ -357,9 +357,10 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         row(ToggleRightPanel, App, "cmd-j", Same, None, act!(crate::ToggleRightPanel)),
         // Not in the editor's text, where ⌘K is an inline edit (below).
         row(OpenPalette, App, "cmd-k", Same, Some("!IdeEditor"), act!(crate::OpenPalette)),
-        // Ctrl+K belongs to the shell in the terminal panel (kill to end of line), so the palette
-        // gets a second way in that works there too, as in VS Code.
-        Binding { id: OpenPaletteAnywhere, group: App, mac: None, windows: Keys("ctrl-shift-p"), context: Some("!IdeEditor"), build: act!(crate::OpenPalette) },
+        // Ctrl+K belongs to the shell in the terminal panel (kill to end of line) and is the inline
+        // edit in the editor's text, so the palette gets a second way in that works there too,
+        // as in VS Code.
+        Binding { id: OpenPaletteAnywhere, group: App, mac: None, windows: Keys("ctrl-shift-p"), context: None, build: act!(crate::OpenPalette) },
         row(OpenInNewWindow, App, "cmd-shift-enter", Same, None, act!(crate::OpenInNewWindow)),
         row(OpenBasecamp, App, "cmd-shift-h", Same, None, act!(crate::OpenBasecamp)),
         row(LeaveBasecamp, App, "escape", Same, Some("Basecamp"), act!(crate::basecamp::Leave)),
@@ -847,7 +848,7 @@ mod tests {
         assert_eq!(ctx(Id::OpenPalette).as_deref(), Some("(!IdeEditor) && !Terminal"), "Ctrl+K is the shell's in the terminal");
         assert_eq!(ctx(Id::NewThread).as_deref(), Some("!Terminal"));
         assert_eq!(ctx(Id::ToggleTerminal), None, "Ctrl+` must reach Trek from inside the terminal");
-        assert_eq!(ctx(Id::OpenPaletteAnywhere).as_deref(), Some("!IdeEditor"), "the palette is still there");
+        assert_eq!(ctx(Id::OpenPaletteAnywhere), None, "the palette is still there, in the terminal and the editor's text too");
         assert_eq!(ctx(Id::NextTab), None);
         assert_eq!(ctx(Id::FocusScm), None);
         // The Mac has no such thing: there ⌘ is never the shell's.
