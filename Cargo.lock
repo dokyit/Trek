@@ -9000,6 +9000,7 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "ctor",
+ "embed-resource",
  "gpui-kit",
  "gpui-pre-macos",
  "gpui-pre-windows",
@@ -9035,6 +9036,7 @@ dependencies = [
  "trek-ipc",
  "trek-remote",
  "vt100",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 
