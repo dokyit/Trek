@@ -3,7 +3,7 @@ name = "trek-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Model Context Protocol server (stdio) giving coding agents macOS computer use, iOS Simulator control and sub-agents"
+description = "Model Context Protocol server (stdio) giving coding agents computer use (macOS and Windows), iOS Simulator control and sub-agents"
 
 [[bin]]
 name = "trek-mcp"
@@ -20,7 +20,24 @@ trek-ipc = { workspace = true, features = ["server"] }
 tokio.workspace = true
 trek-test-fixtures.workspace = true
 
-# Computer use and the iOS Simulator are macOS-only tool families; `orchestrate` runs everywhere.
+# Computer use runs on macOS and Windows, the iOS Simulator on macOS; `orchestrate` runs everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.24", features = ["highsierra"] }
 core-foundation = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+# Input (SendInput), the window list (EnumWindows, DWM), screenshots (GDI) and app launch (ShellExecuteW).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# Screenshots out as PNG (macOS has `screencapture` for that); already in the lockfile via trek-app.
+png = "0.18"

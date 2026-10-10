@@ -1,69 +1,56 @@
-//! `trek-mcp computer` — macOS computer use: screenshots via `screencapture`,
-//! mouse/keyboard via CoreGraphics CGEvents, windows via CGWindowList.
+//! `trek-mcp computer` — computer use on macOS and Windows: screenshots, the mouse and keyboard,
+//! the window list and app launch. The tools, their arguments and what they answer are the same
+//! on both; the platform does the work behind `desktop::Desktop`.
 
 use std::time::Duration;
 
-use core_foundation::base::{CFType, TCFType};
-use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
-use core_foundation::number::CFNumber;
-use core_foundation::string::CFString;
-use core_graphics::display::CGDisplay;
-use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
-};
-use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use core_graphics::geometry::{CGPoint, CGRect};
-use core_graphics::window::{
-    copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
-};
 use serde_json::{Value, json};
 
-use crate::keys::{self, KeyCombo};
+use crate::desktop::{self, Button, Desktop, WindowInfo};
+use crate::keys;
 use crate::rpc::{self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, point_schema, text};
-use crate::util::{self, MAX_IMAGE_SIDE, TempFile, fmt_num};
-
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn AXIsProcessTrusted() -> u8;
-    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGPreflightScreenCaptureAccess() -> bool;
-}
+use crate::util::{MAX_IMAGE_SIDE, fmt_num};
 
 const ACCESSIBILITY_ERROR: &str = "Accessibility permission is missing, so trek-mcp cannot control the mouse or keyboard. \
 macOS may be showing a permission prompt for trek-mcp now — allow it in System Settings ▸ Privacy & Security ▸ Accessibility and try again \
 (no restart needed). If nothing asked, grant it to the app that launched the agent (Trek, or your terminal) in that same list.";
 
-const SCREEN_RECORDING_ERROR: &str = "Screen Recording permission is missing, so trek-mcp cannot capture the screen. \
-Grant it to the app that launched the agent (Trek, or your terminal) in System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording, \
-then restart the agent session.";
-
-const INSTRUCTIONS: &str = "macOS computer use for the main display. Call `screenshot` first: it returns an image plus \
+const INSTRUCTIONS: &str = if cfg!(windows) {
+    "Windows computer use for the primary display. Call `screenshot` first: it returns an image plus \
+the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the most recent \
+full-screen screenshot (origin top-left); trek-mcp converts them to screen pixels. Take a new screenshot after acting \
+to verify the result. Prefer `key` shortcuts (ctrl+c, alt+tab, win+r) and `open_app` over hunting for UI when possible. \
+Trek's own windows are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front \
+(bring the app you mean forward first)."
+} else {
+    "macOS computer use for the main display. Call `screenshot` first: it returns an image plus \
 the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the most recent \
 full-screen screenshot (origin top-left); trek-mcp converts them to screen points. Take a new screenshot after acting \
 to verify the result. Prefer `key` shortcuts and `open_app` over hunting for UI when possible. Trek's own windows \
 are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app \
-you mean forward first).";
+you mean forward first)."
+};
 
-/// Once per run, ask macOS to prompt for Accessibility: the silent check alone never adds
-/// trek-mcp to the list, and a bundled helper can't be picked in the pane by hand.
-fn prompt_accessibility() {
-    use core_foundation::boolean::CFBoolean;
-    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
-    let options = CFDictionary::from_CFType_pairs(&[(
-        CFString::from_static_string("AXTrustedCheckOptionPrompt"),
-        CFBoolean::true_value(),
-    )]);
-    unsafe {
-        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef());
-    }
-}
+/// What a screen coordinate is: macOS moves the mouse in points, Windows (per-monitor DPI aware)
+/// in pixels.
+const SCREEN_UNITS: &str = if cfg!(windows) { "pixels" } else { "points" };
+
+const KEY_DESCRIPTION: &str = if cfg!(windows) {
+    "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"ctrl+shift+t\", \"ctrl+c\", \
+\"alt+tab\", \"win+r\", \"f5\". Modifiers: ctrl, shift, alt, win (cmd is taken as ctrl). Keys: letters, digits, punctuation, \
+return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12."
+} else {
+    "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"cmd+shift+t\", \"cmd+c\", \
+\"alt+left\", \"f5\". Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation, return, tab, space, \
+delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12."
+};
+
+const OPEN_APP_DESCRIPTION: &str = if cfg!(windows) {
+    "Launch a Windows app by name, e.g. \"Notepad\", \"Microsoft Edge\", \"Visual Studio Code\" (as named in the \
+Start menu), or by program name or path, e.g. \"calc\", \"msedge\"."
+} else {
+    "Launch or activate a macOS app by name (like `open -a`), e.g. \"Safari\", \"Notes\", \"Xcode\"."
+};
 
 /// Maps full-screen screenshot pixels to logical screen points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,18 +115,13 @@ impl Mapping {
 
 pub struct Computer {
     last: Option<Mapping>,
-    /// Whether this process may post mouse and keyboard events (Accessibility). A field so tests
-    /// can check the gate without the real permission, and without ever reaching the real mouse.
-    trusted: fn() -> bool,
-    /// The windows on screen, front to back (`on_screen_windows`): asked before every action,
-    /// to keep the mouse and keys out of Trek's own windows. A field so tests can say what's
-    /// on screen.
-    windows: fn() -> Result<Vec<WindowInfo>, String>,
+    /// Does the work: the real screen, mouse and keyboard, or in tests a fake that only records.
+    desktop: Box<dyn Desktop>,
 }
 
 impl Default for Computer {
     fn default() -> Self {
-        Self { last: None, trusted: || unsafe { AXIsProcessTrusted() } != 0, windows: on_screen_windows }
+        Self { last: None, desktop: Box::new(desktop::Native::default()) }
     }
 }
 
@@ -149,9 +131,14 @@ const OWN_WINDOW: &str = "That's in Trek's own window. Agents don't operate Trek
 /// Said when the keys would go to Trek itself.
 const OWN_KEYS: &str = "Trek's own window is in front, so the keys would go to Trek. Agents don't operate Trek itself. Bring the app you mean forward first (open_app, or a click in its window).";
 
-/// Whether a window is one of Trek's: the app's, or a build run from the repository.
+/// Whether an app is Trek: the app's name on macOS, `trek.exe` on Windows, or a build run from
+/// the repository.
+fn is_trek_app(owner: &str) -> bool {
+    owner.eq_ignore_ascii_case("trek")
+}
+
 fn is_trek(w: &WindowInfo) -> bool {
-    w.owner.eq_ignore_ascii_case("trek")
+    is_trek_app(&w.owner)
 }
 
 /// The window a click at (`x`, `y`) in screen points would land in: the frontmost holding it.
@@ -165,8 +152,14 @@ impl Computer {
     /// give itself Full access in Settings. When the windows can't be listed, nothing is done:
     /// better no click than one nobody checked.
     fn keep_off_trek(&self, points: &[(f64, f64)]) -> Result<(), String> {
-        let windows = (self.windows)().map_err(|e| format!("Couldn't check which window that is ({e}), so nothing was done."))?;
-        if points.iter().any(|(x, y)| window_at(&windows, *x, *y).is_some_and(is_trek)) {
+        let windows = self
+            .desktop
+            .windows()
+            .map_err(|e| format!("Couldn't check which window that is ({e}), so nothing was done."))?;
+        let in_trek = |&(x, y): &(f64, f64)| {
+            window_at(&windows, x, y).is_some_and(is_trek) || self.desktop.owner_at(x, y).is_some_and(|o| is_trek_app(&o))
+        };
+        if points.iter().any(in_trek) {
             return Err(OWN_WINDOW.into());
         }
         Ok(())
@@ -174,8 +167,11 @@ impl Computer {
 
     /// Refuses keys while Trek's own window is the one in front (they'd be typed into Trek).
     fn keep_keys_off_trek(&self) -> Result<(), String> {
-        let windows = (self.windows)().map_err(|e| format!("Couldn't check which window is in front ({e}), so nothing was typed."))?;
-        if windows.first().is_some_and(is_trek) {
+        let front = self
+            .desktop
+            .key_window()
+            .map_err(|e| format!("Couldn't check which window is in front ({e}), so nothing was typed."))?;
+        if front.as_ref().is_some_and(is_trek) {
             return Err(OWN_KEYS.into());
         }
         Ok(())
@@ -198,10 +194,11 @@ fn full_side(logical_w: f64, logical_h: f64) -> u32 {
 /// What the model is told with a full-screen screenshot.
 fn full_info(iw: u32, ih: u32, lw: f64, lh: f64, physical: Option<(u64, u64)>, m: Mapping, note: &str) -> String {
     let physical = physical.map(|(pw, ph)| format!(", {pw}x{ph} physical pixels")).unwrap_or_default();
+    let units = if cfg!(windows) { "pixels" } else { "logical points" };
     format!(
-        "Screenshot of the main display: {iw}x{ih} px. Screen: {}x{} logical points{physical}. \
-Scale: 1 screenshot px = {} points. Pass screenshot pixel coordinates (origin top-left) to click, move_mouse, drag \
-and scroll; trek-mcp converts them to screen points.{note}",
+        "Screenshot of the main display: {iw}x{ih} px. Screen: {}x{} {units}{physical}. \
+Scale: 1 screenshot px = {} {SCREEN_UNITS}. Pass screenshot pixel coordinates (origin top-left) to click, move_mouse, drag \
+and scroll; trek-mcp converts them to screen {SCREEN_UNITS}.{note}",
         fmt_num(lw),
         fmt_num(lh),
         fmt_num(m.scale),
@@ -214,7 +211,7 @@ fn region_info(region_pts: (f64, f64, f64, f64), iw: u32, ih: u32, m: Mapping, n
     let (x0, y0, rw, rh) = region_pts;
     let (sx, sy, sw, sh) = (x0 / m.scale, y0 / m.scale, rw / m.scale, rh / m.scale);
     format!(
-        "Zoomed view of screenshot region x={} y={} width={} height={} (screen points {},{} {}x{}), \
+        "Zoomed view of screenshot region x={} y={} width={} height={} (screen {SCREEN_UNITS} {},{} {}x{}), \
 rendered at {iw}x{ih} px. This is for reading detail only: click/drag/scroll coordinates still use the full-screen \
 screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{}, {} + v*{}).{note}",
         fmt_num(sx),
@@ -242,77 +239,37 @@ fn region_points(m: Mapping, x: f64, y: f64, w: f64, h: f64) -> Result<(f64, f64
     Ok((x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)))
 }
 
-fn display_info() -> (CGRect, Option<(u64, u64)>) {
-    let display = CGDisplay::main();
-    let bounds = display.bounds();
-    let pixels = display.display_mode().map(|m| (m.pixel_width(), m.pixel_height()));
-    (bounds, pixels)
-}
-
 impl Computer {
     fn mapping(&self) -> Mapping {
         self.last.unwrap_or_else(|| {
-            let (b, _) = display_info();
-            Mapping::for_display(b.size.width, b.size.height)
+            let d = self.desktop.display();
+            Mapping::for_display(d.width, d.height)
         })
     }
 
     fn screenshot(&mut self, args: &Value) -> ToolResult {
-        let (bounds, pixels) = display_info();
-        let (lw, lh) = (bounds.size.width, bounds.size.height);
-        let tmp = TempFile::new("png");
+        let display = self.desktop.display();
+        let (lw, lh) = (display.width, display.height);
 
         let region = match args.get("region") {
             None | Some(Value::Null) => None,
             Some(r) => Some((arg_f64(r, "x")?, arg_f64(r, "y")?, arg_f64(r, "width")?, arg_f64(r, "height")?)),
         };
 
-        let mut capture_args: Vec<String> = vec!["-x".into(), "-t".into(), "png".into()];
-        // Region → logical points, through the full-screen mapping.
-        let region_pts = match region {
-            Some((x, y, w, h)) => {
-                let (x0, y0, rw, rh) = region_points(self.mapping(), x, y, w, h)?;
-                capture_args.push(format!("-R{},{},{},{}", x0.round(), y0.round(), rw.round(), rh.round()));
-                Some((x0, y0, rw, rh))
-            }
+        match region {
             None => {
-                capture_args.push("-m".into()); // main display only
-                None
-            }
-        };
-        capture_args.push(tmp.path_str().to_string());
-        let arg_refs: Vec<&str> = capture_args.iter().map(String::as_str).collect();
-        let out = util::run("/usr/sbin/screencapture", &arg_refs, None, Duration::from_secs(20))?;
-        let size = std::fs::metadata(&tmp.0).map(|m| m.len()).unwrap_or(0);
-        if !out.success() || size == 0 {
-            let detail = if out.success() { "empty capture".to_string() } else { out.reason() };
-            return Err(format!("{SCREEN_RECORDING_ERROR}\n(screencapture: {detail})"));
-        }
-        let permission_note = if unsafe { CGPreflightScreenCaptureAccess() } {
-            ""
-        } else {
-            "\nWarning: Screen Recording permission does not appear to be granted; other apps' windows may be missing from the image."
-        };
-
-        match region_pts {
-            None => {
-                let target = full_side(lw, lh);
-                let (_, w0, h0) = util::load_png(&tmp.0)?;
-                if w0.max(h0) > target {
-                    util::sips_fit(tmp.path_str(), target)?;
-                }
-                let (b64, iw, ih) = util::load_png(&tmp.0)?;
-                let m = Mapping::from_image(lw, lh, iw, ih);
+                let shot = self.desktop.capture(None, full_side(lw, lh))?;
+                let m = Mapping::from_image(lw, lh, shot.width, shot.height);
                 self.last = Some(m);
-                Ok(vec![rpc::image_png(b64), text(full_info(iw, ih, lw, lh, pixels, m, permission_note))])
+                let info = full_info(shot.width, shot.height, lw, lh, display.physical, m, shot.note);
+                Ok(vec![rpc::image_png(shot.png_base64), text(info)])
             }
-            Some(region) => {
-                let (_, w0, h0) = util::load_png(&tmp.0)?;
-                if w0.max(h0) > MAX_IMAGE_SIDE {
-                    util::sips_fit(tmp.path_str(), MAX_IMAGE_SIDE)?;
-                }
-                let (b64, iw, ih) = util::load_png(&tmp.0)?;
-                Ok(vec![rpc::image_png(b64), text(region_info(region, iw, ih, self.mapping(), permission_note))])
+            // Region → screen points, through the full-screen mapping.
+            Some((x, y, w, h)) => {
+                let region = region_points(self.mapping(), x, y, w, h)?;
+                let shot = self.desktop.capture(Some(region), MAX_IMAGE_SIDE)?;
+                let info = region_info(region, shot.width, shot.height, self.mapping(), shot.note);
+                Ok(vec![rpc::image_png(shot.png_base64), text(info)])
             }
         }
     }
@@ -324,31 +281,21 @@ impl Computer {
         if !(1..=3).contains(&count) {
             return Err("count must be 1 (single), 2 (double) or 3 (triple)".into());
         }
-        let (down, up, btn) = match button {
-            "left" => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGMouseButton::Left),
-            "right" => (CGEventType::RightMouseDown, CGEventType::RightMouseUp, CGMouseButton::Right),
+        let btn = match button {
+            "left" => Button::Left,
+            "right" => Button::Right,
             other => return Err(format!("Unknown button {other:?}; use \"left\" or \"right\"")),
         };
         let (px, py) = self.mapping().to_points(x, y)?;
         self.keep_off_trek(&[(px, py)])?;
-        let pt = CGPoint::new(px, py);
-        post_mouse(CGEventType::MouseMoved, pt, CGMouseButton::Left, None)?;
-        sleep_ms(30);
-        for i in 1..=count {
-            post_mouse(down, pt, btn, Some(i))?;
-            sleep_ms(15);
-            post_mouse(up, pt, btn, Some(i))?;
-            if i < count {
-                sleep_ms(40);
-            }
-        }
+        self.desktop.click(px, py, btn, count as u32)?;
         let what = match count {
             2 => "Double-clicked",
             3 => "Triple-clicked",
             _ => "Clicked",
         };
         Ok(vec![text(format!(
-            "{what} {button} at ({}, {}) (screen points {}, {}).",
+            "{what} {button} at ({}, {}) (screen {SCREEN_UNITS} {}, {}).",
             fmt_num(x),
             fmt_num(y),
             fmt_num(px),
@@ -359,7 +306,7 @@ impl Computer {
     fn move_mouse(&mut self, args: &Value) -> ToolResult {
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         let (px, py) = self.mapping().to_points(x, y)?;
-        post_mouse(CGEventType::MouseMoved, CGPoint::new(px, py), CGMouseButton::Left, None)?;
+        self.desktop.move_to(px, py)?;
         Ok(vec![text(format!("Moved mouse to ({}, {}).", fmt_num(x), fmt_num(y)))])
     }
 
@@ -367,23 +314,10 @@ impl Computer {
         let (fx, fy) = arg_point(args, "from")?;
         let (tx, ty) = arg_point(args, "to")?;
         let m = self.mapping();
-        let (ax, ay) = m.to_points(fx, fy)?;
-        let (bx, by) = m.to_points(tx, ty)?;
-        self.keep_off_trek(&[(ax, ay), (bx, by)])?;
-        let start = CGPoint::new(ax, ay);
-        post_mouse(CGEventType::MouseMoved, start, CGMouseButton::Left, None)?;
-        sleep_ms(30);
-        post_mouse(CGEventType::LeftMouseDown, start, CGMouseButton::Left, Some(1))?;
-        sleep_ms(60);
-        const STEPS: i32 = 24;
-        for i in 1..=STEPS {
-            let t = i as f64 / STEPS as f64;
-            let p = CGPoint::new(ax + (bx - ax) * t, ay + (by - ay) * t);
-            post_mouse(CGEventType::LeftMouseDragged, p, CGMouseButton::Left, Some(1))?;
-            sleep_ms(12);
-        }
-        sleep_ms(40);
-        post_mouse(CGEventType::LeftMouseUp, CGPoint::new(bx, by), CGMouseButton::Left, Some(1))?;
+        let a = m.to_points(fx, fy)?;
+        let b = m.to_points(tx, ty)?;
+        self.keep_off_trek(&[a, b])?;
+        self.desktop.drag(a, b)?;
         Ok(vec![text(format!(
             "Dragged from ({}, {}) to ({}, {}).",
             fmt_num(fx),
@@ -402,12 +336,7 @@ impl Computer {
         }
         let (px, py) = self.mapping().to_points(x, y)?;
         self.keep_off_trek(&[(px, py)])?;
-        post_mouse(CGEventType::MouseMoved, CGPoint::new(px, py), CGMouseButton::Left, None)?;
-        sleep_ms(30);
-        // CGEvent wheel deltas are positive for up/left; our API is positive for down/right.
-        let ev = CGEvent::new_scroll_event(source()?, ScrollEventUnit::LINE, 2, -dy, -dx, 0)
-            .map_err(|_| "Failed to create scroll event".to_string())?;
-        ev.post(CGEventTapLocation::HID);
+        self.desktop.scroll(px, py, dx, dy)?;
         Ok(vec![text(format!(
             "Scrolled dx={dx} dy={dy} lines at ({}, {}).",
             fmt_num(x),
@@ -421,29 +350,15 @@ impl Computer {
             return Err("text is empty".into());
         }
         self.keep_keys_off_trek()?;
-        for segment in split_for_typing(s) {
-            match segment {
-                TypeSegment::Key(code) => press(KeyCombo { keycode: code, flags: 0 })?,
-                TypeSegment::Text(chunk) => {
-                    for down in [true, false] {
-                        let ev = CGEvent::new_keyboard_event(source()?, 0, down)
-                            .map_err(|_| "Failed to create keyboard event".to_string())?;
-                        ev.set_flags(CGEventFlags::empty());
-                        ev.set_string_from_utf16_unchecked(&chunk);
-                        ev.post(CGEventTapLocation::HID);
-                    }
-                }
-            }
-            sleep_ms(8);
-        }
+        self.desktop.type_text(s)?;
         Ok(vec![text(format!("Typed {} characters.", s.chars().count()))])
     }
 
     fn key(&mut self, args: &Value) -> ToolResult {
         let combo = arg_str(args, "combo")?;
-        let parsed = keys::parse_combo(combo)?;
+        let parsed = keys::parse(combo)?;
         self.keep_keys_off_trek()?;
-        press(parsed)?;
+        self.desktop.key(&parsed)?;
         Ok(vec![text(format!("Pressed {combo}."))])
     }
 
@@ -452,15 +367,14 @@ impl Computer {
         if name.is_empty() {
             return Err("name is empty".into());
         }
-        util::run_ok("/usr/bin/open", &["-a", name], None, Duration::from_secs(30))
-            .map_err(|e| format!("Could not open {name:?}: {e}"))?;
+        self.desktop.open_app(name).map_err(|e| format!("Could not open {name:?}: {e}"))?;
         Ok(vec![text(format!(
             "Opened {name}. Take a screenshot to see it (it may take a moment to appear)."
         ))])
     }
 
     fn list_windows(&mut self) -> ToolResult {
-        let windows = on_screen_windows()?;
+        let windows = self.desktop.windows()?;
         let m = self.mapping();
         let list: Vec<Value> = windows
             .iter()
@@ -480,9 +394,10 @@ impl Computer {
                 })
             })
             .collect();
+        let titles = if cfg!(windows) { "" } else { " Window titles are empty without Screen Recording permission." };
+        let units = if cfg!(windows) { " bounds_points is in screen pixels." } else { "" };
         let header = format!(
-            "{} on-screen windows, front to back. bounds_screenshot uses screenshot pixel coordinates (scale {}). \
-Window titles are empty without Screen Recording permission.",
+            "{} on-screen windows, front to back. bounds_screenshot uses screenshot pixel coordinates (scale {}).{units}{titles}",
             list.len(),
             fmt_num(m.scale)
         );
@@ -581,18 +496,16 @@ screenshot pixels) to get a higher-detail zoom of part of the screen; zooms don'
             },
             ToolDef {
                 name: "key",
-                description: "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"cmd+shift+t\", \"cmd+c\", \
-\"alt+left\", \"f5\". Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation, return, tab, space, \
-delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12.",
+                description: KEY_DESCRIPTION,
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"combo": {"type": "string", "description": "Key combo joined with '+', e.g. \"cmd+shift+t\""}},
+                    "properties": {"combo": {"type": "string", "description": if cfg!(windows) { "Key combo joined with '+', e.g. \"ctrl+shift+t\"" } else { "Key combo joined with '+', e.g. \"cmd+shift+t\"" }}},
                     "required": ["combo"],
                 }),
             },
             ToolDef {
                 name: "open_app",
-                description: "Launch or activate a macOS app by name (like `open -a`), e.g. \"Safari\", \"Notes\", \"Xcode\".",
+                description: OPEN_APP_DESCRIPTION,
                 input_schema: json!({
                     "type": "object",
                     "properties": {"name": {"type": "string", "description": "Application name or path"}},
@@ -617,8 +530,8 @@ delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup
     }
 
     fn call(&mut self, name: &str, args: &Value) -> ToolResult {
-        if needs_accessibility(name) && !(self.trusted)() {
-            prompt_accessibility();
+        if needs_accessibility(name) && !self.desktop.may_post_input() {
+            self.desktop.ask_to_post_input();
             return Err(ACCESSIBILITY_ERROR.into());
         }
         match name {
@@ -644,143 +557,16 @@ delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup
     }
 }
 
-// ---- CoreGraphics helpers ----
-
-fn source() -> Result<CGEventSource, String> {
-    CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| "Failed to create CGEventSource".to_string())
-}
-
-fn post_mouse(ty: CGEventType, pt: CGPoint, button: CGMouseButton, click_state: Option<i64>) -> Result<(), String> {
-    let ev = CGEvent::new_mouse_event(source()?, ty, pt, button).map_err(|_| "Failed to create mouse event".to_string())?;
-    // Don't inherit modifier keys the user may be holding.
-    ev.set_flags(CGEventFlags::empty());
-    if let Some(n) = click_state {
-        ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, n);
-    }
-    ev.post(CGEventTapLocation::HID);
-    Ok(())
-}
-
-fn press(combo: KeyCombo) -> Result<(), String> {
-    let flags = CGEventFlags::from_bits_truncate(combo.flags);
-    for down in [true, false] {
-        let ev = CGEvent::new_keyboard_event(source()?, combo.keycode, down)
-            .map_err(|_| "Failed to create keyboard event".to_string())?;
-        ev.set_flags(flags);
-        ev.post(CGEventTapLocation::HID);
-        if down {
-            sleep_ms(15);
-        }
-    }
-    Ok(())
-}
-
-fn sleep_ms(ms: u64) {
-    std::thread::sleep(Duration::from_millis(ms));
-}
-
-#[derive(Debug, PartialEq)]
-enum TypeSegment {
-    Key(u16),
-    /// UTF-16 chunk (≤ 20 units, the CGEventKeyboardSetUnicodeString limit).
-    Text(Vec<u16>),
-}
-
-fn split_for_typing(s: &str) -> Vec<TypeSegment> {
-    const MAX_UNITS: usize = 20;
-    let mut out = Vec::new();
-    let mut cur: Vec<u16> = Vec::new();
-    let s = s.replace("\r\n", "\n");
-    for ch in s.chars() {
-        let key = match ch {
-            '\n' | '\r' => Some(keys::KEY_RETURN),
-            '\t' => Some(keys::KEY_TAB),
-            _ => None,
-        };
-        if let Some(code) = key {
-            if !cur.is_empty() {
-                out.push(TypeSegment::Text(std::mem::take(&mut cur)));
-            }
-            out.push(TypeSegment::Key(code));
-            continue;
-        }
-        let mut buf = [0u16; 2];
-        let units = ch.encode_utf16(&mut buf);
-        if cur.len() + units.len() > MAX_UNITS {
-            out.push(TypeSegment::Text(std::mem::take(&mut cur)));
-        }
-        cur.extend_from_slice(units);
-    }
-    if !cur.is_empty() {
-        out.push(TypeSegment::Text(cur));
-    }
-    out
-}
-
-struct WindowInfo {
-    owner: String,
-    title: String,
-    pid: i64,
-    id: i64,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-}
-
-fn on_screen_windows() -> Result<Vec<WindowInfo>, String> {
-    let arr = copy_window_info(
-        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-        kCGNullWindowID,
-    )
-    .ok_or("CGWindowListCopyWindowInfo returned nothing")?;
-    let key = CFString::from_static_string;
-    let mut out = Vec::new();
-    for item in arr.iter() {
-        let dict: CFDictionary<CFString, CFType> =
-            unsafe { CFDictionary::wrap_under_get_rule(*item as CFDictionaryRef) };
-        let get_str = |k: &'static str| {
-            dict.find(key(k))
-                .and_then(|v| v.downcast::<CFString>())
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        };
-        let get_num = |k: &'static str| {
-            dict.find(key(k))
-                .and_then(|v| v.downcast::<CFNumber>())
-                .and_then(|n| n.to_i64())
-                .unwrap_or(-1)
-        };
-        if get_num("kCGWindowLayer") != 0 {
-            continue;
-        }
-        let Some(bounds) = dict
-            .find(key("kCGWindowBounds"))
-            .and_then(|v| v.downcast::<CFDictionary>())
-            .and_then(|d| CGRect::from_dict_representation(&d))
-        else {
-            continue;
-        };
-        if bounds.size.width < 2.0 || bounds.size.height < 2.0 {
-            continue;
-        }
-        out.push(WindowInfo {
-            owner: get_str("kCGWindowOwnerName"),
-            title: get_str("kCGWindowName"),
-            pid: get_num("kCGWindowOwnerPID"),
-            id: get_num("kCGWindowNumber"),
-            x: bounds.origin.x,
-            y: bounds.origin.y,
-            w: bounds.size.width,
-            h: bounds.size.height,
-        });
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desktop::Display;
+    use crate::desktop::fake::{Event, Recording};
+
+    /// A computer on `fake`, as if its last screenshot was of a 1512x982 display.
+    fn on(fake: &Recording) -> Computer {
+        Computer { last: Some(Mapping::for_display(1512.0, 982.0)), desktop: Box::new(fake.clone()) }
+    }
 
     #[test]
     fn mapping_for_small_display_is_identity() {
@@ -819,11 +605,13 @@ mod tests {
 
     #[test]
     fn input_tools_need_accessibility_and_do_nothing_without_it() {
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false, windows: || Ok(vec![]) };
+        let fake = Recording { trusted: false, ..Recording::new() };
+        let mut c = on(&fake);
         for tool in ["click", "move_mouse", "drag", "scroll", "type_text", "key"] {
             assert!(needs_accessibility(tool));
             assert_eq!(c.call(tool, &acting_args(tool)), Err(ACCESSIBILITY_ERROR.to_string()), "{tool}");
         }
+        assert_eq!(fake.events(), vec![], "nothing was posted");
         // Looking, launching and waiting need no Accessibility.
         for tool in ["screenshot", "list_windows", "open_app", "wait"] {
             assert!(!needs_accessibility(tool), "{tool}");
@@ -831,7 +619,7 @@ mod tests {
         assert_eq!(c.call("wait", &json!({"ms": 0})), Ok(vec![text("Waited 0 ms.")]));
     }
 
-    /// A window as `on_screen_windows` lists one.
+    /// A window as `Desktop::windows` lists one.
     fn window(owner: &str, x: f64, y: f64, w: f64, h: f64) -> WindowInfo {
         WindowInfo { owner: owner.into(), title: String::new(), pid: 1, id: 1, x, y, w, h }
     }
@@ -839,34 +627,99 @@ mod tests {
     #[test]
     fn the_mouse_and_keys_stay_out_of_treks_own_windows() {
         // Trek's window in front, covering the left of the screen; a browser behind it.
-        fn trek_in_front() -> Result<Vec<WindowInfo>, String> {
-            Ok(vec![window("Trek", 0.0, 0.0, 800.0, 900.0), window("Safari", 0.0, 0.0, 1512.0, 982.0)])
-        }
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true, windows: trek_in_front };
-        // Every action that would land in it (or type into it) is refused before any event:
-        // nothing here reaches the real mouse or keyboard.
+        let trek_in_front = vec![window("Trek", 0.0, 0.0, 800.0, 900.0), window("Safari", 0.0, 0.0, 1512.0, 982.0)];
+        let fake = Recording { windows: Ok(trek_in_front.clone()), ..Recording::new() };
+        let mut c = on(&fake);
+        // Every action that would land in it (or type into it) is refused before any event.
         assert_eq!(c.call("click", &json!({"x": 10, "y": 10})), Err(OWN_WINDOW.to_string()));
         assert_eq!(c.call("scroll", &json!({"x": 400, "y": 300, "dy": 3})), Err(OWN_WINDOW.to_string()));
         // A drag that starts outside and ends inside is refused too.
         assert_eq!(c.call("drag", &json!({"from": {"x": 1200, "y": 500}, "to": {"x": 100, "y": 100}})), Err(OWN_WINDOW.to_string()));
         assert_eq!(c.call("type_text", &json!({"text": "y"})), Err(OWN_KEYS.to_string()));
         assert_eq!(c.call("key", &json!({"combo": "return"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(fake.events(), vec![], "nothing reached the desktop");
+        // Outside Trek's window the click goes through, to the point it was given.
+        assert!(c.call("click", &json!({"x": 1200, "y": 500})).is_ok());
+        assert_eq!(fake.events(), vec![Event::Click { x: 1200.0, y: 500.0, button: Button::Left, count: 1 }]);
         // The window a point is in is the frontmost one holding it; a dev build counts as Trek.
-        let windows = trek_in_front().unwrap();
-        assert_eq!(window_at(&windows, 10.0, 10.0).map(|w| w.owner.as_str()), Some("Trek"));
-        assert_eq!(window_at(&windows, 1200.0, 500.0).map(|w| w.owner.as_str()), Some("Safari"));
-        assert_eq!(window_at(&windows, 5000.0, 5000.0).map(|w| w.owner.as_str()), None);
+        assert_eq!(window_at(&trek_in_front, 10.0, 10.0).map(|w| w.owner.as_str()), Some("Trek"));
+        assert_eq!(window_at(&trek_in_front, 1200.0, 500.0).map(|w| w.owner.as_str()), Some("Safari"));
+        assert_eq!(window_at(&trek_in_front, 5000.0, 5000.0).map(|w| w.owner.as_str()), None);
         assert!(is_trek(&window("trek", 0.0, 0.0, 1.0, 1.0)) && !is_trek(&window("Trekking Maps", 0.0, 0.0, 1.0, 1.0)));
         // The windows can't be listed: nothing is done unchecked.
-        let mut blind = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true, windows: || Err("no window list".into()) };
-        assert!(blind.call("click", &json!({"x": 10, "y": 10})).is_err_and(|e| e.contains("nothing was done")));
-        assert!(blind.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+        let blind = Recording { windows: Err("no window list".into()), ..Recording::new() };
+        let mut c = on(&blind);
+        assert!(c.call("click", &json!({"x": 10, "y": 10})).is_err_and(|e| e.contains("nothing was done")));
+        assert!(c.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert_eq!(blind.events(), vec![]);
+    }
+
+    #[test]
+    fn the_system_saying_a_point_is_treks_is_enough_to_refuse() {
+        // The list's frontmost window there is an overlay covering the whole screen (NVIDIA's is,
+        // on Windows, without being marked click-through), but the system's own hit test says the
+        // click would reach Trek beneath it: refused.
+        let fake = Recording {
+            windows: Ok(vec![window("NVIDIA Overlay", 0.0, 0.0, 1512.0, 982.0), window("trek", 0.0, 0.0, 800.0, 900.0)]),
+            owner_at: Some("trek".into()),
+            ..Recording::new()
+        };
+        let mut c = on(&fake);
+        assert_eq!(c.call("click", &json!({"x": 10, "y": 10})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(fake.events(), vec![]);
+        // Keys go by the window in front, whatever is under the mouse.
+        assert!(c.call("key", &json!({"combo": "escape"})).is_ok());
+    }
+
+    #[test]
+    fn keys_go_by_the_window_that_takes_them_not_the_front_of_the_list() {
+        // On Windows an always-on-top window (the taskbar, an overlay) leads the list whichever
+        // app has the focus; the desktop says who does.
+        let taskbar = window("Explorer", 0.0, 940.0, 1512.0, 42.0);
+        let on_top = vec![taskbar.clone(), window("Notepad", 0.0, 0.0, 800.0, 900.0), window("trek", 0.0, 0.0, 1512.0, 982.0)];
+        // Trek has the focus: refused, though the list leads with the taskbar.
+        let fake = Recording { windows: Ok(on_top), key_window: Some(Ok(Some(window("trek", 0.0, 0.0, 1512.0, 982.0)))), ..Recording::new() };
+        let mut c = on(&fake);
+        assert_eq!(c.call("type_text", &json!({"text": "y"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(c.call("key", &json!({"combo": "return"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(fake.events(), vec![]);
+        // Trek is high in the list but another app has the focus: the keys go to that app.
+        let fake = Recording {
+            windows: Ok(vec![window("trek", 0.0, 0.0, 1512.0, 982.0), taskbar]),
+            key_window: Some(Ok(Some(window("Notepad", 0.0, 0.0, 800.0, 900.0)))),
+            ..Recording::new()
+        };
+        let mut c = on(&fake);
+        assert!(c.call("key", &json!({"combo": "ctrl+s"})).is_ok());
+        assert_eq!(fake.events(), vec![Event::Key(keys::parse("ctrl+s").unwrap())]);
+        // The focus can't be read: nothing is typed unchecked.
+        let blind = Recording { key_window: Some(Err("no foreground".into())), ..Recording::new() };
+        let mut c = on(&blind);
+        assert!(c.call("type_text", &json!({"text": "y"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert!(c.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert_eq!(blind.events(), vec![]);
+    }
+
+    #[test]
+    fn the_systems_hit_test_guards_every_pointer_action() {
+        // Whatever the window list says (nothing here), the system's own answer that the point
+        // is Trek's is enough to refuse a click, a scroll, or a drag starting or ending there.
+        let fake = Recording { owner_at: Some("Trek".into()), ..Recording::new() };
+        let mut c = on(&fake);
+        assert_eq!(c.call("click", &json!({"x": 100, "y": 100, "button": "right"})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(c.call("scroll", &json!({"x": 100, "y": 100, "dy": 3})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(c.call("drag", &json!({"from": {"x": 1, "y": 1}, "to": {"x": 100, "y": 100}})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(fake.events(), vec![]);
+        // Another app's answer lets them through.
+        let fake = Recording { owner_at: Some("Notepad".into()), ..Recording::new() };
+        assert!(on(&fake).call("click", &json!({"x": 100, "y": 100})).is_ok());
     }
 
     #[test]
     fn bad_arguments_are_refused_before_any_event() {
         // Trusted, but every call here fails its checks before posting anything.
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || true, windows: || Ok(vec![]) };
+        let fake = Recording::new();
+        let mut c = on(&fake);
         let refused = |c: &mut Computer, tool: &str, args: Value| c.call(tool, &args).expect_err(tool);
         assert!(refused(&mut c, "click", json!({})).contains("`x`"));
         assert!(refused(&mut c, "click", json!({"x": 10, "y": 10, "count": 4})).contains("count must be"));
@@ -881,16 +734,23 @@ mod tests {
         assert!(refused(&mut c, "open_app", json!({"name": "  "})).contains("empty"));
         assert!(refused(&mut c, "wait", json!({"ms": 20_000})).contains("between 0 and 10000"));
         assert!(refused(&mut c, "teleport", json!({})).contains("Unknown tool"));
+        assert_eq!(fake.events(), vec![]);
     }
 
     #[test]
     fn every_tool_has_an_object_schema_and_a_handler() {
-        let mut c = Computer { last: Some(Mapping::for_display(1512.0, 982.0)), trusted: || false, windows: || Ok(vec![]) };
+        let fake = Recording { trusted: false, ..Recording::new() };
+        let mut c = on(&fake);
         let tools = c.tools();
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort();
         names.dedup();
         assert_eq!(names.len(), tools.len(), "names are unique");
+        // The same tools on every platform.
+        assert_eq!(
+            names,
+            vec!["click", "drag", "key", "list_windows", "move_mouse", "open_app", "screenshot", "scroll", "type_text", "wait"]
+        );
         for t in &tools {
             let schema = t.to_json()["inputSchema"].clone();
             assert_eq!(schema["type"], "object", "{}", t.name);
@@ -899,8 +759,7 @@ mod tests {
                 assert!(props.contains_key(req.as_str().unwrap()), "{} requires {req}, which it doesn't describe", t.name);
             }
             assert!(!t.description.is_empty());
-            // Every listed tool is handled (screenshots and the window list read the real
-            // screen, so they're left out here).
+            // Every listed tool is handled (screenshots and the window list are answered below).
             if !matches!(t.name, "screenshot" | "list_windows") {
                 let err = c.call(t.name, &json!({})).expect_err(t.name);
                 assert!(!err.contains("Unknown tool"), "{}: {err}", t.name);
@@ -911,6 +770,15 @@ mod tests {
             let t = tools.iter().find(|t| t.name == name).unwrap();
             assert_eq!(t.input_schema["required"], json!(["x", "y"]));
             assert!(t.input_schema["properties"]["x"]["description"].as_str().unwrap().contains("screenshot pixels"));
+        }
+        // Each platform's text names only its own keys and apps.
+        let key = tools.iter().find(|t| t.name == "key").unwrap().description;
+        let open = tools.iter().find(|t| t.name == "open_app").unwrap().description;
+        if cfg!(windows) {
+            assert!(key.contains("ctrl+c") && key.contains("win") && !key.contains("fn"), "{key}");
+            assert!(!open.contains("macOS") && !INSTRUCTIONS.contains("macOS"), "{open}");
+        } else {
+            assert!(key.contains("cmd+c") && open.contains("macOS"));
         }
     }
 
@@ -951,28 +819,92 @@ mod tests {
         assert!(region_points(m, 10.0, 10.0, 0.0, 5.0).unwrap_err().contains("positive"));
         assert!(region_points(m, 1500.0, 10.0, 400.0, 5.0).unwrap_err().contains("outside"));
         let full = full_info(1568, 1014, 1728.0, 1117.0, Some((3456, 2234)), m, "");
-        assert!(full.contains("1568x1014 px") && full.contains("1728x1117 logical points, 3456x2234 physical pixels"), "{full}");
-        assert!(full.contains(&format!("1 screenshot px = {} points", fmt_num(m.scale))));
+        assert!(full.contains("1568x1014 px") && full.contains("3456x2234 physical pixels"), "{full}");
+        assert!(full.contains(&format!("1 screenshot px = {} {SCREEN_UNITS}", fmt_num(m.scale))));
     }
 
     #[test]
-    fn typing_segments() {
-        let segs = split_for_typing("hi\r\nyou\tthere");
+    fn a_1080p_pc_screen_maps_screenshot_pixels_to_screen_pixels() {
+        // Windows reports the primary display in physical pixels (trek-mcp is per-monitor DPI
+        // aware): a 1920x1080 screen at any scaling is shot at 1568x882.
+        let fake = Recording { display: Display { width: 1920.0, height: 1080.0, physical: None }, ..Recording::new() };
+        let mut c = Computer { last: None, desktop: Box::new(fake.clone()) };
+        let shot = c.call("screenshot", &json!({})).unwrap();
+        assert_eq!(fake.events(), vec![Event::Capture { region: None, max_side: 1568 }]);
+        assert_eq!(shot[0], json!({"type": "image", "data": "UE5H", "mimeType": "image/png"}));
+        let info = shot[1]["text"].as_str().unwrap();
+        assert!(info.starts_with("Screenshot of the main display: 1568x882 px."), "{info}");
+        // The screenshot's centre is the screen's; its far corner stays on it.
+        c.call("click", &json!({"x": 784, "y": 441})).unwrap();
+        c.call("move_mouse", &json!({"x": 1568, "y": 882})).unwrap();
+        let events = fake.events();
+        let Event::Click { x, y, .. } = events[1] else { panic!("{events:?}") };
+        assert!((x - 960.0).abs() <= 1.0 && (y - 540.0).abs() <= 1.0, "{x}, {y}");
+        let Event::Move(x, y) = events[2] else { panic!("{events:?}") };
+        assert!((x - 1919.0).abs() <= 1.0 && (y - 1079.0).abs() <= 1.0, "{x}, {y}");
+    }
+
+    #[test]
+    fn tools_answer_in_the_same_shapes_everywhere() {
+        let fake = Recording {
+            windows: Ok(vec![WindowInfo { owner: "Notepad".into(), title: "notes.txt".into(), pid: 42, id: 7, x: 100.0, y: 50.0, w: 800.0, h: 600.0 }]),
+            ..Recording::new()
+        };
+        let mut c = on(&fake);
+        let points = SCREEN_UNITS;
         assert_eq!(
-            segs,
+            Value::Array(c.call("click", &json!({"x": 10, "y": 20, "button": "right", "count": 2})).unwrap()),
+            json!([{"type": "text", "text": format!("Double-clicked right at (10, 20) (screen {points} 10, 20).")}])
+        );
+        assert_eq!(
+            Value::Array(c.call("drag", &json!({"from": {"x": 1000, "y": 10}, "to": {"x": 1100, "y": 20}})).unwrap()),
+            json!([{"type": "text", "text": "Dragged from (1000, 10) to (1100, 20)."}])
+        );
+        assert_eq!(
+            Value::Array(c.call("scroll", &json!({"x": 1000, "y": 10, "dy": -3})).unwrap()),
+            json!([{"type": "text", "text": "Scrolled dx=0 dy=-3 lines at (1000, 10)."}])
+        );
+        assert_eq!(
+            Value::Array(c.call("type_text", &json!({"text": "héllo\n"})).unwrap()),
+            json!([{"type": "text", "text": "Typed 6 characters."}])
+        );
+        assert_eq!(
+            Value::Array(c.call("key", &json!({"combo": "ctrl+shift+t"})).unwrap()),
+            json!([{"type": "text", "text": "Pressed ctrl+shift+t."}])
+        );
+        assert_eq!(
+            Value::Array(c.call("open_app", &json!({"name": " Notepad "})).unwrap()),
+            json!([{"type": "text", "text": "Opened Notepad. Take a screenshot to see it (it may take a moment to appear)."}])
+        );
+        assert_eq!(
+            fake.events(),
             vec![
-                TypeSegment::Text("hi".encode_utf16().collect()),
-                TypeSegment::Key(36),
-                TypeSegment::Text("you".encode_utf16().collect()),
-                TypeSegment::Key(48),
-                TypeSegment::Text("there".encode_utf16().collect()),
+                Event::Click { x: 10.0, y: 20.0, button: Button::Right, count: 2 },
+                Event::Drag { from: (1000.0, 10.0), to: (1100.0, 20.0) },
+                Event::Scroll { x: 1000.0, y: 10.0, dx: 0, dy: -3 },
+                Event::Type("héllo\n".into()),
+                Event::Key(keys::parse("ctrl+shift+t").unwrap()),
+                Event::OpenApp("Notepad".into()),
             ]
         );
-        // long text is chunked at 20 UTF-16 units without splitting surrogate pairs
-        let s = "a".repeat(19) + "😀" + "b";
-        let segs = split_for_typing(&s);
-        assert_eq!(segs.len(), 2);
-        assert!(matches!(&segs[0], TypeSegment::Text(u) if u.len() == 19));
-        assert!(matches!(&segs[1], TypeSegment::Text(u) if u.len() == 3));
+        // The window list: a header, then one JSON object per window.
+        let listed = c.call("list_windows", &json!({})).unwrap();
+        let body = listed[0]["text"].as_str().unwrap();
+        let mut lines = body.lines();
+        assert!(lines.next().unwrap().starts_with("1 on-screen windows, front to back."));
+        let w: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(
+            w,
+            json!({
+                "app": "Notepad", "title": "notes.txt", "pid": 42, "window_id": 7,
+                "bounds_points": {"x": 100.0, "y": 50.0, "width": 800.0, "height": 600.0},
+                "bounds_screenshot": {"x": 100.0, "y": 50.0, "width": 800.0, "height": 600.0},
+            })
+        );
+        // A zoom: the region in screen units, at most 1568 on its long side.
+        let zoom = c.call("screenshot", &json!({"region": {"x": 100, "y": 200, "width": 300, "height": 150}})).unwrap();
+        assert_eq!(zoom[0]["type"], "image");
+        assert!(zoom[1]["text"].as_str().unwrap().starts_with("Zoomed view of screenshot region x=100 y=200 width=300 height=150"));
+        assert_eq!(fake.events().last(), Some(&Event::Capture { region: Some((100.0, 200.0, 300.0, 150.0)), max_side: 1568 }));
     }
 }
