@@ -1,10 +1,4 @@
-    let copied = (|| {
-        // The folder itself may be a symlink to the real one; its contents are what is wanted, so
-        // the walk starts from the real folder (walking a root that is a link failed on macOS).
-        let root = std::fs::canonicalize(from)?;
-        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-            let entry = entry?;
-            let rel = entry.path().strip_prefix(&root)?;//! Agent skills on this Mac: folders holding a `SKILL.md` (front matter `name` + `description`).
+//! Agent skills on this Mac: folders holding a `SKILL.md` (front matter `name` + `description`).
 //!
 //! Turning a skill off moves its folder into Trek's data folder (with a note of where it came
 //! from), so every agent stops loading it; turning it back on moves it home. Skills that another
@@ -302,10 +296,12 @@ fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(std::fs::symlink_metadata(to).is_err(), "{} already exists", to.display());
     let copied = (|| {
-        // The folder itself may be a symlink to the real one; its contents are what is wanted.
-        for entry in walkdir::WalkDir::new(from).follow_root_links(true).follow_links(false) {
+        // The folder itself may be a symlink to the real one; its contents are what is wanted, so
+        // the walk starts from the real folder (walking a root that is a link failed on macOS).
+        let root = std::fs::canonicalize(from)?;
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
             let entry = entry?;
-            let rel = entry.path().strip_prefix(from)?;
+            let rel = entry.path().strip_prefix(&root)?;
             let dest = to.join(rel);
             let kind = entry.file_type();
             if kind.is_dir() {
