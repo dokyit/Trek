@@ -196,7 +196,7 @@ impl Workspace {
     /// is added.
     pub fn add_custom_agent(&mut self, agent: AddedAgent, secrets: Vec<(String, String)>, cx: &mut gpui_kit::Context<Self>) -> anyhow::Result<()> {
         for (name, value) in &secrets {
-            registry::set_secret(&agent.id, name, value).map_err(|e| anyhow::anyhow!("Couldn't keep {name} in your Keychain: {e}"))?;
+            registry::set_secret(&agent.id, name, value).map_err(|e| anyhow::anyhow!("Couldn't keep {name} in {}: {e}", crate::words::words().your_credential_store))?;
         }
         self.put_added(agent, cx);
         Ok(())

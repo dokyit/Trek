@@ -78,7 +78,7 @@ pub fn billing_note(billing: Option<&Billing>) -> Option<String> {
     match billing? {
         Billing::Plan(plan) => Some(format!("Included in {}", plan_phrase(plan))),
         Billing::Metered => Some("Billed per token by your API provider".to_string()),
-        Billing::Local => Some("Runs on this Mac, nothing is billed".to_string()),
+        Billing::Local => Some(format!("Runs on {}, nothing is billed", crate::words::words().this_computer)),
     }
 }
 

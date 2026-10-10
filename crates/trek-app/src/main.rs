@@ -60,6 +60,7 @@ mod updater;
 mod visualization;
 mod window_place;
 mod winlook;
+mod words;
 mod workspace;
 mod working_bar;
 mod worktree_ui;

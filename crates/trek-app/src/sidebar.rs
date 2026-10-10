@@ -364,7 +364,7 @@ impl Sidebar {
                                         let p = p2.clone();
                                         ws2.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(p) }, cx))
                                     }))
-                                    .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p1)))
+                                    .item(PopupMenuItem::new(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&p1)))
                                     .item(PopupMenuItem::new("Project settings").on_click(move |_, _, cx| {
                                         let id = id3.clone();
                                         ws3.update(cx, |ws, cx| ws.open_project_settings(Some(id), cx))
@@ -885,7 +885,7 @@ impl Sidebar {
                 }
             });
             if let Some(dir) = cwd.clone() {
-                menu = menu.item(PopupMenuItem::new("Show folder in Finder").on_click(move |_, _, cx| cx.reveal_path(&dir)));
+                menu = menu.item(PopupMenuItem::new(crate::words::words().show_folder_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&dir)));
             }
             if let Some((pid, _)) = project.clone() {
                 let ws = ws.clone();
@@ -973,7 +973,7 @@ impl Sidebar {
                     cx.notify();
                 }))
                 .separator()
-                .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p1)))
+                .item(PopupMenuItem::new(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&p1)))
                 .item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))))
                 .item(act("Project settings", |ws, id, _, cx| ws.open_project_settings(Some(id.to_string()), cx)))
                 .separator()

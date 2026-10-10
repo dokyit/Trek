@@ -173,7 +173,7 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
     let tip: SharedString = match (&f.status, actions.view_diff.is_some()) {
         (FileStatus::Renamed { from }, true) => format!("{} · renamed from {from}\nShow the diff", f.path).into(),
         (_, true) => format!("{}\nShow the diff", f.path).into(),
-        (_, false) => format!("{}\nShow in Finder", f.path).into(),
+        (_, false) => format!("{}\n{}", f.path, crate::words::words().show_in_file_manager).into(),
     };
     let (view, reveal, file) = (actions.view_diff.clone(), actions.reveal.clone(), f.clone());
     h_flex()

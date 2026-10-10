@@ -55,7 +55,7 @@ impl Workspace {
         let mut note = find(&req.note_id).ok_or_else(|| tr::HostError::not_found("No such note"))?;
         // Edited on the Mac since the phone read it: the phone's copy would undo that.
         if req.modified.is_some_and(|m| m != note.modified) {
-            return Err(tr::HostError::conflict("This note changed on the Mac since you opened it. Open it again to see the change."));
+            return Err(tr::HostError::conflict(format!("This note changed on {} since you opened it. Open it again to see the change.", crate::words::words().the_computer)));
         }
         if note.body != req.body {
             note.body = req.body;
