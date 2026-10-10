@@ -157,6 +157,47 @@ pub fn provider_display_name(id: &str) -> String {
     direct_provider(id).map(|p| p.name.to_string()).unwrap_or_else(|| id.to_string())
 }
 
+/// How to install an agent's CLI: the line to run on macOS and on Windows, side by side so the
+/// platform is chosen in one place (`here`). A Windows line is what the vendor documents for
+/// PowerShell (`irm … | iex`), or npm's where its documentation offers nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hint {
+    pub unix: &'static str,
+    pub windows: &'static str,
+}
+
+impl Hint {
+    /// One line for both.
+    const fn same(line: &'static str) -> Self {
+        Self { unix: line, windows: line }
+    }
+
+    /// The line for the platform Trek runs on.
+    pub const fn here(&self) -> &'static str {
+        if cfg!(windows) { self.windows } else { self.unix }
+    }
+}
+
+const CLAUDE_CODE: Hint = Hint { unix: "npm i -g @anthropic-ai/claude-code", windows: "irm https://claude.ai/install.ps1 | iex" };
+const CODEX: Hint = Hint::same("npm i -g @openai/codex");
+// OpenCode has no PowerShell installer (its docs list npm, Scoop, Chocolatey and a release download).
+const OPENCODE: Hint = Hint { unix: "curl -fsSL https://opencode.ai/install | bash", windows: "npm i -g opencode-ai" };
+const DROID: Hint = Hint { unix: "curl -fsSL https://app.factory.ai/cli | sh", windows: "irm https://app.factory.ai/cli/windows | iex" };
+const CURSOR: Hint = Hint { unix: "curl https://cursor.com/install -fsS | bash", windows: "irm 'https://cursor.com/install?win32=true' | iex" };
+const GITHUB_COPILOT: Hint = Hint::same("npm i -g @github/copilot");
+const GEMINI: Hint = Hint::same("npm i -g @google/gemini-cli");
+const KIMI: Hint = Hint::same("npm i -g @moonshot-ai/kimi-code");
+const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
+const GROK: Hint = Hint { unix: "curl -fsSL https://x.ai/cli/install.sh | bash", windows: "irm https://x.ai/cli/install.ps1 | iex" };
+const DEVIN: Hint = Hint { unix: "curl -fsSL https://cli.devin.ai/install.sh | bash", windows: "irm https://static.devin.ai/cli/install.ps1 | iex" };
+// Goose's installer for Windows is a script to download and run; it supports x86-64 only.
+const GOOSE: Hint = Hint {
+    unix: "brew install block-goose-cli",
+    windows: r#"Invoke-WebRequest -Uri "https://github.com/aaif-goose/goose/releases/download/stable/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1"#,
+};
+const AMP: Hint = Hint::same("npm i -g @sourcegraph/amp amp-acp");
+const PI: Hint = Hint::same("npm i -g @earendil-works/pi-coding-agent pi-acp");
+
 /// ACP agents Trek knows how to launch. The user adds more (`added_agent`).
 #[derive(Debug, Clone, Copy)]
 pub struct AcpAgent {
@@ -167,25 +208,27 @@ pub struct AcpAgent {
     /// Text that must appear in `<binary> --version` to confirm identity
     /// (e.g. `agent` on PATH may be a different tool).
     pub version_marker: Option<&'static str>,
+    /// The line that installs it on this platform (`Hint::here`).
     pub install_hint: &'static str,
 }
 
 pub const ACP_AGENTS: &[AcpAgent] = &[
-    AcpAgent { id: "cursor", name: "Cursor", binary: "cursor-agent", args: &["acp"], version_marker: None, install_hint: "curl https://cursor.com/install -fsS | bash" },
-    AcpAgent { id: "github-copilot", name: "GitHub Copilot", binary: "copilot", args: &["--acp"], version_marker: None, install_hint: "npm i -g @github/copilot" },
-    AcpAgent { id: "gemini", name: "Gemini CLI", binary: "gemini", args: &["--acp"], version_marker: None, install_hint: "npm i -g @google/gemini-cli" },
-    AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: "npm i -g @moonshot-ai/kimi-code" },
-    AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: "npm i -g @qwen-code/qwen-code" },
-    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["agent", "stdio"], version_marker: None, install_hint: "curl -fsSL https://x.ai/cli/install.sh | bash" },
-    AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: "curl -fsSL https://cli.devin.ai/install.sh | bash" },
-    AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: "brew install block-goose-cli" },
-    AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: "npm i -g @sourcegraph/amp amp-acp" },
-    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: "npm i -g @earendil-works/pi-coding-agent pi-acp" },
+    AcpAgent { id: "cursor", name: "Cursor", binary: "cursor-agent", args: &["acp"], version_marker: None, install_hint: CURSOR.here() },
+    AcpAgent { id: "github-copilot", name: "GitHub Copilot", binary: "copilot", args: &["--acp"], version_marker: None, install_hint: GITHUB_COPILOT.here() },
+    AcpAgent { id: "gemini", name: "Gemini CLI", binary: "gemini", args: &["--acp"], version_marker: None, install_hint: GEMINI.here() },
+    AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: KIMI.here() },
+    AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: QWEN_CODE.here() },
+    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["agent", "stdio"], version_marker: None, install_hint: GROK.here() },
+    AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: DEVIN.here() },
+    AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: GOOSE.here() },
+    AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: AMP.here() },
+    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: PI.here() },
 ];
 
 /// How to install a CLI agent and sign in to it, keyed by `AgentId::key()`.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentSetup {
+    /// The line that installs it on this platform.
     pub install: &'static str,
     /// Command that signs the user in (opens a browser or device-code flow).
     pub login: &'static str,
@@ -193,25 +236,46 @@ pub struct AgentSetup {
     pub account_url: &'static str,
 }
 
+/// The install lines of the agent `key`, for macOS and for Windows.
+pub fn install_hint(key: &str) -> Option<Hint> {
+    Some(match key {
+        "claude-code" => CLAUDE_CODE,
+        "codex" => CODEX,
+        "opencode" => OPENCODE,
+        "droid" => DROID,
+        "cursor" => CURSOR,
+        "github-copilot" => GITHUB_COPILOT,
+        "gemini" => GEMINI,
+        "kimi" => KIMI,
+        "qwen-code" => QWEN_CODE,
+        "grok" => GROK,
+        "devin" => DEVIN,
+        "goose" => GOOSE,
+        "amp" => AMP,
+        "pi" => PI,
+        _ => return None,
+    })
+}
+
 pub fn agent_setup(key: &str) -> Option<AgentSetup> {
-    let (install, login, account_url) = match key {
-        "claude-code" => ("npm i -g @anthropic-ai/claude-code", "claude auth login", "https://claude.ai/settings/usage"),
-        "codex" => ("npm i -g @openai/codex", "codex login", "https://chatgpt.com/codex/settings/usage"),
-        "opencode" => ("curl -fsSL https://opencode.ai/install | bash", "opencode auth login", "https://opencode.ai/auth"),
-        "droid" => ("curl -fsSL https://app.factory.ai/cli | sh", "droid", "https://app.factory.ai/settings/billing"),
-        "cursor" => ("curl https://cursor.com/install -fsS | bash", "cursor-agent login", "https://cursor.com/dashboard"),
-        "github-copilot" => ("npm i -g @github/copilot", "copilot login", "https://github.com/settings/copilot"),
-        "gemini" => ("npm i -g @google/gemini-cli", "gemini", "https://aistudio.google.com"),
-        "kimi" => ("npm i -g @moonshot-ai/kimi-code", "kimi login", "https://www.kimi.com/code"),
-        "qwen-code" => ("npm i -g @qwen-code/qwen-code", "qwen", "https://chat.qwen.ai"),
-        "grok" => ("curl -fsSL https://x.ai/cli/install.sh | bash", "grok login", "https://grok.com/settings"),
-        "devin" => ("curl -fsSL https://cli.devin.ai/install.sh | bash", "devin auth login", "https://app.devin.ai/settings"),
-        "goose" => ("brew install block-goose-cli", "goose configure", "https://block.github.io/goose"),
-        "amp" => ("npm i -g @sourcegraph/amp amp-acp", "amp login", "https://ampcode.com/settings"),
-        "pi" => ("npm i -g @earendil-works/pi-coding-agent pi-acp", "pi", "https://pi.dev"),
+    let (login, account_url) = match key {
+        "claude-code" => ("claude auth login", "https://claude.ai/settings/usage"),
+        "codex" => ("codex login", "https://chatgpt.com/codex/settings/usage"),
+        "opencode" => ("opencode auth login", "https://opencode.ai/auth"),
+        "droid" => ("droid", "https://app.factory.ai/settings/billing"),
+        "cursor" => ("cursor-agent login", "https://cursor.com/dashboard"),
+        "github-copilot" => ("copilot login", "https://github.com/settings/copilot"),
+        "gemini" => ("gemini", "https://aistudio.google.com"),
+        "kimi" => ("kimi login", "https://www.kimi.com/code"),
+        "qwen-code" => ("qwen", "https://chat.qwen.ai"),
+        "grok" => ("grok login", "https://grok.com/settings"),
+        "devin" => ("devin auth login", "https://app.devin.ai/settings"),
+        "goose" => ("goose configure", "https://block.github.io/goose"),
+        "amp" => ("amp login", "https://ampcode.com/settings"),
+        "pi" => ("pi", "https://pi.dev"),
         _ => return None,
     };
-    Some(AgentSetup { install, login, account_url })
+    Some(AgentSetup { install: install_hint(key)?.here(), login, account_url })
 }
 
 pub fn acp_display_name(id: &str) -> String {
@@ -248,5 +312,63 @@ mod tests {
         assert_eq!(presets.first().unwrap().model, "claude-haiku-4-5");
         assert_eq!(presets.last().unwrap().effort, Effort::Max);
         assert!(presets.len() >= 4);
+    }
+
+    /// Every agent Trek can install, by `AgentId::key()`.
+    const INSTALLABLE: &[&str] = &["claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "gemini", "kimi", "qwen-code", "grok", "devin", "goose", "amp", "pi"];
+
+    #[test]
+    fn install_lines_for_macos_are_what_they_were() {
+        let mac = |key: &str| install_hint(key).unwrap().unix;
+        assert_eq!(mac("claude-code"), "npm i -g @anthropic-ai/claude-code");
+        assert_eq!(mac("opencode"), "curl -fsSL https://opencode.ai/install | bash");
+        assert_eq!(mac("droid"), "curl -fsSL https://app.factory.ai/cli | sh");
+        assert_eq!(mac("cursor"), "curl https://cursor.com/install -fsS | bash");
+        assert_eq!(mac("grok"), "curl -fsSL https://x.ai/cli/install.sh | bash");
+        assert_eq!(mac("devin"), "curl -fsSL https://cli.devin.ai/install.sh | bash");
+        assert_eq!(mac("goose"), "brew install block-goose-cli");
+        assert_eq!(mac("pi"), "npm i -g @earendil-works/pi-coding-agent pi-acp");
+    }
+
+    #[test]
+    fn install_lines_for_windows_are_ones_a_windows_shell_runs() {
+        let win = |key: &str| install_hint(key).unwrap().windows;
+        // From the vendors' own documentation and install scripts.
+        assert_eq!(win("claude-code"), "irm https://claude.ai/install.ps1 | iex");
+        assert_eq!(win("cursor"), "irm 'https://cursor.com/install?win32=true' | iex");
+        assert_eq!(win("grok"), "irm https://x.ai/cli/install.ps1 | iex");
+        assert_eq!(win("devin"), "irm https://static.devin.ai/cli/install.ps1 | iex");
+        assert_eq!(win("droid"), "irm https://app.factory.ai/cli/windows | iex");
+        // OpenCode has no PowerShell installer: npm, which its documentation lists.
+        assert_eq!(win("opencode"), "npm i -g opencode-ai");
+        assert!(win("goose").contains("download_cli.ps1"), "{}", win("goose"));
+        // The npm packages are the same on both.
+        for key in ["codex", "github-copilot", "gemini", "kimi", "qwen-code", "amp", "pi"] {
+            let hint = install_hint(key).unwrap();
+            assert_eq!(hint.unix, hint.windows, "{key}");
+            assert!(hint.windows.starts_with("npm i -g "), "{key}");
+        }
+        // And none is a Unix idiom: no `| bash`, `| sh`, `curl … -fsSL`, `brew`.
+        for key in INSTALLABLE {
+            let line = install_hint(key).unwrap().windows;
+            assert!(!line.contains("| bash") && !line.contains("| sh") && !line.contains("brew ") && !line.starts_with("curl"), "{key}: {line}");
+            assert!(line.starts_with("irm ") || line.starts_with("npm i -g ") || line.starts_with("Invoke-WebRequest "), "{key}: {line}");
+        }
+    }
+
+    #[test]
+    fn the_install_line_is_picked_by_platform_in_one_place() {
+        for key in INSTALLABLE {
+            let hint = install_hint(key).unwrap();
+            let here = if cfg!(windows) { hint.windows } else { hint.unix };
+            assert_eq!(hint.here(), here, "{key}");
+            assert_eq!(agent_setup(key).unwrap().install, here, "{key}");
+        }
+        // The ACP agents carry the same line as their setup, so the "isn't installed" message
+        // and the install chip never disagree.
+        for a in ACP_AGENTS {
+            assert_eq!(a.install_hint, agent_setup(a.id).unwrap().install, "{}", a.id);
+        }
+        assert!(install_hint("not-an-agent").is_none() && agent_setup("not-an-agent").is_none());
     }
 }
