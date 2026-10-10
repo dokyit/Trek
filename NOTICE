@@ -7,6 +7,9 @@ Third-party materials bundled in this repository:
   (vendor/gpui-base/LICENSE-APACHE).
 * crates/trek-app/assets/file-icons — Catppuccin file icons, MIT
   (crates/trek-app/assets/file-icons/LICENSE).
+* crates/trek-app/assets/fonts — Inter (The Inter Project Authors) and JetBrains Mono
+  (The JetBrains Mono Project Authors), both under the SIL Open Font License 1.1
+  (OFL-Inter.txt and OFL-JetBrainsMono.txt in that folder).
 * Agent and provider logos under crates/trek-app/assets/logos and
   ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,

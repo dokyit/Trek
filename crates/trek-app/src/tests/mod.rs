@@ -22,6 +22,7 @@ mod inbox;
 mod keys;
 mod lifecycle;
 mod limits;
+mod look;
 mod mcp;
 mod motion;
 mod orchestrate;

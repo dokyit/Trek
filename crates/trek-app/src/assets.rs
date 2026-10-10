@@ -3,6 +3,8 @@ use std::borrow::Cow;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "assets"]
+// The fonts are compiled in by `fonts.rs` (DirectWrite needs them in memory for good): once is enough.
+#[exclude = "fonts/*"]
 struct Embedded;
 
 // Extra Lucide icons beyond GPUI Kit's default set, embedded in the binary.

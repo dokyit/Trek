@@ -6,22 +6,57 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::AgentId;
 
+/// What a window's glass is made of, which decides how much of the theme's colour the panels on
+/// it keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Material {
+    /// macOS 26's Liquid Glass: frosts the desktop heavily.
+    Native,
+    /// Windows 11's Mica Alt: the wallpaper's tint, nearly flat, never a window behind.
+    Mica,
+    /// GPUI's blur of what's behind (macOS before 26): lighter, so panels stay firmer.
+    Blur,
+}
+
+/// What a window's glass was last told: whether it's on, and whether Trek's theme is dark (Mica
+/// follows the theme, not the system).
+pub type GlassState = (bool, bool);
+
+/// The background to ask of a window for glass: nothing when `on` is false; the system's own glass
+/// laid under a transparent window (`native`); Mica Alt where `mica` says this platform has it
+/// (Windows 11 22H2, see `winlook`); else GPUI's blur. Mica Alt rather than Mica for the main
+/// window: it's the material Windows 11 gives a window of its own with a title bar of its own,
+/// tinted a little more than the base one, and the nearest to what Liquid Glass does for Trek's
+/// chrome. Acrylic (`Blurred` on Windows) would show the windows behind through the chrome, which
+/// Trek's panels aren't set for, and no Trek popup is a window of its own that macOS blurs.
+pub fn backdrop(on: bool, native: bool, mica: bool) -> WindowBackgroundAppearance {
+    match (on, native, mica) {
+        (false, _, _) => WindowBackgroundAppearance::Opaque,
+        (true, true, _) => WindowBackgroundAppearance::Transparent,
+        (true, false, true) => WindowBackgroundAppearance::MicaAltBackdrop,
+        (true, false, false) => WindowBackgroundAppearance::Blurred,
+    }
+}
+
 /// Liquid glass on `window`: the system's Liquid Glass behind it when there is one (macOS 26),
-/// else a blur of what's behind; opaque when off. `applied` is what was last asked of the
-/// window, so it's only told when that changes. The window's root paints the theme's background
-/// under everything; under glass it paints nothing, after this frame (it's drawing this one).
-pub fn apply_glass(window: &mut Window, on: bool, applied: &mut Option<bool>, cx: &mut App) {
-    if *applied == Some(on) {
+/// Mica Alt on Windows 11, else a blur of what's behind; opaque when off. `applied` is what was
+/// last asked of the window, so it's only told when that changes. The window's root paints the
+/// theme's background under everything; under glass it paints nothing, after this frame (it's
+/// drawing this one).
+pub fn apply_glass(window: &mut Window, on: bool, dark: bool, applied: &mut Option<GlassState>, cx: &mut App) {
+    // Only Windows' Mica follows the theme's tone; elsewhere a theme change leaves glass alone.
+    let state = (on, dark && cfg!(windows));
+    if *applied == Some(state) {
         return;
     }
-    *applied = Some(on);
+    *applied = Some(state);
     let native = crate::system::native_glass(window, on);
-    NATIVE_GLASS.store(native, std::sync::atomic::Ordering::Relaxed);
-    window.set_background_appearance(match (on, native) {
-        (false, _) => WindowBackgroundAppearance::Opaque,
-        (true, true) => WindowBackgroundAppearance::Transparent,
-        (true, false) => WindowBackgroundAppearance::Blurred,
-    });
+    let mica = cfg!(windows) && on;
+    MATERIAL.store(if native { Material::Native } else if mica { Material::Mica } else { Material::Blur } as u8, std::sync::atomic::Ordering::Relaxed);
+    tracing::debug!("glass: on={on} dark={dark} native={native} mica={mica}");
+    #[cfg(windows)]
+    crate::winlook::set_backdrop(window, dark, on);
+    window.set_background_appearance(backdrop(on, native, mica));
     window.defer(cx, move |window, cx| {
         if let Some(Some(root)) = window.root::<gpui_kit::component::Root>() {
             root.update(cx, |root, cx| {
@@ -33,27 +68,56 @@ pub fn apply_glass(window: &mut Window, on: bool, applied: &mut Option<bool>, cx
 }
 
 /// The chrome behind the sidebar and title bar: the theme's sidebar colour, or under glass that
-/// colour let `tint` of the way through.
+/// colour let `chrome_alpha` of the way through.
 pub fn chrome_bg(glass: Option<f32>, cx: &App) -> Hsla {
     let side = cx.theme().sidebar;
     match glass {
-        Some(t) => side.opacity(t),
+        Some(t) => side.opacity(chrome_alpha(t, material())),
         None => side,
     }
 }
 
-/// The system's Liquid Glass backs the windows (macOS 26), rather than GPUI's lighter blur.
-static NATIVE_GLASS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How much of the sidebar colour the chrome keeps at glass `tint`, on `material`: the tint
+/// itself, but on Mica never under 30%, below which the quieter text (the sidebar's counts and
+/// times) falls under 3:1 over a bright wallpaper's Mica.
+pub fn chrome_alpha(tint: f32, material: Material) -> f32 {
+    match material {
+        Material::Mica => tint.max(0.3),
+        Material::Native | Material::Blur => tint,
+    }
+}
+
+/// What backs the windows now (`Material`, as a number so a window can set it from a frame).
+static MATERIAL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(Material::Blur as u8);
+
+fn material() -> Material {
+    match MATERIAL.load(std::sync::atomic::Ordering::Relaxed) {
+        m if m == Material::Native as u8 => Material::Native,
+        m if m == Material::Mica as u8 => Material::Mica,
+        _ => Material::Blur,
+    }
+}
+
+/// How much of the theme's background an inset panel keeps at glass `tint`, on `material`: the
+/// panels read as frosted panes on the glass, but never so clear that what's behind shows through
+/// the text. The system's glass frosts the desktop heavily, so panels can let it through down to
+/// 60%; Mica is flatter than that but its tone follows the wallpaper, so 70%; over the lighter
+/// blur of older macOS they stay at 82% or more.
+pub fn panel_alpha(tint: f32, material: Material) -> f32 {
+    let floor = match material {
+        Material::Native => 0.6,
+        Material::Mica => 0.7,
+        Material::Blur => 0.82,
+    };
+    (tint + 0.2).clamp(floor, 0.95)
+}
 
 /// An inset panel's fill (the transcript, the tools panel): the theme's background, or under glass
-/// more of it than the chrome keeps, so the panels read as frosted panes on the glass. The
-/// system's glass frosts the desktop heavily, so panels can let it through down to 60%; over the
-/// lighter blur of older macOS they stay at 82% or more, or what's behind shows through the text.
+/// `panel_alpha` of it.
 pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
     let bg = cx.theme().background;
-    let floor = if NATIVE_GLASS.load(std::sync::atomic::Ordering::Relaxed) { 0.6 } else { 0.82 };
     match glass {
-        Some(t) => bg.opacity((t + 0.2).clamp(floor, 0.95)),
+        Some(t) => bg.opacity(panel_alpha(t, material())),
         None => bg,
     }
 }
