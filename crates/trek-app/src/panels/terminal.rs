@@ -44,6 +44,182 @@ fn pump(mut reader: impl Read, screen: &Screen, wake: &async_channel::Sender<()>
     }
 }
 
+/// How a shell takes its arguments: what "log in" and "run this command" look like.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Flavor {
+    /// `-l`, and `-c <script>` (zsh, bash, fish, Git Bash).
+    Posix,
+    /// PowerShell 7 and Windows PowerShell: no login flag.
+    PowerShell,
+    /// `cmd.exe`.
+    Cmd,
+}
+
+/// The kind of shell `program` is. Only Windows tells the three apart: `pwsh` on a Mac is still
+/// started the way every shell there is.
+fn flavor(program: &str, windows: bool) -> Flavor {
+    if !windows {
+        return Flavor::Posix;
+    }
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    match name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem) {
+        "pwsh" | "powershell" => Flavor::PowerShell,
+        "cmd" => Flavor::Cmd,
+        _ => Flavor::Posix,
+    }
+}
+
+/// The shell to start. `setting` is `[terminal] shell`: a path is used as written, a bare name is
+/// looked up with `find`. Empty, it's `$SHELL` (zsh without one) on a Mac; on Windows PowerShell 7,
+/// else Windows PowerShell, else `%COMSPEC%` (cmd.exe).
+fn choose_shell(setting: &str, env_shell: Option<&str>, windows: bool, find: impl Fn(&str) -> Option<PathBuf>, comspec: Option<&str>) -> String {
+    let setting = setting.trim().trim_matches('"');
+    if !setting.is_empty() {
+        if setting.contains(['/', '\\']) {
+            return setting.to_string();
+        }
+        return find(setting).map_or_else(|| setting.to_string(), |p| p.to_string_lossy().into_owned());
+    }
+    if !windows {
+        return env_shell.unwrap_or("/bin/zsh").to_string();
+    }
+    ["pwsh", "powershell"]
+        .into_iter()
+        .find_map(|name| find(name))
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| comspec.filter(|c| !c.is_empty()).map(str::to_string))
+        .unwrap_or_else(|| "cmd.exe".into())
+}
+
+/// `s` as a PowerShell single-quoted string: nothing inside is expanded, and a quote is doubled.
+/// PowerShell reads the typographic single quotes (U+2018 to U+201B) as quotes too.
+fn powershell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// The arguments that start a `flavor` shell, or that run `command` in one. A command's shell
+/// exits when it's done (Install / Sign in rescan agents when it does), after printing what ran
+/// and how it ended; the screen stays up.
+fn shell_args(flavor: Flavor, command: Option<&str>) -> Vec<String> {
+    match (flavor, command) {
+        (Flavor::Posix, None) => vec!["-l".into()],
+        (Flavor::Posix, Some(c)) => {
+            let quoted = format!("'{}'", c.replace('\'', "'\\''"));
+            vec![
+                "-l".into(),
+                "-c".into(),
+                format!("printf '\\033[1m$ %s\\033[0m\\n\\n' {quoted}; {c}; code=$?; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $code; exit $code"),
+            ]
+        }
+        (Flavor::PowerShell, None) => vec!["-NoLogo".into()],
+        (Flavor::PowerShell, Some(c)) => vec![
+            "-NoLogo".into(),
+            "-Command".into(),
+            // `$?` is only the command's until the next statement; a native program's code is in `$LASTEXITCODE`.
+            format!(
+                "Write-Host {}; Write-Host ''; $global:LASTEXITCODE = $null; {c}; $ok = $?; $code = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($ok) {{ 0 }} else {{ 1 }}; Write-Host ''; Write-Host ('[finished with exit code ' + $code + ']'); exit $code",
+                powershell_quote(&format!("$ {c}"))
+            ),
+        ],
+        (Flavor::Cmd, None) => vec![],
+        // cmd reads the rest of its command line as the command, quotes and all; `^%` defers
+        // `%errorlevel%` to when `call` reaches it, after the command has set it.
+        (Flavor::Cmd, Some(c)) => vec!["/c".into(), format!("{c} & call echo. & call echo [finished with exit code %^errorlevel%]")],
+    }
+}
+
+/// `path` without the `\\?\` that canonicalising puts on a Windows path: `\\?\C:\dir` is `C:\dir`
+/// and `\\?\UNC\host\share` is `\\host\share`. Shells show the prefix and `cmd.exe` mishandles it.
+fn plain_path(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else { return path };
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(drive) if drive.as_bytes().get(1) == Some(&b':') => PathBuf::from(drive),
+        _ => path,
+    }
+}
+
+/// Where the shell starts: `cwd` (the project) or home. On Windows, as a plain path; and not a
+/// network one for `cmd.exe`, which can't be in one and would start in the Windows folder.
+fn shell_cwd(cwd: Option<PathBuf>, flavor: Flavor, windows: bool, home: PathBuf) -> PathBuf {
+    let cwd = cwd.unwrap_or_else(|| home.clone());
+    if !windows {
+        return cwd;
+    }
+    let cwd = plain_path(cwd);
+    if flavor == Flavor::Cmd && cwd.to_str().is_some_and(|p| p.starts_with(r"\\")) { home } else { cwd }
+}
+
+/// The shell for `[terminal] shell = setting` as a process to start in a pty, in `cwd`, running
+/// `command` when there is one.
+fn shell_command(setting: &str, cwd: Option<PathBuf>, command: Option<&str>) -> CommandBuilder {
+    let windows = cfg!(windows);
+    let shell = choose_shell(setting, std::env::var("SHELL").ok().as_deref(), windows, |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());
+    let flavor = flavor(&shell, windows);
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.args(shell_args(flavor, command));
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "Trek");
+    if windows {
+        // A shell started from the Start menu has the PATH of whatever started that; a terminal
+        // has the one Windows would give a new session (and `login_path` adds agent CLIs' folders).
+        cmd.env("PATH", trek_core::detect::login_path());
+    }
+    cmd.cwd(shell_cwd(cwd, flavor, windows, trek_core::paths::home()));
+    cmd
+}
+
+/// What a key press does in the terminal besides going to the shell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Shortcut {
+    Paste,
+    /// Clear the screen (Ctrl+L, which the shell understands).
+    Clear,
+    /// Not the terminal's: the app's shortcuts get it.
+    PassThrough,
+}
+
+/// The terminal's shortcuts. On a Mac they're Cmd+V and Cmd+K, and every other Cmd key is the
+/// app's. Elsewhere `secondary` (Ctrl) is what the shell's own keys use (Ctrl+C is interrupt,
+/// Ctrl+V is PowerShell's paste, which reads the clipboard itself), so the terminal doesn't take
+/// it as the app's: pasting is Ctrl+Shift+V or Shift+Insert, as in Windows Terminal. There's no
+/// Ctrl+Shift+C: the panel has no selection to copy, and it mustn't turn into Ctrl+C.
+fn shortcut(key: &str, m: &Modifiers, windows: bool) -> Option<Shortcut> {
+    if !windows {
+        return m.platform.then(|| match key {
+            "v" => Shortcut::Paste,
+            "k" => Shortcut::Clear,
+            _ => Shortcut::PassThrough,
+        });
+    }
+    match key {
+        _ if m.platform => Some(Shortcut::PassThrough),
+        "v" if m.control && m.shift && !m.alt => Some(Shortcut::Paste),
+        "insert" if m.shift && !m.control && !m.alt => Some(Shortcut::Paste),
+        "c" if m.control && m.shift && !m.alt => Some(Shortcut::PassThrough),
+        _ => None,
+    }
+}
+
+/// What to write to the shell for pasted `text`: wrapped when it asked for bracketed paste, and
+/// on Windows with line ends as Enter (CR) like a typed line, not the clipboard's CRLF.
+fn paste_bytes(text: &str, bracketed: bool, windows: bool) -> String {
+    let text = if windows { text.replace("\r\n", "\r").replace('\n', "\r") } else { text.to_string() };
+    if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text }
+}
+
 pub struct TerminalPanel {
     parser: Screen,
     writer: Option<Box<dyn Write + Send>>,
@@ -124,20 +300,8 @@ impl TerminalPanel {
 
     fn spawn(&mut self, cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let pty = native_pty_system().openpty(PtySize { rows: self.size.0, cols: self.size.1, pixel_width: 0, pixel_height: 0 })?;
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let mut cmd = CommandBuilder::new(shell);
-        cmd.arg("-l");
-        if let Some(c) = &command {
-            let quoted = format!("'{}'", c.replace('\'', "'\\''"));
-            cmd.arg("-c");
-            cmd.arg(format!(
-                "printf '\\033[1m$ %s\\033[0m\\n\\n' {quoted}; {c}; code=$?; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $code; exit $code"
-            ));
-        }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "Trek");
-        cmd.cwd(cwd.unwrap_or_else(trek_core::paths::home));
+        // Read when a terminal opens, so a change in settings applies to the next one.
+        let cmd = shell_command(&trek_core::settings::Settings::load().terminal.shell, cwd, command.as_deref());
         let mut child = pty.slave.spawn_command(cmd)?;
         let reader = pty.master.try_clone_reader()?;
         self.writer = Some(pty.master.take_writer()?);
@@ -192,18 +356,16 @@ impl TerminalPanel {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let m = &k.modifiers;
-        if m.platform {
-            match k.key.as_str() {
-                "v" => {
+        if let Some(shortcut) = shortcut(&k.key, m, cfg!(windows)) {
+            match shortcut {
+                Shortcut::Paste => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                        let paste = if self.screen().screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text };
-                        self.write(paste.as_bytes());
+                        let bracketed = self.screen().screen().bracketed_paste();
+                        self.write(paste_bytes(&text, bracketed, cfg!(windows)).as_bytes());
                     }
                 }
-                "k" => {
-                    self.write(b"\x0c");
-                }
-                _ => return, // let app shortcuts through
+                Shortcut::Clear => self.write(b"\x0c"),
+                Shortcut::PassThrough => return, // let app shortcuts through
             }
             cx.stop_propagation();
             return;
@@ -365,8 +527,116 @@ impl Render for TerminalPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Screen, pump};
+    use super::{Flavor, Screen, Shortcut, choose_shell, flavor, paste_bytes, plain_path, powershell_quote, pump, shell_args, shell_cwd, shortcut};
+    use gpui_kit::Modifiers;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    fn found(names: &'static [&'static str]) -> impl Fn(&str) -> Option<PathBuf> {
+        move |n| names.contains(&n).then(|| PathBuf::from(format!(r"C:\bin\{n}.exe")))
+    }
+
+    #[test]
+    fn windows_picks_pwsh_then_windows_powershell_then_comspec() {
+        let pick = |names, comspec| choose_shell("", None, true, found(names), comspec);
+        assert_eq!(pick(&["pwsh", "powershell"], Some(r"C:\Windows\System32\cmd.exe")), r"C:\bin\pwsh.exe");
+        assert_eq!(pick(&["powershell"], Some(r"C:\Windows\System32\cmd.exe")), r"C:\bin\powershell.exe");
+        assert_eq!(pick(&[], Some(r"C:\Windows\System32\cmd.exe")), r"C:\Windows\System32\cmd.exe");
+        assert_eq!(pick(&[], Some("")), "cmd.exe", "an empty COMSPEC is no COMSPEC");
+        assert_eq!(pick(&[], None), "cmd.exe");
+    }
+
+    #[test]
+    fn a_mac_keeps_its_login_shell_and_the_setting_overrides_either() {
+        assert_eq!(choose_shell("", Some("/opt/homebrew/bin/fish"), false, found(&["pwsh"]), None), "/opt/homebrew/bin/fish");
+        assert_eq!(choose_shell("", None, false, found(&[]), None), "/bin/zsh");
+        // A name is looked up; a path, quoted or not, is taken as it is; a name nothing has stays a name.
+        assert_eq!(choose_shell("pwsh", Some("/bin/zsh"), false, found(&["pwsh"]), None), r"C:\bin\pwsh.exe");
+        assert_eq!(choose_shell(r#" "D:\tools\nu.exe" "#, None, true, found(&["pwsh"]), None), r"D:\tools\nu.exe");
+        assert_eq!(choose_shell("nu", None, true, found(&[]), None), "nu");
+    }
+
+    #[test]
+    fn the_shell_kind_comes_from_its_name_on_windows_only() {
+        assert_eq!(flavor(r"C:\Program Files\PowerShell\7\pwsh.exe", true), Flavor::PowerShell);
+        assert_eq!(flavor("PowerShell.EXE", true), Flavor::PowerShell);
+        assert_eq!(flavor(r"C:\Windows\System32\cmd.exe", true), Flavor::Cmd);
+        assert_eq!(flavor(r"C:\Program Files\Git\bin\bash.exe", true), Flavor::Posix);
+        assert_eq!(flavor("/usr/local/bin/pwsh", false), Flavor::Posix);
+    }
+
+    #[test]
+    fn each_kind_of_shell_gets_its_own_arguments() {
+        // macOS: exactly what it always was.
+        assert_eq!(shell_args(Flavor::Posix, None), ["-l"]);
+        assert_eq!(
+            shell_args(Flavor::Posix, Some("echo 'hi'")),
+            [
+                "-l",
+                "-c",
+                r"printf '\033[1m$ %s\033[0m\n\n' 'echo '\''hi'\'''; echo 'hi'; code=$?; printf '\n\033[2m[finished with exit code %s]\033[0m\n' $code; exit $code"
+            ]
+        );
+        // PowerShell has no login flag.
+        assert_eq!(shell_args(Flavor::PowerShell, None), ["-NoLogo"]);
+        let ps = shell_args(Flavor::PowerShell, Some("winget install it's"));
+        assert_eq!((ps[0].as_str(), ps[1].as_str()), ("-NoLogo", "-Command"));
+        assert!(ps[2].starts_with("Write-Host '$ winget install it''s'; "), "{}", ps[2]);
+        assert!(ps[2].contains("; winget install it's; $ok = $?;"), "{}", ps[2]);
+        assert!(shell_args(Flavor::Cmd, None).is_empty());
+        assert_eq!(shell_args(Flavor::Cmd, Some("dir")).first().map(String::as_str), Some("/c"));
+    }
+
+    #[test]
+    fn powershell_quoting_doubles_every_kind_of_single_quote() {
+        assert_eq!(powershell_quote("plain"), "'plain'");
+        assert_eq!(powershell_quote("it's"), "'it''s'");
+        assert_eq!(powershell_quote("a $b `c \"d\""), "'a $b `c \"d\"'", "nothing else is special in single quotes");
+        assert_eq!(powershell_quote("\u{2018}x\u{2019}"), "'\u{2018}\u{2018}x\u{2019}\u{2019}'");
+    }
+
+    #[test]
+    fn the_shell_starts_in_a_plain_folder() {
+        let home = PathBuf::from(r"C:\Users\me");
+        assert_eq!(plain_path(PathBuf::from(r"\\?\C:\code\app")), PathBuf::from(r"C:\code\app"));
+        assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\nas\share\app")), PathBuf::from(r"\\nas\share\app"));
+        assert_eq!(plain_path(PathBuf::from(r"\\?\Volume{1234}\x")), PathBuf::from(r"\\?\Volume{1234}\x"), "only a drive or share path has a plain form");
+        assert_eq!(plain_path(PathBuf::from(r"C:\code")), PathBuf::from(r"C:\code"));
+        let verbatim = Some(PathBuf::from(r"\\?\C:\code\app"));
+        assert_eq!(shell_cwd(verbatim.clone(), Flavor::PowerShell, true, home.clone()), PathBuf::from(r"C:\code\app"));
+        assert_eq!(shell_cwd(None, Flavor::Cmd, true, home.clone()), home);
+        // A network folder is fine for PowerShell, and not for cmd.exe.
+        let unc = Some(PathBuf::from(r"\\nas\share\app"));
+        assert_eq!(shell_cwd(unc.clone(), Flavor::PowerShell, true, home.clone()), PathBuf::from(r"\\nas\share\app"));
+        assert_eq!(shell_cwd(Some(PathBuf::from(r"\\?\UNC\nas\share\app")), Flavor::Cmd, true, home.clone()), home);
+        // Off Windows nothing is rewritten.
+        assert_eq!(shell_cwd(verbatim.clone(), Flavor::Posix, false, home), verbatim.unwrap());
+    }
+
+    #[test]
+    fn paste_keys_leave_ctrl_v_to_the_shell() {
+        let keys = |control, shift, platform| Modifiers { control, shift, platform, ..Default::default() };
+        // Windows: Ctrl+Shift+V and Shift+Insert paste; Ctrl+V is the shell's, and so are Ctrl+C and the Win key's.
+        assert_eq!(shortcut("v", &keys(true, true, false), true), Some(Shortcut::Paste));
+        assert_eq!(shortcut("insert", &keys(false, true, false), true), Some(Shortcut::Paste));
+        assert_eq!(shortcut("v", &keys(true, false, false), true), None);
+        assert_eq!(shortcut("c", &keys(true, false, false), true), None, "Ctrl+C interrupts");
+        assert_eq!(shortcut("c", &keys(true, true, false), true), Some(Shortcut::PassThrough), "no selection to copy, and it isn't an interrupt");
+        assert_eq!(shortcut("v", &keys(false, false, true), true), Some(Shortcut::PassThrough));
+        assert_eq!(shortcut("a", &keys(false, false, false), true), None);
+        // macOS: Cmd+V pastes, Cmd+K clears, the rest of Cmd is the app's, Ctrl is the shell's.
+        assert_eq!(shortcut("v", &keys(false, false, true), false), Some(Shortcut::Paste));
+        assert_eq!(shortcut("k", &keys(false, false, true), false), Some(Shortcut::Clear));
+        assert_eq!(shortcut("t", &keys(false, false, true), false), Some(Shortcut::PassThrough));
+        assert_eq!(shortcut("v", &keys(true, false, false), false), None);
+    }
+
+    #[test]
+    fn pasted_text_is_bracketed_when_asked_and_enters_as_cr_on_windows() {
+        assert_eq!(paste_bytes("a\nb", false, false), "a\nb", "a Mac is untouched");
+        assert_eq!(paste_bytes("a\r\nb\nc", false, true), "a\rb\rc");
+        assert_eq!(paste_bytes("ls", true, true), "\x1b[200~ls\x1b[201~");
+    }
 
     #[test]
     fn a_flood_of_output_is_parsed_off_the_main_thread_with_one_wake_up() {
@@ -392,5 +662,96 @@ mod tests {
         drop(rx);
         // An endless stream: `pump` returns because nothing listens any more.
         pump(std::io::repeat(b'y'), &screen, &tx);
+    }
+
+    /// The shell, in a real pseudo-terminal (ConPTY), as the panel starts it.
+    #[cfg(windows)]
+    mod conpty {
+        use super::super::{Screen, pump, shell_command};
+        use portable_pty::{PtySize, native_pty_system};
+        use std::io::Write as _;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        /// Starts `setting`'s shell running `command` (if any) in a temp folder, types `input`
+        /// (if any), and returns the screen once `done` likes it, or after 20 s. The shell is
+        /// killed afterwards.
+        fn run(setting: &str, command: Option<&str>, input: Option<&str>, done: impl Fn(&str) -> bool) -> String {
+            let dir = std::env::temp_dir().join(format!("trek-terminal-test-{}-{}", std::process::id(), setting.replace(|c: char| !c.is_ascii_alphanumeric(), "_")));
+            std::fs::create_dir_all(&dir).unwrap();
+            let pty = native_pty_system().openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).unwrap();
+            let mut child = pty.slave.spawn_command(shell_command(setting, Some(dir.clone()), command)).unwrap();
+            let reader = pty.master.try_clone_reader().unwrap();
+            let mut writer = pty.master.take_writer().unwrap();
+            let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(30, 100, 0)));
+            let (tx, _rx) = async_channel::bounded::<()>(1);
+            let pumped = screen.clone();
+            std::thread::spawn(move || pump(reader, &pumped, &tx));
+            if let Some(input) = input {
+                // The shell reads keys once it has started: wait for its first output (a prompt).
+                let start = Instant::now();
+                while screen.lock().unwrap().screen().contents().trim().is_empty() && start.elapsed() < Duration::from_secs(20) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                writer.write_all(input.as_bytes()).unwrap();
+                writer.flush().unwrap();
+            }
+            let start = Instant::now();
+            let mut text = String::new();
+            while start.elapsed() < Duration::from_secs(20) {
+                text = screen.lock().unwrap().screen().contents();
+                if done(&text) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(pty.master);
+            let _ = std::fs::remove_dir_all(&dir);
+            text
+        }
+
+        fn has_line(text: &str, line: &str) -> bool {
+            text.lines().any(|l| l.trim() == line)
+        }
+
+        #[test]
+        fn the_chosen_shell_runs_what_is_typed_into_it() {
+            // The typed line is on the screen too ("PS C:\> echo trek-ok"): the output is a line of its own.
+            let text = run("", None, Some("echo trek-ok\r"), |t| has_line(t, "trek-ok"));
+            assert!(has_line(&text, "trek-ok"), "no output from the shell:\n{text}");
+        }
+
+        #[test]
+        fn the_shell_starts_in_the_folder_it_was_given() {
+            let text = run("", None, Some("echo trek-ok\r"), |t| has_line(t, "trek-ok"));
+            assert!(text.contains("trek-terminal-test-"), "no prompt in the folder:\n{text}");
+        }
+
+        #[test]
+        fn a_command_runs_in_each_shell_and_ends_with_its_exit_code() {
+            for (name, command, shows) in [
+                ("pwsh", "Write-Output 'it''s trek'", "it's trek"),
+                ("powershell", "Write-Output 'it''s trek'", "it's trek"),
+                ("cmd", "echo it's trek", "it's trek"),
+            ] {
+                if trek_core::detect::which(name).is_none() {
+                    eprintln!("{name} isn't installed here; skipped");
+                    continue;
+                }
+                let text = run(name, Some(command), None, |t| t.contains("[finished with exit code"));
+                assert!(has_line(&text, shows), "{name}: the command's output is missing:\n{text}");
+                assert!(text.contains("[finished with exit code 0]") || name == "cmd", "{name}: no exit code:\n{text}");
+            }
+        }
+
+        #[test]
+        fn a_failing_native_command_reports_its_code_in_powershell() {
+            let Some(name) = ["pwsh", "powershell"].into_iter().find(|n| trek_core::detect::which(n).is_some()) else { return };
+            let text = run(name, Some("cmd /c exit 3"), None, |t| t.contains("[finished with exit code"));
+            assert!(text.contains("[finished with exit code 3]"), "{text}");
+        }
     }
 }
