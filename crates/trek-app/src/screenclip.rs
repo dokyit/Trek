@@ -287,7 +287,8 @@ mod real {
     pub struct Guard;
 
     impl Guard {
-        /// `None` when another program has the clipboard open.
+        /// `None` when another program has the clipboard open through a window (as one writing to it
+        /// does). Without a window of its own this gets through while others read it the same way.
         pub fn open() -> Option<Self> {
             // SAFETY: no owner window; paired with the `CloseClipboard` in `drop`.
             unsafe { OpenClipboard(None).ok().map(|()| Guard) }
@@ -352,17 +353,33 @@ mod real {
         use super::{Clipboard, Guard};
         use crate::screenclip::Source as _;
         use std::time::{Duration, Instant};
+        use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE};
+        use windows::core::w;
 
-        /// Opened for a moment, whoever else might be looking (a clipboard manager does).
-        fn can_open() -> bool {
-            let until = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < until {
-                if Guard::open().is_some() {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(50));
+        /// Opened for a moment within `within`, whoever else might be looking (a clipboard manager
+        /// does). Through a window of its own: Windows lets an `OpenClipboard(NULL)` through while the
+        /// clipboard is open without a window (as `Guard` leaves it), from any thread, so only an
+        /// open with a window can tell that a `Guard` was never closed.
+        fn opens_with_a_window(within: Duration) -> bool {
+            // SAFETY: a message-only window of a system class, made and destroyed on this thread;
+            // the clipboard is only opened and closed, never emptied or written.
+            unsafe {
+                let window = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), None, WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None).expect("a message-only window");
+                let until = Instant::now() + within;
+                let opened = loop {
+                    if OpenClipboard(Some(window)).is_ok() {
+                        let _ = CloseClipboard();
+                        break true;
+                    }
+                    if Instant::now() >= until {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                };
+                let _ = DestroyWindow(window);
+                opened
             }
-            false
         }
 
         #[test]
@@ -373,7 +390,25 @@ mod real {
                 let _ = clipboard.sequence();
                 let _ = clipboard.read();
             }
-            assert!(can_open(), "the clipboard stayed open after a read");
+            assert!(opens_with_a_window(Duration::from_secs(5)), "the clipboard stayed open after a read");
+        }
+
+        #[test]
+        fn a_clipboard_left_open_would_be_noticed() {
+            // The check above, against a clipboard held open: it must say so. (Only opens it, for a
+            // moment; when another program has it for seconds there is nothing to show.)
+            let until = Instant::now() + Duration::from_secs(5);
+            let open = loop {
+                if let Some(open) = Guard::open() {
+                    break open;
+                }
+                if Instant::now() >= until {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            assert!(!opens_with_a_window(Duration::from_millis(200)), "a window opened the clipboard while a Guard held it");
+            drop(open);
         }
     }
 }
