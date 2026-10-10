@@ -54,6 +54,7 @@ mod tray;
 mod ui;
 mod updater;
 mod visualization;
+mod window_place;
 mod workspace;
 mod working_bar;
 mod worktree_ui;

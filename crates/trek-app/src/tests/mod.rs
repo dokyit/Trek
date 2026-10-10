@@ -25,6 +25,7 @@ mod mcp;
 mod motion;
 mod orchestrate;
 mod palette;
+mod placement;
 mod preview;
 mod pstack;
 mod readability;
