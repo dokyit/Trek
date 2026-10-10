@@ -7,7 +7,7 @@
 //! claude:   plan | keep-planning | question | cancel | interrupt | steer | lost-session
 //! both:     rewind | fork (`claude` or `codex`)
 //!
-//! Each scenario works in its own folder under /tmp/trek-agents-e2e (or `$TREK_E2E_DIR`), keeps
+//! Each scenario works in its own folder under `trek-agents-e2e` in the temp folder (or `$TREK_E2E_DIR`), keeps
 //! what Trek would save there too, and exits non-zero when a check fails.
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -143,7 +143,7 @@ fn check(ok: bool, what: &str) {
 }
 
 fn base() -> PathBuf {
-    PathBuf::from(std::env::var("TREK_E2E_DIR").unwrap_or_else(|_| "/tmp/trek-agents-e2e".into()))
+    std::env::var_os("TREK_E2E_DIR").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("trek-agents-e2e"))
 }
 
 fn folder(name: &str) -> PathBuf {
@@ -199,10 +199,11 @@ const RECALL: &str = "List every word I asked you to remember, comma separated, 
 /// point just after the first turn.
 async fn two_words(agent: &AgentId, model: &str, cwd: &Path) -> (String, String) {
     let mut s = Session::start(agent.clone(), cwd, model, HandHolding::Supervised, false, None);
-    s.prompt("Remember the word APPLE. Reply with just OK.").await;
+    // Not saved to the agent's memory: that would outlive the session being cut back.
+    s.prompt("Just for this conversation (don't save it to memory or to any file), remember the word APPLE. Reply with just OK.").await;
     check(s.turn(180).await.is_none(), "first turn");
     let first = s.mark().unwrap_or_else(|| fail("no point to take the session back to"));
-    s.prompt("Also remember the word BANANA. Reply with just OK.").await;
+    s.prompt("Just for this conversation (don't save it to memory or to any file), also remember the word BANANA. Reply with just OK.").await;
     check(s.turn(180).await.is_none(), "second turn");
     check(s.mark().is_some_and(|m| m != first), "the second turn moved the point on");
     let id = s.native_id();
@@ -264,7 +265,8 @@ async fn approvals(agent: AgentId, model: &str, name: &str) {
     let decisions = [Decision::Allow, Decision::Deny, Decision::AllowForSession];
     for (i, file) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
         // OpenCode ends its turn when a call is rejected, so each write is its own turn.
-        s.prompt(&format!("Run the shell command `touch {file}` (it needs your approval). If it's refused, don't retry; just reply with one word: done.")).await;
+        // `echo ok > file` is a command in both sh and PowerShell (`touch` is only the former).
+        s.prompt(&format!("Run the shell command `echo ok > {file}` (it needs your approval). If it's refused, don't retry; just reply with one word: done.")).await;
         let (rid, title, detail, _) = s.permission(180).await;
         check(title == "Run command" && detail.contains(file), &format!("asks to run `{detail}`"));
         s.send(Command::Respond { request_id: rid, decision: decisions[i] }).await;
@@ -485,7 +487,7 @@ async fn claude_question() {
 async fn claude_cancel() {
     let cwd = folder("claude-cancel");
     let mut s = Session::start(AgentId::ClaudeCode, &cwd, CLAUDE, HandHolding::Supervised, false, None);
-    s.prompt("Run the shell command `touch cancel.txt`, then reply: done").await;
+    s.prompt("Run the shell command `echo ok > cancel.txt`, then reply: done").await;
     let (rid, title, _, _) = s.permission(180).await;
     check(title == "Run command", "asks to run the command");
     s.send(Command::Interrupt).await;

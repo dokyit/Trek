@@ -751,7 +751,9 @@ fn live_rewind_and_fork() {
 
 /// One turn with the real OpenCode through the app: it answers and the thread settles. Not run by
 /// default (one tiny turn on a free model): `TREK_LIVE_AGENT=opencode cargo test -p trek-app
-/// live_opencode -- --ignored`, with `TREK_LIVE_OPENCODE_MODEL` to pick another model.
+/// live_opencode -- --ignored`, with `TREK_LIVE_OPENCODE_MODEL` to pick another model. Needs a
+/// model OpenCode can use here (`opencode run -m <model> hi` answers): when it can't, OpenCode
+/// ends the turn over ACP with zero tokens and no words, and this fails on the empty reply.
 #[test]
 #[ignore = "live: runs a real agent"]
 fn live_opencode_turn() {
