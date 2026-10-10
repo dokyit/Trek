@@ -1594,7 +1594,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "named zones (America/New_York) come with chrono-tz in Phase 2")]
     fn a_usage_limit_is_one_limit_event_with_its_reset() {
         // The stream as Claude Code 2.1.287 sends it at a session limit: a rejected
         // `rate_limit_event`, its own message (no model behind it), and an error result. The

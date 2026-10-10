@@ -289,85 +289,27 @@ fn parse_clock(w: &str, next: Option<&str>) -> Option<(NaiveTime, usize)> {
     Some((NaiveTime::from_hms_opt(h, m, 0)?, used))
 }
 
-/// A zone's UTC offset in seconds at `at` (unix ms): the Mac's own for `None` or its own name,
-/// UTC, else from the system's zone database.
+/// A zone's UTC offset in seconds at `at` (unix ms): the machine's own for `None` or its own name,
+/// UTC, else the bundled IANA database's. A name that isn't in it (anything an agent's message
+/// might say) is no zone.
 fn system_offset(zone: Option<&str>, at: i64) -> Option<i32> {
     let local = || chrono::Local.timestamp_millis_opt(at).single().map(|d| d.offset().fix().local_minus_utc());
     match zone {
         None => local(),
         Some("UTC" | "GMT" | "Z" | "utc") => Some(0),
         Some(name) if Some(name) == local_zone_name().as_deref() => local(),
-        Some(name) => tzif_offset(&read_zone(name)?, at / 1000),
+        Some(name) => {
+            let tz: chrono_tz::Tz = name.parse().ok()?;
+            let utc = chrono::DateTime::from_timestamp_millis(at)?.naive_utc();
+            Some(tz.offset_from_utc_datetime(&utc).fix().local_minus_utc())
+        }
     }
 }
 
-/// The TZif file of zone `name` ("America/New_York"). The name comes from an agent's message, so
-/// only a plain name inside the zone database is read, and only as much as a zone file holds.
-fn read_zone(name: &str) -> Option<Vec<u8>> {
-    use std::io::Read as _;
-    let plain = !name.starts_with(['/', '.', '-', '+'])
-        && !name.contains("..")
-        && name.split('/').all(|part| !part.is_empty())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'));
-    if !plain {
-        return None;
-    }
-    let path = std::path::Path::new("/usr/share/zoneinfo").join(name);
-    // A regular file: not a device, a pipe or a folder.
-    if !std::fs::symlink_metadata(&path).ok()?.is_file() {
-        return None;
-    }
-    const MAX: u64 = 256 * 1024;
-    let mut data = vec![];
-    std::fs::File::open(&path).ok()?.take(MAX).read_to_end(&mut data).ok()?;
-    Some(data)
-}
-
-/// The Mac's zone name ("Europe/Berlin"), from where /etc/localtime points.
+/// The machine's zone name ("Europe/Berlin"): where /etc/localtime points on a Mac, the registry
+/// on Windows.
 fn local_zone_name() -> Option<String> {
-    let target = std::fs::read_link("/etc/localtime").ok()?;
-    let s = target.to_string_lossy();
-    s.split_once("zoneinfo/").map(|(_, z)| z.to_string())
-}
-
-/// The UTC offset a TZif file gives at `t` (unix seconds): the type of the last transition at
-/// or before it. Reads the 64-bit block of version 2+ files, else the 32-bit one.
-fn tzif_offset(data: &[u8], t: i64) -> Option<i32> {
-    let header = |at: usize| -> Option<[usize; 6]> {
-        if data.get(at..at + 4)? != b"TZif" {
-            return None;
-        }
-        let mut counts = [0usize; 6];
-        for (k, c) in counts.iter_mut().enumerate() {
-            let o = at + 20 + k * 4;
-            *c = u32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?) as usize;
-        }
-        Some(counts)
-    };
-    let [isut, isstd, leap, time, types, chars] = header(0)?;
-    let v1_len = time * 5 + types * 6 + chars + leap * 8 + isstd + isut;
-    let (start, width, [_, _, _, time, types, _]) = match data.get(4) {
-        Some(b'2'..=b'9') => (44 + v1_len + 44, 8, header(44 + v1_len)?),
-        _ => (44, 4, [isut, isstd, leap, time, types, chars]),
-    };
-    let read_time = |k: usize| -> Option<i64> {
-        let o = start + k * width;
-        Some(if width == 8 { i64::from_be_bytes(data.get(o..o + 8)?.try_into().ok()?) } else { i32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?) as i64 })
-    };
-    let idx_at = start + time * width;
-    let types_at = idx_at + time;
-    let mut ty = 0usize;
-    for k in 0..time {
-        if read_time(k)? > t {
-            break;
-        }
-        ty = *data.get(idx_at + k)? as usize;
-    }
-    if ty >= types {
-        return None;
-    }
-    let o = types_at + ty * 6;
-    Some(i32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?))
+    iana_time_zone::get_timezone().ok()
 }
 
 /// Whether usage window `l` holds back a thread on `model` that a limit in `scope` stopped. The
@@ -631,15 +573,27 @@ mod tests {
     }
 
     #[test]
+    fn a_zones_offset_follows_its_daylight_saving_change() {
+        // New York went from UTC-5 to UTC-4 at 2026-03-08 07:00 UTC, and back at 2026-11-01 06:00 UTC.
+        let ny = Some("America/New_York");
+        assert_eq!(system_offset(ny, ms("2026-03-08T06:59:59Z")), Some(-5 * 3600));
+        assert_eq!(system_offset(ny, ms("2026-03-08T07:00:00Z")), Some(-4 * 3600));
+        assert_eq!(system_offset(ny, ms("2026-11-01T05:59:59Z")), Some(-4 * 3600));
+        assert_eq!(system_offset(ny, ms("2026-11-01T06:00:00Z")), Some(-5 * 3600));
+        // A reset time read in the zone lands on the right side of the change.
+        let message = "You've hit your limit - resets 7:40pm (America/New_York)";
+        assert_eq!(reset_in(message, ms("2026-11-01T04:00:00Z"), &system_offset), Some(ms("2026-11-02T00:40:00Z")), "7:40pm EST after the fall change");
+        assert_eq!(reset_in(message, ms("2026-03-08T04:00:00Z"), &system_offset), Some(ms("2026-03-08T23:40:00Z")), "7:40pm EDT after the spring change");
+    }
+
+    #[test]
     fn the_systems_zone_database_is_read() {
         // Berlin is UTC+2 in summer time and UTC+1 in winter.
         let summer = ms("2026-07-01T12:00:00Z");
         let winter = ms("2026-12-01T12:00:00Z");
-        if std::path::Path::new("/usr/share/zoneinfo/Europe/Berlin").exists() {
-            assert_eq!(system_offset(Some("Europe/Berlin"), summer), Some(7200));
-            assert_eq!(system_offset(Some("Europe/Berlin"), winter), Some(3600));
-            assert_eq!(system_offset(Some("Asia/Kolkata"), winter), Some(19_800));
-        }
+        assert_eq!(system_offset(Some("Europe/Berlin"), summer), Some(7200));
+        assert_eq!(system_offset(Some("Europe/Berlin"), winter), Some(3600));
+        assert_eq!(system_offset(Some("Asia/Kolkata"), winter), Some(19_800));
         assert_eq!(system_offset(Some("UTC"), winter), Some(0));
         assert_eq!(system_offset(Some("../../etc/passwd"), winter), None);
         // Agent text names no file outside the zone database, and no device or folder in it.
