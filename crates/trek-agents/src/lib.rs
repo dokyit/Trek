@@ -15,6 +15,8 @@ mod opencode;
 mod status;
 #[cfg(test)]
 mod tests_stop;
+#[cfg(all(test, windows))]
+mod tests_cmd_args;
 
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
