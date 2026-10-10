@@ -56,6 +56,14 @@ pub struct Words {
     pub window_shadow_note: &'static str,
     pub screen_recording_label: &'static str,
     pub screen_recording_note: &'static str,
+
+    /// The preview's button for a file's own app: Preview on a Mac (which also opens PDFs and
+    /// photos), whatever the system opens that kind of file with on Windows.
+    pub open_in_viewer: &'static str,
+
+    /// The mic button's tip. Windows has its own dictation, so there the button is left out and
+    /// the tip is the way to it.
+    pub dictate_tip: &'static str,
 }
 
 const MACOS: Words = Words {
@@ -92,6 +100,10 @@ const MACOS: Words = Words {
     window_shadow_note: "Keep macOS's drop shadow around window snapshots.",
     screen_recording_label: "Screen Recording",
     screen_recording_note: "macOS asks once; snapshots of other apps need it.",
+
+    open_in_viewer: "Open in Preview",
+
+    dictate_tip: "Dictate",
 };
 
 const WINDOWS: Words = Words {
@@ -129,6 +141,10 @@ const WINDOWS: Words = Words {
     window_shadow_note: "Keep the window's own drop shadow around window snapshots.",
     screen_recording_label: "Screen capture",
     screen_recording_note: "Windows doesn't ask; snapshots of other apps just work.",
+
+    open_in_viewer: "Open in default app",
+
+    dictate_tip: "Press Win+H to dictate",
 };
 
 /// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
@@ -153,6 +169,12 @@ thread_local! {
     /// The platform a test is pretending to be on, so one run sees both tables (each GPUI test
     /// runs on its own thread).
     static PRETEND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether the platform whose words `words()` gives is Windows: for what a Mac has and Windows
+/// hasn't (the iOS Simulator), which the table can't hold as a word.
+pub fn is_windows() -> bool {
+    std::ptr::eq(words(), &WIN)
 }
 
 /// Until the guard drops, `words()` answers for Windows (`true`) or the Mac (`false`).
@@ -197,6 +219,8 @@ mod tests {
             window_shadow_note,
             screen_recording_label,
             screen_recording_note,
+            open_in_viewer,
+            dictate_tip,
         } = *w;
         vec![
             ("os_name", os_name),
@@ -223,6 +247,8 @@ mod tests {
             ("window_shadow_note", window_shadow_note),
             ("screen_recording_label", screen_recording_label),
             ("screen_recording_note", screen_recording_note),
+            ("open_in_viewer", open_in_viewer),
+            ("dictate_tip", dictate_tip),
         ]
     }
 
@@ -269,6 +295,8 @@ mod tests {
         assert_eq!(w.the_computer, "the Mac");
         assert_eq!(w.keep_awake_label, "Keep the Mac awake while agents work");
         assert_eq!(w.firewall_note, None, "the Mac's Phone page says nothing of a firewall");
+        assert_eq!(w.open_in_viewer, "Open in Preview");
+        assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(
             w.api_keys_blurb,
             "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically."
@@ -285,6 +313,8 @@ mod tests {
         assert_eq!(w.badge_label, "Taskbar badge");
         assert_eq!(w.tray_label, "System tray icon");
         assert!(w.firewall_note.is_some_and(|n| n.contains("Windows Firewall") && n.contains("private networks")));
+        assert_eq!(w.open_in_viewer, "Open in default app", "Windows has no Preview, or Quick Look");
+        assert_eq!(w.dictate_tip, "Press Win+H to dictate");
         assert_eq!(format!("Saved in {}", w.your_credential_store), "Saved in Windows Credential Manager");
         assert_eq!(format!("Runs on {}, nothing is billed", w.this_computer), "Runs on this PC, nothing is billed");
     }
@@ -292,6 +322,16 @@ mod tests {
     #[test]
     fn this_platform_gets_its_own_table() {
         assert_eq!(*words(), for_platform(cfg!(windows)));
+        assert_eq!(is_windows(), cfg!(windows));
+    }
+
+    #[test]
+    fn a_test_can_pretend_to_be_either_platform() {
+        for windows in [true, false] {
+            let _guard = pretend(windows);
+            assert_eq!(is_windows(), windows);
+            assert_eq!(*words(), for_platform(windows));
+        }
     }
 
     /// What no visible string may spell out: each has a field in the table, so a hard-coded one is

@@ -2013,7 +2013,8 @@ impl Render for Composer {
                 .into_any_element()
         };
 
-        // The mic takes dictation when the bundle can ask for it (see dictate::available).
+        // The mic takes dictation when the bundle can ask for it (see dictate::available). Windows
+        // has no mic button: Win+H is its own dictation, which types into the input.
         let dictating = self.dictation.as_ref();
         let mic = dictate::available().then(|| {
             let recording = dictating.is_some_and(|d| d.recording());
@@ -2023,7 +2024,7 @@ impl Render for Composer {
                 .cursor_pointer()
                 .when(recording, |el| el.bg(palette::red(cx)))
                 .tooltip({
-                    let tip = if recording { "Stop and transcribe" } else if transcribing { "Transcribing…" } else { "Dictate" };
+                    let tip = if recording { "Stop and transcribe" } else if transcribing { "Transcribing…" } else { crate::words::words().dictate_tip };
                     move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
                 })
                 .child(if transcribing {

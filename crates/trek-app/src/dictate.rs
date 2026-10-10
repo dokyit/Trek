@@ -196,8 +196,14 @@ mod imp {
 mod imp {
     use super::*;
 
-    /// Dictation is macOS-only for now.
+    /// Dictation in Trek is macOS-only for now; Windows has its own (Win+H), which needs nothing
+    /// from Trek.
     pub struct Dictation;
+
+    /// What a dictation asked for says: on Windows the way to its own, else that it isn't here.
+    fn unavailable() -> String {
+        if cfg!(windows) { format!("{}.", crate::words::words().dictate_tip) } else { "Dictation is macOS-only for now.".into() }
+    }
 
     impl Dictation {
         pub fn recording(&self) -> bool {
@@ -208,7 +214,7 @@ mod imp {
 
     #[cfg(feature = "shots")]
     pub fn transcribe_file(_: std::path::PathBuf, _: Sender<Result<String, String>>) -> Result<Dictation, String> {
-        Err("Dictation is macOS-only for now.".into())
+        Err(unavailable())
     }
 
     pub fn available() -> bool {
@@ -218,7 +224,22 @@ mod imp {
     pub fn ensure_permission(_: Sender<Result<(), String>>) {}
 
     pub fn start() -> Result<Dictation, String> {
-        Err("Dictation is macOS-only for now.".into())
+        Err(unavailable())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn windows_points_to_its_own_dictation() {
+            let said = super::unavailable();
+            if cfg!(windows) {
+                assert_eq!(said, "Press Win+H to dictate.");
+            } else {
+                assert_eq!(said, "Dictation is macOS-only for now.");
+            }
+            assert_eq!(super::start().err(), Some(said));
+            assert!(!super::available(), "no mic button here");
+        }
     }
 }
 
