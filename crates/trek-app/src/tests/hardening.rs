@@ -50,7 +50,8 @@ fn a_link_that_climbs_out_of_a_project_asks_too() {
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
 
-        // A symlink inside the project that leads out of it.
+        // A symlink inside the project that leads out of it. Making one needs a privilege
+        // Windows test runners don't have, so this step stays Unix-only.
         #[cfg(unix)]
         {
             let link = trek.project.join("out");
@@ -84,10 +85,11 @@ fn a_link_into_a_project_opens_without_asking() {
 
 #[cfg(unix)]
 /// The group `quitting_ends_the_process_groups_trek_started` started.
+#[cfg(unix)]
 static GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// `trek_core::procs::end_all` for that test alone: the registry is the whole process's, and other
-/// tests' children run in it too.
+/// tests' children run in it too. Process groups are a Unix thing; Windows ends trees by job.
 #[cfg(unix)]
 fn end_the_tests_group(_: Duration) {
     let group = GROUP.load(std::sync::atomic::Ordering::SeqCst);
@@ -101,7 +103,7 @@ fn quitting_ends_the_process_groups_trek_started() {
     use std::os::unix::process::CommandExt as _;
     run(async |cx| {
         let trek = open(cx);
-        let mut child = std::process::Command::new("/bin/sleep").arg("30").process_group(0).spawn().unwrap();
+        let mut child = std::process::Command::new(trek_test_fixtures::bin("fixture")).args(["sleep", "30"]).process_group(0).spawn().unwrap();
         GROUP.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
         trek.update(cx, |ws, _| ws.end_children_on_quit = Some(end_the_tests_group));
         // Quit as the Dock or a logout does: no Quit action first, straight to shutdown.

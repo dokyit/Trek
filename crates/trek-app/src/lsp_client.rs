@@ -869,8 +869,8 @@ mod tests {
 
     #[test]
     fn lsp_server_that_never_answers_is_ended_when_dropped() {
-        let mut command = Command::new("/bin/sleep");
-        command.arg("30");
+        let mut command = Command::new(trek_test_fixtures::bin("fixture"));
+        command.args(["sleep", "30"]);
         let client = Client::spawn(command, Path::new("/tmp"), "rust").unwrap();
         let pid = lock(&client.child).as_ref().unwrap().id() as i32;
         assert!(trek_core::procs::live().contains(&pid));

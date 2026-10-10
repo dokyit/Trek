@@ -110,6 +110,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Si
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::keys::{self, Id};
 use crate::palette;
 use crate::workspace::{FileReview, Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputState};
@@ -121,7 +122,7 @@ const MAX_FILE_BYTES: u64 = 2_000_000;
 actions!(trek_editor, [SaveFile, InlineEdit, KeepHunk, UndoHunk, NextHunk, PreviousHunk]);
 
 pub fn key_bindings() -> Vec<KeyBinding> {
-    vec![KeyBinding::new("cmd-s", SaveFile, Some("TrekEditor"))]
+    crate::keys::bindings(crate::keys::Group::Editor)
 }
 
 pub struct EditorView {
@@ -888,7 +889,7 @@ impl EditorView {
                 .cursor_pointer()
                 .text_size(px(12.))
         };
-        let kbd = |k: &'static str, c: Hsla| div().text_size(px(10.5)).text_color(c).child(k);
+        let kbd = |k: String, c: Hsla| div().text_size(px(10.5)).text_color(c).child(k);
         Some(
             h_flex()
                 .id("editor-hunk-bar")
@@ -932,7 +933,7 @@ impl EditorView {
                         .when(busy, |el| el.opacity(0.45).cursor_default())
                         .hover(|s| s.bg(theme.foreground.opacity(0.07)).text_color(theme.foreground))
                         .child("Undo")
-                        .child(kbd("⌥⌘⌫", theme.muted_foreground.opacity(0.7)))
+                        .child(kbd(keys::hint(Id::UndoHunk), theme.muted_foreground.opacity(0.7)))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(false, cx))),
                 )
                 .child(
@@ -941,7 +942,7 @@ impl EditorView {
                         .text_color(gpui_kit::white())
                         .hover(|s| s.opacity(0.9))
                         .child("Keep")
-                        .child(kbd("⌘Y", gpui_kit::white().opacity(0.75)))
+                        .child(kbd(keys::hint(Id::KeepHunk), gpui_kit::white().opacity(0.75)))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(true, cx))),
                 )
                 .into_any_element(),
@@ -1031,7 +1032,7 @@ impl EditorView {
         let (a, b) = card.lines;
         let which = if a == b { format!("Edit line {a}") } else { format!("Edit lines {a}–{b}") };
         let model = prefs.model.clone().unwrap_or_else(|| prefs.agent.display_name());
-        let kbd = |k: &'static str, label: &'static str| h_flex().gap(px(4.)).child(div().text_color(theme.foreground.opacity(0.8)).child(k)).child(label);
+        let kbd = |k: String, label: &'static str| h_flex().gap(px(4.)).child(div().text_color(theme.foreground.opacity(0.8)).child(k)).child(label);
         Some(
             v_flex()
                 .id("editor-inline")
@@ -1069,8 +1070,8 @@ impl EditorView {
                         .gap(px(12.))
                         .text_size(px(11.))
                         .text_color(theme.muted_foreground)
-                        .child(kbd("↵", "Run"))
-                        .child(kbd("Esc", "Cancel"))
+                        .child(kbd(keys::localize("↵").into_owned(), "Run"))
+                        .child(kbd("Esc".into(), "Cancel"))
                         .child(div().flex_1())
                         .child("The change comes back to keep or undo"),
                 )
@@ -1178,7 +1179,7 @@ impl Render for EditorView {
                         el.child(div().text_xs().text_color(palette::red(cx)).child(p))
                     })
                     .child(
-                        Button::new("editor-save").ghost().small().label("Save").tooltip("Save (⌘S)")
+                        Button::new("editor-save").ghost().small().label("Save").tooltip(keys::shared("Save (⌘S)"))
                             .when(!dirty, |b| b.disabled(true))
                             .on_click(cx.listener(|this, _, window, cx| this.save(&SaveFile, window, cx))),
                     )

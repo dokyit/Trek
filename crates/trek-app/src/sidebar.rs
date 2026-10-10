@@ -279,12 +279,12 @@ impl Sidebar {
         let basecamp = ui::nav_row("open-basecamp", Icon::new(crate::assets::Lucide::Tent), "Basecamp", None, at_basecamp, cx)
             .test_support()
             .when(waiting > 0, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child(waiting.to_string())))
-            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Basecamp (⌘⇧H)").build(window, cx))
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Basecamp (⌘⇧H)")).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))));
         let at_notes = self.workspace.read(cx).route == Route::Notes;
         let notes = ui::nav_row("open-notes", Icon::new(crate::assets::Lucide::NotebookPen), "Notes", None, at_notes, cx)
             .test_support()
-            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Things to jot down (⌘⇧J)").build(window, cx))
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Things to jot down (⌘⇧J)")).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))));
         v_flex()
             .child(

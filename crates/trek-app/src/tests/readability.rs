@@ -115,7 +115,7 @@ fn a_side_chat_at_work_says_a_trail_word() {
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
         trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx)));
         trek.click(cx, "side-input");
-        trek.type_live(cx, "mock:long 3s");
+        trek.type_live(cx, "mock:long 8s");
         trek.press_live(cx, "enter");
         let side = |ws: &crate::workspace::Workspace| ws.threads.iter().find(|t| t.side_of.is_some()).map(|t| t.id.clone());
         trek.wait(cx, "the side chat to start", |ws| side(ws).is_some_and(|id| ws.live.get(&id).is_some_and(|l| l.turn_started.is_some()))).await;

@@ -1,6 +1,6 @@
 # Trek is developed on macOS and Windows. Everything text is LF in the working tree on both,
-# so include_str! fixtures, snapshot comparisons and shell/perl fixtures behave the same on
-# either platform whatever core.autocrlf says. Binary assets are never touched.
+# so include_str! fixtures, snapshot comparisons and scripts the tests write behave the same
+# on either platform whatever core.autocrlf says. Binary assets are never touched.
 * text=auto eol=lf
 
 # Images, media, archives, fonts and packages

@@ -68,7 +68,7 @@ pub struct Composer {
     /// Where the text on screen belongs (`Attaching::target`): a thread, or a new one in a project.
     draft_key: String,
     /// The prompt's placeholder as last set (`placeholder`).
-    placeholder: &'static str,
+    placeholder: std::borrow::Cow<'static, str>,
     /// What was typed for the threads and drafts not on screen, by `draft_key`.
     drafts: std::collections::HashMap<String, Draft>,
     _subscriptions: Vec<Subscription>,
@@ -202,7 +202,7 @@ impl Composer {
     pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder(placeholder(None))
+            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder(placeholder(None).to_string())
         });
         let pickers = Pickers::new(window, cx);
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
@@ -249,8 +249,8 @@ impl Composer {
                     placeholder(running.then_some(ws.settings.general.follow_up))
                 };
                 if this.placeholder != placeholder {
+                    this.input.update(cx, |s, cx| s.set_placeholder(placeholder.to_string(), window, cx));
                     this.placeholder = placeholder;
-                    this.input.update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
                 }
                 // An open @ picker follows the folder on screen.
                 if this.pickers.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
@@ -1990,7 +1990,7 @@ impl Render for Composer {
             square("stop")
                 .test_support()
                 .cursor_pointer()
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Stop ⌘. · {hint}")).build(window, cx))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::localize(&format!("Stop ⌘. · {hint}")).into_owned()).build(window, cx))
                 .bg(palette::red(cx))
                 .child(div().size(px(10.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2141,7 +2141,7 @@ impl Render for Composer {
                     .child(
                         Pill::new("plan-pill")
                             .selected(plan)
-                            .tooltip(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" })
+                            .tooltip(crate::keys::shared(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" }))
                             .child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
                             .when(!narrow, |p| p.child("Plan"))
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
@@ -2268,7 +2268,7 @@ impl Render for Composer {
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 // ⌥↩ sends the other way from the default while a turn runs (steer ⇄ queue).
                 let k = &ev.keystroke;
-                if k.key == "enter" && k.modifiers.alt && !k.modifiers.platform && !k.modifiers.shift && this.pickers.trigger.is_none() {
+                if k.key == "enter" && k.modifiers.alt && !k.modifiers.secondary() && !k.modifiers.shift && this.pickers.trigger.is_none() {
                     cx.stop_propagation();
                     let other = match this.workspace.read(cx).settings.general.follow_up {
                         FollowUp::Steer => FollowUp::Queue,
@@ -2293,25 +2293,27 @@ impl Render for Composer {
 
 /// The prompt's placeholder: what to type, or mid-turn (`running`: the default way a message
 /// goes), where a message sent now goes.
-fn placeholder(running: Option<FollowUp>) -> &'static str {
+fn placeholder(running: Option<FollowUp>) -> std::borrow::Cow<'static, str> {
     match running {
-        None => "Ask or build · / commands · @ files",
-        Some(FollowUp::Steer) => "Steer the running turn · ⌥↩ queues for after it",
-        Some(FollowUp::Queue) => "Queue a follow-up · ⌥↩ steers the running turn",
+        None => "Ask or build · / commands · @ files".into(),
+        Some(FollowUp::Steer) => crate::keys::localize("Steer the running turn · ⌥↩ queues for after it"),
+        Some(FollowUp::Queue) => crate::keys::localize("Queue a follow-up · ⌥↩ steers the running turn"),
     }
 }
 
 /// The send button's tooltip: which keys send and add a line, and while a turn runs (`running`),
 /// which key steers it and which queues for after it.
 pub(crate) fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
-    let (send, line) = if cmd_enter { ("⌘↩", "↩") } else { ("↩", "⇧↩") };
-    if !running {
-        return format!("Send {send} · New line {line}");
-    }
-    match follow {
-        FollowUp::Steer => format!("{send} steers the running turn · ⌥↩ queues for after it"),
-        FollowUp::Queue => format!("{send} queues for after the turn · ⌥↩ steers it now"),
-    }
+    let (send, line) = if cmd_enter { ("⌘↩", "↩") } else { ("↩", "⇧↩") }; // keys::localize below
+    let text = if !running {
+        format!("Send {send} · New line {line}")
+    } else {
+        match follow {
+            FollowUp::Steer => format!("{send} steers the running turn · ⌥↩ queues for after it"), // keys::localize below
+            FollowUp::Queue => format!("{send} queues for after the turn · ⌥↩ steers it now"), // keys::localize below
+        }
+    };
+    crate::keys::localize(&text).into_owned()
 }
 
 /// The API cost estimate in the status strip, with its breakdown on hover (worked out only then).

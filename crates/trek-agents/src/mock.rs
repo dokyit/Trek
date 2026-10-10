@@ -2430,7 +2430,8 @@ mod tests {
     fn a_watcher_that_catches_something_starts_a_turn_of_its_own() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
-            m.prompt("mock:watch 50ms").await;
+            // Long enough that a loaded runner ends the first turn before it catches anything.
+            m.prompt("mock:watch 5s").await;
             let turn = m.turn().await;
             assert!(turn.iter().any(|e| matches!(e, AgentEvent::Background(b) if b.len() == 1 && b[0].kind == BackgroundKind::Monitor)));
             // No message from anyone: the watcher's report starts the next turn.
@@ -2446,7 +2447,8 @@ mod tests {
     fn long_turns_stop_on_interrupt_and_take_steering() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
-            m.prompt("mock:long 300ms").await;
+            // Long enough that a loaded runner still finds the turn running when it steers.
+            m.prompt("mock:long 5s").await;
             m.prompt("use tabs").await;
             let events = m.turn().await;
             assert!(text(&events).contains("Noted — use tabs"));

@@ -468,11 +468,12 @@ mod tests {
 
     #[test]
     fn a_slow_login_shell_is_given_up_on() {
+        let fixture = || std::process::Command::new(trek_test_fixtures::bin("fixture"));
         let started = std::time::Instant::now();
-        let out = shell_output(std::process::Command::new("/bin/sh").args(["-c", "sleep 30; echo late"]), Duration::from_millis(200));
+        let out = shell_output(fixture().args(["sleep", "30"]), Duration::from_millis(200));
         assert_eq!(out, None);
         assert!(started.elapsed() < Duration::from_secs(5));
-        let out = shell_output(std::process::Command::new("/bin/sh").args(["-c", "printf %s /usr/bin"]), Duration::from_secs(5));
+        let out = shell_output(fixture().args(["print", "/usr/bin"]), Duration::from_secs(5));
         assert_eq!(out.as_deref(), Some(&b"/usr/bin"[..]));
     }
 }

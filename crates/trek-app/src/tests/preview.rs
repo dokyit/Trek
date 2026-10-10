@@ -128,7 +128,7 @@ fn a_sent_messages_image_previews_in_app() {
         assert!(!trek.visible(cx, "preview-remove"), "a sent image isn't the outbox's to take out");
         assert!(!trek.visible(cx, ("preview-thumb", 0usize)), "no filmstrip for one");
         // ⌘W puts the preview away, not the thread's tab under it.
-        trek.press(cx, "cmd-w");
+        trek.press(cx, "secondary-w");
         assert!(!trek.visible(cx, "attachment-preview"));
         assert_eq!(trek.thread_id(cx), id);
     });
@@ -149,9 +149,9 @@ fn a_big_image_fits_and_zooms_to_actual_pixels() {
 
         trek.press(cx, "space");
         assert_eq!(showing(&trek, cx), Some((big.clone(), true)));
-        trek.press(cx, "cmd-0");
+        trek.press(cx, "secondary-0");
         assert_eq!(showing(&trek, cx), Some((big.clone(), false)));
-        trek.press(cx, "cmd-=");
+        trek.press(cx, "secondary-=");
         assert_eq!(showing(&trek, cx), Some((big.clone(), true)));
         trek.press(cx, "space");
         // A click on the image zooms too, and Esc closes from actual pixels.

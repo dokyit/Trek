@@ -39,3 +39,6 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 # The user and machine PATH, for a GUI launch that has an older one.
 winreg = "0.55"
+
+[dev-dependencies]
+trek-test-fixtures.workspace = true

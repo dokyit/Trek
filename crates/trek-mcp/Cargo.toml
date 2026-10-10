@@ -18,6 +18,7 @@ base64 = "0.22"
 # The orchestrate tests talk to a listener like Trek's (a socket, or a pipe on Windows).
 trek-ipc = { workspace = true, features = ["server"] }
 tokio.workspace = true
+trek-test-fixtures.workspace = true
 
 # Computer use and the iOS Simulator are macOS-only tool families; `orchestrate` runs everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
