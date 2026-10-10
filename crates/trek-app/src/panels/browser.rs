@@ -1697,6 +1697,21 @@ fn describe_pick(msg: &serde_json::Value) -> String {
     out
 }
 
+/// The line under the toolbar while a page loads: a bar sliding along it, or, with `still` (reduced
+/// motion), the whole line, dimmer. Sliding is what says "loading"; a sliding bar held at its
+/// start would be off the line altogether.
+pub(crate) fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
+    let bar = div().id("browser-loading-bar").test_support().absolute().top_0().h_full().rounded(px(1.)).bg(ember);
+    let bar = if still {
+        bar.left_0().w_full().opacity(0.45).into_any_element()
+    } else {
+        bar.w(relative(0.32))
+            .with_animation("browser-loading", Animation::new(Duration::from_millis(1100)).repeat().with_easing(ease_in_out), |el, t| el.left(relative(-0.32 + 1.32 * t)))
+            .into_any_element()
+    };
+    div().id("browser-loading").test_support().absolute().left_0().bottom(px(-1.)).w_full().h(px(2.)).overflow_hidden().child(bar)
+}
+
 impl Render for BrowserPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_theme(cx);
@@ -1718,6 +1733,7 @@ impl Render for BrowserPanel {
         }
         let tab = self.active_tab();
         let loading = tab.is_some_and(|t| t.page.loading && !t.page.is_start());
+        let still = !self.workspace.read(cx).motion(cx);
         let can_back = tab.is_some_and(|t| t.page.can_back);
         let can_forward = tab.is_some_and(|t| t.page.can_forward);
         let is_page = tab.is_some_and(|t| !t.page.url.starts_with("trek://"));
@@ -1802,17 +1818,7 @@ impl Render for BrowserPanel {
                     })),
             )
             .child(more)
-            .when(loading, |el| {
-                el.child(
-                    div().absolute().left_0().bottom(px(-1.)).w_full().h(px(2.)).overflow_hidden().child(
-                        div().absolute().top_0().h_full().w(relative(0.32)).rounded(px(1.)).bg(ember).with_animation(
-                            "browser-loading",
-                            Animation::new(Duration::from_millis(1100)).repeat().with_easing(ease_in_out),
-                            |el, t| el.left(relative(-0.32 + 1.32 * t)),
-                        ),
-                    ),
-                )
-            });
+            .when(loading, |el| el.child(loading_line(still, ember)));
 
         let picking_hint = self.picking.then(|| {
             h_flex()
