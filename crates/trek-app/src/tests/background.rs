@@ -266,6 +266,10 @@ fn a_turn_blocked_on_its_sub_agent_says_whom_it_waits_on() {
         assert!(trek.visible(cx, "waiting-on"));
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
+        // The sub-agent is stopped with its parent a moment later (its mock work runs on the
+        // runtime's threads): the wait line goes once it has.
+        let p = id.clone();
+        trek.wait(cx, "the sub-agent to stop", move |ws| !ws.waiting(&p) && ws.children(&p).iter().all(|c| ws.task_state(&c.id) != TaskState::Running)).await;
         assert_eq!(trek.working_bar(cx), None);
     });
 }
