@@ -636,7 +636,24 @@ struct Session {
     background: Vec<String>,
     /// Codex's own ids for the terminals commands run in, by item id: what stopping one takes.
     processes: HashMap<String, String>,
+    /// Windows (a field so both platforms' behaviour is tested on either).
+    windows: bool,
+    /// The user has been told Codex's Windows sandbox isn't set up.
+    sandbox_told: bool,
 }
+
+/// A command Codex's Windows sandbox couldn't start: its sandbox hasn't had the one-time setup,
+/// and every command under Supervised or Auto fails before it starts, with an output that says
+/// the sandbox's "setup refresh had errors" (Codex 0.162.0).
+fn sandbox_not_set_up(item: &Value, windows: bool) -> bool {
+    windows
+        && item["type"] == "commandExecution"
+        && item["status"] == "failed"
+        && item["aggregatedOutput"].as_str().is_some_and(|o| o.contains("setup refresh had errors"))
+}
+
+/// What the user is told when `sandbox_not_set_up`.
+const SANDBOX_SETUP_NOTICE: &str = "Codex's Windows sandbox needs its one-time setup, so its commands fail before they start. Run codex once in a terminal and accept the sandbox setup it asks for, or set this thread's access to Full access.";
 
 impl Session {
     fn new(thread_id: String, config: &SessionConfig, opened: &Value, next_id: i64) -> Self {
@@ -671,6 +688,8 @@ impl Session {
             commands: HashMap::new(),
             background: vec![],
             processes: HashMap::new(),
+            windows: cfg!(windows),
+            sandbox_told: false,
         }
     }
 
@@ -1255,7 +1274,13 @@ impl Session {
             Some("commandExecution") => {
                 self.command_gone(&id, out);
                 let output = item["aggregatedOutput"].as_str().map(|o| clip(o, 8000)).unwrap_or_else(declined);
-                AgentEvent::ToolFinished { id, output, ok: status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0 }
+                let ok = status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0;
+                out.events.push(AgentEvent::ToolFinished { id, output, ok });
+                // Said once after the first command it hit, not at every one.
+                if sandbox_not_set_up(item, self.windows) && !std::mem::replace(&mut self.sandbox_told, true) {
+                    out.events.push(AgentEvent::Notice(SANDBOX_SETUP_NOTICE.into()));
+                }
+                return;
             }
             Some("fileChange") => {
                 let (added, removed) = change_lines(item);
@@ -2629,6 +2654,35 @@ mod tests {
         assert_eq!(out.events[0], AgentEvent::Background(vec![]));
         assert!(matches!(&out.events[1], AgentEvent::ToolFinished { id, ok: true, .. } if id == "exec-1"));
         assert!(s.commands.is_empty() && s.background.is_empty());
+    }
+
+    #[test]
+    fn a_windows_sandbox_without_its_setup_is_explained_once() {
+        // Recorded (Codex 0.162.0, Windows, Auto): every command fails before it starts.
+        let said = "Failed to create unified exec process: helper_unknown_error: setup refresh had errors";
+        let done = |id: &str, status: &str, output: &str| {
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"commandExecution","id":id,"command":"Get-Content -Raw -LiteralPath .\\hello.txt","cwd":"C:\\p","status":status,"commandActions":[],"aggregatedOutput":output,"exitCode":-1}}})
+        };
+        let notices = |out: &Out| out.events.iter().filter(|e| matches!(e, AgentEvent::Notice(_))).count();
+        let mut s = session("t", false);
+        s.windows = true;
+        let out = feed(&mut s, &[done("e1", "failed", said)]);
+        assert!(matches!(&out.events[..], [AgentEvent::ToolFinished { ok: false, .. }, AgentEvent::Notice(n)] if n == SANDBOX_SETUP_NOTICE && n.contains("one-time setup") && n.contains("Full access")), "{:?}", out.events);
+        // Once per session, however many commands hit it.
+        let out = feed(&mut s, &[done("e2", "failed", said)]);
+        assert!(matches!(&out.events[..], [AgentEvent::ToolFinished { ok: false, .. }]), "{:?}", out.events);
+        // Narrowly: other failures, and other output, are Codex's own business.
+        let mut s = session("t", false);
+        s.windows = true;
+        let out = feed(&mut s, &[done("e3", "failed", "command not found"), done("e4", "completed", "setup refresh had errors"), done("e5", "declined", "")]);
+        assert_eq!(notices(&out), 0, "{:?}", out.events);
+        // Not the same words from another item, nor on macOS and Linux.
+        assert!(!sandbox_not_set_up(&json!({"type":"agentMessage","status":"failed","aggregatedOutput":said}), true));
+        let item = done("e6", "failed", said)["params"]["item"].clone();
+        assert!(sandbox_not_set_up(&item, true) && !sandbox_not_set_up(&item, false));
+        let mut s = session("t", false);
+        s.windows = false;
+        assert_eq!(notices(&feed(&mut s, &[done("e7", "failed", said)])), 0);
     }
 
     #[test]

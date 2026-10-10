@@ -506,6 +506,31 @@ struct Turn {
     /// agent said: from the prompt responses' `usage` (agents that report it), or the agent's
     /// own history where that says more.
     tokens: Vec<(Option<String>, TokenUsage, Option<UsageCost>)>,
+    /// The turn showed the user something: words (or thoughts), a tool call, a plan, or a
+    /// request for approval.
+    produced: bool,
+    /// The user interrupted the turn: an agent may end it with `end_turn` and nothing said.
+    interrupted: bool,
+    /// The error a turn that ends with nothing to show fails with, set before it ends (none:
+    /// it ends as the agent said).
+    if_empty: Option<String>,
+}
+
+/// Whether a turn that ended without an error ended with nothing to show: no words, tool call,
+/// plan, approval request or tokens, and not because the user cut it short. Some agents answer
+/// a prompt this way when their model's provider can't (OpenCode, signed out).
+fn ended_empty(error: Option<&str>, produced: bool, interrupted: bool) -> bool {
+    error.is_none() && !produced && !interrupted
+}
+
+/// What the user is told when `ended_empty`: in OpenCode's case where to look, the others get
+/// the general advice.
+fn empty_turn_error(agent: &AgentId, name: &str, model: Option<&str>) -> String {
+    match (agent, model) {
+        (AgentId::OpenCode, Some(model)) => format!("{name} ended the turn without a reply. Check that its provider is signed in: `opencode run -m {model} hi` in a terminal should answer."),
+        (AgentId::OpenCode, None) => format!("{name} ended the turn without a reply. Check that its provider is signed in: `opencode run hi` in a terminal should answer."),
+        _ => format!("{name} ended the turn without a reply. Check that {name} is signed in and can answer when run in a terminal."),
+    }
 }
 
 impl Turn {
@@ -520,16 +545,19 @@ impl Turn {
         match u["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    self.produced = true;
                     self.text.push_str(t);
                     out.push(AgentEvent::TextDelta(t.into()));
                 }
             }
             Some("agent_thought_chunk") => {
                 if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    self.produced = true;
                     out.push(AgentEvent::ReasoningDelta(t.into()));
                 }
             }
             Some(kind @ ("tool_call" | "tool_call_update")) => {
+                self.produced = true;
                 let id = u["toolCallId"].as_str().unwrap_or_default().to_string();
                 let tool = self.tools.entry(id.clone()).or_default();
                 // The row shows the title the call had when it started.
@@ -590,6 +618,7 @@ impl Turn {
                     .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str())))
                     .collect();
                 if !steps.is_empty() {
+                    self.produced = true;
                     self.plan_updates += 1;
                     let id = format!("plan-{}", self.plan_updates);
                     let (detail, output) = plan_row(&steps);
@@ -653,12 +682,15 @@ impl Turn {
     }
 
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
+        let if_empty = self.if_empty.take();
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
         let failed = stop.is_err();
         let added = self.turn_cost();
         let mut tokens = std::mem::take(&mut self.tokens);
+        let produced = std::mem::take(&mut self.produced) || tokens.iter().any(|(_, t, c)| !t.is_empty() || c.is_some());
+        let interrupted = std::mem::take(&mut self.interrupted);
         // The session's cost goes with the turn's tokens when they're one lot priced by nobody
         // else; a cost with no tokens is reported on its own.
         if let Some(usd) = added.filter(|c| *c > 0.0) {
@@ -681,6 +713,8 @@ impl Turn {
             Ok(_) => None,
             Err(msg) => Some(msg),
         };
+        // A cost added with no tokens counts as something done too (a priced turn isn't empty).
+        let error = if ended_empty(error.as_deref(), produced || added.is_some_and(|c| c > 0.0), interrupted) { if_empty } else { error };
         // ACP has no word for a usage limit: agents pass on their provider's error as it reads.
         if let Some(limit) = error.as_deref().filter(|_| failed).and_then(|e| crate::Limit::from_text(e, trek_core::store::now_ms())) {
             out.push(limit.event());
@@ -965,7 +999,7 @@ pub async fn run(
     let mut backlog = Vec::new();
     let init = agent.handshake(&fs, &mut backlog).await?;
     let cwd = config.cwd.display().to_string();
-    let (mcp, skipped) = acp_mcp_servers(&config.mcp_servers, &init);
+    let (mcp, skipped, left_out) = acp_mcp_servers(&config.mcp_servers, &init);
     if !skipped.is_empty() {
         tracing::info!("{}: no HTTP MCP support, leaving out {}", agent.name, skipped.join(", "));
     }
@@ -1046,12 +1080,15 @@ pub async fn run(
     }
     // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
     let no_plan = (plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
-    events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
+    events.send(AgentEvent::Started { native_id: session_id.clone(), model: model.clone() }).await?;
     let mut told_efforts = None;
     if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
         events.send(ev).await?;
     }
     if let Some(notice) = skipped_notice {
+        events.send(AgentEvent::Notice(notice)).await?;
+    }
+    for notice in left_out {
         events.send(AgentEvent::Notice(notice)).await?;
     }
     if let Some(notice) = agent.db_notice.take() {
@@ -1062,7 +1099,7 @@ pub async fn run(
     }
 
     let turn = Turn { resumed: config.resume.is_some() && !lost, ..Default::default() };
-    let mut s = Live { session_id, turn, perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), turn_began: None };
+    let mut s = Live { session_id, turn, perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), name: agent.name.clone(), model, turn_began: None };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -1095,6 +1132,7 @@ pub async fn run(
                         s.prompts.push(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
+                        s.turn.interrupted |= s.turn_began.is_some();
                         agent.rpc.notify("session/cancel", json!({ "sessionId": s.session_id })).await?;
                         for (_, (rpc_id, _)) in s.perms.drain() {
                             agent.rpc.reply(rpc_id, Ok(permission_outcome(None))).await?;
@@ -1116,6 +1154,7 @@ pub async fn run(
                                 Ok(r) => {
                                     ctl.refresh(&r);
                                     latest = Some(r).filter(|r| r["configOptions"].is_array());
+                                    s.model = Some(model.clone());
                                 }
                                 Err(e) => refused = Some(AgentEvent::Error(format!("{} didn't switch to {model}: {}", agent.name, rpc_message(&e)))),
                             }
@@ -1225,6 +1264,10 @@ struct Live {
     /// In plan mode: edits are never approved on the user's behalf.
     planning: bool,
     agent: AgentId,
+    /// The agent's name for the user, and the model the session is on (what a turn that ends
+    /// with nothing says to check).
+    name: String,
+    model: Option<String>,
     /// When the running turn's first prompt went out (unix ms).
     turn_began: Option<i64>,
 }
@@ -1273,6 +1316,7 @@ impl Live {
                                 }
                             }
                         }
+                        self.turn.if_empty = Some(empty_turn_error(&self.agent, &self.name, self.model.as_deref()));
                         self.turn.finish(stop)
                     } else {
                         // Others are still open: the turn goes on. A message the agent turned down
@@ -1312,6 +1356,7 @@ impl Live {
             rpc.reply(rpc_id, reply).await?;
             return Ok(vec![]);
         }
+        self.turn.produced = true;
         match self.turn.permission(p, hand_holding, self.planning) {
             Ask::Answer(option) => {
                 rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
@@ -1670,7 +1715,8 @@ mod tests {
         });
         let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
         assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
-        assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { error: None }), "the turn ends with the first prompt, cleanly");
+        // The held prompt is answered with nothing said, so the turn that ends with it says so.
+        assert!(matches!(seen.last(), Some(AgentEvent::TurnComplete { error: Some(e) }) if e.contains("ended the turn without a reply")), "the turn ends with the first prompt: {seen:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1834,6 +1880,39 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_script_server_goes_to_acp_agents_through_cmd_on_windows_only() {
+        let npx = |args: &[&str]| crate::McpServer::stdio("fs", "npx", args.iter().map(|a| a.to_string()).collect(), vec![("K".into(), "v".into())]);
+        let found = |name: &str| (name == "npx").then(|| PathBuf::from("C:\\n\\npx.cmd"));
+        let init = json!({});
+        // macOS and Linux: as the user wrote it, whatever the lookup finds (compared as values).
+        let servers = [npx(&["-y", "srv"])];
+        let (out, skipped, left_out) = acp_mcp_servers_with(&servers, &init, false, found);
+        assert_eq!(out, json!([{"name":"fs","command":"npx","args":["-y","srv"],"env":[{"name":"K","value":"v"}]}]));
+        assert!(skipped.is_empty() && left_out.is_empty());
+        // Windows: `npx` is `npx.cmd`, which cmd.exe starts; the env goes along as it was.
+        let (out, _, left_out) = acp_mcp_servers_with(&[npx(&["-y", "srv"])], &init, true, found);
+        assert_eq!(out, json!([{"name":"fs","command":"cmd","args":["/c","npx","-y","srv"],"env":[{"name":"K","value":"v"}]}]));
+        assert!(left_out.is_empty());
+        // A real program, or a name nothing is found for, is left alone.
+        let exe = crate::McpServer::stdio("trek", "C:\\Trek\\trek-mcp.exe", vec!["computer".into()], vec![]);
+        let (out, _, left_out) = acp_mcp_servers_with(&[exe, npx(&[])], &init, true, |_| None);
+        assert_eq!(out[0], json!({"name":"trek","command":"C:\\Trek\\trek-mcp.exe","args":["computer"],"env":[]}));
+        assert_eq!(out[1]["command"], "npx");
+        assert!(left_out.is_empty());
+        // One cmd.exe would misread is left out with a notice, and the others still go; the
+        // remote ones are decided as before.
+        let risky = crate::McpServer::stdio("risky", "npx", vec!["a&b".into()], vec![]);
+        let remote = crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![]);
+        let servers = [risky, npx(&["srv"]), remote];
+        let (out, skipped, left_out) = acp_mcp_servers_with(&servers, &init, true, found);
+        assert_eq!(out.as_array().map(Vec::len), Some(1));
+        assert_eq!(out[0]["command"], "cmd");
+        assert_eq!(skipped, ["linear"]);
+        let [notice] = &left_out[..] else { panic!("{left_out:?}") };
+        assert!(notice.starts_with("MCP server risky wasn't started: npx.cmd is a batch script") && notice.contains("argument 1"), "{notice}");
+    }
+
+    #[test]
     fn the_fake_agent_turns_down_servers_in_the_wrong_shape() {
         // What the test above relies on: the stand-in checks `mcpServers` as the spec has it.
         // Claude's `{name: {command…}}` map is refused, as is an HTTP server it didn't ask for.
@@ -1859,9 +1938,9 @@ mod tests {
         let servers = trek_servers();
         let refused = |r: &Value, why: &str| r["error"]["message"].as_str().is_some_and(|m| m.contains(why));
         assert!(refused(&ask(crate::mcp_servers_json_with(&servers[..1], crate::BatchHandOff::CmdWrapper, false, |_| None).0), "must be an array"));
-        let (http, _) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
+        let (http, ..) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
         assert!(refused(&ask(http), "http isn't supported"));
-        let (stdio, skipped) = acp_mcp_servers(&servers, &json!({}));
+        let (stdio, skipped, _) = acp_mcp_servers(&servers, &json!({}));
         assert_eq!(skipped, ["figma-desktop", "linear"], "HTTP is off unless the agent says");
         assert_eq!(ask(stdio)["result"]["sessionId"], "fake-1");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1965,6 +2044,70 @@ mod tests {
         assert_eq!(err(Ok("cancelled")).as_deref(), Some("Interrupted"));
         assert!(err(Ok("refusal")).is_some());
         assert_eq!(err(Err("rate limited".into())).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn a_turn_that_ends_with_nothing_is_decided_from_what_it_produced() {
+        // (error, produced, interrupted)
+        assert!(ended_empty(None, false, false));
+        assert!(!ended_empty(None, true, false), "something was shown");
+        assert!(!ended_empty(None, false, true), "the user cut it short");
+        assert!(!ended_empty(Some("rate limited"), false, false), "an error already says why");
+    }
+
+    #[test]
+    fn an_empty_turn_fails_in_the_agents_name() {
+        let opencode = empty_turn_error(&AgentId::OpenCode, "OpenCode", Some("opencode/big-pickle"));
+        assert_eq!(opencode, "OpenCode ended the turn without a reply. Check that its provider is signed in: `opencode run -m opencode/big-pickle hi` in a terminal should answer.");
+        assert!(empty_turn_error(&AgentId::OpenCode, "OpenCode", None).contains("`opencode run hi`"));
+        let other = empty_turn_error(&AgentId::Acp("goose".into()), "Goose", Some("x"));
+        assert_eq!(other, "Goose ended the turn without a reply. Check that Goose is signed in and can answer when run in a terminal.");
+    }
+
+    #[test]
+    fn a_turn_with_nothing_in_it_ends_with_the_error_and_one_with_something_does_not() {
+        let said = Some("X ended the turn without a reply.".to_string());
+        let ends = |t: &mut Turn, stop| match { t.if_empty = said.clone(); t.finish(stop) }.pop() {
+            Some(AgentEvent::TurnComplete { error }) => error,
+            other => panic!("{other:?}"),
+        };
+        // OpenCode 1.2.27 with a provider that can't answer: end_turn, no tokens, no words.
+        let mut t = Turn::default();
+        assert_eq!(ends(&mut t, Ok("end_turn")), said);
+        // Whatever it shows, the turn is not empty.
+        let shows = [
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}),
+            json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"hm"}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"a","title":"ls","kind":"execute","status":"in_progress"}),
+            json!({"sessionUpdate":"plan","entries":[{"content":"a","status":"pending"}]}),
+        ];
+        for update in shows {
+            let mut t = Turn::default();
+            t.update(&update);
+            assert_eq!(ends(&mut t, Ok("end_turn")), None, "{update}");
+        }
+        // Empty message chunks, unknown updates and a plan with no steps are not output.
+        let mut t = Turn::default();
+        for update in [json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}}), json!({"sessionUpdate":"plan","entries":[]}), json!({"sessionUpdate":"available_commands_update","availableCommands":[]})] {
+            t.update(&update);
+        }
+        assert_eq!(ends(&mut t, Ok("end_turn")), said);
+        // Tokens used, an approval asked for, or the user's interrupt: none of them fail it.
+        let mut t = Turn { tokens: vec![(None, TokenUsage { input: 5, ..Default::default() }, None)], ..Default::default() };
+        assert_eq!(ends(&mut t, Ok("end_turn")), None);
+        let mut t = Turn { produced: true, ..Default::default() };
+        assert_eq!(ends(&mut t, Ok("end_turn")), None);
+        let mut t = Turn { interrupted: true, ..Default::default() };
+        assert_eq!(ends(&mut t, Ok("end_turn")), None);
+        assert_eq!(ends(&mut Turn::default(), Ok("cancelled")).as_deref(), Some("Interrupted"));
+        assert_eq!(ends(&mut Turn::default(), Err("boom".into())).as_deref(), Some("boom"));
+        // The next turn starts clean.
+        let mut t = Turn::default();
+        t.update(&json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}));
+        ends(&mut t, Ok("end_turn"));
+        assert_eq!(ends(&mut t, Ok("end_turn")), said);
+        // `finish` alone (no error to give) is unchanged.
+        assert_eq!(Turn::default().finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { error: None }]);
     }
 
     #[test]
@@ -2386,20 +2529,41 @@ mod tests {
 /// Stdio servers are `{name, command, args, env: [{name, value}]}`; remote ones `{type: "http",
 /// name, url, headers: [{name, value}]}`, sent only to an agent whose `initialize` said it takes
 /// them (`agentCapabilities.mcpCapabilities.http`, false unless said). Returns the names of the
-/// remote servers it left out.
-fn acp_mcp_servers<'a>(servers: &'a [crate::McpServer], init: &Value) -> (Value, Vec<&'a str>) {
+/// remote servers it left out, and a notice for each stdio server it can't hand over (left out).
+/// On Windows a command that is a batch script (`npx`, really `npx.cmd`) goes as `cmd /c`, as for
+/// Claude Code: agents start servers with Node's `spawn`, which won't run one. The user's own
+/// settings are never changed, only what's sent.
+fn acp_mcp_servers<'a>(servers: &'a [crate::McpServer], init: &Value) -> (Value, Vec<&'a str>, Vec<String>) {
+    acp_mcp_servers_with(servers, init, cfg!(windows), |name| detect::which_in(detect::login_path(), name))
+}
+
+/// `acp_mcp_servers` with the platform and the lookup of a command name as arguments, so both
+/// platforms' output is tested on either.
+fn acp_mcp_servers_with<'a>(
+    servers: &'a [crate::McpServer],
+    init: &Value,
+    windows: bool,
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> (Value, Vec<&'a str>, Vec<String>) {
     let pairs = |p: &[(String, String)]| p.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>();
     let http = init["agentCapabilities"]["mcpCapabilities"]["http"] == true;
     let mut skipped = vec![];
+    let mut left_out = vec![];
     let mut out = vec![];
     for m in servers {
         match &m.transport {
-            crate::McpTransport::Stdio { command, args, env } => out.push(json!({ "name": m.name, "command": command, "args": args, "env": pairs(env) })),
+            crate::McpTransport::Stdio { command, args, env } => match crate::agent_stdio_command(crate::BatchHandOff::CmdWrapper, command, args, windows, &resolve) {
+                Ok(handed) => {
+                    let (command, args) = handed.unwrap_or_else(|| (command.clone(), args.clone()));
+                    out.push(json!({ "name": m.name, "command": command, "args": args, "env": pairs(env) }));
+                }
+                Err(problem) => left_out.push(crate::mcp_left_out_notice(&m.name, &problem)),
+            },
             crate::McpTransport::Http { url, headers } if http => out.push(json!({ "type": "http", "name": m.name, "url": url, "headers": pairs(headers) })),
             crate::McpTransport::Http { .. } => skipped.push(m.name.as_str()),
         }
     }
-    (Value::Array(out), skipped)
+    (Value::Array(out), skipped, left_out)
 }
 
 /// What the user is told about remote MCP servers `agent` couldn't be given: once per agent and

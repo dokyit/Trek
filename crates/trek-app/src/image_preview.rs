@@ -376,10 +376,10 @@ impl ImagePreview {
             "left" if plain => self.step(-1, cx),
             "right" if plain => self.step(1, cx),
             "space" if plain && !m.shift => self.toggle_actual(None, window, cx),
-            "=" | "+" if m.platform => self.set_actual(true, window, cx),
-            "0" | "-" if m.platform => self.set_actual(false, window, cx),
-            "c" if m.platform && !m.shift => self.copy(window, cx),
-            "backspace" | "delete" if m.platform && removable => self.remove(window, cx),
+            "=" | "+" if m.secondary() => self.set_actual(true, window, cx),
+            "0" | "-" if m.secondary() => self.set_actual(false, window, cx),
+            "c" if m.secondary() && !m.shift => self.copy(window, cx),
+            "backspace" | "delete" if m.secondary() && removable => self.remove(window, cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -585,9 +585,9 @@ impl ImagePreview {
                     .gap(px(2.))
                     .child(ui::icon_button("preview-open", Icon::new(crate::assets::Lucide::SquareArrowOutUpRight), "Open in Preview").on_click(move |_, _, cx| cx.open_with_system(&open_path)))
                     .child(ui::icon_button("preview-reveal", IconName::FolderOpen, "Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal_path)))
-                    .child(ui::icon_button("preview-copy", IconName::Copy, "Copy image (⌘C)").on_click(cx.listener(|this, _, window, cx| this.copy(window, cx))))
+                    .child(ui::icon_button("preview-copy", IconName::Copy, crate::keys::shared("Copy image (⌘C)")).on_click(cx.listener(|this, _, window, cx| this.copy(window, cx))))
                     .when(s.remove.is_some(), |el| {
-                        el.child(ui::icon_button("preview-remove", Icon::new(crate::assets::Lucide::Trash), "Remove from message (⌘⌫)").on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))))
+                        el.child(ui::icon_button("preview-remove", Icon::new(crate::assets::Lucide::Trash), crate::keys::shared("Remove from message (⌘⌫)")).on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))))
                     })
                     .child(div().w(px(1.)).h(px(16.)).mx(px(6.)).bg(theme.foreground.opacity(0.12)))
                     .child(ui::icon_button("preview-close", IconName::Close, "Close (Esc)").on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))),

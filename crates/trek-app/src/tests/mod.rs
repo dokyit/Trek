@@ -19,6 +19,7 @@ mod hardening;
 mod harness;
 mod ide;
 mod inbox;
+mod keys;
 mod lifecycle;
 mod limits;
 mod mcp;
