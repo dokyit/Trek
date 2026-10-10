@@ -9133,6 +9133,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-update"
+version = "0.4.0"
+dependencies = [
+ "trek-test-fixtures",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "triomphe"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
