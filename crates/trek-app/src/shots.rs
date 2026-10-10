@@ -25,7 +25,9 @@
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
-//! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`, `down down enter`), `scroll <element id> <px>`
+//! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
+//! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
+//! right on both platforms), `scroll <element id> <px>`
 //! (a wheel over that element, positive down the page), `resize <w> <h>` (the main window, logical
 //! px). The thread on screen: `approve` / `deny` its waiting permission, plan
 //! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
@@ -542,11 +544,15 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 "key" => {
                     use gpui_kit::test::TestWindowExt as _;
                     anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (secondary-k, escape, shift-tab …)");
+                    // Manifests write the Mac's keys (`cmd-k`); Trek's bindings read a Mac ⌘ as
+                    // Ctrl on Windows, so the harness does too — `secondary` is gpui's spelling
+                    // of exactly that, keeping one manifest right on both platforms.
+                    let keys: Vec<String> = arg.split_whitespace().map(manifest_key).collect();
                     // All of them parse before any is pressed: a typo doesn't leave half a sequence done.
-                    for k in arg.split_whitespace() {
+                    for k in &keys {
                         Keystroke::parse(k).map_err(|e| anyhow::anyhow!("key: bad keystroke {k:?}: {e}"))?;
                     }
-                    for k in arg.split_whitespace() {
+                    for k in &keys {
                         window.press(k, cx);
                     }
                     Ok(())
@@ -771,6 +777,20 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
         ws.usage_cached.insert(crate::workspace::devin_agent().key(), devin);
         cx.notify();
     });
+}
+
+/// A manifest's `key` keystroke as this platform means it: `cmd`/`win`/`super` name the Mac's ⌘,
+/// which Trek's bindings read as Ctrl off the Mac — gpui's `secondary` is exactly that mapping.
+/// Anything else (a bare `ctrl-`, `shift-`, a key) passes through.
+fn manifest_key(key: &str) -> String {
+    let mut parts: Vec<&str> = key.split('-').collect();
+    let modifiers = parts.len().saturating_sub(1);
+    for part in parts.iter_mut().take(modifiers) {
+        if matches!(part.to_ascii_lowercase().as_str(), "cmd" | "win" | "super") {
+            *part = "secondary";
+        }
+    }
+    parts.join("-")
 }
 
 /// `click|rclick|hover <id>`: the pointer on the one element on screen with that id, as events
