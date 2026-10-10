@@ -660,7 +660,7 @@ fn imported_threads_rewind_and_fork_their_agents_session() {
 /// The whole path with a real agent: checkpoints, a rewind that restores files and cuts the
 /// agent's session back, and a fork. Not run by default (it costs a few tiny turns):
 /// `TREK_LIVE_AGENT=claude` (claude-haiku-4-5) or `codex` (gpt-5.6-luna), with
-/// `cargo test -p trek-app live_rewind -- --ignored`. Works in /tmp/trek-timetravel-e2e.
+/// `cargo test -p trek-app live_rewind -- --ignored`. Works in `trek-timetravel-e2e` in the temp folder.
 #[test]
 #[ignore = "live: runs a real agent"]
 fn live_rewind_and_fork() {
@@ -674,7 +674,7 @@ fn live_rewind_and_fork() {
             s.general.default_model = Some(model.into());
             s.general.default_effort = Effort::Low;
         });
-        let project = std::path::PathBuf::from("/tmp/trek-timetravel-e2e").join(format!("app-{}", agent.key()));
+        let project = std::env::temp_dir().join("trek-timetravel-e2e").join(format!("app-{}", agent.key()));
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(&project).unwrap();
         git_project(&project);
