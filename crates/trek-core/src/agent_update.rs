@@ -3,10 +3,17 @@
 //! that updates it the way its vendor documents.
 //!
 //! Channels: npm (and Bun, pnpm) global packages are asked of the npm registry and updated with
-//! the package manager that installed them; Homebrew formulae and casks are asked of
+//! the package manager that installed them; Homebrew formulae and casks (macOS only) are asked of
 //! formulae.brew.sh (a third-party tap's formula of its GitHub repository) and updated with
-//! `brew upgrade`; anything else came from the vendor's own installer, whose release feed says
-//! what's newest and whose CLI updates itself (`claude update`, `grok update`, …).
+//! `brew upgrade`; WinGet packages (Windows, Claude Code only) with `winget upgrade`; anything
+//! else came from the vendor's own installer, whose release feed says what's newest and whose CLI
+//! updates itself (`claude update`, `grok update`, …).
+//!
+//! On Windows the layouts differ, not the channels: npm's global prefix has no `lib` folder
+//! (`%APPDATA%\npm\node_modules\<package>`), a package's shim is a `.cmd` (read for the package it
+//! runs), package managers are `.cmd` files found with `PATHEXT`, the PATH separator is `;`, and
+//! scripts (the package move, a vendor's `install.ps1`) run through PowerShell, not `/bin/sh`.
+//! The release feeds name versions only, not per-platform downloads, so they are the same on both.
 //!
 //! Everything here is read-only except `run_update`. Checks never fail as a whole: an agent
 //! whose feed can't be reached (offline) keeps the newest version the last check found
@@ -15,8 +22,11 @@
 use crate::detect::{login_path, which};
 use crate::types::AgentId;
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::Duration;
+
+/// What separates the folders of a PATH string.
+const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
 
 /// An agent CLI Trek can keep up to date.
 #[derive(Debug, Clone, Copy)]
@@ -80,8 +90,29 @@ impl Harness {
                 self.npm == Some(package.as_str()) || self.moved(package) || self.majors.iter().any(|(_, p)| p == package)
             }
             Install::Brew { formula: name, .. } | Install::Cask { cask: name, .. } => self.brew.contains(&name.as_str()),
+            Install::Winget { id } => self.winget().contains(&id.as_str()),
             Install::Volta | Install::Native => true,
         }
+    }
+
+    /// The WinGet package ids that are this CLI. Only what its vendor documents: Claude Code's
+    /// `winget install Anthropic.ClaudeCode`. Any other WinGet install reads as the vendor's own.
+    pub fn winget(&self) -> &'static [&'static str] {
+        match self.agent {
+            "claude-code" => &["Anthropic.ClaudeCode"],
+            _ => &[],
+        }
+    }
+
+    /// The line that re-runs the vendor's installer (`installer`), as this platform's shell runs it:
+    /// the `curl … | sh` of `installer`, or on Windows the PowerShell line the vendor documents
+    /// (`catalog`'s install hint for the agent).
+    pub fn installer_line(&self) -> Option<&'static str> {
+        let unix = self.installer?;
+        if !cfg!(windows) {
+            return Some(unix);
+        }
+        crate::catalog::agent_setup(self.agent.strip_prefix("acp:").unwrap_or(self.agent)).map(|s| s.install)
     }
 }
 
@@ -134,17 +165,20 @@ pub fn harness(id: &str) -> Option<&'static Harness> {
     HARNESSES.iter().find(|h| h.binary == id)
 }
 
-/// How an agent CLI got onto this Mac.
+/// How an agent CLI got onto this computer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Install {
-    /// A global npm package, under `prefix` (`<prefix>/lib/node_modules/<package>`).
+    /// A global npm package, under `prefix`: `<prefix>/lib/node_modules/<package>`, or on Windows
+    /// `<prefix>\node_modules\<package>` (`%APPDATA%\npm` unless the user set another).
     Npm { package: String, prefix: PathBuf },
     Bun { package: String },
     Pnpm { package: String },
     /// A Homebrew formula; `tap` is `None` for homebrew/core.
     Brew { formula: String, prefix: PathBuf, tap: Option<String> },
     Cask { cask: String, prefix: PathBuf },
+    /// A WinGet package (`winget upgrade --id <id>`).
+    Winget { id: String },
     /// A Volta-managed package: its binary on PATH is Volta's shim.
     Volta,
     /// The vendor's own installer.
@@ -159,6 +193,7 @@ impl Install {
             Install::Bun { .. } => "Bun",
             Install::Pnpm { .. } => "pnpm",
             Install::Brew { .. } | Install::Cask { .. } => "Homebrew",
+            Install::Winget { .. } => "WinGet",
             Install::Volta => "Volta",
             Install::Native => "Installer",
         }
@@ -174,28 +209,74 @@ fn names(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn rooted(parts: &[String]) -> PathBuf {
-    let mut p = PathBuf::from("/");
+/// What `names` leaves out of `path`: its root (`/`, or `C:\`). A verbatim path, which is what
+/// `canonicalize` gives on Windows (`\\?\C:\…`), comes back as the plain one: npm, handed the
+/// verbatim form as its prefix, doesn't understand it.
+fn root_of(path: &Path) -> PathBuf {
+    let mut root = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::VerbatimDisk(drive) => root.push(format!("{}:", drive as char)),
+                Prefix::VerbatimUNC(server, share) => root.push(format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())),
+                _ => root.push(c.as_os_str()),
+            },
+            Component::RootDir => root.push(c.as_os_str()),
+            _ => break,
+        }
+    }
+    if root.as_os_str().is_empty() {
+        root.push("/");
+    }
+    root
+}
+
+fn rooted(root: &Path, parts: &[String]) -> PathBuf {
+    let mut p = root.to_path_buf();
     p.extend(parts);
     p
+}
+
+/// `run` is a stretch of folders in `parts`, one after the other. Windows paths don't care about case.
+fn has_run(parts: &[String], run: &[&str]) -> bool {
+    parts.windows(run.len()).any(|w| w.iter().zip(run).all(|(a, b)| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b }))
+}
+
+/// The WinGet package whose folder (`…\WinGet\Packages\<Id>_<source>`) holds the binary.
+fn winget_package(parts: &[String]) -> Option<String> {
+    let i = parts.windows(2).position(|w| w[0].eq_ignore_ascii_case("WinGet") && w[1].eq_ignore_ascii_case("Packages"))?;
+    let id = parts.get(i + 2)?.split('_').next()?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// How the binary at `resolved` (symlinks followed) was installed, from where it lives. A
 /// formula's tap isn't in its path: `detect_install` reads it from the keg's receipt.
 pub fn install_of(resolved: &Path) -> Install {
     let parts = names(resolved);
+    let root = root_of(resolved);
     let at = |name: &str| parts.iter().position(|p| p == name);
-    // Before Cellar: Volta itself may be a formula, its shim a link into its keg.
-    if parts.last().is_some_and(|n| n == "volta-shim") || resolved.to_string_lossy().contains("/.volta/tools/image/packages/") {
+    // Before Cellar: Volta itself may be a formula, its shim a link into its keg. On Windows
+    // Volta's home is `%LOCALAPPDATA%\Volta`, its shims `bin\<tool>.exe` copies of one program.
+    let volta_dir = has_run(&parts, &[".volta", "tools", "image", "packages"]) || (cfg!(windows) && has_run(&parts, &["Volta", "tools", "image", "packages"]));
+    let volta_shim = parts.last().is_some_and(|n| n == "volta-shim") || (cfg!(windows) && parts.len() >= 3 && has_run(&parts[parts.len() - 3..parts.len() - 1], &["Volta", "bin"]));
+    if volta_shim || volta_dir {
         return Install::Volta;
     }
-    // Before node_modules: a formula may be an npm package installed into its keg (gemini-cli,
-    // qwen-code), and only brew may change a keg.
-    if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
-        return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&parts[..i]), tap: None };
+    // Homebrew exists on macOS only: a Windows folder called Cellar is just a folder.
+    if !cfg!(windows) {
+        // Before node_modules: a formula may be an npm package installed into its keg
+        // (gemini-cli, qwen-code), and only brew may change a keg.
+        if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
+            return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]), tap: None };
+        }
+        if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
+            return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]) };
+        }
     }
-    if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
-        return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&parts[..i]) };
+    if cfg!(windows)
+        && let Some(id) = winget_package(&parts)
+    {
+        return Install::Winget { id };
     }
     if let Some(i) = at("node_modules") {
         let Some(first) = parts.get(i + 1) else { return Install::Native };
@@ -204,15 +285,15 @@ pub fn install_of(resolved: &Path) -> Install {
             (true, None) => return Install::Native,
             (false, _) => first.clone(),
         };
-        let path = resolved.to_string_lossy();
-        if path.contains("/.bun/install/global/") {
+        if has_run(&parts, &[".bun", "install", "global"]) {
             return Install::Bun { package };
         }
         if parts[..i].iter().any(|p| p == "pnpm") {
             return Install::Pnpm { package };
         }
+        // npm's prefix holds `lib/node_modules` on Unix, and on Windows `node_modules` itself.
         let end = if i > 0 && parts[i - 1] == "lib" { i - 1 } else { i };
-        return Install::Npm { package, prefix: rooted(&parts[..end]) };
+        return Install::Npm { package, prefix: rooted(&root, &parts[..end]) };
     }
     Install::Native
 }
@@ -232,9 +313,14 @@ pub fn shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
     }
     let dir = shim.parent()?;
     let target = text.split('"').find_map(|t| t.strip_prefix("$basedir/").filter(|t| t.contains("node_modules/")))?;
-    // Lexically: the shim's folder may be reached through `..`.
+    Some(lexical(&dir.join(target)))
+}
+
+/// `path` with its `.` and `..` folded away, without asking the disk: the shim's folder may be
+/// reached through `..`.
+fn lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
-    for c in dir.join(target).components() {
+    for c in path.components() {
         match c {
             Component::ParentDir => {
                 out.pop();
@@ -243,13 +329,41 @@ pub fn shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
             c => out.push(c),
         }
     }
-    Some(out)
+    out
 }
 
-/// The script a binary runs: what a package manager's shell-script shim points at, or itself.
+/// What a `.cmd` shim runs. npm (cmd-shim) and pnpm write one beside every global binary, and
+/// the script it runs is named by a quoted `%dp0%\…\node_modules\<package>\…` (older ones
+/// `%~dp0\…`), `dp0` being the shim's own folder:
+/// `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*`.
+pub fn cmd_shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
+    let dir = shim.parent()?;
+    let target = text.split('"').find_map(|t| t.strip_prefix("%dp0%").or_else(|| t.strip_prefix("%~dp0")).filter(|t| t.contains("node_modules")))?;
+    Some(lexical(&dir.join(target.trim_start_matches(['\\', '/']))))
+}
+
+/// What a Bun shim runs. `bun add -g` on Windows leaves `<name>.exe` (one launcher program for all)
+/// beside `<name>.bunx`, whose UTF-16 text holds the path of the script, relative to the folder
+/// or absolute. Read for the first path in it that goes through `node_modules`.
+pub fn bunx_target(shim: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let text = String::from_utf16_lossy(&units);
+    let path = text.split(['\0', '"']).find(|t| t.contains("node_modules"))?.trim_start_matches(r"\??\");
+    let path = Path::new(path);
+    Some(lexical(&if path.is_absolute() { path.to_path_buf() } else { shim.parent()?.join(path) }))
+}
+
+/// The script a binary runs: what a package manager's shim points at (a shell script's, or on
+/// Windows a `.cmd`'s or Bun's), or itself.
 pub fn script_of(resolved: &Path) -> PathBuf {
     let small = std::fs::metadata(resolved).is_ok_and(|m| m.len() < 8 * 1024);
-    small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t)).unwrap_or_else(|| resolved.to_path_buf())
+    let extension = resolved.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+    let target = match extension.as_deref() {
+        Some("cmd" | "bat") if cfg!(windows) => small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| cmd_shim_target(resolved, &t)),
+        Some("exe") if cfg!(windows) => std::fs::read(resolved.with_extension("bunx")).ok().filter(|b| b.len() < 8 * 1024).and_then(|b| bunx_target(resolved, &b)),
+        _ => small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t)),
+    };
+    target.unwrap_or_else(|| resolved.to_path_buf())
 }
 
 /// A vendor installer's marker (Pi's `managed-install.json`): what's under its folder is the
@@ -279,7 +393,7 @@ pub fn package_dir(script: &Path) -> Option<PathBuf> {
     let i = parts.iter().rposition(|p| p == "node_modules")?;
     let first = parts.get(i + 1)?;
     let end = if first.starts_with('@') { i + 3 } else { i + 2 };
-    (parts.len() >= end).then(|| rooted(&parts[..end]))
+    (parts.len() >= end).then(|| rooted(&root_of(script), &parts[..end]))
 }
 
 /// The version in a package's `package.json`.
@@ -360,7 +474,8 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
         Install::Brew { formula, tap: Some(tap), .. } => Some(Source::TapFormula { tap: tap.clone(), formula: formula.clone() }),
         Install::Cask { cask, .. } => Some(Source::Cask(cask.clone())),
         Install::Volta => h.npm_for(installed).map(|p| Source::Npm(p.into())),
-        Install::Native => match h.feed {
+        // WinGet publishes what the vendor's own release feed does.
+        Install::Native | Install::Winget { .. } => match h.feed {
             Feed::Npm => h.npm_for(installed).map(|p| Source::Npm(p.into())),
             feed => Some(Source::Feed(feed)),
         },
@@ -379,16 +494,18 @@ pub fn urls(source: &Source) -> Vec<String> {
             vec![format!("{base}/Formula/{formula}.rb"), format!("{base}/{formula}.rb")]
         }
         Source::Cask(c) => vec![format!("https://formulae.brew.sh/api/cask/{c}.json")],
-        Source::Feed(feed) => vec![match feed {
-            Feed::Npm => return vec![],
-            Feed::ClaudeReleases => "https://downloads.claude.ai/claude-code-releases/latest".into(),
-            Feed::ClaudeStable => "https://downloads.claude.ai/claude-code-releases/stable".into(),
-            Feed::GrokStable => "https://x.ai/cli/stable".into(),
-            Feed::DevinManifest => "https://static.devin.ai/cli/current/manifest.json".into(),
-            Feed::CursorInstaller => "https://cursor.com/install".into(),
-            Feed::DroidInstaller => "https://app.factory.ai/cli".into(),
-            Feed::GitHub(repo) => format!("https://api.github.com/repos/{repo}/releases/latest"),
-        }],
+        // The feeds name a version, not a download: the same on every platform. Cursor's and
+        // Factory's are their install scripts, and each has a Windows one that names it too.
+        Source::Feed(feed) => match feed {
+            Feed::Npm => vec![],
+            Feed::ClaudeReleases => vec!["https://downloads.claude.ai/claude-code-releases/latest".into()],
+            Feed::ClaudeStable => vec!["https://downloads.claude.ai/claude-code-releases/stable".into()],
+            Feed::GrokStable => vec!["https://x.ai/cli/stable".into()],
+            Feed::DevinManifest => vec!["https://static.devin.ai/cli/current/manifest.json".into()],
+            Feed::CursorInstaller => vec!["https://cursor.com/install".into(), "https://cursor.com/install?win32=true".into()],
+            Feed::DroidInstaller => vec!["https://app.factory.ai/cli".into(), "https://app.factory.ai/cli/windows".into()],
+            Feed::GitHub(repo) => vec![format!("https://api.github.com/repos/{repo}/releases/latest")],
+        },
     }
 }
 
@@ -426,7 +543,12 @@ pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
             Feed::ClaudeReleases | Feed::ClaudeStable | Feed::GrokStable => plain(body.lines().next().map(|l| l.trim().to_string())),
             Feed::DevinManifest => plain(json()?["version"].as_str().map(String::from)),
             Feed::CursorInstaller => plain(between(body, "downloads.cursor.com/lab/", '/').map(String::from)),
-            Feed::DroidInstaller => plain(body.lines().find_map(|l| l.trim().strip_prefix("VER=").map(|v| v.trim_matches('"').to_string()))),
+            // `VER="0.233.0"` in the shell script, `$version = '0.237.0'` in the PowerShell one.
+            Feed::DroidInstaller => plain(body.lines().find_map(|l| {
+                let l = l.trim();
+                let value = l.strip_prefix("VER=").or_else(|| l.strip_prefix("$version").and_then(|v| v.trim_start().strip_prefix('=')))?;
+                Some(value.trim().trim_matches(['"', '\'']).to_string())
+            })),
             Feed::GitHub(_) => plain(json()?["tag_name"].as_str().map(String::from)),
         },
     }
@@ -447,26 +569,79 @@ pub struct UpdateCommand {
     /// that put the old package back).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_exit: Vec<(i32, String)>,
+    /// What to show instead of the program and its arguments, for a script that runs through
+    /// PowerShell (`irm https://… | iex`) and does more than it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+/// The extensions `CreateProcess` can run, in the order `PATHEXT` gives them (its own default
+/// when it names none of them).
+fn runnable_extensions() -> Vec<String> {
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    let mut found: Vec<String> = pathext.split(';').map(|e| e.trim().to_ascii_lowercase()).filter(|e| [".com", ".exe", ".bat", ".cmd"].contains(&e.as_str())).collect();
+    if found.is_empty() {
+        found = [".com", ".exe", ".bat", ".cmd"].map(String::from).to_vec();
+    }
+    found
+}
+
+/// The file a bare `program` is, in `search_path`'s folders: that name on Unix; on Windows
+/// that name with an extension from `PATHEXT` (`npm` is `npm.cmd`; the extensionless `npm`
+/// beside it is a shell script Windows can't run, and is never taken).
+fn resolve_program(program: &Path, search_path: &str) -> Option<PathBuf> {
+    if program.is_absolute() {
+        return Some(program.to_path_buf());
+    }
+    let name = program.to_string_lossy();
+    let names: Vec<String> = if !cfg!(windows) {
+        vec![name.to_string()]
+    } else if runnable_extensions().iter().any(|e| name.to_ascii_lowercase().ends_with(e.as_str())) {
+        vec![name.to_string()]
+    } else {
+        runnable_extensions().iter().map(|e| format!("{name}{e}")).collect()
+    };
+    std::env::split_paths(search_path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+}
+
+/// Windows PowerShell, the one every Windows has (PowerShell 7 isn't on all of them).
+fn powershell() -> PathBuf {
+    let system = std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+    system.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("powershell"))
 }
 
 impl UpdateCommand {
     pub fn new(program: impl Into<PathBuf>, args: &[&str]) -> Self {
-        Self { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), path: vec![], env: vec![], on_exit: vec![] }
+        Self { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), path: vec![], env: vec![], on_exit: vec![], display: None }
+    }
+
+    /// `script` run by PowerShell, which is how a Windows installer line (`irm … | iex`) and the
+    /// package move run where there's no `/bin/sh`. Shown as `shown`.
+    pub fn powershell(script: &str, shown: &str) -> Self {
+        Self { display: Some(shown.to_string()), ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]) }
     }
 
     /// The PATH it runs with.
     pub fn search_path(&self) -> String {
-        self.path.iter().map(|p| p.display().to_string()).chain(std::iter::once(login_path().to_string())).collect::<Vec<_>>().join(":")
+        self.path.iter().map(|p| p.display().to_string()).chain(std::iter::once(login_path().to_string())).collect::<Vec<_>>().join(&PATH_SEP.to_string())
     }
 
     /// As the user would type it: "npm install -g @openai/codex@latest", "claude update".
     pub fn shown(&self) -> String {
+        if let Some(shown) = &self.display {
+            return shown.clone();
+        }
         let program = self.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.program.display().to_string());
         // A script runs through `sh -c`: show the line itself, or what it's named after it (the
         // script's `$0`) when it does more than it says.
         if program == "sh" && self.args.first().is_some_and(|a| a == "-c") {
             return self.args.get(2).unwrap_or(&self.args[1]).clone();
         }
+        // On Windows `claude.exe` and `npm.cmd` are typed `claude` and `npm`.
+        let program = match program.rsplit_once('.') {
+            Some((stem, ext)) if cfg!(windows) && [".com", ".exe", ".bat", ".cmd"].contains(&format!(".{}", ext.to_ascii_lowercase()).as_str()) => stem.to_string(),
+            _ => program,
+        };
         std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
     }
 }
@@ -490,20 +665,40 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
         let new = h.npm?;
         // Into a shell line: only a version that can't run anything.
         let back = installed.filter(|v| safe_version(v)).map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
-        let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
         let shown = format!("{remove} {old} && {add} {new}@latest");
         let name = h.name();
+        let command = if cfg!(windows) {
+            // The same steps in PowerShell, which reads a bare `@scope/name` as splatting: each
+            // package is quoted. Stopping on an error makes a missing program exit 1, not go on.
+            let step = |line: String, test: &str, then: String| format!("{line}; if ($LASTEXITCODE -{test}) {{ {then} }}");
+            let script = [
+                "$ErrorActionPreference = 'Stop'".to_string(),
+                step(format!("{remove} '{old}'"), "ne 0", "exit $LASTEXITCODE".into()),
+                step(format!("{add} '{new}@latest'"), "eq 0", "exit 0".into()),
+                step(format!("{add} {offline}'{back}'"), "eq 0", format!("exit {PUT_BACK}")),
+                format!("exit {LOST}"),
+            ]
+            .join("; ");
+            UpdateCommand::powershell(&script, &shown)
+        } else {
+            // Into a shell line: only a version that can't run anything.
+            let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
+            UpdateCommand::new("/bin/sh", &["-c", &script, &shown])
+        };
         Some(UpdateCommand {
             on_exit: vec![
                 (PUT_BACK, format!("Couldn't install {new}, so {back} was put back.")),
                 (LOST, format!("Couldn't install {new}, nor put {back} back: {name} isn't installed now. Run {add} {new} to install it.")),
             ],
-            ..UpdateCommand::new("/bin/sh", &["-c", &script, &shown])
+            ..command
         })
     };
+    // Where an npm prefix keeps its programs: `<prefix>/bin`, and on Windows the prefix itself
+    // (`npm.cmd`, `node.exe` and the shims of its packages, an nvm version's folder included).
+    let npm_dir = |prefix: &Path| if cfg!(windows) { prefix.to_path_buf() } else { prefix.join("bin") };
     match install {
         Install::Npm { package, prefix } if h.moved(package) => moving("npm uninstall -g", "npm install -g", "--prefer-offline ", package).map(|c| UpdateCommand {
-            path: vec![prefix.join("bin")],
+            path: vec![npm_dir(prefix)],
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..c
         }),
@@ -513,7 +708,7 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
         // and the prefix is set outright: a prefix of the user's own (`~/.npm-global`) has
         // neither, so the npm on PATH installs there.
         Install::Npm { package, prefix } => Some(UpdateCommand {
-            path: vec![prefix.join("bin")],
+            path: vec![npm_dir(prefix)],
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..UpdateCommand::new("npm", &["install", "-g", &format!("{package}@latest")])
         }),
@@ -528,7 +723,11 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
             Some(cmd) => Some(cmd),
             None => Some(UpdateCommand::new(prefix.join("bin/brew"), &["upgrade", "--cask", cask])),
         },
-        Install::Native => own().or_else(|| h.installer.map(|script| UpdateCommand::new("/bin/sh", &["-c", script]))),
+        // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update themselves.
+        Install::Winget { id } => Some(UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements"])),
+        Install::Native => own().or_else(|| {
+            h.installer_line().map(|line| if cfg!(windows) { UpdateCommand::powershell(line, line) } else { UpdateCommand::new("/bin/sh", &["-c", line]) })
+        }),
     }
 }
 
@@ -698,7 +897,7 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
     })
 }
 
-/// Check every agent CLI on this Mac, side by side. Takes a few seconds; never fails as a whole.
+/// Check every agent CLI on this computer, side by side. Takes a few seconds; never fails as a whole.
 pub async fn check_all() -> Vec<AgentVersion> {
     let client = client();
     futures::future::join_all(HARNESSES.iter().map(|h| check(h, &client))).await.into_iter().flatten().collect()
@@ -752,18 +951,15 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
         return Outcome::Failed { summary: format!("Trek doesn't know how to update {}.", v.name), output: String::new() };
     };
     let path = cmd.search_path();
-    let program = if cmd.program.is_absolute() { Some(cmd.program.clone()) } else { path.split(':').map(|d| Path::new(d).join(&cmd.program)).find(|p| p.is_file()) };
-    let Some(program) = program.filter(|p| p.is_file()) else {
+    let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else {
         return Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() };
     };
-    let run = tokio::process::Command::new(&program)
-        .args(&cmd.args)
-        .env("PATH", path)
-        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
-        .env("NO_COLOR", "1")
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+    let mut run = tokio::process::Command::new(&program);
+    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    // Trek has no console to share: without this each `.cmd` and PowerShell opens one.
+    #[cfg(windows)]
+    run.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    let run = run.output();
     let out = match tokio::time::timeout(UPDATE_TIMEOUT, run).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => return Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() },
