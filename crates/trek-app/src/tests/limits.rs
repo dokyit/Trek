@@ -838,7 +838,8 @@ fn usage_read_while_a_turn_runs_asks_it_to_wrap_up_once() {
     run(async |cx| {
         let trek = open(cx);
         test_clock(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        // Running while the reads below ask it to wrap up: a loaded runner can take seconds.
+        let id = trek.send(cx, "mock:long 8s");
         let thread = id.clone();
         trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
         let now = trek.read(cx, |ws, _| ws.now());
