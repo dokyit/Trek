@@ -41,6 +41,10 @@ fn page(result: &Value) -> (Vec<String>, Option<String>) {
 
 async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: Duration) -> Result<Vec<String>, String> {
     use std::process::Stdio;
+    // Run as the user wrote it; a `.cmd` (`npx.cmd`) can't be given every argument, which they hear.
+    if let Some(problem) = trek_core::detect::batch_args_problem(std::path::Path::new(command), args) {
+        return Err(problem);
+    }
     let mut cmd = tokio::process::Command::new(command);
     // The login shell's PATH (where npx and uvx are), unless the server sets its own.
     cmd.args(args).env("PATH", trek_core::detect::login_path()).envs(env.iter().map(|(k, v)| (k, v)));
