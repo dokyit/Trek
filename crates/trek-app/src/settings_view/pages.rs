@@ -436,6 +436,8 @@ impl SettingsView {
                         "Liquid glass",
                         if covered {
                             "Your desktop shows through the window, blurred. Hidden while the background art fills the window."
+                        } else if cfg!(windows) {
+                            "Your wallpaper's tint shows through the window (Mica), under translucent panels. Needs Windows 11 22H2 or later, and is off while Transparency effects are off in Windows."
                         } else {
                             "Your desktop shows through the window, blurred, under translucent panels. Off while macOS reduces transparency."
                         },

@@ -70,3 +70,76 @@ fn the_command_pill_holds_its_text_on_both_platforms() {
         });
     });
 }
+
+/// WCAG relative luminance of an sRGB colour (0–1 channels).
+fn luminance([r, g, b]: [f32; 3]) -> f32 {
+    let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+fn contrast(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// `top` laid at `alpha` over `under`.
+fn over(top: [f32; 3], alpha: f32, under: [f32; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|i| top[i] * alpha + under[i] * (1. - alpha))
+}
+
+fn rgb(c: gpui_kit::Hsla) -> [f32; 3] {
+    let c = c.to_rgb();
+    [c.r, c.g, c.b]
+}
+
+#[test]
+fn text_stays_readable_on_mica_in_both_themes_at_every_tint() {
+    use crate::ui::{Material, panel_alpha};
+    use trek_core::settings::ThemeChoice;
+    run(async |cx| {
+        let _trek = open(cx);
+        // Mica Alt's range under each theme's tone: the plain material and what a bold wallpaper
+        // makes of it (the brightest dark Mica, the dimmest light one).
+        for (choice, micas) in [(ThemeChoice::Night, [[0.06, 0.06, 0.06], [0.30, 0.30, 0.36]]), (ThemeChoice::Paper, [[0.95, 0.95, 0.95], [0.76, 0.78, 0.84]])] {
+            cx.update(|cx| crate::apply_theme(choice, None, cx));
+            let (bg, side, fg, muted) = cx.update(|cx| {
+                let t = cx.theme();
+                (t.background, t.sidebar, t.foreground, t.muted_foreground)
+            });
+            for mica in micas {
+                for step in 0..=15 {
+                    let tint = 0.2 + 0.05 * step as f32;
+                    // An inset panel (the transcript): the text and the quieter text on it.
+                    let panel = over(rgb(bg), panel_alpha(tint, Material::Mica), mica);
+                    let (c_fg, c_muted) = (contrast(rgb(fg), panel), contrast(over(rgb(muted), muted.a, panel), panel));
+                    assert!(c_fg >= 7., "{choice:?} panel at tint {tint:.2} over {mica:?}: text {c_fg:.1}:1");
+                    assert!(c_muted >= 4.5, "{choice:?} panel at tint {tint:.2} over {mica:?}: quiet text {c_muted:.1}:1");
+                    // The chrome (sidebar, title bar) is the sidebar's colour at the tint itself.
+                    let chrome = over(rgb(side), crate::ui::chrome_alpha(tint, Material::Mica), mica);
+                    let (c_fg, c_muted) = (contrast(rgb(fg), chrome), contrast(over(rgb(muted), muted.a, chrome), chrome));
+                    assert!(c_fg >= 4.5, "{choice:?} chrome at tint {tint:.2} over {mica:?}: text {c_fg:.1}:1");
+                    assert!(c_muted >= 3., "{choice:?} chrome at tint {tint:.2} over {mica:?}: quiet text {c_muted:.1}:1");
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn glass_picks_its_material_by_platform_and_switch() {
+    use crate::ui::backdrop;
+    use gpui_kit::WindowBackgroundAppearance as W;
+    // Off: opaque, whatever the platform has.
+    assert_eq!(backdrop(false, false, true), W::Opaque);
+    assert_eq!(backdrop(false, true, false), W::Opaque);
+    // macOS 26: the system's glass laid under a transparent window; macOS before: GPUI's blur.
+    assert_eq!(backdrop(true, true, false), W::Transparent);
+    assert_eq!(backdrop(true, false, false), W::Blurred);
+    // Windows 11 22H2 and later: Mica Alt.
+    assert_eq!(backdrop(true, false, true), W::MicaAltBackdrop);
+    // Which Windows can: Mica needs 22H2, and the Transparency effects switch on (Windows 10, or
+    // the switch off, leaves the window opaque: glass is never asked for).
+    assert!(!crate::winlook::glass_available(19045, true));
+    assert!(crate::winlook::glass_available(22631, true));
+    assert!(!crate::winlook::glass_available(22631, false));
+}

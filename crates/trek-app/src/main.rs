@@ -57,6 +57,7 @@ mod tray;
 mod ui;
 mod updater;
 mod visualization;
+mod winlook;
 mod workspace;
 mod working_bar;
 mod worktree_ui;
