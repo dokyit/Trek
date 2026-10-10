@@ -114,6 +114,10 @@ impl ThreadWindow {
                 }
             }),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
+            cx.observe_window_appearance(window, |this, _, cx| {
+                crate::ui::colours_changed(&mut this.glass_applied);
+                cx.notify();
+            }),
             // With nothing focused, keys reach none of the window's shortcuts (⌘W included): the
             // composer takes focus back when what had it leaves (an answered question's text field).
             cx.on_focus_lost(window, |this, window, cx| this.composer.update(cx, |c, cx| c.focus(window, cx))),
