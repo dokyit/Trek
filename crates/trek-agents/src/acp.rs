@@ -511,6 +511,9 @@ struct Turn {
     produced: bool,
     /// The user interrupted the turn: an agent may end it with `end_turn` and nothing said.
     interrupted: bool,
+    /// The error a turn that ends with nothing to show fails with, set before it ends (none:
+    /// it ends as the agent said).
+    if_empty: Option<String>,
 }
 
 /// Whether a turn that ended without an error ended with nothing to show: no words, tool call,
@@ -679,11 +682,7 @@ impl Turn {
     }
 
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
-        self.finish_with(stop, None)
-    }
-
-    /// `finish`; `if_empty` is the error a turn that ended with nothing to show fails with.
-    fn finish_with(&mut self, stop: std::result::Result<&str, String>, if_empty: Option<String>) -> Vec<AgentEvent> {
+        let if_empty = self.if_empty.take();
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
@@ -1317,7 +1316,8 @@ impl Live {
                                 }
                             }
                         }
-                        self.turn.finish_with(stop, Some(empty_turn_error(&self.agent, &self.name, self.model.as_deref())))
+                        self.turn.if_empty = Some(empty_turn_error(&self.agent, &self.name, self.model.as_deref()));
+                        self.turn.finish(stop)
                     } else {
                         // Others are still open: the turn goes on. A message the agent turned down
                         // didn't reach it, so the user is told.
@@ -2067,7 +2067,7 @@ mod tests {
     #[test]
     fn a_turn_with_nothing_in_it_ends_with_the_error_and_one_with_something_does_not() {
         let said = Some("X ended the turn without a reply.".to_string());
-        let ends = |t: &mut Turn, stop| match t.finish_with(stop, said.clone()).pop() {
+        let ends = |t: &mut Turn, stop| match { t.if_empty = said.clone(); t.finish(stop) }.pop() {
             Some(AgentEvent::TurnComplete { error }) => error,
             other => panic!("{other:?}"),
         };
