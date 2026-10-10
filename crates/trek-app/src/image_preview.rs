@@ -584,7 +584,7 @@ impl ImagePreview {
                     .flex_none()
                     .gap(px(2.))
                     .child(ui::icon_button("preview-open", Icon::new(crate::assets::Lucide::SquareArrowOutUpRight), "Open in Preview").on_click(move |_, _, cx| cx.open_with_system(&open_path)))
-                    .child(ui::icon_button("preview-reveal", IconName::FolderOpen, "Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal_path)))
+                    .child(ui::icon_button("preview-reveal", IconName::FolderOpen, crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal_path)))
                     .child(ui::icon_button("preview-copy", IconName::Copy, crate::keys::shared("Copy image (⌘C)")).on_click(cx.listener(|this, _, window, cx| this.copy(window, cx))))
                     .when(s.remove.is_some(), |el| {
                         el.child(ui::icon_button("preview-remove", Icon::new(crate::assets::Lucide::Trash), crate::keys::shared("Remove from message (⌘⌫)")).on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))))

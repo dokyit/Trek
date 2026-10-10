@@ -22,6 +22,12 @@ use trek_core::settings::{NotifyMode, Settings, ThemeChoice};
 use trek_core::store::{Item, Store};
 use trek_core::{AgentId, HandHolding, RunState};
 
+/// The fonts the app registers at startup (`fonts::register`), for the tests' text system: the
+/// theme names them, and GPUI can't lay out a line in a family it hasn't got.
+fn add_fonts() {
+    TEXT.get().expect("text system").add_fonts(crate::fonts::files()).expect("Trek's fonts register");
+}
+
 /// CoreText, so text lays out as in the app. `MacPlatform` must be made on the main thread and
 /// tests run on worker threads, so it's made before `main`.
 static TEXT: OnceLock<Arc<dyn PlatformTextSystem>> = OnceLock::new();
@@ -31,6 +37,7 @@ static TEXT: OnceLock<Arc<dyn PlatformTextSystem>> = OnceLock::new();
 fn load_text_system() {
     let platform = gpui_macos::MacPlatform::new(true);
     let _ = TEXT.set(gpui_kit::Platform::text_system(&platform));
+    add_fonts();
     // Lives for the whole process; dropping it would tear down state the text system shares.
     std::mem::forget(platform);
 }
@@ -46,6 +53,7 @@ fn load_text_system() {
 fn load_text_system() {
     let platform = gpui_windows::WindowsPlatform::new(false).expect("DirectWrite text system for the UI tests");
     let _ = TEXT.set(gpui_kit::Platform::text_system(&platform));
+    add_fonts();
     // Lives for the whole process, as on macOS: it owns the message window the text system's devices belong to.
     std::mem::forget(platform);
 }

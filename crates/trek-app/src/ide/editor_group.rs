@@ -424,7 +424,7 @@ impl IdeWorkbench {
                             .item(copy("Copy Path", path.display().to_string()))
                             .item(copy("Copy Relative Path", relative))
                             .separator()
-                            .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                            .item(PopupMenuItem::new(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
                             .item(PopupMenuItem::new("Open in Default App").on_click(move |_, _, cx| cx.open_with_system(&open)))
                     })
             }))
