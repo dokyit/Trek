@@ -25,7 +25,7 @@
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
-//! `key <keystroke>…` (`cmd-k`, `escape`, `shift-tab`, `down down enter`), `scroll <element id> <px>`
+//! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`, `down down enter`), `scroll <element id> <px>`
 //! (a wheel over that element, positive down the page), `resize <w> <h>` (the main window, logical
 //! px). The thread on screen: `approve` / `deny` its waiting permission, plan
 //! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
@@ -541,7 +541,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 }
                 "key" => {
                     use gpui_kit::test::TestWindowExt as _;
-                    anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (cmd-k, escape, shift-tab …)");
+                    anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (secondary-k, escape, shift-tab …)");
                     // All of them parse before any is pressed: a typo doesn't leave half a sequence done.
                     for k in arg.split_whitespace() {
                         Keystroke::parse(k).map_err(|e| anyhow::anyhow!("key: bad keystroke {k:?}: {e}"))?;
