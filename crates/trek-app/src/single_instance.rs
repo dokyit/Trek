@@ -76,7 +76,9 @@ fn background() -> bool {
 }
 
 /// What a launch hands over: `trek://` links as they are, paths made absolute against `cwd` (the
-/// running Trek has its own working folder). Flags, which Trek takes none of, are left out.
+/// running Trek has its own working folder). Flags, which Trek takes none of, are left out, and
+/// so is anything past the most the running Trek takes (`MAX_ARGS`: "Open with Trek" on a
+/// hundred files would otherwise be refused whole).
 pub fn launch_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<String> {
     args.into_iter()
         .filter_map(|a| {
@@ -91,6 +93,7 @@ pub fn launch_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<
             let p = if p.is_absolute() { p } else { std::path::absolute(cwd.join(&p)).unwrap_or_else(|_| cwd.join(&p)) };
             Some(p.to_string_lossy().into_owned())
         })
+        .take(trek_ipc::instance::MAX_ARGS)
         .collect()
 }
 
@@ -135,7 +138,10 @@ pub(crate) fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
 /// The running Trek's pipe, as it wrote it to the data folder.
 #[cfg(windows)]
 fn published(dir: &Path) -> Option<PathBuf> {
-    let name = std::fs::read_to_string(dir.join(PIPE_FILE)).ok()?;
+    use std::io::Read as _;
+    // A pipe's name is short: read no more than that, whatever the file has become.
+    let mut name = String::new();
+    std::fs::File::open(dir.join(PIPE_FILE)).ok()?.take(512).read_to_string(&mut name).ok()?;
     let name = name.trim();
     (!name.is_empty() && name.len() < 512).then(|| PathBuf::from(name))
 }
@@ -201,7 +207,18 @@ async fn hand_over(tx: async_channel::Sender<Forwarded>, open: Open) -> Result<(
 fn publish(dir: &Path, address: &Path) -> std::io::Result<()> {
     let tmp = dir.join(format!("{PIPE_FILE}.{}", std::process::id()));
     std::fs::write(&tmp, address.to_string_lossy().as_bytes())?;
-    std::fs::rename(&tmp, dir.join(PIPE_FILE)).inspect_err(|_| _ = std::fs::remove_file(&tmp))
+    // A launch reading the old file, or a scanner looking at it, can make the replacing fail for a
+    // moment on Windows; without the name there, later launches could never reach this Trek.
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(&tmp, dir.join(PIPE_FILE)) {
+            Err(_) if tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result.inspect_err(|_| _ = std::fs::remove_file(&tmp)),
+        }
+    }
 }
 
 /// A launch that couldn't hand over: say why where the user will see it (a message box, as a
@@ -288,6 +305,17 @@ mod tests {
         assert_eq!(launch_args([abs.clone().into_os_string()], Path::new("/elsewhere")), [abs.to_string_lossy().into_owned()]);
     }
 
+    /// More files than the running Trek takes in one hand-over: the first ones go, rather than
+    /// the whole request being refused (and the launch ending in an error box).
+    #[test]
+    fn a_hundred_files_are_handed_over_as_far_as_the_limit() {
+        let files = (0..100).map(|i| OsString::from(format!("f{i}.rs")));
+        let got = launch_args(files, &std::env::temp_dir());
+        assert_eq!(got.len(), trek_ipc::instance::MAX_ARGS);
+        assert!(got[0].ends_with("f0.rs") && got.last().unwrap().ends_with(&format!("f{}.rs", trek_ipc::instance::MAX_ARGS - 1)));
+        assert!(trek_ipc::instance::Open::parse(&Open { args: got, background: false }.to_frame()).is_some(), "the running Trek accepts them");
+    }
+
     #[test]
     fn the_pipe_s_name_is_published_whole() {
         let dir = std::env::temp_dir().join(format!("trek-publish-{}", std::process::id()));
@@ -303,6 +331,16 @@ mod tests {
     mod windows {
         use super::super::*;
         use std::time::Instant;
+
+        #[test]
+        fn a_pipe_file_that_is_not_a_name_is_not_read_whole() {
+            let dir = data_dir("big");
+            std::fs::write(dir.join(PIPE_FILE), vec![b'x'; 8 << 20]).unwrap();
+            assert_eq!(published(&dir), None);
+            std::fs::write(dir.join(PIPE_FILE), "  \\\\.\\pipe\\trek-1-0-ab\r\n").unwrap();
+            assert_eq!(published(&dir), Some(PathBuf::from(r"\\.\pipe\trek-1-0-ab")));
+            let _ = std::fs::remove_dir_all(dir);
+        }
 
         fn data_dir(tag: &str) -> PathBuf {
             let dir = std::env::temp_dir().join(format!("trek-si-{tag}-{}-{}", std::process::id(), &trek_ipc::token().unwrap()[..8]));

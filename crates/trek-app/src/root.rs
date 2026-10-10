@@ -682,7 +682,7 @@ fn database_error(error: &str, window: &mut Window, cx: &mut App) {
 /// Bring the main window forward, reopening it if it was closed.
 pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
     let main = workspace.read(cx).main_window;
-    if main.is_some_and(|m| m.update(cx, |_, window, _| crate::system::activate_window(window)).is_ok()) {
+    if main.is_some_and(|m| m.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     if let Err(e) = open_main(workspace, true, cx) {
@@ -801,7 +801,7 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
         return show_main(workspace.clone(), cx);
     }
     let own = workspace.read(cx).thread_windows.get(thread).copied();
-    if own.is_some_and(|w| w.update(cx, |_, window, _| crate::system::activate_window(window)).is_ok()) {
+    if own.is_some_and(|w| w.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     // In the editor it opens in the AI side bar.
