@@ -572,14 +572,15 @@ impl SettingsView {
             Self::heading("Badges", cx),
             ui::group(
                 vec![
+                    // words(): these three become the platform table's.
                     Self::row(
-                        "Dock badge",
-                        "Count of threads waiting on you, on Trek's Dock icon.",
+                        if cfg!(windows) { "Taskbar badge" } else { "Dock badge" },
+                        if cfg!(windows) { "Count of threads waiting on you, on Trek's taskbar button." } else { "Count of threads waiting on you, on Trek's Dock icon." },
                         self.switch("dock-badge", n.dock_badge, |s, v| s.notifications.dock_badge = v),
                         cx,
                     ),
                     Self::row(
-                        "Menu bar icon",
+                        if cfg!(windows) { "System tray icon" } else { "Menu bar icon" },
                         "The trail fills in while agents work and shows a dot when one needs you.",
                         self.switch("menu-bar-icon", n.menu_bar_icon, |s, v| s.notifications.menu_bar_icon = v),
                         cx,
