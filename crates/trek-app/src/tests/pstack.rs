@@ -476,7 +476,7 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
 /// verification skill knows its CLI and reads Trek's guides without asking. Not run by default
 /// (two tiny turns):
 /// `TREK_LIVE_AGENT=claude cargo test -p trek-app live_restate -- --ignored`. Works in
-/// /tmp/trek-pstack-e2e; remove ~/.claude/projects/-private-tmp-trek-pstack-e2e afterwards.
+/// `trek-pstack-e2e` in the temp folder; remove its folder under ~/.claude/projects afterwards.
 #[test]
 #[ignore = "live: runs a real agent"]
 fn live_restate_first_and_project_notes() {
@@ -487,7 +487,7 @@ fn live_restate_first_and_project_notes() {
             s.general.default_model = Some("claude-haiku-4-5".into());
             s.general.default_effort = trek_core::Effort::Low;
         });
-        let project = std::path::PathBuf::from("/tmp/trek-pstack-e2e");
+        let project = std::env::temp_dir().join("trek-pstack-e2e");
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(project.join(".agents/skills/control-app")).unwrap();
         std::fs::write(project.join("README.md"), "# Notes\n\nA tiny notes app.\n").unwrap();
@@ -557,7 +557,7 @@ fn live_restate_first_and_project_notes() {
 /// turns), and needs `trek-mcp` next to the test binary:
 /// `cargo build -p trek-mcp && cp target/debug/trek-mcp target/debug/deps/ &&
 /// TREK_LIVE_AGENT=arena cargo test -p trek-app live_arena -- --ignored`. Works in
-/// /tmp/trek-pstack-e2e; remove ~/.claude/projects/-private-tmp-trek-pstack-e2e and the Codex
+/// `trek-pstack-e2e` in the temp folder; remove its folder under ~/.claude/projects and the Codex
 /// sessions whose cwd is that folder afterwards.
 #[test]
 #[ignore = "live: runs real agents"]
@@ -574,7 +574,7 @@ fn live_arena_with_real_agents() {
         let agents = trek_core::runtime().block_on(trek_core::detect::detect_all());
         trek.update(cx, |ws, _| ws.agents = agents);
         assert!(trek.read(cx, |ws, _| ws.consult_unavailable(&AgentId::ClaudeCode)).is_none(), "trek-mcp next to the test binary, Claude Code and Codex installed");
-        let project = std::path::PathBuf::from("/tmp/trek-pstack-e2e");
+        let project = std::env::temp_dir().join("trek-pstack-e2e");
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join("src/lib.rs"), "//! Timeouts for a tiny job runner.\n\npub struct Job {\n    pub name: String,\n}\n\npub fn run(job: &Job) {\n    println!(\"running {}\", job.name);\n}\n").unwrap();

@@ -1624,7 +1624,7 @@ mod live_usage {
     }
 
     fn turn_in(agent: AgentId, model: &str, resume: Option<String>, prompt: &str, hand_holding: HandHolding) -> Vec<AgentEvent> {
-        let cwd = std::path::PathBuf::from("/tmp/trek-basecamp-e2e");
+        let cwd = std::env::temp_dir().join("trek-basecamp-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
             agent,
@@ -1693,7 +1693,7 @@ mod live_usage {
     #[test]
     #[ignore = "talks to the real Claude Code"]
     fn claude_live_background_shell_outlives_the_turn_and_wakes_it() {
-        let cwd = std::path::PathBuf::from("/tmp/trek-background-e2e");
+        let cwd = std::env::temp_dir().join("trek-background-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
             agent: AgentId::ClaudeCode,
@@ -1744,7 +1744,7 @@ mod live_usage {
     #[test]
     #[ignore = "talks to the real Claude Code"]
     fn claude_live_stopped_background_agent_and_what_follows() {
-        let cwd = std::path::PathBuf::from("/tmp/trek-background-e2e");
+        let cwd = std::env::temp_dir().join("trek-background-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
             agent: AgentId::ClaudeCode,
