@@ -382,8 +382,9 @@ fn a_parent_whose_turn_failed_with_messages_left_queued_still_wakes() {
 fn a_parent_in_a_thread_window_wakes_and_shows_its_wait_there() {
     run(async |cx| {
         let trek = open(cx);
-        // Still working when its window renders: a loaded runner can take seconds to get there.
-        let id = trek.send(cx, "mock:delegate mock:long 8s");
+        // Still working when its window renders: a loaded runner can take seconds to get there
+        // (a window, a navigation and a frame), so it works for fifteen seconds.
+        let id = trek.send(cx, "mock:delegate mock:long 15s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
         let window = trek.open_thread_window(cx, &id);

@@ -92,6 +92,58 @@ pub fn peer_is_me(stream: &Stream) -> bool {
     }
 }
 
+/// Read one frame, at most `max` bytes. `Ok(None)` at the end of the stream; an error for a
+/// longer one (the rest of the stream is then unusable).
+pub async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R, max: usize) -> io::Result<Option<String>> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    let mut buf = Vec::new();
+    let n = (&mut *r).take(max as u64 + 1).read_until(b'\n', &mut buf).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame longer than {max} bytes")));
+    }
+    String::from_utf8(buf).map(Some).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame isn't UTF-8"))
+}
+
+/// One connection from a second launch (`instance`): an open request within `within`, at most
+/// `MAX_FRAME` bytes, which `dispatch` takes; its answer goes back. Another user's process gets
+/// nothing; one that sends too much, too late or not an open request gets the connection closed
+/// (with a word why, when it sent something). Nothing it sent is logged.
+pub async fn serve_open<F, Fut>(stream: Stream, within: std::time::Duration, dispatch: F)
+where
+    F: FnOnce(crate::instance::Open) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    use serde_json::json;
+    use tokio::io::AsyncWriteExt as _;
+    if !peer_is_me(&stream) {
+        return;
+    }
+    let (rd, mut w) = tokio::io::split(stream);
+    let mut r = tokio::io::BufReader::new(rd);
+    let open = match tokio::time::timeout(within, read_frame(&mut r, crate::MAX_FRAME)).await {
+        Ok(Ok(Some(line))) => serde_json::from_str(&line).ok().as_ref().and_then(crate::instance::Open::parse),
+        Ok(Err(e)) => {
+            tracing::warn!("refused a second launch's request: {e}");
+            return;
+        }
+        // Nothing in time, or nothing at all.
+        _ => return,
+    };
+    let answer = match open {
+        Some(open) => match dispatch(open).await {
+            Ok(()) => json!({ "ok": true }),
+            Err(e) => json!({ "error": e }),
+        },
+        None => json!({ "error": "not an open request Trek understands" }),
+    };
+    let _ = w.write_all(crate::encode(&answer).as_bytes()).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +354,95 @@ mod tests {
         let client = Client { socket: address, token: "secret".into(), session: "s".into() };
         let err = client.connect().err().unwrap();
         assert!(err.starts_with("Didn't connect to Trek: the pipe isn't served by Trek"), "a refusal, not Trek gone: {err}");
+    }
+
+    use crate::instance::{ForwardError, Open, forward};
+    use std::sync::{Arc, Mutex};
+
+    /// Serves open requests as a running Trek does, with a fake dispatcher that keeps what it's
+    /// handed and answers as `answer` says (`None`: never, as a hung Trek).
+    fn open_server(rt: &tokio::runtime::Runtime, within: Duration, answer: fn(&Open) -> Option<Result<(), String>>) -> (PathBuf, Arc<Mutex<Vec<Open>>>) {
+        let address = address("open");
+        let mut listener = {
+            let _enter = rt.enter();
+            Listener::bind(&address).unwrap()
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        rt.spawn(async move {
+            loop {
+                let Ok(stream) = listener.accept().await else { continue };
+                let kept = kept.clone();
+                tokio::spawn(serve_open(stream, within, move |open: Open| async move {
+                    kept.lock().unwrap().push(open.clone());
+                    match answer(&open) {
+                        Some(result) => result,
+                        None => std::future::pending().await,
+                    }
+                }));
+            }
+        });
+        (address, seen)
+    }
+
+    /// Send `bytes` as they are, and read what comes back: `None` when the server closed the
+    /// connection without a word.
+    fn raw(address: &Path, bytes: &[u8]) -> Option<Value> {
+        use std::io::Write as _;
+        let mut stream = crate::Stream::connect(address).unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        // A server that gives up half way through a long frame breaks the pipe under the write.
+        let _ = stream.write_all(bytes);
+        crate::read_frame(&mut reader, crate::MAX_FRAME).ok().flatten().map(|line| serde_json::from_str(&line).unwrap())
+    }
+
+    #[test]
+    fn a_second_launch_hands_its_arguments_to_the_running_one() {
+        let rt = runtime();
+        let (address, seen) = open_server(&rt, Duration::from_secs(5), |open| Some(if open.args.iter().any(|a| a == "refuse") { Err("busy".into()) } else { Ok(()) }));
+        let open = Open { args: vec!["trek://edit?path=%2Ftmp%2Fx.rs&line=3".into(), "/tmp/folder with spaces".into()], background: false };
+        forward(&address, &open, Duration::from_secs(5)).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [open], "handed over as sent");
+        assert_eq!(forward(&address, &Open { args: vec!["refuse".into()], background: true }, Duration::from_secs(5)), Err(ForwardError::Refused("busy".into())));
+        forward(&address, &Open::default(), Duration::from_secs(5)).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn junk_and_oversized_requests_reach_no_one() {
+        let rt = runtime();
+        let (address, seen) = open_server(&rt, Duration::from_secs(5), |_| Some(Ok(())));
+        for junk in [&b"not json\n"[..], b"{\"hello\":{\"version\":1,\"token\":\"t\",\"session\":\"s\"}}\n", b"{\"open\":{\"version\":1,\"args\":[1]}}\n"] {
+            let answer = raw(&address, junk).expect("a word why");
+            assert!(answer["error"].is_string(), "{answer}");
+        }
+        // A frame a byte over the limit: the server stops reading there and hangs up.
+        assert_eq!(raw(&address, &vec![b'x'; crate::MAX_FRAME + 1]), None);
+        // So do too many arguments, though the frame itself is small.
+        let many = Open { args: vec!["x".into(); crate::instance::MAX_ARGS + 1], background: false };
+        assert!(raw(&address, crate::encode(&many.to_frame()).as_bytes()).unwrap()["error"].is_string());
+        assert!(seen.lock().unwrap().is_empty(), "the dispatcher saw none of it");
+        // And it still serves a proper request after all that.
+        forward(&address, &Open { args: vec!["trek://ask?path=%2Fa".into()], background: false }, Duration::from_secs(5)).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_client_that_says_nothing_is_dropped() {
+        let rt = runtime();
+        let (address, _) = open_server(&rt, Duration::from_millis(300), |_| Some(Ok(())));
+        let started = Instant::now();
+        assert_eq!(raw(&address, b""), None);
+        assert!(started.elapsed() < Duration::from_secs(3), "dropped after the time it's given, not left open");
+    }
+
+    #[test]
+    fn a_hung_trek_times_the_second_launch_out() {
+        let rt = runtime();
+        let (address, seen) = open_server(&rt, Duration::from_secs(5), |_| None);
+        let started = Instant::now();
+        assert_eq!(forward(&address, &Open { args: vec!["trek://edit?path=%2Fx".into()], background: false }, Duration::from_millis(500)), Err(ForwardError::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert_eq!(seen.lock().unwrap().len(), 1, "it got there; the answer never came");
     }
 }
