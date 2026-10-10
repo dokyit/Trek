@@ -120,6 +120,8 @@ impl TrekWindow {
         let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), Scope::Main, window, cx));
         let handle = window.window_handle();
         workspace.update(cx, |ws, _| ws.main_window = Some(handle));
+        // The next launch opens the main window where this one is left.
+        cx.observe_window_bounds(window, |_, window, cx| crate::window_place::remember(window, cx)).detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -635,9 +637,18 @@ fn launch_size() -> Option<Size<Pixels>> {
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
+    let min = size(px(760.), px(520.));
+    // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
+    // window every time).
+    let (display_id, window_bounds) = match launch_size() {
+        Some(asked) => (None, WindowBounds::centered(asked, cx)),
+        None if std::env::var_os("TREK_SHOT_DIR").is_some() => (None, WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        None => crate::window_place::initial(size(px(1280.), px(820.)), min, focus, cx),
+    };
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(launch_size().unwrap_or(size(px(1280.), px(820.))), cx)),
-        window_min_size: Some(size(px(760.), px(520.))),
+        window_bounds: Some(window_bounds),
+        display_id,
+        window_min_size: Some(min),
         app_id: Some("dev.trek.Trek".into()),
         focus,
         show: focus || crate::system::SHOW_BEHIND,
