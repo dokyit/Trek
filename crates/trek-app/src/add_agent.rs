@@ -272,7 +272,7 @@ impl AddAgentSheet {
             }
             RowState::Installing(label) => chip(format!("registry-installing-{id}"), h_flex().gap(px(6.)).child(Spinner::new().xsmall().color(muted)).child(label.clone()).into_any_element()),
             RowState::Failed(_) => Button::new(SharedString::from(format!("registry-add-{id}"))).small().outline().label("Retry").on_click(install).into_any_element(),
-            RowState::Unavailable => div().text_size(px(12.5)).text_color(muted).child("Not for this Mac").into_any_element(),
+            RowState::Unavailable => div().text_size(px(12.5)).text_color(muted).child(format!("Not for {}", crate::words::words().this_computer)).into_any_element(),
             RowState::Available => Button::new(SharedString::from(format!("registry-add-{id}"))).small().outline().label("Add").on_click(install).into_any_element(),
         };
         // npx and uvx need Node and uv: say which, so a failure to start isn't a surprise.
@@ -391,7 +391,7 @@ impl AddAgentSheet {
                     .small()
                     .selected(secret)
                     .icon(Icon::new(if secret { crate::assets::Lucide::Lock } else { crate::assets::Lucide::LockOpen }).text_color(if secret { theme.foreground } else { muted }))
-                    .tooltip(if secret { "Secret: kept in your Keychain" } else { "Keep it in your Keychain instead of settings" })
+                    .tooltip(if secret { format!("Secret: kept in {}", crate::words::words().your_credential_store) } else { format!("Keep it in {} instead of settings", crate::words::words().your_credential_store) })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(row) = this.env.get_mut(i) {
                             row.secret = !row.secret;
@@ -416,6 +416,7 @@ impl AddAgentSheet {
             .collect();
         let add_row = |id: &'static str, label: &'static str| Button::new(id).ghost().xsmall().icon(Icon::new(IconName::Plus).text_color(muted)).label(label);
         let id_hint = "Threads and settings know the agent by it. Lowercase letters, digits, dots, dashes and underscores.";
+        let env_hint = (!self.env.is_empty()).then(|| format!("A locked value is kept in {}, never in settings.toml.", crate::words::words().your_credential_store));
         div()
             .id("command-form")
             .test_support()
@@ -444,7 +445,7 @@ impl AddAgentSheet {
                     .child(Self::field(
                         "Environment",
                         v_flex().gap(px(6.)).children(env).child(h_flex().child(add_row("env-add", "Add variable").on_click(cx.listener(|this, _, window, cx| this.add_env(window, cx))))),
-                        if self.env.is_empty() { None } else { Some("A locked value is kept in your Keychain, never in settings.toml.") },
+                        env_hint.as_deref(),
                         cx,
                     ))
                     .child(Self::field("ID", div().font_family(mono).child(Input::new(&self.id).id("command-id").small()), Some(id_hint), cx)),

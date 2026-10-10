@@ -1110,7 +1110,7 @@ impl GitPanel {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(Button::new("git-reveal").small().ghost().icon(IconName::FolderOpen).label("Show in Finder").on_click({
+                    .child(Button::new("git-reveal").small().ghost().icon(IconName::FolderOpen).label(crate::words::words().show_in_file_manager).on_click({
                         let path = t.wt.path.clone();
                         move |_, _, cx| cx.reveal_path(&path)
                     }))

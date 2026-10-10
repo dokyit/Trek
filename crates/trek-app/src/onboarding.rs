@@ -192,7 +192,7 @@ impl Onboarding {
                 v_flex()
                     .gap(px(20.))
                     .child(point(Icon::new(IconName::Bot), "Bring the agents you already pay for", "Claude Code, Codex, OpenCode and more run with your own logins and plans."))
-                    .child(point(Icon::new(IconName::Inbox), "Pick up where you left off", "Conversations from other agents on this Mac appear in your sidebar, read-only."))
+                    .child(point(Icon::new(IconName::Inbox), "Pick up where you left off", &format!("Conversations from other agents on {} appear in your sidebar, read-only.", crate::words::words().this_computer)))
                     .child(point(Icon::new(crate::assets::Lucide::ShieldCheck), "Stay in control", "Choose how much an agent may do on its own, per thread.")),
             )
             .into_any_element()
@@ -309,9 +309,9 @@ impl Onboarding {
         }
         let none = found.is_empty() && !detecting;
         let body = if none {
-            "Trek drives each vendor's own agent with the login you already have. None is installed on this Mac yet: install one below, sign in to it, then scan again."
+            format!("Trek drives each vendor's own agent with the login you already have. None is installed on {} yet: install one below, sign in to it, then scan again.", crate::words::words().this_computer)
         } else {
-            "Trek drives each vendor's own agent with the login you already have. Your credentials never pass through Trek."
+            "Trek drives each vendor's own agent with the login you already have. Your credentials never pass through Trek.".to_string()
         };
         let found_rows: Vec<AnyElement> = found.into_iter().map(|(agent, name, detail, state)| self.agent_row(&agent, &name, detail, state, cx)).collect();
         let more = missing.len().saturating_sub(MISSING_SHOWN);
@@ -319,9 +319,9 @@ impl Onboarding {
         let missing_rows: Vec<AnyElement> = missing.iter().take(shown).map(|(agent, name)| self.agent_row(agent, name, String::new(), AgentState::NotInstalled, cx)).collect();
         let section = |text: &str| div().pt(px(22.)).pb(px(8.)).text_size(px(12.5)).font_medium().text_color(theme.muted_foreground).child(text.to_string());
         v_flex()
-            .child(Self::header("Your agents", body, cx))
+            .child(Self::header("Your agents", &body, cx))
             .when(detecting && found_rows.is_empty(), |el| {
-                el.child(h_flex().gap(px(10.)).py(px(16.)).text_size(px(13.)).text_color(theme.muted_foreground).child(Spinner::new().small()).child("Looking for agents on this Mac…"))
+                el.child(h_flex().gap(px(10.)).py(px(16.)).text_size(px(13.)).text_color(theme.muted_foreground).child(Spinner::new().small()).child(format!("Looking for agents on {}…", crate::words::words().this_computer)))
             })
             .when(!found_rows.is_empty(), |el| el.child(Self::list(found_rows, cx)))
             .when(!missing_rows.is_empty(), |el| {
@@ -353,7 +353,7 @@ impl Onboarding {
     fn threads_step(&self, cx: &App) -> AnyElement {
         let ws = self.workspace.read(cx);
         let theme = cx.theme().clone();
-        let body = "Trek reads, and never changes, the conversations other agents keep on this Mac.";
+        let body = format!("Trek reads, and never changes, the conversations other agents keep on {}.", crate::words::words().this_computer);
         let content = match ws.import_summary.clone() {
             None => h_flex().gap(px(10.)).py(px(16.)).text_size(px(13.)).text_color(theme.muted_foreground).child(Spinner::new().small()).child("Reading your history…").into_any_element(),
             Some(s) => {
@@ -374,7 +374,7 @@ impl Onboarding {
                     .into_any_element()
             }
         };
-        v_flex().child(Self::header("Your threads", body, cx)).child(content).into_any_element()
+        v_flex().child(Self::header("Your threads", &body, cx)).child(content).into_any_element()
     }
 
     fn hand_holding_step(&self, cx: &mut Context<Self>) -> AnyElement {

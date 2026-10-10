@@ -63,7 +63,7 @@ impl Workspace {
         if let Some(key) = &change.default_agent {
             let agent = AgentId::from_key(key);
             if !self.ready_agents().contains(&agent) {
-                return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
+                return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
             }
             if s.general.default_agent != *key {
                 s.general.default_agent = key.clone();

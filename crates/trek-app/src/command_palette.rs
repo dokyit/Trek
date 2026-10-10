@@ -721,9 +721,9 @@ impl CommandPalette {
         }
         let theme = ws.settings.appearance.theme;
         for (choice, label, glyph) in [
-            (ThemeChoice::Night, "Theme: Night", Icon::new(crate::assets::Lucide::Moon)),
-            (ThemeChoice::Paper, "Theme: Paper", Icon::new(crate::assets::Lucide::Sun)),
-            (ThemeChoice::System, "Theme: Match macOS", Icon::new(crate::assets::Lucide::Monitor)),
+            (ThemeChoice::Night, "Theme: Night".to_string(), Icon::new(crate::assets::Lucide::Moon)),
+            (ThemeChoice::Paper, "Theme: Paper".to_string(), Icon::new(crate::assets::Lucide::Sun)),
+            (ThemeChoice::System, format!("Theme: {}", crate::words::words().match_system_theme), Icon::new(crate::assets::Lucide::Monitor)),
         ] {
             add(Entry::new(c, icon(glyph), label, Action::Theme(choice)).checked(choice == theme), "appearance dark light system mode colors");
         }

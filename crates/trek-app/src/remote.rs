@@ -327,7 +327,7 @@ fn computer_name() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Mac".to_string())
+        .unwrap_or_else(|| crate::words::words().computer.to_string())
 }
 
 impl Workspace {
@@ -576,7 +576,7 @@ impl Workspace {
         if let Some(key) = &req.agent {
             let agent = AgentId::from_key(key);
             if !self.ready_agents().contains(&agent) {
-                return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
+                return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
             }
             if agent != prefs.agent {
                 // Another agent starts on its default model, as its model menu shows first.
@@ -631,7 +631,7 @@ impl Workspace {
             id => Some(self.project(id).map(|p| p.path.clone()).ok_or_else(|| tr::HostError::not_found("No such project"))?),
         };
         if !self.ready_agents().contains(&agent) {
-            return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
+            return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
         }
         let images = save_uploads(&req.images)?;
         let hand_holding = req.access.map(|a| hand_holding(a, &self.settings)).transpose()?;
@@ -688,7 +688,7 @@ impl Workspace {
                         if let Some(remote) = self.remote.as_mut() {
                             remote.answered.remove(&(id.clone(), req.request_id.clone()));
                         }
-                        return Err(tr::HostError::bad_request("Allowing for a whole session from the phone is off on this Mac (Settings › Phone). Allow just this once, or turn it on there."));
+                        return Err(tr::HostError::bad_request(format!("Allowing for a whole session from the phone is off on {} (Settings › Phone). Allow just this once, or turn it on there.", crate::words::words().this_computer)));
                     }
                     tr::Decision::AllowForSession => trek_agents::Decision::AllowForSession,
                     tr::Decision::Deny => trek_agents::Decision::Deny,
@@ -1634,7 +1634,7 @@ fn hand_holding(access: tr::Access, settings: &trek_core::settings::Settings) ->
         tr::Access::AutoAcceptEdits => trek_core::HandHolding::AutoAcceptEdits,
         tr::Access::Auto => trek_core::HandHolding::Auto,
         tr::Access::FullAccess if settings.permissions.full_access_unlocked => trek_core::HandHolding::FullAccess,
-        tr::Access::FullAccess => return Err(tr::HostError::bad_request("Full access is locked on this Mac: unlock it in Trek's Permissions settings first.")),
+        tr::Access::FullAccess => return Err(tr::HostError::bad_request(format!("Full access is locked on {}: unlock it in Trek's Permissions settings first.", crate::words::words().this_computer))),
     })
 }
 
