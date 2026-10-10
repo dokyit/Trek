@@ -61,10 +61,9 @@ pub fn windows_menus(menus: Vec<Menu>) -> Vec<Menu> {
     menus
 }
 
-/// A key as a menu shows it. keys.rs replaces this (the keystroke formatter lives there).
+/// A key as a menu shows it: "Ctrl+Shift+K" here, from the same formatter as every other label.
 fn shortcut_label(keystroke: &gpui_kit::Keystroke) -> String {
-    // keys.rs replaces this
-    keystroke.to_string()
+    crate::keys::label_keystroke(keystroke)
 }
 
 /// A row of an open menu, as it was when the menu opened: whether an item is on offer depends
