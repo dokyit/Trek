@@ -16,6 +16,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Siz
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use crate::mentions::{self, PickKind};
+use crate::screenclip;
 use std::path::PathBuf;
 use trek_core::catalog::ModelInfo;
 use trek_core::orchestrate::{Consult, Consultant, Style};
@@ -38,6 +39,10 @@ pub struct Composer {
     /// Images going out with the next message.
     outbox: Outbox,
     snapshotting: bool,
+    /// Windows: the wait for what Snipping Tool puts on the clipboard (`snapshot_by_screenclip`).
+    /// It ends with the composer, and with `window` (a composer can outlive its window).
+    screenclip: Option<Task<()>>,
+    window: AnyWindowHandle,
     /// `general.send_with_cmd_enter`: ↩ inserts a newline and ⌘↩ sends (else ↩ sends, ⇧↩ newline).
     cmd_enter: bool,
     /// Width of the composer card at last layout; narrow cards get compact pills.
@@ -270,6 +275,8 @@ impl Composer {
             pickers,
             outbox: Outbox::default(),
             snapshotting: false,
+            screenclip: None,
+            window: window.window_handle(),
             cmd_enter,
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
@@ -810,6 +817,12 @@ impl Composer {
         (self.outbox.paths.clone(), self.outbox.saving)
     }
 
+    /// A snapshot is waiting on Snipping Tool.
+    #[cfg(test)]
+    pub(crate) fn snapshot_waiting(&self) -> bool {
+        self.screenclip.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.set_value(text, window, cx));
@@ -993,6 +1006,10 @@ impl Composer {
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
     fn snapshot(&mut self, mode: &'static str, cx: &mut Context<Self>) {
+        if cfg!(windows) {
+            // Snipping Tool's overlay picks the window or area itself, so `mode` has no say.
+            return self.snapshot_by_screenclip(cx);
+        }
         if self.snapshotting {
             return;
         }
@@ -1040,6 +1057,81 @@ impl Composer {
             });
         })
         .detach();
+    }
+
+    /// Windows: open Snipping Tool's overlay and attach what is picked in it, which it puts on the
+    /// clipboard (`screenclip`). Asking again while waiting gives up on the snip, quietly: a snip
+    /// that is cancelled in the overlay leaves nothing to tell it by.
+    pub(crate) fn snapshot_by_screenclip(&mut self, cx: &mut Context<Self>) {
+        if self.snapshotting {
+            if self.screenclip.take().is_some() {
+                self.snapshotting = false;
+                cx.notify();
+            }
+            return;
+        }
+        let backend = screenclip::backend(cx);
+        let mut source = backend.source();
+        // Taken before the overlay opens, so only an image copied after it counts.
+        let seen = source.sequence();
+        if let Err(e) = backend.launch() {
+            self.toast(format!("Couldn't open the snipping tool: {e}."), cx);
+            return;
+        }
+        self.snapshotting = true;
+        cx.notify();
+        let path = mentions::snapshot_path();
+        let (interval, timeout) = (backend.interval(), backend.timeout());
+        self.screenclip = Some(cx.spawn(async move |this, cx| {
+            let mut pickup = screenclip::Pickup::new(seen, interval, timeout);
+            let arrived = loop {
+                cx.background_executor().timer(interval).await;
+                // The window was closed meanwhile: nobody is left to attach it to.
+                let open = this.update(cx, |this, cx| cx.windows().contains(&this.window)).unwrap_or(false);
+                if !open {
+                    let _ = this.update(cx, |this, _| {
+                        this.snapshotting = false;
+                        if let Some(task) = this.screenclip.take() {
+                            task.detach();
+                        }
+                    });
+                    return;
+                }
+                let (back, wait, poll) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let poll = pickup.poll(source.as_mut());
+                        (source, pickup, poll)
+                    })
+                    .await;
+                (source, pickup) = (back, wait);
+                match poll {
+                    screenclip::Poll::Waiting => {}
+                    screenclip::Poll::Arrived(clip) => break Some(clip),
+                    screenclip::Poll::TimedOut => break None,
+                }
+            };
+            let saved = match arrived {
+                Some(clip) => {
+                    let out = path.clone();
+                    Some(cx.background_executor().spawn(async move { screenclip::to_png(clip).and_then(|png| Ok(std::fs::write(&out, png)?)) }).await)
+                }
+                None => None,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.snapshotting = false;
+                // This task is the one finishing: let it go on rather than cancel itself.
+                if let Some(task) = this.screenclip.take() {
+                    task.detach();
+                }
+                match saved {
+                    Some(Ok(())) => this.outbox.add([path]),
+                    Some(Err(e)) => this.toast(format!("Couldn't attach the snapshot: {e}."), cx),
+                    None => this.toast(crate::keys::localize("Nothing was picked in a minute, so no snapshot was attached. ⌘⇧S tries again.").into_owned(), cx),
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
@@ -1092,7 +1184,23 @@ impl Composer {
                 cx.notify();
             });
         };
-        Some(div().px(px(14.)).pt(px(12.)).child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx)).into_any_element())
+        let waiting = self.screenclip.is_some().then(|| {
+            div()
+                .id("snapshot-wait")
+                .test_support()
+                .pt(px(6.))
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::keys::localize("Pick a region… ⌘⇧S cancels").into_owned())
+        });
+        Some(
+            div()
+                .px(px(14.))
+                .pt(px(12.))
+                .child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx))
+                .children(waiting)
+                .into_any_element(),
+        )
     }
 
     /// "+" menu: files and photos, snapshots, the three pickers, and restating first.
@@ -1108,14 +1216,20 @@ impl Composer {
             .icon(Icon::new(IconName::Plus).text_color(theme.muted_foreground))
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                 let (a, b, c, d, e, f, g, h) = (me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone());
-                menu.min_w(px(230.))
+                let menu = menu
+                    .min_w(px(230.))
                     .check_side(gpui_kit::component::Side::Right)
                     .item(PopupMenuItem::new("Add photos & files").icon(crate::assets::Lucide::Image).on_click(move |_, window, cx| a.update(cx, |c, cx| c.attach(window, cx))))
-                    .separator()
-                    .item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
-                    .item(PopupMenuItem::new("Snapshot an area").icon(crate::assets::Lucide::Crosshair).on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))))
-                    .item(PopupMenuItem::new("Snapshot the screen").icon(crate::assets::Lucide::Monitor).on_click(move |_, _, cx| d.update(cx, |c, cx| c.snapshot("screen", cx))))
-                    .separator()
+                    .separator();
+                // Snipping Tool has the window, area and screen choice in its own toolbar.
+                let menu = if cfg!(windows) {
+                    menu.item(PopupMenuItem::new("Take a snapshot").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("area", cx))))
+                } else {
+                    menu.item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
+                        .item(PopupMenuItem::new("Snapshot an area").icon(crate::assets::Lucide::Crosshair).on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))))
+                        .item(PopupMenuItem::new("Snapshot the screen").icon(crate::assets::Lucide::Monitor).on_click(move |_, _, cx| d.update(cx, |c, cx| c.snapshot("screen", cx))))
+                };
+                menu.separator()
                     .item(PopupMenuItem::new("Mention a file  @").icon(IconName::File).on_click(move |_, window, cx| e.update(cx, |c, cx| c.insert_trigger("@", window, cx))))
                     .item(PopupMenuItem::new("Use a skill  $").icon(crate::assets::Lucide::Sparkle).on_click(move |_, window, cx| f.update(cx, |c, cx| c.insert_trigger("$", window, cx))))
                     .item(PopupMenuItem::new("Run a command  /").icon(IconName::SquareTerminal).on_click(move |_, window, cx| g.update(cx, |c, cx| c.insert_trigger("/", window, cx))))
