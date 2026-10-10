@@ -794,8 +794,14 @@ impl BrowserPanel {
                 let url = normalize(&input.read(cx).value());
                 this.editing = false;
                 this.navigate(url, cx);
-                if let Some(tab) = this.active_tab() {
-                    let _ = tab.view.read(cx).raw().focus();
+                // WKWebView takes the keys once an address is entered. WebView2 would keep them from
+                // Trek's own shortcuts (Ctrl+K, Ctrl+W…: none reach Trek while the page has them)
+                // until the page is clicked, so on Windows they stay where they were.
+                #[cfg(not(windows))]
+                {
+                    if let Some(tab) = this.active_tab() {
+                        let _ = tab.view.read(cx).raw().focus();
+                    }
                 }
                 let _ = window;
                 cx.notify();
