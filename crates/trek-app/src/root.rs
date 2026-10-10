@@ -370,6 +370,8 @@ pub struct WindowTitle {
     right_panel: Entity<RightPanel>,
     /// The window's sidebar spring: the title's left part widens and narrows with the sidebar.
     sidebar_motion: SharedSpring,
+    /// Trek's menus, in the title bar where the system has no menu bar (Windows).
+    menu_bar: Option<Entity<crate::menu_bar::MenuBar>>,
     _subscription: Vec<Subscription>,
 }
 
@@ -377,7 +379,27 @@ impl WindowTitle {
     fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, sidebar_motion: SharedSpring, cx: &mut Context<Self>) -> Self {
         // The panel opening can make the sidebar step aside, which moves the title's left edge.
         let _subscription = vec![cx.observe(&workspace, |_, _, cx| cx.notify()), cx.observe(&right_panel, |_, _, cx| cx.notify())];
-        Self { workspace, right_panel, sidebar_motion, _subscription }
+        let menu_bar = crate::chrome::IN_WINDOW_MENUS.then(|| cx.new(|cx| crate::menu_bar::MenuBar::new(workspace.clone(), cx)));
+        Self { workspace, right_panel, sidebar_motion, menu_bar, _subscription }
+    }
+
+    /// The title bar's left end: the sidebar's toggle (Agents), Trek's mark and its wordmark, which
+    /// the menus take the place of where there's no system menu bar. `shown` is how far out the
+    /// sidebar under it is (1 out): the cluster is as wide as the sidebar, as far as that's out
+    /// (the menus can take more).
+    fn left_cluster(&self, toggle: Option<AnyElement>, wordmark: bool, shown: f32, cx: &App) -> Div {
+        let theme = cx.theme();
+        let menus = self.menu_bar.clone();
+        let width = crate::chrome::left_cluster(SIDEBAR_WIDTH);
+        h_flex()
+            .gap_2()
+            .when(shown > 0., |el| el.min_w(px(width * shown)))
+            .when(shown >= 1. && menus.is_none(), |el| el.w(px(width)))
+            .flex_none()
+            .children(toggle)
+            .child(crate::brand::logo_mark(px(15.)))
+            .when(menus.is_none() && wordmark, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")))
+            .children(menus)
     }
 }
 
@@ -387,6 +409,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     h_flex()
         .id("mode-switch")
+        .test_support()
         .flex_none()
         .h(px(26.))
         .p(px(2.))
@@ -443,15 +466,8 @@ impl WindowTitle {
                     .items_center()
                     .gap_2()
                     .pr_2()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .when(layout.primary_open, |el| el.w(px(SIDEBAR_WIDTH - 80.)))
-                            .flex_none()
-                            // The layout toggles are on the right, as VS Code and Cursor have them.
-                            .child(crate::brand::logo_mark(px(15.)))
-                            .child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")),
-                    )
+                    // The layout toggles are on the right, as VS Code and Cursor have them.
+                    .child(self.left_cluster(None, true, if layout.primary_open { 1. } else { 0. }, cx))
                     .child(mode_switch(crate::workspace::Mode::Editor, cx))
                     .child(
                         h_flex().flex_1().min_w_0().justify_center().child(
@@ -559,22 +575,13 @@ impl Render for WindowTitle {
                 .items_center()
                 .gap_2()
                 .pr_2()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        // As wide as the sidebar under it, as far as that's out.
-                        .when(shown > 0., |el| el.min_w(px((SIDEBAR_WIDTH - 80.) * shown)))
-                        .when(shown >= 1., |el| el.w(px(SIDEBAR_WIDTH - 80.)))
-                        .flex_none()
-                        .child(
-                            crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
-                                let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
-                                toggle_sidebar(&ws, &panel, window, cx)
-                            })),
-                        )
-                        .child(crate::brand::logo_mark(px(15.)))
-                        .when(!narrow, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek"))),
-                )
+                .child({
+                    let toggle = crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
+                        let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
+                        toggle_sidebar(&ws, &panel, window, cx)
+                    }));
+                    self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
+                })
                 .child(mode_switch(crate::workspace::Mode::Agents, cx))
                 .child(
                     h_flex()
@@ -723,13 +730,37 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     .detach();
     let ws = workspace.downgrade();
     cx.on_window_closed(move |cx, id| {
-        let _ = ws.update(cx, |ws, cx| {
-            if let Some(main) = ws.main_window.filter(|m| m.window_id() == id) {
-                ws.main_window_closed(main, cx);
-            }
-        });
+        let closed_main = ws
+            .update(cx, |ws, cx| match ws.main_window.filter(|m| m.window_id() == id) {
+                Some(main) => {
+                    ws.main_window_closed(main, cx);
+                    true
+                }
+                None => false,
+            })
+            .unwrap_or(false);
+        if closed_main && cx.has_global::<QuitWithMainWindow>() {
+            cx.dispatch_action(&crate::Quit);
+        }
     })
     .detach();
+}
+
+/// Set on an app that ends with its main window: Windows has no Dock to keep Trek alive with no
+/// window open, and the thread windows left would be a Trek with nothing to bring the main
+/// window back. (On macOS the app stays, and the Dock icon reopens the main window.)
+struct QuitWithMainWindow;
+
+impl Global for QuitWithMainWindow {}
+
+pub fn quit_with_main_window(cx: &mut App) {
+    cx.set_global(QuitWithMainWindow);
+}
+
+/// End the app: the agents' sessions first.
+pub fn quit(cx: &mut App) {
+    crate::workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
+    cx.quit();
 }
 
 /// The Trek window with keyboard focus; `None` when another app is in front.
@@ -1185,6 +1216,8 @@ impl Render for TrekWindow {
             .child(self.palette.clone())
             .child(self.preview.clone())
             .children(crate::motion::leaving_sheet(window, cx))
+            // Windows: the caption buttons stay reachable over what covers the title bar.
+            .children((self.palette.read(cx).open || self.preview.read(cx).is_open()).then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
             .into_any_element()
     }
 }
