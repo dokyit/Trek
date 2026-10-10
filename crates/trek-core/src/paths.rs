@@ -120,8 +120,61 @@ pub fn tildify(path: &std::path::Path) -> String {
     }
 }
 
+/// Move `path` to the Trash (the Recycle Bin on Windows), where the user can still get it back.
+pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
+    let path = path.to_path_buf();
+    // The crate initialises COM on the calling thread, and panics if that thread already holds
+    // it in another mode. A thread of its own always starts clean.
+    #[cfg(windows)]
+    let result = std::thread::spawn(move || move_to_trash(&path)).join().map_err(|_| anyhow::anyhow!("The Recycle Bin wouldn't open"))?;
+    #[cfg(not(windows))]
+    let result = move_to_trash(&path);
+    result
+}
+
+fn move_to_trash(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // NSFileManager, as the app has always done, not the Finder (an AppleScript round trip).
+        use trash::macos::{DeleteMethod, TrashContextExtMacos as _};
+        let mut ctx = trash::TrashContext::default();
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        ctx.delete(path)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    trash::delete(path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trashing_a_file_or_folder_takes_it_out_of_its_folder() {
+        let dir = std::env::temp_dir().join(format!("trek-trash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder/inner")).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::write(dir.join("folder/inner/a.txt"), "y").unwrap();
+        super::trash(&file).unwrap();
+        super::trash(&dir.join("folder")).unwrap();
+        assert!(!file.exists() && !dir.join("folder").exists());
+        assert!(super::trash(&dir.join("never-was")).is_err());
+        // These two now sit in the user's Recycle Bin (their own temp files, nothing else); take
+        // just them out again where the crate can list and purge.
+        #[cfg(windows)]
+        {
+            let items: Vec<_> = trash::os_limited::list()
+                .unwrap()
+                .into_iter()
+                .filter(|i| i.original_parent.file_name() == dir.file_name() && (i.name == "note.txt" || i.name == "folder"))
+                .collect();
+            assert_eq!(items.len(), 2, "both went into the Recycle Bin");
+            trash::os_limited::purge_all(items).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn tests_never_reach_the_users_data() {
         // Isolated before any test asked, and staying where it was put.
