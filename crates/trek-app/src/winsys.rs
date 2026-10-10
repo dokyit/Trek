@@ -1,6 +1,7 @@
 //! What Trek asks of Windows beyond its windows: the taskbar button's overlay badge (the Dock
-//! badge's twin), the identity toasts are shown under, and the alert sound. Each is a thin call;
-//! `system` and `root` decide when to make it, and the tests watch that.
+//! badge's twin), the identity toasts are shown under, the alert sound, and whether the user is at
+//! the PC (idle time, a locked session). Each is a thin call; `system`, `root` and `push` decide
+//! when to make it, and the tests watch that.
 
 /// The AppUserModelID and name Windows knows Trek by (`set_app_identity`).
 #[cfg(windows)]
@@ -119,6 +120,64 @@ pub fn hwnd_of(window: &gpui_kit::Window) -> Option<isize> {
     }
 }
 
+/// Seconds from the last keyboard or mouse input (`GetLastInputInfo`'s tick) to `now_ms`
+/// (`GetTickCount`). Both are 32-bit milliseconds since boot that wrap every 49.7 days, so the
+/// difference is taken modulo 2³²: a wrap between the two still reads as the few seconds it was.
+#[cfg(any(windows, test))]
+pub fn idle_seconds_between(now_ms: u32, last_input_ms: u32) -> f64 {
+    f64::from(now_ms.wrapping_sub(last_input_ms)) / 1000.0
+}
+
+/// Seconds since the last keyboard or mouse input in this session, or `None` when Windows won't say.
+#[cfg(windows)]
+pub fn idle_seconds() -> Option<f64> {
+    use windows_sys::Win32::System::SystemInformation::GetTickCount;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    // SAFETY: `info` is a LASTINPUTINFO with its size set, as the call asks; it's read after a
+    // success only. The tick is taken after the input's, so it is never the earlier of the two.
+    unsafe { (GetLastInputInfo(&mut info) != 0).then(|| idle_seconds_between(GetTickCount(), info.dwTime)) }
+}
+
+/// Whether a session's `WTSINFOEX` says its screen is locked, or that the session is no longer
+/// the one on the console (`WTSDisconnected`: another user's turn after a fast switch, or a remote
+/// desktop that was closed). Either way nobody is looking at Trek. `flags` is `SessionFlags`:
+/// `WTS_SESSIONSTATE_LOCK` is 0 (Windows 8 and later; Windows 7 had it the other way round).
+#[cfg(any(windows, test))]
+pub fn session_is_away(state: i32, flags: i32) -> bool {
+    const WTS_DISCONNECTED: i32 = 4;
+    const WTS_SESSIONSTATE_LOCK: i32 = 0;
+    state == WTS_DISCONNECTED || flags == WTS_SESSIONSTATE_LOCK
+}
+
+/// Whether this session is locked or switched away from, as `session_is_away` says. Asked of
+/// Windows now, not tracked: it is wanted only when a notification is about to go out, and that
+/// needs no window procedure of Trek's (nor `WTSRegisterSessionNotification`'s message hook).
+/// False when Windows won't say: a note the user didn't need beats one they never got.
+#[cfg(windows)]
+pub fn session_locked() -> bool {
+    use windows_sys::Win32::System::RemoteDesktop::{WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx};
+    let mut buffer: *mut u16 = std::ptr::null_mut();
+    let mut bytes = 0u32;
+    // SAFETY: on success `buffer` is a block of `bytes` bytes that WTS allocated and we free; it is
+    // read as the WTSINFOEXW that `WTSSessionInfoEx` returns once it's seen to be that long and
+    // Level 1 (the only one there is), unaligned in case the allocator's alignment is short.
+    unsafe {
+        if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfoEx, &mut buffer, &mut bytes) == 0 || buffer.is_null() {
+            return false;
+        }
+        let away = (bytes as usize >= std::mem::size_of::<WTSINFOEXW>())
+            .then(|| std::ptr::read_unaligned(buffer.cast::<WTSINFOEXW>()))
+            .filter(|info| info.Level == 1)
+            .is_some_and(|info| {
+                let level = info.Data.WTSInfoExLevel1;
+                session_is_away(level.SessionState, level.SessionFlags)
+            });
+        WTSFreeMemory(buffer.cast());
+        away
+    }
+}
+
 /// Register the identity and icon toasts show under, before the first is posted. GPUI registers
 /// the AppUserModelID's name (`set_app_identity`); an unpackaged app also needs an icon there, or
 /// its toasts show a blank one. Written once per run, to the current user's classes only.
@@ -162,7 +221,35 @@ pub fn play_notification_sound() {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_description, badge_rgba};
+    use super::{badge_description, badge_rgba, idle_seconds_between, session_is_away};
+
+    #[test]
+    fn idle_time_is_the_ticks_apart_in_seconds() {
+        assert_eq!(idle_seconds_between(10_000, 10_000), 0.0);
+        assert_eq!(idle_seconds_between(130_500, 10_000), 120.5);
+        // The tick counter wrapped between the last input and now: still the 2 s it was.
+        assert_eq!(idle_seconds_between(1_000, u32::MAX - 999), 2.0);
+    }
+
+    #[test]
+    fn a_locked_or_switched_away_session_is_away() {
+        const ACTIVE: i32 = 0;
+        const DISCONNECTED: i32 = 4;
+        // `SessionFlags`: 0 is locked, 1 is unlocked, and -1 (0xFFFFFFFF) is unknown.
+        assert!(session_is_away(ACTIVE, 0), "locked");
+        assert!(!session_is_away(ACTIVE, 1), "unlocked");
+        assert!(!session_is_away(ACTIVE, -1), "Windows didn't say: not away");
+        assert!(session_is_away(DISCONNECTED, 1), "another user's turn, or a closed remote desktop");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_answers_for_this_session() {
+        // Whether the session is locked depends on who runs the test (a locked laptop, a CI
+        // service), so only that both calls come back, with a time that makes sense.
+        let _ = super::session_locked();
+        assert!(super::idle_seconds().is_none_or(|s| (0.0..=f64::from(u32::MAX) / 1000.0).contains(&s)));
+    }
 
     fn lit(pixels: &[u8], white: bool) -> usize {
         pixels.chunks_exact(4).filter(|p| p[3] > 0 && (p[0] == 0xff && p[1] == 0xff) == white).count()
