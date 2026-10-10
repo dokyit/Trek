@@ -613,19 +613,26 @@ fn a_click_as_the_preview_shrinks_back_goes_to_what_is_under_it() {
 
 #[test]
 fn a_click_on_a_sheet_as_it_leaves_does_nothing() {
+    use gpui_kit::test::TestWindowExt as _;
     run(async |cx| {
         let trek = open(cx);
         moving(cx);
         let ws = trek.ws.clone();
         trek.window(cx, |window, cx| crate::add_agent::open(ws, crate::add_agent::Tab::Command, window, cx));
         frame(&trek, cx, 1_000);
-        trek.click(cx, "command-cancel");
-        trek.render(cx);
-        assert!(trek.visible(cx, "sheet-leaving"));
-        // "Add agent" on the empty form would complain; on its way out it does nothing.
-        trek.click(cx, "command-add");
-        trek.render(cx);
-        assert!(!trek.visible(cx, "command-error"));
+        trek.window(cx, |window, cx| {
+            // Esc is a real close path: the dialog's on_close runs sheet_left at once, so the
+            // leave is registered before the next frame draws. A pointer click on the cancel
+            // button is hit-tested against the live tree and a loaded runner has missed it;
+            // close_dialog pops the dialog without running on_close.
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.find("sheet-leaving").visible(), "the sheet is on its way out");
+            // "Add agent" on the empty form would complain; on its way out it does nothing.
+            window.click("command-add", cx);
+            window.render_frame(cx);
+            assert!(!window.try_find("command-error").is_some_and(|e| e.visible()));
+        });
         assert!(trek.window(cx, |window, cx| !window.has_active_dialog(cx)));
     });
 }
