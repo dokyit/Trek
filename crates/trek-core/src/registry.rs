@@ -373,6 +373,31 @@ pub fn id_from_name(name: &str) -> String {
     id.trim_end_matches('-').trim_start_matches(['.', '_']).chars().take(64).collect()
 }
 
+/// What follows `~/` (or on Windows `~\`) at the start of `command`.
+fn home_relative(command: &str, windows: bool) -> Option<&str> {
+    command.strip_prefix("~/").or_else(|| command.strip_prefix("~\\").filter(|_| windows))
+}
+
+/// Whether `command` is a full path on this platform: `/opt/x/agent`; on Windows a drive (`C:\x`,
+/// `D:/x`) or a network share (`\\server\share\x`). A rooted path with no drive (`\x`) isn't.
+fn is_full_path(command: &str, windows: bool) -> bool {
+    if !windows {
+        return command.starts_with('/');
+    }
+    let b = command.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    drive || command.starts_with(r"\\") || command.starts_with("//")
+}
+
+/// A program is its name on the PATH or a full path, not a path from somewhere (`./agent`,
+/// `.\agent.exe`, `tools/agent`) that depends on where Trek was started.
+fn check_command(command: &str, windows: bool) -> Result<()> {
+    if crate::detect::is_bare_name_on(command, windows) || is_full_path(command, windows) || home_relative(command, windows).is_some() {
+        return Ok(());
+    }
+    bail!("Give the program's full path, or just its name if it's on your PATH.");
+}
+
 /// Check what the user typed for an agent of their own and make it one. `id` is optional (made
 /// from the name); `taken` are the ids already in use.
 pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<EnvVar>, taken: &[String]) -> Result<AddedAgent> {
@@ -394,9 +419,7 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
     if command.is_empty() {
         bail!("Say which program starts the agent: its name on your PATH, or its full path.");
     }
-    if command.contains('/') && !Path::new(command).is_absolute() && !command.starts_with("~/") {
-        bail!("Give the program's full path, or just its name if it's on your PATH.");
-    }
+    check_command(command, cfg!(windows))?;
     let mut seen = std::collections::HashSet::new();
     for v in &env {
         let ok = v.name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && v.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -407,7 +430,7 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
             bail!("{} is set twice.", v.name);
         }
     }
-    let command = match command.strip_prefix("~/") {
+    let command = match home_relative(command, cfg!(windows)) {
         Some(rest) => crate::paths::home().join(rest).display().to_string(),
         None => command.to_string(),
     };
@@ -424,11 +447,19 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
 
 impl AddedAgent {
     /// The program to start, if it's here: a full path that exists, or a name found on PATH.
+    ///
+    /// On Windows a name finds the file under any of `PATHEXT`'s extensions (`npx` is `npx.cmd`),
+    /// which `detect::batch_args_problem` then checks the arguments for before it starts.
     pub fn resolve(&self) -> Option<PathBuf> {
-        if self.command.contains('/') {
-            Some(PathBuf::from(&self.command)).filter(|p| p.is_file())
+        self.resolve_in(crate::detect::login_path())
+    }
+
+    /// `resolve`, a name looked up on `path`.
+    fn resolve_in(&self, path: &str) -> Option<PathBuf> {
+        if crate::detect::is_bare_name(&self.command) {
+            crate::detect::which_in(path, &self.command)
         } else {
-            crate::detect::which(&self.command)
+            Some(PathBuf::from(&self.command)).filter(|p| p.is_file())
         }
     }
 
@@ -438,7 +469,7 @@ impl AddedAgent {
             (AgentSource::Registry, Some("npx")) => "npx isn't on your PATH: install Node.js to run it.".into(),
             (AgentSource::Registry, Some("uvx")) => "uvx isn't on your PATH: install uv to run it.".into(),
             (AgentSource::Registry, _) => "Its download is gone. Remove it and add it again from the ACP Registry.".into(),
-            (AgentSource::Command, _) if self.command.contains('/') => format!("{} doesn't exist.", crate::paths::tildify(Path::new(&self.command))),
+            (AgentSource::Command, _) if !crate::detect::is_bare_name(&self.command) => format!("{} doesn't exist.", crate::paths::tildify(Path::new(&self.command))),
             (AgentSource::Command, _) => format!("{} isn't on your PATH.", self.command),
         }
     }
@@ -456,7 +487,7 @@ impl AddedAgent {
 
     /// The command line it runs, for Settings: `npx -y @scope/agent@1.2.3 --acp`.
     pub fn command_line(&self) -> String {
-        let program = if self.command.contains('/') { crate::paths::tildify(Path::new(&self.command)) } else { self.command.clone() };
+        let program = if !crate::detect::is_bare_name(&self.command) { crate::paths::tildify(Path::new(&self.command)) } else { self.command.clone() };
         std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
     }
 }
@@ -699,8 +730,13 @@ fn keep_icon(agent: &RegistryAgent, home: &Path) -> Option<String> {
 /// Fetch the package and its dependencies into npm's cache now, so the agent's first start
 /// doesn't spend its handshake time downloading. Runs only `node -e ""`, nothing of the package.
 async fn warm_npx(npx: &Path, package: &str) -> Result<()> {
+    // On Windows `npx` is `npx.cmd`, which cmd.exe starts (see `detect::which`).
+    let args = ["-y", "--package", package, "--", "node", "-e", ""];
+    if let Some(problem) = crate::detect::batch_args_problem(npx, args) {
+        bail!("npx can't fetch {package}: {problem}");
+    }
     let run = tokio::process::Command::new(npx)
-        .args(["-y", "--package", package, "--", "node", "-e", ""])
+        .args(args)
         .env("PATH", crate::detect::login_path())
         .current_dir(crate::paths::home())
         .stdin(std::process::Stdio::null())
@@ -1029,6 +1065,54 @@ mod tests {
         let a = custom("A", "", abs, vec![], env("TOKEN"), &[]).unwrap();
         assert_eq!(a.launch_env(), [("TOKEN".to_string(), "v".to_string())]);
         assert_eq!(a.command_line(), abs);
+    }
+
+    #[test]
+    fn a_program_is_a_name_or_a_full_path_on_either_system() {
+        let ok = |c: &str, windows| check_command(c, windows).is_ok();
+        // Names, and full paths as each system writes them.
+        for c in ["my-agent", "npx", "agent.exe", "~/bin/agent"] {
+            assert!(ok(c, false) && ok(c, true), "{c}");
+        }
+        assert!(ok("/opt/x/agent", false));
+        for c in [r"C:\tools\agent.exe", "D:/x/agent", r"\\server\share\agent.exe", r"~\bin\agent.exe"] {
+            assert!(ok(c, true), "{c}");
+        }
+        // Not full: relative to wherever Trek happens to be, or rooted without a drive.
+        for c in [r".\agent.exe", "./agent", "bin/agent", r"tools\agent.exe", r"\agent.exe", "/opt/x/agent", "C:agent.exe", "agent/x.exe"] {
+            assert!(!ok(c, true), "{c}");
+        }
+        for c in ["./agent", "bin/agent", "../agent"] {
+            assert!(!ok(c, false), "{c}");
+        }
+        assert_eq!(check_command("bin/agent", false).unwrap_err().to_string(), "Give the program's full path, or just its name if it's on your PATH.");
+        // The same through `custom`, on this system.
+        let abs = if cfg!(windows) { r"C:\opt\a.exe" } else { "/opt/a" };
+        assert_eq!(custom("A", "", abs, vec![], vec![], &[]).unwrap().command, abs);
+        assert!(custom("A", "", r".\agent.exe", vec![], vec![], &[]).is_err() == cfg!(windows));
+        assert_eq!(custom("A", "", "npx", vec![], vec![], &[]).unwrap().command, "npx");
+        let home = custom("A", "", if cfg!(windows) { r"~\bin\a.exe" } else { "~/bin/a" }, vec![], vec![], &[]).unwrap();
+        assert!(Path::new(&home.command).starts_with(crate::paths::home()), "{}", home.command);
+    }
+
+    #[test]
+    fn a_name_finds_its_script_and_a_path_is_used_as_written() {
+        let dir = std::env::temp_dir().join(format!("trek added agent {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `npx` is `npx.cmd` on Windows.
+        let script = dir.join(if cfg!(windows) { "npx.cmd" } else { "npx" });
+        std::fs::write(&script, "").unwrap();
+        let path = std::env::join_paths([dir.as_path()]).unwrap().to_string_lossy().into_owned();
+        let added = |command: &str| AddedAgent { command: command.into(), ..Default::default() };
+        assert_eq!(added("npx").resolve_in(&path), Some(script.clone()));
+        assert_eq!(added("uvx").resolve_in(&path), None);
+        assert_eq!(added(&script.display().to_string()).resolve_in(""), Some(script.clone()));
+        assert_eq!(added(&dir.join("gone").display().to_string()).resolve_in(&path), None);
+        // What Settings says is missing is the path for a path, whichever slash it has.
+        assert!(added(&dir.join("gone").display().to_string()).missing().ends_with("doesn't exist."));
+        assert_eq!(added("npx").missing(), "npx isn't on your PATH.");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
