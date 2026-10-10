@@ -306,6 +306,54 @@ fn documents_follow_answers_that_move() {
     });
 }
 
+/// A long answer as agents write them: sections with headings, paragraphs with paths and bold,
+/// lists, and a code block with a blank line in it, about 15 KB.
+fn long_answer() -> String {
+    (0..12)
+        .map(|s| {
+            let para = format!("Section {s} reads `src/server/routes.rs` and changes **three** things in the retry loop, so the log lines up with the trace. ");
+            format!("## Section {s}\n\n{}\n\n{}\n\n- First, the backoff.\n- Then the cap, at 30 s.\n\n```rust\nfn backoff(n: u32) -> u64 {{\n\n    250 * 2u64.pow(n.min(7))\n}}\n```\n\n{}\n\n", para.repeat(4), para.repeat(3), para.repeat(2))
+        })
+        .collect()
+}
+
+#[test]
+fn a_long_answer_is_drawn_in_parts_that_add_up_to_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let full = long_answer();
+        assert!(full.len() > 12_000, "{} bytes", full.len());
+        // Streamed a couple of hundred bytes at a time, each batch drawn before the next.
+        let chars: Vec<char> = full.chars().collect();
+        for chunk in chars.chunks(200) {
+            trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta(chunk.iter().collect())], cx));
+            trek.render(cx);
+        }
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDone(full.clone()), AgentEvent::TurnComplete { error: None }], cx));
+        trek.render(cx);
+        assert_eq!(trek.answers(cx, &id), full);
+        let parts = trek.rows(cx).iter().filter(|r| r.starts_with("assistant part")).count();
+        assert!(parts >= 5, "{:?}", trek.rows(cx));
+        assert!(!trek.rows(cx).iter().any(|r| r == "assistant"), "one answer, in parts only: {:?}", trek.rows(cx));
+        // Every part was drawn as it streamed (each was the last for a while); their documents
+        // hold the answer between them, each cut where a new block starts.
+        let answer = trek.item_ix(cx, &id, |i| matches!(i, Item::Assistant { .. }));
+        let docs: Vec<String> = trek.drawn_markdown(cx).into_iter().filter(|(ix, _)| *ix == answer).map(|(_, t)| t).collect();
+        assert_eq!(docs.len(), parts);
+        assert_eq!(docs.concat(), full);
+        for doc in &docs[1..] {
+            assert!(!doc.starts_with(char::is_whitespace), "a part starts mid-block: {:?}", &doc[..40]);
+        }
+        // The last part is on screen, at the end of the transcript, and the first is the top of
+        // the answer.
+        assert!(trek.visible(cx, gpui_kit::ElementId::NamedInteger("answer-part".into(), ((answer as u64) << 20) | (parts as u64 - 1))));
+        // A short answer after it is one row, as ever.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { error: None }], cx));
+        assert_eq!(trek.rows(cx).iter().filter(|r| *r == "assistant").count(), 1);
+    });
+}
+
 #[test]
 fn raising_hand_holding_approves_what_the_new_level_covers() {
     run(async |cx| {
