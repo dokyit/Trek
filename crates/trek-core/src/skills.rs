@@ -5,6 +5,7 @@
 //! tool manages — Claude.ai sync, Codex's built-ins, plugins — are listed read-only, as are the
 //! ones Trek ships itself (`SHIPPED`), kept in its data folder for any agent to follow.
 
+use crate::import::codex::codex_home_for;
 use crate::paths;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub enum SkillSource {
     /// `~/.claude/skills`
     ClaudeCode,
-    /// `~/.codex/skills`
+    /// `~/.codex/skills` (under `CODEX_HOME` when that is set)
     Codex,
     /// `~/.agents/skills`, read by several agents.
     Shared,
@@ -20,7 +21,7 @@ pub enum SkillSource {
     Project,
     /// `~/.claude/skills/synced/…`, managed by Claude.
     Synced,
-    /// `~/.codex/skills/.system`, shipped with Codex.
+    /// `~/.codex/skills/.system`, shipped with Codex (under `CODEX_HOME` when that is set).
     CodexSystem,
     /// A Claude Code plugin's `skills/` folder.
     Plugin(String),
@@ -72,12 +73,17 @@ pub enum SkillHome {
     Shared,
 }
 
+/// Codex's skills folder, inside its home (`~/.codex`, or `CODEX_HOME`: `codex_home_for` knows).
+fn codex_skills_dir(codex_home: &Path) -> PathBuf {
+    codex_home.join("skills")
+}
+
 impl SkillHome {
     pub fn dir(self) -> PathBuf {
         let home = paths::agents_home();
         match self {
             SkillHome::ClaudeCode => home.join(".claude/skills"),
-            SkillHome::Codex => home.join(".codex/skills"),
+            SkillHome::Codex => codex_skills_dir(&codex_home_for(&home)),
             SkillHome::Shared => home.join(".agents/skills"),
         }
     }
@@ -164,9 +170,10 @@ fn scan(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
 /// Every skill Trek can see, enabled and disabled, for the given project.
 pub fn discover(project: Option<&Path>) -> Vec<Skill> {
     let home = paths::agents_home();
+    let codex_skills = codex_skills_dir(&codex_home_for(&home));
     let mut out = vec![];
     scan(&home.join(".claude/skills"), SkillSource::ClaudeCode, &mut out);
-    scan(&home.join(".codex/skills"), SkillSource::Codex, &mut out);
+    scan(&codex_skills, SkillSource::Codex, &mut out);
     scan(&home.join(".agents/skills"), SkillSource::Shared, &mut out);
     if let Some(p) = project.filter(|p| *p != home.as_path()) {
         scan(&p.join(".claude/skills"), SkillSource::Project, &mut out);
@@ -178,7 +185,7 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
             scan(&b.path(), SkillSource::Synced, &mut out);
         }
     }
-    scan(&home.join(".codex/skills/.system"), SkillSource::CodexSystem, &mut out);
+    scan(&codex_skills.join(".system"), SkillSource::CodexSystem, &mut out);
     for (name, _) in SHIPPED {
         let _ = shipped(name);
     }
@@ -206,7 +213,7 @@ fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
     let home = paths::agents_home();
     if origin.starts_with(home.join(".claude/skills")) {
         SkillSource::ClaudeCode
-    } else if origin.starts_with(home.join(".codex/skills")) {
+    } else if origin.starts_with(codex_skills_dir(&codex_home_for(&home))) {
         SkillSource::Codex
     } else if origin.starts_with(home.join(".agents/skills")) {
         SkillSource::Shared
@@ -400,6 +407,16 @@ mod tests {
         assert_eq!(listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), [CREATE_VERIFICATION, MAINTAIN_VERIFICATION]);
         assert!(!SkillSource::Trek.editable(), "read-only");
         assert!(shipped("nope").is_err());
+    }
+
+    #[test]
+    fn codex_skills_live_under_the_codex_home_wherever_that_is() {
+        let default = Path::new("/home/u/.codex");
+        assert_eq!(codex_skills_dir(default), default.join("skills"));
+        // A CODEX_HOME elsewhere moves the skills with it, built-ins included.
+        let moved = std::env::temp_dir().join("elsewhere-codex");
+        assert_eq!(codex_skills_dir(&moved), moved.join("skills"));
+        assert_eq!(codex_skills_dir(&moved).join(".system"), moved.join("skills").join(".system"));
     }
 
     #[test]
