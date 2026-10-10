@@ -220,9 +220,15 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// Tests' folders are their own: gone for good, not into the user's Trash.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(test)]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(Into::into)
+}
+
+/// The Recycle Bin (Windows) or the XDG trash (Linux).
+#[cfg(all(not(target_os = "macos"), not(test)))]
+pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
+    trek_core::paths::trash(path)
 }
 
 /// `std::fs::canonicalize`, but without the `\\?\` prefix Windows puts on a drive path: git, the
