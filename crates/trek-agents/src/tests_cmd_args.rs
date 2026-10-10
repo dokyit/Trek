@@ -300,3 +300,22 @@ async fn an_mcp_check_says_why_a_cmd_can_t_take_its_arguments() {
     let said = crate::mcp_check::list_tools(&server).await.unwrap_err();
     assert!(!said.contains("line break") && !said.contains("couldn't start"), "{said}");
 }
+
+/// An MCP server (or an npx-run agent) typed as a bare name (`npx`) is found as the `.cmd` it is on
+/// the PATH the server gets, which `Command::new` alone never does (`a_bare_name_never_finds_a_cmd`),
+/// and the arguments it can't take are refused by the script's name, not the one typed.
+#[tokio::test]
+async fn an_mcp_check_finds_a_bare_name_as_its_cmd() {
+    let shims = Shims::new("mcp-bare");
+    let path = std::env::join_paths([&shims.0]).unwrap().to_string_lossy().into_owned();
+    let on_path = |args: Vec<String>| crate::McpServer::stdio("x", "simple", args, vec![("PATH".into(), path.clone())]);
+    // Started (the stand-in isn't a server: it ends, which is what the check then says).
+    let said = crate::mcp_check::list_tools(&on_path(vec!["-y".into(), "@scope/server & more".into()])).await.unwrap_err();
+    assert!(said.starts_with("It stopped"), "{said}");
+    // Not started: the arguments can't reach a `.cmd`.
+    let said = crate::mcp_check::list_tools(&on_path(vec!["-y".into(), "two\nlines".into()])).await.unwrap_err();
+    assert_eq!(said, "simple.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one).");
+    // A name that isn't there is said as typed.
+    let none = crate::McpServer::stdio("x", "nothing-here", vec![], vec![("PATH".into(), path)]);
+    assert_eq!(crate::mcp_check::list_tools(&none).await.unwrap_err(), "nothing-here isn't installed, or isn't on your PATH.");
+}
