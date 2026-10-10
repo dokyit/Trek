@@ -506,6 +506,28 @@ struct Turn {
     /// agent said: from the prompt responses' `usage` (agents that report it), or the agent's
     /// own history where that says more.
     tokens: Vec<(Option<String>, TokenUsage, Option<UsageCost>)>,
+    /// The turn showed the user something: words (or thoughts), a tool call, a plan, or a
+    /// request for approval.
+    produced: bool,
+    /// The user interrupted the turn: an agent may end it with `end_turn` and nothing said.
+    interrupted: bool,
+}
+
+/// Whether a turn that ended without an error ended with nothing to show: no words, tool call,
+/// plan, approval request or tokens, and not because the user cut it short. Some agents answer
+/// a prompt this way when their model's provider can't (OpenCode, signed out).
+fn ended_empty(error: Option<&str>, produced: bool, interrupted: bool) -> bool {
+    error.is_none() && !produced && !interrupted
+}
+
+/// What the user is told when `ended_empty`: in OpenCode's case where to look, the others get
+/// the general advice.
+fn empty_turn_error(agent: &AgentId, name: &str, model: Option<&str>) -> String {
+    match (agent, model) {
+        (AgentId::OpenCode, Some(model)) => format!("{name} ended the turn without a reply. Check that its provider is signed in: `opencode run -m {model} hi` in a terminal should answer."),
+        (AgentId::OpenCode, None) => format!("{name} ended the turn without a reply. Check that its provider is signed in: `opencode run hi` in a terminal should answer."),
+        _ => format!("{name} ended the turn without a reply. Check that {name} is signed in and can answer when run in a terminal."),
+    }
 }
 
 impl Turn {
@@ -520,16 +542,19 @@ impl Turn {
         match u["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    self.produced = true;
                     self.text.push_str(t);
                     out.push(AgentEvent::TextDelta(t.into()));
                 }
             }
             Some("agent_thought_chunk") => {
                 if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    self.produced = true;
                     out.push(AgentEvent::ReasoningDelta(t.into()));
                 }
             }
             Some(kind @ ("tool_call" | "tool_call_update")) => {
+                self.produced = true;
                 let id = u["toolCallId"].as_str().unwrap_or_default().to_string();
                 let tool = self.tools.entry(id.clone()).or_default();
                 // The row shows the title the call had when it started.
@@ -590,6 +615,7 @@ impl Turn {
                     .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str())))
                     .collect();
                 if !steps.is_empty() {
+                    self.produced = true;
                     self.plan_updates += 1;
                     let id = format!("plan-{}", self.plan_updates);
                     let (detail, output) = plan_row(&steps);
@@ -653,12 +679,19 @@ impl Turn {
     }
 
     fn finish(&mut self, stop: std::result::Result<&str, String>) -> Vec<AgentEvent> {
+        self.finish_with(stop, None)
+    }
+
+    /// `finish`; `if_empty` is the error a turn that ended with nothing to show fails with.
+    fn finish_with(&mut self, stop: std::result::Result<&str, String>, if_empty: Option<String>) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.flush_text(&mut out);
         self.tools.clear();
         let failed = stop.is_err();
         let added = self.turn_cost();
         let mut tokens = std::mem::take(&mut self.tokens);
+        let produced = std::mem::take(&mut self.produced) || tokens.iter().any(|(_, t, c)| !t.is_empty() || c.is_some());
+        let interrupted = std::mem::take(&mut self.interrupted);
         // The session's cost goes with the turn's tokens when they're one lot priced by nobody
         // else; a cost with no tokens is reported on its own.
         if let Some(usd) = added.filter(|c| *c > 0.0) {
@@ -681,6 +714,8 @@ impl Turn {
             Ok(_) => None,
             Err(msg) => Some(msg),
         };
+        // A cost added with no tokens counts as something done too (a priced turn isn't empty).
+        let error = if ended_empty(error.as_deref(), produced || added.is_some_and(|c| c > 0.0), interrupted) { if_empty } else { error };
         // ACP has no word for a usage limit: agents pass on their provider's error as it reads.
         if let Some(limit) = error.as_deref().filter(|_| failed).and_then(|e| crate::Limit::from_text(e, trek_core::store::now_ms())) {
             out.push(limit.event());
@@ -1046,7 +1081,7 @@ pub async fn run(
     }
     // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
     let no_plan = (plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
-    events.send(AgentEvent::Started { native_id: session_id.clone(), model }).await?;
+    events.send(AgentEvent::Started { native_id: session_id.clone(), model: model.clone() }).await?;
     let mut told_efforts = None;
     if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
         events.send(ev).await?;
@@ -1062,7 +1097,7 @@ pub async fn run(
     }
 
     let turn = Turn { resumed: config.resume.is_some() && !lost, ..Default::default() };
-    let mut s = Live { session_id, turn, perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), turn_began: None };
+    let mut s = Live { session_id, turn, perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), name: agent.name.clone(), model, turn_began: None };
     for v in std::mem::take(&mut backlog) {
         if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
             return Ok(());
@@ -1095,6 +1130,7 @@ pub async fn run(
                         s.prompts.push(agent.rpc.request("session/prompt", params).await?);
                     }
                     Command::Interrupt => {
+                        s.turn.interrupted |= s.turn_began.is_some();
                         agent.rpc.notify("session/cancel", json!({ "sessionId": s.session_id })).await?;
                         for (_, (rpc_id, _)) in s.perms.drain() {
                             agent.rpc.reply(rpc_id, Ok(permission_outcome(None))).await?;
@@ -1116,6 +1152,7 @@ pub async fn run(
                                 Ok(r) => {
                                     ctl.refresh(&r);
                                     latest = Some(r).filter(|r| r["configOptions"].is_array());
+                                    s.model = Some(model.clone());
                                 }
                                 Err(e) => refused = Some(AgentEvent::Error(format!("{} didn't switch to {model}: {}", agent.name, rpc_message(&e)))),
                             }
@@ -1225,6 +1262,10 @@ struct Live {
     /// In plan mode: edits are never approved on the user's behalf.
     planning: bool,
     agent: AgentId,
+    /// The agent's name for the user, and the model the session is on (what a turn that ends
+    /// with nothing says to check).
+    name: String,
+    model: Option<String>,
     /// When the running turn's first prompt went out (unix ms).
     turn_began: Option<i64>,
 }
@@ -1273,7 +1314,7 @@ impl Live {
                                 }
                             }
                         }
-                        self.turn.finish(stop)
+                        self.turn.finish_with(stop, Some(empty_turn_error(&self.agent, &self.name, self.model.as_deref())))
                     } else {
                         // Others are still open: the turn goes on. A message the agent turned down
                         // didn't reach it, so the user is told.
@@ -1312,6 +1353,7 @@ impl Live {
             rpc.reply(rpc_id, reply).await?;
             return Ok(vec![]);
         }
+        self.turn.produced = true;
         match self.turn.permission(p, hand_holding, self.planning) {
             Ask::Answer(option) => {
                 rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
@@ -1670,7 +1712,8 @@ mod tests {
         });
         let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
         assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
-        assert_eq!(seen.last(), Some(&AgentEvent::TurnComplete { error: None }), "the turn ends with the first prompt, cleanly");
+        // The held prompt is answered with nothing said, so the turn that ends with it says so.
+        assert!(matches!(seen.last(), Some(AgentEvent::TurnComplete { error: Some(e) }) if e.contains("ended the turn without a reply")), "the turn ends with the first prompt: {seen:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1965,6 +2008,70 @@ mod tests {
         assert_eq!(err(Ok("cancelled")).as_deref(), Some("Interrupted"));
         assert!(err(Ok("refusal")).is_some());
         assert_eq!(err(Err("rate limited".into())).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn a_turn_that_ends_with_nothing_is_decided_from_what_it_produced() {
+        // (error, produced, interrupted)
+        assert!(ended_empty(None, false, false));
+        assert!(!ended_empty(None, true, false), "something was shown");
+        assert!(!ended_empty(None, false, true), "the user cut it short");
+        assert!(!ended_empty(Some("rate limited"), false, false), "an error already says why");
+    }
+
+    #[test]
+    fn an_empty_turn_fails_in_the_agents_name() {
+        let opencode = empty_turn_error(&AgentId::OpenCode, "OpenCode", Some("opencode/big-pickle"));
+        assert_eq!(opencode, "OpenCode ended the turn without a reply. Check that its provider is signed in: `opencode run -m opencode/big-pickle hi` in a terminal should answer.");
+        assert!(empty_turn_error(&AgentId::OpenCode, "OpenCode", None).contains("`opencode run hi`"));
+        let other = empty_turn_error(&AgentId::Acp("goose".into()), "Goose", Some("x"));
+        assert_eq!(other, "Goose ended the turn without a reply. Check that Goose is signed in and can answer when run in a terminal.");
+    }
+
+    #[test]
+    fn a_turn_with_nothing_in_it_ends_with_the_error_and_one_with_something_does_not() {
+        let said = Some("X ended the turn without a reply.".to_string());
+        let ends = |t: &mut Turn, stop| match t.finish_with(stop, said.clone()).pop() {
+            Some(AgentEvent::TurnComplete { error }) => error,
+            other => panic!("{other:?}"),
+        };
+        // OpenCode 1.2.27 with a provider that can't answer: end_turn, no tokens, no words.
+        let mut t = Turn::default();
+        assert_eq!(ends(&mut t, Ok("end_turn")), said);
+        // Whatever it shows, the turn is not empty.
+        let shows = [
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}),
+            json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"hm"}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"a","title":"ls","kind":"execute","status":"in_progress"}),
+            json!({"sessionUpdate":"plan","entries":[{"content":"a","status":"pending"}]}),
+        ];
+        for update in shows {
+            let mut t = Turn::default();
+            t.update(&update);
+            assert_eq!(ends(&mut t, Ok("end_turn")), None, "{update}");
+        }
+        // Empty message chunks, unknown updates and a plan with no steps are not output.
+        let mut t = Turn::default();
+        for update in [json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}}), json!({"sessionUpdate":"plan","entries":[]}), json!({"sessionUpdate":"available_commands_update","availableCommands":[]})] {
+            t.update(&update);
+        }
+        assert_eq!(ends(&mut t, Ok("end_turn")), said);
+        // Tokens used, an approval asked for, or the user's interrupt: none of them fail it.
+        let mut t = Turn { tokens: vec![(None, TokenUsage { input: 5, ..Default::default() }, None)], ..Default::default() };
+        assert_eq!(ends(&mut t, Ok("end_turn")), None);
+        let mut t = Turn { produced: true, ..Default::default() };
+        assert_eq!(ends(&mut t, Ok("end_turn")), None);
+        let mut t = Turn { interrupted: true, ..Default::default() };
+        assert_eq!(ends(&mut t, Ok("end_turn")), None);
+        assert_eq!(ends(&mut Turn::default(), Ok("cancelled")).as_deref(), Some("Interrupted"));
+        assert_eq!(ends(&mut Turn::default(), Err("boom".into())).as_deref(), Some("boom"));
+        // The next turn starts clean.
+        let mut t = Turn::default();
+        t.update(&json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}));
+        ends(&mut t, Ok("end_turn"));
+        assert_eq!(ends(&mut t, Ok("end_turn")), said);
+        // `finish` alone (no error to give) is unchanged.
+        assert_eq!(Turn::default().finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { error: None }]);
     }
 
     #[test]
