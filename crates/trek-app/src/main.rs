@@ -59,6 +59,8 @@ mod visualization;
 mod workspace;
 mod working_bar;
 mod worktree_ui;
+#[cfg(any(windows, test))]
+mod winsys;
 
 #[cfg(test)]
 mod tests;
@@ -229,7 +231,7 @@ fn main() {
     app.run(|cx| {
         // Windows toasts need an identity (the AppUserModelID) set before any window opens.
         #[cfg(windows)]
-        cx.set_app_identity("dev.trek.Trek", "Trek");
+        cx.set_app_identity(winsys::APP_ID, winsys::APP_NAME);
         gpui_kit::init(cx);
         toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());

@@ -12,6 +12,10 @@ struct Applied {
     /// dropped (and by the system when Trek quits or dies).
     awake: Option<Task<Result<ActivityGuard>>>,
     badge: usize,
+    /// The window the badge is on, where it belongs to one (a taskbar button; the Dock tile is the app's).
+    badge_window: Option<AnyWindowHandle>,
+    /// A pending second try at the badge, when the first couldn't be made.
+    badge_retry: Option<Task<()>>,
     menu_bar_icon: bool,
     ui_font_size: f32,
     /// `None` until the first sync, so the chosen icon is put up at launch.
@@ -25,6 +29,8 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let mut applied = Applied {
         awake: None,
         badge: 0,
+        badge_window: None,
+        badge_retry: None,
         menu_bar_icon: ws.settings.notifications.menu_bar_icon,
         ui_font_size: 0.,
         app_icon: None,
@@ -85,14 +91,29 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     let menu_bar_icon = ws.settings.notifications.menu_bar_icon;
     let ui_font_size = ws.settings.appearance.ui_font_size();
     let app_icon = ws.settings.appearance.app_icon;
+    let main = ws.main_window;
 
     if awake != applied.awake.is_some() {
         applied.awake = awake.then(|| cx.prevent_idle_sleep("Agents are working in Trek"));
         tracing::debug!("keep awake: {awake}");
     }
-    if badge != applied.badge {
-        applied.badge = badge;
-        set_dock_badge(badge);
+    // A taskbar badge sits on a window's button, so a window opened after the count rose (or
+    // reopened) needs it put up again; the Dock tile belongs to the app.
+    let moved = cfg!(windows) && badge > 0 && main != applied.badge_window;
+    if badge != applied.badge || moved {
+        applied.badge_retry = None;
+        // Not noted as applied until it was: the taskbar button may not exist yet (a window just
+        // opened), or the window be busy. Ask again soon rather than wait for a change.
+        if set_dock_badge(badge, main, cx) {
+            applied.badge = badge;
+            applied.badge_window = main;
+        } else if main.is_some() {
+            let workspace = workspace.downgrade();
+            applied.badge_retry = Some(cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let _ = workspace.update(cx, |_, cx| cx.notify());
+            }));
+        }
     }
     if ui_font_size != applied.ui_font_size {
         applied.ui_font_size = ui_font_size;
@@ -115,20 +136,33 @@ pub fn apply_ui_font_size(size: f32, cx: &mut App) {
     }
 }
 
-/// Show `count` on the Dock tile (cleared at 0). Must run on the main thread; a no-op elsewhere.
+/// Show `count` on the Dock tile (cleared at 0). Must run on the main thread. Whether it was
+/// shown; `main` is the main window, which only the taskbar's badge belongs to.
 #[cfg(all(target_os = "macos", not(test)))]
-fn set_dock_badge(count: usize) {
+fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -> bool {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::NSString;
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else { return true };
     let tile = NSApplication::sharedApplication(mtm).dockTile();
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     tile.setBadgeLabel(label.as_deref());
+    true
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
-fn set_dock_badge(_: usize) {}
+/// The taskbar button's overlay badge, on the main window's button. With no main window there is
+/// no button; the count is put up when one opens.
+#[cfg(all(windows, not(test)))]
+fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, cx: &mut App) -> bool {
+    let Some(main) = main else { return count == 0 };
+    let hwnd = main.update(cx, |_, window, _| crate::winsys::hwnd_of(window)).ok().flatten();
+    hwnd.is_some_and(|hwnd| crate::winsys::set_overlay_badge(hwnd, count))
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows), not(test)))]
+fn set_dock_badge(_: usize, _: Option<AnyWindowHandle>, _: &mut App) -> bool {
+    true
+}
 
 /// The rendered icon for `icon` (`assets/brand`).
 pub fn app_icon_image(icon: AppIcon) -> &'static str {
@@ -167,6 +201,8 @@ fn set_app_icon(icon: AppIcon) {
 thread_local! {
     /// What tests would have shown on the Dock tile (each GPUI test runs on its own thread).
     pub static DOCK_BADGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The window tests were last asked to put the badge on (or take it from).
+    pub static BADGE_ON: std::cell::Cell<Option<AnyWindowHandle>> = const { std::cell::Cell::new(None) };
     /// Alert sounds tests would have played.
     pub static SOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The Dock icon tests would have shown.
@@ -174,8 +210,10 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn set_dock_badge(count: usize) {
+fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, _: &mut App) -> bool {
     DOCK_BADGE.with(|b| b.set(count));
+    BADGE_ON.with(|w| w.set(main));
+    true
 }
 
 /// macOS's Reduce Transparency is on (Accessibility › Display): liquid glass stays off. Asked at
@@ -473,19 +511,24 @@ pub mod lately {
 /// for minutes, and Trek crawled meanwhile).
 #[cfg(not(test))]
 pub fn play_alert_sound() {
-    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     static PLAYING: AtomicBool = AtomicBool::new(false);
     if PLAYING.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(|| {
-        let _ = Command::new("/usr/bin/afplay")
-            .arg("/System/Library/Sounds/Glass.aiff")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        #[cfg(windows)]
+        crate::winsys::play_notification_sound();
+        #[cfg(not(windows))]
+        {
+            use std::process::{Command, Stdio};
+            let _ = Command::new("/usr/bin/afplay")
+                .arg("/System/Library/Sounds/Glass.aiff")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         PLAYING.store(false, Ordering::SeqCst);
     });
 }
