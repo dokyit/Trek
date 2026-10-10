@@ -36,7 +36,7 @@ fn an_empty_palette_lists_the_latest_threads_first_numbered_for_jumping() {
     run(async |cx| {
         let trek = open(cx);
         let newest = threads(&trek, cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         assert!(trek.visible(cx, "palette"));
         let listed = rows(&trek, cx);
@@ -60,19 +60,19 @@ fn command_and_a_digit_open_that_recent_thread() {
     run(async |cx| {
         let trek = open(cx);
         let newest = threads(&trek, cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
-        trek.press(cx, "cmd-3");
+        trek.press(cx, "secondary-3");
         trek.render(cx);
         assert!(!trek.visible(cx, "palette"), "jumping closes the palette");
         let opened = trek.read(cx, |ws, _| ws.current_thread().map(|t| t.title.clone()));
         assert_eq!(opened.as_deref(), Some(newest[2].as_str()));
 
         // While searching there are no numbers: ⌘2 leaves the palette as it is.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.type_text(cx, "Thread 1");
         trek.render(cx);
-        trek.press(cx, "cmd-2");
+        trek.press(cx, "secondary-2");
         trek.render(cx);
         assert!(trek.visible(cx, "palette"));
         assert_eq!(trek.read(cx, |ws, _| ws.current_thread().map(|t| t.title.clone())).as_deref(), Some(newest[2].as_str()));

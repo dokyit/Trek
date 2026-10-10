@@ -8987,6 +8987,7 @@ dependencies = [
  "tracing",
  "trek-core",
  "trek-ipc",
+ "trek-test-fixtures",
  "vt100",
  "windows-sys 0.61.2",
 ]
@@ -9000,6 +9001,7 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "ctor",
+ "embed-resource",
  "gpui-kit",
  "gpui-pre-macos",
  "gpui-pre-windows",
@@ -9034,7 +9036,9 @@ dependencies = [
  "trek-core",
  "trek-ipc",
  "trek-remote",
+ "trek-test-fixtures",
  "vt100",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 
@@ -9062,6 +9066,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "trash",
+ "trek-test-fixtures",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",
@@ -9091,6 +9096,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "trek-ipc",
+ "trek-test-fixtures",
 ]
 
 [[package]]
@@ -9113,6 +9119,13 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "trek-test-fixtures"
+version = "0.4.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

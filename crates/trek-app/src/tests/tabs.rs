@@ -229,7 +229,7 @@ fn a_full_tab_strip_scrolls_fades_and_lists_every_tab() {
 fn the_tools_panel_opens_on_a_grid_of_tools_and_never_clips_a_tab() {
     run(async |cx| {
         let trek = open(cx);
-        trek.press(cx, "cmd-j");
+        trek.press(cx, "secondary-j");
         trek.render(cx);
         for tool in crate::workspace::PanelTool::ALL {
             assert!(trek.visible(cx, format!("tool-tile-{}", tool.label())), "{}", tool.label());

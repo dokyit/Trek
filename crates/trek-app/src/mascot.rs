@@ -20,12 +20,8 @@ pub(crate) const LAP: Duration = Duration::from_secs(16);
 /// Waiting for others to come back, it paces the same trail on a shorter lap: restless where
 /// the working walk is steady.
 pub(crate) const PACE: Duration = Duration::from_secs(8);
-/// One sprite pixel, in points, as designed: 3 device pixels on Retina. At other scales it's
-/// whatever whole number of device pixels comes nearest (`cell_device_px`).
+/// One sprite pixel, in points. 1.5pt is 3 device pixels on Retina, so edges stay crisp.
 const PX: f32 = 1.5;
-/// The most a sprite pixel may grow to, in points, rounding up to whole device pixels: the hiker
-/// then still fits the trail's height.
-const PX_MAX: f32 = 1.6;
 const SPRITE_W: usize = 14;
 const SPRITE_H: usize = 16;
 /// Height of the trail with the hiker on it.
@@ -119,42 +115,51 @@ pub(crate) fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
     (pos, frame, right)
 }
 
-/// How many device pixels one sprite pixel takes at `scale`: the whole number nearest `PX`
-/// points' worth, so every sprite pixel is the same size (GPUI snaps each quad's edges to device
-/// pixels: at 125 % a 1.5pt pixel would come out 2, 2, 2, 2, 1 device pixels wide). Rounding up
-/// is held to `PX_MAX`, so at 100 % it's 1 device pixel rather than a hiker a third taller.
-fn cell_device_px(scale: f32) -> f32 {
-    let n = (PX * scale).round().max(1.);
-    if n > 1. && n / scale > PX_MAX { n - 1. } else { n }
+/// `v` points moved to the nearest whole device pixel at `scale` (device pixels per point).
+pub(crate) fn snap(v: f32, scale: f32) -> f32 {
+    (v * scale).round() / scale
 }
 
-/// `v` points, moved to the nearest device pixel.
-fn snap(v: f32, scale: f32) -> f32 {
-    (v * scale).round() / scale
+/// One sprite pixel, in points, at `scale`: a whole number of device pixels, so no edge falls
+/// between two (1.5 pt is 1.875 device pixels at 125%, and every cell would blur). It's the whole
+/// number nearest [`PX`] (ties down), kept short enough that the sprite fits its trail's height
+/// ([`HEIGHT`], less the trail's own line). On a Retina display that's 3 device pixels, 1.5 pt, as
+/// it always was; at 125% and 150% it's 2 (1.6 and 1.33 pt).
+pub(crate) fn cell_size(scale: f32) -> f32 {
+    let fits = ((HEIGHT - 1.) * scale / SPRITE_H as f32).floor();
+    let nearest = (PX * scale - 0.5).ceil();
+    nearest.min(fits).max(1.) / scale
+}
+
+/// Where the sprite's pixel grid sits on a trail whose ground is at `ground` and whose hiker is
+/// at `x`, in points at `scale`: its left edge, its feet, and a pixel's size — every one a whole
+/// number of device pixels, the left edge on the sprite's own grid so it steps pixel by pixel.
+pub(crate) fn grid(x: f32, ground: f32, scale: f32) -> (f32, f32, f32) {
+    let cell = cell_size(scale);
+    let left = (x / cell).round() * cell;
+    (snap(left, scale), snap(ground, scale), cell)
 }
 
 fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
     let scale = window.scale_factor();
     let w = b.size.width.as_f32();
     let ground = snap(b.origin.y.as_f32() + HEIGHT - 2., scale);
-    // Dotted trail: dots of a whole number of device pixels, on device pixels, all alike.
-    let dot = (2. * scale).round().max(1.) / scale;
+    // Dotted trail: dots a whole number of device pixels across, each on a device pixel.
+    let dot = ((2. * scale).round() / scale).max(1. / scale);
     let mut x = b.origin.x.as_f32() + 2.;
     while x < b.origin.x.as_f32() + w - 2. {
-        window.paint_quad(fill(Bounds::new(point(px(snap(x, scale)), px(ground - 1.)), size(px(dot), px(dot))), dots).corner_radii(px(dot / 2.)));
+        window.paint_quad(fill(Bounds::new(point(px(snap(x, scale)), px(snap(ground - 1., scale))), size(px(dot), px(dot))), dots).corner_radii(px(dot / 2.)));
         x += 7.;
     }
-    let n = cell_device_px(scale);
-    let cell = n / scale;
-    let travel = (w - SPRITE_W as f32 * cell - 8.).max(0.);
-    // Snap to the sprite's pixel grid, in device pixels, so it never blurs mid-pixel.
-    let left = (((b.origin.x.as_f32() + 4. + travel * pos) * scale) / n).round() * n / scale;
-    // Its feet on the trail; a hiker rounded up a little is kept inside the trail's height.
-    let top = snap(ground - 1. - SPRITE_H as f32 * cell, scale).max(snap(b.origin.y.as_f32(), scale));
-    sprite(left, top, cell, frame, right, window);
+    let sprite_w = SPRITE_W as f32 * cell_size(scale);
+    let travel = (w - sprite_w - 8.).max(0.);
+    // The sprite's pixels sit on whole device pixels, so none blurs between two.
+    let (left, feet, cell) = grid(b.origin.x.as_f32() + 4. + travel * pos, ground - 1., scale);
+    sprite(left, feet, cell, frame, right, window);
 }
 
-fn sprite(left: f32, top: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
+fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
+    let top = ground - SPRITE_H as f32 * cell_px;
     let cell = |x: f32, y: f32, rgb: u32, window: &mut Window| {
         let col = if right { x } else { SPRITE_W as f32 - 1. - x };
         window.paint_quad(fill(Bounds::new(point(px(left + col * cell_px), px(top + y * cell_px)), size(px(cell_px), px(cell_px))), gpui_kit::rgb(rgb)));
@@ -217,19 +222,42 @@ mod tests {
         assert!(super::PACE < super::LAP);
     }
 
+    /// Within a thousandth of a device pixel of a whole number.
+    fn whole(points: f32, scale: f32) -> bool {
+        let dev = points * scale;
+        (dev - dev.round()).abs() < 1e-3
+    }
+
     #[test]
-    fn sprite_pixels_are_whole_device_pixels_at_every_scale() {
-        // Retina is as designed: 3 device pixels, 1.5pt.
-        assert_eq!(super::cell_device_px(2.), 3.);
-        for (scale, want) in [(1., 1.), (1.25, 2.), (1.5, 2.), (1.75, 2.), (2., 3.), (2.25, 3.), (2.5, 4.), (3., 4.)] {
-            let n = super::cell_device_px(scale);
-            assert_eq!(n, want, "at {scale}");
-            assert!(n / scale <= super::PX_MAX + 1e-6, "at {scale} the hiker still fits the trail");
-            // The sprite's top, from a ground on a device pixel, lands on one too.
-            let ground = super::snap(100.3, scale);
-            let top = super::snap(ground - 1. - super::SPRITE_H as f32 * n / scale, scale);
-            assert!(((top * scale) - (top * scale).round()).abs() < 1e-3 && ((ground * scale) - (ground * scale).round()).abs() < 1e-3);
+    fn the_sprite_keeps_its_size_on_a_retina_screen() {
+        assert_eq!(super::cell_size(2.), 1.5, "1.5 pt is 3 device pixels at 2x");
+        let (left, feet, cell) = super::grid(40.2, 25., 2.);
+        assert_eq!((left, feet, cell), (40.5, 25., 1.5), "steps by 1.5 pt, as before");
+    }
+
+    #[test]
+    fn the_sprite_lands_on_whole_device_pixels_at_every_scale() {
+        for scale in [1., 1.25, 1.5, 1.75, 2., 2.25, 2.5, 3.] {
+            let cell = super::cell_size(scale);
+            assert!(whole(cell, scale) && cell * scale >= 1., "{scale}: a pixel of the art is {} device px", cell * scale);
+            // It fits the trail it's drawn on, and isn't far from the art's size.
+            assert!(cell * super::SPRITE_H as f32 <= super::HEIGHT, "{scale}: {} pt tall in a {} pt trail", cell * super::SPRITE_H as f32, super::HEIGHT);
+            assert!(cell >= super::PX * 0.6 && cell <= super::PX * 1.4, "{scale}: a pixel of {cell} pt for {} pt", super::PX);
+            // Wherever the hiker is on the trail, edge and feet are on device pixels too.
+            for i in 0..200 {
+                let (left, feet, c) = super::grid(4. + i as f32 * 1.37, 25.3, scale);
+                assert!(whole(left, scale) && whole(feet, scale) && c == cell, "{scale}: left {left} feet {feet}");
+                // Each of the art's pixels begins on one.
+                assert!(whole(left + 13. * c, scale) && whole(feet - 16. * c, scale), "{scale}: art pixels at {left}, {feet}");
+            }
         }
+    }
+
+    #[test]
+    fn snapping_goes_to_the_nearest_device_pixel() {
+        assert_eq!(super::snap(10.1, 1.25), 10.4, "13 device pixels is 10.4 pt");
+        assert_eq!(super::snap(3., 2.), 3.);
+        assert!(whole(super::snap(7.77, 1.5), 1.5));
     }
 
     #[test]

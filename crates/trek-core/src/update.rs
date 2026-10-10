@@ -935,7 +935,7 @@ mod tests {
     #[test]
     fn after_launch_clears_only_downloads_of_exited_processes() {
         let dir = scratch("after-launch");
-        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let mut exited = std::process::Command::new(trek_test_fixtures::bin("fixture")).arg("exit").spawn().unwrap();
         exited.wait().unwrap();
         let mine = new_download_dir(&dir).unwrap();
         let theirs = dir.join(format!("download-{}-0.noindex", exited.id()));
@@ -962,23 +962,28 @@ mod tests {
         let (bundle, backup) = (dir.join("Trek.app"), dir.join("previous.noindex/Trek.app"));
         write_app(&bundle, "dev.trek.Trek", "new");
         write_app(&backup, "dev.trek.Trek", "old");
-        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let mut exited = std::process::Command::new(trek_test_fixtures::bin("fixture")).arg("exit").spawn().unwrap();
         exited.wait().unwrap();
         let skip = dir.join(SKIP_MARKER);
-        let helper = |backup: Option<&Path>, opener: &str| relaunch_command(exited.id(), &bundle, backup, &skip, "0.2.1", opener, &["-n".into()]).status().unwrap();
+        // The "opener" is `fixture exit <code>`: the app opens or it doesn't.
+        let fixture = trek_test_fixtures::bin("fixture");
+        let fixture = fixture.to_str().unwrap();
+        let helper = |backup: Option<&Path>, code: &str| {
+            relaunch_command(exited.id(), &bundle, backup, &skip, "0.2.1", fixture, &["exit".into(), code.into()]).status().unwrap()
+        };
 
-        assert!(helper(Some(&backup), "/usr/bin/true").success());
+        assert!(helper(Some(&backup), "0").success());
         assert_eq!(contents(&bundle), "new", "opened: nothing moves");
         assert!(backup.exists());
         assert!(!skip.exists());
 
         // Nothing was replaced (the app on disk was already newer): a backup from an earlier
         // update must not go back.
-        helper(None, "/usr/bin/false");
+        helper(None, "1");
         assert_eq!(contents(&bundle), "new");
         assert!(backup.exists());
 
-        helper(Some(&backup), "/usr/bin/false");
+        helper(Some(&backup), "1");
         assert_eq!(contents(&bundle), "old", "the backup is back in place");
         assert!(!backup.exists());
         assert!(!dir.join("Trek.app.failed").exists());
