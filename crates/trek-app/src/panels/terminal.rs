@@ -4,7 +4,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -27,15 +27,51 @@ type Screen = Arc<Mutex<vt100::Parser>>;
 /// Repaints at most this often while output streams in.
 const FRAME: Duration = Duration::from_millis(16);
 
+/// Write `bytes` to the shell's input.
+fn write_to(writer: &Mutex<Box<dyn Write + Send>>, bytes: &[u8]) {
+    let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = w.write_all(bytes);
+    let _ = w.flush();
+}
+
+/// "Where is the cursor?" (DSR). Windows' ConPTY asks it before anything else and sends no output
+/// until it's answered, so without a reply the terminal stays blank.
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
+/// How many times `chunk` asks where the cursor is, counting a query that began in the last read
+/// (`carry`, at most the query's length less one) and ends in this one.
+fn cursor_queries(carry: &[u8], chunk: &[u8]) -> usize {
+    let joined = [carry, chunk].concat();
+    joined.windows(CURSOR_QUERY.len()).filter(|w| *w == CURSOR_QUERY).count()
+}
+
+/// The cursor-position report for a cursor at `(row, col)`, which count from 0: `ESC [ row ; col R`.
+fn cursor_report((row, col): (u16, u16)) -> String {
+    format!("\x1b[{};{}R", row + 1, col + 1)
+}
+
 /// Feed the shell's output into `screen` until it ends, waking the view after each read. `wake`
-/// holds one wake-up at most: while one is waiting, more output only changes the screen.
-fn pump(mut reader: impl Read, screen: &Screen, wake: &async_channel::Sender<()>) {
+/// holds one wake-up at most: while one is waiting, more output only changes the screen. `reply`
+/// writes back to the shell what its output asks for (the cursor position, on Windows).
+fn pump(mut reader: impl Read, screen: &Screen, wake: &async_channel::Sender<()>, reply: impl Fn(&[u8])) {
     let mut buf = [0u8; 16384];
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                screen.lock().unwrap_or_else(|e| e.into_inner()).process(&buf[..n]);
+                // Answered after the screen is let go: a write to a busy shell mustn't hold up painting.
+                let queries = cursor_queries(&carry, &buf[..n]);
+                let cursor = {
+                    let mut screen = screen.lock().unwrap_or_else(|e| e.into_inner());
+                    screen.process(&buf[..n]);
+                    screen.screen().cursor_position()
+                };
+                for _ in 0..queries {
+                    reply(cursor_report(cursor).as_bytes());
+                }
+                carry.clear();
+                carry.extend_from_slice(&buf[n.saturating_sub(CURSOR_QUERY.len() - 1)..n]);
                 if let Err(async_channel::TrySendError::Closed(_)) = wake.try_send(()) {
                     break;
                 }
@@ -132,8 +168,9 @@ fn shell_args(flavor: Flavor, command: Option<&str>) -> Vec<String> {
         ],
         (Flavor::Cmd, None) => vec![],
         // cmd reads the rest of its command line as the command, quotes and all; `^%` defers
-        // `%errorlevel%` to when `call` reaches it, after the command has set it.
-        (Flavor::Cmd, Some(c)) => vec!["/c".into(), format!("{c} & call echo. & call echo [finished with exit code %^errorlevel%]")],
+        // `%errorlevel%` to when `call` reaches it, after the command has set it. Only that one
+        // `call`: another before it (`call echo.`) would reset the level to 0.
+        (Flavor::Cmd, Some(c)) => vec!["/c".into(), format!("{c} & echo. & call echo [finished with exit code %^errorlevel%]")],
     }
 }
 
@@ -151,21 +188,51 @@ fn plain_path(path: PathBuf) -> PathBuf {
 }
 
 /// Where the shell starts: `cwd` (the project) or home. On Windows, as a plain path; and not a
-/// network one for `cmd.exe`, which can't be in one and would start in the Windows folder.
-fn shell_cwd(cwd: Option<PathBuf>, flavor: Flavor, windows: bool, home: PathBuf) -> PathBuf {
+/// network one for `cmd.exe`, which can't be in one and would start in the Windows folder. A folder
+/// that's gone is home, and with no home either (`None`) the shell starts where Trek is, so a
+/// terminal always opens.
+fn shell_cwd(cwd: Option<PathBuf>, flavor: Flavor, windows: bool, home: PathBuf, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let cwd = cwd.unwrap_or_else(|| home.clone());
-    if !windows {
-        return cwd;
+    let cwd = if !windows {
+        cwd
+    } else {
+        let cwd = plain_path(cwd);
+        if flavor == Flavor::Cmd && cwd.to_str().is_some_and(|p| p.starts_with(r"\\")) { home.clone() } else { cwd }
+    };
+    [cwd, home].into_iter().find(|dir| exists(dir))
+}
+
+/// What a terminal runs besides an interactive shell, and whose command it is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Job {
+    /// One of Trek's own (an agent's install or sign-in, a plugin). On Windows these are written
+    /// for PowerShell (`irm ... | iex`), so they run in it whatever `[terminal] shell` says.
+    Setup(String),
+    /// The user's (a project action): written for the shell they chose, and run by it.
+    Action(String),
+}
+
+impl Job {
+    fn command(&self) -> &str {
+        match self {
+            Job::Setup(c) | Job::Action(c) => c,
+        }
     }
-    let cwd = plain_path(cwd);
-    if flavor == Flavor::Cmd && cwd.to_str().is_some_and(|p| p.starts_with(r"\\")) { home } else { cwd }
+}
+
+/// The shell to start for `job` (none: an interactive shell). The setting picks the interactive
+/// shell and the user's own commands' shell; Trek's own commands get the automatic choice.
+fn shell_for(setting: &str, job: Option<&Job>, env_shell: Option<&str>, windows: bool, find: impl Fn(&str) -> Option<PathBuf>, comspec: Option<&str>) -> String {
+    let setting = if matches!(job, Some(Job::Setup(_))) { "" } else { setting };
+    choose_shell(setting, env_shell, windows, find, comspec)
 }
 
 /// The shell for `[terminal] shell = setting` as a process to start in a pty, in `cwd`, running
-/// `command` when there is one.
-fn shell_command(setting: &str, cwd: Option<PathBuf>, command: Option<&str>) -> CommandBuilder {
+/// `job` when there is one.
+fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> CommandBuilder {
     let windows = cfg!(windows);
-    let shell = choose_shell(setting, std::env::var("SHELL").ok().as_deref(), windows, |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());
+    let shell = shell_for(setting, job, std::env::var("SHELL").ok().as_deref(), windows, |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());
+    let command = job.map(Job::command);
     let flavor = flavor(&shell, windows);
     let mut cmd = CommandBuilder::new(shell);
     cmd.args(shell_args(flavor, command));
@@ -177,7 +244,9 @@ fn shell_command(setting: &str, cwd: Option<PathBuf>, command: Option<&str>) -> 
         // has the one Windows would give a new session (and `login_path` adds agent CLIs' folders).
         cmd.env("PATH", trek_core::detect::login_path());
     }
-    cmd.cwd(shell_cwd(cwd, flavor, windows, trek_core::paths::home()));
+    if let Some(dir) = shell_cwd(cwd, flavor, windows, trek_core::paths::home(), |dir| dir.is_dir()) {
+        cmd.cwd(dir);
+    }
     cmd
 }
 
@@ -222,7 +291,8 @@ fn paste_bytes(text: &str, bracketed: bool, windows: bool) -> String {
 
 pub struct TerminalPanel {
     parser: Screen,
-    writer: Option<Box<dyn Write + Send>>,
+    /// Shared with the thread that reads the shell's output, which answers its queries (ConPTY's).
+    writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     master: Option<Box<dyn MasterPty + Send>>,
     size: (u16, u16),
     focus: FocusHandle,
@@ -263,13 +333,18 @@ fn color(c: vt100::Color) -> Option<Hsla> {
 }
 
 impl TerminalPanel {
-    pub fn new(cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        Self::with_command(cwd, None, cx)
+    /// A terminal in `cwd`. `shell` is `[terminal] shell` as the workspace holds it now.
+    pub fn new(cwd: Option<PathBuf>, shell: String, cx: &mut Context<Self>) -> Self {
+        Self::with_job(cwd, None, shell, cx)
     }
 
-    /// A terminal that runs one command in a login shell (agent install / sign-in), shows its output
-    /// and stays open after it exits.
-    pub fn with_command(cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> Self {
+    /// A terminal that runs one command in a login shell (agent install / sign-in, a project
+    /// action), shows its output and stays open after it exits.
+    pub fn with_command(cwd: Option<PathBuf>, job: Job, shell: String, cx: &mut Context<Self>) -> Self {
+        Self::with_job(cwd, Some(job), shell, cx)
+    }
+
+    fn with_job(cwd: Option<PathBuf>, job: Option<Job>, shell: String, cx: &mut Context<Self>) -> Self {
         let size = (30u16, 90u16);
         let mut this = Self {
             parser: Arc::new(Mutex::new(vt100::Parser::new(size.0, size.1, 2000))),
@@ -285,10 +360,10 @@ impl TerminalPanel {
         // An isolated (test) process starts no shell: one would run the user's login profile,
         // and the command (a project's tests, an agent's sign-in) for real.
         if trek_core::paths::isolated() {
-            this.screen().process(format!("$ {}\r\n(no shell in tests)\r\n", command.unwrap_or_default()).as_bytes());
+            this.screen().process(format!("$ {}\r\n(no shell in tests)\r\n", job.as_ref().map_or("", Job::command)).as_bytes());
             return this;
         }
-        if let Err(e) = this.spawn(cwd, command, cx) {
+        if let Err(e) = this.spawn(cwd, job, &shell, cx) {
             this.screen().process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
         }
         this
@@ -298,18 +373,23 @@ impl TerminalPanel {
         self.parser.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn spawn(&mut self, cwd: Option<PathBuf>, command: Option<String>, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    fn spawn(&mut self, cwd: Option<PathBuf>, job: Option<Job>, shell: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let pty = native_pty_system().openpty(PtySize { rows: self.size.0, cols: self.size.1, pixel_width: 0, pixel_height: 0 })?;
-        // Read when a terminal opens, so a change in settings applies to the next one.
-        let cmd = shell_command(&trek_core::settings::Settings::load().terminal.shell, cwd, command.as_deref());
+        let cmd = shell_command(shell, cwd, job.as_ref());
         let mut child = pty.slave.spawn_command(cmd)?;
         let reader = pty.master.try_clone_reader()?;
-        self.writer = Some(pty.master.take_writer()?);
+        let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
+        self.writer = Some(writer.clone());
         self.master = Some(pty.master);
         let (tx, rx) = async_channel::bounded::<()>(1);
         let screen = self.parser.clone();
         std::thread::spawn(move || {
-            pump(reader, &screen, &tx);
+            // Only ConPTY asks where the cursor is, and a Mac's shells never got an answer.
+            pump(reader, &screen, &tx, |bytes| {
+                if cfg!(windows) {
+                    write_to(&writer, bytes);
+                }
+            });
             let _ = child.wait();
         });
         self._reader = Some(cx.spawn(async move |this, cx| {
@@ -336,9 +416,8 @@ impl TerminalPanel {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if let Some(w) = self.writer.as_mut() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
+        if let Some(w) = &self.writer {
+            write_to(w, bytes);
         }
     }
 
@@ -527,9 +606,9 @@ impl Render for TerminalPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flavor, Screen, Shortcut, choose_shell, flavor, paste_bytes, plain_path, powershell_quote, pump, shell_args, shell_cwd, shortcut};
+    use super::{Flavor, Job, Screen, Shortcut, choose_shell, cursor_queries, cursor_report, flavor, paste_bytes, plain_path, powershell_quote, pump, shell_args, shell_cwd, shell_for, shortcut};
     use gpui_kit::Modifiers;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     fn found(names: &'static [&'static str]) -> impl Fn(&str) -> Option<PathBuf> {
@@ -584,7 +663,7 @@ mod tests {
         assert!(ps[2].starts_with("Write-Host '$ winget install it''s'; "), "{}", ps[2]);
         assert!(ps[2].contains("; winget install it's; $ok = $?;"), "{}", ps[2]);
         assert!(shell_args(Flavor::Cmd, None).is_empty());
-        assert_eq!(shell_args(Flavor::Cmd, Some("dir")).first().map(String::as_str), Some("/c"));
+        assert_eq!(shell_args(Flavor::Cmd, Some("dir")), ["/c", "dir & echo. & call echo [finished with exit code %^errorlevel%]"], "one `call`: an earlier one resets the exit code");
     }
 
     #[test]
@@ -602,15 +681,46 @@ mod tests {
         assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\nas\share\app")), PathBuf::from(r"\\nas\share\app"));
         assert_eq!(plain_path(PathBuf::from(r"\\?\Volume{1234}\x")), PathBuf::from(r"\\?\Volume{1234}\x"), "only a drive or share path has a plain form");
         assert_eq!(plain_path(PathBuf::from(r"C:\code")), PathBuf::from(r"C:\code"));
+        let all = |_: &Path| true;
         let verbatim = Some(PathBuf::from(r"\\?\C:\code\app"));
-        assert_eq!(shell_cwd(verbatim.clone(), Flavor::PowerShell, true, home.clone()), PathBuf::from(r"C:\code\app"));
-        assert_eq!(shell_cwd(None, Flavor::Cmd, true, home.clone()), home);
+        assert_eq!(shell_cwd(verbatim.clone(), Flavor::PowerShell, true, home.clone(), all), Some(PathBuf::from(r"C:\code\app")));
+        assert_eq!(shell_cwd(None, Flavor::Cmd, true, home.clone(), all), Some(home.clone()));
         // A network folder is fine for PowerShell, and not for cmd.exe.
         let unc = Some(PathBuf::from(r"\\nas\share\app"));
-        assert_eq!(shell_cwd(unc.clone(), Flavor::PowerShell, true, home.clone()), PathBuf::from(r"\\nas\share\app"));
-        assert_eq!(shell_cwd(Some(PathBuf::from(r"\\?\UNC\nas\share\app")), Flavor::Cmd, true, home.clone()), home);
+        assert_eq!(shell_cwd(unc.clone(), Flavor::PowerShell, true, home.clone(), all), Some(PathBuf::from(r"\\nas\share\app")));
+        assert_eq!(shell_cwd(Some(PathBuf::from(r"\\?\UNC\nas\share\app")), Flavor::Cmd, true, home.clone(), all), Some(home.clone()));
         // Off Windows nothing is rewritten.
-        assert_eq!(shell_cwd(verbatim.clone(), Flavor::Posix, false, home), verbatim.unwrap());
+        assert_eq!(shell_cwd(verbatim.clone(), Flavor::Posix, false, home.clone(), all), verbatim);
+    }
+
+    #[test]
+    fn a_folder_that_is_gone_starts_the_shell_in_home_and_without_home_where_trek_is() {
+        let home = PathBuf::from(r"C:\Users\me");
+        let only_home = |p: &Path| p == Path::new(r"C:\Users\me");
+        assert_eq!(shell_cwd(Some(PathBuf::from(r"C:\gone")), Flavor::PowerShell, true, home.clone(), only_home), Some(home.clone()));
+        // cmd.exe and a network folder: home too, and if that is gone, nothing (no panic, no error).
+        assert_eq!(shell_cwd(Some(PathBuf::from(r"\\nas\share")), Flavor::Cmd, true, home.clone(), only_home), Some(home.clone()));
+        assert_eq!(shell_cwd(Some(PathBuf::from(r"C:\gone")), Flavor::Cmd, true, home.clone(), |_: &Path| false), None);
+        assert_eq!(shell_cwd(None, Flavor::Posix, false, home, |_: &Path| false), None);
+    }
+
+    #[test]
+    fn treks_own_commands_run_in_powershell_whatever_shell_the_user_chose() {
+        let find = found(&["pwsh", "powershell", "bash", "nu"]);
+        let comspec = Some(r"C:\Windows\System32\cmd.exe");
+        let pick = |setting, job: Option<&Job>| shell_for(setting, job, None, true, &find, comspec);
+        let setup = Job::Setup("irm https://example.com/install.ps1 | iex".into());
+        let action = Job::Action("./build.sh && make".into());
+        // The setting picks the interactive shell and the user's own commands' shell.
+        assert_eq!(pick("nu", None), r"C:\bin\nu.exe");
+        assert_eq!(pick("bash", Some(&action)), r"C:\bin\bash.exe");
+        // Install / Sign in are PowerShell one-liners on Windows: Git Bash, nu or cmd would choke on them.
+        assert_eq!(pick("bash", Some(&setup)), r"C:\bin\pwsh.exe");
+        assert_eq!(pick(r"C:\Windows\System32\cmd.exe", Some(&setup)), r"C:\bin\pwsh.exe");
+        assert_eq!(shell_for("nu", Some(&setup), None, true, found(&["powershell"]), comspec), r"C:\bin\powershell.exe");
+        // A Mac has one kind of shell: its own command runs in the one it chose, else `$SHELL`.
+        assert_eq!(shell_for("", Some(&setup), Some("/bin/zsh"), false, found(&[]), None), "/bin/zsh");
+        assert_eq!(shell_for("fish", Some(&action), Some("/bin/zsh"), false, found(&[]), None), "fish");
     }
 
     #[test]
@@ -645,7 +755,7 @@ mod tests {
         let flood = "y\r\n".repeat(2 << 20) + "done\r\n";
         let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
         let (tx, rx) = async_channel::bounded::<()>(1);
-        pump(std::io::Cursor::new(flood.into_bytes()), &screen, &tx);
+        pump(std::io::Cursor::new(flood.into_bytes()), &screen, &tx, |_| panic!("nothing asked for a reply"));
         assert_eq!(rx.len(), 1, "one wake-up stands for every read");
         let text = screen.lock().unwrap().screen().contents();
         assert!(text.trim_end().ends_with("done"), "{text}");
@@ -661,45 +771,76 @@ mod tests {
         let (tx, rx) = async_channel::bounded::<()>(1);
         drop(rx);
         // An endless stream: `pump` returns because nothing listens any more.
-        pump(std::io::repeat(b'y'), &screen, &tx);
+        pump(std::io::repeat(b'y'), &screen, &tx, |_| panic!("nothing asked for a reply"));
+    }
+
+    #[test]
+    fn a_shell_that_asks_where_the_cursor_is_is_told() {
+        assert_eq!(cursor_report((0, 0)), "\x1b[1;1R");
+        assert_eq!(cursor_report((4, 11)), "\x1b[5;12R");
+        assert_eq!(cursor_queries(b"", b"\x1b[6n"), 1);
+        assert_eq!(cursor_queries(b"", b"hello\x1b[6nworld\x1b[6n"), 2);
+        assert_eq!(cursor_queries(b"", b"\x1b[6"), 0);
+        assert_eq!(cursor_queries(b"\x1b[6", b"n"), 1, "a query split across two reads");
+        assert_eq!(cursor_queries(b"\x1b[6", b"ok"), 0);
+        // ConPTY's first output is the query alone; the prompt follows only once it is answered.
+        let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let (tx, _rx) = async_channel::bounded::<()>(1);
+        let said = std::cell::RefCell::new(Vec::<u8>::new());
+        let stream = std::io::Cursor::new(b"ab\r\n\x1b[6n".to_vec());
+        pump(stream, &screen, &tx, |bytes| said.borrow_mut().extend_from_slice(bytes));
+        assert_eq!(said.into_inner(), b"\x1b[2;1R");
     }
 
     /// The shell, in a real pseudo-terminal (ConPTY), as the panel starts it.
     #[cfg(windows)]
     mod conpty {
-        use super::super::{Screen, pump, shell_command};
+        use super::super::{Job, Screen, pump, shell_command, write_to};
         use portable_pty::{PtySize, native_pty_system};
-        use std::io::Write as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
 
-        /// Starts `setting`'s shell running `command` (if any) in a temp folder, types `input`
-        /// (if any), and returns the screen once `done` likes it, or after 20 s. The shell is
+        /// How long a shell gets for each step: generous, as profiles are slow and tests run side by side.
+        const LIMIT: Duration = Duration::from_secs(90);
+
+        /// Starts `setting`'s shell running `job` (if any) in a temp folder, types `input`
+        /// (if any), and returns the screen once `done` likes it, or after `LIMIT`. The shell is
         /// killed afterwards.
-        fn run(setting: &str, command: Option<&str>, input: Option<&str>, done: impl Fn(&str) -> bool) -> String {
-            let dir = std::env::temp_dir().join(format!("trek-terminal-test-{}-{}", std::process::id(), setting.replace(|c: char| !c.is_ascii_alphanumeric(), "_")));
+        fn run(setting: &str, job: Option<Job>, input: Option<&str>, done: impl Fn(&str) -> bool) -> String {
+            // A folder of its own: the tests run side by side, and each removes its folder.
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!("trek-terminal-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
             std::fs::create_dir_all(&dir).unwrap();
             let pty = native_pty_system().openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).unwrap();
-            let mut child = pty.slave.spawn_command(shell_command(setting, Some(dir.clone()), command)).unwrap();
+            let mut child = pty.slave.spawn_command(shell_command(setting, Some(dir.clone()), job.as_ref())).unwrap();
             let reader = pty.master.try_clone_reader().unwrap();
-            let mut writer = pty.master.take_writer().unwrap();
+            // As the panel runs it: the output thread answers ConPTY's cursor query on the same writer.
+            let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
             let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(30, 100, 0)));
             let (tx, _rx) = async_channel::bounded::<()>(1);
             let pumped = screen.clone();
-            std::thread::spawn(move || pump(reader, &pumped, &tx));
+            let answering = writer.clone();
+            std::thread::spawn(move || pump(reader, &pumped, &tx, |bytes| write_to(&answering, bytes)));
             if let Some(input) = input {
-                // The shell reads keys once it has started: wait for its first output (a prompt).
+                // The shell reads keys once it has started (a profile can take seconds to run, and
+                // five shells start at once here): wait for output, then for it to settle at its prompt.
                 let start = Instant::now();
-                while screen.lock().unwrap().screen().contents().trim().is_empty() && start.elapsed() < Duration::from_secs(20) {
+                let (mut last, mut changed) = (String::new(), Instant::now());
+                while start.elapsed() < LIMIT {
+                    let now = screen.lock().unwrap().screen().contents();
+                    if now != last {
+                        (last, changed) = (now, Instant::now());
+                    } else if !last.trim().is_empty() && changed.elapsed() > Duration::from_millis(2000) {
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                std::thread::sleep(Duration::from_millis(500));
-                writer.write_all(input.as_bytes()).unwrap();
-                writer.flush().unwrap();
+                write_to(&writer, input.as_bytes());
             }
             let start = Instant::now();
             let mut text = String::new();
-            while start.elapsed() < Duration::from_secs(20) {
+            while start.elapsed() < LIMIT {
                 text = screen.lock().unwrap().screen().contents();
                 if done(&text) {
                     break;
@@ -741,17 +882,50 @@ mod tests {
                     eprintln!("{name} isn't installed here; skipped");
                     continue;
                 }
-                let text = run(name, Some(command), None, |t| t.contains("[finished with exit code"));
+                let text = run(name, Some(Job::Action(command.into())), None, |t| t.contains("[finished with exit code"));
                 assert!(has_line(&text, shows), "{name}: the command's output is missing:\n{text}");
-                assert!(text.contains("[finished with exit code 0]") || name == "cmd", "{name}: no exit code:\n{text}");
+                assert!(text.contains("[finished with exit code 0]"), "{name}: no exit code:\n{text}");
             }
         }
 
         #[test]
-        fn a_failing_native_command_reports_its_code_in_powershell() {
-            let Some(name) = ["pwsh", "powershell"].into_iter().find(|n| trek_core::detect::which(n).is_some()) else { return };
-            let text = run(name, Some("cmd /c exit 3"), None, |t| t.contains("[finished with exit code"));
-            assert!(text.contains("[finished with exit code 3]"), "{text}");
+        fn a_failing_native_command_reports_its_code_in_each_shell() {
+            for name in ["pwsh", "powershell", "cmd"] {
+                if trek_core::detect::which(name).is_none() {
+                    eprintln!("{name} isn't installed here; skipped");
+                    continue;
+                }
+                let text = run(name, Some(Job::Action("cmd /c exit 3".into())), None, |t| t.contains("[finished with exit code"));
+                assert!(text.contains("[finished with exit code 3]"), "{name}:\n{text}");
+            }
+        }
+
+        #[test]
+        fn a_command_that_runs_no_program_reports_success_or_failure_in_powershell() {
+            // `$LASTEXITCODE` is empty when no program ran: a failed cmdlet is 1, a good one 0.
+            for name in ["pwsh", "powershell"] {
+                if trek_core::detect::which(name).is_none() {
+                    eprintln!("{name} isn't installed here; skipped");
+                    continue;
+                }
+                let fails = run(name, Some(Job::Action("Get-Item .\\no-such-file".into())), None, |t| t.contains("[finished with exit code"));
+                assert!(fails.contains("[finished with exit code 1]"), "{name}:\n{fails}");
+            }
+        }
+
+        #[test]
+        fn treks_own_command_runs_in_powershell_when_the_chosen_shell_is_git_bash() {
+            let bash = r"C:\Program Files\Git\bin\bash.exe";
+            if !std::path::Path::new(bash).exists() || trek_core::detect::which("pwsh").or_else(|| trek_core::detect::which("powershell")).is_none() {
+                eprintln!("Git Bash or PowerShell isn't installed here; skipped");
+                return;
+            }
+            // `Write-Output` is a cmdlet: bash would say "command not found".
+            let text = run(bash, Some(Job::Setup("Write-Output 'ran in powershell'".into())), None, |t| t.contains("[finished with exit code"));
+            assert!(has_line(&text, "ran in powershell") && text.contains("[finished with exit code 0]"), "{text}");
+            // The user's own command goes to the shell they chose.
+            let text = run(bash, Some(Job::Action("echo ran in bash".into())), None, |t| t.contains("[finished with exit code"));
+            assert!(has_line(&text, "ran in bash") && text.contains("[finished with exit code 0]"), "{text}");
         }
     }
 }

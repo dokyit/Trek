@@ -804,9 +804,12 @@ pub enum WorkspaceEvent {
     FocusComposer,
     /// The editor's AI side bar takes the keys (a chat tab switched or opened, the editor shown).
     FocusAiInput,
-    /// Run a shell command in a new terminal tab (an agent install or sign-in, a project action),
-    /// in `cwd` or else the folder on screen, then rescan agents.
+    /// Run one of Trek's own shell commands (an agent install or sign-in) in a new terminal tab,
+    /// in `cwd` or else the folder on screen, then rescan agents. On Windows it runs in PowerShell,
+    /// which these are written for, whatever `[terminal] shell` is.
     RunInTerminal { command: String, cwd: Option<PathBuf> },
+    /// The same for one of the user's project actions, which the shell they chose runs.
+    RunProjectAction { command: String, cwd: Option<PathBuf> },
     /// Insert text at the composer's cursor (e.g. an element picked in the browser).
     InsertIntoComposer(String),
     /// Open `path` in the in-app editor, at `line` when given (Explorer, `trek://edit`).
@@ -2231,7 +2234,7 @@ impl Workspace {
         if matches!(self.route, Route::Settings(_)) {
             self.navigate(Route::Draft { project: Some(dir.clone()) }, cx);
         }
-        cx.emit(WorkspaceEvent::RunInTerminal { command, cwd: Some(dir) });
+        cx.emit(WorkspaceEvent::RunProjectAction { command, cwd: Some(dir) });
     }
 
     pub fn open_project_settings(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {

@@ -535,6 +535,10 @@ impl Default for Settings {
 pub struct Terminal {
     /// The shell it opens: a path, or a name found on PATH (`pwsh`, `nu`). Empty, the automatic
     /// choice: `$SHELL` on macOS; on Windows PowerShell 7, else Windows PowerShell, else `%COMSPEC%`.
+    /// It is the shell of the terminal tabs and of a project's own actions. Trek's own commands
+    /// (agent Install / Sign in) are PowerShell one-liners on Windows, so they run in PowerShell
+    /// whatever this says. Read when the app starts and when it saves settings, so a hand edit
+    /// of the file applies to the next launch.
     pub shell: String,
 }
 
