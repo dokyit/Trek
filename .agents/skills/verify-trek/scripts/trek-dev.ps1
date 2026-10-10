@@ -145,21 +145,24 @@ function Write-Cmd([string[]]$Lines) {
 function Wait-Done($State, [double]$Timeout) {
     $done = Join-Path $ShotDir 'done'
     $deadline = (Get-Date).AddSeconds($Timeout)
+    $read = {
+        if (-not (Test-Path $done)) { return $null }
+        # The app writes `done` directly (not atomically): an empty read is a torn write —
+        # wait for the next tick rather than take it as the answer.
+        $result = (Get-Content $done -Raw).Trim()
+        if ($result -eq '') { return $null }
+        Remove-Item $done, $PendingPath -Force -ErrorAction SilentlyContinue
+        return $result
+    }
     while ($true) {
-        if (Test-Path $done) {
-            $result = (Get-Content $done -Raw).Trim()
-            Remove-Item $done, $PendingPath -Force -ErrorAction SilentlyContinue
-            return $result
-        }
+        $result = & $read
+        if ($null -ne $result) { return $result }
         if (-not (Test-Alive $State)) { return '__exited__' }
         if ((Get-Date) -gt $deadline) {
             # Close the boundary race: take a completion written on the last tick; otherwise
             # keep pending.json so no later batch mistakes this one's `done` for its own.
-            if (Test-Path $done) {
-                $result = (Get-Content $done -Raw).Trim()
-                Remove-Item $done, $PendingPath -Force -ErrorAction SilentlyContinue
-                return $result
-            }
+            $result = & $read
+            if ($null -ne $result) { return $result }
             return '__timeout__'
         }
         Start-Sleep -Milliseconds 100
@@ -244,10 +247,12 @@ function Start-Trek([bool]$Build, [string]$Size) {
     # cmd's `>> log 2>&1` merges both streams into one file the way the Python driver's
     # `stdout=log, stderr=STDOUT` does — OS-level redirection, so the log keeps filling
     # for the app's whole life, not just while this script runs. taskkill /T ends both.
-    # Arguments goes on cmd's command line verbatim; Start-Process would re-quote it.
+    # Arguments goes on cmd's command line verbatim; Start-Process would re-quote it. The /c
+    # string needs a whole extra pair of quotes around it: with more than two quote marks cmd
+    # strips the first and the last, which would unbalance the redirect's quoting.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = 'cmd.exe'
-    $psi.Arguments = "/d /c `"$binary`" >> `"$LogPath`" 2>&1"
+    $psi.Arguments = "/d /c `"`"$binary`" >> `"$LogPath`" 2>&1`""
     $psi.WorkingDirectory = $Root
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -274,7 +279,7 @@ function Stop-Trek {
     $deadline = (Get-Date).AddSeconds(10)
     while ((Test-Alive $state) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
     if (Test-Alive $state) { End-Trek $state }
-    $state.stopped_at = (Get-Date).ToUniversalTime().ToString('o')
+    $state | Add-Member -Force -NotePropertyName stopped_at -NotePropertyValue (Get-Date).ToUniversalTime().ToString('o')
     $state.pid = $null
     $state | ConvertTo-Json | Set-Content $StatePath
     Remove-Item $PendingPath, (Join-Path $ShotDir 'cmd'), (Join-Path $ShotDir 'done') -Force -ErrorAction SilentlyContinue
