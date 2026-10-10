@@ -204,7 +204,10 @@ fn tailscale_ip() -> Option<Ipv4Addr> {
     let (app, name) = (PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"), "tailscale.exe");
     #[cfg(not(windows))]
     let (app, name) = (PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"), "tailscale");
-    let cli = trek_core::detect::which(name).or_else(|| app.is_file().then_some(app))?;
+    // On Windows the installer's own copy first: a `tailscale` further down PATH may be another
+    // tailnet's (a second install, a build) rather than the one whose adapter is up.
+    let installed = app.is_file().then_some(app);
+    let cli = if cfg!(windows) { installed.or_else(|| trek_core::detect::which(name)) } else { trek_core::detect::which(name).or(installed) }?;
     let mut command = Command::new(cli);
     command.args(["ip", "-4"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
@@ -228,7 +231,12 @@ fn tailscale_ip() -> Option<Ipv4Addr> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    out.lines().find_map(|l| l.trim().parse().ok())
+    first_ipv4(&out)
+}
+
+/// The first IPv4 address on a line of `tailscale ip -4`'s output (one per line, CRLF on Windows).
+pub(crate) fn first_ipv4(output: &str) -> Option<Ipv4Addr> {
+    output.lines().find_map(|l| l.trim().parse().ok())
 }
 
 /// Where the server listens and what the pairing code tells phones to dial: the same address,
