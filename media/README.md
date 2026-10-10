@@ -11,6 +11,9 @@ script/capture.sh mac/readme              # macOS suite → dist/media/readme/
 script/capture.sh ios/store               # iOS suite   → dist/media/store/
 ```
 
+On Windows the same driver is `script/capture.ps1` (`pwsh script/capture.ps1 mac/parity`); iOS
+suites stay macOS-only.
+
 Knobs (env): `BUILD=0` skip the build · `SIZE=1280x820` window points · `FPS=15` video frame
 rate · `OUT=dist/media` · `KEEP=1` keep the scratch dir · `TREK_SHOT_UNDER=<png>` backdrop under
 glass · `SIM="iPhone 17 Pro Max"` for App Store-sized iOS shots (the default iPhone 18 Pro is

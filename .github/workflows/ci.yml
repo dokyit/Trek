@@ -62,12 +62,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
 
-  # The Windows port: the workspace must check warning-free there. Tests and clippy join once
-  # the suite passes on Windows (Phase 5 of the port).
-  check-windows:
-    name: Check (Windows)
+  # The Windows port runs the same suite as the Mac (Phase 5 of the port): the runner's Git for
+  # Windows, PowerShell 7 and Windows PowerShell cover what the tests spawn.
+  test-windows:
+    name: Test (Windows)
     runs-on: windows-latest
-    timeout-minutes: 75
+    # Slower than the Mac: a cold build of the whole workspace plus the ConPTY tests' waits.
+    timeout-minutes: 120
     steps:
       # Deep build paths under the runner's workspace can pass MAX_PATH.
       - name: Long paths
@@ -76,11 +77,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
 
-      - name: Check
-        run: cargo check --workspace --locked
+      # The PowerShell twin of the Mac's `zsh -n` over the shell scripts.
+      - name: Scripts parse
+        run: |
+          foreach ($f in Get-ChildItem script\*.ps1, script\lib\*.ps1 -ErrorAction SilentlyContinue) {
+            [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $f.FullName))
+          }
+
+      # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
+      # `-D warnings` above doesn't turn them into errors).
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
