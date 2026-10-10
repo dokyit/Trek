@@ -45,7 +45,8 @@ fn windows_pages_say_windows() {
         assert!(has(&notifications, "System tray icon"), "{notifications:?}");
 
         let appearance = said(&trek, cx, SettingsPage::Appearance);
-        assert!(appearance.iter().any(|s| s.contains("changing the app icon isn't supported on Windows yet")), "{appearance:?}");
+        assert!(has(&appearance, "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Ember."), "{appearance:?}");
+        assert!(!appearance.iter().any(|s| s.contains("isn't supported")), "{appearance:?}");
         assert!(!appearance.iter().any(|s| s.contains("Dock") || s.contains("Finder") || s.contains("macOS")), "{appearance:?}");
 
         let keys = said(&trek, cx, SettingsPage::ApiKeys);

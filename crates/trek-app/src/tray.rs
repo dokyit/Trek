@@ -200,10 +200,12 @@ fn build() -> anyhow::Result<Parts> {
 impl Tray {
     fn new(parts: Parts, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let Parts { icon, status, ids, rx } = parts;
-        let ws = workspace.clone();
+        // Weak: the menu's events can come for as long as the app lives.
+        let ws = workspace.downgrade();
         let events = cx.spawn(async move |_, cx| {
             while let Ok(id) = rx.recv().await {
                 let _ = cx.update(|cx| {
+                    let Some(ws) = ws.upgrade() else { return };
                     if id == ids.0 {
                         cx.activate(true);
                         // The main window may have been closed; bring it back.
@@ -220,8 +222,7 @@ impl Tray {
                         cx.activate(true);
                         ws.update(cx, |ws, cx| ws.show_in_main(Route::Settings(SettingsPage::General), cx));
                     } else if id == ids.3 {
-                        ws.update(cx, |ws, _| ws.shutdown_sessions());
-                        cx.quit();
+                        crate::root::quit(cx);
                     }
                 });
             }

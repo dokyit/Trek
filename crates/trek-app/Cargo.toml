@@ -62,7 +62,8 @@ block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 # LockFileEx on the data folder, a job object per language server, the registry for the OS name,
-# and the session's idle time and lock state for push notifications' away-detection.
+# the session's idle time and lock state for push notifications' away-detection, and the exe's
+# icon resources for the windows' icons.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
@@ -70,6 +71,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",

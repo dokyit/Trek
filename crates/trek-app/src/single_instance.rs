@@ -261,9 +261,16 @@ pub fn hear(primary_forwarded: Option<async_channel::Receiver<Forwarded>>, own: 
         dispatch(arg, &ws, &links, cx);
     }
     let Some(rx) = primary_forwarded else { return };
+    // Weak: this loop waits on the pipe for as long as the app lives, and a handle it held would
+    // still be there when GPUI drops its entities at exit (the leak detector panics on that).
+    let ws = ws.downgrade();
     cx.spawn(async move |cx| {
         while let Ok(Forwarded { open, done }) = rx.recv().await {
-            let _ = cx.update(|cx| take(open, &ws, &links, cx));
+            let _ = cx.update(|cx| {
+                if let Some(ws) = ws.upgrade() {
+                    take(open, &ws, &links, cx);
+                }
+            });
             let _ = done.try_send(Ok(()));
         }
     })

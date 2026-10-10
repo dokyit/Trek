@@ -675,6 +675,14 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         if let Some(error) = workspace.update(cx, |ws, _| ws.store_error.take()) {
             window.on_next_frame(move |window, cx| database_error(&error, window, cx));
         }
+        // Where the app ends with its main window, its close button is the Quit command, the
+        // same way out as the menu's: `quit` closes the windows itself and ends the app after.
+        if cx.has_global::<QuitWithMainWindow>() {
+            window.on_window_should_close(cx, |_, cx| {
+                quit(cx);
+                false
+            });
+        }
         cx.new(|cx| TrekWindow::new(workspace, window, cx))
     })?;
     Ok(())
@@ -771,14 +779,38 @@ struct QuitWithMainWindow;
 
 impl Global for QuitWithMainWindow {}
 
+/// The quit is Trek's own (`quit`), not GPUI's, which quits the moment the last window is gone,
+/// with no time for what `quit` waits for.
 pub fn quit_with_main_window(cx: &mut App) {
     cx.set_global(QuitWithMainWindow);
+    cx.set_quit_mode(QuitMode::Explicit);
 }
 
 /// End the app: the agents' sessions first.
+///
+/// On Windows the windows go first too, and the quit follows them after a moment. A window's
+/// native state is let go by a task its drop queues, and one still queued as the loop ends never
+/// runs: a text field in focus has handed the window the handle it takes the keys by, which is
+/// then left holding the field's state when GPUI drops its entities (a `shots` build, or a test,
+/// panics with "Exited with leaked handles" there). A window being updated can't be removed from
+/// inside that update, so the work waits for the current one to finish; and a window closed by its
+/// own close button has its task queued already, which the moment lets run.
 pub fn quit(cx: &mut App) {
     crate::workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
-    cx.quit();
+    if cfg!(windows) {
+        cx.defer(|cx| {
+            for window in cx.windows() {
+                let _ = window.update(cx, |_, window, _| window.remove_window());
+            }
+            cx.spawn(async |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    } else {
+        cx.quit();
+    }
 }
 
 /// The Trek window with keyboard focus; `None` when another app is in front.

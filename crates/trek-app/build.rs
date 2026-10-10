@@ -2,8 +2,15 @@
 //! in `trek.exe`. GPUI loads the window's icon from resource 1 of the executable, which is what
 //! the title bar and the taskbar then show. Nothing on other platforms.
 //!
-//! `assets/brand/trek.ico` comes from `script/windows-icons.py`. GPUI's own resource (its manifest)
-//! has other type and id, so the two link side by side.
+//! The `.ico`s in `assets/brand` come from `script/windows-icons.py`: Ember (resource 1, the exe's
+//! icon) and the two other choices of Appearance › App icon (resources 2 and 3), which Trek puts
+//! on its windows at run time (`winsys::icon_resource` is the app's side of these ids, and a test
+//! reads the list below). GPUI's own resource (its manifest) has other type and id, so they link
+//! side by side.
+
+/// (resource id, file in `assets/brand`).
+#[cfg_attr(not(windows), allow(dead_code))]
+const ICONS: [(u16, &str); 3] = [(1, "trek.ico"), (2, "trek-night.ico"), (3, "trek-glass.ico")];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -16,18 +23,22 @@ fn main() {
 fn windows() {
     use std::path::PathBuf;
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let ico = manifest.join("../../assets/brand/trek.ico").canonicalize().expect("assets/brand/trek.ico");
-    println!("cargo:rerun-if-changed={}", ico.display());
+    // rc.exe reads the paths as C source: forward slashes, so no escapes to get wrong.
+    let icons: String = ICONS
+        .iter()
+        .map(|(id, file)| {
+            let ico = manifest.join("../../assets/brand").join(file).canonicalize().unwrap_or_else(|e| panic!("assets/brand/{file}: {e}"));
+            println!("cargo:rerun-if-changed={}", ico.display());
+            format!("{id} ICON \"{}\"\n", ico.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"))
+        })
+        .collect();
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     // 1.2.3-beta.4 → 1,2,3,0: the numeric fields take the numbers only.
     let mut numbers = version.split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
     let [major, minor, patch] = std::array::from_fn(|_| numbers.next().unwrap_or(0));
-    // rc.exe reads the path as C source: forward slashes, so no escapes to get wrong.
-    let ico = ico.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/");
     let rc = format!(
-        r#"1 ICON "{ico}"
-1 VERSIONINFO
+        r#"{icons}1 VERSIONINFO
 FILEVERSION {major},{minor},{patch},0
 PRODUCTVERSION {major},{minor},{patch},0
 BEGIN
