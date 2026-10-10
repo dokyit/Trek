@@ -420,8 +420,13 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_secs(WAIT_MIN));
         assert_eq!(out["id"], "child-2");
         assert_eq!(out["status"], "running");
-        // The connection gave up waiting: the workspace sees nobody listening any more.
-        assert!(held.lock().unwrap()[0].is_closed());
+        // The connection gave up waiting: the workspace sees nobody listening any more, once
+        // the closed side of the channel reaches it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !held.lock().unwrap()[0].is_closed() {
+            assert!(std::time::Instant::now() < deadline, "the workspace still waits on the caller's behalf");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
