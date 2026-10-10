@@ -548,6 +548,13 @@ fn an_error_that_ends_nothing_leaves_the_turn_running() {
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "the follow-up still waits its turn");
         let done = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { error: None }];
         trek.update(cx, |ws, cx| ws.apply_events(&id, done, cx));
+        // The turn ended cleanly, so the follow-up goes out in its place and the thread isn't
+        // "finished" yet. The mock agent answers it on the runtime's threads, in real time: the
+        // test waits for that second turn instead of reading the alerts while it may still run.
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0, "the follow-up went out when the turn ended");
+        assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::User { text, .. } if text == "then the tests")));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // One alert, for the follow-up's turn: the first one's end said nothing.
         assert_eq!(*alerts.borrow(), [format!("Finished: {}", trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()))]);
         assert!(matches!(trek.items(cx, &id).iter().find(|i| matches!(i, Item::Error { .. })), Some(Item::Error { text }) if text.contains("/x.png")));
 
