@@ -26,6 +26,7 @@ mod ide;
 mod image_preview;
 mod integrations;
 mod ipc;
+mod keys;
 #[cfg(windows)]
 mod job;
 mod mascot;
@@ -192,57 +193,9 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+/// Trek's key bindings: the table in `keys.rs`, which has each platform's keys.
 fn key_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-h", HideApp, None),
-        KeyBinding::new("cmd-m", Minimize, None),
-        // ⌘N only ever makes something new: never an undo, whatever has focus.
-        KeyBinding::new("cmd-n", NewThread, None),
-        KeyBinding::new("cmd-o", OpenFolder, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
-        KeyBinding::new("cmd-e", SettleThread, None),
-        KeyBinding::new("shift-tab", TogglePlan, Some("Composer")),
-        KeyBinding::new("cmd-shift-s", TakeSnapshot, None),
-        KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
-        KeyBinding::new("cmd-.", Interrupt, None),
-        KeyBinding::new("cmd-j", ToggleRightPanel, None),
-        // Not in the editor's text, where ⌘K is an inline edit (below).
-        KeyBinding::new("cmd-k", OpenPalette, Some("!IdeEditor")),
-        KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
-        KeyBinding::new("cmd-shift-h", OpenBasecamp, None),
-        KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
-        KeyBinding::new("cmd-shift-j", OpenNotes, None),
-        // ⌥⌘E switches Agents ⇄ Editor. ⌘⇧E is the Explorer, in the editor only (as in VS Code).
-        KeyBinding::new("alt-cmd-e", SwitchMode, None),
-        KeyBinding::new("cmd-shift-e", ToggleIde, Some("TrekIde")),
-        KeyBinding::new("cmd-shift-f", ToggleIdeSearch, Some("TrekWindow")),
-        KeyBinding::new("cmd-p", QuickOpen, None),
-        KeyBinding::new("alt-cmd-b", ToggleAiBar, None),
-        KeyBinding::new("ctrl-`", ToggleTerminal, None),
-        KeyBinding::new("ctrl-shift-g", FocusScm, None),
-        // The editor's selection to the AI side bar: ⌘⇧L the chat in front, ⌘L a new one.
-        KeyBinding::new("cmd-shift-l", AddSelectionToChat, Some("TrekIde")),
-        KeyBinding::new("cmd-l", AddSelectionToNewChat, Some("TrekIde")),
-        // In the editor's text: ⌘K edits the picked lines inline (elsewhere it's the palette);
-        // with a review's hunks in the file, ⌘Y keeps the one the bar is on and ⌥⌘⌫ undoes it
-        // (its toast takes that back), ⌥⌘↑/↓ step between them.
-        KeyBinding::new("cmd-k", editor::InlineEdit, Some("IdeEditor")),
-        KeyBinding::new("cmd-y", editor::KeepHunk, Some("IdeEditor && hunks")),
-        KeyBinding::new("alt-cmd-backspace", editor::UndoHunk, Some("IdeEditor && hunks")),
-        KeyBinding::new("alt-cmd-down", editor::NextHunk, Some("IdeEditor && hunks")),
-        KeyBinding::new("alt-cmd-up", editor::PreviousHunk, Some("IdeEditor && hunks")),
-        // In the AI input: undo every pending change, or stop the turn (⌘↩, its pair, comes
-        // through the input's Enter).
-        KeyBinding::new("cmd-shift-backspace", ide::ai::UndoAllOrStop, Some("AiInput")),
-        // Only thread windows close with ⌘W; the main window stays put.
-        KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
-        // In the main window ⌘W closes the tab in front; the window stays put.
-        KeyBinding::new("cmd-w", CloseTab, Some("TrekWindow")),
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-    ]
+    keys::bindings(keys::Group::App)
 }
 
 fn main() {
