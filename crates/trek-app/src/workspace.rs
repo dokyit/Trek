@@ -1236,6 +1236,8 @@ impl Workspace {
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
         let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
         if trek_core::update::blocker().is_none() {
+            // Windows: trek-update couldn't swap the update in, and put this version back.
+            launch_toasts.extend(trek_core::update::take_install_failure());
             // A first launch has nothing new to show; one after an update shows what it brought
             // (from a build older than "What's new", whose setting is still empty).
             if this.settings.updates.seen_notes.is_empty() {
@@ -6031,7 +6033,10 @@ impl Workspace {
         self.updater.status = UpdateStatus::Idle;
         if let Err(e) = trek_core::update::relaunch(&installed, crate::system::app_is_active()) {
             tracing::warn!("relaunch after update failed: {e:#}");
-            self.updater.status = UpdateStatus::Failed("The update is installed. Quit and reopen Trek to start it.".into());
+            // On Windows the relaunch is the install (trek-update swaps the folder once Trek has
+            // quit): nothing changed, and quitting tries again.
+            let message = if cfg!(windows) { format!("Couldn't install the update: {e:#}") } else { "The update is installed. Quit and reopen Trek to start it.".into() };
+            self.updater.status = UpdateStatus::Failed(message);
             cx.notify();
             return;
         }
@@ -6042,8 +6047,10 @@ impl Workspace {
     /// Quitting with an update ready installs it, so the next launch is the new version.
     fn install_on_quit(&mut self) {
         if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } = &self.updater.status {
-            match trek_core::update::install(staged) {
-                Ok(_) => tracing::info!("update installed on quit"),
+            // On Windows `install` gets it ready and `swap_on_exit` has trek-update swap it in once
+            // Trek has exited.
+            match trek_core::update::install(staged).and_then(|installed| trek_core::update::swap_on_exit(&installed)) {
+                Ok(()) => tracing::info!("update installed on quit"),
                 Err(e) => tracing::warn!("update install on quit failed: {e:#}"),
             }
         }

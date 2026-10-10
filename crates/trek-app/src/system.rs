@@ -304,7 +304,20 @@ pub fn app_is_active() -> bool {
     MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the window in front is one of Trek's.
+#[cfg(windows)]
+pub fn app_is_active() -> bool {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    // SAFETY: plain calls; a null window (none in front) is passed over, and `pid` is writable.
+    unsafe {
+        let front = GetForegroundWindow();
+        let mut pid = 0u32;
+        !front.is_null() && GetWindowThreadProcessId(front, &mut pid) != 0 && pid == GetCurrentProcessId()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn app_is_active() -> bool {
     true
 }
