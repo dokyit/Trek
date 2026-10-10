@@ -5,9 +5,9 @@
 //! Channels: npm (and Bun, pnpm) global packages are asked of the npm registry and updated with
 //! the package manager that installed them; Homebrew formulae and casks (macOS only) are asked of
 //! formulae.brew.sh (a third-party tap's formula of its GitHub repository) and updated with
-//! `brew upgrade`; WinGet packages (Windows, Claude Code only) with `winget upgrade`; anything
-//! else came from the vendor's own installer, whose release feed says what's newest and whose CLI
-//! updates itself (`claude update`, `grok update`, …).
+//! `brew upgrade`; WinGet packages (Windows: Claude Code's and Copilot CLI's) with `winget
+//! upgrade`; anything else came from the vendor's own installer, whose release feed says what's
+//! newest and whose CLI updates itself (`claude update`, `grok update`, …).
 //!
 //! On Windows the layouts differ, not the channels: npm's global prefix has no `lib` folder
 //! (`%APPDATA%\npm\node_modules\<package>`), a package's shim is a `.cmd` (read for the package it
@@ -95,12 +95,24 @@ impl Harness {
         }
     }
 
-    /// The WinGet package ids that are this CLI. Only what its vendor documents: Claude Code's
-    /// `winget install Anthropic.ClaudeCode`. Any other WinGet install reads as the vendor's own.
+    /// The WinGet package ids that are this CLI: Claude Code's `winget install Anthropic.ClaudeCode`
+    /// (its documentation), and Copilot CLI's `GitHub.Copilot` (the folder its WinGet install
+    /// lays out). Another package of the same binary name isn't the agent.
     pub fn winget(&self) -> &'static [&'static str] {
         match self.agent {
             "claude-code" => &["Anthropic.ClaudeCode"],
+            "acp:github-copilot" => &["GitHub.Copilot"],
             _ => &[],
+        }
+    }
+
+    /// `install` as it applies to this agent: a WinGet package that isn't one of its known ids
+    /// is read as the vendor's own install (its CLI's `update`), not as a package Trek would
+    /// `winget upgrade` on a guess.
+    pub fn reading(&self, install: Install) -> Install {
+        match install {
+            Install::Winget { id } if !self.winget().contains(&id.as_str()) => Install::Native,
+            other => other,
         }
     }
 
@@ -594,12 +606,11 @@ fn resolve_program(program: &Path, search_path: &str) -> Option<PathBuf> {
         return Some(program.to_path_buf());
     }
     let name = program.to_string_lossy();
-    let names: Vec<String> = if !cfg!(windows) {
-        vec![name.to_string()]
-    } else if runnable_extensions().iter().any(|e| name.to_ascii_lowercase().ends_with(e.as_str())) {
+    let extensions = runnable_extensions();
+    let names: Vec<String> = if !cfg!(windows) || extensions.iter().any(|e| name.to_ascii_lowercase().ends_with(e.as_str())) {
         vec![name.to_string()]
     } else {
-        runnable_extensions().iter().map(|e| format!("{name}{e}")).collect()
+        extensions.iter().map(|e| format!("{name}{e}")).collect()
     };
     std::env::split_paths(search_path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
 }
@@ -870,7 +881,7 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
     which(h.detected_by())?;
     let binary = which(h.binary)?;
     let resolved = std::fs::canonicalize(&binary).unwrap_or_else(|_| binary.clone());
-    let install = detect_install(&resolved);
+    let install = h.reading(detect_install(&resolved));
     if !h.owns(&install) {
         return None;
     }
@@ -1614,6 +1625,13 @@ mod tests {
         assert!(!h("codex").owns(&winget), "another agent's package id");
         assert!(!claude.owns(&Install::Winget { id: "Other.Tool".into() }));
         assert_eq!(winget.label(), "WinGet");
+        // Copilot CLI's WinGet package (the one installed on a real Windows machine).
+        let copilot = Install::Winget { id: "GitHub.Copilot".into() };
+        assert!(h("acp:github-copilot").owns(&copilot) && !claude.owns(&copilot));
+        assert_eq!(h("acp:github-copilot").reading(copilot.clone()), copilot);
+        // A package of another id isn't `winget upgrade`d on a guess: it's the vendor's own install.
+        assert_eq!(h("codex").reading(Install::Winget { id: "OpenAI.Codex".into() }), Install::Native);
+        assert_eq!(claude.reading(Install::Native), Install::Native);
         // Its versions are the vendor's own feed's.
         assert_eq!(source(claude, &winget, None), Some(Source::Feed(Feed::ClaudeReleases)));
         let cmd = update_command(claude, &winget, Path::new(r"C:\x\claude.exe"), false, Some("2.1.1")).unwrap();
@@ -1726,14 +1744,12 @@ mod tests {
         let cmd = UpdateCommand { path: vec![r"C:\nvm\v22".into(), r"C:\other".into()], ..UpdateCommand::new("npm", &[]) };
         assert!(cmd.search_path().starts_with(r"C:\nvm\v22;C:\other;"), "{}", cmd.search_path());
         // The vendor's PowerShell installers, run by Windows PowerShell with what's shown as typed.
-        for agent in ["droid"] {
-            let h = h(agent);
-            let line = h.installer_line().unwrap();
-            assert!(line.starts_with("irm https://") && line.ends_with(" | iex"), "{line}");
-            let cmd = update_command(h, &Install::Native, Path::new(r"C:\Users\me\bin\droid.exe"), false, None).unwrap();
-            assert_eq!((cmd.shown().as_str(), cmd.args.last().map(String::as_str)), (line, Some(line)));
-            assert!(cmd.args.windows(2).any(|w| w == ["-ExecutionPolicy", "Bypass"]) && cmd.args.contains(&"-NoProfile".to_string()), "{:?}", cmd.args);
-        }
+        let droid = h("droid");
+        let line = droid.installer_line().unwrap();
+        assert!(line.starts_with("irm https://") && line.ends_with(" | iex"), "{line}");
+        let cmd = update_command(droid, &Install::Native, Path::new(r"C:\Users\me\bin\droid.exe"), false, None).unwrap();
+        assert_eq!((cmd.shown().as_str(), cmd.args.last().map(String::as_str)), (line, Some(line)));
+        assert!(cmd.args.windows(2).any(|w| w == ["-ExecutionPolicy", "Bypass"]) && cmd.args.contains(&"-NoProfile".to_string()), "{:?}", cmd.args);
         // The CLIs with their own update command use it, not the installer.
         for (agent, bin) in [("claude-code", r"C:\Users\me\.local\bin\claude.exe"), ("acp:grok", r"C:\Users\me\.grok\bin\grok.exe"), ("acp:devin", r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe"), ("acp:cursor", r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe")] {
             let cmd = update_command(h(agent), &Install::Native, Path::new(bin), false, None).unwrap();
