@@ -116,9 +116,87 @@ impl McpServer {
     }
 }
 
-/// `{name: {…}, ...}` for a set of servers.
-pub(crate) fn mcp_servers_json(servers: &[McpServer]) -> serde_json::Value {
-    serde_json::Value::Object(servers.iter().map(|s| (s.name.clone(), s.to_json())).collect())
+/// `{name: {…}, ...}` for a set of servers, as `agent` can start them, and the notices for the
+/// ones it can't (left out). The user's own settings are never changed, only what's handed over.
+pub(crate) fn mcp_servers_json(servers: &[McpServer], agent: BatchHandOff) -> (serde_json::Value, Vec<String>) {
+    mcp_servers_json_with(servers, agent, cfg!(windows), |name| trek_core::detect::which_in(trek_core::detect::login_path(), name))
+}
+
+/// `mcp_servers_json` with the platform and the lookup of a command name as arguments, so both
+/// platforms' output is tested on either.
+pub(crate) fn mcp_servers_json_with(servers: &[McpServer], agent: BatchHandOff, windows: bool, resolve: impl Fn(&str) -> Option<PathBuf>) -> (serde_json::Value, Vec<String>) {
+    let mut out = serde_json::Map::new();
+    let mut left_out = vec![];
+    for server in servers {
+        let mut entry = server.to_json();
+        if let McpTransport::Stdio { command, args, .. } = &server.transport {
+            match agent_stdio_command(agent, command, args, windows, &resolve) {
+                Ok(Some((command, args))) => {
+                    entry["command"] = serde_json::json!(command);
+                    entry["args"] = serde_json::json!(args);
+                }
+                Ok(None) => {}
+                Err(problem) => {
+                    left_out.push(format!("MCP server {} wasn't started: {problem}", server.name));
+                    continue;
+                }
+            }
+        }
+        out.insert(server.name.clone(), entry);
+    }
+    (serde_json::Value::Object(out), left_out)
+}
+
+/// How an agent can start a stdio MCP server whose command is a batch script (`npx.cmd`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchHandOff {
+    /// `cmd /c <command> <args>`: Claude Code starts servers with Node's `spawn`, which refuses a
+    /// batch file (and finds no `npx` without the extension); cmd.exe starts it, and reads the
+    /// whole command line by its own rules.
+    CmdWrapper,
+    /// The script's own path: Codex is a Rust program starting servers with tokio's `Command`,
+    /// which runs a `.cmd` path through cmd.exe with every argument safely quoted.
+    ResolvedPath,
+}
+
+/// What an agent is told to run for a stdio server's `command` and `args`: `None` when as written
+/// is right. On Windows a command that is (or is found as) a `.cmd` or `.bat` is handed over as
+/// `agent` says; an `Err` says why it can't be (in words for the user).
+fn agent_stdio_command(
+    agent: BatchHandOff,
+    command: &str,
+    args: &[String],
+    windows: bool,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    if !windows {
+        return Ok(None);
+    }
+    let bare = trek_core::detect::is_bare_name_on(command, true);
+    let program = if bare { resolve(command) } else { Some(PathBuf::from(command)) };
+    let Some(program) = program.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))) else {
+        return Ok(None);
+    };
+    if let Some(problem) = trek_core::detect::batch_script_problem(&program, args) {
+        return Err(problem);
+    }
+    match agent {
+        BatchHandOff::ResolvedPath => Ok(Some((program.to_string_lossy().into_owned(), args.to_vec()))),
+        BatchHandOff::CmdWrapper => {
+            // Found by name, cmd.exe finds it again by that name; a path is written with backslashes
+            // (a `/` begins cmd's switches).
+            let target = if bare { command.to_string() } else { command.replace('/', "\\") };
+            let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
+            if let Some(n) = std::iter::once(&target).chain(args).position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"'])) {
+                let which = if n == 0 { "its name".to_string() } else { format!("argument {n}") };
+                return Err(format!("{name} is a batch script, which Claude Code can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."));
+            }
+            if target.contains(' ') {
+                return Err(format!("{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."));
+            }
+            Ok(Some(("cmd".into(), ["/c".to_string(), target].into_iter().chain(args.iter().cloned()).collect())))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1748,5 +1826,102 @@ mod live_usage {
         let ev = one_turn(AgentId::OpenCode, &std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into()));
         assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { error: None, .. })), "{ev:?}");
         println!("reported: {:?}", reported(&ev));
+    }
+}
+
+#[cfg(test)]
+mod mcp_hand_off_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `npx` is a `.cmd` in a folder with a space in its name; `uvx` and `node` are `.exe`s.
+    fn found(name: &str) -> Option<PathBuf> {
+        match name {
+            "npx" => Some(r"C:\Program Files\nodejs\npx.cmd".into()),
+            "uvx" => Some(r"C:\Users\me\.local\bin\uvx.exe".into()),
+            _ => None,
+        }
+    }
+
+    fn strings(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn hand_off(agent: BatchHandOff, command: &str, args: &[&str]) -> Result<Option<(String, Vec<String>)>, String> {
+        agent_stdio_command(agent, command, &strings(args), true, &found)
+    }
+
+    #[test]
+    fn claude_is_given_a_batch_script_through_cmd() {
+        let wrapped = |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
+        // By name, as the user wrote it (cmd.exe finds `npx.cmd`, even from a folder with spaces).
+        assert_eq!(wrapped("npx", &["-y", "@scope/pkg@1.0"]), Ok(Some(("cmd".into(), strings(&["/c", "npx", "-y", "@scope/pkg@1.0"])))));
+        // By path, with the backslashes cmd.exe wants.
+        assert_eq!(wrapped("D:/tools/run.cmd", &["a b"]), Ok(Some(("cmd".into(), strings(&["/c", r"D:\tools\run.cmd", "a b"])))));
+        assert_eq!(wrapped(r"C:\tools\run.BAT", &[]), Ok(Some(("cmd".into(), strings(&["/c", r"C:\tools\run.BAT"])))));
+        // An `.exe`, a name that isn't found, and a path to something else: as written.
+        assert_eq!(wrapped("uvx", &["tool"]), Ok(None));
+        assert_eq!(wrapped("not-installed", &["x"]), Ok(None));
+        assert_eq!(wrapped(r"C:\tools\agent.exe", &["x"]), Ok(None));
+    }
+
+    #[test]
+    fn claude_is_not_given_what_cmd_would_misread() {
+        let wrapped = |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
+        let err = wrapped("npx", &["-y", "two\nlines"]).unwrap_err();
+        assert_eq!(err, "npx.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one).");
+        for bad in ["a&b", "a|b", "<x", "x>", "a^b", "%PATH%", "say \"hi\""] {
+            let err = wrapped("npx", &["-y", bad]).unwrap_err();
+            assert!(err.starts_with("npx.cmd is a batch script") && err.contains("argument 2") && !err.contains(bad), "{bad}: {err}");
+        }
+        assert!(wrapped(r"C:\a&b\run.cmd", &[]).unwrap_err().contains("its name"));
+        assert!(wrapped(r"C:\Program Files\tools\run.cmd", &[]).unwrap_err().contains("folder with a space"));
+        let long = "x".repeat(9000);
+        assert!(wrapped("npx", &[&long]).unwrap_err().contains("over cmd.exe's limit"));
+    }
+
+    #[test]
+    fn codex_is_given_the_scripts_own_path() {
+        // Codex starts a server with tokio's `Command`, which runs a `.cmd` path with every argument
+        // quoted (see `tests_cmd_args`), so `&` and quotes get through; a line break still can't.
+        let given = |command: &str, args: &[&str]| hand_off(BatchHandOff::ResolvedPath, command, args);
+        assert_eq!(given("npx", &["-y", "a&b", "say \"hi\""]), Ok(Some((r"C:\Program Files\nodejs\npx.cmd".into(), strings(&["-y", "a&b", "say \"hi\""])))));
+        assert_eq!(given(r"C:\tools\run.cmd", &["x"]), Ok(Some((r"C:\tools\run.cmd".into(), strings(&["x"])))));
+        assert_eq!(given("uvx", &["tool"]), Ok(None));
+        assert!(given("npx", &["two\r\nlines"]).unwrap_err().contains("line break"));
+    }
+
+    #[test]
+    fn nothing_is_different_off_windows() {
+        for agent in [BatchHandOff::CmdWrapper, BatchHandOff::ResolvedPath] {
+            assert_eq!(agent_stdio_command(agent, "npx", &strings(&["-y", "a&b\nc"]), false, &found), Ok(None));
+        }
+        // The same JSON as before, to the byte, however the lookup answers.
+        let servers = [
+            McpServer::stdio("fs", "npx", strings(&["-y", "srv"]), vec![("K".into(), "v".into())]),
+            McpServer::stdio("trek", "/Applications/Trek.app/Contents/MacOS/trek-mcp", vec![], vec![]),
+            McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
+        ];
+        let expected = r#"{"fs":{"args":["-y","srv"],"command":"npx","env":{"K":"v"}},"linear":{"headers":{"Authorization":"Bearer t"},"type":"http","url":"https://mcp.linear.app/mcp"},"trek":{"args":[],"command":"/Applications/Trek.app/Contents/MacOS/trek-mcp","env":{}}}"#;
+        for agent in [BatchHandOff::CmdWrapper, BatchHandOff::ResolvedPath] {
+            let (out, left_out) = mcp_servers_json_with(&servers, agent, false, found);
+            assert_eq!(out.to_string(), expected);
+            assert!(left_out.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_server_that_cant_be_handed_over_is_left_out_with_its_reason() {
+        let servers = [
+            McpServer::stdio("fs", "npx", strings(&["-y", "srv"]), vec![("K".into(), "v".into())]),
+            McpServer::stdio("bad", "npx", strings(&["a\nb"]), vec![]),
+            McpServer::http("linear", "https://mcp.linear.app/mcp", vec![]),
+        ];
+        let (out, left_out) = mcp_servers_json_with(&servers, BatchHandOff::CmdWrapper, true, found);
+        assert_eq!(out, json!({"fs":{"command":"cmd","args":["/c","npx","-y","srv"],"env":{"K":"v"}},"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{}}}));
+        assert_eq!(left_out.len(), 1);
+        assert!(left_out[0].starts_with("MCP server bad wasn't started: npx.cmd is a batch script"), "{left_out:?}");
+        // The user's own settings are what they were.
+        assert_eq!(servers[0].transport, McpTransport::Stdio { command: "npx".into(), args: strings(&["-y", "srv"]), env: vec![("K".into(), "v".into())] });
     }
 }
