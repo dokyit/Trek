@@ -37,6 +37,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::path::Path;
 
+pub mod instance;
 #[cfg(any(feature = "server", test))]
 pub mod server;
 #[cfg(windows)]
