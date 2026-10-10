@@ -22,6 +22,11 @@
 //! (an ACP Registry install's row, without downloading), `toast [undo|error] <message>` (a toast, with
 //! an Undo or the error icon), `shot <name>`, `quit`.
 //!
+//! The Browser tool (open it with `tools browser`; its page is a native view, so `shot` doesn't
+//! show it): `browser go <address>|back|forward|reload`, `browser state` (the page, the native
+//! view's rectangle beside the panel's and which window has the keys, to `browser.json`), and
+//! `browser snap <name>` (the page as its screenshot button captures it, to `<name>.png`; Windows).
+//!
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
@@ -59,6 +64,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                 let result = match verb {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
+                    "browser" => browser(&workspace, &dir, arg, cx).await,
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
                     "quit" => quit(&workspace, cx),
                     _ => cx.update(|cx| run(&workspace, verb, arg, cx)),
@@ -143,6 +149,42 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
         .await?;
     tracing::info!("shot: {}", path.display());
     Ok(())
+}
+
+async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let (cmd, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let panel = main.update(cx, |root, _, cx| {
+        let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+        view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()).and_then(|trek| trek.read(cx).right_panel.read(cx).browser())
+    })?;
+    let panel = panel.ok_or_else(|| anyhow::anyhow!("browser: the Browser tool isn't open (tools browser)"))?;
+    match cmd {
+        "state" => {
+            // A beat for the last command's layout to reach the native view.
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            let state = main.update(cx, |_, window, cx| panel.read(cx).shots_state(window, cx))?;
+            std::fs::write(dir.join("browser.json"), serde_json::to_string_pretty(&state)?)?;
+            Ok(())
+        }
+        "snap" => {
+            anyhow::ensure!(!rest.is_empty(), "browser snap needs a name");
+            #[cfg(windows)]
+            {
+                let png = cx.update(|cx| panel.read(cx).shots_capture(cx)).ok_or_else(|| anyhow::anyhow!("browser snap: no page"))?;
+                let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("browser snap: the page closed"))?.map_err(|e| anyhow::anyhow!("browser snap: {e}"))?;
+                std::fs::write(dir.join(format!("{rest}.png")), bytes)?;
+                Ok(())
+            }
+            #[cfg(not(windows))]
+            anyhow::bail!("browser snap: Windows only (WebView2's CapturePreview)")
+        }
+        _ => {
+            cx.update(|cx| panel.update(cx, |p, cx| p.shots(cmd, rest, cx)))?;
+            cx.update(|cx| cx.refresh_windows());
+            Ok(())
+        }
+    }
 }
 
 async fn record(ws: &Entity<Workspace>, dir: &Path, arg: &str, slot: &mut Option<Recording>, cx: &mut AsyncApp) -> anyhow::Result<()> {
