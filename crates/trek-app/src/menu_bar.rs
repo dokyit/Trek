@@ -290,7 +290,7 @@ impl MenuBar {
                     .rounded(px(7.))
                     .text_size(px(12.5))
                     .when(!enabled, |el| el.text_color(theme.foreground.opacity(0.35)))
-                    .when(enabled, |el| el.text_color(theme.foreground).cursor_pointer().when(lit, |el| el.bg(theme.list_active)))
+                    .when(enabled, |el| el.text_color(theme.foreground).cursor_pointer().when(lit, |el| el.bg(theme.foreground.opacity(0.09))))
                     .child(div().whitespace_nowrap().child(label.clone()))
                     .when_some(shortcut.clone(), |el, s| el.child(div().whitespace_nowrap().text_size(px(11.5)).text_color(theme.muted_foreground).child(s)))
                     .when(enabled, |el| {

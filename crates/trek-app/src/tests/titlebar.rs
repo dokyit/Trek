@@ -243,6 +243,23 @@ mod windows_menus {
     }
 
     #[test]
+    fn the_caption_buttons_stay_reachable_over_the_palette() {
+        run(async |cx| {
+            let trek = open(cx);
+            assert!(!trek.visible(cx, "caption-close"), "the title bar's own are enough with nothing over them");
+            trek.window(cx, |window, cx| window.dispatch_action(Box::new(crate::OpenPalette), cx));
+            cx.run_until_parked();
+            assert!(trek.visible(cx, "palette"));
+            for id in ["caption-minimize", "caption-maximize", "caption-close"] {
+                assert!(trek.visible(cx, id), "{id} is over the palette's backdrop");
+            }
+            let close = trek.bounds(cx, "caption-close").expect("drawn");
+            near(close.origin.x + close.size.width, px(WIDTH));
+            assert_eq!(close.origin.y, px(0.));
+        });
+    }
+
+    #[test]
     fn closing_the_main_window_quits_but_closing_a_thread_window_does_not() {
         run(async |cx| {
             let trek = open(cx);

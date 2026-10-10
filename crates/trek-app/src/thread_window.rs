@@ -268,5 +268,6 @@ impl Render for ThreadWindow {
                 ),
             )
             .child(self.preview.clone())
+            .children(self.preview.read(cx).is_open().then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
     }
 }
