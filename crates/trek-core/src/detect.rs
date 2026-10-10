@@ -104,23 +104,49 @@ fn expand_env_refs(value: &str, lookup: impl Fn(&str) -> Option<String>) -> Stri
 }
 
 /// Folders agent CLIs install into that a minimal PATH lacks.
+#[cfg(unix)]
 fn extra_dirs(home: &Path) -> Vec<PathBuf> {
-    #[cfg(unix)]
-    let (relative, absolute) = (
-        [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", ".opencode/bin", ".factory/bin"].as_slice(),
-        ["/opt/homebrew/bin", "/usr/local/bin"].as_slice(),
-    );
-    #[cfg(windows)]
-    let (relative, absolute) = ([r".local\bin", r".bun\bin", r".cargo\bin", r".opencode\bin", r".factory\bin"].as_slice(), [""; 0].as_slice());
-    let mut dirs = Vec::new();
-    #[cfg(windows)]
-    {
+    let relative = [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", ".opencode/bin", ".factory/bin"];
+    let absolute = ["/opt/homebrew/bin", "/usr/local/bin"];
+    relative.iter().map(|d| home.join(d)).chain(absolute.iter().map(PathBuf::from)).collect()
+}
+
+#[cfg(windows)]
+fn extra_dirs(home: &Path) -> Vec<PathBuf> {
+    windows_dirs(home, |name| std::env::var_os(name))
+}
+
+/// Windows' install folders, `var` reading the environment. Where a tool names its folder with a
+/// variable of its own (`SCOOP`, `PNPM_HOME`, `VOLTA_HOME`, `NVM_SYMLINK`, ...), that comes first;
+/// its default otherwise. A variable that isn't an absolute path is ignored.
+///
+/// Vendors' own installers come first, then the package managers whose shims are `.exe`s, then
+/// Node's, whose are `.cmd`s: when a CLI is in more than one and neither is on the PATH, the one
+/// that takes its arguments without cmd.exe is found (`claude.exe` from Claude's installer before
+/// npm's `claude.cmd`; see `which`).
+#[cfg(windows)]
+fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let dir = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let local = dir("LOCALAPPDATA").unwrap_or_else(|| home.join(r"AppData\Local"));
+    let roaming = dir("APPDATA").unwrap_or_else(|| home.join(r"AppData\Roaming"));
+    let program_data = dir("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let program_files = dir("ProgramFiles").unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    let mut dirs: Vec<PathBuf> = [r".local\bin", r".bun\bin", r".cargo\bin", r".opencode\bin", r".factory\bin"].iter().map(|d| home.join(d)).collect();
+    dirs.extend([
+        // Scoop's shims, for the user and for the machine (`scoop install -g`).
+        dir("SCOOP").unwrap_or_else(|| home.join("scoop")).join("shims"),
+        dir("SCOOP_GLOBAL").unwrap_or_else(|| program_data.join("scoop")).join("shims"),
+        // WinGet's links to the portable packages it installs, for the user and for the machine.
+        local.join(r"Microsoft\WinGet\Links"),
+        program_files.join(r"WinGet\Links"),
+        dir("ChocolateyInstall").unwrap_or_else(|| program_data.join("chocolatey")).join("bin"),
         // npm's global prefix, where `claude.cmd` and `codex.cmd` land.
-        let roaming = std::env::var_os("APPDATA").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join("AppData").join("Roaming"));
-        dirs.push(roaming.join("npm"));
-    }
-    dirs.extend(relative.iter().map(|d| home.join(d)));
-    dirs.extend(absolute.iter().map(PathBuf::from));
+        roaming.join("npm"),
+        dir("PNPM_HOME").unwrap_or_else(|| local.join("pnpm")),
+        dir("VOLTA_HOME").unwrap_or_else(|| local.join("Volta")).join("bin"),
+        // nvm for Windows: the active Node's folder, where its global packages' shims land.
+        dir("NVM_SYMLINK").unwrap_or_else(|| PathBuf::from(r"C:\nvm4w\nodejs")),
+    ]);
     dirs
 }
 
@@ -177,7 +203,9 @@ fn shell_output(command: &mut std::process::Command, timeout: Duration) -> Optio
 ///
 /// On Windows a name without an extension is looked for with each of `PATHEXT`'s (`claude` finds
 /// `claude.cmd`, which npm installs next to an extensionless shell script Windows can't run), and
-/// the result keeps the extension it was found under.
+/// the result keeps the extension it was found under. In one folder the order is `PATHEXT`'s,
+/// `.EXE` before `.CMD` by default, so a vendor's own `.exe` wins over a shim beside it; across
+/// folders the first wins, as in a terminal (`extra_dirs` puts `.exe` folders first).
 ///
 /// Caution for callers: on Windows, `std::process::Command` runs a `.cmd` or `.bat` result through
 /// `cmd.exe`, which reads its arguments by different quoting rules than other programs. Passing
@@ -470,6 +498,80 @@ mod tests_paths {
             assert!(got.contains(&format!(r"C:\Users\me\{dir}")), "{dir} in {got}");
         }
         assert!(!got.contains(";;") && !got.ends_with(';'), "{got}");
+    }
+
+    /// `windows_dirs` with only these variables set.
+    #[cfg(windows)]
+    fn windows_dirs_with(vars: &[(&str, &str)]) -> Vec<String> {
+        let lookup = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v));
+        windows_dirs(Path::new(r"C:\Users\me"), lookup).iter().map(|d| d.display().to_string()).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_folders_default_to_where_each_tool_puts_them() {
+        let got = windows_dirs_with(&[
+            ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+            ("LOCALAPPDATA", r"C:\Users\me\AppData\Local"),
+            ("ProgramData", r"C:\ProgramData"),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+        assert_eq!(
+            got,
+            [
+                r"C:\Users\me\.local\bin",
+                r"C:\Users\me\.bun\bin",
+                r"C:\Users\me\.cargo\bin",
+                r"C:\Users\me\.opencode\bin",
+                r"C:\Users\me\.factory\bin",
+                r"C:\Users\me\scoop\shims",
+                r"C:\ProgramData\scoop\shims",
+                r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links",
+                r"C:\Program Files\WinGet\Links",
+                r"C:\ProgramData\chocolatey\bin",
+                r"C:\Users\me\AppData\Roaming\npm",
+                r"C:\Users\me\AppData\Local\pnpm",
+                r"C:\Users\me\AppData\Local\Volta\bin",
+                r"C:\nvm4w\nodejs",
+            ]
+        );
+        // With nothing set, the profile folders are found under home.
+        let bare = windows_dirs_with(&[]);
+        assert!(bare.contains(&r"C:\Users\me\AppData\Roaming\npm".to_string()), "{bare:?}");
+        assert!(bare.contains(&r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links".to_string()), "{bare:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tool_s_own_variable_moves_its_folder() {
+        let got = windows_dirs_with(&[
+            ("LOCALAPPDATA", r"D:\Local"),
+            ("SCOOP", r"D:\scoop"),
+            ("SCOOP_GLOBAL", r"E:\scoop-global"),
+            ("ChocolateyInstall", r"D:\choco"),
+            ("PNPM_HOME", r"D:\pnpm-home"),
+            ("VOLTA_HOME", r"D:\volta"),
+            ("NVM_SYMLINK", r"D:\nodejs"),
+        ]);
+        for want in [r"D:\scoop\shims", r"E:\scoop-global\shims", r"D:\choco\bin", r"D:\pnpm-home", r"D:\volta\bin", r"D:\nodejs", r"D:\Local\Microsoft\WinGet\Links"] {
+            assert!(got.contains(&want.to_string()), "{want} in {got:?}");
+        }
+        for default in [r"C:\Users\me\scoop\shims", r"C:\ProgramData\chocolatey\bin", r"C:\nvm4w\nodejs"] {
+            assert!(!got.contains(&default.to_string()), "{default} in {got:?}");
+        }
+        // A relative value isn't a folder to trust: the default stands.
+        let got = windows_dirs_with(&[("SCOOP", r"scoop"), ("NVM_SYMLINK", "")]);
+        assert!(got.contains(&r"C:\Users\me\scoop\shims".to_string()) && got.contains(&r"C:\nvm4w\nodejs".to_string()), "{got:?}");
+    }
+
+    /// Where Claude's own installer puts `claude.exe` comes before npm's `claude.cmd`.
+    #[cfg(windows)]
+    #[test]
+    fn an_installer_s_exe_folder_comes_before_npm_s() {
+        let got = windows_dirs_with(&[]);
+        let at = |d: &str| got.iter().position(|g| g.ends_with(d)).unwrap();
+        assert!(at(r".local\bin") < at(r"Roaming\npm"), "{got:?}");
+        assert!(at(r"scoop\shims") < at(r"Roaming\npm") && at(r"chocolatey\bin") < at(r"Roaming\npm"), "{got:?}");
     }
 
     #[cfg(windows)]
