@@ -334,12 +334,14 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             let dy: f32 = args.get(2).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf scroll: bad or missing <px>"))?;
             let steps = num(3, "<steps>")?;
             let label = args.get(4).unwrap_or(&"scroll");
-            // The pointer goes over the element once, as a hand on a wheel stays put.
+            // The pointer goes over the element once, as a hand on a wheel stays put: over the
+            // middle of what's on screen of it (a tall row's own middle can be off the window).
             let position = main.update(cx, |_, window, cx| -> anyhow::Result<Point<Pixels>> {
                 pointer(window, "hover", id, cx)?;
                 let id = element_id(id);
                 let found = gpui_kit::base::test_support::snapshots(window).into_iter().find(|s| s.path().last() == Some(&id));
-                Ok(found.ok_or_else(|| anyhow::anyhow!("perf scroll: {id:?} went away"))?.bounds().center())
+                let bounds = found.ok_or_else(|| anyhow::anyhow!("perf scroll: {id:?} went away"))?.bounds();
+                Ok(bounds.intersect(&Bounds::new(point(px(0.), px(0.)), window.viewport_size())).center())
             })??;
             crate::perf::record();
             let (mut latency, mut unpainted) = (vec![], 0);

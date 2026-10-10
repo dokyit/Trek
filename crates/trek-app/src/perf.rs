@@ -36,13 +36,15 @@ fn since_start() -> Duration {
 }
 
 /// One painted frame of the main window: when its render began and when painting reached the
-/// probe.
+/// probe. (Frames are read by the `perf` commands of a `shots` build.)
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub struct Frame {
     pub begun: Instant,
     pub painted: Instant,
 }
 
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 impl Frame {
     /// The frame's work on the main thread.
     pub fn took(&self) -> Duration {
@@ -110,6 +112,7 @@ fn painted() {
 
 /// The next frame the main window paints, on the receiver. The sender is for a time limit: a
 /// `None` sent on it ends the wait (two fit, so neither side blocks).
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub fn next_frame() -> (async_channel::Sender<Option<Frame>>, async_channel::Receiver<Option<Frame>>) {
     let (tx, rx) = async_channel::bounded(2);
     FRAMES.with(|f| f.borrow_mut().waiters.push(tx.clone()));
@@ -117,6 +120,7 @@ pub fn next_frame() -> (async_channel::Sender<Option<Frame>>, async_channel::Rec
 }
 
 /// Keep every frame painted from now until `take_recorded`.
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub fn record() {
     FRAMES.with(|f| {
         let mut f = f.borrow_mut();
@@ -126,6 +130,7 @@ pub fn record() {
 }
 
 /// The frames painted since `record`, and stop keeping them.
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub fn take_recorded() -> Vec<Frame> {
     FRAMES.with(|f| {
         let mut f = f.borrow_mut();
@@ -175,7 +180,9 @@ impl Summary {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: that brings gpui's `test` attribute in over the standard one.
+    use super::{BUDGET, Summary, summarize};
+    use std::time::Duration;
 
     fn ms(v: &[u64]) -> Vec<Duration> {
         v.iter().map(|&m| Duration::from_millis(m)).collect()

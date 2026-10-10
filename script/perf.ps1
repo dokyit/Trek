@@ -4,7 +4,7 @@
 # and reads back the `perf:` lines it logs (crates/trek-app/src/perf.rs). See docs/PERF.md.
 #
 #   pwsh script/perf.ps1                       # every measurement, three runs each, medians
-#   pwsh script/perf.ps1 startup basecamp      # some of them: startup basecamp scroll type inbox
+#   pwsh script/perf.ps1 startup basecamp      # some of them: startup basecamp scroll type inbox stream
 #   pwsh script/perf.ps1 stress                # the long run: 30 minutes, memory and handles
 #
 # Knobs (env): TREK_BIN=<trek.exe> (a release build with --features shots; copy it out of a
@@ -22,7 +22,7 @@ $Size = if ($env:SIZE) { $env:SIZE } else { '1280x820' }
 $Out = if ($env:OUT) { $env:OUT } else { 'dist/perf' }
 $StressMin = if ($env:STRESS_MIN) { [int]$env:STRESS_MIN } else { 30 }
 $Keep = $env:KEEP -eq '1'
-$All = @('startup', 'basecamp', 'scroll', 'type', 'inbox')
+$All = @('startup', 'basecamp', 'scroll', 'type', 'inbox', 'stream')
 if (-not $What) { $What = $All }
 foreach ($w in $What) { if ($w -notin $All + 'stress') { throw "unknown measurement '$w' (one of: $($All -join ' ') stress)" } }
 
@@ -138,10 +138,14 @@ function Wait-Perf($T, [string]$Kind, [int]$TimeoutSec = 60, [scriptblock]$Where
     throw "no perf: $Kind within ${TimeoutSec}s"
 }
 
+# Quit as the menu does and wait; $script:QuitMs is how long from `quit` to the process gone.
 function Stop-Trek($T) {
+    $script:QuitMs = $null
     if (-not $T.Proc.HasExited) {
+        $asked = [Diagnostics.Stopwatch]::StartNew()
         try { Send-Batch $T @('quit') 30 } catch {}
         if (-not $T.Proc.WaitForExit(20000)) { try { $T.Proc.Kill() } catch {}; return -1 }
+        $script:QuitMs = $asked.ElapsedMilliseconds
     }
     $T.Proc.WaitForExit()
     $T.Proc.ExitCode
@@ -212,7 +216,37 @@ function Measure-Inbox($Bin, [int]$Run) {
         Send-Batch $t (@($lines) + @('wait 1500', 'perf frames 8000 inbox-subagents')) 120
         $f = Wait-Perf $t 'frames' 10 { $_.label -eq 'inbox-subagents' }
         $p = Get-Process -Id $t.Proc.Id
-        Add-Result 'inbox-8-subagents' $Run @{ frame_p50_ms = $f.frame_p50; frame_p95_ms = $f.frame_p95; frame_max_ms = $f.frame_max; frames = $f.frames; over_budget = $f.frame_over; lag_p95_ms = $f.lag_p95; lag_max_ms = $f.lag_max; working_set_mb = [math]::Round($p.WorkingSet64 / 1MB) }
+        $v = @{ frame_p50_ms = $f.frame_p50; frame_p95_ms = $f.frame_p95; frame_max_ms = $f.frame_max; frames = $f.frames; over_budget = $f.frame_over; lag_p95_ms = $f.lag_p95; lag_max_ms = $f.lag_max; working_set_mb = [math]::Round($p.WorkingSet64 / 1MB) }
+        # Quitting with the eight still at work: sessions ended, the process tree let go.
+        $exit = Stop-Trek $t
+        $v.quit_ms = $script:QuitMs
+        $v.quit_exit = $exit
+        Add-Result 'inbox-8-subagents' $Run $v
+    } finally { $null = Stop-Trek $t }
+}
+
+# A long answer streaming in the thread on screen (two minutes of `mock:stream`), with Mica on and
+# off: the frames of the transcript growing, and what the backdrop costs on top.
+function Measure-Stream($Bin, [int]$Run) {
+    $t = Start-Trek $Bin "stream-$Run" -Seeded
+    try {
+        $null = Wait-Perf $t 'startup' 60
+        Send-Batch $t @('pace 1', 'route project:@DATA@\projects\atlas-api', 'send mock:stream 150s', 'wait 120000', 'glass on', 'wait 500', 'perf frames 3000 stream-glass', 'glass off', 'wait 500', 'perf frames 3000 stream-plain') 300
+        foreach ($g in 'glass', 'plain') {
+            $f = Wait-Perf $t 'frames' 10 { $_.label -eq "stream-$g" }
+            Add-Result "stream-2min-$g" $Run @{ frame_p50_ms = $f.frame_p50; frame_p95_ms = $f.frame_p95; frame_max_ms = $f.frame_max; frames = $f.frames; lag_p95_ms = $f.lag_p95 }
+        }
+        # Then, finished, the wheel up through it.
+        Send-Batch $t @('wait idle 120000', 'wait 500', 'elements') 200
+        # The answer's last part on screen (a build before parts: the answer's one row).
+        $part = (Select-String "$($t.Shot)\elements.txt" -Pattern '^(answer-part#\d+|answer#\d+) ' | Select-Object -Last 1).Matches[0].Groups[1].Value
+        # (Builds before 2026-10-10 aimed the wheel at the middle of the row, off the window for
+        # a tall one: every step goes unpainted there, at 500 ms each. Not worth waiting for.)
+        try {
+            Send-Batch $t @("perf scroll $part -60 300 long-answer-up") 400
+            $s = Wait-Perf $t 'scroll' 10 { $_.label -eq 'long-answer-up' }
+            Add-Result 'scroll-long-answer' $Run @{ frame_p50_ms = $s.frame_p50; frame_p95_ms = $s.frame_p95; frame_max_ms = $s.frame_max; frames = $s.frames; latency_p50_ms = $s.latency_p50; latency_p95_ms = $s.latency_p95; unpainted = $s.unpainted }
+        } catch { Say "  scroll-long-answer #${Run}: $_" }
     } finally { $null = Stop-Trek $t }
 }
 
@@ -268,6 +302,7 @@ try {
         if ('scroll' -in $What) { Measure-Scroll $bin $run }
         if ('type' -in $What) { Measure-Type $bin $run }
         if ('inbox' -in $What) { Measure-Inbox $bin $run }
+        if ('stream' -in $What) { Measure-Stream $bin $run }
     }
     if ($Results.Count) {
         $Results | Export-Csv -NoTypeInformation "$Out\runs.csv"
