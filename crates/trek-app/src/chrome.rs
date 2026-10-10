@@ -14,9 +14,10 @@ use gpui_kit::*;
 pub const LEFT_INSET: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
 
 /// How wide the caption buttons are, which `TitleBar` draws as a row of three squares as tall as
-/// the bar: 0 on macOS, where the traffic lights are on the left.
+/// the bar (34 px, 102 in all; Windows 11's own are 46 wide): 0 on macOS, where the traffic lights
+/// are on the left. `TitleBar` puts its content left of them by itself; this is for what Trek
+/// draws outside a `TitleBar` (Quick Look's header).
 pub const RIGHT_RESERVE: f32 = if cfg!(target_os = "macos") { 0. } else { 3. * TITLE_BAR_HEIGHT_PX };
-// (Windows 11's own caption buttons are 46 px wide; gpui-component's are the bar's height.)
 
 /// `TitleBar`'s height, as a plain number.
 pub const TITLE_BAR_HEIGHT_PX: f32 = 34.;
