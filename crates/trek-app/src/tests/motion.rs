@@ -326,7 +326,10 @@ fn the_add_agent_sheet_leaves_rather_than_vanishing() {
         trek.window(cx, |window, cx| crate::add_agent::open(ws, crate::add_agent::Tab::Command, window, cx));
         frame(&trek, cx, 1_000);
         assert!(trek.visible(cx, "add-agent-sheet"));
-        trek.click(cx, "command-cancel");
+        // Esc is a real close path: the dialog's on_close runs sheet_left at once, so the leave
+        // is registered before the next frame draws. A pointer click on the cancel button is
+        // hit-tested against the live tree and a loaded runner has missed it.
+        trek.press(cx, "escape");
         trek.render(cx);
         assert!(trek.window(cx, |window, cx| !window.has_active_dialog(cx)), "the dialog is down");
         assert!(trek.visible(cx, "sheet-leaving"), "its sheet is drawn once more as it goes");
