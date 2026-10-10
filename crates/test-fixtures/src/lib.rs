@@ -108,6 +108,17 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200) && started.elapsed() < Duration::from_secs(5));
     }
 
+    #[test]
+    fn ready_then_eof_says_so_and_exits_when_its_stdin_ends() {
+        let mut child = fixture(&["ready-then-eof"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        assert_eq!(line, "ready\n");
+        assert!(child.try_wait().unwrap().is_none(), "it waits for the end of stdin");
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+    }
+
     /// Send `input`, one message a line, then collect every line the fake agent answered.
     fn ask(dir: &Path, input: &[Value]) -> Vec<Value> {
         let mut child = Command::new(bin("fake-acp"))
