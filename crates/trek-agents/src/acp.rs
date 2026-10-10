@@ -34,8 +34,8 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
         return Ok((PathBuf::from("/usr/bin/perl"), vec![script.into()], "Fake".into()));
     }
     let (binary, args, name, hint): (&str, Vec<&str>, String, &str) = match agent {
-        AgentId::OpenCode => (detect::OPENCODE, vec!["acp"], "OpenCode".into(), "curl -fsSL https://opencode.ai/install | bash"),
-        AgentId::Droid => ("droid", vec!["exec", "--output-format", "acp"], "Droid".into(), "curl -fsSL https://app.factory.ai/cli | sh"),
+        AgentId::OpenCode => (detect::OPENCODE, vec!["acp"], "OpenCode".into(), trek_core::catalog::agent_setup("opencode").map_or("curl -fsSL https://opencode.ai/install | bash", |s| s.install)),
+        AgentId::Droid => ("droid", vec!["exec", "--output-format", "acp"], "Droid".into(), trek_core::catalog::agent_setup("droid").map_or("curl -fsSL https://app.factory.ai/cli | sh", |s| s.install)),
         AgentId::Acp(id) => match ACP_AGENTS.iter().find(|a| a.id == id) {
             Some(a) => (a.binary, a.args.to_vec(), a.name.into(), a.install_hint),
             // One the user added: its own command, as a path or a name on PATH.
@@ -96,6 +96,10 @@ impl Agent {
             _ => Default::default(),
         };
         env.extend(db.env);
+        // An agent the user added may be a `.cmd` given arguments they typed.
+        if let Some(problem) = detect::batch_args_problem(&bin, &args) {
+            bail!("{name} can't start: {problem}");
+        }
         let mut command = tokio::process::Command::new(&bin);
         command
             .args(&args)

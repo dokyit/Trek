@@ -87,7 +87,7 @@ pub fn chats_dir() -> PathBuf {
 pub fn new_chat_dir() -> std::io::Result<PathBuf> {
     let dir = chats_dir().join(chrono::Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string());
     std::fs::create_dir_all(&dir)?;
-    let _ = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let _ = std::process::Command::new(crate::git::git_program()).args(["init", "-q"]).current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     Ok(dir)
 }
 

@@ -104,23 +104,49 @@ fn expand_env_refs(value: &str, lookup: impl Fn(&str) -> Option<String>) -> Stri
 }
 
 /// Folders agent CLIs install into that a minimal PATH lacks.
+#[cfg(unix)]
 fn extra_dirs(home: &Path) -> Vec<PathBuf> {
-    #[cfg(unix)]
-    let (relative, absolute) = (
-        [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", ".opencode/bin", ".factory/bin"].as_slice(),
-        ["/opt/homebrew/bin", "/usr/local/bin"].as_slice(),
-    );
-    #[cfg(windows)]
-    let (relative, absolute) = ([r".local\bin", r".bun\bin", r".cargo\bin", r".opencode\bin", r".factory\bin"].as_slice(), [""; 0].as_slice());
-    let mut dirs = Vec::new();
-    #[cfg(windows)]
-    {
+    let relative = [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", ".opencode/bin", ".factory/bin"];
+    let absolute = ["/opt/homebrew/bin", "/usr/local/bin"];
+    relative.iter().map(|d| home.join(d)).chain(absolute.iter().map(PathBuf::from)).collect()
+}
+
+#[cfg(windows)]
+fn extra_dirs(home: &Path) -> Vec<PathBuf> {
+    windows_dirs(home, |name| std::env::var_os(name))
+}
+
+/// Windows' install folders, `var` reading the environment. Where a tool names its folder with a
+/// variable of its own (`SCOOP`, `PNPM_HOME`, `VOLTA_HOME`, `NVM_SYMLINK`, ...), that comes first;
+/// its default otherwise. A variable that isn't an absolute path is ignored.
+///
+/// Vendors' own installers come first, then the package managers whose shims are `.exe`s, then
+/// Node's, whose are `.cmd`s: when a CLI is in more than one and neither is on the PATH, the one
+/// that takes its arguments without cmd.exe is found (`claude.exe` from Claude's installer before
+/// npm's `claude.cmd`; see `which`).
+#[cfg(windows)]
+fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let dir = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let local = dir("LOCALAPPDATA").unwrap_or_else(|| home.join(r"AppData\Local"));
+    let roaming = dir("APPDATA").unwrap_or_else(|| home.join(r"AppData\Roaming"));
+    let program_data = dir("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let program_files = dir("ProgramFiles").unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    let mut dirs: Vec<PathBuf> = [r".local\bin", r".bun\bin", r".cargo\bin", r".opencode\bin", r".factory\bin"].iter().map(|d| home.join(d)).collect();
+    dirs.extend([
+        // Scoop's shims, for the user and for the machine (`scoop install -g`).
+        dir("SCOOP").unwrap_or_else(|| home.join("scoop")).join("shims"),
+        dir("SCOOP_GLOBAL").unwrap_or_else(|| program_data.join("scoop")).join("shims"),
+        // WinGet's links to the portable packages it installs, for the user and for the machine.
+        local.join(r"Microsoft\WinGet\Links"),
+        program_files.join(r"WinGet\Links"),
+        dir("ChocolateyInstall").unwrap_or_else(|| program_data.join("chocolatey")).join("bin"),
         // npm's global prefix, where `claude.cmd` and `codex.cmd` land.
-        let roaming = std::env::var_os("APPDATA").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join("AppData").join("Roaming"));
-        dirs.push(roaming.join("npm"));
-    }
-    dirs.extend(relative.iter().map(|d| home.join(d)));
-    dirs.extend(absolute.iter().map(PathBuf::from));
+        roaming.join("npm"),
+        dir("PNPM_HOME").unwrap_or_else(|| local.join("pnpm")),
+        dir("VOLTA_HOME").unwrap_or_else(|| local.join("Volta")).join("bin"),
+        // nvm for Windows: the active Node's folder, where its global packages' shims land.
+        dir("NVM_SYMLINK").unwrap_or_else(|| PathBuf::from(r"C:\nvm4w\nodejs")),
+    ]);
     dirs
 }
 
@@ -177,14 +203,57 @@ fn shell_output(command: &mut std::process::Command, timeout: Duration) -> Optio
 ///
 /// On Windows a name without an extension is looked for with each of `PATHEXT`'s (`claude` finds
 /// `claude.cmd`, which npm installs next to an extensionless shell script Windows can't run), and
-/// the result keeps the extension it was found under.
+/// the result keeps the extension it was found under. In one folder the order is `PATHEXT`'s,
+/// `.EXE` before `.CMD` by default, so a vendor's own `.exe` wins over a shim beside it; across
+/// folders the first wins, as in a terminal (`extra_dirs` puts `.exe` folders first).
 ///
-/// Caution for callers: on Windows, `std::process::Command` runs a `.cmd` or `.bat` result through
-/// `cmd.exe`, which reads its arguments by different quoting rules than other programs. Passing
-/// one arguments that hold user input, quotes, `%` or `&` needs the Phase 2 escaping audit; none
-/// is done here.
+/// On Windows, `std::process::Command` runs a `.cmd` or `.bat` result through `cmd.exe` (see
+/// `runs_through_cmd`): every argument still arrives exactly as given, quotes, `%VAR%`, `&` and
+/// all, except that one with a line break can't be passed at all and the whole command line has
+/// a limit (see `batch_args_problem`, and trek-agents' `tests_cmd_args` for the full table).
 pub fn which(binary: &str) -> Option<PathBuf> {
-    find_in(login_path(), binary, &std::env::var("PATHEXT").unwrap_or_default())
+    which_in(login_path(), binary)
+}
+
+/// `which`, on another PATH (`path`, in the platform's own format).
+pub fn which_in(path: &str, binary: &str) -> Option<PathBuf> {
+    find_in(path, binary, &std::env::var("PATHEXT").unwrap_or_default())
+}
+
+/// Whether Windows starts `program` through `cmd.exe`: a `.cmd` or `.bat` (npm's `claude.cmd` and
+/// `codex.cmd`), which `std::process::Command` runs as `cmd.exe /c`. Never on macOS.
+pub fn runs_through_cmd(program: &Path) -> bool {
+    cfg!(windows) && program.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+}
+
+/// cmd.exe's limit on the command line it's given, in UTF-16 units.
+const CMD_LINE_MAX: usize = 8191;
+
+/// Why `args` can't reach `program`, in words for the user; `None` when they can, as they always
+/// can but through cmd.exe (see `runs_through_cmd`). Through cmd.exe, std escapes every argument
+/// so it arrives exactly as given, but it refuses to start one with a line break in an argument
+/// (cmd.exe would end the command there), and cmd.exe gives up on a command line over 8191
+/// characters. This says which, before anything starts, without repeating the argument (it may be
+/// a secret). The length is what the arguments need at least: a line just short of the limit can
+/// still fail once std's quotes and the shim's own words are added, and then the program's output
+/// is cmd.exe's "The command line is too long."
+pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<String> {
+    if !runs_through_cmd(program) {
+        return None;
+    }
+    let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
+    let mut len = program.as_os_str().to_string_lossy().encode_utf16().count();
+    for (n, arg) in args.into_iter().enumerate() {
+        let arg = arg.as_ref().to_string_lossy();
+        if arg.contains(['\r', '\n']) {
+            return Some(format!(
+                "{name} is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument {} has one).",
+                n + 1
+            ));
+        }
+        len += 1 + arg.encode_utf16().count();
+    }
+    (len > CMD_LINE_MAX).then(|| format!("{name} is a batch script, which Windows runs through cmd.exe, and its command line would be {len} characters, over cmd.exe's limit of {CMD_LINE_MAX}."))
 }
 
 /// The first file in `path`'s folders that is one of `candidate_names(binary, pathext)`.
@@ -470,6 +539,111 @@ mod tests_paths {
             assert!(got.contains(&format!(r"C:\Users\me\{dir}")), "{dir} in {got}");
         }
         assert!(!got.contains(";;") && !got.ends_with(';'), "{got}");
+    }
+
+    /// `windows_dirs` with only these variables set.
+    #[cfg(windows)]
+    fn windows_dirs_with(vars: &[(&str, &str)]) -> Vec<String> {
+        let lookup = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v));
+        windows_dirs(Path::new(r"C:\Users\me"), lookup).iter().map(|d| d.display().to_string()).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_folders_default_to_where_each_tool_puts_them() {
+        let got = windows_dirs_with(&[
+            ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+            ("LOCALAPPDATA", r"C:\Users\me\AppData\Local"),
+            ("ProgramData", r"C:\ProgramData"),
+            ("ProgramFiles", r"C:\Program Files"),
+        ]);
+        assert_eq!(
+            got,
+            [
+                r"C:\Users\me\.local\bin",
+                r"C:\Users\me\.bun\bin",
+                r"C:\Users\me\.cargo\bin",
+                r"C:\Users\me\.opencode\bin",
+                r"C:\Users\me\.factory\bin",
+                r"C:\Users\me\scoop\shims",
+                r"C:\ProgramData\scoop\shims",
+                r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links",
+                r"C:\Program Files\WinGet\Links",
+                r"C:\ProgramData\chocolatey\bin",
+                r"C:\Users\me\AppData\Roaming\npm",
+                r"C:\Users\me\AppData\Local\pnpm",
+                r"C:\Users\me\AppData\Local\Volta\bin",
+                r"C:\nvm4w\nodejs",
+            ]
+        );
+        // With nothing set, the profile folders are found under home.
+        let bare = windows_dirs_with(&[]);
+        assert!(bare.contains(&r"C:\Users\me\AppData\Roaming\npm".to_string()), "{bare:?}");
+        assert!(bare.contains(&r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links".to_string()), "{bare:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tool_s_own_variable_moves_its_folder() {
+        let got = windows_dirs_with(&[
+            ("LOCALAPPDATA", r"D:\Local"),
+            ("SCOOP", r"D:\scoop"),
+            ("SCOOP_GLOBAL", r"E:\scoop-global"),
+            ("ChocolateyInstall", r"D:\choco"),
+            ("PNPM_HOME", r"D:\pnpm-home"),
+            ("VOLTA_HOME", r"D:\volta"),
+            ("NVM_SYMLINK", r"D:\nodejs"),
+        ]);
+        for want in [r"D:\scoop\shims", r"E:\scoop-global\shims", r"D:\choco\bin", r"D:\pnpm-home", r"D:\volta\bin", r"D:\nodejs", r"D:\Local\Microsoft\WinGet\Links"] {
+            assert!(got.contains(&want.to_string()), "{want} in {got:?}");
+        }
+        for default in [r"C:\Users\me\scoop\shims", r"C:\ProgramData\chocolatey\bin", r"C:\nvm4w\nodejs"] {
+            assert!(!got.contains(&default.to_string()), "{default} in {got:?}");
+        }
+        // A relative value isn't a folder to trust: the default stands.
+        let got = windows_dirs_with(&[("SCOOP", r"scoop"), ("NVM_SYMLINK", "")]);
+        assert!(got.contains(&r"C:\Users\me\scoop\shims".to_string()) && got.contains(&r"C:\nvm4w\nodejs".to_string()), "{got:?}");
+    }
+
+    /// Where Claude's own installer puts `claude.exe` comes before npm's `claude.cmd`.
+    #[cfg(windows)]
+    #[test]
+    fn an_installer_s_exe_folder_comes_before_npm_s() {
+        let got = windows_dirs_with(&[]);
+        let at = |d: &str| got.iter().position(|g| g.ends_with(d)).unwrap();
+        assert!(at(r".local\bin") < at(r"Roaming\npm"), "{got:?}");
+        assert!(at(r"scoop\shims") < at(r"Roaming\npm") && at(r"chocolatey\bin") < at(r"Roaming\npm"), "{got:?}");
+    }
+
+    #[test]
+    fn only_batch_scripts_on_windows_run_through_cmd() {
+        for (name, batch) in [("claude.cmd", true), ("x.BAT", true), (r"C:\a b\Codex.Cmd", true), ("claude.exe", false), ("claude", false), ("cmd", false), ("x.cmd.exe", false)] {
+            assert_eq!(runs_through_cmd(Path::new(name)), cfg!(windows) && batch, "{name}");
+        }
+    }
+
+    #[test]
+    fn arguments_any_program_but_a_batch_script_takes() {
+        let long = "x".repeat(20_000);
+        let awkward = ["line\nbreak", "cr\r", long.as_str(), "\" & %PATH% ^"];
+        assert_eq!(batch_args_problem(Path::new("claude.exe"), awkward), None);
+        assert_eq!(batch_args_problem(Path::new("claude"), awkward), None);
+        assert_eq!(batch_args_problem(Path::new("claude.cmd"), ["\" & %PATH% ^", "", "日本語"]), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_script_can_t_take_a_line_break_or_a_line_over_cmd_s_limit() {
+        let cmd = Path::new(r"C:\Users\me\AppData\Roaming\npm\claude.cmd");
+        let said = batch_args_problem(cmd, ["-p", "--append-system-prompt", "secret one\nsecret two"]).unwrap();
+        assert!(said.starts_with("claude.cmd is a batch script") && said.contains("argument 3"), "{said}");
+        assert!(!said.contains("secret"), "the argument isn't repeated: {said}");
+        assert!(batch_args_problem(cmd, ["a\rb"]).is_some());
+        let said = batch_args_problem(cmd, ["-p", "x".repeat(9000).as_str()]).unwrap();
+        assert!(said.contains("over cmd.exe's limit of 8191"), "{said}");
+        assert_eq!(batch_args_problem(cmd, ["-p", "x".repeat(4000).as_str()]), None);
+        // `.bat` too, in any case.
+        assert!(batch_args_problem(Path::new("run.BAT"), ["\n"]).is_some());
     }
 
     #[cfg(windows)]
