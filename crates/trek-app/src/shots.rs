@@ -131,16 +131,43 @@ async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
     }
 }
 
+/// Set once a manifest has put the pointer somewhere (`click`, `hover`, `scroll` …): from then on
+/// it's where it was put.
+static POINTER_SCRIPTED: AtomicBool = AtomicBool::new(false);
+
+/// Until then, a frame is drawn with the pointer outside the window. The window isn't in front, but
+/// a real mouse resting over it still hovers what's under it (p08 of the parity set caught a
+/// Basecamp bar's tooltip that way), and a capture shouldn't depend on where the mouse is.
+fn park_pointer(window: &mut Window, cx: &mut App) {
+    if !POINTER_SCRIPTED.load(Ordering::Relaxed) {
+        window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: point(px(-100.), px(-100.)), pressed_button: None, modifiers: Default::default() }), cx);
+    }
+}
+
 async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     if arg.is_empty() {
         anyhow::bail!("shot needs a name");
     }
     // A few frames for whatever the last command changed to be drawn.
     cx.background_executor().timer(Duration::from_millis(400)).await;
+    // And for the git reads the command set going (the composer's branch chip): a process spawn
+    // costs a hundred milliseconds on Windows, so they can land after those few frames.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut waited = false;
+    while cx.update(|cx| ws.read(cx).git_inflight) > 0 && Instant::now() < deadline {
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+        waited = true;
+    }
+    if waited {
+        cx.background_executor().timer(Duration::from_millis(200)).await;
+    }
     let path = dir.join(format!("{arg}.png"));
     let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
-        main.update(cx, |_, window, _| window.render_to_image())?
+        main.update(cx, |_, window, cx| {
+            park_pointer(window, cx);
+            window.render_to_image()
+        })?
     })?;
     let path2 = path.clone();
     cx.background_executor()
@@ -252,7 +279,10 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
         while started.elapsed() < Duration::from_millis(ms) && !flag.load(Ordering::Relaxed) {
             let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
                 let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
-                main.update(cx, |_, window, _| window.render_to_image())?
+                main.update(cx, |_, window, cx| {
+                    park_pointer(window, cx);
+                    window.render_to_image()
+                })?
             })?;
             times.push(started.elapsed().as_secs_f64());
             let path = frames_dir.join(format!("f{index:05}.png"));
@@ -844,6 +874,7 @@ fn manifest_key(key: &str) -> String {
 fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::Result<()> {
     use gpui_kit::test::TestWindowExt as _;
     anyhow::ensure!(!id.is_empty(), "{verb} needs an element id (see `elements`)");
+    POINTER_SCRIPTED.store(true, Ordering::Relaxed);
     window.render_frame(cx);
     let id = element_id(id);
     let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| s.path().last() == Some(&id)).collect();
