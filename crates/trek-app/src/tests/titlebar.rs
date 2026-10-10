@@ -91,6 +91,7 @@ fn macos_keeps_its_system_menus_and_title_bar() {
 mod windows_menus {
     use super::*;
     use crate::workspace::Route;
+    use gpui_kit::{Capslock, InputEvent as _, Modifiers, ModifiersChangedEvent};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -137,8 +138,25 @@ mod windows_menus {
         });
     }
 
+    /// Whether the menu bar has the keyboard, read from its focus.
+    fn bar_focused(trek: &super::super::harness::Trek, cx: &mut TestAppContext) -> bool {
+        use gpui_kit::test::TestWindowExt as _;
+        trek.render(cx);
+        trek.window(cx, |window, _| window.try_find("menu-bar").is_some_and(|bar| bar.focused() == Some(true)))
+    }
+
+    /// Holds Alt down or lets it go, as the platform reports it: a modifiers change.
+    fn alt(trek: &super::super::harness::Trek, cx: &mut TestAppContext, held: bool) {
+        let modifiers = if held { Modifiers::alt() } else { Modifiers::none() };
+        trek.window(cx, |window, cx| {
+            window.dispatch_event(ModifiersChangedEvent { modifiers, capslock: Capslock { on: false } }.to_platform_input(), cx);
+        });
+        cx.run_until_parked();
+        trek.render(cx);
+    }
+
     #[test]
-    fn escape_puts_the_menu_away_and_focus_goes_back() {
+    fn escape_puts_the_menu_away_and_a_second_leaves_the_bar() {
         run(async |cx| {
             let trek = open(cx);
             let focused = trek.window(cx, |window, cx| window.focused(cx));
@@ -146,10 +164,112 @@ mod windows_menus {
             assert!(trek.visible(cx, "menu-dropdown"));
             trek.press(cx, "escape");
             assert!(!trek.visible(cx, "menu-dropdown"));
+            assert!(bar_focused(&trek, cx), "the bar keeps the keyboard until a second Escape");
+            trek.press(cx, "escape");
             assert_eq!(trek.window(cx, |window, cx| window.focused(cx)), focused, "the composer has focus again");
             // And typing still lands in it.
             trek.type_text(cx, "hi");
             assert_eq!(trek.composer_text(cx), "hi");
+        });
+    }
+
+    #[test]
+    fn a_tap_of_alt_takes_the_keyboard_with_the_first_title_lit_and_no_menu() {
+        run(async |cx| {
+            let trek = open(cx);
+            alt(&trek, cx, true);
+            alt(&trek, cx, false);
+            assert!(bar_focused(&trek, cx), "Alt tapped alone focuses the bar");
+            assert!(!trek.visible(cx, "menu-dropdown"), "and opens no menu");
+            // Return opens the lit title: File, whose first row is New Thread (and its marks show).
+            assert!(trek.visible(cx, ("mnemonic-title", 0usize)));
+            trek.press(cx, "enter");
+            assert!(trek.visible(cx, "menu-dropdown"));
+            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 0usize)));
+        });
+    }
+
+    #[test]
+    fn alt_with_a_letter_opens_the_menu_it_marks_even_from_the_composer() {
+        run(async |cx| {
+            let trek = open(cx);
+            trek.type_text(cx, "hi");
+            trek.press(cx, "alt-v");
+            assert!(trek.visible(cx, "menu-dropdown"), "View opens");
+            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 2usize)));
+            assert_eq!(trek.composer_text(cx), "hi", "the letter isn't typed where the composer has focus");
+        });
+    }
+
+    #[test]
+    fn the_arrows_light_titles_with_the_keyboard_and_down_opens_the_lit_one() {
+        run(async |cx| {
+            let trek = open(cx);
+            alt(&trek, cx, true);
+            alt(&trek, cx, false);
+            trek.press(cx, "right");
+            assert!(!trek.visible(cx, "menu-dropdown"), "moving the light opens nothing");
+            trek.press(cx, "down");
+            assert!(trek.visible(cx, "menu-dropdown"));
+            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 1usize)));
+            // With a menu open, the left arrow moves it to File.
+            trek.press(cx, "left");
+            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 0usize)));
+        });
+    }
+
+    #[test]
+    fn with_a_menu_open_a_letter_chooses_the_item_it_marks() {
+        run(async |cx| {
+            let trek = open(cx);
+            trek.press(cx, "alt-f");
+            // File's Settings… is the S.
+            trek.press(cx, "s");
+            assert!(!trek.visible(cx, "menu-dropdown"));
+            assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(crate::workspace::SettingsPage::General)));
+        });
+    }
+
+    #[test]
+    fn holding_alt_underlines_the_marks_without_moving_anything() {
+        run(async |cx| {
+            let trek = open(cx);
+            let plain = trek.bounds(cx, ("menu-title", 0usize)).expect("drawn");
+            assert!(!trek.visible(cx, ("mnemonic-title", 0usize)), "no marks shown with the keyboard elsewhere");
+            alt(&trek, cx, true);
+            assert!(trek.visible(cx, ("mnemonic-title", 0usize)), "underlined while Alt is held");
+            let held = trek.bounds(cx, ("menu-title", 0usize)).expect("drawn");
+            near(held.size.width, plain.size.width);
+            near(held.origin.x, plain.origin.x);
+            // Let go: the tap takes the keyboard, so the marks stay until the bar lets go.
+            alt(&trek, cx, false);
+            assert!(trek.visible(cx, ("mnemonic-title", 0usize)));
+            trek.press(cx, "escape");
+            assert!(!trek.visible(cx, ("mnemonic-title", 0usize)));
+        });
+    }
+
+    #[test]
+    fn a_click_with_alt_held_is_not_a_tap_of_alt() {
+        run(async |cx| {
+            let trek = open(cx);
+            alt(&trek, cx, true);
+            trek.click(cx, "mode-agents");
+            alt(&trek, cx, false);
+            assert!(!bar_focused(&trek, cx), "Alt released after a click doesn't take the keyboard");
+        });
+    }
+
+    #[test]
+    fn a_press_elsewhere_gives_the_keyboard_up() {
+        run(async |cx| {
+            let trek = open(cx);
+            alt(&trek, cx, true);
+            alt(&trek, cx, false);
+            assert!(bar_focused(&trek, cx));
+            trek.click(cx, "mode-agents");
+            assert!(!bar_focused(&trek, cx), "a press outside the bar leaves it");
+            assert!(!trek.visible(cx, ("mnemonic-title", 0usize)), "and the marks go back to plain");
         });
     }
 
@@ -210,6 +330,8 @@ mod windows_menus {
             trek.click(cx, ("menu-title", 0usize));
             trek.click(cx, ("menu-item", 5usize));
             assert!(trek.visible(cx, "menu-dropdown"), "a dimmed item doesn't close the menu");
+            trek.press(cx, "escape");
+            // The second Escape leaves the bar, so the next open takes its items afresh.
             trek.press(cx, "escape");
             // With a handler it's on offer, and runs.
             let heard = quit_heard(cx);
