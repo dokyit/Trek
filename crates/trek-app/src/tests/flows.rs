@@ -433,7 +433,7 @@ fn plans_can_be_sent_back_or_approved() {
 fn queued_follow_ups_wait_for_the_turn() {
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
-        let id = trek.send(cx, "mock:long 3s");
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         trek.send(cx, "then summarize");
@@ -453,7 +453,7 @@ fn queued_follow_ups_wait_for_the_turn() {
 fn steered_follow_ups_join_the_running_turn() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:long 3s");
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         trek.send(cx, "use tabs");
