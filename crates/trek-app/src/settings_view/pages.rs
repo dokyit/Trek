@@ -873,30 +873,34 @@ impl SettingsView {
             );
             page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::releases_notes("update-notes", &changes.releases, px(360.), cx)).into_any_element());
         }
-        page.push(ui::group(
-            vec![
-                Self::row(
-                    "Channel",
-                    "Stable gets finished releases. Beta and Nightly get new things first, with the occasional rough edge, and every stable release too.",
-                    ui::segmented(
-                        "channel",
-                        vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
-                        s.updates.channel,
-                        self.setter(|s, v| s.updates.channel = v),
+        // Where Trek can't update itself yet (Windows) the line under its name says so, and the
+        // channel and the two automatic steps have nothing to act on: they are left out.
+        if !crate::words::is_windows() {
+            page.push(ui::group(
+                vec![
+                    Self::row(
+                        "Channel",
+                        "Stable gets finished releases. Beta and Nightly get new things first, with the occasional rough edge, and every stable release too.",
+                        ui::segmented(
+                            "channel",
+                            vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
+                            s.updates.channel,
+                            self.setter(|s, v| s.updates.channel = v),
+                            cx,
+                        ),
                         cx,
                     ),
-                    cx,
-                ),
-                Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
-                Self::row(
-                    "Download automatically",
-                    "Gets the update ready in the background. It installs when you restart or quit Trek, never while an agent is working.",
-                    self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
-                    cx,
-                ),
-            ],
-            cx,
-        ));
+                    Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
+                    Self::row(
+                        "Download automatically",
+                        "Gets the update ready in the background. It installs when you restart or quit Trek, never while an agent is working.",
+                        self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
+                        cx,
+                    ),
+                ],
+                cx,
+            ));
+        }
         if !history.is_empty() {
             page.push(
                 h_flex()
@@ -1036,8 +1040,12 @@ impl SettingsView {
                 Button::new("snap-perm").small().outline().label("Allow Screen Recording").on_click(|_, _, cx| cx.open_url(crate::integrations::SCREEN_RECORDING_PANE)).into_any_element()
             }
         };
-        vec![
-            ui::group(
+        let words = crate::words::words();
+        // Where Snipping Tool does the capturing, it decides the mode and the file's format, and
+        // has no shadow, sound or hiding of Trek to set: a sentence says so in place of those rows.
+        let capture = match words.snipping_tool_note {
+            Some(note) => Self::note(note, cx),
+            None => ui::group(
                 vec![
                     Self::row(
                         crate::keys::localize("⌘⇧S takes").into_owned(),
@@ -1052,7 +1060,7 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row("Hide Trek while capturing", "Trek steps aside so you can pick the window behind it.", self.switch("snap-hide", p.hide_trek, |s, v| s.snapshots.hide_trek = v), cx),
-                    Self::row("Window shadow", crate::words::words().window_shadow_note, self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
+                    Self::row("Window shadow", words.window_shadow_note.unwrap_or_default(),self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
                     Self::row("Shutter sound", "", self.switch("snap-sound", p.sound, |s, v| s.snapshots.sound = v), cx),
                     Self::row(
                         "Format",
@@ -1063,6 +1071,11 @@ impl SettingsView {
                 ],
                 cx,
             ),
+        };
+        // The system's permission to capture the screen, where it has one.
+        let permission = words.screen_recording.map(|(label, note)| [Self::heading("Permission", cx), ui::group(vec![Self::row(label, note, permission, cx)], cx)]);
+        let mut page = vec![
+            capture,
             Self::heading("Storage", cx),
             ui::group(
                 vec![
@@ -1087,10 +1100,10 @@ impl SettingsView {
                 ],
                 cx,
             ),
-            Self::heading("Permission", cx),
-            ui::group(vec![Self::row(crate::words::words().screen_recording_label, crate::words::words().screen_recording_note, permission, cx)], cx),
-            div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element(),
-        ]
+        ];
+        page.extend(permission.into_iter().flatten());
+        page.push(div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element());
+        page
     }
 
     pub(super) fn skills_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1184,20 +1197,21 @@ impl SettingsView {
                     .item(PopupMenuItem::new("Open SKILL.md").on_click(move |_, _, cx| cx.open_with_system(&md)))
                     .item(PopupMenuItem::new(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&dir)));
                 if s2.source.editable() {
-                    menu = menu.separator().item(PopupMenuItem::new("Move to Trash").icon(IconName::Delete).on_click(move |_, window, cx| {
+                    let trash = crate::words::words().trash;
+                    menu = menu.separator().item(PopupMenuItem::new(format!("Move to {trash}")).icon(IconName::Delete).on_click(move |_, window, cx| {
                         let s3 = s2.clone();
                         let view = view.clone();
                         window.open_alert_dialog(cx, move |alert, _, _| {
                             let (s4, view) = (s3.clone(), view.clone());
                             alert
-                                .title(format!("Move “{}” to the Trash?", s3.name))
-                                .description("Every agent stops loading it. You can restore it from the Trash.")
+                                .title(format!("Move “{}” to the {trash}?", s3.name))
+                                .description(format!("Every agent stops loading it. You can restore it from the {trash}."))
                                 .confirm()
-                                .ok_text("Move to Trash")
+                                .ok_text(format!("Move to {trash}"))
                                 .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
                                 .on_ok(move |_, window, cx| {
                                     match trek_core::skills::trash(&s4) {
-                                        Ok(()) => crate::toast::push(window, format!("Moved {} to the Trash", s4.name), cx),
+                                        Ok(()) => crate::toast::push(window, format!("Moved {} to the {trash}", s4.name), cx),
                                         Err(e) => crate::toast::push(window, format!("{e}"), cx),
                                     }
                                     view.update(cx, |this, cx| this.skills_changed(cx));

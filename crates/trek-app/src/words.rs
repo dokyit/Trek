@@ -52,10 +52,22 @@ pub struct Words {
     /// listens. `None` where it asks nothing Trek needs to explain.
     pub firewall_note: Option<&'static str>,
 
-    /// Snapshots: the drop shadow around a window capture, and the permission to capture the screen.
-    pub window_shadow_note: &'static str,
-    pub screen_recording_label: &'static str,
-    pub screen_recording_note: &'static str,
+    /// Snapshots, where Trek runs the system's own capture tool (`screencapture`): the drop shadow
+    /// around a window capture, and the permission to capture the screen as (label, note). `None`
+    /// where Snipping Tool does the capturing, which has neither.
+    pub window_shadow_note: Option<&'static str>,
+    pub screen_recording: Option<(&'static str, &'static str)>,
+    /// Settings › Snapshots, where Snipping Tool decides what is captured: the one sentence that
+    /// stands in for the mode, Hide Trek, shadow, sound and format rows. `None` where Trek asks
+    /// for them.
+    pub snipping_tool_note: Option<&'static str>,
+
+    /// Settings › Tools › Computer use, where the system asks for no permission: the one sentence
+    /// that stands in for the Accessibility and Screen Recording rows. `None` where it asks.
+    pub computer_use_note: Option<&'static str>,
+
+    /// The place a removed file goes to be got back from, as it ends "to the ...": "Trash".
+    pub trash: &'static str,
 
     /// The preview's button for a file's own app: Preview on a Mac (which also opens PDFs and
     /// photos), whatever the system opens that kind of file with on Windows.
@@ -100,9 +112,13 @@ const MACOS: Words = Words {
 
     firewall_note: None,
 
-    window_shadow_note: "Keep macOS's drop shadow around window snapshots.",
-    screen_recording_label: "Screen Recording",
-    screen_recording_note: "macOS asks once; snapshots of other apps need it.",
+    window_shadow_note: Some("Keep macOS's drop shadow around window snapshots."),
+    screen_recording: Some(("Screen Recording", "macOS asks once; snapshots of other apps need it.")),
+    snipping_tool_note: None,
+
+    computer_use_note: None,
+
+    trash: "Trash",
 
     open_in_viewer: "Open in Preview",
 
@@ -143,9 +159,13 @@ const WINDOWS: Words = Words {
 
     firewall_note: Some("The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC."),
 
-    window_shadow_note: "Keep the window's own drop shadow around window snapshots.",
-    screen_recording_label: "Screen capture",
-    screen_recording_note: "Windows doesn't ask; snapshots of other apps just work.",
+    window_shadow_note: None,
+    screen_recording: None,
+    snipping_tool_note: Some("Snipping Tool decides whether a snapshot takes a window, an area or the screen, and Trek saves it as a PNG. Windows asks for no permission to capture the screen."),
+
+    computer_use_note: Some("Windows asks for no permission: once computer use is on, agents can see the screen, click and type. They can't type into apps running as administrator."),
+
+    trash: "Recycle Bin",
 
     open_in_viewer: "Open in default app",
 
@@ -224,12 +244,16 @@ mod tests {
             keep_awake_label,
             firewall_note,
             window_shadow_note,
-            screen_recording_label,
-            screen_recording_note,
+            screen_recording,
+            snipping_tool_note,
+            computer_use_note,
+            trash,
             open_in_viewer,
             dictate_tip,
             browser_unavailable,
         } = *w;
+        // Said by one platform only: the other's blank is not a blank wording.
+        let nothing = "(says nothing)";
         vec![
             ("os_name", os_name),
             ("file_manager", file_manager),
@@ -250,11 +274,13 @@ mod tests {
             ("computer", computer),
             ("computer_fingerprint", computer_fingerprint),
             ("keep_awake_label", keep_awake_label),
-            // Said by one platform only: the other's blank is not a blank wording.
-            ("firewall_note", firewall_note.unwrap_or("(says nothing)")),
-            ("window_shadow_note", window_shadow_note),
-            ("screen_recording_label", screen_recording_label),
-            ("screen_recording_note", screen_recording_note),
+            ("firewall_note", firewall_note.unwrap_or(nothing)),
+            ("window_shadow_note", window_shadow_note.unwrap_or(nothing)),
+            ("screen_recording_label", screen_recording.map_or(nothing, |(label, _)| label)),
+            ("screen_recording_note", screen_recording.map_or(nothing, |(_, note)| note)),
+            ("snipping_tool_note", snipping_tool_note.unwrap_or(nothing)),
+            ("computer_use_note", computer_use_note.unwrap_or(nothing)),
+            ("trash", trash),
             ("open_in_viewer", open_in_viewer),
             ("dictate_tip", dictate_tip),
             ("browser_unavailable", browser_unavailable),
@@ -264,7 +290,7 @@ mod tests {
     #[test]
     fn the_windows_table_names_nothing_from_the_mac() {
         for (field, text) in strings(&for_platform(true)) {
-            for word in ["Finder", "Dock", "Keychain", "macOS", "Mac", "Spotlight", "menu bar", "Menu bar", "Homebrew"] {
+            for word in ["Finder", "Dock", "Keychain", "macOS", "Mac", "Spotlight", "menu bar", "Menu bar", "Homebrew", "Trash"] {
                 assert!(!text.contains(word), "Windows `{field}` still says {word}: {text}");
             }
         }
@@ -273,7 +299,7 @@ mod tests {
     #[test]
     fn the_macos_table_names_nothing_from_windows() {
         for (field, text) in strings(&for_platform(false)) {
-            for word in ["File Explorer", "Taskbar", "taskbar", "Credential Manager", "Windows", "WinGet", "PC", "tray"] {
+            for word in ["File Explorer", "Taskbar", "taskbar", "Credential Manager", "Windows", "WinGet", "PC", "tray", "Recycle Bin", "Snipping Tool"] {
                 assert!(!text.contains(word), "macOS `{field}` says {word}: {text}");
             }
         }
@@ -307,6 +333,11 @@ mod tests {
         assert_eq!(w.open_in_viewer, "Open in Preview");
         assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(w.browser_unavailable, "The embedded browser isn't available on this system.");
+        assert_eq!(w.window_shadow_note, Some("Keep macOS's drop shadow around window snapshots."));
+        assert_eq!(w.screen_recording, Some(("Screen Recording", "macOS asks once; snapshots of other apps need it.")));
+        assert_eq!(w.snipping_tool_note, None, "the Mac's Snapshots page has every row");
+        assert_eq!(w.computer_use_note, None, "the Mac's Tools page has the two permissions");
+        assert_eq!(format!("Move to the {}", w.trash), "Move to the Trash");
         assert_eq!(
             w.api_keys_blurb,
             "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically."
@@ -325,6 +356,11 @@ mod tests {
         assert!(w.firewall_note.is_some_and(|n| n.contains("Windows Firewall") && n.contains("private networks")));
         assert_eq!(w.open_in_viewer, "Open in default app", "Windows has no Preview, or Quick Look");
         assert_eq!(w.dictate_tip, "Press Win+H to dictate");
+        assert_eq!(w.window_shadow_note, None, "Snipping Tool has no shadow to keep");
+        assert_eq!(w.screen_recording, None, "Windows has no permission to capture the screen");
+        assert!(w.snipping_tool_note.is_some_and(|n| n.contains("Snipping Tool decides") && n.contains("PNG")));
+        assert!(w.computer_use_note.is_some_and(|n| n.contains("asks for no permission")));
+        assert_eq!(format!("Move to the {}", w.trash), "Move to the Recycle Bin");
         assert_eq!(format!("Saved in {}", w.your_credential_store), "Saved in Windows Credential Manager");
         assert_eq!(format!("Runs on {}, nothing is billed", w.this_computer), "Runs on this PC, nothing is billed");
     }
