@@ -194,12 +194,16 @@ pub struct Win;
 impl Default for Win {
     fn default() -> Self {
         static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| unsafe {
-            // Coordinates, window bounds and captures in physical pixels, matching each other on
-            // every display whatever its scaling. Fails only if already set, which is fine.
-            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            // ShellExecute may hand off to shell extensions that need COM on this thread.
-            CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+        INIT.call_once(|| {
+            // SAFETY: both calls take a constant and a null reserved pointer, and run once,
+            // before this process has asked Windows for any coordinate.
+            unsafe {
+                // Coordinates, window bounds and captures in physical pixels, matching each other
+                // on every display whatever its scaling. Fails only if already set, which is fine.
+                SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                // ShellExecute may hand off to shell extensions that need COM on this thread.
+                CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+            }
         });
         Win
     }
@@ -212,17 +216,21 @@ impl Desktop for Win {
     }
 
     fn display(&self) -> Display {
+        // SAFETY: `GetSystemMetrics` takes an index and no pointers.
         let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
         Display { width: w.max(1) as f64, height: h.max(1) as f64, physical: None }
     }
 
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
         unsafe extern "system" fn collect(hwnd: HWND, out: LPARAM) -> i32 {
+            // SAFETY: `out` is the `&mut Vec<HWND>` passed to `EnumWindows` below, which calls this
+            // synchronously on this thread while that vector is alive and not otherwise borrowed.
             unsafe { (*(out as *mut Vec<HWND>)).push(hwnd) };
             1
         }
         let mut hwnds: Vec<HWND> = Vec::new();
         // Top-level windows in z-order, front first.
+        // SAFETY: `collect` has the callback's signature and `hwnds` outlives the call (see there).
         if unsafe { EnumWindows(Some(collect), &mut hwnds as *mut Vec<HWND> as LPARAM) } == 0 {
             return Err("EnumWindows failed".into());
         }
@@ -232,12 +240,16 @@ impl Desktop for Win {
 
     /// The foreground window takes the keys, whichever window is topmost.
     fn key_window(&self) -> Result<Option<WindowInfo>, String> {
+        // SAFETY: takes no arguments; the handle it returns is only ever passed back to Windows,
+        // which checks it (a window closed since just fails the calls).
         let hwnd = unsafe { GetForegroundWindow() };
         Ok((!hwnd.is_null()).then(|| describe(hwnd, &mut Default::default())))
     }
 
     /// Windows' own hit test, which knows about click-through and child windows.
     fn owner_at(&self, x: f64, y: f64) -> Option<String> {
+        // SAFETY: a point by value in, a handle out; Windows validates the handle (null is
+        // allowed and answers null) in `GetAncestor` as everywhere below.
         let child = unsafe { WindowFromPoint(POINT { x: x.round() as i32, y: y.round() as i32 }) };
         let root = unsafe { GetAncestor(child, GA_ROOT) };
         let hwnd = if root.is_null() { child } else { root };
@@ -309,6 +321,8 @@ impl Desktop for Win {
         send(&[mouse(x, y, MOUSEEVENTF_MOVE, 0)])?;
         sleep_ms(30);
         let mut lines: u32 = 3;
+        // SAFETY: for SPI_GETWHEELSCROLLLINES the pointer is a `UINT` to fill, which `lines` is;
+        // on failure it keeps the default.
         unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &mut lines as *mut u32 as *mut _, 0) };
         let mut inputs = Vec::new();
         // The wheel is positive away from the user (up); our dy is positive down. A horizontal
@@ -345,6 +359,8 @@ impl Desktop for Win {
         let target = resolve_app(name, start_menu_shortcut, app_path);
         let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (verb, file) = (wide("open"), wide(&target));
+        // SAFETY: `verb` and `file` are NUL-terminated and outlive the call; the other pointers are
+        // null (no window, parameters or directory), all of which `ShellExecuteW` allows.
         let code = unsafe {
             ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
         } as isize;
@@ -361,6 +377,7 @@ fn sleep_ms(ms: u64) {
 
 /// A mouse event at screen pixel (`x`, `y`), placed absolutely on the virtual screen.
 fn mouse(x: f64, y: f64, flags: u32, data: i32) -> INPUT {
+    // SAFETY: `GetSystemMetrics` takes an index and no pointers.
     let (vx, vy, vw, vh) = unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -390,6 +407,7 @@ fn key_input(stroke: Stroke) -> INPUT {
     let ki = match stroke {
         Stroke::Key { vk, up } => KEYBDINPUT {
             wVk: vk,
+            // SAFETY: a plain lookup of a virtual-key code; no pointers.
             wScan: unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16,
             dwFlags: if is_extended(vk) { KEYEVENTF_EXTENDEDKEY } else { 0 } | if up { KEYEVENTF_KEYUP } else { 0 },
             time: 0,
@@ -410,6 +428,7 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
     if inputs.is_empty() {
         return Ok(());
     }
+    // SAFETY: `inputs` is a valid slice of `INPUT` for the count given, and `cbSize` is `INPUT`'s size.
     let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
         return Err(format!(
@@ -423,11 +442,15 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
 fn raw(hwnd: HWND) -> Raw {
     let (_, _, w, h) = bounds(hwnd);
     let mut cloaked: u32 = 0;
+    // SAFETY: DWMWA_CLOAKED fills a `DWORD`: `cloaked`, four bytes. A window that has gone just
+    // fails the call and leaves it 0.
     unsafe {
         DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut _, 4);
     }
     let mut class = [0u16; 64];
+    // SAFETY: the buffer and the length passed are `class`'s.
     let n = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) }.max(0) as usize;
+    // SAFETY (the three calls below): they take the handle by value, which Windows validates.
     Raw {
         visible: unsafe { IsWindowVisible(hwnd) } != 0,
         cloaked: cloaked != 0,
@@ -443,8 +466,10 @@ fn raw(hwnd: HWND) -> Raw {
 fn bounds(hwnd: HWND) -> (f64, f64, f64, f64) {
     let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     let size = std::mem::size_of::<RECT>() as u32;
+    // SAFETY: DWMWA_EXTENDED_FRAME_BOUNDS fills a `RECT`: `r`, `size` bytes.
     let ok = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut r as *mut RECT as *mut _, size) } == 0;
     if !ok {
+        // SAFETY: `r` is a `RECT` for it to fill.
         unsafe { GetWindowRect(hwnd, &mut r) };
     }
     (r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64)
@@ -452,6 +477,7 @@ fn bounds(hwnd: HWND) -> (f64, f64, f64, f64) {
 
 fn window_pid(hwnd: HWND) -> u32 {
     let mut pid = 0u32;
+    // SAFETY: `pid` is a `DWORD` for it to fill (left 0 if the window has gone).
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
     pid
 }
@@ -460,6 +486,7 @@ fn describe(hwnd: HWND, names: &mut std::collections::HashMap<u32, String>) -> W
     let pid = window_pid(hwnd);
     let owner = names.entry(pid).or_insert_with(|| process_name(pid)).clone();
     let mut title = [0u16; 512];
+    // SAFETY: the buffer and the length passed are `title`'s.
     let n = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) }.max(0) as usize;
     let (x, y, w, h) = bounds(hwnd);
     WindowInfo { owner, title: String::from_utf16_lossy(&title[..n]), pid: pid as i64, id: hwnd as i64, x, y, w, h }
@@ -467,13 +494,17 @@ fn describe(hwnd: HWND, names: &mut std::collections::HashMap<u32, String>) -> W
 
 /// The executable's name for a process, or "" when Windows won't say (a protected process).
 fn process_name(pid: u32) -> String {
+    // SAFETY: plain values in; a null handle (refused) is checked below.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         return String::new();
     }
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
+    // SAFETY: `process` is a live handle with query access; `buf` holds `len` units, and `len`
+    // comes back as how many were written.
     let ok = unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) } != 0;
+    // SAFETY: `process` was opened above and is closed exactly once, here.
     unsafe { CloseHandle(process) };
     if ok { exe_name(&String::from_utf16_lossy(&buf[..len as usize])) } else { String::new() }
 }
@@ -488,6 +519,8 @@ struct Gdi {
 
 impl Drop for Gdi {
     fn drop(&mut self) {
+        // SAFETY: each handle is either null (not made) or one `grab` made and still owns; `old` is
+        // put back before the bitmap it replaced is deleted, and nothing is released twice.
         unsafe {
             if !self.old.is_null() {
                 SelectObject(self.mem, self.old);
@@ -506,11 +539,14 @@ impl Drop for Gdi {
 /// The screen's pixels in (`sx`, `sy`, `sw`, `sh`), scaled to `tw`×`th`, as RGB rows top down.
 fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>, String> {
     let fail = |what: &str| format!("Couldn't capture the screen ({what} failed). The screen may be locked.");
+    // SAFETY: a null window asks for the whole screen's DC; null (failure) is checked below. `Gdi`
+    // releases it, and what's made from it, whichever way this function leaves.
     let screen = unsafe { GetDC(std::ptr::null_mut()) };
     if screen.is_null() {
         return Err(fail("GetDC"));
     }
     let mut gdi = Gdi { screen, mem: std::ptr::null_mut(), dib: std::ptr::null_mut(), old: std::ptr::null_mut() };
+    // SAFETY: `screen` is a live DC.
     gdi.mem = unsafe { CreateCompatibleDC(screen) };
     if gdi.mem.is_null() {
         return Err(fail("CreateCompatibleDC"));
@@ -528,12 +564,16 @@ fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>,
         ..Default::default()
     };
     let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    // SAFETY: `info` describes a 32-bit top-down bitmap and outlives the call; `bits` is where it
+    // writes the pixels' address; no file mapping is used (null, 0).
     gdi.dib = unsafe { CreateDIBSection(gdi.mem, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0) };
     if gdi.dib.is_null() || bits.is_null() {
         return Err(fail("CreateDIBSection"));
     }
+    // SAFETY: both handles were made above and are live.
     gdi.old = unsafe { SelectObject(gdi.mem, gdi.dib) };
     // CAPTUREBLT takes layered windows (menus, tooltips, translucent windows) too.
+    // SAFETY: the memory DC holds the bitmap `tw`×`th` the copy fills; the screen DC is live.
     let copied = unsafe {
         if (tw, th) == (sw, sh) {
             BitBlt(gdi.mem, 0, 0, tw, th, screen, sx, sy, SRCCOPY | CAPTUREBLT)
@@ -546,9 +586,13 @@ fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>,
     if copied == 0 {
         return Err(fail("BitBlt"));
     }
+    // SAFETY: no arguments; it only waits for pending drawing to reach the bitmap.
     unsafe { GdiFlush() };
     let pixels = (tw as usize) * (th as usize);
     // BGRX in memory; the PNG wants RGB.
+    // SAFETY: `bits` points into the DIB section, which is `tw`×`th` pixels of 4 bytes (rows are
+    // already 4-byte aligned, so no padding) and stays alive until `gdi` drops at the end of this
+    // function, after `rgb` has copied everything out.
     let bgrx = unsafe { std::slice::from_raw_parts(bits as *const u8, pixels * 4) };
     let mut rgb = Vec::with_capacity(pixels * 3);
     for px in bgrx.chunks_exact(4) {
@@ -588,6 +632,8 @@ fn app_path(exe: &str) -> Option<String> {
     [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().find_map(|hive: HKEY| {
         let mut buf = [0u16; 1024];
         let mut size = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: `key` is NUL-terminated; `buf` has `size` bytes, and `size` comes back as the
+        // bytes written (a string value is always NUL-terminated with RRF_RT_REG_SZ).
         let err = unsafe {
             RegGetValueW(hive, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _, &mut size)
         };
@@ -734,8 +780,7 @@ mod tests {
         assert_eq!(resolve_app("ms-settings:display", shortcut, app_path), "ms-settings:display");
         assert_eq!(resolve_app("https://example.com", shortcut, app_path), "https://example.com");
         assert!(shell_error(2).contains("no app"));
-        assert!(shell_error(31).contains("nothing is set to open it"));
-    }
+        assert!(shell_error(31).contains("nothing is set to open it"));    }
 
     /// Lists the windows on screen and captures the primary display: nothing else, and no input.
     /// Run by hand: `cargo test -p trek-mcp -- --ignored --exact desktop::windows::tests::smoke_lists_windows_and_captures_the_screen --nocapture`.
