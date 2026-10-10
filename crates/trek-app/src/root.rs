@@ -54,8 +54,8 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
-    /// Whether the window was last told to blur what's behind it (liquid glass).
-    glass_applied: Option<bool>,
+    /// What the window was last told about its glass (`ui::apply_glass`).
+    glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
     /// second ⌘B mid-way turns it round where it is.
     pub(crate) sidebar_motion: SharedSpring,
@@ -237,6 +237,9 @@ impl TrekWindow {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
                 }
+                // Windows announces its Transparency effects switch with the colours: glass asks again.
+                crate::winlook::forget();
+                this.workspace.update(cx, |_, cx| cx.notify());
             }),
         ];
         // TREK_OPEN_TOOL=browser (or terminal, explorer, git, side-chat) opens that tool at launch.
@@ -496,7 +499,7 @@ impl WindowTitle {
                                 .child(Icon::new(IconName::Search).size(px(13.)))
                                 .when_some(folder, |el, f| el.child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(f)).child("—"))
                                 .child(div().min_w_0().truncate().child("Go to file, command…"))
-                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child("⌘P"))
+                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child(crate::keys::shared("⌘P")))
                                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::QuickOpen), cx)),
                         ),
                     )
@@ -1008,7 +1011,7 @@ impl Render for TrekWindow {
         place_toasts(toast_bottom, window, cx);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
-        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
         let ide = self.workspace.read(cx).ide();
         let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
         let shown = sidebar_shown(&self.sidebar_motion, collapsed, motion, now, window);

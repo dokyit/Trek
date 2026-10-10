@@ -40,10 +40,11 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     cx.observe(&workspace, move |workspace, cx| sync(&workspace, &mut applied, cx)).detach();
 }
 
-/// macOS's Reduce motion is on, as last asked.
+/// The system's Reduce motion (macOS) or Animation effects off (Windows) is on, as last asked.
 static SYSTEM_REDUCES_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// macOS's Reduce motion (Accessibility › Display) or Trek's own setting stills every animation:
+/// The system's Reduce motion (macOS: Accessibility › Display; Windows: Accessibility › Visual
+/// effects › Animation effects, off) or Trek's own setting stills every animation:
 /// `Workspace::motion` reads both, and gpui's and gpui-component's own (toasts coming and going,
 /// dialogs sliding in) read the app's flag, which follows either. Nothing tells gpui when the
 /// system's changes, so it's asked every couple of seconds; Trek's setting is followed in `sync`.
@@ -233,8 +234,14 @@ pub fn reduce_transparency() -> bool {
     })
 }
 
+/// Where the system won't have glass: on Windows, a Windows without Mica (10, or 11 before 22H2)
+/// or with Transparency effects off (`winlook`), as macOS's Reduce Transparency does. The window
+/// stays opaque.
 #[cfg(not(target_os = "macos"))]
 pub fn reduce_transparency() -> bool {
+    #[cfg(windows)]
+    return !crate::winlook::glass_now();
+    #[cfg(not(windows))]
     false
 }
 
@@ -244,7 +251,13 @@ fn reduce_motion() -> bool {
     objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows's Animation effects are off (Settings › Accessibility › Visual effects).
+#[cfg(windows)]
+fn reduce_motion() -> bool {
+    crate::winlook::reduce_motion()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn reduce_motion() -> bool {
     false
 }
