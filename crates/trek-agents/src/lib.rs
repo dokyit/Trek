@@ -186,7 +186,7 @@ fn agent_stdio_command(
             // Found by name, cmd.exe finds it again by that name; a path is written with backslashes
             // (a `/` begins cmd's switches).
             let target = if bare { command.to_string() } else { command.replace('/', "\\") };
-            let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
+            let name = trek_core::detect::script_name(&program);
             if let Some(n) = std::iter::once(&target).chain(args).position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"'])) {
                 let which = if n == 0 { "its name".to_string() } else { format!("argument {n}") };
                 return Err(format!("{name} is a batch script, which Claude Code can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."));
@@ -1903,9 +1903,11 @@ mod mcp_hand_off_tests {
             McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
         ];
         let expected = r#"{"fs":{"args":["-y","srv"],"command":"npx","env":{"K":"v"}},"linear":{"headers":{"Authorization":"Bearer t"},"type":"http","url":"https://mcp.linear.app/mcp"},"trek":{"args":[],"command":"/Applications/Trek.app/Contents/MacOS/trek-mcp","env":{}}}"#;
+        // As values: serde_json keeps keys in a different order on each platform's build.
+        let expected: serde_json::Value = serde_json::from_str(expected).unwrap();
         for agent in [BatchHandOff::CmdWrapper, BatchHandOff::ResolvedPath] {
             let (out, left_out) = mcp_servers_json_with(&servers, agent, false, found);
-            assert_eq!(out.to_string(), expected);
+            assert_eq!(out, expected);
             assert!(left_out.is_empty());
         }
     }
