@@ -359,7 +359,7 @@ fn switching_agents_ends_a_pause_and_hands_its_messages_back() {
 /// The handoff with real agents: Claude Code (claude-haiku-4-5) hears a word, then the thread
 /// moves to Codex (gpt-5.6-luna), which must know it from the recap alone. Not run by default (two
 /// tiny turns): `TREK_LIVE_AGENT=handoff cargo test -p trek-app live_handoff -- --ignored`. Works
-/// in /tmp/trek-limits-e2e.
+/// in `trek-limits-e2e` in the temp folder.
 #[test]
 #[ignore = "live: runs real agents"]
 fn live_handoff_carries_the_conversation() {
@@ -369,7 +369,7 @@ fn live_handoff_carries_the_conversation() {
             s.general.default_model = Some("claude-haiku-4-5".into());
             s.general.default_effort = Effort::Low;
         });
-        let project = std::path::PathBuf::from("/tmp/trek-limits-e2e");
+        let project = std::env::temp_dir().join("trek-limits-e2e");
         std::fs::create_dir_all(&project).unwrap();
         trek.update(cx, |ws, cx| {
             ws.store.ensure_project(&project).unwrap();
