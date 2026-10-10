@@ -272,7 +272,7 @@ impl RightPanel {
     /// The + menu's rows: a tool per row.
     fn launcher_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        PanelTool::ALL
+        PanelTool::offered()
             .into_iter()
             .map(|tool| {
                 h_flex()
@@ -297,7 +297,7 @@ impl RightPanel {
     fn tool_grid(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let cols = if self.width >= 420. { 2 } else { 1 };
-        let tiles = PanelTool::ALL.into_iter().map(|tool| {
+        let tiles = PanelTool::offered().into_iter().map(|tool| {
             h_flex()
                 .id(SharedString::from(format!("tool-tile-{}", tool.label())))
                 .test_support()

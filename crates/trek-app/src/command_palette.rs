@@ -716,7 +716,7 @@ impl CommandPalette {
         }
         add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle sidebar", Action::ToggleSidebar).hint(keys::hint(Id::ToggleSidebar)), "hide show inbox");
         add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle tools panel", Action::ToggleTools).hint(keys::hint(Id::ToggleRightPanel)), "right panel hide show");
-        for tool in PanelTool::ALL {
+        for tool in PanelTool::offered() {
             add(Entry::new(c, icon(crate::panels::tool_icon(tool)), format!("Open {}", tool.label()), Action::OpenTool(tool)), "tools panel");
         }
         let theme = ws.settings.appearance.theme;

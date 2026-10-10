@@ -414,7 +414,12 @@ impl BackgroundStrip {
                 .label("Full output")
                 .tooltip(file.display().to_string())
                 .on_click(move |_, _, _| {
-                    let _ = std::process::Command::new("/usr/bin/open").arg("-t").arg(&file).spawn();
+                    // A text editor, as `open -t` is: output files have no extension Windows knows.
+                    let mut editor = std::process::Command::new(if cfg!(windows) { "notepad.exe" } else { "/usr/bin/open" });
+                    if !cfg!(windows) {
+                        editor.arg("-t");
+                    }
+                    let _ = editor.arg(&file).spawn();
                 })
         });
         let note = if !r.readable {
