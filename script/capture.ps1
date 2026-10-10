@@ -16,7 +16,7 @@
 # Each .cmds line is a shots.rs command (see the doc comment in crates/trek-app/src/shots.rs).
 # iOS suites (*.list) run xcrun simctl; they stay macOS-only.
 [CmdletBinding()]
-param([Parameter(Position = 0)] [string]$Command)
+param([Parameter(Position = 0)] [string]$Command, [Parameter(Position = 1)] [string]$Target)
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
@@ -69,8 +69,18 @@ function Test-ListFile([string]$File) {
     -not $bad
 }
 
-function Test-Manifests {
+# `check` lints every manifest; `check <suite>` (`mac/parity`, or just `parity`) lints that one;
+# `check all` is `check`.
+function Test-Manifests([string]$Suite) {
     $ok = $true
+    if ($Suite -and $Suite -ne 'all') {
+        $name = $Suite -replace '^(mac|ios)/', ''
+        $cmds = "media/mac/$name.cmds"
+        $list = "media/ios/$name.list"
+        if (Test-Path $cmds) { return (Test-Cmds (Resolve-Path $cmds).Path) }
+        if (Test-Path $list) { return (Test-ListFile (Resolve-Path $list).Path) }
+        Die "no manifest named $Suite (see 'capture.ps1 list')"
+    }
     foreach ($f in Get-ChildItem media/mac/*.cmds) { if (-not (Test-Cmds $f.FullName)) { $ok = $false } }
     foreach ($f in Get-ChildItem media/ios/*.list) { if (-not (Test-ListFile $f.FullName)) { $ok = $false } }
     $ok
@@ -324,7 +334,7 @@ batch · TREK_SHOT_UNDER=<png> for the backdrop under glass · SHOT_REPO=<path> 
 
 switch -Regex ($Command) {
     '^list$' { Show-Suites; break }
-    '^check$' { if (Test-Manifests) { Say 'all manifests lint clean' } else { exit 1 }; break }
+    '^check$' { if (Test-Manifests $Target) { Say $(if ($Target -and $Target -ne 'all') { "$Target lints clean" } else { 'all manifests lint clean' }) } else { exit 1 }; break }
     '^all$' {
         foreach ($f in Get-ChildItem media/mac/*.cmds) { Invoke-MacSuite $f.BaseName }
         if (Get-ChildItem media/ios/*.list -ErrorAction SilentlyContinue) { Say 'iOS suites need macOS; skipped' }
