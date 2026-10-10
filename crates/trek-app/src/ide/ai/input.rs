@@ -727,7 +727,7 @@ impl AiInput {
             .trigger(
                 Pill::new("ai-mode-pill")
                     .small(true)
-                    .tooltip("Mode (⇧Tab)")
+                    .tooltip(crate::keys::shared("Mode (⇧Tab)"))
                     .child(icon(mode).size(px(12.)).text_color(tint))
                     .when(!self.narrow, |el| el.child(mode.label()))
                     .child(Icon::new(IconName::ChevronDown).size(px(10.)).text_color(theme.muted_foreground)),
@@ -884,7 +884,7 @@ impl Render for AiInput {
             square("ai-stop")
                 .cursor_pointer()
                 .bg(theme.foreground.opacity(0.85))
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Stop (⌘.)").build(window, cx))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Stop (⌘.)")).build(window, cx))
                 .child(div().size(px(8.)).rounded(px(1.5)).bg(theme.background))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(id) = thread.clone() {

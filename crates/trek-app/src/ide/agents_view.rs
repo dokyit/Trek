@@ -117,7 +117,7 @@ impl IdeWorkbench {
             }
         }
         if empty {
-            list = list.child(div().px(px(12.)).py(px(10.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("No threads in this folder yet. Start one in the AI side bar (⌘N)."));
+            list = list.child(div().px(px(12.)).py(px(10.)).text_size(px(12.5)).text_color(theme.muted_foreground).child(crate::keys::shared("No threads in this folder yet. Start one in the AI side bar (⌘N).")));
         }
         v_flex()
             .flex_1()
@@ -159,7 +159,7 @@ impl IdeWorkbench {
                         .on_click(cx.listener(|this, _, window, cx| this.show_view(super::SideView::Agents, window, cx))),
                 ),
             )
-            .child(list.when(empty, |el| el.child(div().px(px(12.)).pb(px(8.)).text_size(px(12.)).text_color(cx.theme().muted_foreground).child("None yet: ⌘N starts one here."))))
+            .child(list.when(empty, |el| el.child(div().px(px(12.)).pb(px(8.)).text_size(px(12.)).text_color(cx.theme().muted_foreground).child(crate::keys::shared("None yet: ⌘N starts one here.")))))
             .into_any_element()
     }
 }

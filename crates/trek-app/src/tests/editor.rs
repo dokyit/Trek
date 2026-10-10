@@ -108,7 +108,7 @@ fn cmd_k_in_the_ide_finds_files() {
         trek.update(cx, |ws, cx| ws.toggle_ide(cx));
         trek.render(cx);
 
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         trek.type_live(cx, "needle");
         trek.render(cx);
@@ -126,7 +126,7 @@ fn cmd_shift_f_searches_the_folder() {
         std::fs::write(trek.project.join("searchable.txt"), "the quick brown fox\n").unwrap();
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
         trek.update(cx, |ws, cx| ws.toggle_ide(cx));
-        trek.press(cx, "cmd-shift-f");
+        trek.press(cx, "secondary-shift-f");
         trek.render(cx);
         trek.type_live(cx, "quick brown");
         // The scan runs on a worker thread — poll for the hit row.
