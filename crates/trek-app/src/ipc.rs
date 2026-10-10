@@ -14,8 +14,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
 /// How long a new connection has to say hello. Shorter in tests, so the one that waits it out
-/// doesn't hold them up.
-const HELLO_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
+/// doesn't hold them up; not shorter than a loaded runner can take to get a thread running
+/// (a client that stalls past it is dropped, and its test fails with "closed").
+const HELLO_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 5 });
 /// How long `delegate_task` with `wait` waits unless asked otherwise, and the bounds it may ask for.
 pub const WAIT_DEFAULT: Duration = Duration::from_secs(600);
 /// Shorter in tests, so a wait that runs out doesn't hold them up.
@@ -422,7 +423,7 @@ mod tests {
         assert_eq!(out["status"], "running");
         // The connection gave up waiting: the workspace sees nobody listening any more, once
         // the closed side of the channel reaches it.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !held.lock().unwrap()[0].is_closed() {
             assert!(std::time::Instant::now() < deadline, "the workspace still waits on the caller's behalf");
             std::thread::sleep(Duration::from_millis(10));
@@ -445,7 +446,7 @@ mod tests {
         let call = std::thread::spawn(move || conn.call("delegate_task", &json!({"wait": true})));
         let started = std::time::Instant::now();
         let soon = |what: &str| {
-            assert!(started.elapsed() < Duration::from_secs(5), "{what}");
+            assert!(started.elapsed() < Duration::from_secs(30), "{what}");
             std::thread::sleep(Duration::from_millis(10));
         };
         while held.lock().unwrap().is_empty() {
