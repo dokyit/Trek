@@ -585,7 +585,8 @@ mod tests {
         assert_eq!(output_path(said, false), Some("/tmp/claude-501/x/tasks/b1.output"));
         assert_eq!(output_path("Output is being written to /tmp/a b/c.output; see it", false), Some("/tmp/a"));
         // Where a Windows path can't be one, nothing about it changes.
-        assert_eq!(output_path(r"Output is being written to: C:\Temp\a b\c.output.", false), Some(r"C:\Temp\a"));    }
+        assert_eq!(output_path(r"Output is being written to: C:\Temp\a b\c.output.", false), Some(r"C:\Temp\a"));
+    }
 
     #[test]
     fn a_windows_path_keeps_its_spaces() {
