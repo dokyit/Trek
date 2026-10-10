@@ -313,4 +313,62 @@ mod tests {
         assert_eq!(presets.last().unwrap().effort, Effort::Max);
         assert!(presets.len() >= 4);
     }
+
+    /// Every agent Trek can install, by `AgentId::key()`.
+    const INSTALLABLE: &[&str] = &["claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "gemini", "kimi", "qwen-code", "grok", "devin", "goose", "amp", "pi"];
+
+    #[test]
+    fn install_lines_for_macos_are_what_they_were() {
+        let mac = |key: &str| install_hint(key).unwrap().unix;
+        assert_eq!(mac("claude-code"), "npm i -g @anthropic-ai/claude-code");
+        assert_eq!(mac("opencode"), "curl -fsSL https://opencode.ai/install | bash");
+        assert_eq!(mac("droid"), "curl -fsSL https://app.factory.ai/cli | sh");
+        assert_eq!(mac("cursor"), "curl https://cursor.com/install -fsS | bash");
+        assert_eq!(mac("grok"), "curl -fsSL https://x.ai/cli/install.sh | bash");
+        assert_eq!(mac("devin"), "curl -fsSL https://cli.devin.ai/install.sh | bash");
+        assert_eq!(mac("goose"), "brew install block-goose-cli");
+        assert_eq!(mac("pi"), "npm i -g @earendil-works/pi-coding-agent pi-acp");
+    }
+
+    #[test]
+    fn install_lines_for_windows_are_ones_a_windows_shell_runs() {
+        let win = |key: &str| install_hint(key).unwrap().windows;
+        // From the vendors' own documentation and install scripts.
+        assert_eq!(win("claude-code"), "irm https://claude.ai/install.ps1 | iex");
+        assert_eq!(win("cursor"), "irm 'https://cursor.com/install?win32=true' | iex");
+        assert_eq!(win("grok"), "irm https://x.ai/cli/install.ps1 | iex");
+        assert_eq!(win("devin"), "irm https://static.devin.ai/cli/install.ps1 | iex");
+        assert_eq!(win("droid"), "irm https://app.factory.ai/cli/windows | iex");
+        // OpenCode has no PowerShell installer: npm, which its documentation lists.
+        assert_eq!(win("opencode"), "npm i -g opencode-ai");
+        assert!(win("goose").contains("download_cli.ps1"), "{}", win("goose"));
+        // The npm packages are the same on both.
+        for key in ["codex", "github-copilot", "gemini", "kimi", "qwen-code", "amp", "pi"] {
+            let hint = install_hint(key).unwrap();
+            assert_eq!(hint.unix, hint.windows, "{key}");
+            assert!(hint.windows.starts_with("npm i -g "), "{key}");
+        }
+        // And none is a Unix idiom: no `| bash`, `| sh`, `curl … -fsSL`, `brew`.
+        for key in INSTALLABLE {
+            let line = install_hint(key).unwrap().windows;
+            assert!(!line.contains("| bash") && !line.contains("| sh") && !line.contains("brew ") && !line.starts_with("curl"), "{key}: {line}");
+            assert!(line.starts_with("irm ") || line.starts_with("npm i -g ") || line.starts_with("Invoke-WebRequest "), "{key}: {line}");
+        }
+    }
+
+    #[test]
+    fn the_install_line_is_picked_by_platform_in_one_place() {
+        for key in INSTALLABLE {
+            let hint = install_hint(key).unwrap();
+            let here = if cfg!(windows) { hint.windows } else { hint.unix };
+            assert_eq!(hint.here(), here, "{key}");
+            assert_eq!(agent_setup(key).unwrap().install, here, "{key}");
+        }
+        // The ACP agents carry the same line as their setup, so the "isn't installed" message
+        // and the install chip never disagree.
+        for a in ACP_AGENTS {
+            assert_eq!(a.install_hint, agent_setup(a.id).unwrap().install, "{}", a.id);
+        }
+        assert!(install_hint("not-an-agent").is_none() && agent_setup("not-an-agent").is_none());
+    }
 }
