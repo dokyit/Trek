@@ -23,6 +23,7 @@ mod logging;
 mod lsp_client;
 mod editor;
 mod file_icon;
+mod fonts;
 mod ide;
 mod image_preview;
 mod integrations;
@@ -231,6 +232,8 @@ fn main() {
         #[cfg(windows)]
         cx.set_app_identity("dev.trek.Trek", "Trek");
         gpui_kit::init(cx);
+        // The families the theme names must be known before it's applied and anything is laid out.
+        fonts::register(cx);
         toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
