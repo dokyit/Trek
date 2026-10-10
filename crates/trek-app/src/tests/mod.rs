@@ -41,6 +41,7 @@ mod upkeep;
 mod usage;
 mod visualization;
 mod windows;
+mod words;
 mod worktrees;
 
 use std::cell::RefCell;

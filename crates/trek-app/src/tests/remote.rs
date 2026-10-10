@@ -965,7 +965,7 @@ fn the_phone_allows_for_a_whole_session_only_where_the_mac_lets_it() {
         let settings = ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap();
         assert!(!settings.session_approvals);
         let refused = ask(&trek, cx, for_session).unwrap_err();
-        assert!(refused.message.contains("off on this Mac"), "{refused:?}");
+        assert!(refused.message.contains(&format!("off on {}", crate::words::words().this_computer)), "{refused:?}");
         assert_eq!(trek.run_state(cx, &id), RunState::NeedsYou);
         assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.len() == 1 && ws.remote.as_ref().is_none_or(|r| r.answered.is_empty())));
         // Turned on at the Mac, the same answer goes through.

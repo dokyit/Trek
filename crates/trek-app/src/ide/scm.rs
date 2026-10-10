@@ -482,7 +482,7 @@ impl ScmView {
                 };
                 menu.separator()
                     .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
-                    .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                    .item(PopupMenuItem::new(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
             })
     }
 
