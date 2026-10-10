@@ -1,0 +1,12 @@
+{
+  "version": "0.4.0",
+  "notes": "- Maintenance release.",
+  "pub_date": "2026-10-10T01:02:03Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/dokyit/Trek/releases/download/v0.4.0/Trek-0.4.0-darwin-aarch64.app.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "signature": "untrusted comment: signature from minisign secret key\nRUTestMacSignatureLine==\ntrusted comment: Trek 0.4.0 darwin-aarch64\nTWFrQ29tbWVudA=="
+    }
+  }
+}
