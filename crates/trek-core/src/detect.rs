@@ -244,11 +244,18 @@ pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl As
     batch_script_problem(program, args)
 }
 
+/// A batch script's file name (`npx.cmd` from `C:\Program Files\nodejs\npx.cmd`), as the user is
+/// told it. Split on either slash: the path is a Windows one whichever platform asks.
+pub fn script_name(program: &Path) -> String {
+    let text = program.to_string_lossy();
+    text.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(&text).to_string()
+}
+
 /// `batch_args_problem` without asking whether this platform runs `program` through cmd.exe: for a
 /// caller that has decided it will (a command handed to an agent as `cmd /c`), and for tests on
 /// every platform.
 pub fn batch_script_problem(program: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<String> {
-    let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
+    let name = script_name(program);
     let mut len = program.as_os_str().to_string_lossy().encode_utf16().count();
     for (n, arg) in args.into_iter().enumerate() {
         let arg = arg.as_ref().to_string_lossy();
@@ -671,6 +678,11 @@ mod tests_paths {
     fn the_batch_check_can_be_asked_on_any_platform() {
         let said = batch_script_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).unwrap();
         assert!(said.starts_with("npx.cmd is a batch script") && said.contains("argument 2"), "{said}");
+        // Named by its file name on every platform, even where `\` isn't a separator.
+        let said = batch_script_problem(Path::new(r"C:\Program Files\nodejs\npx.cmd"), ["a\nb"]).unwrap();
+        assert!(said.starts_with("npx.cmd is a batch script"), "{said}");
+        assert_eq!(script_name(Path::new("D:/tools/run.cmd")), "run.cmd");
+        assert_eq!(script_name(Path::new("npx.cmd")), "npx.cmd");
         assert_eq!(batch_script_problem(Path::new("npx.cmd"), ["-y", "ok"]), None);
         assert_eq!(batch_args_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).is_some(), cfg!(windows));
     }
