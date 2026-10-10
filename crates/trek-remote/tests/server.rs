@@ -498,15 +498,42 @@ async fn pairing_then_hello() {
     assert_eq!(handle.devices().len(), 1);
 }
 
-/// Over dual-stack loopback: two addresses, `127.0.0.1` and `::1`.
-async fn start_dual_stack() -> (RemoteHandle, String, String) {
+/// A way to reach the test server as one distinct source: the `ws://` URL, and a local address
+/// to connect from where two sources can't arrive by the destination alone.
+struct From(String, Option<std::net::SocketAddr>);
+
+/// One listener and two source addresses the server tells apart: `127.0.0.1` and `::1` over a
+/// dual-stack socket. On Windows an `[::]` bind is IPv6-only, and a 127/8 connection's source
+/// is 127.0.0.1 whatever its destination, so the second source is bound on the client side
+/// (all of 127/8 is loopback there) over `0.0.0.0`.
+#[cfg(unix)]
+async fn start_dual_stack() -> (RemoteHandle, From, From) {
     let (handle, _) = start_with(|config| config.bind = "[::]:0".parse().unwrap()).await;
     let port = handle.local_addr().port();
-    (handle, format!("ws://127.0.0.1:{port}"), format!("ws://[::1]:{port}"))
+    (handle, From(format!("ws://127.0.0.1:{port}"), None), From(format!("ws://[::1]:{port}"), None))
 }
 
-async fn try_pair(url: &str, code: &str, device_id: &str) -> Value {
-    let (mut c, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+#[cfg(windows)]
+async fn start_dual_stack() -> (RemoteHandle, From, From) {
+    let (handle, _) = start_with(|config| config.bind = "0.0.0.0:0".parse().unwrap()).await;
+    let port = handle.local_addr().port();
+    let url = || format!("ws://127.0.0.1:{port}");
+    (handle, From(url(), None), From(url(), Some("127.0.0.2:0".parse().unwrap())))
+}
+
+async fn try_pair(from: &From, code: &str, device_id: &str) -> Value {
+    let From(url, bind) = from;
+    let (mut c, _) = match bind {
+        None => tokio_tungstenite::connect_async(url).await.unwrap(),
+        Some(bind) => {
+            // A source `connect_async` can't choose: bound first, the handshake runs on it.
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind(*bind).unwrap();
+            let host: std::net::SocketAddr = url.strip_prefix("ws://").unwrap().parse().unwrap();
+            let stream = socket.connect(host).await.unwrap();
+            tokio_tungstenite::client_async(url.as_str(), MaybeTlsStream::Plain(stream)).await.unwrap()
+        }
+    };
     send(&mut c, json!({"type": "pair", "protocol": 1, "code": code, "device_id": device_id, "device_name": "x"})).await;
     recv(&mut c).await
 }
@@ -529,7 +556,7 @@ async fn a_wrong_code_holds_up_only_its_address() {
 #[tokio::test]
 async fn wrong_codes_back_off_then_count_again() {
     let (handle, _) = start().await;
-    let url = format!("ws://{}", handle.local_addr());
+    let url = From(format!("ws://{}", handle.local_addr()), None);
     handle.pairing_offer_with_code("K7Q2-9XMV");
     assert_eq!(try_pair(&url, "AAAA-AAAA", "x").await["message"], "Wrong pairing code");
     tokio::time::sleep(Duration::from_millis(1100)).await;
