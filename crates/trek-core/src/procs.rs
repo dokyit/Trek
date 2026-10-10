@@ -300,6 +300,23 @@ fn group_exists(_group: i32) -> bool {
     false
 }
 
+/// The processes `pid` started that still run (its direct children; ask again of each for the
+/// tree under it). Empty when `pid` is gone or the system won't list them.
+#[cfg(not(windows))]
+pub fn children(pid: u32) -> Vec<u32> {
+    let out = std::process::Command::new("/usr/bin/pgrep").args(["-P", &pid.to_string()]).stderr(std::process::Stdio::null()).output();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()).collect()).unwrap_or_default()
+}
+
+/// The processes `pid` started that still run (its direct children; ask again of each for the
+/// tree under it). A process counts when it was created no earlier than `pid` was: a child whose
+/// parent id belonged to an earlier process isn't `pid`'s. Empty when `pid` is gone or the system
+/// won't list them.
+#[cfg(windows)]
+pub fn children(pid: u32) -> Vec<u32> {
+    win::children(pid)
+}
+
 /// When process `pid` started (unix seconds), if it runs.
 #[cfg(target_os = "macos")]
 fn start_time(pid: i32) -> Option<i64> {
@@ -505,6 +522,13 @@ mod win {
         Some(found.into_iter().zip(keep).filter_map(|((p, _), keep)| keep.then_some(p)).collect())
     }
 
+    /// The ids of `pid`'s running children, created no earlier than it.
+    pub(super) fn children(pid: u32) -> Vec<u32> {
+        let Some(parent) = i32::try_from(pid).ok().and_then(Proc::open) else { return vec![] };
+        let Some(all) = snapshot() else { return vec![] };
+        all.into_iter().filter(|&(child, ppid)| ppid == pid && child != pid).filter(|&(child, _)| i32::try_from(child).ok().and_then(Proc::open).is_some_and(|c| c.created >= parent.created)).map(|(child, _)| child).collect()
+    }
+
     /// Which of `found` (ids and parent ids, each parent before its children, all under `root`)
     /// are still where they were by the later list `again`: with the same parent, under a parent
     /// that is.
@@ -654,6 +678,35 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!tree.iter().any(win::Proc::running), "the ping under cmd was ended too");
+    }
+
+    #[test]
+    fn a_process_lists_the_children_it_started() {
+        // The shell waits for the sleeper it starts (the `;` keeps it from exec'ing it away).
+        #[cfg(windows)]
+        let mut parent = quiet("cmd.exe", &["/d", "/c", "ping -n 30 127.0.0.1 >nul"]);
+        #[cfg(target_os = "macos")]
+        let mut parent = std::process::Command::new("/bin/sh").args(["-c", "/bin/sleep 30; true"]).spawn().unwrap();
+        let id = parent.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut kids = children(id);
+        while kids.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            kids = children(id);
+        }
+        assert_eq!(kids.len(), 1, "one child: {kids:?}");
+        assert!(children(kids[0]).is_empty(), "and none under it");
+        assert!(children(u32::MAX - 1).is_empty(), "no such process");
+        let _ = parent.kill();
+        let _ = parent.wait();
+        #[cfg(windows)]
+        // Ending cmd leaves its ping running; it's ours to end.
+        assert!(win::end_tree(Group { id: kids[0] as i32, started: start_time(kids[0] as i32).unwrap() }));
+        #[cfg(not(windows))]
+        // SAFETY: the child of a shell this test started and ended.
+        unsafe {
+            libc::kill(kids[0] as i32, libc::SIGKILL);
+        }
     }
 
     #[cfg(windows)]
