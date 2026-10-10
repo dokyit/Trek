@@ -38,6 +38,16 @@ pub fn backdrop(on: bool, native: bool, mica: bool) -> WindowBackgroundAppearanc
     }
 }
 
+/// The system's colours changed (dark or light, the Transparency effects switch): `applied` is
+/// forgotten so the window is told its glass and tone again at the next frame. Windows announces
+/// the Transparency switch with the colours, so glass asks the switch again too; and it sets a
+/// window's dark title and Mica tone from the system's colours when they change, which Trek's own
+/// theme (Night or Paper chosen against them) may not be.
+pub fn colours_changed(applied: &mut Option<GlassState>) {
+    crate::winlook::forget();
+    *applied = None;
+}
+
 /// Liquid glass on `window`: the system's Liquid Glass behind it when there is one (macOS 26),
 /// Mica Alt on Windows 11, else a blur of what's behind; opaque when off. `applied` is what was
 /// last asked of the window, so it's only told when that changes. The window's root paints the
@@ -50,6 +60,8 @@ pub fn apply_glass(window: &mut Window, on: bool, dark: bool, applied: &mut Opti
         return;
     }
     *applied = Some(state);
+    #[cfg(test)]
+    BACKDROP_ASKS.with(|n| n.set(n.get() + 1));
     let native = crate::system::native_glass(window, on);
     let mica = cfg!(windows) && on;
     MATERIAL.store(if native { Material::Native } else if mica { Material::Mica } else { Material::Blur } as u8, std::sync::atomic::Ordering::Relaxed);
@@ -85,6 +97,12 @@ pub fn chrome_alpha(tint: f32, material: Material) -> f32 {
         Material::Mica => tint.max(0.3),
         Material::Native | Material::Blur => tint,
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a window has been told its glass and tone (each GPUI test runs on its own thread).
+    pub static BACKDROP_ASKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What backs the windows now (`Material`, as a number so a window can set it from a frame).

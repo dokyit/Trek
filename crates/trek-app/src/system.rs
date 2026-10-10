@@ -85,7 +85,14 @@ fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     if cfg!(test) {
         return;
     }
-    let on = SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed) || workspace.read(cx).settings.appearance.reduce_motion;
+    reduce_motion_as(SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed), workspace, cx);
+}
+
+/// Set the app's reduce-motion flag from what the system asks (`system`) and Trek's own setting:
+/// either one stills every animation. Split from the read so that a test can say what the system
+/// asked, as the clock is told in the motion tests.
+pub(crate) fn reduce_motion_as(system: bool, workspace: &Entity<Workspace>, cx: &mut App) {
+    let on = system || workspace.read(cx).settings.appearance.reduce_motion;
     if cx.reduce_motion() != on {
         cx.set_reduce_motion(on)
     }
@@ -232,6 +239,21 @@ fn set_app_icon(_: AppIcon, _: &mut App) -> bool {
     true
 }
 
+/// `window` is on a display of another scale than it was (dragged there, or the display's scale
+/// changed): on Windows its icons, cut for the old scale, are put on again at the new one's size.
+/// Called from the window's own update, so it asks the window rather than updating it.
+pub fn scale_changed(window: &Window, cx: &App) {
+    #[cfg(test)]
+    SCALE_CHANGES.with(|n| n.set(n.get() + 1));
+    #[cfg(all(windows, not(test)))]
+    if let (Some(workspace), Some(hwnd)) = (cx.try_global::<crate::workspace::GlobalWorkspace>(), crate::winsys::hwnd_of(window)) {
+        let icon = workspace.0.read(cx).settings.appearance.app_icon;
+        crate::winsys::set_window_icon(hwnd, crate::winsys::icon_resource(icon));
+    }
+    #[cfg(not(all(windows, not(test))))]
+    let _ = (window, cx);
+}
+
 #[cfg(test)]
 fn set_app_icon(icon: AppIcon, _: &mut App) -> bool {
     APP_ICON.with(|i| i.set(Some(icon)));
@@ -248,6 +270,8 @@ thread_local! {
     pub static SOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The Dock icon tests would have shown.
     pub static APP_ICON: std::cell::Cell<Option<AppIcon>> = const { std::cell::Cell::new(None) };
+    /// How many times a window's icons would have been cut again for another display's scale.
+    pub static SCALE_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

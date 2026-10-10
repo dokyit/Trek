@@ -90,12 +90,12 @@ fn taskbar_is_light() -> bool {
     false
 }
 
-/// The width of a small icon at the display's scale (`SM_CXSMICON`).
+/// The width of a small icon at the taskbar's scale (`SM_CXSMICON` at its DPI): the taskbar's
+/// own, which another display's scale or one changed since Trek started doesn't alter (the
+/// plain `GetSystemMetrics` answers for the DPI the process started at).
 #[cfg(windows)]
 fn tray_icon_px() -> u32 {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
-    // SAFETY: a plain query.
-    u32::try_from(unsafe { GetSystemMetrics(SM_CXSMICON) }).unwrap_or(16)
+    u32::try_from(crate::winsys::icon_edges(crate::winsys::taskbar_dpi()).0).unwrap_or(16)
 }
 
 #[cfg(not(windows))]
@@ -361,6 +361,15 @@ mod tests {
         assert_eq!([16, 17, 20, 21, 24, 25, 32].map(tray_size), [16, 20, 20, 24, 24, 32, 32]);
         assert_eq!(tray_size(48), 32, "bigger than any: the largest");
         assert_eq!(tray_size(0), 16);
+    }
+
+    /// The glyph each display scale gets: Windows's own small-icon size at that DPI, taken up to
+    /// the next one drawn (175 %'s 28 px is drawn at 32).
+    #[cfg(windows)]
+    #[test]
+    fn the_glyph_is_cut_for_the_taskbar_s_scale() {
+        let drawn = [96, 120, 144, 168, 192].map(|dpi| tray_size(u32::try_from(crate::winsys::icon_edges(dpi).0).unwrap()));
+        assert_eq!(drawn, [16, 20, 24, 32, 32]);
     }
 
     #[test]

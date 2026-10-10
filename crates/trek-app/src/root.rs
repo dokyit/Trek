@@ -55,7 +55,7 @@ pub struct TrekWindow {
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
     /// What the window was last told about its glass (`ui::apply_glass`).
-    glass_applied: Option<crate::ui::GlassState>,
+    pub(crate) glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
     /// second ⌘B mid-way turns it round where it is.
     pub(crate) sidebar_motion: SharedSpring,
@@ -125,7 +125,14 @@ impl TrekWindow {
             cx.notify();
         });
         // The next launch opens the main window where this one is left.
-        cx.observe_window_bounds(window, |_, window, cx| crate::window_place::remember(window, cx)).detach();
+        let mut scale = window.scale_factor();
+        cx.observe_window_bounds(window, move |_, window, cx| {
+            crate::window_place::remember(window, cx);
+            if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor()) {
+                crate::system::scale_changed(window, cx);
+            }
+        })
+        .detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -239,8 +246,7 @@ impl TrekWindow {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
                 }
-                // Windows announces its Transparency effects switch with the colours: glass asks again.
-                crate::winlook::forget();
+                crate::ui::colours_changed(&mut this.glass_applied);
                 this.workspace.update(cx, |_, cx| cx.notify());
             }),
         ];
