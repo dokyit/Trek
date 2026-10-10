@@ -37,6 +37,8 @@ pub struct Settings {
     pub mobile: Mobile,
     /// The sidebar's Usage card.
     pub usage: Usage,
+    /// The built-in terminal panel.
+    pub terminal: Terminal,
     /// What `load` couldn't read, and whether `save` may write the file.
     #[serde(skip)]
     pub guard: SaveGuard,
@@ -521,9 +523,19 @@ impl Default for Settings {
             ide: Ide::default(),
             mobile: Mobile::default(),
             usage: Usage::default(),
+            terminal: Terminal::default(),
             guard: SaveGuard::default(),
         }
     }
+}
+
+/// The built-in terminal panel.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Terminal {
+    /// The shell it opens: a path, or a name found on PATH (`pwsh`, `nu`). Empty, the automatic
+    /// choice: `$SHELL` on macOS; on Windows PowerShell 7, else Windows PowerShell, else `%COMSPEC%`.
+    pub shell: String,
 }
 
 /// How many providers the Usage card shows at once.
@@ -1117,6 +1129,18 @@ mod tests {
         // Unchecking every one is a choice too (an empty card), not a return to automatic.
         s.usage.shown = Some(vec![]);
         assert_eq!(toml::from_str::<Settings>(&toml::to_string_pretty(&s).unwrap()).unwrap().usage.shown, Some(vec![]));
+    }
+
+    #[test]
+    fn the_terminal_shell_is_automatic_until_one_is_named() {
+        let old: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
+        assert_eq!(old.terminal.shell, "", "files from before the key: the automatic choice");
+        let mut s = Settings::default();
+        s.terminal.shell = r"C:\Program Files\PowerShell\7\pwsh.exe".into();
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(text.contains("[terminal]"), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap().terminal.shell, s.terminal.shell);
+        assert_eq!(toml::from_str::<Settings>("[terminal]\nshell = \"nu\"\n").unwrap().terminal.shell, "nu");
     }
 
     #[test]
