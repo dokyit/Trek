@@ -136,7 +136,7 @@ pub struct ScmView {
 
 impl ScmView {
     pub fn new(workspace: Entity<Workspace>, workbench: WeakEntity<IdeWorkbench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let message = cx.new(|cx| InputState::new(window, cx).placeholder("Message (⌘↩ to commit)"));
+        let message = cx.new(|cx| InputState::new(window, cx).placeholder(crate::keys::localize("Message (⌘↩ to commit)").into_owned()));
         let subscriptions = vec![
             cx.observe(&workspace, |this, ws, cx| {
                 let (root, seen) = {
