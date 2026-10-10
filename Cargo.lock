@@ -9093,10 +9093,12 @@ dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
+ "png 0.18.1",
  "serde_json",
  "tokio",
  "trek-ipc",
  "trek-test-fixtures",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
