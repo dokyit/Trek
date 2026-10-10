@@ -740,20 +740,85 @@ fn count(inputs: Inputs, base: Option<String>) -> anyhow::Result<(PathBuf, Strin
 }
 
 /// The repository's top folder `top` (as git names it: links resolved) in the form the thread's
-/// folder `cwd` was given in (`/var/…` rather than `/private/var/…`), so paths built on it match
-/// the ones the editor and the Explorer use.
+/// folder `cwd` was given in (`/var/…` rather than `/private/var/…`; on Windows `C:\Users\RUNNER~1\…`
+/// rather than `C:/Users/runneradmin/…`), so paths built on it match the ones the editor and the
+/// Explorer use.
 pub fn as_given(top: &Path, cwd: &Path) -> PathBuf {
-    let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    match canon.strip_prefix(top) {
-        Ok(below) => cwd.ancestors().nth(below.components().count()).map_or_else(|| top.to_path_buf(), Path::to_path_buf),
-        Err(_) => top.to_path_buf(),
+    let canon = std::fs::canonicalize(cwd).map(|p| plain(&p)).unwrap_or_else(|_| cwd.to_path_buf());
+    match below(&canon, top) {
+        Some(n) => cwd.ancestors().nth(n).map_or_else(|| top.to_path_buf(), Path::to_path_buf),
+        None => top.to_path_buf(),
+    }
+}
+
+/// How many folders `path` is below `top`; `None` when it isn't under it. The two are compared
+/// the way the file system names folders: on Windows regardless of case, `/` as `\`.
+fn below(path: &Path, top: &Path) -> Option<usize> {
+    let mut rest = path.components();
+    for t in top.components() {
+        let p = rest.next()?;
+        let same = if cfg!(windows) { p.as_os_str().to_string_lossy().eq_ignore_ascii_case(&t.as_os_str().to_string_lossy()) } else { p == t };
+        if !same {
+            return None;
+        }
+    }
+    Some(rest.count())
+}
+
+/// `path` without the `\\?\` prefix `canonicalize` puts on Windows paths (`\\?\C:\…`, or
+/// `\\?\UNC\server\share\…` for a share), which git's paths never carry.
+fn plain(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::relative;
-    use std::path::Path;
+    use super::{as_given, below, plain, relative};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_folder_is_counted_below_the_top_the_way_the_file_system_names_it() {
+        assert_eq!(below(Path::new("/p/a/b"), Path::new("/p")), Some(2));
+        assert_eq!(below(Path::new("/p"), Path::new("/p")), Some(0));
+        assert_eq!(below(Path::new("/q/a"), Path::new("/p")), None);
+        assert_eq!(below(Path::new("/p"), Path::new("/p/a")), None);
+        if cfg!(windows) {
+            assert_eq!(below(Path::new(r"C:\Users\RUNNERADMIN\Temp\x"), Path::new("c:/users/runneradmin")), Some(2));
+        } else {
+            assert_eq!(below(Path::new("/P/a"), Path::new("/p")), None);
+        }
+    }
+
+    #[test]
+    fn the_verbatim_prefix_comes_off_a_canonical_windows_path() {
+        assert_eq!(plain(Path::new(r"\\?\C:\Users\x")), PathBuf::from(r"C:\Users\x"));
+        assert_eq!(plain(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(plain(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
+    }
+
+    /// The top folder comes back the way the thread's folder was given, even where git names it
+    /// differently: with links resolved, and on Windows in another case or with `/`.
+    #[test]
+    fn the_top_folder_is_named_the_way_the_folder_was_given() {
+        let tmp = std::env::temp_dir().join(format!("trek-as-given-{}", std::process::id()));
+        let project = tmp.join("Project").join("sub");
+        std::fs::create_dir_all(&project).unwrap();
+        let real = plain(&std::fs::canonicalize(&tmp).unwrap());
+        // As git prints it: `/` throughout; the thread's folder as the user typed it.
+        let git_top = PathBuf::from(real.join("Project").to_string_lossy().replace('\\', "/"));
+        let given = if cfg!(windows) { PathBuf::from(tmp.join("PROJECT").join("SUB").to_string_lossy().to_lowercase()) } else { project.clone() };
+        assert_eq!(as_given(&git_top, &given), given.parent().unwrap());
+        assert_eq!(as_given(&real, &given), given.ancestors().nth(2).unwrap());
+        assert_eq!(as_given(Path::new("/elsewhere"), &given), Path::new("/elsewhere"), "not below: git's name stays");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn reported_paths_are_taken_relative_to_the_folder() {
