@@ -240,7 +240,7 @@ pub fn tell(why: &str) {
 /// launches hand over, on the main thread, as macOS's `on_open_urls` and `on_reopen` would.
 pub fn hear(primary_forwarded: Option<async_channel::Receiver<Forwarded>>, own: Vec<String>, ws: Entity<Workspace>, links: async_channel::Sender<String>, cx: &mut App) {
     for arg in own {
-        dispatch(arg, &links, cx);
+        dispatch(arg, &ws, &links, cx);
     }
     let Some(rx) = primary_forwarded else { return };
     cx.spawn(async move |cx| {
@@ -266,7 +266,7 @@ pub(crate) fn take(open: Open, ws: &Entity<Workspace>, links: &async_channel::Se
         crate::root::show_main(ws.clone(), cx);
     }
     for arg in open.args {
-        dispatch(arg, links, cx);
+        dispatch(arg, ws, links, cx);
     }
 }
 
@@ -274,17 +274,66 @@ fn is_link(arg: &str) -> bool {
     arg.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("trek://"))
 }
 
-/// A link goes where macOS's `on_open_urls` sends links; a file opens in the editor as a
-/// `trek://edit` link to it would (asking first when it's outside the user's projects).
-/// Anything else (a folder, a path that isn't there) only brought Trek forward.
-fn dispatch(arg: String, links: &async_channel::Sender<String>, cx: &mut App) {
-    if is_link(&arg) {
-        let _ = links.try_send(arg);
-        return;
+/// The longest link acted on. A link carries a path and perhaps a selection of code (`trek://ask`),
+/// and Windows' own limit on a command line (32 K characters) is under this; a longer one came
+/// by the pipe from something that isn't a launch.
+const MAX_LINK: usize = 64 * 1024;
+
+/// What one argument of a launch means.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Arg {
+    /// A `trek://` link, for the place macOS sends its open-URL events (`deep_link::open`).
+    Link(String),
+    /// A file: opens in the editor, as a `trek://edit` link to it would.
+    File(PathBuf),
+    /// A folder: becomes a project, as "Open Folder…" makes one.
+    Folder(PathBuf),
+    /// Nothing Trek acts on, and why.
+    Ignored(&'static str),
+}
+
+/// Sort `arg` out. Arguments come from other processes (a link from any web page, anything a
+/// user's tools launch Trek with), so only a short `trek://` link or an absolute path to a file or
+/// folder that exists is acted on.
+pub(crate) fn classify(arg: &str) -> Arg {
+    if is_link(arg) {
+        if arg.len() > MAX_LINK {
+            return Arg::Ignored("a link that is too long");
+        }
+        if arg.contains('\0') {
+            return Arg::Ignored("a link with a NUL in it");
+        }
+        return Arg::Link(arg.to_string());
+    }
+    if arg.is_empty() || arg.contains('\0') {
+        return Arg::Ignored("an empty or malformed argument");
     }
     let path = PathBuf::from(arg);
-    if path.is_file() {
-        crate::deep_link::open_file(path, cx);
+    // `launch_args` made it absolute against the launch's own folder; one that isn't came from
+    // something else, and Trek's own working folder isn't what it meant.
+    if !path.is_absolute() {
+        return Arg::Ignored("a path that isn't absolute");
+    }
+    match std::fs::metadata(&path) {
+        Ok(m) if m.is_dir() => Arg::Folder(path),
+        Ok(m) if m.is_file() => Arg::File(path),
+        Ok(_) => Arg::Ignored("a path that is neither a file nor a folder"),
+        Err(_) => Arg::Ignored("a path that isn't there"),
+    }
+}
+
+/// A link goes where macOS's `on_open_urls` sends links; a file opens in the editor as a
+/// `trek://edit` link to it would (asking first when it's outside the user's projects); a folder
+/// opens as a project, as "Open Folder…" opens one. Anything else is ignored, and logged.
+fn dispatch(arg: String, ws: &Entity<Workspace>, links: &async_channel::Sender<String>, cx: &mut App) {
+    match classify(&arg) {
+        Arg::Link(link) => {
+            let _ = links.try_send(link);
+        }
+        Arg::File(path) => crate::deep_link::open_file(path, cx),
+        Arg::Folder(path) => ws.update(cx, |ws, cx| ws.add_project(path, cx)),
+        // Not the argument itself: a link may carry code.
+        Arg::Ignored(what) => tracing::warn!("single instance: ignored {what} ({} characters)", arg.chars().count()),
     }
 }
 
@@ -314,6 +363,31 @@ mod tests {
         assert_eq!(got.len(), trek_ipc::instance::MAX_ARGS);
         assert!(got[0].ends_with("f0.rs") && got.last().unwrap().ends_with(&format!("f{}.rs", trek_ipc::instance::MAX_ARGS - 1)));
         assert!(trek_ipc::instance::Open::parse(&Open { args: got, background: false }.to_frame()).is_some(), "the running Trek accepts them");
+    }
+
+    #[test]
+    fn an_argument_is_a_link_a_file_a_folder_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("trek-classify-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.rs"), "").unwrap();
+        let s = |p: PathBuf| p.to_string_lossy().into_owned();
+
+        // Links, whatever the case of the scheme, as they came.
+        assert_eq!(classify("trek://edit?path=%2Fx"), Arg::Link("trek://edit?path=%2Fx".into()));
+        assert_eq!(classify("TREK://ask?path=%2Fx"), Arg::Link("TREK://ask?path=%2Fx".into()));
+        // The folder, the file; a path that isn't there is not acted on.
+        assert_eq!(classify(&s(dir.join("sub"))), Arg::Folder(dir.join("sub")));
+        assert_eq!(classify(&s(dir.join("a.rs"))), Arg::File(dir.join("a.rs")));
+        assert!(matches!(classify(&s(dir.join("gone"))), Arg::Ignored(_)));
+        // Not links, not paths: other schemes, empty, relative, a link with a NUL, one too long.
+        for junk in ["https://example.com/", "file:///C:/x", "", "relative/dir", "..", "trek:/edit", "trek://edit\0x"] {
+            assert!(matches!(classify(junk), Arg::Ignored(_)), "{junk:?}");
+        }
+        let long = format!("trek://ask?selection={}", "x".repeat(MAX_LINK));
+        assert!(matches!(classify(&long), Arg::Ignored(_)));
+        let just = format!("trek://ask?selection={}", "x".repeat(MAX_LINK - "trek://ask?selection=".len()));
+        assert!(matches!(classify(&just), Arg::Link(_)), "a link at the limit goes");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

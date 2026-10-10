@@ -1,7 +1,7 @@
 //! The main window across launches and displays: where it was left, what another launch hands
 //! over (Windows' single instance), and a display of another scale.
 
-use super::harness::{open, run};
+use super::harness::{new_project, open, run};
 use crate::single_instance::Forwarded;
 use crate::window_place::{Placement, initial, load};
 use crate::workspace::Route;
@@ -56,16 +56,86 @@ fn another_launch_s_arguments_open_on_the_main_thread_and_are_answered() {
         cx.update(|cx| crate::single_instance::hear(Some(rx), vec![], ws, links, cx));
 
         let (done, answer) = async_channel::bounded(1);
-        let open = Open { args: vec!["trek://ask?path=%2Fx&line=1".into(), file.display().to_string(), trek.project.display().to_string()], background: false };
+        // What isn't a link or something that exists is left alone (and doesn't stop the rest).
+        let args = ["trek://ask?path=%2Fx&line=1".to_string(), "https://example.com/".into(), "relative.rs".into(), file.display().to_string()];
+        let open = Open { args: args.into(), background: false };
         tx.try_send(Forwarded { open, done }).unwrap();
         cx.run_until_parked();
         assert_eq!(answer.try_recv(), Ok(Ok(())), "answered once the main thread took them");
-        // The link goes where macOS's `on_open_urls` sends links; the file opens in the editor;
-        // the folder only brought Trek forward.
+        // The link goes where macOS's `on_open_urls` sends links; the file opens in the editor.
         assert_eq!(heard.try_recv().as_deref(), Ok("trek://ask?path=%2Fx&line=1"));
         assert!(heard.try_recv().is_err());
         trek.render(cx);
         assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Editor { path } if path == file));
+    });
+}
+
+/// `trek.exe <folder>`: the folder becomes a project and a draft opens in it, as "Open Folder…"
+/// does, whether it's this launch's own argument or another launch's.
+#[test]
+fn a_folder_argument_opens_as_a_project() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (links, heard) = async_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
+        let (first, second) = (new_project("first"), new_project("second"));
+        let ws = trek.ws.clone();
+        let own = vec![first.display().to_string()];
+        cx.update(|cx| crate::single_instance::hear(Some(rx), own, ws, links, cx));
+        cx.run_until_parked();
+        let is_project = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext, p: &std::path::Path| {
+            trek.read(cx, |ws, _| ws.settings.user_projects.contains(&p.display().to_string()))
+        };
+        assert!(is_project(&trek, cx, &first), "its own argument");
+        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == first));
+
+        let (done, answer) = async_channel::bounded(1);
+        tx.try_send(Forwarded { open: Open { args: vec![second.display().to_string()], background: false }, done }).unwrap();
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv(), Ok(Ok(())));
+        assert!(is_project(&trek, cx, &second), "a forwarded one");
+        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second));
+        assert!(heard.try_recv().is_err(), "no link went anywhere");
+
+        // One that isn't there is no project.
+        let gone = second.join("gone");
+        let (done, _answer) = async_channel::bounded(1);
+        tx.try_send(Forwarded { open: Open { args: vec![gone.display().to_string()], background: false }, done }).unwrap();
+        cx.run_until_parked();
+        assert!(!is_project(&trek, cx, &gone));
+        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second));
+    });
+}
+
+/// What the VS Code extension sends, through a second launch: the link rides the pipe, goes to
+/// the open-URL handler's place, and drafts a thread in the file's project with the selection in
+/// the composer.
+#[test]
+fn a_forwarded_ask_link_drafts_a_thread_in_the_files_project() {
+    run(async |cx| {
+        let trek = open(cx);
+        let (links, links_rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
+        let ws = trek.ws.clone();
+        cx.update(|cx| crate::single_instance::hear(Some(rx), vec![], ws, links, cx));
+        trek.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
+        // Somewhere else first, so arriving at the project is the link's doing.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(crate::workspace::SettingsPage::General), cx));
+
+        let file = trek.project.join("lib.rs");
+        std::fs::write(&file, "let x = 1;\n").unwrap();
+        // Percent-encoded as `URLSearchParams` writes a Windows path.
+        let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+        let url = format!("trek://ask?path={}&line=3&end=5&selection={}", enc(&file.display().to_string()), enc("let x = 1;"));
+        let (done, answer) = async_channel::bounded(1);
+        tx.try_send(Forwarded { open: Open { args: vec![url], background: false }, done }).unwrap();
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv(), Ok(Ok(())));
+        trek.render(cx);
+        let project = trek.project.clone();
+        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == project));
+        let text = trek.composer_text(cx);
+        assert!(text.contains("`lib.rsL3-L5`") && text.contains("let x = 1;"), "{text:?}");
     });
 }
 

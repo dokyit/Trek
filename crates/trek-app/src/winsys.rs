@@ -150,6 +150,115 @@ pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
     }
 }
 
+/// What Windows runs for a `trek://` link: Trek, with the link as its one argument. Quoted both
+/// ways: a path with spaces, and a link with `&` in it.
+#[cfg(any(windows, test))]
+pub fn protocol_command(exe: &std::path::Path) -> String {
+    format!("\"{}\" \"%1\"", exe.display())
+}
+
+/// Where the protocol's keys go for real: the current user's classes.
+#[cfg(windows)]
+pub const CLASSES: &str = r"Software\Classes";
+
+/// What `register_protocol` did.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registered {
+    /// The key was already as it should be: nothing written.
+    Already,
+    Written,
+}
+
+/// Make Windows hand `trek://` links to `exe`: `<root>\trek` marked as a URL protocol, with
+/// `shell\open\command` running Trek on the link. `root` is a key under `HKEY_CURRENT_USER`
+/// (`CLASSES`, or a key of a test's own); nothing is ever written to the machine's classes.
+/// Read first and written only when the command differs, so a run that finds it right touches
+/// nothing (and doesn't make the registry hive busy at every start).
+#[cfg(windows)]
+pub fn register_protocol(root: &str, exe: &std::path::Path) -> std::io::Result<Registered> {
+    let command = protocol_command(exe);
+    let key = format!(r"{root}\trek");
+    let command_key = format!(r"{key}\shell\open\command");
+    if reg_read(&command_key, "").as_deref() == Some(command.as_str()) && reg_read(&key, "URL Protocol").is_some() {
+        return Ok(Registered::Already);
+    }
+    reg_write(&key, "", "URL:Trek")?;
+    reg_write(&key, "URL Protocol", "")?;
+    reg_write(&format!(r"{key}\DefaultIcon"), "", &format!("\"{}\",0", exe.display()))?;
+    reg_write(&command_key, "", &command)?;
+    Ok(Registered::Written)
+}
+
+/// Register the protocol for the running Trek, in the user's classes. Once a launch; a failure
+/// is logged and nothing else: links then keep going where they went. Not for a process with a
+/// data folder of its own (a test, a capture run, a trial build): it mustn't take over the links
+/// of the Trek the user has.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub fn register_trek_protocol() {
+    if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty()) {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return tracing::warn!("trek:// links: where Trek is: {e}"),
+    };
+    match register_protocol(CLASSES, &exe) {
+        Ok(Registered::Written) => tracing::info!("trek:// links now open {}", exe.display()),
+        Ok(Registered::Already) => {}
+        Err(e) => tracing::warn!("trek:// links: couldn't register the protocol: {e}"),
+    }
+}
+
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
+/// A string value of a key under `HKEY_CURRENT_USER` (`""` is the key's default value).
+#[cfg(windows)]
+fn reg_read(key: &str, value: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let (key, value) = (wide(key), wide(value));
+    let mut bytes = 0u32;
+    // SAFETY: NUL-ended names; the first call only asks how long the value is, the second fills
+    // a buffer of that size.
+    unsafe {
+        if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes) != 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+        if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes) != 0 {
+            return None;
+        }
+        // The size counts the terminating NUL.
+        buf.truncate((bytes as usize / 2).saturating_sub(1));
+        Some(String::from_utf16_lossy(&buf))
+    }
+}
+
+/// Set a string value of a key under `HKEY_CURRENT_USER`, making the key (and those above it).
+#[cfg(windows)]
+fn reg_write(key: &str, value: &str, text: &str) -> std::io::Result<()> {
+    use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegSetValueExW};
+    let (key, value, data) = (wide(key), wide(value), wide(text));
+    let mut hkey: HKEY = std::ptr::null_mut();
+    // SAFETY: NUL-ended names, and a key handle that is closed below.
+    unsafe {
+        let made = RegCreateKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, std::ptr::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, std::ptr::null(), &mut hkey, std::ptr::null_mut());
+        if made != 0 {
+            return Err(std::io::Error::from_raw_os_error(made as i32));
+        }
+        let set = RegSetValueExW(hkey, value.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32);
+        RegCloseKey(hkey);
+        if set != 0 {
+            return Err(std::io::Error::from_raw_os_error(set as i32));
+        }
+    }
+    Ok(())
+}
+
 /// The system's notification sound, waiting until it has played.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
@@ -189,6 +298,63 @@ mod tests {
     fn the_badge_reads_aloud_in_the_singular_and_plural() {
         assert_eq!(badge_description(1), "1 thread needs you");
         assert_eq!(badge_description(3), "3 threads need you");
+    }
+
+    #[test]
+    fn a_link_runs_trek_with_the_link_as_one_argument() {
+        let exe = std::path::Path::new(r"C:\Program Files\Trek\trek.exe");
+        assert_eq!(super::protocol_command(exe), r#""C:\Program Files\Trek\trek.exe" "%1""#);
+    }
+
+    /// Against a key of the test's own (`HKCU\Software\Trek-tests\<pid>`), deleted afterwards:
+    /// never the real `trek` key.
+    #[cfg(windows)]
+    mod registry {
+        use super::super::{Registered, protocol_command, reg_read, register_protocol};
+        use std::path::Path;
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteTreeW};
+
+        struct TestKey(String);
+
+        impl TestKey {
+            fn new(tag: &str) -> TestKey {
+                TestKey(format!(r"Software\Trek-tests\{}-{tag}", std::process::id()))
+            }
+        }
+
+        impl Drop for TestKey {
+            fn drop(&mut self) {
+                let key: Vec<u16> = self.0.encode_utf16().chain([0]).collect();
+                // SAFETY: a NUL-ended name of a key this test made.
+                unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+            }
+        }
+
+        #[test]
+        fn the_protocol_is_registered_once_and_then_left_alone() {
+            let root = TestKey::new("once");
+            let exe = Path::new(r"C:\Apps\Trek\trek.exe");
+            assert_eq!(reg_read(&format!(r"{}\trek", root.0), "URL Protocol"), None, "nothing there yet");
+
+            assert_eq!(register_protocol(&root.0, exe).unwrap(), Registered::Written);
+            let key = format!(r"{}\trek", root.0);
+            assert_eq!(reg_read(&key, "URL Protocol").as_deref(), Some(""), "marked as a URL protocol");
+            assert_eq!(reg_read(&format!(r"{key}\shell\open\command"), "").as_deref(), Some(protocol_command(exe).as_str()));
+            assert_eq!(reg_read(&key, "").as_deref(), Some("URL:Trek"));
+
+            assert_eq!(register_protocol(&root.0, exe).unwrap(), Registered::Already, "the second run writes nothing");
+        }
+
+        /// Trek moved (an update, another folder): the command follows it.
+        #[test]
+        fn a_command_that_differs_is_replaced() {
+            let root = TestKey::new("moved");
+            register_protocol(&root.0, Path::new(r"C:\Old\trek.exe")).unwrap();
+            let new = Path::new(r"D:\New place\trek.exe");
+            assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Written);
+            assert_eq!(reg_read(&format!(r"{}\trek\shell\open\command", root.0), "").as_deref(), Some(protocol_command(new).as_str()));
+            assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Already);
+        }
     }
 }
 

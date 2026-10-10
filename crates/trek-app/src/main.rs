@@ -279,6 +279,9 @@ fn main() {
         if let Some(lock) = lock {
             workspace::keep_data_folder_lock(trek_core::paths::data_dir(), lock);
         }
+        // Windows has no bundle to say which app opens `trek://`: Trek says so itself.
+        #[cfg(windows)]
+        winsys::register_trek_protocol();
         let ws = workspace::init(cx);
         ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         tray::init(ws.clone(), cx);
