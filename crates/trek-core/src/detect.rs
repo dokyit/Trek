@@ -207,12 +207,53 @@ fn shell_output(command: &mut std::process::Command, timeout: Duration) -> Optio
 /// `.EXE` before `.CMD` by default, so a vendor's own `.exe` wins over a shim beside it; across
 /// folders the first wins, as in a terminal (`extra_dirs` puts `.exe` folders first).
 ///
-/// Caution for callers: on Windows, `std::process::Command` runs a `.cmd` or `.bat` result through
-/// `cmd.exe`, which reads its arguments by different quoting rules than other programs. Passing
-/// one arguments that hold user input, quotes, `%` or `&` needs the Phase 2 escaping audit; none
-/// is done here.
+/// On Windows, `std::process::Command` runs a `.cmd` or `.bat` result through `cmd.exe` (see
+/// `runs_through_cmd`): every argument still arrives exactly as given, quotes, `%VAR%`, `&` and
+/// all, except that one with a line break can't be passed at all and the whole command line has
+/// a limit (see `batch_args_problem`, and trek-agents' `tests_cmd_args` for the full table).
 pub fn which(binary: &str) -> Option<PathBuf> {
-    find_in(login_path(), binary, &std::env::var("PATHEXT").unwrap_or_default())
+    which_in(login_path(), binary)
+}
+
+/// `which`, on another PATH (`path`, in the platform's own format).
+pub fn which_in(path: &str, binary: &str) -> Option<PathBuf> {
+    find_in(path, binary, &std::env::var("PATHEXT").unwrap_or_default())
+}
+
+/// Whether Windows starts `program` through `cmd.exe`: a `.cmd` or `.bat` (npm's `claude.cmd` and
+/// `codex.cmd`), which `std::process::Command` runs as `cmd.exe /c`. Never on macOS.
+pub fn runs_through_cmd(program: &Path) -> bool {
+    cfg!(windows) && program.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+}
+
+/// cmd.exe's limit on the command line it's given, in UTF-16 units.
+const CMD_LINE_MAX: usize = 8191;
+
+/// Why `args` can't reach `program`, in words for the user; `None` when they can, as they always
+/// can but through cmd.exe (see `runs_through_cmd`). Through cmd.exe, std escapes every argument
+/// so it arrives exactly as given, but it refuses to start one with a line break in an argument
+/// (cmd.exe would end the command there), and cmd.exe gives up on a command line over 8191
+/// characters. This says which, before anything starts, without repeating the argument (it may be
+/// a secret). The length is what the arguments need at least: a line just short of the limit can
+/// still fail once std's quotes and the shim's own words are added, and then the program's output
+/// is cmd.exe's "The command line is too long."
+pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<String> {
+    if !runs_through_cmd(program) {
+        return None;
+    }
+    let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
+    let mut len = program.as_os_str().to_string_lossy().encode_utf16().count();
+    for (n, arg) in args.into_iter().enumerate() {
+        let arg = arg.as_ref().to_string_lossy();
+        if arg.contains(['\r', '\n']) {
+            return Some(format!(
+                "{name} is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument {} has one).",
+                n + 1
+            ));
+        }
+        len += 1 + arg.encode_utf16().count();
+    }
+    (len > CMD_LINE_MAX).then(|| format!("{name} is a batch script, which Windows runs through cmd.exe, and its command line would be {len} characters, over cmd.exe's limit of {CMD_LINE_MAX}."))
 }
 
 /// The first file in `path`'s folders that is one of `candidate_names(binary, pathext)`.
@@ -572,6 +613,37 @@ mod tests_paths {
         let at = |d: &str| got.iter().position(|g| g.ends_with(d)).unwrap();
         assert!(at(r".local\bin") < at(r"Roaming\npm"), "{got:?}");
         assert!(at(r"scoop\shims") < at(r"Roaming\npm") && at(r"chocolatey\bin") < at(r"Roaming\npm"), "{got:?}");
+    }
+
+    #[test]
+    fn only_batch_scripts_on_windows_run_through_cmd() {
+        for (name, batch) in [("claude.cmd", true), ("x.BAT", true), (r"C:\a b\Codex.Cmd", true), ("claude.exe", false), ("claude", false), ("cmd", false), ("x.cmd.exe", false)] {
+            assert_eq!(runs_through_cmd(Path::new(name)), cfg!(windows) && batch, "{name}");
+        }
+    }
+
+    #[test]
+    fn arguments_any_program_but_a_batch_script_takes() {
+        let long = "x".repeat(20_000);
+        let awkward = ["line\nbreak", "cr\r", long.as_str(), "\" & %PATH% ^"];
+        assert_eq!(batch_args_problem(Path::new("claude.exe"), awkward), None);
+        assert_eq!(batch_args_problem(Path::new("claude"), awkward), None);
+        assert_eq!(batch_args_problem(Path::new("claude.cmd"), ["\" & %PATH% ^", "", "日本語"]), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_script_can_t_take_a_line_break_or_a_line_over_cmd_s_limit() {
+        let cmd = Path::new(r"C:\Users\me\AppData\Roaming\npm\claude.cmd");
+        let said = batch_args_problem(cmd, ["-p", "--append-system-prompt", "secret one\nsecret two"]).unwrap();
+        assert!(said.starts_with("claude.cmd is a batch script") && said.contains("argument 3"), "{said}");
+        assert!(!said.contains("secret"), "the argument isn't repeated: {said}");
+        assert!(batch_args_problem(cmd, ["a\rb"]).is_some());
+        let said = batch_args_problem(cmd, ["-p", "x".repeat(9000).as_str()]).unwrap();
+        assert!(said.contains("over cmd.exe's limit of 8191"), "{said}");
+        assert_eq!(batch_args_problem(cmd, ["-p", "x".repeat(4000).as_str()]), None);
+        // `.bat` too, in any case.
+        assert!(batch_args_problem(Path::new("run.BAT"), ["\n"]).is_some());
     }
 
     #[cfg(windows)]

@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-const ECHO: &str = "TREK_TEST_ARGV_ECHO";
+pub(crate) const ECHO: &str = "TREK_TEST_ARGV_ECHO";
 
 /// The stand-in CLI: with `ECHO` set, print argv as a JSON array and exit.
 #[ctor::ctor(unsafe)]
@@ -28,8 +28,10 @@ fn echo_argv() {
 }
 
 /// npm's shim as `cmd-shim` writes it today (`codex.cmd` from npm 10), with the stand-in as
-/// `node.exe` beside it.
+/// `node.exe` beside it. Each shim sets `ECHO` itself (as the first thing, out of the way of what
+/// npm's does), so a caller that sets no environment, an agent's own spawn, still gets the echo.
 const NPM_SHIM: &str = r#"@ECHO off
+SET "TREK_TEST_ARGV_ECHO=1"
 GOTO start
 :find_dp0
 SET dp0=%~dp0
@@ -49,14 +51,14 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\..\pk
 "#;
 
 /// The short form older npm versions (and hand-written wrappers) use.
-const SIMPLE_SHIM: &str = "@\"%~dp0\\node.exe\" \"%~dp0\\..\\pkg\\bin\\x.js\" %*\r\n";
+const SIMPLE_SHIM: &str = "@SET \"TREK_TEST_ARGV_ECHO=1\"\r\n@\"%~dp0\\node.exe\" \"%~dp0\\..\\pkg\\bin\\x.js\" %*\r\n";
 
 /// A folder (with a space in its name, as under `C:\Users\First Last`) holding the stand-in as
 /// `node.exe` and the two shims; removed when dropped.
-struct Shims(PathBuf);
+pub(crate) struct Shims(pub(crate) PathBuf);
 
 impl Shims {
-    fn new(label: &str) -> Self {
+    pub(crate) fn new(label: &str) -> Self {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("trek cmd args {label} {}-{n}", std::process::id()));
@@ -73,13 +75,13 @@ impl Shims {
         Self(dir)
     }
 
-    fn node(&self) -> PathBuf {
+    pub(crate) fn node(&self) -> PathBuf {
         self.0.join("node.exe")
     }
-    fn npm(&self) -> PathBuf {
+    pub(crate) fn npm(&self) -> PathBuf {
         self.0.join("npm.cmd")
     }
-    fn simple(&self) -> PathBuf {
+    pub(crate) fn simple(&self) -> PathBuf {
         self.0.join("simple.cmd")
     }
 }
@@ -248,6 +250,21 @@ async fn tokio_passes_arguments_to_a_cmd_shim_as_std_does() {
     assert!(differ.is_empty(), "{}", differ.join("\n"));
 }
 
+/// `detect::batch_args_problem`, which Trek asks before starting a `.cmd`, objects to exactly the
+/// rows std refuses or cmd.exe can't take, and to nothing it passes.
+#[test]
+fn the_check_before_starting_agrees_with_the_table() {
+    let shims = Shims::new("check");
+    for (name, arg, expect) in cases() {
+        let args = ["before", arg.as_str(), "after"];
+        let problem = trek_core::detect::batch_args_problem(&shims.npm(), args);
+        // NUL is refused for any program, by std; it's not the shim's to say.
+        let objects = matches!(expect, Expect::Refused | Expect::TooLong) && !arg.contains('\0');
+        assert_eq!(problem.is_some(), objects, "{name}: {problem:?}");
+        assert_eq!(trek_core::detect::batch_args_problem(&shims.node(), args), None, "{name}");
+    }
+}
+
 /// A user folder that isn't ASCII (`C:\Users\Jürgen`) holds the shim: it still runs, and its
 /// arguments arrive.
 #[test]
@@ -267,4 +284,19 @@ fn a_bare_name_never_finds_a_cmd() {
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     let found = std::process::Command::new("simple.cmd").env("PATH", &path).env(ECHO, "1").stdin(Stdio::null()).output();
     assert_eq!(outcome(Path::new("simple.cmd"), found), Outcome::Arrived(vec![]));
+}
+
+/// An MCP server the user typed as a `.cmd` with an argument cmd.exe can't take is told so in
+/// words, not started; its other arguments are passed as written (the stand-in isn't a server,
+/// so the check then fails for that reason, having started it).
+#[tokio::test]
+async fn an_mcp_check_says_why_a_cmd_can_t_take_its_arguments() {
+    let shims = Shims::new("mcp");
+    let npm = shims.npm().display().to_string();
+    let server = crate::McpServer::stdio("x", npm.clone(), vec!["--note".into(), "two\nlines".into()], vec![]);
+    let said = crate::mcp_check::list_tools(&server).await.unwrap_err();
+    assert!(said.contains("line break") && said.contains("argument 2"), "{said}");
+    let server = crate::McpServer::stdio("x", npm, vec!["-y".into(), "@scope/server & more".into()], vec![]);
+    let said = crate::mcp_check::list_tools(&server).await.unwrap_err();
+    assert!(!said.contains("line break") && !said.contains("couldn't start"), "{said}");
 }

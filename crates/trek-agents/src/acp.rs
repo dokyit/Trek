@@ -96,6 +96,10 @@ impl Agent {
             _ => Default::default(),
         };
         env.extend(db.env);
+        // An agent the user added may be a `.cmd` given arguments they typed.
+        if let Some(problem) = detect::batch_args_problem(&bin, &args) {
+            bail!("{name} can't start: {problem}");
+        }
         let mut command = tokio::process::Command::new(&bin);
         command
             .args(&args)
