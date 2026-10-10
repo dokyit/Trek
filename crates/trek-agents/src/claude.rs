@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -241,14 +241,19 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
 
 /// `mcpServers` for `--mcp-config`, with a per-server `timeout` (ms) where a server's calls may
 /// run long: it lifts both Claude Code's limit on one call and its idle limit (half an hour).
-fn claude_mcp_servers(servers: &[crate::McpServer]) -> Value {
-    let mut out = mcp_servers_json(servers);
+/// Along with a notice for each server that can't be handed to Claude Code (left out).
+fn claude_mcp_servers(servers: &[crate::McpServer]) -> (Value, Vec<String>) {
+    claude_mcp_servers_with(servers, mcp_servers_json(servers, BatchHandOff::CmdWrapper))
+}
+
+/// `claude_mcp_servers` on top of the servers' JSON as handed over (see `mcp_servers_json_with`).
+fn claude_mcp_servers_with(servers: &[crate::McpServer], (mut out, left_out): (Value, Vec<String>)) -> (Value, Vec<String>) {
     for s in servers {
         if let (Some(secs), Some(entry)) = (s.tool_timeout_secs, out.get_mut(&s.name)) {
             entry["timeout"] = json!(secs * 1000);
         }
     }
-    out
+    (out, left_out)
 }
 
 /// A session to cut back that isn't on disk with that message (deleted, or the message is from
@@ -773,7 +778,11 @@ pub async fn run(
     let mcp_file = if config.mcp_servers.is_empty() {
         None
     } else {
-        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": claude_mcp_servers(&config.mcp_servers) }))?)?)
+        let (servers, left_out) = claude_mcp_servers(&config.mcp_servers);
+        for notice in left_out {
+            let _ = events.send(AgentEvent::Notice(notice)).await;
+        }
+        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": servers }))?)?)
     };
     let mut cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
     let mut ctl = Control { next_id: 0 };
@@ -1767,22 +1776,25 @@ mod tests {
     #[test]
     fn mcp_config_shape() {
         let servers = [crate::McpServer::stdio("fs", "npx", vec!["-y".into(), "srv".into()], vec![("K".into(), "v".into())])];
+        // Not on Windows (here, or with an `npx` that is a `.cmd`): what the user wrote, as before.
+        let as_written = |servers: &[crate::McpServer]| claude_mcp_servers_with(servers, crate::mcp_servers_json_with(servers, BatchHandOff::CmdWrapper, false, |_| Some("C:\\n\\npx.cmd".into())));
         assert_eq!(
-            json!({ "mcpServers": mcp_servers_json(&servers) }),
+            json!({ "mcpServers": as_written(&servers).0 }),
             json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})
         );
         // A remote server: Claude Code's own `--transport http` shape.
         let figma = crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]);
         let linear = crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]);
         assert_eq!(
-            claude_mcp_servers(&[figma, linear]),
+            as_written(&[figma, linear]).0,
             json!({
                 "figma-desktop": {"type":"http","url":"http://127.0.0.1:3845/mcp","headers":{}},
                 "linear": {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer t"}},
             })
         );
         let trek = crate::McpServer { tool_timeout_secs: Some(1900), ..crate::McpServer::stdio("trek-orchestrate", "trek-mcp", vec![], vec![]) };
-        let out = claude_mcp_servers(&[trek, servers[0].clone()]);
+        let (out, left_out) = as_written(&[trek, servers[0].clone()]);
+        assert!(left_out.is_empty());
         assert_eq!(out["trek-orchestrate"]["timeout"], 1_900_000, "Trek's tools may wait long on a sub-agent");
         assert!(out["fs"].get("timeout").is_none(), "others keep Claude Code's default");
     }

@@ -1858,7 +1858,7 @@ mod tests {
         };
         let servers = trek_servers();
         let refused = |r: &Value, why: &str| r["error"]["message"].as_str().is_some_and(|m| m.contains(why));
-        assert!(refused(&ask(crate::mcp_servers_json(&servers[..1])), "must be an array"));
+        assert!(refused(&ask(crate::mcp_servers_json_with(&servers[..1], crate::BatchHandOff::CmdWrapper, false, |_| None).0), "must be an array"));
         let (http, _) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
         assert!(refused(&ask(http), "http isn't supported"));
         let (stdio, skipped) = acp_mcp_servers(&servers, &json!({}));
