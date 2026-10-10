@@ -43,6 +43,9 @@ use std::time::{Duration, Instant};
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else { return };
     let _ = std::fs::create_dir_all(&dir);
+    // Weak between batches: this loop outlives the app's own wind-down, and a handle it held
+    // would be one left when GPUI drops its entities (the leak detector panics on that).
+    let workspace = workspace.downgrade();
     cx.spawn(async move |cx| {
         let mut recording: Option<Recording> = None;
         loop {
@@ -50,6 +53,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
             let cmd = dir.join("cmd");
             let Ok(text) = std::fs::read_to_string(&cmd) else { continue };
             let _ = std::fs::remove_file(&cmd);
+            let Some(workspace) = workspace.upgrade() else { break };
             let mut errors = Vec::new();
             for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
                 let (verb, arg) = line.split_once(' ').unwrap_or((line, ""));
@@ -57,7 +61,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
-                    "quit" => quit(&workspace, cx),
+                    "quit" => quit(cx),
                     _ => cx.update(|cx| run(&workspace, verb, arg, cx)),
                 };
                 if let Err(e) = result {
@@ -229,11 +233,9 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
     Recording { stop, task }
 }
 
-fn quit(ws: &Entity<Workspace>, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    cx.update(|cx| {
-        ws.update(cx, |ws, _| ws.shutdown_sessions());
-        cx.quit();
-    });
+fn quit(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    // As the Quit menu item does.
+    cx.update(crate::root::quit);
     Ok(())
 }
 

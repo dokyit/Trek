@@ -776,9 +776,25 @@ pub fn quit_with_main_window(cx: &mut App) {
 }
 
 /// End the app: the agents' sessions first.
+///
+/// On Windows the windows go first too, and the quit follows them. A window's native state is let
+/// go by a task its drop queues, and one still queued as the loop ends never runs: a text field
+/// in focus has handed the window the handle it takes the keys by, which is then left holding
+/// the field's state when GPUI drops its entities (a `shots` build, or a test, panics with
+/// "Exited with leaked handles" there). A window being updated can't be removed from inside
+/// that update, so the work waits for the current one to finish.
 pub fn quit(cx: &mut App) {
     crate::workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
-    cx.quit();
+    if cfg!(windows) {
+        cx.defer(|cx| {
+            for window in cx.windows() {
+                let _ = window.update(cx, |_, window, _| window.remove_window());
+            }
+            cx.quit();
+        });
+    } else {
+        cx.quit();
+    }
 }
 
 /// The Trek window with keyboard focus; `None` when another app is in front.
