@@ -227,3 +227,44 @@ fn quitting_closes_the_windows_first_on_windows() {
         drop(trek);
     });
 }
+
+/// The note on screen as saved on disk.
+fn note_on_disk() -> String {
+    trek_core::notes::list_in(&trek_core::notes::notes_dir()).first().map(|n| n.body.clone()).unwrap_or_default()
+}
+
+#[test]
+fn a_note_typed_just_before_quitting_is_kept() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        // Typed, then quit before the save that follows typing comes round. The Notes view is
+        // the main window's, and only the window holds it (as in the app, not the harness): on
+        // Windows `quit` closes the windows before GPUI's quit handlers run.
+        trek.type_text(cx, "milk");
+        drop(trek);
+        cx.update(|cx| crate::root::quit(cx));
+        cx.run_until_parked();
+        cx.update(|cx| cx.shutdown());
+        cx.run_until_parked();
+        assert_eq!(note_on_disk(), "milk");
+    });
+}
+
+#[test]
+fn a_note_typed_just_before_the_main_window_closes_is_kept() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        trek.type_text(cx, "eggs");
+        cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
+        let window = trek.window;
+        drop(trek);
+        // Closed as on macOS, where Trek keeps running.
+        let _ = cx.update(|cx| window.update(cx, |_, window, _| window.remove_window()));
+        cx.run_until_parked();
+        assert_eq!(note_on_disk(), "eggs");
+    });
+}
