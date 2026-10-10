@@ -579,12 +579,33 @@ mod tests {
         quiet("ping", &["-n", "30", "127.0.0.1"])
     }
 
-    /// `program` started with no console window, its output thrown away.
+    /// `program` started with no console at all, its output thrown away. Detached, not just
+    /// windowless: a new console would come with a conhost.exe of the process's own, which
+    /// `children()` would count as one the process started (CI run 38048790217 caught two).
     #[cfg(windows)]
     fn quiet(program: &str, args: &[&str]) -> std::process::Child {
         use std::os::windows::process::CommandExt as _;
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-        std::process::Command::new(program).args(args).stdout(std::process::Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn().unwrap()
+        use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
+        std::process::Command::new(program).args(args).stdout(std::process::Stdio::null()).creation_flags(DETACHED_PROCESS).spawn().unwrap()
+    }
+
+    /// The image `pid` runs, lower-cased ("c:\windows\system32\conhost.exe"), "" when it's gone.
+    #[cfg(windows)]
+    fn image_name(pid: u32) -> String {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: a handle this call owns (closed below), and a buffer written to `n` bytes.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return String::new();
+            }
+            let mut buf = [0u16; 1024];
+            let mut n = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n);
+            CloseHandle(h);
+            if ok == 0 { String::new() } else { String::from_utf16_lossy(&buf[..n as usize]).to_lowercase() }
+        }
     }
 
     #[test]
@@ -688,14 +709,23 @@ mod tests {
         #[cfg(target_os = "macos")]
         let mut parent = std::process::Command::new("/bin/sh").args(["-c", "/bin/sleep 30; true"]).spawn().unwrap();
         let id = parent.id();
+        // Console children may bring a conhost.exe (or OpenConsole.exe) of their own — Windows
+        // parents each console's host under the console's owner — so it isn't counted; inside
+        // the wait too, or a snapshot could catch it alone first.
+        #[cfg(windows)]
+        let is_console_host = |pid: u32| { let n = image_name(pid); n.ends_with("conhost.exe") || n.ends_with("openconsole.exe") };
+        #[cfg(windows)]
+        let kids_of = |pid: u32| children(pid).into_iter().filter(|k| !is_console_host(*k)).collect::<Vec<_>>();
+        #[cfg(not(windows))]
+        let kids_of = children;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut kids = children(id);
+        let mut kids = kids_of(id);
         while kids.is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
-            kids = children(id);
+            kids = kids_of(id);
         }
         assert_eq!(kids.len(), 1, "one child: {kids:?}");
-        assert!(children(kids[0]).is_empty(), "and none under it");
+        assert!(kids_of(kids[0]).is_empty(), "and none under it");
         assert!(children(u32::MAX - 1).is_empty(), "no such process");
         let _ = parent.kill();
         let _ = parent.wait();
