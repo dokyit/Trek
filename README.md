@@ -88,6 +88,11 @@ Download `Trek-<version>-darwin-aarch64.app.tar.gz` from
 [Releases](https://github.com/dokyit/Trek/releases), unpack it (double-click) and move **Trek.app** to
 Applications. Trek needs macOS 13 or later on Apple silicon.
 
+On Windows, download `Trek-<version>-windows-x86_64.zip` instead, unzip it into a folder your account
+can write (not `Program Files`) and run `trek.exe`. Nothing is Authenticode-signed yet, so SmartScreen
+warns once on first launch - **More info** > **Run anyway**. Trek targets Windows 11 on x64; Windows 10
+22H2 is best effort, with an opaque window instead of Mica.
+
 Releases are signed with Trek's own certificate but **not notarized by Apple**, so the first launch needs
 one extra step. Either:
 
@@ -198,8 +203,10 @@ last reported, so Trek doesn't open a session to ask again). See
 
 ## What isn't done
 
-- **Apple silicon only, macOS only.** No Intel build is published; Windows and Linux aren't supported.
-- **Not notarized.** First launch needs the step above. Notarization needs an Apple Developer ID.
+- **Apple silicon only on Mac, x64 only on Windows.** No Intel Mac or ARM64 Windows build is published;
+  Linux isn't supported.
+- **Not notarized, not Authenticode-signed.** First launch needs the step above (Gatekeeper on macOS,
+  one SmartScreen prompt on Windows).
 - **API keys and local models are chat only.** Trek's own tool loop (read, edit, run with the hand-holding
   gates) isn't built yet; use a CLI agent for real work in a repository.
 - **Imports** cover Claude Code, Codex and OpenCode; Cursor, Copilot and other agents' history isn't
