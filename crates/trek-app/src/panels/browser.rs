@@ -129,15 +129,21 @@ const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
 /// Where to get the WebView2 runtime when a Windows system has none.
 const WEBVIEW2_DOWNLOAD: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 
-/// WebView2 can't load a custom scheme, so on Windows wry serves `trek://newtab/…` as
-/// `http://trek.newtab/…`. Every `http://trek.*` request goes to Trek's handler, so nothing but
-/// Trek's pages can be at that address.
-const WEBVIEW2_TREK: &str = "http://trek.";
+/// The scheme Trek's own pages are registered under, which Trek spells `trek://`. WebView2 can't
+/// load a custom scheme, so on Windows wry serves `<scheme>://newtab/…` as `http://<scheme>.newtab/…`
+/// and answers every `http://<scheme>.*` request itself: nothing else can be at such an address.
+/// So there the scheme is one no web site uses (`http://trek.localhost`, say, is somebody's dev
+/// server, not Trek's start page).
+const PAGES_SCHEME: &str = if cfg!(windows) { "trek-pages" } else { "trek" };
+const WEBVIEW2_TREK: &str = "http://trek-pages.";
 
+/// Trek's form of a page address for WebView2's (`trek://newtab/` is `http://trek-pages.newtab/`),
+/// whatever case the scheme was typed in.
 fn to_webview2(url: &str) -> Cow<'_, str> {
-    match url.strip_prefix("trek://") {
-        Some(rest) => Cow::Owned(format!("{WEBVIEW2_TREK}{rest}")),
-        None => Cow::Borrowed(url),
+    const TREK: &str = "trek://";
+    match url.get(..TREK.len()) {
+        Some(scheme) if scheme.eq_ignore_ascii_case(TREK) => Cow::Owned(format!("{WEBVIEW2_TREK}{}", &url[TREK.len()..])),
+        _ => Cow::Borrowed(url),
     }
 }
 
@@ -462,6 +468,34 @@ impl Page {
     }
 }
 
+/// How long a page screenshot may take before Trek gives up on it.
+#[cfg(windows)]
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The page screenshots asked for, one at a time. WebView2 never answers one for a view it isn't
+/// drawing, so each is given a number and the first of its answer and its timeout wins.
+#[cfg(windows)]
+#[derive(Default)]
+struct Captures {
+    last: u64,
+    waiting: Option<u64>,
+}
+
+#[cfg(windows)]
+impl Captures {
+    /// A screenshot starts; its number.
+    fn begin(&mut self) -> u64 {
+        self.last += 1;
+        self.waiting = Some(self.last);
+        self.last
+    }
+
+    /// Screenshot `id` answered or ran out of time: whether it was still being waited for.
+    fn end(&mut self, id: u64) -> bool {
+        self.waiting.take_if(|waiting| *waiting == id).is_some()
+    }
+}
+
 pub struct BrowserPanel {
     workspace: Entity<Workspace>,
     tabs: Vec<Tab>,
@@ -474,6 +508,8 @@ pub struct BrowserPanel {
     menu_open: bool,
     picking: bool,
     capturing: bool,
+    #[cfg(windows)]
+    captures: Captures,
     unavailable: bool,
     tx: async_channel::Sender<Msg>,
     /// CSS custom properties for internal pages, shared with every view's protocol handler.
@@ -781,6 +817,8 @@ impl BrowserPanel {
             menu_open: false,
             picking: false,
             capturing: false,
+            #[cfg(windows)]
+            captures: Captures::default(),
             unavailable: false,
             tx,
             page_vars: Rc::new(RefCell::new(page_vars(cx))),
@@ -855,7 +893,7 @@ impl BrowserPanel {
                 .with_accept_first_mouse(true)
                 .with_back_forward_navigation_gestures(true)
                 .with_initialization_script_for_main_only(INIT_JS, true)
-                .with_custom_protocol("trek".into(), move |_, request| {
+                .with_custom_protocol(PAGES_SCHEME.into(), move |_, request| {
                     let (mime, body) = internal_page(request.uri().path(), &vars.borrow());
                     wry::http::Response::builder().header("Content-Type", mime).header("Cache-Control", "no-store").body(body).unwrap_or_default()
                 })
@@ -1185,10 +1223,12 @@ impl BrowserPanel {
     #[cfg(windows)]
     fn screenshot(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else { return };
-        if self.capturing || !self.visible || !tab.page.ready {
+        // WebView2 draws nothing for a view that's hidden, and never says so.
+        if self.capturing || !self.visible || !tab.page.ready || !tab.view.read(cx).visible() {
             return;
         }
         let png = native::capture_png(tab.view.read(cx).raw());
+        let id = self.captures.begin();
         self.capturing = true;
         cx.notify();
         let task = cx.spawn(async move |this, cx| {
@@ -1196,23 +1236,37 @@ impl BrowserPanel {
             let result = match png.recv().await {
                 Ok(Ok(bytes)) => {
                     let out = dest.clone();
-                    cx.background_executor().spawn(async move { std::fs::write(&out, bytes).map_err(|e| e.to_string()) }).await
+                    cx.background_executor().spawn(async move { std::fs::write(&out, bytes).map_err(|e| e.to_string()) }).await.map(|()| dest)
                 }
                 Ok(Err(message)) => Err(format!("Couldn't capture the page: {message}")),
                 Err(_) => Err("The page closed before it was captured.".to_string()),
             };
-            let _ = this.update(cx, |this, cx| {
-                this.capturing = false;
-                let event = match result {
-                    Ok(()) => WorkspaceEvent::AttachImage(dest),
-                    Err(message) => WorkspaceEvent::Toast { message, undo: None },
-                };
-                this.workspace.update(cx, |_, cx| cx.emit(event));
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.captured(id, result, cx));
+        });
+        // A view that stops drawing mid-capture (a crashed page, a minimised window) never answers:
+        // give up, or the button would spin for good.
+        let timeout = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CAPTURE_TIMEOUT).await;
+            let _ = this.update(cx, |this, cx| this.captured(id, Err("Couldn't capture the page: it didn't draw.".to_string()), cx));
         });
         self._tasks.retain(|t| !t.is_ready());
         self._tasks.push(task);
+        self._tasks.push(timeout);
+    }
+
+    /// Screenshot `id` ended (an image to attach, or why not), unless it already did.
+    #[cfg(windows)]
+    fn captured(&mut self, id: u64, result: Result<PathBuf, String>, cx: &mut Context<Self>) {
+        if !self.captures.end(id) {
+            return;
+        }
+        self.capturing = false;
+        let event = match result {
+            Ok(dest) => WorkspaceEvent::AttachImage(dest),
+            Err(message) => WorkspaceEvent::Toast { message, undo: None },
+        };
+        self.workspace.update(cx, |_, cx| cx.emit(event));
+        cx.notify();
     }
 
     #[cfg(not(windows))]
@@ -1795,25 +1849,37 @@ mod tests {
     };
     use gpui_kit::ImageFormat;
     #[cfg(windows)]
-    use super::{Msg, native};
-    #[cfg(windows)]
-    use std::borrow::Cow;
-    #[cfg(windows)]
-    use std::time::{Duration, Instant};
+    use super::{Captures, Msg, PAGES_SCHEME, native};
 
     #[test]
     fn trek_pages_cross_into_webview2_and_back() {
-        assert_eq!(to_webview2("trek://newtab/"), "http://trek.newtab/");
-        assert_eq!(to_webview2("trek://newtab/error#http%3A%2F%2Fx"), "http://trek.newtab/error#http%3A%2F%2Fx");
-        assert_eq!(from_webview2("http://trek.newtab/mark.png".into()), "trek://newtab/mark.png");
-        // Everything else passes untouched, either way.
-        for url in ["https://example.com/", "http://localhost:3000/", "https://trek.dev/", "about:blank"] {
+        assert_eq!(to_webview2("trek://newtab/"), "http://trek-pages.newtab/");
+        assert_eq!(to_webview2("trek://newtab/error#http%3A%2F%2Fx"), "http://trek-pages.newtab/error#http%3A%2F%2Fx");
+        assert_eq!(from_webview2("http://trek-pages.newtab/mark.png".into()), "trek://newtab/mark.png");
+        // A scheme is the same scheme in any case: WebView2 mustn't be handed `TREK://`, which it
+        // would take for an app to launch.
+        assert_eq!(to_webview2("TREK://newtab/"), "http://trek-pages.newtab/");
+        assert_eq!(to_webview2("Trek://newtab/error"), "http://trek-pages.newtab/error");
+        // Everything else passes untouched, either way, including sites named like Trek's pages.
+        for url in ["https://example.com/", "http://localhost:3000/", "https://trek.dev/", "http://trek.localhost:3000/", "http://trek/", "trek:", "trek:/x", "trek:/é", "tré","about:blank", ""] {
             assert_eq!(to_webview2(url), url);
             assert_eq!(from_webview2(url.into()), url);
         }
         // The platform's own form: a round trip always lands back on Trek's.
         assert_eq!(from_view(to_view(START_URL).into_owned()), START_URL);
         assert_eq!(to_view(START_URL) == START_URL, !cfg!(windows));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_screenshot_is_given_up_on_once_and_a_late_answer_is_ignored() {
+        let mut captures = Captures::default();
+        let first = captures.begin();
+        assert!(captures.end(first), "the timeout ends it");
+        assert!(!captures.end(first), "its late answer finds it gone");
+        let second = captures.begin();
+        assert!(!captures.end(first), "an old answer doesn't end the next screenshot");
+        assert!(captures.end(second));
     }
 
     #[test]
@@ -1926,23 +1992,27 @@ mod tests {
         assert_eq!(huge, None, "too big to be an icon");
     }
 
-    /// A real WebView2 in a real window (off screen, never activated): the native calls the
-    /// headless harness can't reach. Run by hand: `cargo test -p trek-app real_webview2 -- --ignored`.
+    /// A real WebView2 in a real window, for the `#[ignore]`d tests below: off screen, never
+    /// activated, on a data folder of its own.
     #[cfg(windows)]
-    #[test]
-    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
-    fn a_real_webview2_loads_reports_captures_and_outlives_its_window() {
+    mod real {
+        use super::{Msg, PAGES_SCHEME, from_view, native};
         use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
+        use std::borrow::Cow;
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-        struct Parent(isize);
+        pub struct Parent(pub isize);
         impl HasWindowHandle for Parent {
             fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
                 let hwnd = std::num::NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?;
                 Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(hwnd))) })
             }
         }
-        fn pump() {
+
+        pub fn pump() {
             unsafe {
                 let mut msg = std::mem::zeroed::<MSG>();
                 while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -1951,7 +2021,8 @@ mod tests {
                 }
             }
         }
-        fn wait_for<T>(what: &str, mut poll: impl FnMut() -> Option<T>) -> T {
+
+        pub fn wait_for<T>(what: &str, mut poll: impl FnMut() -> Option<T>) -> T {
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 pump();
@@ -1963,49 +2034,109 @@ mod tests {
             }
         }
 
-        // A plain STATIC window as the parent: off screen, no taskbar button, never activated.
-        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-        let parent = unsafe {
-            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.as_ptr(), std::ptr::null(), WS_POPUP | WS_CLIPCHILDREN, -32000, -32000, 640, 480, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null())
-        };
-        assert!(!parent.is_null(), "a parent window");
-        unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
+        /// A plain STATIC window as the parent: off screen, no taskbar button, never activated.
+        pub fn parent_window() -> isize {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let parent = unsafe {
+                CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.as_ptr(), std::ptr::null(), WS_POPUP | WS_CLIPCHILDREN, -32000, -32000, 640, 480, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null())
+            };
+            assert!(!parent.is_null(), "a parent window");
+            unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
+            parent as isize
+        }
 
-        let data = std::env::temp_dir().join(format!("trek-webview2-test-{}", std::process::id()));
-        let mut context = wry::WebContext::new(Some(data.clone()));
-        let (tx, rx) = async_channel::unbounded::<Msg>();
-        let (t1, t2) = (tx.clone(), tx.clone());
-        let wv = wry::WebViewBuilder::new_with_web_context(&mut context)
-            .with_focused(false)
-            .with_url("about:blank")
-            .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(0, 0).into(), size: wry::dpi::LogicalSize::new(400, 300).into() })
-            .with_custom_protocol("trek".into(), |_, _| {
-                wry::http::Response::builder().header("Content-Type", "text/html").body(Cow::Borrowed(&b"<title>Trek page</title>"[..])).unwrap_or_default()
-            })
-            .with_document_title_changed_handler(move |title| {
-                let _ = t1.try_send(Msg::Title(1, title));
-            })
-            .with_on_page_load_handler(move |event, url| {
-                let _ = t2.try_send(Msg::Load { tab: 1, finished: matches!(event, wry::PageLoadEvent::Finished), url });
-            })
-            .build_as_child(&Parent(parent as isize))
-            .expect("a WebView2 (is the runtime installed?)");
-        native::watch(&wv, 1, &tx);
-        let loaded = |want: &str| {
-            let want = want.to_string();
-            wait_for(&format!("{want} to load"), || match rx.try_recv() {
-                Ok(Msg::Load { finished: true, url, .. }) if from_view(url.clone()) == want => Some(()),
-                _ => None,
-            })
-        };
+        /// The window in front, whoever's it is.
+        pub fn foreground() -> isize {
+            unsafe { GetForegroundWindow() as isize }
+        }
+
+        /// The window of this thread with the keys (0 for none).
+        pub fn focus() -> isize {
+            unsafe {
+                let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..std::mem::zeroed() };
+                GetGUIThreadInfo(windows_sys::Win32::System::Threading::GetCurrentThreadId(), &mut info);
+                info.hwndFocus as isize
+            }
+        }
+
+        /// A view as the Browser tool makes one (Trek's pages under `PAGES_SCHEME`), with what it reports.
+        pub struct View {
+            pub wv: wry::WebView,
+            pub rx: async_channel::Receiver<Msg>,
+            context: wry::WebContext,
+            data: PathBuf,
+        }
+
+        impl View {
+            pub fn open(parent: isize) -> View {
+                static N: AtomicUsize = AtomicUsize::new(0);
+                let data = std::env::temp_dir().join(format!("trek-webview2-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+                let mut context = wry::WebContext::new(Some(data.clone()));
+                let (tx, rx) = async_channel::unbounded::<Msg>();
+                let (t1, t2) = (tx.clone(), tx.clone());
+                let wv = wry::WebViewBuilder::new_with_web_context(&mut context)
+                    .with_focused(false)
+                    .with_url("about:blank")
+                    .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(0, 0).into(), size: wry::dpi::LogicalSize::new(400, 300).into() })
+                    .with_custom_protocol(PAGES_SCHEME.into(), |_, _| {
+                        wry::http::Response::builder().header("Content-Type", "text/html").body(Cow::Borrowed(&b"<title>Trek page</title>"[..])).unwrap_or_default()
+                    })
+                    .with_document_title_changed_handler(move |title| {
+                        let _ = t1.try_send(Msg::Title(1, title));
+                    })
+                    .with_on_page_load_handler(move |event, url| {
+                        let _ = t2.try_send(Msg::Load { tab: 1, finished: matches!(event, wry::PageLoadEvent::Finished), url });
+                    })
+                    .build_as_child(&Parent(parent))
+                    .expect("a WebView2 (is the runtime installed?)");
+                native::watch(&wv, 1, &tx);
+                View { wv, rx, context, data }
+            }
+
+            /// Wait for `want` (in Trek's form) to finish loading.
+            pub fn loaded(&self, want: &str) {
+                wait_for(&format!("{want} to load"), || match self.rx.try_recv() {
+                    Ok(Msg::Load { finished: true, url, .. }) if from_view(url.clone()) == want => Some(()),
+                    _ => None,
+                })
+            }
+
+            /// Wait for the page's title to be `want`.
+            pub fn titled(&self, want: &str) {
+                wait_for(&format!("the title {want:?}"), || match self.rx.try_recv() {
+                    Ok(Msg::Title(_, title)) if title == want => Some(()),
+                    _ => None,
+                })
+            }
+
+            /// Close the view, then the data folder it kept.
+            pub fn finish(self) {
+                let View { wv, context, data, .. } = self;
+                drop(wv);
+                pump();
+                drop(context);
+                let _ = std::fs::remove_dir_all(&data);
+            }
+        }
+    }
+
+    /// A real WebView2 in a real window (off screen, never activated): the native calls the
+    /// headless harness can't reach. Run by hand: `cargo test -p trek-app a_real_webview2 -- --ignored`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_loads_reports_captures_and_outlives_its_window() {
+        use real::{View, focus, parent_window, pump, wait_for};
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        let parent = parent_window();
+        let view = View::open(parent);
+        let (wv, rx) = (&view.wv, &view.rx);
+        let loaded = |want: &str| view.loaded(want);
         loaded("about:blank");
         // Created without the keys: nothing in this thread took the focus.
-        let focus = unsafe {
-            let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..std::mem::zeroed() };
-            GetGUIThreadInfo(windows_sys::Win32::System::Threading::GetCurrentThreadId(), &mut info);
-            info.hwndFocus
-        };
-        assert!(focus.is_null() || focus == parent, "the new view took the focus");
+        let keys = focus();
+        assert!(keys == 0 || keys == parent, "the new view took the focus");
 
         // A titled page: the title arrives, and history now goes back.
         wv.load_url("data:text/html,<title>Trek%20test</title><p>hello").expect("navigate");
@@ -2016,7 +2147,7 @@ mod tests {
         wait_for("history", || native::can_go_back(&wv).then_some(()));
         assert!(!native::can_go_forward(&wv));
 
-        // Trek's own pages, through wry's http://trek. stand-in, come back as trek://.
+        // Trek's own pages, through wry's http://trek-pages. stand-in, come back as trek://.
         wv.load_url(&to_view(START_URL)).expect("navigate");
         loaded(START_URL);
 
@@ -2036,12 +2167,88 @@ mod tests {
         assert!(failed.starts_with("http://127.0.0.1:9"), "{failed}");
 
         // The window goes first (a closed Trek window), then the view: no crash.
-        unsafe { DestroyWindow(parent) };
+        unsafe { DestroyWindow(parent as _) };
         pump();
-        drop(wv);
+        view.finish();
+    }
+
+    /// Only Trek's pages are at Trek's address, hiding the view leaves the windows alone, and a
+    /// hidden view answers no capture.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_serves_sites_named_like_trek_and_keeps_the_front_window_when_hidden() {
+        use real::{View, foreground, parent_window, pump, wait_for};
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        // A dev server on loopback that answers anything with a titled page.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("its address").port();
+        listener.set_nonblocking(true).expect("non-blocking");
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = std::thread::spawn({
+            let stop = stop.clone();
+            move || {
+                let page = "<title>Dev server</title>";
+                while !stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                            let _ = stream.read(&mut [0u8; 4096]);
+                            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+                            let _ = stream.write_all(head.as_bytes());
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            }
+        });
+
+        let parent = parent_window();
+        let view = View::open(parent);
+        let wv = &view.wv;
+        view.loaded("about:blank");
+
+        // `trek.localhost` is a dev server's name (Caddy, portless…), not Trek's start page.
+        wv.load_url(&to_view(&format!("http://trek.localhost:{port}/"))).expect("navigate");
+        view.titled("Dev server");
+        wv.load_url(&to_view(START_URL)).expect("navigate");
+        view.titled("Trek page");
+
+        // Handing the keys back and hiding the view move nothing in front of anything.
+        let front = foreground();
+        wv.focus_parent().expect("focus parent");
+        wv.set_visible(false).expect("hide");
         pump();
-        drop(context);
-        let _ = std::fs::remove_dir_all(&data);
+        wv.set_visible(true).expect("show");
+        pump();
+        assert_eq!(foreground(), front, "the view changed which window is in front");
+
+        // A view that's hidden draws nothing and answers no capture (hence the panel's timeout and
+        // its refusing to ask); shown again, it answers.
+        wv.set_visible(false).expect("hide");
+        let hidden = native::capture_png(wv);
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            pump();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hidden.try_recv().is_err(), "a hidden view drew a capture: the panel's guard is not needed");
+        wv.set_visible(true).expect("show");
+        let shot = native::capture_png(wv);
+        let png = wait_for("a capture", || shot.try_recv().ok()).expect("a capture");
+        assert!(png.starts_with(b"\x89PNG"));
+
+        unsafe { DestroyWindow(parent as _) };
+        pump();
+        view.finish();
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("the server");
     }
 
     #[test]
