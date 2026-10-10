@@ -164,12 +164,22 @@ mod tests {
         // just them out again where the crate can list and purge.
         #[cfg(windows)]
         {
-            let items: Vec<_> = trash::os_limited::list()
-                .unwrap()
-                .into_iter()
-                .filter(|i| i.original_parent.file_name() == dir.file_name() && (i.name == "note.txt" || i.name == "folder"))
-                .collect();
-            assert_eq!(items.len(), 2, "both went into the Recycle Bin");
+            // The bin's enumeration trails IFileOperation on change notifications: on a loaded
+            // machine the second item hasn't shown yet when the first is already listed. Wait for
+            // both rather than read once (CI run 38048787332 saw exactly one).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let items = loop {
+                let items: Vec<_> = trash::os_limited::list()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|i| i.original_parent.file_name() == dir.file_name() && (i.name == "note.txt" || i.name == "folder"))
+                    .collect();
+                if items.len() == 2 {
+                    break items;
+                }
+                assert!(std::time::Instant::now() < deadline, "both went into the Recycle Bin");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
             trash::os_limited::purge_all(items).unwrap();
         }
         let _ = std::fs::remove_dir_all(&dir);
