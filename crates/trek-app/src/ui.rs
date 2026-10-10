@@ -53,8 +53,9 @@ pub fn apply_glass(window: &mut Window, on: bool, dark: bool, applied: &mut Opti
     let native = crate::system::native_glass(window, on);
     let mica = cfg!(windows) && on;
     MATERIAL.store(if native { Material::Native } else if mica { Material::Mica } else { Material::Blur } as u8, std::sync::atomic::Ordering::Relaxed);
+    tracing::debug!("glass: on={on} dark={dark} native={native} mica={mica}");
     #[cfg(windows)]
-    crate::winlook::set_backdrop_dark(window, dark);
+    crate::winlook::set_backdrop(window, dark, on);
     window.set_background_appearance(backdrop(on, native, mica));
     window.defer(cx, move |window, cx| {
         if let Some(Some(root)) = window.root::<gpui_kit::component::Root>() {

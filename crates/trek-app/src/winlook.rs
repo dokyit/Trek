@@ -6,6 +6,9 @@
 //! The decisions are plain functions of what was read (`glass_available`, `reduces_motion`), so
 //! they run, and are tested, on every platform; the reads are Windows-only.
 
+// The decisions are plain functions that other platforms' tests run too; only Windows calls them.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 /// The first Windows 11 build with the system backdrop material (Mica, Mica Alt) a window can ask
 /// for (22H2). Windows 10, and 11 before this, get an opaque window where macOS gets glass.
 pub const MICA_BUILD: u32 = 22621;
@@ -99,11 +102,13 @@ pub fn reduce_motion() -> bool {
     read != 0 && reduces_motion(on != 0)
 }
 
-/// Tell DWM whether the window's backdrop material should be its dark or its light one, so Mica
-/// follows Trek's theme (Night, Paper) rather than the system's: Paper over a dark Mica would be
-/// muddy, and Night over a light one glaring. GPUI sets this from the system's appearance only.
+/// Tell DWM how the window's backdrop material should look. `dark` picks its dark or light tone,
+/// so Mica follows Trek's theme (Night, Paper) rather than the system's: Paper over a dark Mica
+/// would be muddy, and Night over a light one glaring (GPUI sets this from the system's
+/// appearance only). Without `glass` the material is taken off the window (GPUI's opaque
+/// background leaves a Mica it set before in place), so none shows at the frame's edge.
 #[cfg(windows)]
-pub fn set_backdrop_dark(window: &gpui_kit::Window, dark: bool) {
+pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     #[link(name = "dwmapi")]
     unsafe extern "system" {
@@ -111,12 +116,22 @@ pub fn set_backdrop_dark(window: &gpui_kit::Window, dark: bool) {
     }
     /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
     const USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    /// `DWMWA_SYSTEMBACKDROP_TYPE`, and its `DWMSBT_NONE`.
+    const SYSTEMBACKDROP_TYPE: u32 = 38;
+    const BACKDROP_NONE: i32 = 1;
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
     let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
-    let value = dark as i32;
-    // SAFETY: `hwnd` is the live window GPUI created for this `window`, on its own thread; the
-    // attribute takes a BOOL, which `value` is the size of and outlives the call.
-    unsafe { DwmSetWindowAttribute(win32.hwnd.get() as *mut core::ffi::c_void, USE_IMMERSIVE_DARK_MODE, (&value as *const i32).cast(), std::mem::size_of::<i32>() as u32) };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    let set = |attribute: u32, value: i32| {
+        // SAFETY: `hwnd` is the live window GPUI created for this `window`, on its own thread;
+        // both attributes take a 4-byte value, which `value` is and outlives the call. Windows
+        // before 11 22H2 refuse the backdrop one, which is the answer wanted there.
+        unsafe { DwmSetWindowAttribute(hwnd, attribute, (&value as *const i32).cast(), std::mem::size_of::<i32>() as u32) };
+    };
+    set(USE_IMMERSIVE_DARK_MODE, dark as i32);
+    if !glass {
+        set(SYSTEMBACKDROP_TYPE, BACKDROP_NONE);
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +150,16 @@ mod tests {
         assert!(!glass_available(26100, false));
         // An unreadable build (0) is not Mica.
         assert!(!glass_available(0, true));
+    }
+
+    /// The reads themselves run here and answer something sensible; what they answer is this
+    /// machine's own setting, so only the build number is held to a value.
+    #[cfg(windows)]
+    #[test]
+    fn the_reads_work_on_this_machine() {
+        assert!(build_number() >= 19041, "a Windows 10 or 11 build number, got {}", build_number());
+        let _ = (reduce_motion(), glass_now());
+        forget();
     }
 
     #[test]
