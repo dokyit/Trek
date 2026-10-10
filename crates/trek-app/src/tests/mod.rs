@@ -35,6 +35,7 @@ mod rewind;
 mod screens;
 mod sidebar;
 mod tabs;
+mod titlebar;
 mod upkeep;
 mod usage;
 mod visualization;

@@ -566,9 +566,9 @@ impl ImagePreview {
             .h(px(HEADER))
             .w_full()
             .flex_none()
-            // Clear of the traffic lights.
-            .pl(px(86.))
-            .pr(px(10.))
+            // Clear of the traffic lights, and of the caption buttons.
+            .pl(px(crate::chrome::LEFT_INSET + 6.))
+            .pr(px(10. + crate::chrome::RIGHT_RESERVE))
             .gap(px(12.))
             .items_center()
             .child(

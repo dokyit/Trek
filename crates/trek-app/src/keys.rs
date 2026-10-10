@@ -223,7 +223,6 @@ pub fn label_for(keystroke: &str, mac: bool) -> String {
 
 /// A keystroke a window received (or a binding holds), written like `label`. (The menu bar's
 /// shortcut labels use it.)
-#[allow(dead_code)]
 pub fn label_keystroke(keystroke: &Keystroke) -> String {
     Stroke::from_gpui(keystroke).label(is_mac())
 }
