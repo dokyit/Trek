@@ -247,7 +247,7 @@ impl TrekWindow {
         // TREK_OPEN_TOOL=browser (or terminal, explorer, git, side-chat) opens that tool at launch.
         if let Ok(name) = std::env::var("TREK_OPEN_TOOL") {
             let name = name.trim().to_lowercase();
-            if let Some(tool) = crate::workspace::PanelTool::ALL.into_iter().find(|t| t.label().to_lowercase().replace(' ', "-") == name) {
+            if let Some(tool) = crate::workspace::PanelTool::offered().into_iter().find(|t| t.label().to_lowercase().replace(' ', "-") == name) {
                 let panel = right_panel.clone();
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
@@ -946,9 +946,9 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, dir: std::path::
     })
 }
 
-/// "Open in" menu for the project folder: the file manager, Terminal, and editors that are
-/// installed. The apps are launched through macOS's `open`, so on Windows the file manager is
-/// all it offers, opened through the shell.
+/// "Open in" menu for the project folder: the file manager, the terminal, and editors that are
+/// installed. On a Mac the apps are launched through `open -a`; on Windows each is found through
+/// the registry and PATH (`trek_core::open_in`) and started with the folder as its argument.
 pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     gpui_kit::component::button::Button::new("open-in")
@@ -960,6 +960,20 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
             let mut menu = menu.min_w(px(180.));
             // Checked when the menu opens, not on every frame of the title bar.
+            if cfg!(windows) {
+                let folder = dir.clone();
+                menu = menu.item(PopupMenuItem::new(crate::words::words().file_manager).on_click(move |_, _, cx| cx.open_with_system(&folder)));
+                for target in trek_core::open_in::windows_targets() {
+                    let (label, dir) = (target.label, dir.clone());
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
+                        let Some(launch) = target.launch(&dir) else { return tracing::warn!("open in {label}: {} isn't an absolute path", dir.display()) };
+                        if let Err(e) = trek_core::open_in::spawn(&launch) {
+                            tracing::warn!("open in {label}: {e}");
+                        }
+                    }));
+                }
+                return menu;
+            }
             let apps = [
                 (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
                 ("Terminal", "Terminal"),
@@ -970,21 +984,11 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
                 ("Xcode", "Xcode"),
             ]
             .into_iter()
-            .filter(|(_, app)| {
-                if cfg!(windows) {
-                    *app == "Finder" // words: ok, the file manager's entry, whatever it's called
-                } else {
-                    matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists() // words: ok
-                }
-            });
+            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists()); // words: ok
             for (label, app) in apps {
                 let dir = dir.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                    if cfg!(windows) {
-                        cx.open_with_system(&dir);
-                    } else {
-                        let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
-                    }
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
+                    let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
                 }));
             }
             menu

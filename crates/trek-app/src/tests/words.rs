@@ -73,6 +73,66 @@ fn windows_pages_say_windows() {
     });
 }
 
+/// Settings › Tools, the tools panel and the palette on Windows: the iOS Simulator needs a Mac,
+/// and says so where its switch would be.
+#[test]
+fn windows_has_no_ios_simulator_and_says_so() {
+    run(async |cx| {
+        let _windows = pretend(true);
+        let trek = open(cx);
+
+        let tools = said(&trek, cx, SettingsPage::Tools);
+        assert!(has(&tools, "iOS Simulator"), "the heading stays: {tools:?}");
+        assert!(has(&tools, "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows."), "{tools:?}");
+        for gone in ["Simulator tools", "Touch input (AXe)"] {
+            assert!(!has(&tools, gone), "{gone} is a Mac's row: {tools:?}");
+        }
+        assert!(tools.iter().all(|s| !s.contains("Install AXe")), "{tools:?}");
+        assert_eq!(page_blurb(SettingsPage::Tools), "Computer use, and the MCP servers, skills and plugins your agents can call.");
+
+        // No tab for it in the tools panel, nor a command that opens one; the others stay.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.press(cx, "secondary-j");
+        trek.render(cx);
+        assert!(trek.visible(cx, "tool-tile-Terminal") && trek.visible(cx, "tool-tile-Browser"));
+        assert!(!trek.visible(cx, "tool-tile-Simulator"));
+        assert!(commands(&trek, cx, "Open Simulator").is_empty());
+        assert!(commands(&trek, cx, "Open Terminal").iter().any(|c| c == "Open Terminal"));
+    });
+}
+
+#[test]
+fn a_mac_keeps_its_ios_simulator() {
+    run(async |cx| {
+        let _mac = pretend(false);
+        let trek = open(cx);
+
+        let tools = said(&trek, cx, SettingsPage::Tools);
+        assert!(has(&tools, "Simulator tools") && has(&tools, "Touch input (AXe)"), "{tools:?}");
+        assert!(tools.iter().all(|s| !s.contains("doesn't offer it")), "{tools:?}");
+        assert_eq!(page_blurb(SettingsPage::Tools), "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.");
+
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.press(cx, "secondary-j");
+        trek.render(cx);
+        assert!(trek.visible(cx, "tool-tile-Simulator"));
+        assert!(commands(&trek, cx, "Open Simulator").iter().any(|c| c == "Open Simulator"));
+    });
+}
+
+/// There's no mic button where Trek can't take dictation, which is all of Windows: the composer
+/// is drawn, the button isn't.
+#[cfg(windows)]
+#[test]
+fn the_composer_has_no_mic_on_windows() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "send"), "the composer is on screen");
+        assert!(!trek.visible(cx, "dictate"));
+    });
+}
+
 #[test]
 fn a_mac_reads_as_it_always_has() {
     run(async |cx| {

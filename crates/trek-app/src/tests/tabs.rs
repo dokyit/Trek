@@ -231,7 +231,7 @@ fn the_tools_panel_opens_on_a_grid_of_tools_and_never_clips_a_tab() {
         let trek = open(cx);
         trek.press(cx, "secondary-j");
         trek.render(cx);
-        for tool in crate::workspace::PanelTool::ALL {
+        for tool in crate::workspace::PanelTool::offered() {
             assert!(trek.visible(cx, format!("tool-tile-{}", tool.label())), "{}", tool.label());
         }
         trek.click(cx, "tool-tile-Terminal");

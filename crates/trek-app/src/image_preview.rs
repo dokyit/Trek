@@ -2,7 +2,7 @@
 //! message, an image or image link in an answer) lays it over the window, fit to it, with its
 //! name, size and a few actions. ←/→ step through the others it came with, a click or Space shows
 //! it at actual pixels (drag or scroll to pan), Esc or a click beside it puts it away. Files Trek
-//! can't draw go to Quick Look instead.
+//! can't draw go to Quick Look instead (on Windows, to the app the system opens them with).
 //!
 //! Each window (the main one, thread windows) has one, drawn over everything else in it; whatever
 //! is clicked finds its window's through `open`.
@@ -34,7 +34,8 @@ const CLICK_SLOP: f32 = 4.;
 /// position: the outbox may have changed since the preview opened).
 pub type Remove = Rc<dyn Fn(&Path, &mut Window, &mut App)>;
 
-/// Preview `paths` at `index` in this window. One Trek can't draw goes to Quick Look.
+/// Preview `paths` at `index` in this window. One Trek can't draw goes to Quick Look, or to its
+/// default app on Windows.
 pub fn open(paths: Vec<PathBuf>, index: usize, window: &mut Window, cx: &mut App) {
     show(paths, index, None, window, cx);
 }
@@ -52,7 +53,7 @@ pub fn showable(path: &Path) -> bool {
 fn show(paths: Vec<PathBuf>, index: usize, remove: Option<Remove>, window: &mut Window, cx: &mut App) {
     let Some(clicked) = paths.get(index).cloned() else { return };
     if !showable(&clicked) {
-        quick_look(&clicked);
+        quick_look(&clicked, cx);
         return;
     }
     // Only what it can draw comes along to step through.
@@ -65,23 +66,40 @@ fn show(paths: Vec<PathBuf>, index: usize, remove: Option<Remove>, window: &mut 
     }
 }
 
-/// macOS's Quick Look on `path`, for files Trek doesn't draw itself (PDFs, SVGs, HEIC photos).
-fn quick_look(path: &Path) {
+/// What shows a file Trek doesn't draw itself (PDFs, SVGs, HEIC photos).
+#[derive(Debug, PartialEq, Eq)]
+enum Viewer {
+    /// macOS's Quick Look.
+    QuickLook,
+    /// The app the system opens that kind of file with (Windows has no Quick Look).
+    DefaultApp,
+}
+
+fn viewer(windows: bool) -> Viewer {
+    if windows { Viewer::DefaultApp } else { Viewer::QuickLook }
+}
+
+/// Show `path` as `viewer` does, for files Trek doesn't draw itself.
+#[cfg_attr(test, allow(unused_variables))]
+fn quick_look(path: &Path, cx: &mut App) {
     #[cfg(test)]
     QUICK_LOOKED.with(|q| q.borrow_mut().push(path.to_path_buf()));
     #[cfg(not(test))]
-    {
-        let child = std::process::Command::new("/usr/bin/qlmanage")
-            .arg("-p")
-            .arg(path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        match child {
-            // Reaped when it closes, so it doesn't linger as a zombie.
-            Ok(mut child) => _ = std::thread::spawn(move || child.wait()),
-            Err(e) => tracing::warn!("quick look {}: {e}", path.display()),
+    match viewer(cfg!(windows)) {
+        Viewer::DefaultApp => cx.open_with_system(path),
+        Viewer::QuickLook => {
+            let child = std::process::Command::new("/usr/bin/qlmanage")
+                .arg("-p")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match child {
+                // Reaped when it closes, so it doesn't linger as a zombie.
+                Ok(mut child) => _ = std::thread::spawn(move || child.wait()),
+                Err(e) => tracing::warn!("quick look {}: {e}", path.display()),
+            }
         }
     }
 }
@@ -583,7 +601,7 @@ impl ImagePreview {
                 h_flex()
                     .flex_none()
                     .gap(px(2.))
-                    .child(ui::icon_button("preview-open", Icon::new(crate::assets::Lucide::SquareArrowOutUpRight), "Open in Preview").on_click(move |_, _, cx| cx.open_with_system(&open_path)))
+                    .child(ui::icon_button("preview-open", Icon::new(crate::assets::Lucide::SquareArrowOutUpRight), crate::words::words().open_in_viewer).on_click(move |_, _, cx| cx.open_with_system(&open_path)))
                     .child(ui::icon_button("preview-reveal", IconName::FolderOpen, crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal_path)))
                     .child(ui::icon_button("preview-copy", IconName::Copy, crate::keys::shared("Copy image (⌘C)")).on_click(cx.listener(|this, _, window, cx| this.copy(window, cx))))
                     .when(s.remove.is_some(), |el| {
@@ -754,12 +772,18 @@ impl Render for ImagePreview {
 
 #[cfg(test)]
 mod tests {
-    use super::{Layout, Shown, clamp_offset, file_size};
+    use super::{Layout, Shown, Viewer, clamp_offset, file_size, viewer};
     use gpui_kit::{point, px, size};
     use std::path::PathBuf;
 
     fn shown(pixels: Option<(u32, u32)>) -> Shown {
         Shown { path: PathBuf::from("/x.png"), pixels, bytes: None }
+    }
+
+    #[test]
+    fn a_file_trek_cant_draw_opens_in_its_own_app_on_windows_and_in_quick_look_on_a_mac() {
+        assert_eq!(viewer(true), Viewer::DefaultApp);
+        assert_eq!(viewer(false), Viewer::QuickLook);
     }
 
     #[test]
