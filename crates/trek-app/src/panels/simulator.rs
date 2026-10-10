@@ -1013,7 +1013,7 @@ impl SimulatorPanel {
         if (self.axe.is_none() && self.ready_link().is_none()) || self.live().is_none() {
             return;
         }
-        if m.platform {
+        if m.secondary() {
             if k.key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     self.queue_text(&text, cx);

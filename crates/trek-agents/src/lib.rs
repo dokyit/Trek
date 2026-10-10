@@ -137,7 +137,7 @@ pub(crate) fn mcp_servers_json_with(servers: &[McpServer], agent: BatchHandOff, 
                 }
                 Ok(None) => {}
                 Err(problem) => {
-                    left_out.push(format!("MCP server {} wasn't started: {problem}", server.name));
+                    left_out.push(mcp_left_out_notice(&server.name, &problem));
                     continue;
                 }
             }
@@ -145,6 +145,11 @@ pub(crate) fn mcp_servers_json_with(servers: &[McpServer], agent: BatchHandOff, 
         out.insert(server.name.clone(), entry);
     }
     (serde_json::Value::Object(out), left_out)
+}
+
+/// What the user is told about a stdio server `agent_stdio_command` found a `problem` with.
+pub(crate) fn mcp_left_out_notice(server: &str, problem: &str) -> String {
+    format!("MCP server {server} wasn't started: {problem}")
 }
 
 /// How an agent can start a stdio MCP server whose command is a batch script (`npx.cmd`).
@@ -189,7 +194,7 @@ fn agent_stdio_command(
             let name = trek_core::detect::script_name(&program);
             if let Some(n) = std::iter::once(&target).chain(args).position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"'])) {
                 let which = if n == 0 { "its name".to_string() } else { format!("argument {n}") };
-                return Err(format!("{name} is a batch script, which Claude Code can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."));
+                return Err(format!("{name} is a batch script, which the agent can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."));
             }
             if target.contains(' ') {
                 return Err(format!("{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."));

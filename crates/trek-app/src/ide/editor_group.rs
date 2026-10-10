@@ -7,6 +7,7 @@
 use super::IdeWorkbench;
 use super::diff_view::{DiffSource, DiffView};
 use crate::editor::EditorView;
+use crate::keys::{self, Id};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
@@ -485,11 +486,11 @@ impl IdeWorkbench {
     /// No file open: the shortcuts worth knowing, quietly, as Cursor and VS Code show them.
     fn watermark(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let row = |label: &'static str, keys: &'static str| {
+        let row = |label: &'static str, keys: String| {
             h_flex()
                 .gap(px(18.))
                 .child(div().w(px(150.)).text_right().child(label))
-                .child(div().w(px(110.)).text_color(theme.muted_foreground.opacity(0.75)).child(keys))
+                .child(div().min_w(px(110.)).text_color(theme.muted_foreground.opacity(0.75)).child(keys))
         };
         v_flex()
             .id("ide-watermark")
@@ -501,12 +502,12 @@ impl IdeWorkbench {
             .text_size(px(12.5))
             .text_color(theme.muted_foreground)
             .child(div().pb(px(14.)).opacity(0.5).child(crate::brand::logo_mark(px(56.))))
-            .child(row("Go to File", "⌘P"))
-            .child(row("New Chat", "⌘N"))
-            .child(row("Keep / Undo a Change", "⌘Y / ⌥⌘⌫"))
-            .child(row("Show Terminal", "⌘J"))
-            .child(row("Toggle AI Side Bar", "⌥⌘B"))
-            .child(row("Switch to Agents", "⌥⌘E"))
+            .child(row("Go to File", keys::hint(Id::QuickOpen)))
+            .child(row("New Chat", keys::hint(Id::NewThread)))
+            .child(row("Keep / Undo a Change", format!("{} / {}", keys::hint(Id::KeepHunk), keys::hint(Id::UndoHunk))))
+            .child(row("Show Terminal", keys::hint(Id::ToggleRightPanel)))
+            .child(row("Toggle AI Side Bar", keys::hint(Id::ToggleAiBar)))
+            .child(row("Switch to Agents", keys::hint(Id::SwitchMode)))
     }
 
     /// No folder open: what to do, then recent folders and loose files.
