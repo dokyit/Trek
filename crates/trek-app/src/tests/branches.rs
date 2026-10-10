@@ -107,6 +107,45 @@ fn branches_other_worktrees_have_are_named_and_every_branch_is_listed() {
 }
 
 #[test]
+fn the_git_read_gathers_everything_the_chip_and_panel_show() {
+    let dir = super::harness::new_project("git-read");
+    two_branches(&dir);
+    std::fs::write(dir.join("new.rs"), "untracked\n").unwrap();
+    std::fs::write(dir.join("a.rs"), "edited\n").unwrap();
+    git(&dir, &["remote", "add", "origin", "https://example.com/acme/app.git"]);
+    let info = crate::workspace::read_git_info(&dir);
+    assert!(info.is_repo);
+    assert_eq!(info.branch.as_deref(), Some("main"));
+    assert_eq!(info.default_branch.as_deref(), Some("main"));
+    assert_eq!(info.changed, 2, "one edit and one untracked file");
+    assert_eq!((info.ahead, info.behind), (0, 0), "no upstream");
+    assert_eq!(info.head, Some(git(&dir, &["rev-parse", "HEAD"])));
+    assert_eq!(info.branches.len(), 2, "{:?}", info.branches);
+    assert!(info.branches.iter().any(|b| b == "feature") && info.elsewhere.is_empty());
+    assert!(info.remote.as_deref().is_some_and(|r| r.contains("acme/app")), "{:?}", info.remote);
+    // Not a repository: nothing to say.
+    let plain = super::harness::new_project("git-read-plain");
+    assert_eq!(crate::workspace::read_git_info(&plain), crate::workspace::GitInfo::default());
+}
+
+#[test]
+fn a_git_read_is_counted_until_it_lands_so_a_screenshot_can_wait_for_the_chip() {
+    run(async |cx| {
+        let trek = open(cx);
+        two_branches(&trek.project);
+        // Not through `trek.update`, which lets the read land before it returns.
+        let (before, during) = trek.ws.update(cx, |ws, cx| {
+            let before = ws.git_inflight;
+            ws.refresh_git_at(trek.project.clone(), cx);
+            (before, ws.git_inflight)
+        });
+        assert_eq!(during, before + 1, "counted from the moment it's asked for");
+        trek.wait(cx, "every git read to land", |ws| ws.git_inflight == 0).await;
+        assert_eq!(trek.read(cx, |ws, _| ws.git_info.get(&trek.project).and_then(|g| g.branch.clone())).as_deref(), Some("main"));
+    });
+}
+
+#[test]
 fn git_errors_read_as_sentences_with_the_files_they_name() {
     use crate::workspace::git_error;
     let dirty = "error: Your local changes to the following files would be overwritten by checkout:\n\ta.rs\n\tb.rs\nPlease commit your changes or stash them before you switch branches.\nAborting\n";
