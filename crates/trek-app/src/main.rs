@@ -40,6 +40,7 @@ mod notes;
 mod onboarding;
 mod panels;
 mod palette;
+mod perf;
 mod push;
 mod remote;
 mod root;
@@ -209,6 +210,7 @@ fn key_bindings() -> Vec<KeyBinding> {
 }
 
 fn main() {
+    perf::start();
     logging::init();
 
     // On Windows, one Trek per data folder: a second launch hands its links and paths to the
@@ -221,12 +223,14 @@ fn main() {
             std::process::exit(1)
         }
     };
+    perf::phase("claim");
 
     // `trek://` links (editors, browsers) arrive as bare strings with no App context;
     // they wait on a channel until the app's update loop picks them up.
     let (links_tx, links_rx) = async_channel::unbounded::<String>();
     let forwarded_links = links_tx.clone();
     let app = gpui_kit::application().with_assets(assets::Assets);
+    perf::phase("platform");
     #[cfg(all(feature = "shots", target_os = "macos"))]
     if std::env::var_os("TREK_SHOT_DIR").is_some() {
         // Capture runs are invisible: no Dock tile, no recent-apps entry.
@@ -247,12 +251,15 @@ fn main() {
         }
     });
     app.run(|cx| {
+        perf::phase("run");
         // Windows toasts need an identity (the AppUserModelID) set before any window opens.
         #[cfg(windows)]
         cx.set_app_identity(winsys::APP_ID, winsys::APP_NAME);
         gpui_kit::init(cx);
+        perf::phase("kit");
         // The families the theme names must be known before it's applied and anything is laid out.
         fonts::register(cx);
+        perf::phase("fonts");
         toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
@@ -283,7 +290,9 @@ fn main() {
         // Windows has no bundle to say which app opens `trek://`: Trek says so itself.
         #[cfg(windows)]
         winsys::register_trek_protocol();
+        perf::phase("app");
         let ws = workspace::init(cx);
+        perf::phase("workspace");
         ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         tray::init(ws.clone(), cx);
         let theme = ws.read(cx).settings.appearance.theme;
@@ -297,6 +306,7 @@ fn main() {
         let background = std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1");
         root::init(ws.clone(), cx);
         root::open_main(ws.clone(), !background, cx).expect("open window");
+        perf::phase("window");
         single_instance::hear(forwarded, own, ws.clone(), forwarded_links, cx);
         #[cfg(feature = "shots")]
         shots::init(ws.clone(), cx);
