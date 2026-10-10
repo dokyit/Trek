@@ -141,8 +141,9 @@ const WINDOWS: Words = Words {
 
     badge_label: "Taskbar badge",
     badge_note: "Count of threads waiting on you, on Trek's taskbar button.",
-    // Windows has no per-app icon to swap while an app runs: the picker saves a choice nothing uses.
-    app_icon_note: "Trek's own icon stays on the taskbar and in the title bar: changing the app icon isn't supported on Windows yet.",
+    // Windows lets an app change its windows' icons while it runs, but not the exe's own: that
+    // stays Ember until an installer makes a shortcut with another.
+    app_icon_note: "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Ember.",
     tray_label: "System tray icon",
 
     glass_note: "Your wallpaper's tint shows through the window (Mica), under translucent panels. Needs Windows 11 22H2 or later, and is off while Transparency effects are off in Windows.",
