@@ -35,6 +35,7 @@ mod readability;
 mod remote;
 mod render;
 mod rewind;
+mod scaling;
 mod screens;
 mod sidebar;
 mod snapshots;

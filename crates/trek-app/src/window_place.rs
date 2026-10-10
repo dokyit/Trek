@@ -29,18 +29,33 @@ pub struct Placement {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// The display's size in the logical pixels these numbers are in (its width and height at
+    /// the scale it had then): when it's not what it is now (the display's scale was changed,
+    /// or its resolution), the numbers mean a different part of it. Files from before have none.
+    #[serde(default)]
+    pub area: Option<(f32, f32)>,
 }
 
 impl Placement {
     /// `window`'s placement now: its bounds when not maximized, and whether it is. A full-screen
     /// window is kept by the bounds it had before (the next launch opens it as a window).
     pub fn of(window: &Window, cx: &App) -> Option<Placement> {
-        let display = window.display(cx)?.uuid().ok()?.to_string();
+        let on = window.display(cx)?;
+        let display = on.uuid().ok()?.to_string();
+        let area = on.bounds().size;
         let (b, maximized) = match window.window_bounds() {
             WindowBounds::Windowed(b) | WindowBounds::Fullscreen(b) => (b, false),
             WindowBounds::Maximized(b) => (b, true),
         };
-        Some(Placement { display, maximized, x: b.origin.x.as_f32(), y: b.origin.y.as_f32(), width: b.size.width.as_f32(), height: b.size.height.as_f32() })
+        Some(Placement {
+            display,
+            maximized,
+            x: b.origin.x.as_f32(),
+            y: b.origin.y.as_f32(),
+            width: b.size.width.as_f32(),
+            height: b.size.height.as_f32(),
+            area: Some((area.width.as_f32(), area.height.as_f32())),
+        })
     }
 }
 
@@ -53,7 +68,15 @@ pub fn restore(saved: &Placement, displays: &[(String, DisplayId, Bounds<Pixels>
         return None;
     }
     let fit = |want: f32, least: Pixels, most: Pixels| px(want.max(least.as_f32()).min(most.as_f32().max(least.as_f32())));
-    let bounds = Bounds::new(point(px(saved.x), px(saved.y)), size(fit(saved.width, min.width, area.size.width), fit(saved.height, min.height, area.size.height)));
+    let mut bounds = Bounds::new(point(px(saved.x), px(saved.y)), size(fit(saved.width, min.width, area.size.width), fit(saved.height, min.height, area.size.height)));
+    // On a display that isn't the size it was in logical pixels (its scale changed: 125 % to 200 %
+    // makes it 1.6 times smaller), where the window was is another part of it, and its right and
+    // bottom edges may have gone off. Put it wholly on, as far as it fits. (A window left partly
+    // off the edge on purpose, on a display as it was, stays so.)
+    if saved.area.is_some_and(|(w, h)| (w - area.size.width.as_f32()).abs() > 1. || (h - area.size.height.as_f32()).abs() > 1.) {
+        let on = |at: f32, extent: f32, from: f32, to: f32| at.min(to - extent).max(from);
+        bounds.origin = point(px(on(bounds.origin.x.as_f32(), bounds.size.width.as_f32(), area.left().as_f32(), area.right().as_f32())), px(on(bounds.origin.y.as_f32(), bounds.size.height.as_f32(), area.top().as_f32(), area.bottom().as_f32())));
+    }
     let shown = bounds.intersect(area);
     let top_on_screen = bounds.top() >= area.top() && bounds.top() <= area.bottom() - px(MIN_ON_SCREEN.1);
     if !top_on_screen || shown.size.width < px(MIN_ON_SCREEN.0) || shown.size.height < px(MIN_ON_SCREEN.1) {
@@ -137,7 +160,7 @@ mod tests {
     }
 
     fn placed(display: &str, x: f32, y: f32, w: f32, h: f32) -> Placement {
-        Placement { display: display.into(), maximized: false, x, y, width: w, height: h }
+        Placement { display: display.into(), maximized: false, x, y, width: w, height: h, area: None }
     }
 
     fn min_size() -> Size<Pixels> {
@@ -170,6 +193,57 @@ mod tests {
         assert_eq!(b.size, min_size());
         let Some((_, WindowBounds::Windowed(b))) = restore(&placed("right", 1280., 0., 4000., 3000.), &displays(), min_size()) else { panic!() };
         assert_eq!(b.size, size(px(1707.), px(960.)));
+    }
+
+    /// The same displays at every scale Windows offers: a 1080p one at 100 % is 1920×1080 logical
+    /// pixels, at 200 % 960×540. A window left on it at 100 % comes back whole and on it at any,
+    /// not hanging off its right and bottom edges where the numbers now point.
+    #[test]
+    fn a_window_saved_at_one_scale_comes_back_whole_on_the_display_at_another() {
+        for (w, h) in [(1920., 1080.), (2560., 1440.), (3840., 2160.)] {
+            let at_100 = (w, h);
+            for scale in [1., 1.25, 1.5, 1.75, 2.] {
+                let area = Bounds::new(point(px(0.), px(0.)), size(px(w / scale), px(h / scale)));
+                let shown = vec![("d".to_string(), DisplayId::new(1), area)];
+                // Right and low on the display at 100 %, as a window dragged there is.
+                let saved = Placement { area: Some(at_100), ..placed("d", w - 1300., h - 840., 1280., 820.) };
+                let Some((_, WindowBounds::Windowed(b))) = restore(&saved, &shown, min_size()) else { panic!("{w}x{h} at {scale}: opens centred") };
+                let (right, bottom) = (b.right().as_f32(), b.bottom().as_f32());
+                // Whole on the display, unless the display (in logical pixels) is smaller than the window's least.
+                assert!(b.size.width <= area.size.width.max(min_size().width) && b.size.height <= area.size.height.max(min_size().height), "{w}x{h} at {scale}: {b:?}");
+                assert!(b.origin.x.as_f32() >= -0.01 && b.origin.y.as_f32() >= -0.01, "{w}x{h} at {scale}: {b:?}");
+                assert!(right <= area.size.width.as_f32() + 0.01 || b.size.width <= min_size().width, "{w}x{h} at {scale}: right edge at {right}");
+                assert!(bottom <= area.size.height.as_f32() + 0.01 || b.size.height <= min_size().height, "{w}x{h} at {scale}: bottom edge at {bottom}");
+                // At the scale it was saved at it's exactly where it was.
+                if scale == 1. {
+                    assert_eq!(b.origin, point(px(w - 1300.), px(h - 840.)));
+                }
+            }
+        }
+        // A window left half off the edge on purpose, with the display as it was, stays so; and a
+        // file from before the size was kept (no area) is left as it is.
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1080.)));
+        let shown = vec![("d".to_string(), DisplayId::new(1), area)];
+        for kept in [Some((1920., 1080.)), None] {
+            let saved = Placement { area: kept, ..placed("d", 1500., 300., 1000., 700.) };
+            let Some((_, WindowBounds::Windowed(b))) = restore(&saved, &shown, min_size()) else { panic!() };
+            assert_eq!(b.origin, point(px(1500.), px(300.)));
+        }
+    }
+
+    /// The smallest windows Windows machines have: its minimum doesn't fit, the window opens at
+    /// its minimum anyway with its title bar on screen (the bar and the controls can be reached to
+    /// move or close it).
+    #[test]
+    fn on_a_display_smaller_than_the_minimum_the_title_bar_is_still_on_it() {
+        // 1366×768 at 150 % and 1280×720 at 175 %: 910×512 and 731×411 logical.
+        for (w, h) in [(910., 512.), (731., 411.)] {
+            let shown = vec![("d".to_string(), DisplayId::new(1), Bounds::new(point(px(0.), px(0.)), size(px(w), px(h))))];
+            let saved = Placement { area: Some((1366., 768.)), ..placed("d", 40., 40., 1280., 820.) };
+            let Some((_, WindowBounds::Windowed(b))) = restore(&saved, &shown, min_size()) else { panic!("{w}x{h}: opens centred") };
+            assert_eq!(b.origin, point(px(0.), px(0.)), "{w}x{h}");
+            assert!(b.size.width.as_f32() >= min_size().width.as_f32() - 0.01, "{w}x{h}: {b:?}");
+        }
     }
 
     #[test]
