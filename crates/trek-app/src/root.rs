@@ -935,7 +935,9 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, dir: std::path::
     })
 }
 
-/// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
+/// "Open in" menu for the project folder: the file manager, Terminal, and editors that are
+/// installed. The apps are launched through macOS's `open`, so on Windows the file manager is
+/// all it offers, opened through the shell.
 pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     gpui_kit::component::button::Button::new("open-in")
@@ -948,7 +950,7 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
             let mut menu = menu.min_w(px(180.));
             // Checked when the menu opens, not on every frame of the title bar.
             let apps = [
-                ("Finder", "Finder"),
+                (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
                 ("Terminal", "Terminal"),
                 ("Ghostty", "Ghostty"),
                 ("Zed", "Zed"),
@@ -957,11 +959,21 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
                 ("Xcode", "Xcode"),
             ]
             .into_iter()
-            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists());
+            .filter(|(_, app)| {
+                if cfg!(windows) {
+                    *app == "Finder" // words: ok, the file manager's entry, whatever it's called
+                } else {
+                    matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists() // words: ok
+                }
+            });
             for (label, app) in apps {
                 let dir = dir.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
-                    let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    if cfg!(windows) {
+                        cx.open_with_system(&dir);
+                    } else {
+                        let _ = std::process::Command::new("/usr/bin/open").arg("-a").arg(app).arg(&dir).spawn();
+                    }
                 }));
             }
             menu

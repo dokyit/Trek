@@ -1731,7 +1731,7 @@ impl Composer {
             chip("env-local")
                 .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
                 .child("Local")
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Runs on this Mac, in the project folder").build(window, cx))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Runs on {}, in the project folder", crate::words::words().this_computer)).build(window, cx))
                 .into_any_element()
         } else {
             // A thread in the project folder is the usual case: only a worktree is worth a chip.
