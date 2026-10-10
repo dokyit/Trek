@@ -1,4 +1,10 @@
-//! Agent skills on this Mac: folders holding a `SKILL.md` (front matter `name` + `description`).
+    let copied = (|| {
+        // The folder itself may be a symlink to the real one; its contents are what is wanted, so
+        // the walk starts from the real folder (walking a root that is a link failed on macOS).
+        let root = std::fs::canonicalize(from)?;
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            let entry = entry?;
+            let rel = entry.path().strip_prefix(&root)?;//! Agent skills on this Mac: folders holding a `SKILL.md` (front matter `name` + `description`).
 //!
 //! Turning a skill off moves its folder into Trek's data folder (with a note of where it came
 //! from), so every agent stops loading it; turning it back on moves it home. Skills that another
