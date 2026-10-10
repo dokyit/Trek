@@ -76,8 +76,8 @@ pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
             out.push(("Claude Code", names));
         }
     }
-    // Codex: `[mcp_servers.<name>]` tables in ~/.codex/config.toml.
-    if let Ok(text) = std::fs::read_to_string(home.join(".codex/config.toml")) {
+    // Codex: `[mcp_servers.<name>]` tables in config.toml of its home (`~/.codex`, or `$CODEX_HOME`).
+    if let Ok(text) = std::fs::read_to_string(trek_core::import::codex::codex_home_for(&home).join("config.toml")) {
         let mut names: Vec<String> = text
             .lines()
             .filter_map(|l| l.trim().strip_prefix("[mcp_servers.")?.strip_suffix(']').map(str::to_string))

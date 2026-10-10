@@ -112,11 +112,12 @@ impl Restored {
 fn git_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let exec_path = Command::new("git").arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
+        let git = crate::git::git_program();
+        let exec_path = Command::new(git).arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
         exec_path
             .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("git"))
             .filter(|p| p.exists())
-            .unwrap_or_else(|| PathBuf::from("git"))
+            .unwrap_or_else(|| git.to_path_buf())
     })
 }
 
@@ -170,7 +171,7 @@ impl Repo {
         if let Some(repo) = Repo::find(dir) {
             return Ok(repo);
         }
-        let out = base_command(dir).args(["rev-parse", "--show-toplevel"]).output().context("couldn't run git")?;
+        let out = base_command(dir).args(["rev-parse", "--show-toplevel"]).output().map_err(crate::git::run_error)?;
         let why = String::from_utf8_lossy(&out.stderr);
         let why = why.lines().find(|l| l.starts_with("fatal:") || l.starts_with("error:")).unwrap_or(why.trim()).trim();
         bail!("git can't open {}: {}", dir.display(), if why.is_empty() { "unknown error" } else { why })
@@ -210,7 +211,7 @@ impl Repo {
         if input.is_some() {
             c.stdin(Stdio::piped());
         }
-        let mut child = c.spawn().context("couldn't run git")?;
+        let mut child = c.spawn().map_err(crate::git::run_error)?;
         // Fed from a thread of its own: git may write more than a pipe holds before it has read
         // all of it, and waiting on the write while nothing drains its output would hang both.
         let feed = match input {

@@ -5,6 +5,7 @@
 //! tool manages — Claude.ai sync, Codex's built-ins, plugins — are listed read-only, as are the
 //! ones Trek ships itself (`SHIPPED`), kept in its data folder for any agent to follow.
 
+use crate::import::codex::codex_home_for;
 use crate::paths;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub enum SkillSource {
     /// `~/.claude/skills`
     ClaudeCode,
-    /// `~/.codex/skills`
+    /// `~/.codex/skills` (under `CODEX_HOME` when that is set)
     Codex,
     /// `~/.agents/skills`, read by several agents.
     Shared,
@@ -20,7 +21,7 @@ pub enum SkillSource {
     Project,
     /// `~/.claude/skills/synced/…`, managed by Claude.
     Synced,
-    /// `~/.codex/skills/.system`, shipped with Codex.
+    /// `~/.codex/skills/.system`, shipped with Codex (under `CODEX_HOME` when that is set).
     CodexSystem,
     /// A Claude Code plugin's `skills/` folder.
     Plugin(String),
@@ -72,12 +73,17 @@ pub enum SkillHome {
     Shared,
 }
 
+/// Codex's skills folder, inside its home (`~/.codex`, or `CODEX_HOME`: `codex_home_for` knows).
+fn codex_skills_dir(codex_home: &Path) -> PathBuf {
+    codex_home.join("skills")
+}
+
 impl SkillHome {
     pub fn dir(self) -> PathBuf {
         let home = paths::agents_home();
         match self {
             SkillHome::ClaudeCode => home.join(".claude/skills"),
-            SkillHome::Codex => home.join(".codex/skills"),
+            SkillHome::Codex => codex_skills_dir(&codex_home_for(&home)),
             SkillHome::Shared => home.join(".agents/skills"),
         }
     }
@@ -164,9 +170,10 @@ fn scan(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
 /// Every skill Trek can see, enabled and disabled, for the given project.
 pub fn discover(project: Option<&Path>) -> Vec<Skill> {
     let home = paths::agents_home();
+    let codex_skills = codex_skills_dir(&codex_home_for(&home));
     let mut out = vec![];
     scan(&home.join(".claude/skills"), SkillSource::ClaudeCode, &mut out);
-    scan(&home.join(".codex/skills"), SkillSource::Codex, &mut out);
+    scan(&codex_skills, SkillSource::Codex, &mut out);
     scan(&home.join(".agents/skills"), SkillSource::Shared, &mut out);
     if let Some(p) = project.filter(|p| *p != home.as_path()) {
         scan(&p.join(".claude/skills"), SkillSource::Project, &mut out);
@@ -178,7 +185,7 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
             scan(&b.path(), SkillSource::Synced, &mut out);
         }
     }
-    scan(&home.join(".codex/skills/.system"), SkillSource::CodexSystem, &mut out);
+    scan(&codex_skills.join(".system"), SkillSource::CodexSystem, &mut out);
     for (name, _) in SHIPPED {
         let _ = shipped(name);
     }
@@ -206,7 +213,7 @@ fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
     let home = paths::agents_home();
     if origin.starts_with(home.join(".claude/skills")) {
         SkillSource::ClaudeCode
-    } else if origin.starts_with(home.join(".codex/skills")) {
+    } else if origin.starts_with(codex_skills_dir(&codex_home_for(&home))) {
         SkillSource::Codex
     } else if origin.starts_with(home.join(".agents/skills")) {
         SkillSource::Shared
@@ -274,20 +281,57 @@ fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         // Different volume: copy, then remove.
         Err(_) => {
-            let status = std::process::Command::new("/bin/cp").arg("-R").arg(from).arg(to).status()?;
-            anyhow::ensure!(status.success(), "Couldn't move {}", from.display());
+            // A symlinked skill moves as the link, as a rename would have moved it.
+            #[cfg(unix)]
+            if let Ok(target) = std::fs::read_link(from) {
+                std::os::unix::fs::symlink(target, to)?;
+                std::fs::remove_file(from)?;
+                return Ok(());
+            }
+            copy_dir(from, to).map_err(|e| e.context(format!("Couldn't move {}", from.display())))?;
             std::fs::remove_dir_all(from)?;
             Ok(())
         }
     }
 }
 
+/// Copy the folder `from` to the new path `to`, files and folders alike, like `cp -R`. A file keeps
+/// its permissions (so a skill's scripts stay executable). A symlink inside the folder is never
+/// followed, so nothing outside `from` is read: on Unix it is recreated as the same link, and
+/// where links can't be made without a privilege (Windows) it is left out. A failed copy leaves
+/// no half-copied `to`.
+fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(std::fs::symlink_metadata(to).is_err(), "{} already exists", to.display());
+    let copied = (|| {
+        // The folder itself may be a symlink to the real one; its contents are what is wanted, so
+        // the walk starts from the real folder (walking a root that is a link failed on macOS).
+        let root = std::fs::canonicalize(from)?;
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            let entry = entry?;
+            let rel = entry.path().strip_prefix(&root)?;
+            let dest = to.join(rel);
+            let kind = entry.file_type();
+            if kind.is_dir() {
+                std::fs::create_dir(&dest)?;
+            } else if kind.is_file() {
+                std::fs::copy(entry.path(), &dest)?;
+            } else if kind.is_symlink() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &dest)?;
+            }
+        }
+        anyhow::Ok(())
+    })();
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(to);
+    }
+    copied
+}
+
 /// Move a skill folder to the Trash.
 pub fn trash(skill: &Skill) -> anyhow::Result<()> {
     anyhow::ensure!(skill.source.editable(), "{} skills are managed elsewhere", skill.source.label());
-    let status = std::process::Command::new("/usr/bin/trash").arg(&skill.dir).status()?;
-    anyhow::ensure!(status.success(), "Couldn't move {} to the Trash", skill.dir.display());
-    Ok(())
+    paths::trash(&skill.dir).map_err(|e| e.context(format!("Couldn't move {} to the Trash", skill.dir.display())))
 }
 
 /// Copy a skill folder (one containing SKILL.md) into `home`.
@@ -298,8 +342,7 @@ pub fn install_from(folder: &Path, home: SkillHome) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&root)?;
     let dest = root.join(name);
     anyhow::ensure!(!dest.exists(), "A skill named {} is already there", name.to_string_lossy());
-    let status = std::process::Command::new("/bin/cp").arg("-R").arg(folder).arg(&dest).status()?;
-    anyhow::ensure!(status.success(), "Couldn't copy the skill");
+    copy_dir(folder, &dest).map_err(|e| e.context("Couldn't copy the skill"))?;
     Ok(dest)
 }
 
@@ -367,6 +410,16 @@ mod tests {
     }
 
     #[test]
+    fn codex_skills_live_under_the_codex_home_wherever_that_is() {
+        let default = Path::new("/home/u/.codex");
+        assert_eq!(codex_skills_dir(default), default.join("skills"));
+        // A CODEX_HOME elsewhere moves the skills with it, built-ins included.
+        let moved = std::env::temp_dir().join("elsewhere-codex");
+        assert_eq!(codex_skills_dir(&moved), moved.join("skills"));
+        assert_eq!(codex_skills_dir(&moved).join(".system"), moved.join("skills").join(".system"));
+    }
+
+    #[test]
     fn an_isolated_process_keeps_to_its_own_skills() {
         let data = std::env::temp_dir().join(format!("trek-isolated-skills-{}", std::process::id()));
         crate::paths::isolate_thread(data.clone());
@@ -383,6 +436,96 @@ mod tests {
         assert!(off.starts_with(&data));
         let off = discover(None).into_iter().find(|s| s.name == "isolated-check").expect("listed off");
         assert!(set_enabled(&off, true).unwrap().starts_with(&data));
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    /// A skill with nested folders, an empty folder and (on Unix) an executable script.
+    fn sample_skill(dir: &Path) -> PathBuf {
+        let skill = dir.join("sample");
+        std::fs::create_dir_all(skill.join("scripts/deep")).unwrap();
+        std::fs::create_dir_all(skill.join("empty")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: sample\ndescription: A sample.\n---\nbody").unwrap();
+        std::fs::write(skill.join("scripts/run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::write(skill.join("scripts/deep/data.bin"), [0u8, 159, 146, 150]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(skill.join("scripts/run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        skill
+    }
+
+    fn listing(root: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+        let mut all: Vec<_> = walkdir::WalkDir::new(root)
+            .min_depth(1)
+            .into_iter()
+            .map(|e| {
+                let e = e.unwrap();
+                let rel = e.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                (rel, e.file_type().is_file().then(|| std::fs::read(e.path()).unwrap()))
+            })
+            .collect();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn a_skill_folder_is_copied_whole() {
+        let dir = std::env::temp_dir().join(format!("trek-skill-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = sample_skill(&dir);
+        let copy = dir.join("copy");
+        copy_dir(&skill, &copy).unwrap();
+        assert_eq!(listing(&copy), listing(&skill));
+        assert!(copy.join("empty").is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&copy.join("scripts/run.sh")), 0o755, "scripts stay executable");
+            assert_eq!(mode(&copy.join("SKILL.md")), mode(&skill.join("SKILL.md")));
+        }
+        // Like `cp -R` into a name that is taken: refused, and what was there is left alone.
+        let err = copy_dir(&skill, &copy).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(listing(&copy), listing(&skill));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_a_skill_is_copied_as_a_link_and_never_followed() {
+        let dir = std::env::temp_dir().join(format!("trek-skill-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = sample_skill(&dir);
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "not part of the skill").unwrap();
+        std::os::unix::fs::symlink(&outside, skill.join("out")).unwrap();
+        std::os::unix::fs::symlink("SKILL.md", skill.join("alias.md")).unwrap();
+        let copy = dir.join("copy");
+        copy_dir(&skill, &copy).unwrap();
+        assert!(std::fs::symlink_metadata(copy.join("out")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(copy.join("out")).unwrap(), outside);
+        assert_eq!(std::fs::read_link(copy.join("alias.md")).unwrap(), Path::new("SKILL.md"));
+        // The skill folder itself being a link is fine: its contents are copied.
+        let linked = dir.join("linked");
+        std::os::unix::fs::symlink(&skill, &linked).unwrap();
+        let from_link = dir.join("from-link");
+        copy_dir(&linked, &from_link).unwrap();
+        assert!(from_link.join("scripts/run.sh").is_file() && !from_link.is_symlink());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installing_a_skill_copies_it_into_its_home_once() {
+        let data = std::env::temp_dir().join(format!("trek-skill-install-{}", std::process::id()));
+        crate::paths::isolate_thread(data.clone());
+        let skill = sample_skill(&data.join("source"));
+        let installed = install_from(&skill, SkillHome::ClaudeCode).unwrap();
+        assert!(installed.starts_with(&data), "{}", installed.display());
+        assert_eq!(listing(&installed), listing(&skill));
+        assert!(install_from(&skill, SkillHome::ClaudeCode).unwrap_err().to_string().contains("already there"));
         let _ = std::fs::remove_dir_all(data);
     }
 

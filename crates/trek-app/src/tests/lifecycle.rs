@@ -171,7 +171,7 @@ fn commit(dir: &Path, file: &str, date: Option<&str>) {
 fn repo_on_a_feature_branch() -> std::path::PathBuf {
     let dir = new_project("repo");
     git(&dir, &["init", "-q", "-b", "main"]);
-    for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test"), ("commit.gpgsign", "false")] {
+    for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
         git(&dir, &["config", k, v]);
     }
     commit(&dir, "README.md", Some("2020-01-01T09:00:00"));

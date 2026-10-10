@@ -97,6 +97,13 @@ const UNUSED_NOTIFICATIONS: &[&str] = &[
     "thread/status/changed",
 ];
 
+/// End an app-server: its stdin first, the cue to exit and on Windows the only gentle one (see
+/// `GroupChild::terminate`), then the group.
+async fn stop(mut child: GroupChild, rpc: Rpc) {
+    drop(rpc);
+    child.terminate().await;
+}
+
 /// Spawn `codex app-server` in `cwd` and complete the initialize handshake. Messages that
 /// arrive before the handshake completes are left in `backlog`. The experimental API is on
 /// for Plan mode (`collaborationMode`).
@@ -128,7 +135,7 @@ pub(crate) async fn start_app_server(
         )
         .await?;
     if let Err(e) = startup_response(&mut lines, id, backlog, "initialize").await {
-        child.terminate().await;
+        stop(child, rpc).await;
         return Err(if e.to_string().contains("exited") { stderr.exited("Codex") } else { e });
     }
     rpc.send(&json!({ "method": "initialized" })).await?;
@@ -265,8 +272,12 @@ fn readable_error(msg: &str) -> String {
         .unwrap_or_else(|| msg.to_string())
 }
 
-/// `/bin/zsh -lc 'touch a.txt'` → `touch a.txt`: the command as the model wrote it.
+/// `/bin/zsh -lc 'touch a.txt'` → `touch a.txt`: the command as the model wrote it. On Windows
+/// Codex wraps in `powershell.exe -NoProfile -Command <script>` (or `pwsh`, or `cmd.exe /c`).
 fn unwrap_shell(cmd: &str) -> String {
+    if let Some(script) = unwrap_windows_shell(cmd) {
+        return script;
+    }
     for flag in [" -lc ", " -c "] {
         let Some(i) = cmd.find(flag) else { continue };
         if !matches!(cmd[..i].rsplit('/').next(), Some("sh" | "bash" | "zsh")) {
@@ -282,6 +293,65 @@ fn unwrap_shell(cmd: &str) -> String {
         return rest.to_string();
     }
     cmd.to_string()
+}
+
+/// What Codex puts ahead of a PowerShell script so its output comes back as UTF-8: not part of the
+/// command the model wrote.
+const POWERSHELL_UTF8_PRELUDES: [&str; 2] = ["[Console]::OutputEncoding=[System.Text.Encoding]::UTF8", "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}"];
+
+/// `powershell.exe -NoProfile -Command 'Get-ChildItem'` → `Get-ChildItem`, and likewise for `pwsh`
+/// and `cmd.exe /c`: the program may be a path (quoted when it has spaces), in any case, with or
+/// without `.exe`. `None` when `cmd` isn't one of those wrappers.
+fn unwrap_windows_shell(cmd: &str) -> Option<String> {
+    let (program, mut rest) = next_word(cmd)?;
+    let name = program.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    let powershell = matches!(name, "powershell" | "pwsh");
+    if !powershell && name != "cmd" {
+        return None;
+    }
+    let script = loop {
+        let (word, after) = next_word(rest)?;
+        match word.to_ascii_lowercase().as_str() {
+            "-command" | "-c" if powershell => break after,
+            "/c" if !powershell => break after,
+            "-noprofile" | "-nologo" | "-noninteractive" | "-executionpolicybypass" | "-noexit" if powershell => rest = after,
+            "-executionpolicy" | "-ep" if powershell => rest = next_word(after)?.1,
+            "/d" | "/s" | "/q" if !powershell => rest = after,
+            _ => return None,
+        }
+    };
+    let script = script.trim();
+    if script.is_empty() {
+        return None;
+    }
+    let script = if script.len() >= 2 && script.starts_with('\'') && script.ends_with('\'') {
+        script[1..script.len() - 1].replace("'\"'\"'", "'").replace("''", "'")
+    } else if script.len() >= 2 && script.starts_with('"') && script.ends_with('"') {
+        script[1..script.len() - 1].replace("\\\"", "\"").replace("`\"", "\"").replace("\"\"", "\"")
+    } else {
+        script.to_string()
+    };
+    let mut script = script.as_str();
+    if powershell {
+        for prelude in POWERSHELL_UTF8_PRELUDES {
+            if let Some(after) = script.strip_prefix(prelude) {
+                script = after.trim_start_matches([';', ' ', '\r', '\n']);
+            }
+        }
+    }
+    Some(script.to_string())
+}
+
+/// The first word of `s` (a quoted one without its quotes) and what follows it.
+fn next_word(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if let Some(inner) = s.strip_prefix(['\'', '"']) {
+        let end = inner.find(&s[..1])?;
+        return Some((&inner[..end], &inner[end + 1..]));
+    }
+    let end = s.find(char::is_whitespace).unwrap_or(s.len());
+    (end > 0).then(|| (&s[..end], &s[end..]))
 }
 
 fn command_text(v: &Value) -> String {
@@ -1314,7 +1384,7 @@ pub async fn run(
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
     let mut backlog = Vec::new();
-    let (mut child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
+    let (child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
     // Which login the session uses (ChatGPT plan or API key); answered alongside thread/start.
     let account_req = rpc.request("account/read", json!({})).await?;
 
@@ -1341,7 +1411,7 @@ pub async fn run(
                     match cut_back(&mut rpc, &mut lines, &mut backlog, &thread, &at).await {
                         Ok(()) => Some(r),
                         Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
-                            child.terminate().await;
+                            stop(child, rpc).await;
                             return Err(e);
                         }
                         Err(e) => {
@@ -1353,7 +1423,7 @@ pub async fn run(
                 }
                 Ok(r) => Some(r),
                 Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
-                    child.terminate().await;
+                    stop(child, rpc).await;
                     return Err(e);
                 }
                 // Codex no longer has the thread (its rollout was deleted): carry on in a new one.
@@ -1379,7 +1449,7 @@ pub async fn run(
             match startup_response(&mut lines, id, &mut backlog, "thread/start").await {
                 Ok(r) => r,
                 Err(e) => {
-                    child.terminate().await;
+                    stop(child, rpc).await;
                     return Err(e);
                 }
             }
@@ -1413,7 +1483,7 @@ pub async fn run(
         }
         for ev in std::mem::take(&mut out.events) {
             if events.send(ev).await.is_err() {
-                child.terminate().await;
+                stop(child, rpc).await;
                 return Ok(());
             }
         }
@@ -1436,7 +1506,7 @@ pub async fn run(
             }
         }
     }
-    child.terminate().await;
+    stop(child, rpc).await;
     Ok(())
 }
 
@@ -1512,7 +1582,8 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, _) = start_app_server(&trek_core::paths::home(), &[], &mut backlog).await?;
     let out = fetch_models(&mut rpc, &mut lines, &mut backlog).await;
-    child.terminate().await;
+    // A probe that opened no thread: Codex has nothing to save.
+    child.kill_now().await;
     out
 }
 
@@ -1785,6 +1856,37 @@ mod tests {
         assert_eq!(unwrap_shell("bash -c \"echo \\\"hi\\\"\""), "echo \"hi\"");
         assert_eq!(unwrap_shell("/bin/zsh -lc 'echo '\\''x'\\'''"), "echo 'x'");
         assert_eq!(unwrap_shell("ls -c foo"), "ls -c foo");
+    }
+
+    #[test]
+    fn windows_shell_wrappers_are_unwrapped() {
+        // Codex's own flags: `-NoProfile -Command`, the script as one argument.
+        assert_eq!(unwrap_shell("powershell.exe -NoProfile -Command 'Get-ChildItem'"), "Get-ChildItem");
+        assert_eq!(unwrap_shell("powershell.exe -Command Get-ChildItem -Force"), "Get-ChildItem -Force");
+        assert_eq!(unwrap_shell("pwsh -NoLogo -NoProfile -Command \"Get-Content a.txt\""), "Get-Content a.txt");
+        assert_eq!(unwrap_shell("PowerShell -c 'ls'"), "ls");
+        assert_eq!(unwrap_shell("powershell -ExecutionPolicy Bypass -NoProfile -Command 'ls'"), "ls");
+        // A full path, quoted when it has spaces.
+        assert_eq!(unwrap_shell(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command 'dir'"), "dir");
+        assert_eq!(unwrap_shell(r"'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -Command 'dir'"), "dir");
+        assert_eq!(unwrap_shell(r#""C:\Program Files\PowerShell\7\pwsh.exe" -Command dir"#), "dir");
+        // Quotes inside: `''` in single quotes (and the POSIX spelling), `\"` and `""` in double quotes.
+        assert_eq!(unwrap_shell("powershell.exe -Command 'Write-Output ''hi'''"), "Write-Output 'hi'");
+        assert_eq!(unwrap_shell("powershell.exe -Command 'Write-Output '\"'\"'hi'\"'\"''"), "Write-Output 'hi'");
+        assert_eq!(unwrap_shell(r#"powershell.exe -Command "Write-Output \"hi\"""#), "Write-Output \"hi\"");
+        assert_eq!(unwrap_shell(r#"powershell.exe -Command "Write-Output ""hi""""#), "Write-Output \"hi\"");
+        // The UTF-8 line Codex puts ahead of the script isn't the model's.
+        assert_eq!(unwrap_shell("powershell.exe -NoProfile -Command '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\nGet-Date'"), "Get-Date");
+        assert_eq!(unwrap_shell("powershell.exe -Command '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Date'"), "Get-Date");
+        // cmd.exe.
+        assert_eq!(unwrap_shell("cmd.exe /c dir /b"), "dir /b");
+        assert_eq!(unwrap_shell("cmd /d /s /c \"echo hi\""), "echo hi");
+        assert_eq!(unwrap_shell(r"C:\Windows\System32\cmd.exe /C type a.txt"), "type a.txt");
+        // Not wrappers: another program, or PowerShell running a file.
+        assert_eq!(unwrap_shell("powershell.exe -File a.ps1"), "powershell.exe -File a.ps1");
+        assert_eq!(unwrap_shell("cargo test -c foo"), "cargo test -c foo");
+        assert_eq!(unwrap_shell("powershell.exe"), "powershell.exe");
+        assert_eq!(unwrap_shell("cmd.exe /c"), "cmd.exe /c");
     }
 
     #[test]

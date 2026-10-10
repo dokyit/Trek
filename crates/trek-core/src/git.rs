@@ -1,16 +1,59 @@
 //! What the inbox needs to know from git: which branch a thread's work is on, and whether that
 //! branch has been merged (`inbox.auto_settle_on_merge`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+
+/// There is no git to run. Its text is what the user is told, so it says how to get one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GitMissing;
+
+impl GitMissing {
+    #[cfg(windows)]
+    pub const MESSAGE: &'static str = "Trek needs Git. Install Git for Windows (https://git-scm.com/download/win) or `winget install Git.Git`, then restart Trek.";
+    #[cfg(target_os = "macos")]
+    pub const MESSAGE: &'static str = "Trek needs Git. Install the Xcode command line tools (`xcode-select --install`) or `brew install git`, then restart Trek.";
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub const MESSAGE: &'static str = "Trek needs Git. Install it with your package manager, then restart Trek.";
+}
+
+impl std::fmt::Display for GitMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(Self::MESSAGE)
+    }
+}
+
+impl std::error::Error for GitMissing {}
+
+/// The git Trek runs: the first on the login PATH, looked up once. Callers that can report an
+/// error use this and say [`GitMissing`]; a restart is what picks up a git installed since.
+pub fn git_binary() -> Result<&'static Path, GitMissing> {
+    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BIN.get_or_init(|| crate::detect::which("git")).as_deref().ok_or(GitMissing)
+}
+
+/// What to run for git: [`git_binary`], or plain `git` when there is none (spawning it then fails
+/// as not found, which [`run_error`] turns into the message). For building a `Command`.
+pub fn git_program() -> &'static Path {
+    git_binary().unwrap_or(Path::new("git"))
+}
+
+/// A failure to start git, as the user should hear it: [`GitMissing`] when there is no git, else
+/// the error under "couldn't run git".
+pub fn run_error(e: std::io::Error) -> anyhow::Error {
+    explain(e, git_binary().is_ok())
+}
+
+fn explain(e: std::io::Error, found: bool) -> anyhow::Error {
+    if found { anyhow::Error::new(e).context("couldn't run git") } else { anyhow::Error::new(GitMissing) }
+}
 
 /// Settings a repository's own config can't override in Trek's read-only calls: nothing from the
 /// folder runs (fsmonitor, hooks), and diffs keep the `a/` `b/` prefixes Trek parses.
-const READ_ONLY_CONFIG: [&str; 10] = [
+const READ_ONLY_CONFIG: [&str; 8] = [
     "-c",
     "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
     "-c",
     "diff.noprefix=false",
     "-c",
@@ -19,13 +62,30 @@ const READ_ONLY_CONFIG: [&str; 10] = [
     "core.splitIndex=false",
 ];
 
+/// The `core.hooksPath` setting that keeps every hook from running. Where there is a null device
+/// to point at, that; on Windows git doesn't take `/dev/null` for a folder, so an empty folder of
+/// Trek's own in the temp dir (made once per process; no files in it, so no hook to run).
+fn no_hooks() -> &'static str {
+    static SETTING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SETTING.get_or_init(|| {
+        let dir = std::env::temp_dir().join("trek-no-hooks");
+        let value = if cfg!(windows) && std::fs::create_dir_all(&dir).is_ok() {
+            // Forward slashes: backslashes in a `-c` value are escapes to git.
+            dir.to_string_lossy().replace('\\', "/")
+        } else {
+            "/dev/null".to_string()
+        };
+        format!("core.hooksPath={value}")
+    })
+}
+
 /// A git command for questions that change nothing, run in `dir`: no lock an agent's own git
 /// would then wait on (`GIT_OPTIONAL_LOCKS=0`), no prompt, no fsmonitor or hook from the folder's
 /// config, English output, the login shell's PATH, and no `GIT_*` from Trek's environment
 /// pointing it at another repository. Add the subcommand and its arguments; use
 /// `tokio::process::Command::from` for an async one.
 pub fn read_only(dir: &Path) -> Command {
-    let mut c = Command::new("git");
+    let mut c = Command::new(git_program());
     c.current_dir(dir)
         .env("PATH", crate::detect::login_path())
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -41,6 +101,7 @@ pub fn read_only(dir: &Path) -> Command {
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_EXTERNAL_DIFF")
+        .args(["-c", no_hooks()])
         .args(READ_ONLY_CONFIG)
         .stdin(Stdio::null());
     c
@@ -122,7 +183,36 @@ pub fn branch_state(cwd: &Path, branch: &str) -> BranchState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    #[test]
+    fn no_git_is_one_clear_message() {
+        let gone = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        let said = explain(gone(), false);
+        assert_eq!(said.to_string(), GitMissing::MESSAGE);
+        assert!(said.downcast_ref::<GitMissing>().is_some(), "callers can tell it apart");
+        // Any way of not starting git, when there is none, is the same message.
+        assert_eq!(explain(std::io::Error::from(std::io::ErrorKind::PermissionDenied), false).to_string(), GitMissing::MESSAGE);
+        // With git found, a failure to start it is its own.
+        let other = explain(std::io::Error::from(std::io::ErrorKind::PermissionDenied), true);
+        assert_eq!(other.to_string(), "couldn't run git");
+        assert!(other.downcast_ref::<GitMissing>().is_none());
+        #[cfg(windows)]
+        assert_eq!(
+            GitMissing.to_string(),
+            "Trek needs Git. Install Git for Windows (https://git-scm.com/download/win) or `winget install Git.Git`, then restart Trek."
+        );
+        #[cfg(target_os = "macos")]
+        assert!(GitMissing.to_string().contains("xcode-select --install"));
+    }
+
+    #[test]
+    fn git_is_found_where_the_tests_run() {
+        // The suite needs git anyway; what is found is a file, and what `read_only` runs.
+        let found = git_binary().expect("git on PATH");
+        assert!(found.is_file(), "{}", found.display());
+        assert_eq!(Command::new(git_program()).get_program(), found.as_os_str());
+        assert_eq!(read_only(Path::new(".")).get_program(), found.as_os_str());
+    }
 
     fn repo(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("trek-git-{name}-{}", std::process::id()));
@@ -219,6 +309,26 @@ mod tests {
         assert!(!marker.exists(), "fsmonitor ran");
         let diff = read(&dir, &["diff"]).unwrap();
         assert!(diff.contains("--- a/first.txt"), "{diff}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_only_calls_run_none_of_the_folders_hooks() {
+        let dir = repo("hooks");
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        // The hook does turn a plain commit down...
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        run(&dir, &["add", "."]);
+        let plain = Command::new("git").args(["commit", "-q", "-m", "a"]).current_dir(&dir).output().unwrap();
+        assert!(!plain.status.success(), "the hook didn't run for a plain commit");
+        // ...and doesn't through Trek's wrapper.
+        let out = read_only(&dir).args(["commit", "-q", "-m", "a"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(read(&dir, &["log", "-1", "--format=%s"]).as_deref(), Some("a"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

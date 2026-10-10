@@ -40,8 +40,10 @@ impl Listener {
         self.socket.accept().await.map(|(stream, _)| stream)
     }
 
-    /// Listen on the pipe named `address` (`\\.\pipe\…`), which must not exist yet: a name
-    /// someone else made first is refused rather than shared. Call within a tokio runtime.
+    /// Listen on the pipe named `address` (`pipe_name`), which must not exist yet: a name someone
+    /// else made first is refused rather than shared. Only this user may open the pipe or add an
+    /// instance to it (`PipeSecurity`); an instance another process of this user's adds is one a
+    /// client refuses, as the name carries this process's id. Call within a tokio runtime.
     #[cfg(windows)]
     pub fn bind(address: &Path) -> io::Result<Listener> {
         let security = crate::PipeSecurity::new()?;
@@ -67,16 +69,26 @@ fn instance(name: &std::ffi::OsStr, security: &crate::PipeSecurity, first: bool)
 }
 
 /// Whether the process at the other end of a connection Trek accepted runs as Trek's own user.
+/// One that doesn't is logged (who it was, never what it sent).
 pub fn peer_is_me(stream: &Stream) -> bool {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
-        crate::peer_uid(stream.as_raw_fd()).ok() == Some(crate::my_uid())
+        let uid = crate::peer_uid(stream.as_raw_fd());
+        let me = uid.as_ref().ok() == Some(&crate::my_uid());
+        if !me {
+            tracing::warn!("refused an IPC connection from another user (uid {uid:?})");
+        }
+        me
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::AsHandle as _;
-        crate::client_is_me(stream.as_handle())
+        let me = crate::client_is_me(stream.as_handle());
+        if !me {
+            tracing::warn!("refused an IPC connection from another user, or a process Trek can't look at (pid {:?})", crate::windows::client_pid(stream.as_handle()));
+        }
+        me
     }
 }
 
@@ -93,9 +105,15 @@ mod tests {
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
     }
 
+    #[cfg(unix)]
     fn address(tag: &str) -> PathBuf {
-        let unique = format!("trek-ipc-{tag}-{}-{}", std::process::id(), &crate::token().unwrap()[..8]);
-        if cfg!(windows) { format!(r"\\.\pipe\{unique}").into() } else { std::env::temp_dir().join(format!("{unique}.sock")) }
+        std::env::temp_dir().join(format!("trek-ipc-{tag}-{}-{}.sock", std::process::id(), &crate::token().unwrap()[..8]))
+    }
+
+    /// A pipe's name as Trek's are (a client refuses others); the random part keeps it unique.
+    #[cfg(windows)]
+    fn address(_tag: &str) -> PathBuf {
+        crate::pipe_name(0).unwrap()
     }
 
     /// Answers `echo`, refuses any token but "good", and never answers `hang`: it reports how
@@ -175,6 +193,40 @@ mod tests {
         assert!(good.call("echo", &json!({})).unwrap_err().contains("isn't reachable"), "gone with its listener");
     }
 
+    #[test]
+    fn a_client_takes_a_frame_up_to_the_limit_and_refuses_a_longer_one() {
+        let rt = runtime();
+        let address = address("frames");
+        let mut listener = {
+            let _enter = rt.enter();
+            Listener::bind(&address).unwrap()
+        };
+        // Answers the hello, then a first request with a result exactly MAX_FRAME long (a JSON
+        // string of `x`s), a second with one a byte longer.
+        rt.spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (rd, mut w) = tokio::io::split(stream);
+            let mut r = tokio::io::BufReader::new(rd);
+            let mut line = String::new();
+            let _ = r.read_line(&mut line).await;
+            let _ = w.write_all(encode(&json!({"ok": true})).as_bytes()).await;
+            for extra in [0, 1] {
+                line.clear();
+                let _ = r.read_line(&mut line).await;
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let frame = encode(&reply(&req["id"], Ok(json!(""))));
+                let fill = crate::MAX_FRAME + extra - (frame.len() - 1);
+                let frame = encode(&reply(&req["id"], Ok(json!("x".repeat(fill)))));
+                assert_eq!(frame.len() - 1, crate::MAX_FRAME + extra);
+                let _ = w.write_all(frame.as_bytes()).await;
+            }
+        });
+        let mut conn = Client { socket: address, token: "t".into(), session: "s".into() }.connect().unwrap();
+        assert_eq!(conn.call("big", &json!({})).unwrap().as_str().unwrap().len(), crate::MAX_FRAME - r#"{"id":1,"result":""}"#.len());
+        let err = conn.call("bigger", &json!({})).unwrap_err();
+        assert!(err.contains(&format!("frame longer than {} bytes", crate::MAX_FRAME)), "{err}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn only_this_user_may_open_the_pipe_and_no_one_can_take_its_name() {
@@ -211,5 +263,44 @@ mod tests {
             LocalFree(descriptor);
         }
         assert!(Listener::bind(&address).is_err(), "a name in use isn't shared");
+    }
+
+    /// Another process of this user's adds an instance of Trek's pipe while Trek has none waiting
+    /// (between a client taking one and `accept` making the next): the next client lands in it,
+    /// and must refuse it rather than say the token. This test plays both: the pipe is named for
+    /// another process (as Trek's would be), so the instance the test adds is a stranger's.
+    #[cfg(windows)]
+    #[test]
+    fn a_client_refuses_an_instance_another_process_added() {
+        use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
+        use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES};
+
+        let rt = runtime();
+        let trek = std::process::id() + 4;
+        let address = PathBuf::from(crate::windows::name_for(trek, 0, &crate::token().unwrap()[..16]));
+        let _enter = rt.enter();
+        let _listener = Listener::bind(&address).unwrap();
+        // A client takes the one instance waiting; `accept` hasn't run to make the next.
+        let _first = std::fs::OpenOptions::new().read(true).write(true).open(&address).unwrap();
+        // An instance serves one client, so each attempt below gets one of its own.
+        let wide: Vec<u16> = address.as_os_str().to_str().unwrap().encode_utf16().chain([0]).collect();
+        let add_instance = || {
+            // SAFETY: a NUL-terminated name; no security attributes (an added instance has the pipe's).
+            let h = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, std::ptr::null()) };
+            assert_ne!(h, INVALID_HANDLE_VALUE, "this user may add an instance: {}", io::Error::last_os_error());
+            // SAFETY: just created, and owned from here on.
+            unsafe { OwnedHandle::from_raw_handle(h) }
+        };
+
+        let _rogue = add_instance();
+        let err = crate::Stream::connect(&address).err().expect("a stranger's instance is refused");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(err.to_string(), format!("the pipe isn't served by Trek (pid {trek}) but by process {}", std::process::id()));
+        let _rogue = add_instance();
+        let client = Client { socket: address, token: "secret".into(), session: "s".into() };
+        let err = client.connect().err().unwrap();
+        assert!(err.starts_with("Didn't connect to Trek: the pipe isn't served by Trek"), "a refusal, not Trek gone: {err}");
     }
 }
