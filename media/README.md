@@ -11,8 +11,8 @@ script/capture.sh mac/readme              # macOS suite → dist/media/readme/
 script/capture.sh ios/store               # iOS suite   → dist/media/store/
 ```
 
-On Windows the same driver is `script/capture.ps1` (`pwsh script/capture.ps1 mac/parity`); iOS
-suites stay macOS-only.
+On Windows the same driver is `script/capture.ps1` (`pwsh script/capture.ps1 mac/readme` and
+`mac/parity` run there too); iOS suites stay macOS-only.
 
 Knobs (env): `BUILD=0` skip the build · `SIZE=1280x820` window points · `FPS=15` video frame
 rate · `OUT=dist/media` · `KEEP=1` keep the scratch dir · `TREK_SHOT_UNDER=<png>` backdrop under
