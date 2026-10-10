@@ -1,7 +1,7 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
-use crate::{AgentEvent, Billing, Command, Decision, GroupChild, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -428,8 +428,14 @@ fn mcp_title(item: &Value) -> String {
 /// `mcp_servers` for Codex's config: the shared shape for stdio servers, `url` and
 /// `http_headers` for remote ones, with a tool timeout where a server needs longer than Codex's
 /// default minute.
-fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
-    let mut out = mcp_servers_json(servers);
+///
+/// Along with a notice for each server that can't be handed to Codex (left out).
+fn codex_mcp_servers(servers: &[crate::McpServer]) -> (Value, Vec<String>) {
+    codex_mcp_servers_with(servers, mcp_servers_json(servers, BatchHandOff::ResolvedPath))
+}
+
+/// `codex_mcp_servers` on top of the servers' JSON as handed over (see `mcp_servers_json_with`).
+fn codex_mcp_servers_with(servers: &[crate::McpServer], (mut out, left_out): (Value, Vec<String>)) -> (Value, Vec<String>) {
     for s in servers {
         let Some(entry) = out.get_mut(&s.name) else { continue };
         if let crate::McpTransport::Http { url, headers } = &s.transport {
@@ -443,7 +449,7 @@ fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
             entry["tool_timeout_sec"] = json!(secs);
         }
     }
-    out
+    (out, left_out)
 }
 
 fn tool_output(item: &Value) -> String {
@@ -1397,7 +1403,11 @@ pub async fn run(
     }
     if !config.mcp_servers.is_empty() {
         // Config overrides merge with the user's own `mcp_servers` (verified against 0.160).
-        params["config"] = json!({ "mcp_servers": codex_mcp_servers(&config.mcp_servers) });
+        let (servers, left_out) = codex_mcp_servers(&config.mcp_servers);
+        for notice in left_out {
+            let _ = events.send(AgentEvent::Notice(notice)).await;
+        }
+        params["config"] = json!({ "mcp_servers": servers });
     }
     let mut lost = false;
     // The thread couldn't be cut back or forked where asked: a new one, with the recap.
@@ -1676,17 +1686,24 @@ mod tests {
         events.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).count()
     }
 
+    /// `codex_mcp_servers` where nothing is handed over differently: not Windows.
+    fn as_written(servers: &[crate::McpServer]) -> Value {
+        let (out, left_out) = codex_mcp_servers_with(servers, crate::mcp_servers_json_with(servers, BatchHandOff::ResolvedPath, false, |_| Some("C:\\n\\npx.cmd".into())));
+        assert!(left_out.is_empty());
+        out
+    }
+
     #[test]
     fn slow_mcp_tools_get_a_longer_timeout() {
         let server = |name: &str, timeout| crate::McpServer { tool_timeout_secs: timeout, ..crate::McpServer::stdio(name, "trek-mcp", vec![], vec![]) };
-        let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
+        let out = as_written(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
         assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
         assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
     }
 
     #[test]
     fn remote_mcp_servers_use_codexs_url_keys() {
-        let out = codex_mcp_servers(&[
+        let out = as_written(&[
             crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]),
             crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
             // A command's environment (its tokens) goes in `env`, as Codex's config has it.
