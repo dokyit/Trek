@@ -13,6 +13,7 @@ mod background_strip;
 mod basecamp;
 mod brand;
 mod changes_card;
+mod chrome;
 mod command_palette;
 mod composer;
 mod cost;
@@ -30,6 +31,7 @@ mod ipc;
 mod job;
 mod mascot;
 mod md;
+mod menu_bar;
 mod mentions;
 mod motion;
 mod notes;
@@ -283,7 +285,12 @@ fn main() {
         cx.bind_keys(notes::key_bindings());
         cx.bind_keys(editor::key_bindings());
         app_actions(cx);
+        // macOS has the system's menu bar. Windows draws the same menus in the window (`menu_bar`),
+        // and has no Dock to keep the app up with its main window closed.
         cx.set_menus(menus());
+        if cfg!(windows) {
+            root::quit_with_main_window(cx);
+        }
 
         // A capture run must never reach the user's data or accounts: TREK_SHOT_DIR isolates the
         // process (all storage under TREK_DATA_DIR, no Keychain, only the mock agent can start).
@@ -329,10 +336,7 @@ fn main() {
 /// Actions the app handles itself. Windows handle the rest of these; with none open, the menu and
 /// shortcuts reopen the main window.
 fn app_actions(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| {
-        workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
-        cx.quit();
-    });
+    cx.on_action(|_: &Quit, cx| root::quit(cx));
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
     cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
