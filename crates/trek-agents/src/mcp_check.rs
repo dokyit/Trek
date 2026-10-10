@@ -306,7 +306,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("tool-launcher");
-        std::fs::write(&file, format!("#!/bin/sh\nexec /usr/bin/perl \"{}/fixtures/fake-mcp.pl\" \"$@\"\n", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        std::fs::write(&file, format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", trek_test_fixtures::bin("fake-mcp").display())).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.display().to_string();
         let server = McpServer::stdio("x", "tool-launcher", vec!["ok".into()], vec![("PATH".into(), path)]);
