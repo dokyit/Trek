@@ -178,26 +178,22 @@ fn snapshots_settings_are_snipping_tools_to_decide_on_windows() {
     });
 }
 
-/// Settings › Updates: Trek can't update itself on Windows yet, so the channel and the two
-/// automatic steps (which would do nothing) are left out; a Mac keeps them.
+/// Settings › Updates: Trek updates itself on Windows as on a Mac (trek-update swaps its folder),
+/// so both have the channel and the two automatic steps, and the same blurb. Where it can't (a dev
+/// build, as here) the line under Trek's name says so.
 #[test]
-fn the_updates_page_leaves_out_what_windows_cant_do_yet() {
+fn the_updates_page_is_the_same_on_windows_and_a_mac() {
     run(async |cx| {
         let trek = open(cx);
-        {
-            let _windows = pretend(true);
+        for windows in [true, false] {
+            let _platform = pretend(windows);
             let updates = said(&trek, cx, SettingsPage::Updates);
-            for gone in ["Channel", "Check automatically", "Download automatically"] {
-                assert!(!has(&updates, gone), "{gone} acts on nothing on Windows: {updates:?}");
+            for row in ["Channel", "Check automatically", "Download automatically"] {
+                assert!(has(&updates, row), "{row} (windows: {windows}): {updates:?}");
             }
-            assert_eq!(page_blurb(SettingsPage::Updates), "", "the blurb doesn't promise updates the line under Trek's name says it can't make");
+            assert!(has(&updates, "This is a development build. It updates when you rebuild it."), "{updates:?}");
+            assert_eq!(page_blurb(SettingsPage::Updates), "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.");
         }
-        let _mac = pretend(false);
-        let updates = said(&trek, cx, SettingsPage::Updates);
-        for row in ["Channel", "Check automatically", "Download automatically"] {
-            assert!(has(&updates, row), "{row}: {updates:?}");
-        }
-        assert_eq!(page_blurb(SettingsPage::Updates), "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.");
     });
 }
 

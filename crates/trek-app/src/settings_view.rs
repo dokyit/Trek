@@ -117,8 +117,6 @@ pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Tools if crate::words::is_windows() => "Computer use, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Permissions => "How much each agent may do without asking.".into(),
-        // Windows can't update Trek in place yet: the line under its name says so.
-        SettingsPage::Updates if crate::words::is_windows() => "".into(),
         SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.".into(),
     }
 }

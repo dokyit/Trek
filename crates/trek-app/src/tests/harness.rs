@@ -178,8 +178,8 @@ pub fn mock() -> AgentId {
 }
 
 /// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
-/// Trek can't replace itself yet (Windows).
-pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "isn't available on Windows" } else { "not running from an app bundle" };
+/// the staged update the tests name isn't there (Windows checks that before anything else).
+pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "the downloaded update is gone" } else { "not running from an app bundle" };
 
 /// `root` with `rel` (written with `/`, as the tests write paths) under it, with the platform's
 /// separators throughout: a path joined as `root.join("a/b")` mixes them on Windows, and so isn't
