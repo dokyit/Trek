@@ -2671,7 +2671,8 @@ mod tests {
 
 /// Against the real Codex: a message sent mid-turn steers the running turn. Costs a few cents of
 /// the user's plan, so it only runs on request:
-/// `cargo test -p trek-agents codex_live -- --ignored --nocapture` (Codex must be signed in).
+/// `cargo test -p trek-agents codex_live -- --ignored --nocapture` (Codex must be signed in;
+/// `TREK_LIVE_CODEX_ACCESS=full` runs it without Codex's sandbox).
 #[cfg(test)]
 mod live {
     use crate::{AgentEvent, Command, SessionConfig, start};
@@ -2688,7 +2689,9 @@ mod live {
             cwd,
             model: Some(std::env::var("TREK_LIVE_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".into())),
             effort: Effort::Low,
-            hand_holding: HandHolding::Auto,
+            // Codex's sandbox on Windows needs its own one-time setup; where that hasn't been done
+            // every command fails before it starts ("setup refresh had errors"). `full` skips it.
+            hand_holding: if std::env::var("TREK_LIVE_CODEX_ACCESS").as_deref() == Ok("full") { HandHolding::FullAccess } else { HandHolding::Auto },
             plan: false,
             read_only: false,
             resume: None,
