@@ -566,7 +566,11 @@ pub(crate) fn capitalize(s: &str) -> String {
 /// no session. Credentials stay with Devin: nothing of `auth status` but the email and the
 /// plan's name is kept, and none of it is logged.
 pub async fn devin_status() -> Result<AgentStatus> {
-    let bin = detect::which("devin").context("Devin isn't installed (curl -fsSL https://cli.devin.ai/install.sh | bash)")?;
+    #[cfg(windows)]
+    let missing = "Devin isn't installed";
+    #[cfg(not(windows))]
+    let missing = "Devin isn't installed (curl -fsSL https://cli.devin.ai/install.sh | bash)";
+    let bin = detect::which("devin").context(missing)?;
     let out = crate::output_group(tokio::process::Command::new(&bin).args(["auth", "status"]).env("PATH", detect::login_path()), None, TIMEOUT)
         .await
         .context("devin auth status failed")?;
@@ -606,91 +610,150 @@ fn devin_account(text: &str) -> AgentStatus {
 /// Run Devin's terminal UI in `dir`, ask it for `/usage`, and return the screen once the quota
 /// is on it (or the UI gave up fetching it).
 fn devin_usage_screen(bin: &Path, dir: &Path) -> Result<String> {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use std::io::{Read, Write};
-    let (rows, cols) = (40, 140);
-    let pty = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
-    let mut cmd = CommandBuilder::new(bin);
+    let mut cmd = portable_pty::CommandBuilder::new(bin);
     // The folder is Trek's own and empty; nothing to trust, and the prompt would wait forever.
     cmd.args(["--respect-workspace-trust", "false"]);
     cmd.cwd(dir);
     cmd.env("PATH", detect::login_path());
     cmd.env("TERM", "xterm-256color");
-    let mut child = pty.slave.spawn_command(cmd)?;
-    drop(pty.slave);
-    let mut reader = pty.master.try_clone_reader()?;
-    let mut writer = pty.master.take_writer()?;
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 16 * 1024];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-    let mut parser = vt100::Parser::new(rows, cols, 0);
-    // Feed the screen until `done` says so, or `limit` runs out. Terminal queries (cursor
-    // position, device attributes) are answered as a terminal would.
-    let mut pump = |limit: Duration, done: &dyn Fn(&str) -> bool, writer: &mut Box<dyn Write + Send>| -> String {
-        let end = std::time::Instant::now() + limit;
-        loop {
-            let screen = parser.screen().contents();
-            if done(&screen) || std::time::Instant::now() >= end {
-                return screen;
-            }
-            let chunk = match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(chunk) => chunk,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                // Devin exited: the screen is all there will be.
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return screen,
-            };
-            parser.process(&chunk);
-            if chunk.windows(4).any(|w| w == b"\x1b[6n") {
-                let (r, c) = parser.screen().cursor_position();
-                let _ = write!(writer, "\x1b[{};{}R", r + 1, c + 1);
-            }
-            if chunk.windows(3).any(|w| w == b"\x1b[c") || chunk.windows(4).any(|w| w == b"\x1b[0c") {
-                let _ = writer.write_all(b"\x1b[?62;c");
-            }
-        }
-    };
+    let mut pty = Pty::start(cmd, 40, 140)?;
     let result = (|| {
-        let ready = pump(Duration::from_secs(20), &|s| s.contains('❭') || s.contains("Trust "), &mut writer);
+        let ready = pty.pump(Duration::from_secs(20), &|s| s.contains('❭') || s.contains("Trust "));
         if ready.contains("Trust ") && !ready.contains('❭') {
             anyhow::bail!("Devin asked to trust a folder before showing its quota");
         }
         if !ready.contains('❭') {
             anyhow::bail!("Devin's terminal UI didn't start");
         }
-        writer.write_all(b"/usage")?;
-        pump(Duration::from_millis(600), &|_| false, &mut writer);
+        pty.send(b"/usage")?;
+        pty.pump(Duration::from_millis(600), &|_| false);
         // Close the command list it opened, then run the command as typed.
-        writer.write_all(b"\x1b")?;
-        pump(Duration::from_millis(300), &|_| false, &mut writer);
-        writer.write_all(b"\r")?;
+        pty.send(b"\x1b")?;
+        pty.pump(Duration::from_millis(300), &|_| false);
+        pty.send(b"\r")?;
         // "Fetching quota…" stays above the bars once they're in.
         let fetched = |s: &str| s.contains("% used") || s.contains("Failed to fetch quota");
-        let screen = pump(Duration::from_secs(20), &fetched, &mut writer);
+        let screen = pty.pump(Duration::from_secs(20), &fetched);
         // The panel draws in one go; a moment more for anything after the bars.
-        Ok(if screen.contains("% used") { pump(Duration::from_millis(300), &|_| false, &mut writer) } else { screen })
+        Ok(if screen.contains("% used") { pty.pump(Duration::from_millis(300), &|_| false) } else { screen })
     })();
-    // The processes Devin runs as (it starts its UI in a process of its own), for their locks.
-    let pids: Vec<u32> = child.process_id().map(descendants).unwrap_or_default();
-    // Quit as a user would (twice Ctrl-C), so Devin lets go of the session it opened; kill it
-    // if it lingers.
-    for _ in 0..2 {
-        let _ = writer.write_all(b"\x03");
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let end = std::time::Instant::now() + Duration::from_secs(3);
-    while std::time::Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    // Quit as a user would (twice Ctrl-C), so Devin lets go of the session it opened.
+    let pids = pty.end(b"\x03\x03");
     drop_session_locks(&devin_session_locks(), &pids);
     result
+}
+
+/// A program running in a pseudo-terminal of its own (ConPTY on Windows), its screen kept by a
+/// terminal emulator, for reading what a terminal UI shows and typing to it. No window is
+/// involved, and nothing reaches one: the program's console is this.
+struct Pty {
+    parser: vt100::Parser,
+    chunks: std::sync::mpsc::Receiver<Vec<u8>>,
+    writer: Box<dyn std::io::Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl Pty {
+    fn start(cmd: portable_pty::CommandBuilder, rows: u16, cols: u16) -> Result<Pty> {
+        use std::io::Read;
+        let pair = portable_pty::native_pty_system().openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+        let child = pair.slave.spawn_command(cmd)?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
+        let (tx, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
+        // Reads until the terminal closes, even once nobody listens: on Windows, closing it waits
+        // for its output to be read.
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let _ = tx.send(buf[..n].to_vec());
+            }
+        });
+        // Written down, so that a Trek that crashes with it running can end it at its next launch.
+        #[cfg(windows)]
+        if let Some(id) = child.process_id() {
+            trek_core::procs::register(id as i32);
+        }
+        Ok(Pty { parser: vt100::Parser::new(rows, cols, 0), chunks, writer, child, master: pair.master })
+    }
+
+    fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        self.writer.write_all(bytes)?;
+        self.writer.flush()
+    }
+
+    /// Feed the screen until `done` says so, or `limit` runs out; the screen's text then. Terminal
+    /// queries (cursor position, device attributes) are answered as a terminal would.
+    fn pump(&mut self, limit: Duration, done: &dyn Fn(&str) -> bool) -> String {
+        let end = std::time::Instant::now() + limit;
+        loop {
+            let screen = self.parser.screen().contents();
+            if done(&screen) || std::time::Instant::now() >= end {
+                return screen;
+            }
+            match self.chunks.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => self.feed(&chunk),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // The program exited: the screen is all there will be. (On Windows the terminal
+                    // stays open, and quiet, after it.)
+                    if matches!(self.child.try_wait(), Ok(Some(_))) {
+                        while let Ok(chunk) = self.chunks.try_recv() {
+                            self.feed(&chunk);
+                        }
+                        return self.parser.screen().contents();
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return screen,
+            }
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        use std::io::Write;
+        self.parser.process(chunk);
+        if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+            let (r, c) = self.parser.screen().cursor_position();
+            // In one write: a terminal takes an escape sequence split in two for a key and the rest.
+            let _ = self.writer.write_all(format!("\x1b[{};{}R", r + 1, c + 1).as_bytes());
+        }
+        if chunk.windows(3).any(|w| w == b"\x1b[c") || chunk.windows(4).any(|w| w == b"\x1b[0c") {
+            let _ = self.writer.write_all(b"\x1b[?62;c");
+        }
+        let _ = self.writer.flush();
+    }
+
+    /// Stop the program and everything it started: type each key of `quit` to it, give it a few
+    /// seconds to go, then end it. The ids of the processes it ran as (it may start its UI in one
+    /// of its own), for the caller to tidy up after.
+    fn end(mut self, quit: &[u8]) -> Vec<u32> {
+        let id = self.child.process_id();
+        let pids: Vec<u32> = id.map(descendants).unwrap_or_default();
+        for key in quit {
+            let _ = self.send(&[*key]);
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let end = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < end && matches!(self.child.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = self.child.kill();
+        // Ending a process on Windows leaves what it started running: found by parent ids.
+        #[cfg(windows)]
+        if let Some(id) = id {
+            trek_core::procs::end_tree(id as i32);
+            trek_core::procs::unregister(id as i32);
+        }
+        let _ = self.child.wait();
+        drop(self.writer);
+        drop(self.master);
+        pids
+    }
 }
 
 /// `pid` and the processes under it, as they are now.
@@ -698,8 +761,12 @@ fn descendants(pid: u32) -> Vec<u32> {
     let mut out = vec![pid];
     let mut i = 0;
     while i < out.len() && out.len() < 64 {
-        let kids = std::process::Command::new("/usr/bin/pgrep").args(["-P", &out[i].to_string()]).stderr(Stdio::null()).output();
-        out.extend(kids.map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse::<u32>().ok()).collect::<Vec<_>>()).unwrap_or_default());
+        let kids = trek_core::procs::children(out[i]);
+        for kid in kids {
+            if !out.contains(&kid) {
+                out.push(kid);
+            }
+        }
         i += 1;
     }
     out
@@ -718,10 +785,21 @@ fn drop_session_locks(locks: &Path, pids: &[u32]) {
     }
 }
 
-/// Where Devin keeps its session locks.
+/// Where Devin keeps its session locks: under the user's data folder, `$XDG_DATA_HOME` or
+/// `~/.local/share` on a Mac; `%APPDATA%` (Roaming) on Windows, where the others are fallbacks.
 fn devin_session_locks() -> PathBuf {
-    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| trek_core::paths::home().join(".local/share"));
-    data.join("devin/cli/session_locks")
+    let home = trek_core::paths::home();
+    let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    #[cfg(windows)]
+    let data = vec![absolute("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")), home.join(".local").join("share")];
+    #[cfg(not(windows))]
+    let data = vec![absolute("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local").join("share"))];
+    first_existing(data.into_iter().map(|d| d.join("devin").join("cli").join("session_locks")).collect())
+}
+
+/// The first of `candidates` that is a folder, else the first.
+fn first_existing(candidates: Vec<PathBuf>) -> PathBuf {
+    candidates.iter().find(|c| c.is_dir()).or(candidates.first()).cloned().unwrap_or_default()
 }
 
 /// The quota bars of Devin's `/usage` panel, as its screen shows them:
@@ -1070,6 +1148,64 @@ mod tests {
         left.sort();
         assert_eq!(left, ["ionized-growth.lock", "notes.txt"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_session_locks_are_where_devin_made_them() {
+        let dir = std::env::temp_dir().join(format!("trek-devin-where-{}", std::process::id()));
+        let (first, second) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&second).unwrap();
+        assert_eq!(first_existing(vec![first.clone(), second.clone()]), second, "the first that exists");
+        assert_eq!(first_existing(vec![first.clone(), dir.join("c")]), first, "none do: the first");
+        assert_eq!(first_existing(vec![]), PathBuf::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(devin_session_locks().ends_with(Path::new("devin").join("cli").join("session_locks")));
+    }
+
+    /// The pseudo-terminal Devin's UI runs in, with `cmd.exe` as the program: it shows what it
+    /// prints, takes what is typed, and ends with everything it started.
+    #[cfg(windows)]
+    #[test]
+    fn a_program_runs_in_a_conpty_and_ends_with_all_it_started() {
+        let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
+        cmd.args(["/d", "/k", "prompt $G$S"]);
+        let mut pty = Pty::start(cmd, 40, 140).unwrap();
+        let shown = |word: &'static str| move |s: &str| s.lines().any(|l| l.trim() == word);
+        pty.pump(Duration::from_secs(20), &|s| s.contains("> "));
+        // The echoed command line holds the word too; its output is a line of its own.
+        pty.send(b"echo hello\r").unwrap();
+        let screen = pty.pump(Duration::from_secs(20), &shown("hello"));
+        assert!(shown("hello")(&screen), "{screen}");
+        // A child that keeps running: cmd waits for it.
+        pty.send(b"ping -n 60 127.0.0.1 >nul\r").unwrap();
+        let id = pty.child.process_id().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while descendants(id).len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let pids = pty.end(b"");
+        assert_eq!(pids.len(), 2, "cmd and its ping: {pids:?}");
+        let running = |pid: u32| String::from_utf8_lossy(&std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap().stdout).contains(&pid.to_string());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while pids.iter().any(|p| running(*p)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!pids.iter().any(|p| running(*p)), "everything under cmd was ended: {pids:?}");
+        assert!(!trek_core::procs::live().contains(&(id as i32)), "and untracked");
+    }
+
+    /// A program that exits is noticed, not waited out.
+    #[cfg(windows)]
+    #[test]
+    fn a_program_that_exits_leaves_its_last_screen() {
+        let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
+        cmd.args(["/d", "/c", "echo goodbye"]);
+        let mut pty = Pty::start(cmd, 40, 140).unwrap();
+        let started = std::time::Instant::now();
+        let screen = pty.pump(Duration::from_secs(20), &|_| false);
+        assert!(screen.contains("goodbye"), "{screen}");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        pty.end(b"");
     }
 
     #[test]
