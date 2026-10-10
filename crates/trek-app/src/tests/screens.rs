@@ -263,7 +263,7 @@ pub(super) fn runs(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<(Stri
     let sink = seen.clone();
     cx.update(|cx| {
         cx.subscribe(&trek.ws, move |_, event: &WorkspaceEvent, _| {
-            if let WorkspaceEvent::RunInTerminal { command, cwd } = event {
+            if let WorkspaceEvent::RunInTerminal { command, cwd } | WorkspaceEvent::RunProjectAction { command, cwd } = event {
                 sink.borrow_mut().push((command.clone(), cwd.clone()));
             }
         })

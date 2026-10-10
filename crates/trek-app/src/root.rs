@@ -5,6 +5,7 @@ use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
+use crate::panels::terminal::Job;
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
@@ -169,13 +170,17 @@ impl TrekWindow {
                     this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
                     this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
-                WorkspaceEvent::RunInTerminal { command, cwd } if this.workspace.read(cx).ide() => {
-                    let (command, cwd) = (command.clone(), cwd.clone());
-                    this.ide.update(cx, |ide, cx| ide.run_command(command, cwd, window, cx));
-                }
-                WorkspaceEvent::RunInTerminal { command, cwd } => {
-                    let (command, cwd) = (command.clone(), cwd.clone());
-                    this.right_panel.update(cx, |p, cx| p.run_command(command, cwd, window, cx));
+                WorkspaceEvent::RunInTerminal { command, cwd } | WorkspaceEvent::RunProjectAction { command, cwd } => {
+                    let job = match event {
+                        WorkspaceEvent::RunProjectAction { .. } => Job::Action(command.clone()),
+                        _ => Job::Setup(command.clone()),
+                    };
+                    let cwd = cwd.clone();
+                    if this.workspace.read(cx).ide() {
+                        this.ide.update(cx, |ide, cx| ide.run_command(job, cwd, window, cx));
+                    } else {
+                        this.right_panel.update(cx, |p, cx| p.run_command(job, cwd, window, cx));
+                    }
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
                 WorkspaceEvent::OpenEditor { path, line, preview } if this.workspace.read(cx).main_window == Some(window.window_handle()) => {
