@@ -61,7 +61,8 @@ objc2-speech = "0.3"
 block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
-# LockFileEx on the data folder, a job object per language server, the registry for the OS name.
+# LockFileEx on the data folder, a job object per language server, the registry for the OS name,
+# and the session's idle time and lock state for push notifications' away-detection.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
@@ -70,8 +71,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # The adapters and their addresses for the phone pairing screen (getifaddrs has no Windows twin).
