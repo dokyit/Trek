@@ -1,8 +1,8 @@
 # Trek
 
-**Every agent. One trail.** Trek is a native macOS app (Rust + GPUI) that runs your coding agents —
-Claude Code, Codex, OpenCode, Cursor, Copilot and other ACP agents, plus API and local models — from one
-inbox-style window.
+**Every agent. One trail.** Trek is a native app for macOS and Windows (Rust + GPUI) that runs your coding
+agents — Claude Code, Codex, OpenCode, Cursor, Copilot and other ACP agents, plus API and local models —
+from one inbox-style window.
 
 Trek is early (0.x). It's used daily by its author, but expect rough edges, and read
 [What isn't done](#what-isnt-done) before you rely on it.
@@ -23,7 +23,8 @@ credentials:
   gate its edits and commands, added only where your own OpenCode config sets none.
 - **API keys and local models**: Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, xAI, Mistral, Groq,
   custom OpenAI-compatible endpoints, Ollama, LM Studio and llama.cpp / MLX. Keys live in the macOS
-  Keychain (or come from your shell's `*_API_KEY` variables). These are chat only for now.
+  Keychain or Windows Credential Manager (or come from your shell's `*_API_KEY` variables). These are
+  chat only for now.
 
 **One inbox for all of it.** Running threads and anything waiting on you sit at the top of the sidebar;
 finished work settles on its own (after a few idle days, or when you settle it), and threads can be pinned,
@@ -82,16 +83,22 @@ A turn under the mock agent, captured by `script/capture.sh` — [video](docs/me
 
 <img src="docs/media/clip-stream.gif" alt="A working turn streaming" width="800">
 
+### Windows
+
+<img src="docs/media/01-working-night-windows.png" alt="Trek on Windows: a finished answer in the Night theme, with the sidebar and composer" width="800">
+
+<table>
+  <tr>
+    <td><img src="docs/media/03-approval-night-windows.png" alt="Trek on Windows: an approval card waiting for a decision"></td>
+    <td><img src="docs/media/05-basecamp-paper-windows.png" alt="Trek on Windows: Basecamp in the paper theme, with the threads that need you"></td>
+  </tr>
+</table>
+
 ## Install
 
 Download `Trek-<version>-darwin-aarch64.app.tar.gz` from
 [Releases](https://github.com/dokyit/Trek/releases), unpack it (double-click) and move **Trek.app** to
 Applications. Trek needs macOS 13 or later on Apple silicon.
-
-On Windows, download `Trek-<version>-windows-x86_64.zip` instead, unzip it into a folder your account
-can write (not `Program Files`) and run `trek.exe`. Nothing is Authenticode-signed yet, so SmartScreen
-warns once on first launch - **More info** > **Run anyway**. Trek targets Windows 11 on x64; Windows 10
-22H2 is best effort, with an opaque window instead of Mica.
 
 Releases are signed with Trek's own certificate but **not notarized by Apple**, so the first launch needs
 one extra step. Either:
@@ -112,6 +119,36 @@ itself until you move it to Applications; the same goes for a folder your accoun
 
 To use the agents, install and log in to their CLIs as usual (`claude`, `codex`, `opencode`, …). Trek finds
 them through your login shell's `PATH`; Settings → Agents & Subscriptions shows what it found.
+
+### Windows
+
+Download `Trek-<version>-windows-x86_64.zip` from the same [Releases](https://github.com/dokyit/Trek/releases)
+page, unzip it into a folder your account can write (not `Program Files`) and run `trek.exe`. The zip holds
+`trek.exe`, `trek-mcp.exe` and `trek-update.exe`, and nothing else. Nothing is Authenticode-signed yet, so
+SmartScreen warns once on first launch: **More info** > **Run anyway**. Trek targets Windows 11 on x64;
+Windows 10 22H2 is best effort, with an opaque window instead of Mica.
+
+Updates are signed with the same minisign key as the Mac's. `trek-update.exe` swaps the install folder when an
+update is installed, after the signature is checked, so your account has to be able to write to that folder.
+Logs are in `%LOCALAPPDATA%\Trek\logs`, one file a day.
+
+Windows differs from the Mac in these ways:
+
+- **Tray and taskbar.** A system tray icon in place of the menu bar icon, and a taskbar badge in place of the
+  Dock badge.
+- **Notifications** are Windows toasts, under Trek's name.
+- **Dictation** has no Dictate button. Press Win+H, which is Windows' own dictation.
+- **Snapshots** go through Snipping Tool: you pick the window, area or screen in its overlay, and Trek attaches
+  the picture. Windows asks for no permission to capture the screen.
+- **Computer use** needs no permission. Once it's on in Settings › Tools, agents can see the screen, click and
+  type. They can't type into apps running as administrator.
+- **No iOS Simulator.** Trek doesn't offer it on Windows, so there's no Simulator tab.
+- **Glass.** On Windows 11 22H2 and later, the wallpaper's tint shows through the window (Mica), while
+  Transparency effects are on.
+- **`trek://` links** open in Trek, which registers the scheme for your account each time it starts.
+- **Phone.** The first time the phone server is on, Windows Firewall asks whether Trek may communicate on
+  private networks. Allow it, or your iPhone can't reach this PC.
+- **Shortcuts** use Ctrl where this README says ⌘. A few differ.
 
 ## Build from source
 
@@ -169,6 +206,18 @@ and painting only (the test platform has no GPU). For the whole cost, drawing in
 `TREK_DATA_DIR`, and sample it with `top -pid`. `TREK_FORCE_ACTIVE=1` is a measurement aid, not a setting: it
 runs the working animation as if the window were in front and keeps drawing the window while it's covered.
 
+### Windows
+
+You need Rust (stable, MSVC toolchain), Visual Studio 2022 Build Tools with the C++ workload, and the Windows
+SDK. Release builds compile GPUI's shaders with the SDK's `fxc.exe`; a debug build doesn't need it. The `.ps1`
+scripts in `script/` need PowerShell 7.
+
+```powershell
+cargo run -p trek-app                 # debug build, runs from target\debug
+```
+
+CI runs `cargo test --workspace --locked` on Windows too.
+
 ## Releases
 
 Releases are published to GitHub by `script/release.sh <version> [--channel stable|beta|nightly]`, which
@@ -203,10 +252,13 @@ last reported, so Trek doesn't open a session to ask again). See
 
 ## What isn't done
 
-- **Apple silicon only on Mac, x64 only on Windows.** No Intel Mac or ARM64 Windows build is published;
-  Linux isn't supported.
+- **Apple silicon only on Mac, x64 only on Windows.** No Intel Mac build is published, ARM64 Windows is
+  untested, and Linux isn't supported.
 - **Not notarized, not Authenticode-signed.** First launch needs the step above (Gatekeeper on macOS,
   one SmartScreen prompt on Windows).
+- **No Windows release yet.** The first one hasn't been published, so the Windows zip isn't on Releases.
+- **Windows 10 is best effort.** It isn't tested in CI, and it gets an opaque window instead of Mica.
+- **Windows CI is still being made reliable.**
 - **API keys and local models are chat only.** Trek's own tool loop (read, edit, run with the hand-holding
   gates) isn't built yet; use a CLI agent for real work in a repository.
 - **Imports** cover Claude Code, Codex and OpenCode; Cursor, Copilot and other agents' history isn't
