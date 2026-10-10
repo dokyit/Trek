@@ -48,6 +48,10 @@ pub struct Words {
     /// General › System: the row that holds off idle sleep.
     pub keep_awake_label: &'static str,
 
+    /// Settings › Phone, before the phone server is on: what the system will ask the first time it
+    /// listens. `None` where it asks nothing Trek needs to explain.
+    pub firewall_note: Option<&'static str>,
+
     /// Snapshots: the drop shadow around a window capture, and the permission to capture the screen.
     pub window_shadow_note: &'static str,
     pub screen_recording_label: &'static str,
@@ -83,6 +87,8 @@ const MACOS: Words = Words {
 
     keep_awake_label: "Keep the Mac awake while agents work",
 
+    firewall_note: None,
+
     window_shadow_note: "Keep macOS's drop shadow around window snapshots.",
     screen_recording_label: "Screen Recording",
     screen_recording_note: "macOS asks once; snapshots of other apps need it.",
@@ -117,6 +123,8 @@ const WINDOWS: Words = Words {
     computer_fingerprint: "This PC's fingerprint",
 
     keep_awake_label: "Keep the PC awake while agents work",
+
+    firewall_note: Some("The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC."),
 
     window_shadow_note: "Keep the window's own drop shadow around window snapshots.",
     screen_recording_label: "Screen capture",
@@ -185,6 +193,7 @@ mod tests {
             computer,
             computer_fingerprint,
             keep_awake_label,
+            firewall_note,
             window_shadow_note,
             screen_recording_label,
             screen_recording_note,
@@ -209,6 +218,8 @@ mod tests {
             ("computer", computer),
             ("computer_fingerprint", computer_fingerprint),
             ("keep_awake_label", keep_awake_label),
+            // Said by one platform only: the other's blank is not a blank wording.
+            ("firewall_note", firewall_note.unwrap_or("(says nothing)")),
             ("window_shadow_note", window_shadow_note),
             ("screen_recording_label", screen_recording_label),
             ("screen_recording_note", screen_recording_note),
@@ -257,6 +268,7 @@ mod tests {
         assert_eq!(w.this_computer, "this Mac");
         assert_eq!(w.the_computer, "the Mac");
         assert_eq!(w.keep_awake_label, "Keep the Mac awake while agents work");
+        assert_eq!(w.firewall_note, None, "the Mac's Phone page says nothing of a firewall");
         assert_eq!(
             w.api_keys_blurb,
             "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically."
@@ -272,6 +284,7 @@ mod tests {
         assert_eq!(w.match_system_theme, "Match Windows");
         assert_eq!(w.badge_label, "Taskbar badge");
         assert_eq!(w.tray_label, "System tray icon");
+        assert!(w.firewall_note.is_some_and(|n| n.contains("Windows Firewall") && n.contains("private networks")));
         assert_eq!(format!("Saved in {}", w.your_credential_store), "Saved in Windows Credential Manager");
         assert_eq!(format!("Runs on {}, nothing is billed", w.this_computer), "Runs on this PC, nothing is billed");
     }
