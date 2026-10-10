@@ -816,14 +816,18 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
 
-        /// How long a shell gets for each step: generous, as profiles are slow and tests run side by side.
-        const LIMIT: Duration = Duration::from_secs(90);
+        /// How long a shell gets for each step: generous, as profiles are slow and the machine
+        /// may be building something else.
+        const LIMIT: Duration = Duration::from_secs(180);
 
         /// Starts `setting`'s shell running `job` (if any) in a temp folder, types `input`
         /// (if any), and returns the screen once `done` likes it, or after `LIMIT`. The shell is
-        /// killed afterwards.
+        /// killed afterwards. One shell at a time: six PowerShells starting at once, each running
+        /// the user's profile, took longer than `LIMIT` on a loaded machine.
         fn run(setting: &str, job: Option<Job>, input: Option<&str>, done: impl Fn(&str) -> bool) -> String {
-            // A folder of its own: the tests run side by side, and each removes its folder.
+            static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+            let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            // A folder of its own, as each test removes its folder.
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let dir = std::env::temp_dir().join(format!("trek-terminal-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
             std::fs::create_dir_all(&dir).unwrap();
