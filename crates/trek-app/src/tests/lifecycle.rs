@@ -404,7 +404,8 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
 fn queued_follow_ups_go_out_one_turn_each_in_order() {
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
-        let id = trek.send(cx, "mock:long 2s");
+        // Running while the follow-ups queue behind it: a loaded runner can take seconds.
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         trek.send(cx, "first follow-up");
@@ -421,7 +422,7 @@ fn queued_follow_ups_go_out_one_turn_each_in_order() {
                 _ => None,
             })
             .collect();
-        assert_eq!(order, ["mock:long 2s", "end", "first follow-up", "end", "second follow-up", "end"]);
+        assert_eq!(order, ["mock:long 8s", "end", "first follow-up", "end", "second follow-up", "end"]);
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0);
     });
 }

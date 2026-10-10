@@ -42,7 +42,8 @@ fn onboarding_lists_every_agent_with_the_command_that_sets_it_up() {
         trek.render(cx);
         assert!(trek.visible(cx, "ob-agent-acp-cursor"));
         trek.click(cx, "ob-copy-claude-code");
-        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("npm i -g @anthropic-ai/claude-code"));
+        let install = trek_core::catalog::install_hint("claude-code").unwrap().here();
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some(install));
 
         // Found: connected ones need nothing; one that isn't signed in shows its sign-in command.
         trek.update(cx, |ws, cx| {

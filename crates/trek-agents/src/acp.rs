@@ -27,11 +27,10 @@ pub struct AcpInfo {
 
 /// Binary and arguments that start `agent` as an ACP server.
 fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
-    // Tests talk to a stand-in agent (fixtures/fake-acp.pl).
+    // Tests talk to a stand-in agent (the fake-acp binary from trek-test-fixtures).
     #[cfg(test)]
     if *agent == AgentId::Acp(tests::FAKE.into()) {
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-acp.pl");
-        return Ok((PathBuf::from("/usr/bin/perl"), vec![script.into()], "Fake".into()));
+        return Ok((trek_test_fixtures::bin("fake-acp"), vec![], "Fake".into()));
     }
     let (binary, args, name, hint): (&str, Vec<&str>, String, &str) = match agent {
         AgentId::OpenCode => (detect::OPENCODE, vec!["acp"], "OpenCode".into(), trek_core::catalog::agent_setup("opencode").map_or("curl -fsSL https://opencode.ai/install | bash", |s| s.install)),
@@ -1561,7 +1560,7 @@ impl ProbeCache {
 mod tests {
     use super::*;
 
-    /// The ACP agent id that runs fixtures/fake-acp.pl (see `launch_spec`).
+    /// The ACP agent id that runs the fake-acp fixture binary (see `launch_spec`).
     pub(super) const FAKE: &str = "test-fake";
 
     #[test]
@@ -1614,24 +1613,26 @@ mod tests {
     #[test]
     fn an_added_agent_starts_with_its_own_command_and_environment() {
         use trek_core::registry::{AddedAgent, EnvVar};
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-acp.pl");
-        let perl = AddedAgent {
-            id: "perl-agent".into(),
-            name: "Perl agent".into(),
-            command: "/usr/bin/perl".into(),
-            args: vec![script.into()],
-            env: vec![EnvVar { name: "PERL_AGENT_MODE".into(), value: "quiet".into(), secret: false }],
+        let fake = trek_test_fixtures::bin("fake-acp");
+        let local = AddedAgent {
+            id: "local-agent".into(),
+            name: "Local agent".into(),
+            command: fake.display().to_string(),
+            args: vec!["--acp".into()],
+            env: vec![EnvVar { name: "LOCAL_AGENT_MODE".into(), value: "quiet".into(), secret: false }],
             ..Default::default()
         };
-        let on_path = AddedAgent { id: "on-path".into(), name: "On PATH".into(), command: "sh".into(), ..Default::default() };
+        let shell = if cfg!(windows) { "cmd" } else { "sh" };
+        let on_path = AddedAgent { id: "on-path".into(), name: "On PATH".into(), command: shell.into(), ..Default::default() };
         let gone = AddedAgent { id: "gone".into(), name: "Gone".into(), command: "trek-no-such-agent".into(), ..Default::default() };
-        trek_core::catalog::set_added_agents(&[perl, on_path, gone]);
-        let agent = AgentId::Acp("perl-agent".into());
+        trek_core::catalog::set_added_agents(&[local, on_path, gone]);
+        let agent = AgentId::Acp("local-agent".into());
         let (bin, args, name) = launch_spec(&agent).unwrap();
-        assert_eq!((bin, args, name.as_str()), (PathBuf::from("/usr/bin/perl"), vec![script.to_string()], "Perl agent"));
-        assert_eq!(launch_env(&agent, Path::new("/")), [("PERL_AGENT_MODE".to_string(), "quiet".to_string())]);
-        assert_eq!(agent.display_name(), "Perl agent");
-        assert!(launch_spec(&AgentId::Acp("on-path".into())).unwrap().0.ends_with("sh"), "a name is looked up on PATH");
+        assert_eq!((bin, args, name.as_str()), (fake, vec!["--acp".to_string()], "Local agent"));
+        assert_eq!(launch_env(&agent, Path::new("/")), [("LOCAL_AGENT_MODE".to_string(), "quiet".to_string())]);
+        assert_eq!(agent.display_name(), "Local agent");
+        let found = launch_spec(&AgentId::Acp("on-path".into())).unwrap().0;
+        assert!(found.file_stem().is_some_and(|s| s == shell), "a name is looked up on PATH");
         let err = launch_spec(&AgentId::Acp("gone".into())).unwrap_err().to_string();
         assert!(err.contains("trek-no-such-agent isn't on your PATH"), "{err}");
         assert!(launch_spec(&AgentId::Acp("never-added".into())).is_err());
@@ -1924,8 +1925,7 @@ mod tests {
                 .iter()
                 .map(|m| format!("{m}\n"))
                 .collect::<String>();
-            let mut child = std::process::Command::new("/usr/bin/perl")
-                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-acp.pl"))
+            let mut child = std::process::Command::new(trek_test_fixtures::bin("fake-acp"))
                 .current_dir(&dir)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
