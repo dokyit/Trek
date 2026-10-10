@@ -52,6 +52,9 @@ pub struct Words {
     pub window_shadow_note: &'static str,
     pub screen_recording_label: &'static str,
     pub screen_recording_note: &'static str,
+
+    /// The Browser tool when the system's web view can't be made (WebView2 on Windows).
+    pub browser_unavailable: &'static str,
 }
 
 const MACOS: Words = Words {
@@ -86,6 +89,8 @@ const MACOS: Words = Words {
     window_shadow_note: "Keep macOS's drop shadow around window snapshots.",
     screen_recording_label: "Screen Recording",
     screen_recording_note: "macOS asks once; snapshots of other apps need it.",
+
+    browser_unavailable: "The embedded browser isn't available on this system.",
 };
 
 const WINDOWS: Words = Words {
@@ -121,6 +126,8 @@ const WINDOWS: Words = Words {
     window_shadow_note: "Keep the window's own drop shadow around window snapshots.",
     screen_recording_label: "Screen capture",
     screen_recording_note: "Windows doesn't ask; snapshots of other apps just work.",
+
+    browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
 };
 
 /// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
@@ -188,6 +195,7 @@ mod tests {
             window_shadow_note,
             screen_recording_label,
             screen_recording_note,
+            browser_unavailable,
         } = *w;
         vec![
             ("os_name", os_name),
@@ -212,6 +220,7 @@ mod tests {
             ("window_shadow_note", window_shadow_note),
             ("screen_recording_label", screen_recording_label),
             ("screen_recording_note", screen_recording_note),
+            ("browser_unavailable", browser_unavailable),
         ]
     }
 
@@ -257,6 +266,7 @@ mod tests {
         assert_eq!(w.this_computer, "this Mac");
         assert_eq!(w.the_computer, "the Mac");
         assert_eq!(w.keep_awake_label, "Keep the Mac awake while agents work");
+        assert_eq!(w.browser_unavailable, "The embedded browser isn't available on this system.");
         assert_eq!(
             w.api_keys_blurb,
             "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically."
