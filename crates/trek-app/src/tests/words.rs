@@ -74,6 +74,23 @@ fn windows_pages_say_windows() {
 }
 
 #[test]
+fn the_phone_page_explains_the_firewall_question_on_windows_only() {
+    run(async |cx| {
+        let note = "The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC.";
+        let trek = open(cx);
+        {
+            let _windows = pretend(true);
+            let mobile = said(&trek, cx, SettingsPage::Mobile);
+            assert!(has(&mobile, note), "{mobile:?}");
+        }
+        let _mac = pretend(false);
+        let mobile = said(&trek, cx, SettingsPage::Mobile);
+        assert!(mobile.iter().all(|s| !s.contains("Firewall") && !s.contains("firewall")), "{mobile:?}");
+        assert!(has(&mobile, "Let your iPhone connect"), "the page itself is there: {mobile:?}");
+    });
+}
+
+#[test]
 fn a_mac_reads_as_it_always_has() {
     run(async |cx| {
         let _mac = pretend(false);
