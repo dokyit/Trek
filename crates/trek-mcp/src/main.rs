@@ -8,6 +8,8 @@
 #[cfg(target_os = "macos")]
 mod computer;
 #[cfg(target_os = "macos")]
+mod desktop;
+#[cfg(target_os = "macos")]
 mod keys;
 mod orchestrate;
 mod rpc;
