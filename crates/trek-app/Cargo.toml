@@ -79,8 +79,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 # The adapters and their addresses for the phone pairing screen (getifaddrs has no Windows twin).
 if-addrs = "0.13"
-# The taskbar button's overlay badge (ITaskbarList3); the version GPUI's Windows platform uses.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# The taskbar button's overlay badge (ITaskbarList3), and snapshots: Snipping Tool's overlay (ShellExecuteW)
+# and the clipboard it leaves the image on. The version GPUI's Windows platform uses.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # The app icon in trek.exe (build.rs), through the Windows SDK's rc.exe.
