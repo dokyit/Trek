@@ -175,9 +175,21 @@ fn build() -> anyhow::Result<Parts> {
     let icon = with_glyph(TrayIconBuilder::new(), load_icon(Glyph::Idle.name(), Surface::current()).ok_or_else(|| anyhow::anyhow!("tray icon glyph"))?)
         .with_tooltip("Trek")
         .with_menu(Box::new(menu))
+        // On Windows a left click opens the app, as taskbar programs do there; the menu is on
+        // the right button. On macOS either button opens the menu, as menu bar items do.
+        .with_menu_on_left_click(!cfg!(windows))
         .build()?;
     // Menu clicks arrive on the main thread; forward them into GPUI without polling.
     let (tx, rx) = async_channel::unbounded::<tray_icon::menu::MenuId>();
+    if cfg!(windows) {
+        // A left click is "Open Trek".
+        let (tx, open) = (tx.clone(), open.id().clone());
+        tray_icon::TrayIconEvent::set_event_handler(Some(move |e: tray_icon::TrayIconEvent| {
+            if let tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = e {
+                let _ = tx.try_send(open.clone());
+            }
+        }));
+    }
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = tx.try_send(e.id);
     }));
