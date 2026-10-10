@@ -64,6 +64,9 @@ pub struct Words {
     /// The mic button's tip. Windows has its own dictation, so there the button is left out and
     /// the tip is the way to it.
     pub dictate_tip: &'static str,
+
+    /// The Browser tool when the system's web view can't be made (WebView2 on Windows).
+    pub browser_unavailable: &'static str,
 }
 
 const MACOS: Words = Words {
@@ -104,6 +107,8 @@ const MACOS: Words = Words {
     open_in_viewer: "Open in Preview",
 
     dictate_tip: "Dictate",
+
+    browser_unavailable: "The embedded browser isn't available on this system.",
 };
 
 const WINDOWS: Words = Words {
@@ -145,6 +150,8 @@ const WINDOWS: Words = Words {
     open_in_viewer: "Open in default app",
 
     dictate_tip: "Press Win+H to dictate",
+
+    browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
 };
 
 /// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
@@ -221,6 +228,7 @@ mod tests {
             screen_recording_note,
             open_in_viewer,
             dictate_tip,
+            browser_unavailable,
         } = *w;
         vec![
             ("os_name", os_name),
@@ -249,6 +257,7 @@ mod tests {
             ("screen_recording_note", screen_recording_note),
             ("open_in_viewer", open_in_viewer),
             ("dictate_tip", dictate_tip),
+            ("browser_unavailable", browser_unavailable),
         ]
     }
 
@@ -297,6 +306,7 @@ mod tests {
         assert_eq!(w.firewall_note, None, "the Mac's Phone page says nothing of a firewall");
         assert_eq!(w.open_in_viewer, "Open in Preview");
         assert_eq!(w.dictate_tip, "Dictate");
+        assert_eq!(w.browser_unavailable, "The embedded browser isn't available on this system.");
         assert_eq!(
             w.api_keys_blurb,
             "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically."

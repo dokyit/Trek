@@ -28,7 +28,7 @@ SHOT_TIMEOUT=${SHOT_TIMEOUT:-900}
 
 say() { print -r -- "$(date +%H:%M:%S)  $*"; }
 
-VERBS="route send attach project diff pair push new settled glass tint theme tools range usage-demo pace wait record editor agent-install toast click rclick hover elements type key scroll resize approve deny answer rewind shot quit"
+VERBS="route send attach project diff pair push new settled glass tint theme tools range usage-demo pace wait record editor agent-install toast click rclick hover elements type key scroll resize approve deny answer rewind shot browser quit"
 
 check_cmds() {
   local file=$1 bad=0
