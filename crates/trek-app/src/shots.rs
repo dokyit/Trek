@@ -137,6 +137,17 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
     }
     // A few frames for whatever the last command changed to be drawn.
     cx.background_executor().timer(Duration::from_millis(400)).await;
+    // And for the git reads the command set going (the composer's branch chip): a process spawn
+    // costs a hundred milliseconds on Windows, so they can land after those few frames.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut waited = false;
+    while cx.update(|cx| ws.read(cx).git_inflight) > 0 && Instant::now() < deadline {
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+        waited = true;
+    }
+    if waited {
+        cx.background_executor().timer(Duration::from_millis(200)).await;
+    }
     let path = dir.join(format!("{arg}.png"));
     let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
