@@ -20,8 +20,12 @@ pub(crate) const LAP: Duration = Duration::from_secs(16);
 /// Waiting for others to come back, it paces the same trail on a shorter lap: restless where
 /// the working walk is steady.
 pub(crate) const PACE: Duration = Duration::from_secs(8);
-/// One sprite pixel, in points. 1.5pt is 3 device pixels on Retina, so edges stay crisp.
+/// One sprite pixel, in points, as designed: 3 device pixels on Retina. At other scales it's
+/// whatever whole number of device pixels comes nearest (`cell_device_px`).
 const PX: f32 = 1.5;
+/// The most a sprite pixel may grow to, in points, rounding up to whole device pixels: the hiker
+/// then still fits the trail's height.
+const PX_MAX: f32 = 1.6;
 const SPRITE_W: usize = 14;
 const SPRITE_H: usize = 16;
 /// Height of the trail with the hiker on it.
@@ -115,24 +119,42 @@ pub(crate) fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
     (pos, frame, right)
 }
 
-fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
-    let w = b.size.width.as_f32();
-    let ground = (b.origin.y.as_f32() + HEIGHT - 2.).round();
-    // Dotted trail.
-    let mut x = b.origin.x.as_f32() + 2.;
-    while x < b.origin.x.as_f32() + w - 2. {
-        window.paint_quad(fill(Bounds::new(point(px(x), px(ground - 1.)), size(px(2.), px(2.))), dots).corner_radii(px(1.)));
-        x += 7.;
-    }
-    let sprite_w = SPRITE_W as f32 * PX;
-    let travel = (w - sprite_w - 8.).max(0.);
-    // Snap to the sprite's pixel grid so it never blurs mid-pixel.
-    let left = ((b.origin.x.as_f32() + 4. + travel * pos) / PX).round() * PX;
-    sprite(left, ground - 1., PX, frame, right, window);
+/// How many device pixels one sprite pixel takes at `scale`: the whole number nearest `PX`
+/// points' worth, so every sprite pixel is the same size (GPUI snaps each quad's edges to device
+/// pixels: at 125 % a 1.5pt pixel would come out 2, 2, 2, 2, 1 device pixels wide). Rounding up
+/// is held to `PX_MAX`, so at 100 % it's 1 device pixel rather than a hiker a third taller.
+fn cell_device_px(scale: f32) -> f32 {
+    let n = (PX * scale).round().max(1.);
+    if n > 1. && n / scale > PX_MAX { n - 1. } else { n }
 }
 
-fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
-    let top = ground - SPRITE_H as f32 * cell_px;
+/// `v` points, moved to the nearest device pixel.
+fn snap(v: f32, scale: f32) -> f32 {
+    (v * scale).round() / scale
+}
+
+fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
+    let scale = window.scale_factor();
+    let w = b.size.width.as_f32();
+    let ground = snap(b.origin.y.as_f32() + HEIGHT - 2., scale);
+    // Dotted trail: dots of a whole number of device pixels, on device pixels, all alike.
+    let dot = (2. * scale).round().max(1.) / scale;
+    let mut x = b.origin.x.as_f32() + 2.;
+    while x < b.origin.x.as_f32() + w - 2. {
+        window.paint_quad(fill(Bounds::new(point(px(snap(x, scale)), px(ground - 1.)), size(px(dot), px(dot))), dots).corner_radii(px(dot / 2.)));
+        x += 7.;
+    }
+    let n = cell_device_px(scale);
+    let cell = n / scale;
+    let travel = (w - SPRITE_W as f32 * cell - 8.).max(0.);
+    // Snap to the sprite's pixel grid, in device pixels, so it never blurs mid-pixel.
+    let left = (((b.origin.x.as_f32() + 4. + travel * pos) * scale) / n).round() * n / scale;
+    // Its feet on the trail; a hiker rounded up a little is kept inside the trail's height.
+    let top = snap(ground - 1. - SPRITE_H as f32 * cell, scale).max(snap(b.origin.y.as_f32(), scale));
+    sprite(left, top, cell, frame, right, window);
+}
+
+fn sprite(left: f32, top: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
     let cell = |x: f32, y: f32, rgb: u32, window: &mut Window| {
         let col = if right { x } else { SPRITE_W as f32 - 1. - x };
         window.paint_quad(fill(Bounds::new(point(px(left + col * cell_px), px(top + y * cell_px)), size(px(cell_px), px(cell_px))), gpui_kit::rgb(rgb)));
@@ -193,6 +215,21 @@ mod tests {
         }
         // The wait's pace is a visibly different lap, not the working walk again.
         assert!(super::PACE < super::LAP);
+    }
+
+    #[test]
+    fn sprite_pixels_are_whole_device_pixels_at_every_scale() {
+        // Retina is as designed: 3 device pixels, 1.5pt.
+        assert_eq!(super::cell_device_px(2.), 3.);
+        for (scale, want) in [(1., 1.), (1.25, 2.), (1.5, 2.), (1.75, 2.), (2., 3.), (2.25, 3.), (2.5, 4.), (3., 4.)] {
+            let n = super::cell_device_px(scale);
+            assert_eq!(n, want, "at {scale}");
+            assert!(n / scale <= super::PX_MAX + 1e-6, "at {scale} the hiker still fits the trail");
+            // The sprite's top, from a ground on a device pixel, lands on one too.
+            let ground = super::snap(100.3, scale);
+            let top = super::snap(ground - 1. - super::SPRITE_H as f32 * n / scale, scale);
+            assert!(((top * scale) - (top * scale).round()).abs() < 1e-3 && ((ground * scale) - (ground * scale).round()).abs() < 1e-3);
+        }
     }
 
     #[test]
