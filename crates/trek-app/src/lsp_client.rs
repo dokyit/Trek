@@ -696,18 +696,21 @@ pub fn uri_for(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::os::unix::net::UnixStream;
+    use std::net::{TcpListener, TcpStream};
 
-    /// A client wired to an in-process "server": what it writes, and a handle to write back.
-    fn fake() -> (Arc<Client>, UnixStream, BufReader<UnixStream>) {
-        let (ours, theirs) = UnixStream::pair().unwrap();
+    /// A client wired to an in-process "server" (a loopback socket pair, which exists on every
+    /// platform): what it writes, and a handle to write back.
+    fn fake() -> (Arc<Client>, TcpStream, BufReader<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let theirs = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (ours, _) = listener.accept().unwrap();
         theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let client = Client::with_io(ours.try_clone().unwrap(), ours, None, Path::new("/tmp"), "rust");
         let from_client = BufReader::new(theirs.try_clone().unwrap());
         (client, theirs, from_client)
     }
 
-    fn next(from_client: &mut BufReader<UnixStream>) -> Value {
+    fn next(from_client: &mut BufReader<TcpStream>) -> Value {
         match read_frame(from_client) {
             Frame::Message(msg) => msg,
             other => panic!("expected a message, got {other:?}"),
@@ -822,10 +825,17 @@ mod tests {
         assert_eq!(roots.roots, vec![a.to_path_buf(), b.to_path_buf()]);
     }
 
-    /// Whether `pid` is gone (exited and reaped).
+    /// Whether `pid` is gone (exited and reaped). Unix keeps a zombie until it's reaped; a dead
+    /// pid just leaves the process list on Windows.
+    #[cfg(unix)]
     fn gone(pid: i32) -> bool {
         // SAFETY: signal 0 only checks.
         unsafe { libc::kill(pid, 0) != 0 }
+    }
+
+    #[cfg(windows)]
+    fn gone(pid: i32) -> bool {
+        !trek_core::procs::live().contains(&pid)
     }
 
     #[test]
