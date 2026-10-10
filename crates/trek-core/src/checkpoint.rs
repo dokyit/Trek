@@ -1431,7 +1431,8 @@ mod tests {
     fn a_snapshot_that_takes_too_long_is_stopped() {
         let s = Scratch::new(true);
         // A clean filter that hangs (an LFS server that doesn't answer, say).
-        s.git(&["config", "filter.slow.clean", "sleep 5; cat"]);
+        let filter = format!("\"{}\" cat --delay 5", trek_test_fixtures::bin("fixture").display());
+        s.git(&["config", "filter.slow.clean", &filter]);
         s.write(".gitattributes", "*.big filter=slow\n");
         s.write("data.big", "lots\n");
         let started = std::time::Instant::now();

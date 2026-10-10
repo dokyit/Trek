@@ -116,7 +116,8 @@ fn background_work_that_ends_quietly_changes_nothing() {
 fn background_work_that_reports_makes_the_agent_work_again() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:watch 600ms");
+        // Watching through the checks below: a loaded runner can take seconds to reach them.
+        let id = trek.send(cx, "mock:watch 8s");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert_eq!(section(&trek, cx, &id), Some(Section::Inbox), "the watcher runs; the thread is answered");
         assert!(!trek.read(cx, |ws, _| ws.waiting(&id)));
@@ -224,7 +225,8 @@ fn a_parent_waiting_on_its_sub_agent_is_at_work_not_in_the_inbox() {
     run(async |cx| {
         let trek = open(cx);
         let seen = alerts(&trek, cx);
-        let id = trek.send(cx, "mock:delegate mock:long 2s");
+        // Still working through the checks below: a loaded runner can take seconds to reach them.
+        let id = trek.send(cx, "mock:delegate mock:long 8s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none() && ws.live[&p].items.iter().any(|i| matches!(i, Item::TurnEnd { .. }))).await;
         let child = children(&trek, cx, &id).pop().unwrap();
@@ -302,7 +304,8 @@ fn a_failing_sub_agent_wakes_its_parent() {
 fn a_parent_asking_the_user_hears_its_sub_agent_once_answered() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:delegate mock:long 300ms");
+        // Still running until the parent's ask lands: its report is what's held meanwhile.
+        let id = trek.send(cx, "mock:delegate mock:long 5s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
         let child = children(&trek, cx, &id).pop().unwrap();
@@ -326,7 +329,7 @@ fn a_parent_asking_the_user_hears_its_sub_agent_once_answered() {
 fn a_parent_whose_session_was_reaped_still_wakes() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:delegate mock:long 1500ms");
+        let id = trek.send(cx, "mock:delegate mock:long 8s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
         // Off screen and idle a while: its session is let go while its sub-agent works.
@@ -347,7 +350,7 @@ fn a_parent_whose_session_was_reaped_still_wakes() {
 fn a_parent_whose_turn_failed_with_messages_left_queued_still_wakes() {
     run(async |cx| {
         let trek = super::harness::open_with(cx, |s| s.general.follow_up = trek_core::settings::FollowUp::Queue);
-        let id = trek.send(cx, "mock:delegate mock:long 1500ms");
+        let id = trek.send(cx, "mock:delegate mock:long 8s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
         // Another turn, a follow-up queued behind it, and the session dies under it while the
@@ -379,7 +382,8 @@ fn a_parent_whose_turn_failed_with_messages_left_queued_still_wakes() {
 fn a_parent_in_a_thread_window_wakes_and_shows_its_wait_there() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:delegate mock:long 1500ms");
+        // Still working when its window renders: a loaded runner can take seconds to get there.
+        let id = trek.send(cx, "mock:delegate mock:long 8s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
         let window = trek.open_thread_window(cx, &id);
@@ -740,7 +744,9 @@ fn a_setting_changed_mid_turn_with_background_work_reaches_the_session_after_the
 fn a_setting_read_at_launch_doesn_t_strand_a_thread_waiting_on_its_agent_s_own_sub_agents() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "send subagents 600ms");
+        // Agents out long enough that a loaded runner still finds them out (`600ms` can be
+        // over before the first poll), and back well inside a `wait`.
+        let id = trek.send(cx, "send subagents 8s");
         let p = id.clone();
         trek.wait(cx, "the answer with agents out", move |ws| ws.live[&p].turn_started.is_none() && ws.live[&p].background.len() == 2).await;
         toggle_fast(&trek, cx, &Scope::Main);
@@ -762,7 +768,7 @@ fn a_setting_read_at_launch_doesn_t_strand_a_thread_waiting_on_its_agent_s_own_s
 fn a_sub_agent_finishing_while_its_parent_s_session_restarts_still_wakes_it() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:delegate mock:long 1500ms");
+        let id = trek.send(cx, "mock:delegate mock:long 8s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none()).await;
         // Idle with nothing in the background: the setting restarts its session at once.

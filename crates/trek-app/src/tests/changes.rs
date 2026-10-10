@@ -63,7 +63,7 @@ fn changes_made_outside_the_agents_edit_tools_count_too() {
     run(async |cx| {
         let trek = open(cx);
         make_repo(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        let id = trek.send(cx, "mock:long 8s");
         trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
         // What a shell command of the turn's would do: a file written, one deleted.
         std::fs::create_dir_all(trek.project.join("src")).unwrap();
@@ -149,7 +149,7 @@ fn review_opens_the_turns_diff_and_a_row_opens_its_file() {
     run(async |cx| {
         let trek = open(cx);
         make_repo(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        let id = trek.send(cx, "mock:long 8s");
         trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
         std::fs::create_dir_all(trek.project.join("src")).unwrap();
         std::fs::write(trek.project.join("src/gen.rs"), "pub fn a() {}\n").unwrap();
@@ -183,7 +183,7 @@ fn a_card_shows_eight_files_then_offers_the_rest() {
     run(async |cx| {
         let trek = open(cx);
         make_repo(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        let id = trek.send(cx, "mock:long 8s");
         trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
         std::fs::create_dir_all(trek.project.join("src")).unwrap();
         for i in 0..10 {
@@ -224,7 +224,7 @@ fn the_cards_undo_asks_the_same_confirmation() {
         // A turn with many files ends on a row at the transcript's foot — as near the window's
         // bottom as a row gets. Its confirmation lists those files: too tall for the room below,
         // so it flips over the row rather than clamping back over it.
-        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 2s".into(), vec![], cx));
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 8s".into(), vec![], cx));
         trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
         std::fs::create_dir_all(trek.project.join("src")).unwrap();
         for i in 0..10 {

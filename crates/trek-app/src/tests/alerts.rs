@@ -244,7 +244,8 @@ fn the_mac_stays_awake_exactly_while_agents_work() {
         cx.update(|cx| crate::system::init(trek.ws.clone(), cx));
         assert_eq!(cx.active_idle_sleep_preventions(), 0);
 
-        let id = trek.send(cx, "mock:long 2s");
+        // Working through the checks below: a loaded runner can take seconds to reach them.
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.any_turn_running() && ws.live[&tid].items.iter().any(|i| matches!(i, trek_core::store::Item::Tool { .. }))).await;
         assert_eq!(cx.active_idle_sleep_preventions(), 1, "held while the turn runs");
@@ -254,7 +255,7 @@ fn the_mac_stays_awake_exactly_while_agents_work() {
             ws.route.clone()
         });
         assert!(matches!(other, Route::Draft { .. }));
-        let second = trek.send(cx, "mock:long 1s");
+        let second = trek.send(cx, "mock:long 5s");
         let sid = second.clone();
         trek.wait(cx, "the second build", |ws| ws.live.get(&sid).is_some_and(|l| l.turn_started.is_some())).await;
         assert_eq!(cx.active_idle_sleep_preventions(), 1);

@@ -416,7 +416,7 @@ fn return_queues_while_a_turn_runs_and_cmd_return_steers() {
     run(async |cx| {
         let trek = open(cx);
         editor_on_draft(&trek, cx);
-        let id = ai_send(&trek, cx, "mock:long 3s", "enter");
+        let id = ai_send(&trek, cx, "mock:long 8s", "enter");
         trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
         ai_send(&trek, cx, "then the docs", "enter");
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "Return queues it for after the turn");
@@ -542,7 +542,7 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         assert_eq!(trek.read(cx, |ws, _| ws.pending_files(&id).iter().map(|f| (f.added, f.removed)).collect::<Vec<_>>()), [(1, 0)]);
 
         // No Undo while a turn runs: it would race the agent.
-        ai_send(&trek, cx, "mock:long 2s", "enter");
+        ai_send(&trek, cx, "mock:long 8s", "enter");
         trek.wait(cx, "the turn to start", |ws| ws.turn_running(&id)).await;
         trek.update(cx, |ws, cx| ws.undo_files(&id, None, cx));
         assert_eq!(std::fs::read_to_string(&two).unwrap(), "# Notes\n\n- Note 1\n- Note 2\n", "refused while the turn runs");
