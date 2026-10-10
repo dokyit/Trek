@@ -415,7 +415,7 @@ fn the_git_tool_keeps_its_place_and_a_turned_down_commit_message() {
         trek.click(cx, "git-commit");
         let message = |trek: &Trek, cx: &TestAppContext| cx.read(|cx| trek.root.read(cx).right_panel.read(cx).git_message(cx));
         trek.wait(cx, "the commit to be turned down", |_| true).await;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
         while trek.window(cx, |window, cx| crate::toast::count(window, cx)) == 0 {
             assert!(std::time::Instant::now() < deadline, "no word on the commit");
             settle_real_time(cx, 20);
@@ -568,7 +568,7 @@ fn a_worktree_thread_checkpoints_rewinds_and_forks_in_its_worktree() {
 /// What the open rewind/undo confirmation says about the files, once it has checked them.
 async fn confirm_files(trek: &Trek, cx: &mut TestAppContext) -> String {
     let view = trek.thread_view(cx);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         match view.read_with(cx, |v, _| v.confirm_files()) {
