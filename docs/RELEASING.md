@@ -133,6 +133,52 @@ Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default
 `TREK_SIGN_IDENTITY`, and `TREK_RELEASE_DOWNLOAD_URL` to point the manifest's archive URL somewhere else
 (a staging server).
 
+## Windows
+
+The Mac's `release.sh` publishes first - it creates the release and its `<channel>.json`. Windows then
+attaches to the same release: `.github/workflows/release-windows.yml` runs on `windows-latest` and never
+creates a release itself; it fails if the tag's release doesn't exist yet. The order matters in both
+directions: `release.sh` writes `<channel>.json` with only the Mac's entry, so a Mac publish (a new
+beta or nightly, or a re-run of one) drops the Windows entry until the workflow runs again.
+
+- **Stable**: publishing the `v<version>` release triggers the workflow automatically.
+- **Beta / nightly**: run it by hand once the Mac's prerelease exists under the moving `beta`/`nightly`
+  tag: `gh workflow run release-windows.yml -f version=0.3.0-beta.1 -f channel=beta`.
+
+The job checks out the version's tag (`v<version>`; the moving `nightly` tag for nightlies), builds
+`cargo build --release --locked -p trek-app -p trek-mcp`, smokes it with `cargo test -p trek-core
+--locked`, packs `Trek-<version>-windows-x86_64.zip` - flat: `trek.exe`, `trek-mcp.exe` and
+`trek-update.exe`, nothing else - and signs it with the same minisign key (trusted comment `Trek
+<version> windows-x86_64`). It then downloads the release's `<channel>.json`, adds or replaces the
+`windows-x86_64` entry (keeping the Mac's; a version mismatch, or a manifest with no `darwin-*` entry
+because the Mac hasn't published, fails the job before anything is uploaded) and uploads the zip, its
+`.minisig` and finally the manifest, with `--clobber`. On beta and nightly it also deletes the previous
+build's Windows zip, as `release.sh` does for the Mac's. The merge lives in
+`script/lib/release-manifest.ps1`, shared between the workflow and `script/release.ps1`;
+`script/tests/release-manifest.Tests.ps1` covers it and runs in CI's Windows job.
+
+Secrets the workflow needs (repo Settings > Secrets and variables > Actions):
+
+- `TREK_MINISIGN_KEY`: the contents of `~/.trek-signing/minisign.key`, pasted whole (it is all ASCII).
+- `TREK_MINISIGN_PASSWORD`: that key's password. minisign reads it from stdin, so a non-interactive
+  runner works.
+
+The job downloads `minisign-0.12-win64.zip` from jedisct1/minisign's GitHub release and checks it
+against a pinned SHA-256 before running it; bump the version and hash together.
+
+Local run: `pwsh script/release.ps1 0.4.0` dry-runs on a Windows machine (build, zip, sign if a key is
+configured, manifest in `dist/release/0.4.0/`; nothing is uploaded). `-Publish` does what the workflow
+does against the release that must already exist. `-Key`, `-PubKey` and `-Minisign` point at other keys
+or binaries for testing; publishing always verifies against `assets/update/minisign.pub`. `BUILD=0`
+reuses the binaries already in the release target dir for exercising the script (refused with
+`-Publish`).
+
+Windows binaries are **not Authenticode-signed** - there is no certificate yet - so SmartScreen shows a
+one-time warning on first launch (**More info** > **Run anyway**). The minisign signature still gates
+updates: the updater verifies it before touching the install folder. To install, the user unzips
+anywhere their account can write (not `Program Files`) and runs `trek.exe`; `trek-update.exe` swaps
+the install folder on update, which is why it must stay user-writable.
+
 ## How an update installs
 
 1. Check: on launch, then once a day by the wall clock (sleep counts), and when the channel changes. A
