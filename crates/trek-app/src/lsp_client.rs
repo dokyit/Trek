@@ -359,7 +359,7 @@ impl Client {
 
     /// The provider bundle one editor installs on its `EditorState`.
     pub fn lsp_for(self: &Arc<Self>, uri: String, workspace: gpui_kit::Entity<crate::workspace::Workspace>) -> Lsp {
-        let doc = std::rc::Rc::new(DocProviders { client: self.clone(), uri, workspace });
+        let doc = std::rc::Rc::new(DocProviders { client: self.clone(), uri, workspace: workspace.downgrade() });
         let mut lsp = Lsp::default();
         lsp.completion_provider = Some(doc.clone());
         lsp.hover_provider = Some(doc.clone());
@@ -369,8 +369,7 @@ impl Client {
             move |params: &lsp_types::ShowDocumentParams, _window, cx| {
                 let Some(path) = path_of_uri(params.uri.as_str()) else { return false };
                 let line = params.selection.map(|r| r.start.line + 1);
-                doc.workspace.update(cx, |ws, cx| ws.open_editor(path, line, cx));
-                true
+                doc.workspace.update(cx, |ws, cx| ws.open_editor(path, line, cx)).is_ok()
             }
         }));
         lsp
@@ -584,7 +583,8 @@ fn initialize_params(root: &Path) -> Value {
 struct DocProviders {
     client: Arc<Client>,
     uri: String,
-    workspace: gpui_kit::Entity<crate::workspace::Workspace>,
+    /// Weak: the providers live in the editor's state, which the workspace outlives.
+    workspace: gpui_kit::WeakEntity<crate::workspace::Workspace>,
 }
 
 impl DocProviders {
