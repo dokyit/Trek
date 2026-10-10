@@ -117,6 +117,8 @@ pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Tools if crate::words::is_windows() => "Computer use, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Permissions => "How much each agent may do without asking.".into(),
+        // Windows can't update Trek in place yet: the line under its name says so.
+        SettingsPage::Updates if crate::words::is_windows() => "".into(),
         SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.".into(),
     }
 }
@@ -1069,24 +1071,27 @@ impl SettingsView {
         let sr = probe.as_ref().map(|p| p.screen_recording);
         out.extend(self.connections(cx));
         out.push(Self::heading("Computer use", cx));
-        out.push(ui::group(
-            vec![
-                Self::row(
-                    "Computer use tools",
-                    "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
-                    self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
-                    cx,
-                ),
-                Self::row("Accessibility", "Lets Trek click and type for the agent.", permission("ax-perm", "Accessibility", ax, crate::integrations::ACCESSIBILITY_PANE, cx), cx),
-                Self::row(
-                    "Screen Recording",
-                    "Lets Trek take screenshots of other apps.",
-                    permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
-                    cx,
-                ),
-            ],
+        let mut computer_use = vec![Self::row(
+            "Computer use tools",
+            "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
+            self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
             cx,
-        ));
+        )];
+        let permissions_note = crate::words::words().computer_use_note;
+        // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
+        if permissions_note.is_none() {
+            computer_use.push(Self::row("Accessibility", "Lets Trek click and type for the agent.", permission("ax-perm", "Accessibility", ax, crate::integrations::ACCESSIBILITY_PANE, cx), cx));
+            computer_use.push(Self::row(
+                "Screen Recording",
+                "Lets Trek take screenshots of other apps.",
+                permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
+                cx,
+            ));
+        }
+        out.push(ui::group(computer_use, cx));
+        if let Some(note) = permissions_note {
+            out.push(div().pt_3().child(Self::note(note, cx)).into_any_element());
+        }
         out.push(Self::heading("iOS Simulator", cx));
         if crate::words::is_windows() {
             // Xcode's tools are all it has to run on: nothing to switch, install or allow.

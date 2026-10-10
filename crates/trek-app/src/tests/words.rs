@@ -4,7 +4,7 @@
 
 use super::harness::{Trek, open, run};
 use crate::settings_view::{page_blurb, shown};
-use crate::words::pretend;
+use crate::words::{for_platform, pretend};
 use crate::workspace::{Route, SettingsPage};
 use gpui_kit::TestAppContext;
 
@@ -117,6 +117,87 @@ fn a_mac_keeps_its_ios_simulator() {
         trek.render(cx);
         assert!(trek.visible(cx, "tool-tile-Simulator"));
         assert!(commands(&trek, cx, "Open Simulator").iter().any(|c| c == "Open Simulator"));
+    });
+}
+
+/// Settings › Tools › Computer use: Windows asks for no permission, so one sentence stands where
+/// the Accessibility and Screen Recording rows are; a Mac keeps both rows and has no sentence.
+#[test]
+fn computer_use_asks_nothing_on_windows_and_says_so() {
+    run(async |cx| {
+        let trek = open(cx);
+        let note = for_platform(true).computer_use_note.expect("Windows says it");
+        {
+            let _windows = pretend(true);
+            let tools = said(&trek, cx, SettingsPage::Tools);
+            assert!(has(&tools, "Computer use tools"), "the switch stays: {tools:?}");
+            assert!(has(&tools, note), "{tools:?}");
+            for gone in ["Accessibility", "Screen Recording"] {
+                assert!(!has(&tools, gone), "{gone} is a Mac's permission: {tools:?}");
+            }
+            assert!(tools.iter().all(|s| !s.contains("Lets Trek click") && !s.contains("Lets Trek take screenshots")), "{tools:?}");
+            assert!(!trek.visible(cx, "ax-perm-checking") && !trek.visible(cx, "sr-perm-checking"));
+        }
+        let _mac = pretend(false);
+        let tools = said(&trek, cx, SettingsPage::Tools);
+        assert!(has(&tools, "Accessibility") && has(&tools, "Screen Recording"), "{tools:?}");
+        assert!(!has(&tools, note), "{tools:?}");
+        assert!(tools.iter().all(|s| !s.contains("asks for no permission")), "{tools:?}");
+    });
+}
+
+/// Settings › Snapshots: Snipping Tool decides the mode and saves a PNG, and has no shadow, sound
+/// or hiding Trek, so those rows give way to one sentence on Windows. Where snapshots are kept
+/// and for how long still apply.
+#[test]
+fn snapshots_settings_are_snipping_tools_to_decide_on_windows() {
+    run(async |cx| {
+        let trek = open(cx);
+        let note = for_platform(true).snipping_tool_note.expect("Windows says it");
+        {
+            let _windows = pretend(true);
+            let snapshots = said(&trek, cx, SettingsPage::Snapshots);
+            assert!(has(&snapshots, note), "{snapshots:?}");
+            for gone in ["Hide Trek while capturing", "Window shadow", "Shutter sound", "Format", "Permission", "Screen Recording", "Screen capture"] {
+                assert!(!has(&snapshots, gone), "{gone} does nothing on Windows: {snapshots:?}");
+            }
+            assert!(snapshots.iter().all(|s| !s.ends_with(" takes") && !s.contains("PNG is sharp") && !s.contains("drop shadow")), "{snapshots:?}");
+            for kept in ["Storage", "Keep snapshots", "Snapshot folder"] {
+                assert!(has(&snapshots, kept), "{kept} still applies: {snapshots:?}");
+            }
+        }
+        let _mac = pretend(false);
+        let snapshots = said(&trek, cx, SettingsPage::Snapshots);
+        for row in ["Hide Trek while capturing", "Window shadow", "Shutter sound", "Format", "Permission", "Screen Recording", "Storage", "Keep snapshots", "Snapshot folder"] {
+            assert!(has(&snapshots, row), "{row} is on a Mac's page: {snapshots:?}");
+        }
+        assert!(snapshots.iter().any(|s| s.ends_with(" takes")), "the mode row: {snapshots:?}");
+        assert!(has(&snapshots, "Keep macOS's drop shadow around window snapshots."), "{snapshots:?}");
+        assert!(has(&snapshots, "macOS asks once; snapshots of other apps need it."), "{snapshots:?}");
+        assert!(!has(&snapshots, note), "{snapshots:?}");
+    });
+}
+
+/// Settings › Updates: Trek can't update itself on Windows yet, so the channel and the two
+/// automatic steps (which would do nothing) are left out; a Mac keeps them.
+#[test]
+fn the_updates_page_leaves_out_what_windows_cant_do_yet() {
+    run(async |cx| {
+        let trek = open(cx);
+        {
+            let _windows = pretend(true);
+            let updates = said(&trek, cx, SettingsPage::Updates);
+            for gone in ["Channel", "Check automatically", "Download automatically"] {
+                assert!(!has(&updates, gone), "{gone} acts on nothing on Windows: {updates:?}");
+            }
+            assert_eq!(page_blurb(SettingsPage::Updates), "", "the blurb doesn't promise updates the line under Trek's name says it can't make");
+        }
+        let _mac = pretend(false);
+        let updates = said(&trek, cx, SettingsPage::Updates);
+        for row in ["Channel", "Check automatically", "Download automatically"] {
+            assert!(has(&updates, row), "{row}: {updates:?}");
+        }
+        assert_eq!(page_blurb(SettingsPage::Updates), "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.");
     });
 }
 
