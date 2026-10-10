@@ -70,8 +70,11 @@ fn pump(mut reader: impl Read, screen: &Screen, wake: &async_channel::Sender<()>
                 for _ in 0..queries {
                     reply(cursor_report(cursor).as_bytes());
                 }
-                carry.clear();
-                carry.extend_from_slice(&buf[n.saturating_sub(CURSOR_QUERY.len() - 1)..n]);
+                // The last bytes of what was read so far, carry included: a query may arrive one
+                // byte per read.
+                let mut tail = std::mem::take(&mut carry);
+                tail.extend_from_slice(&buf[..n]);
+                carry = tail[tail.len().saturating_sub(CURSOR_QUERY.len() - 1)..].to_vec();
                 if let Err(async_channel::TrySendError::Closed(_)) = wake.try_send(()) {
                     break;
                 }
@@ -790,6 +793,18 @@ mod tests {
         let stream = std::io::Cursor::new(b"ab\r\n\x1b[6n".to_vec());
         pump(stream, &screen, &tx, |bytes| said.borrow_mut().extend_from_slice(bytes));
         assert_eq!(said.into_inner(), b"\x1b[2;1R");
+        // One byte per read, which is what a slow pipe can do: the query is still seen once.
+        struct ByteAtATime(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for ByteAtATime {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let one = buf.len().min(1);
+                self.0.read(&mut buf[..one])
+            }
+        }
+        let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let said = std::cell::RefCell::new(Vec::<u8>::new());
+        pump(ByteAtATime(std::io::Cursor::new(b"\x1b[6n".to_vec())), &screen, &tx, |bytes| said.borrow_mut().extend_from_slice(bytes));
+        assert_eq!(said.into_inner(), b"\x1b[1;1R");
     }
 
     /// The shell, in a real pseudo-terminal (ConPTY), as the panel starts it.
