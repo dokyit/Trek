@@ -31,6 +31,19 @@ pub enum Clip {
     Dib(Vec<u8>),
 }
 
+/// The first bytes of every PNG file.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+impl Clip {
+    /// Not plainly something else: a program can put anything under the name "PNG".
+    fn looks_whole(&self) -> bool {
+        match self {
+            Clip::Png(bytes) => bytes.starts_with(&PNG_SIGNATURE),
+            Clip::Dib(_) => true,
+        }
+    }
+}
+
 /// What one look at the clipboard found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
@@ -149,6 +162,7 @@ impl Pickup {
 
 /// `clip` as PNG bytes, for the attachment.
 pub fn to_png(clip: Clip) -> Result<Vec<u8>> {
+    ensure!(clip.looks_whole(), "it isn't a PNG");
     let dib = match clip {
         Clip::Png(bytes) => return Ok(bytes),
         Clip::Dib(bytes) => bytes,
@@ -330,21 +344,27 @@ mod real {
             let Some(open) = Guard::open() else { return Read::Busy };
             // SAFETY: plain queries while the clipboard is open.
             let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
-            let mut present = false;
+            let mut unreadable = false;
             // PNG is lossless and keeps what was picked as it is; the DIBs are what everything has.
             for (format, wrap) in [(png, Clip::Png as fn(Vec<u8>) -> Clip), (CF_DIBV5, Clip::Dib), (CF_DIB, Clip::Dib)] {
                 // SAFETY: as above.
                 if format == 0 || unsafe { IsClipboardFormatAvailable(format) }.is_err() {
                     continue;
                 }
-                present = true;
-                if let Some(bytes) = bytes_of(&open, format) {
-                    return Read::Image(wrap(bytes));
+                match bytes_of(&open, format) {
+                    // A "PNG" that isn't one is passed over for the bitmaps beside it.
+                    Some(bytes) => {
+                        let clip = wrap(bytes);
+                        if clip.looks_whole() {
+                            return Read::Image(clip);
+                        }
+                    }
+                    None => unreadable = true,
                 }
             }
             // An image that is there but wouldn't come out (the owner is slow to render it) is
             // asked for again; no image at all is a clipboard of something else.
-            if present { Read::Busy } else { Read::NotAnImage }
+            if unreadable { Read::Busy } else { Read::NotAnImage }
         }
     }
 
@@ -447,7 +467,7 @@ mod tests {
     }
 
     fn png_clip() -> Clip {
-        Clip::Png(vec![0x89, b'P', b'N', b'G'])
+        Clip::Png(PNG_SIGNATURE.to_vec())
     }
 
     #[test]
@@ -559,7 +579,10 @@ mod tests {
 
     #[test]
     fn a_png_is_kept_and_a_broken_dib_is_refused() {
-        assert_eq!(to_png(png_clip()).unwrap(), vec![0x89, b'P', b'N', b'G']);
+        assert_eq!(to_png(png_clip()).unwrap(), PNG_SIGNATURE.to_vec());
+        // Something else under the name "PNG" is not attached as one.
+        assert!(to_png(Clip::Png(b"GIF89a\x01\x00".to_vec())).is_err(), "not a PNG");
+        assert!(to_png(Clip::Png(vec![])).is_err(), "nothing at all");
         let mut cut = dib24();
         cut.truncate(cut.len() - 4);
         assert!(to_png(Clip::Dib(cut)).is_err(), "pixels missing");
