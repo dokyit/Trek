@@ -119,7 +119,11 @@ impl TrekWindow {
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
         let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), Scope::Main, window, cx));
         let handle = window.window_handle();
-        workspace.update(cx, |ws, _| ws.main_window = Some(handle));
+        // Notified: what follows a window (the taskbar badge) is put on the new one.
+        workspace.update(cx, |ws, cx| {
+            ws.main_window = Some(handle);
+            cx.notify();
+        });
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -753,6 +757,8 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         crate::system::play_alert_sound();
     }
     if alert.banner {
+        #[cfg(all(windows, not(test)))]
+        register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
         cx.show_system_notification(SystemNotification { tag: attention_tag(thread), title: message.clone().into(), body: SharedString::default(), actions: Vec::new() });
@@ -763,6 +769,18 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         let note = crate::toast::Toast::new(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
         let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
     }
+}
+
+/// Windows shows a toast under its AppUserModelID's name and icon, which Trek, being no installed
+/// app, registers itself: once a run, before the first toast.
+#[cfg(all(windows, not(test)))]
+fn register_toast_identity() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(png) = crate::assets::brand_bytes("brand/icon.png") {
+            crate::winsys::register_toast_identity(crate::winsys::APP_ID, crate::winsys::APP_NAME, &png);
+        }
+    });
 }
 
 const ATTENTION_TAG: &str = "trek-attention-";
