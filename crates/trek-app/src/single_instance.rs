@@ -75,26 +75,44 @@ fn background() -> bool {
     std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1")
 }
 
+/// What the `trek://` protocol's command puts before the link (`winsys::protocol_command`).
+/// Windows writes the link into that command as it came, inside quotes; a link with a `"` in it
+/// (from a page or a document that didn't encode it) ends the quotes early, and what follows
+/// becomes arguments of its own: a folder Trek would add as a project, unasked. After this, the
+/// launch is a link's, and one link is all it may carry.
+pub const LINK_ARG: &str = "--link";
+
 /// What a launch hands over: `trek://` links as they are, paths made absolute against `cwd` (the
 /// running Trek has its own working folder). Flags, which Trek takes none of, are left out, and
 /// so is anything past the most the running Trek takes (`MAX_ARGS`: "Open with Trek" on a
-/// hundred files would otherwise be refused whole).
+/// hundred files would otherwise be refused whole). A link's launch (`LINK_ARG`) hands over its
+/// one link, or nothing.
 pub fn launch_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<String> {
-    args.into_iter()
-        .filter_map(|a| {
-            let s = a.to_string_lossy();
-            if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("trek://")) {
-                return Some(s.into_owned());
+    let mut args = args.into_iter().peekable();
+    if args.next_if(|a| a.to_str() == Some(LINK_ARG)).is_some() {
+        return match args.collect::<Vec<_>>().as_slice() {
+            [link] if is_link(&link.to_string_lossy()) => vec![link.to_string_lossy().into_owned()],
+            // Not the arguments themselves: a link may carry code.
+            rest => {
+                tracing::warn!("single instance: a link's launch with {} argument(s) rather than one link: nothing opened", rest.len());
+                Vec::new()
             }
-            if s.is_empty() || s.starts_with('-') {
-                return None;
-            }
-            let p = PathBuf::from(&a);
-            let p = if p.is_absolute() { p } else { std::path::absolute(cwd.join(&p)).unwrap_or_else(|_| cwd.join(&p)) };
-            Some(p.to_string_lossy().into_owned())
-        })
-        .take(trek_ipc::instance::MAX_ARGS)
-        .collect()
+        };
+    }
+    args.filter_map(|a| {
+        let s = a.to_string_lossy();
+        if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("trek://")) {
+            return Some(s.into_owned());
+        }
+        if s.is_empty() || s.starts_with('-') {
+            return None;
+        }
+        let p = PathBuf::from(&a);
+        let p = if p.is_absolute() { p } else { std::path::absolute(cwd.join(&p)).unwrap_or_else(|_| cwd.join(&p)) };
+        Some(p.to_string_lossy().into_owned())
+    })
+    .take(trek_ipc::instance::MAX_ARGS)
+    .collect()
 }
 
 /// `claim` for the data folder `dir`, trying for at most `wait` to reach a running Trek.
@@ -363,6 +381,22 @@ mod tests {
         assert_eq!(got.len(), trek_ipc::instance::MAX_ARGS);
         assert!(got[0].ends_with("f0.rs") && got.last().unwrap().ends_with(&format!("f{}.rs", trek_ipc::instance::MAX_ARGS - 1)));
         assert!(trek_ipc::instance::Open::parse(&Open { args: got, background: false }.to_frame()).is_some(), "the running Trek accepts them");
+    }
+
+    /// A link's launch (`LINK_ARG`, put there by the protocol's command) hands over its one link.
+    /// Anything more is a link that broke out of its quotes, and none of it goes: a folder there
+    /// would become a project without asking.
+    #[test]
+    fn a_link_s_launch_hands_over_its_one_link_or_nothing() {
+        let cwd = std::env::temp_dir();
+        let tmp = cwd.display().to_string();
+        let got = |args: &[&str]| launch_args(args.iter().map(OsString::from), &cwd);
+        assert_eq!(got(&[LINK_ARG, "trek://ask?path=%2Fx"]), ["trek://ask?path=%2Fx"]);
+        for broken in [&[LINK_ARG, "trek://ask?x", &tmp][..], &[LINK_ARG, &tmp], &[LINK_ARG, "trek://a", "trek://b"], &[LINK_ARG, "notes.md"], &[LINK_ARG]] {
+            assert_eq!(got(broken), Vec::<String>::new(), "{broken:?}");
+        }
+        // Typed by the user: a folder and a link both go.
+        assert_eq!(got(&[&tmp, "trek://ask?x"]).len(), 2);
     }
 
     #[test]

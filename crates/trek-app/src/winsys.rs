@@ -151,10 +151,11 @@ pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
 }
 
 /// What Windows runs for a `trek://` link: Trek, with the link as its one argument. Quoted both
-/// ways: a path with spaces, and a link with `&` in it.
+/// ways: a path with spaces, and a link with `&` in it. `LINK_ARG` before it says the launch is a
+/// link's, so that arguments a link with a `"` in it makes of itself are refused, not opened.
 #[cfg(any(windows, test))]
 pub fn protocol_command(exe: &std::path::Path) -> String {
-    format!("\"{}\" \"%1\"", exe.display())
+    format!("\"{}\" {} \"%1\"", exe.display(), crate::single_instance::LINK_ARG)
 }
 
 /// Where the protocol's keys go for real: the current user's classes.
@@ -303,7 +304,39 @@ mod tests {
     #[test]
     fn a_link_runs_trek_with_the_link_as_one_argument() {
         let exe = std::path::Path::new(r"C:\Program Files\Trek\trek.exe");
-        assert_eq!(super::protocol_command(exe), r#""C:\Program Files\Trek\trek.exe" "%1""#);
+        assert_eq!(super::protocol_command(exe), r#""C:\Program Files\Trek\trek.exe" --link "%1""#);
+    }
+
+    /// The command as Windows runs it for a link (the link put in for `%1` as it came) and splits
+    /// it (`CommandLineToArgvW`, whose rules `std::env::args` follows), then as Trek reads it.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_that_breaks_out_of_its_quotes_opens_nothing() {
+        use std::ffi::OsString;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::UI::Shell::CommandLineToArgvW;
+        let exe = std::path::Path::new(r"C:\Program Files\Trek\trek.exe");
+        let launch = |link: &str| {
+            let command: Vec<u16> = super::protocol_command(exe).replace("%1", link).encode_utf16().chain([0]).collect();
+            let mut n = 0;
+            // SAFETY: a NUL-ended command; the array Windows returns is read within its count, then freed.
+            let args: Vec<OsString> = unsafe {
+                let argv = CommandLineToArgvW(windows::core::PCWSTR(command.as_ptr()), &mut n);
+                assert!(!argv.is_null());
+                let args = (1..n as usize).map(|i| OsString::from((*argv.add(i)).to_string().unwrap())).collect();
+                LocalFree(Some(HLOCAL(argv.cast())));
+                args
+            };
+            crate::single_instance::launch_args(args, std::path::Path::new(r"C:\"))
+        };
+        let encoded = "trek://ask?path=C%3A%5Cx.rs&selection=say%20%22hi%22%20%25PATH%25";
+        assert_eq!(launch(encoded), [encoded], "an encoded link goes as it came");
+        // A folder that is there, with no `\` at its end (which would escape the quote after it).
+        let folder = r"C:\Windows";
+        assert_eq!(launch(&format!(r#"trek://ask?x" "{folder}"#)), Vec::<String>::new(), "a folder of the link's own");
+        assert_eq!(launch(&format!(r#"trek://ask?x" "{folder}" "trek://edit?path=y"#)), Vec::<String>::new());
+        // A `\"` keeps it inside its quotes: one link, odd, for `deep_link` to judge.
+        assert_eq!(launch(&format!(r#"trek://ask?x\" {folder}"#)), [format!(r#"trek://ask?x" {folder}"#)]);
     }
 
     /// Against a key of the test's own (`HKCU\Software\Trek-tests\<pid>`), deleted afterwards:
