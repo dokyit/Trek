@@ -550,7 +550,9 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         trek.wait_done(cx, &id, RunState::Idle).await;
 
         // Undo all, from the bar, asks first: once arms it, again does it. Back to the kept
-        // version; the editor shows it.
+        // version; the editor shows it. The ask is ignored while the review is being counted
+        // again after the turn, so wait for that to be over first.
+        trek.wait(cx, "the review settled", |ws| ws.review_settled(&id)).await;
         trek.render(cx);
         trek.click(cx, "ai-undo-all");
         assert!(trek.read(cx, |ws, _| ws.review(&id).is_some_and(|r| r.undo_all_armed())), "asked, not done");
@@ -576,7 +578,7 @@ fn diff_tab(trek: &Trek, cx: &TestAppContext) -> Option<Entity<crate::ide::diff_
 
 /// Wait (in real time) until `f` holds.
 async fn until(cx: &mut TestAppContext, what: &str, f: impl Fn(&mut TestAppContext) -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         if f(cx) {
@@ -766,7 +768,7 @@ fn editor(trek: &Trek, cx: &TestAppContext) -> Entity<crate::editor::EditorView>
 
 /// Wait until the editor in front says `until`.
 async fn wait_editor(trek: &Trek, cx: &mut TestAppContext, what: &str, until: impl Fn(&crate::editor::EditorView, &gpui_kit::App) -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         let e = editor(trek, cx);

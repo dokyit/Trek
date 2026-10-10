@@ -179,6 +179,12 @@ pub fn mock() -> AgentId {
 
 /// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
 /// Trek can't replace itself yet (Windows).
+/// How long a test waits, in real time, for work that runs off the main thread (git, the mock
+/// agent, file reads) before it calls it lost. It is only ever spent when something is wrong, so
+/// it is generous: a loaded two-core machine ran the whole suite 4.5 times slower than GitHub's
+/// runner does, and 20 s was not enough for a git job on it.
+pub const REAL_TIME_LIMIT: Duration = Duration::from_secs(60);
+
 pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "isn't available on Windows" } else { "not running from an app bundle" };
 
 /// `root` with `rel` (written with `/`, as the tests write paths) under it, with the platform's
@@ -438,7 +444,13 @@ impl Trek {
 
     /// Wait (in real time; the agent runs on other threads) until `until` holds.
     pub async fn wait(&self, cx: &mut TestAppContext, what: &str, until: impl Fn(&Workspace) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        self.wait_up_to(cx, what, REAL_TIME_LIMIT, until).await;
+    }
+
+    /// `wait`, for work that is slow by design (a test that makes git crawl) and gets a longer
+    /// limit than the usual 20 s.
+    pub async fn wait_up_to(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool) {
+        let deadline = Instant::now() + limit;
         loop {
             cx.run_until_parked();
             if self.ws.read_with(cx, |ws, _| until(ws)) {

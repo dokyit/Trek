@@ -195,7 +195,9 @@ fn stopping_while_a_card_is_up_clears_it() {
 fn the_working_bar_follows_the_thread_on_screen() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:long 30s");
+        // Longer than any other turn here can take (30 s ran out on a loaded machine while the
+        // other thread's turn was still being waited for): the delete below ends it.
+        let id = trek.send(cx, "mock:long 600s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.visible(cx, "working-bar"));
