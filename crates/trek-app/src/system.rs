@@ -20,6 +20,11 @@ struct Applied {
     ui_font_size: f32,
     /// `None` until the first sync, so the chosen icon is put up at launch.
     app_icon: Option<AppIcon>,
+    /// The windows the icon was last put on (Windows: it belongs to each window, so one opened
+    /// later is given it too).
+    icon_windows: Vec<AnyWindowHandle>,
+    /// A pending second try at the icon, when a window couldn't take it yet.
+    icon_retry: Option<Task<()>>,
 }
 
 /// Watch the workspace and keep the system in step. The check is a few comparisons per notify,
@@ -34,6 +39,8 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
         menu_bar_icon: ws.settings.notifications.menu_bar_icon,
         ui_font_size: 0.,
         app_icon: None,
+        icon_windows: Vec::new(),
+        icon_retry: None,
     };
     follow_reduce_motion(&workspace, cx);
     sync(&workspace, &mut applied, cx);
@@ -120,9 +127,23 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
         applied.ui_font_size = ui_font_size;
         apply_ui_font_size(ui_font_size, cx);
     }
-    if applied.app_icon != Some(app_icon) {
+    // The Dock tile is the app's, so the icon is put up once per choice; a Windows icon is each
+    // window's, so a window that wasn't there when it was chosen needs it put on too.
+    let windows = if cfg!(windows) { cx.windows() } else { Vec::new() };
+    if applied.app_icon != Some(app_icon) || windows != applied.icon_windows {
         applied.app_icon = Some(app_icon);
-        set_app_icon(app_icon);
+        applied.icon_retry = None;
+        // A window may be busy (it's the one being updated) or not made yet: ask again soon.
+        if set_app_icon(app_icon, cx) {
+            applied.icon_windows = windows;
+        } else {
+            applied.icon_windows.clear();
+            let workspace = workspace.downgrade();
+            applied.icon_retry = Some(cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let _ = workspace.update(cx, |_, cx| cx.notify());
+            }));
+        }
     }
     if menu_bar_icon != applied.menu_bar_icon {
         applied.menu_bar_icon = menu_bar_icon;
@@ -175,27 +196,46 @@ pub fn app_icon_image(icon: AppIcon) -> &'static str {
 }
 
 /// Show `icon` in the Dock while Trek runs. The bundle's own icon (Ember) is what Finder and a
-/// quit app's Dock tile show: macOS only lets a running app change its tile.
+/// quit app's Dock tile show: macOS only lets a running app change its tile. Whether it was put
+/// up (the Windows one, below, asks again when a window couldn't take it).
 #[cfg(all(target_os = "macos", not(test)))]
-fn set_app_icon(icon: AppIcon) {
+fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
     use objc2::{AllocAnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else { return };
+    let Some(mtm) = MainThreadMarker::new() else { return true };
+    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else { return true };
     let data = NSData::with_bytes(&bytes);
     let image = NSImage::initWithData(NSImage::alloc(), &data);
     // SAFETY: on the main thread (`mtm`), with an image AppKit retains; `None` puts the bundle's
     // icon back.
     unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image.as_deref()) };
+    true
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
-fn set_app_icon(_: AppIcon) {}
+/// On Windows the icon is each window's (`WM_SETICON`) and its class's, taken from the exe's icon
+/// resources (`winsys::icon_resource`): the taskbar button and title bar show it while Trek runs,
+/// and the exe's own icon (Explorer, a shortcut) stays Ember.
+#[cfg(all(windows, not(test)))]
+fn set_app_icon(icon: AppIcon, cx: &mut App) -> bool {
+    let resource = crate::winsys::icon_resource(icon);
+    let mut all = true;
+    for handle in cx.windows() {
+        let hwnd = handle.update(cx, |_, window, _| crate::winsys::hwnd_of(window)).ok().flatten();
+        all &= hwnd.is_some_and(|hwnd| crate::winsys::set_window_icon(hwnd, resource));
+    }
+    all
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows), not(test)))]
+fn set_app_icon(_: AppIcon, _: &mut App) -> bool {
+    true
+}
 
 #[cfg(test)]
-fn set_app_icon(icon: AppIcon) {
+fn set_app_icon(icon: AppIcon, _: &mut App) -> bool {
     APP_ICON.with(|i| i.set(Some(icon)));
+    true
 }
 
 #[cfg(test)]

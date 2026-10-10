@@ -107,6 +107,50 @@ pub fn set_overlay_badge(hwnd: isize, count: usize) -> bool {
     }
 }
 
+/// The id of the icon resource in `trek.exe` for `icon`. `build.rs` embeds the three `.ico`s
+/// under these numbers (ember stays 1: GPUI's window class and Explorer read the exe's icon
+/// from there), and a test keeps the two lists the same.
+#[cfg(any(windows, test))]
+pub fn icon_resource(icon: trek_core::settings::AppIcon) -> u16 {
+    use trek_core::settings::AppIcon;
+    match icon {
+        AppIcon::Ember => 1,
+        AppIcon::Night => 2,
+        AppIcon::Glass => 3,
+    }
+}
+
+/// Put icon resource `resource` on window `hwnd` (small, for the title bar, and big, for the
+/// taskbar and Alt+Tab) and on the window class GPUI makes every window from, so windows opened
+/// later start with it. Whether the icons could be loaded.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub fn set_window_icon(hwnd: isize, resource: u16) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GCLP_HICON, GCLP_HICONSM, GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW,
+        SetClassLongPtrW, WM_SETICON,
+    };
+    // SAFETY: the resource id goes where a name does (MAKEINTRESOURCE); shared icons belong to
+    // the system, which keeps them for the life of the process, so there is nothing to free.
+    // `hwnd` is a window of this process, asked from its own thread.
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        let load = |w: i32, h: i32| LoadImageW(module, resource as usize as *const u16, IMAGE_ICON, GetSystemMetrics(w), GetSystemMetrics(h), LR_SHARED);
+        let (small, big) = (load(SM_CXSMICON, SM_CYSMICON), load(SM_CXICON, SM_CYICON));
+        if small.is_null() || big.is_null() {
+            return false;
+        }
+        let window = hwnd as HWND;
+        SendMessageW(window, WM_SETICON, ICON_SMALL as WPARAM, small as LPARAM);
+        SendMessageW(window, WM_SETICON, ICON_BIG as WPARAM, big as LPARAM);
+        SetClassLongPtrW(window, GCLP_HICONSM, small as isize);
+        SetClassLongPtrW(window, GCLP_HICON, big as isize);
+        true
+    }
+}
+
 /// The window's handle, the way Win32 knows it.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
@@ -162,7 +206,8 @@ pub fn play_notification_sound() {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_description, badge_rgba};
+    use super::{badge_description, badge_rgba, icon_resource};
+    use trek_core::settings::AppIcon;
 
     fn lit(pixels: &[u8], white: bool) -> usize {
         pixels.chunks_exact(4).filter(|p| p[3] > 0 && (p[0] == 0xff && p[1] == 0xff) == white).count()
@@ -183,6 +228,34 @@ mod tests {
         assert_eq!(badge_rgba(99, 32), badge_rgba(250, 32));
         // Two digits have more ink than one.
         assert!(lit(&badge_rgba(88, 32), true) > lit(&badge_rgba(1, 32), true));
+    }
+
+    /// What `build.rs` embeds, as it spells it: (resource id, file in assets/brand).
+    const EMBEDDED: [(AppIcon, &str); 3] = [(AppIcon::Ember, "trek.ico"), (AppIcon::Night, "trek-night.ico"), (AppIcon::Glass, "trek-glass.ico")];
+
+    #[test]
+    fn each_app_icon_has_its_own_resource_and_ember_stays_the_exes_icon() {
+        // Resource 1 is what GPUI's window class loads at start and Explorer shows for the exe.
+        assert_eq!(icon_resource(AppIcon::Ember), 1);
+        let ids: Vec<u16> = EMBEDDED.iter().map(|(icon, _)| icon_resource(*icon)).collect();
+        assert_eq!(ids, [1, 2, 3]);
+    }
+
+    #[test]
+    fn build_rs_embeds_the_icons_under_the_ids_the_app_asks_for() {
+        let build = include_str!("../build.rs");
+        let brand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/brand");
+        let mut seen = vec![];
+        for (icon, file) in EMBEDDED {
+            assert!(build.contains(&format!("({}, \"{file}\")", icon_resource(icon))), "build.rs doesn't embed {file} as resource {}", icon_resource(icon));
+            let bytes = std::fs::read(brand.join(file)).unwrap_or_else(|e| panic!("{file}: {e} (script/windows-icons.py makes it)"));
+            // An .ico: reserved 0, type 1, then at least the 256 px frame.
+            assert_eq!(&bytes[..4], &[0, 0, 1, 0], "{file} isn't an icon file");
+            assert!(bytes[4] >= 8, "{file} has too few sizes");
+            seen.push(bytes);
+        }
+        // Three different pictures, not one drawn three times.
+        assert!(seen[0] != seen[1] && seen[1] != seen[2] && seen[0] != seen[2]);
     }
 
     #[test]
