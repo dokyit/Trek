@@ -101,12 +101,20 @@ fn trusted(ws: &Workspace, path: &Path) -> bool {
         .chain(ws.ide_root.clone())
         .filter(|r| r.is_absolute() && !home.starts_with(r))
         .collect();
-    let real = std::fs::canonicalize(path).ok();
+    within(&roots, path, |p| std::fs::canonicalize(p).ok())
+}
+
+/// `path` is written under one of `roots`, and is there where it really is (`real`: symlinks
+/// followed). `real` is asked about `path` only once it is written under a root: a path outside
+/// them, such as a `\\server\share` from a web page, isn't looked at before the user agrees, as
+/// looking would connect to that server (on Windows, offering it the user's sign-in).
+fn within(roots: &[PathBuf], path: &Path, real: impl Fn(&Path) -> Option<PathBuf>) -> bool {
+    let mut real_path = None;
     roots.iter().any(|r| {
         path.starts_with(r)
-            && match &real {
+            && match real_path.get_or_insert_with(|| real(path)) {
                 // Where a symlink in the project leads counts, not where the link sits.
-                Some(real) => std::fs::canonicalize(r).is_ok_and(|r| real.starts_with(r)),
+                Some(real_path) => real(r).is_some_and(|r| real_path.starts_with(r)),
                 None => true,
             }
     })
@@ -193,6 +201,26 @@ mod tests {
         assert_eq!(path, PathBuf::from("/tmp/x.rs"));
         assert_eq!((line, end), (Some(3), Some(9)));
         assert_eq!(selection, "let x = 1");
+    }
+
+    /// A link to a file outside the user's projects is not looked at (a `\\server\share` would be
+    /// connected to) until the user says to open it; one inside is, so that a symlink leading out
+    /// of the project doesn't count as in it.
+    #[test]
+    fn a_path_outside_the_projects_is_not_looked_at() {
+        let root = std::env::temp_dir().join("trek-trust-project");
+        let far = if cfg!(windows) { PathBuf::from(r"\\attacker.example\share\x.rs") } else { PathBuf::from("/Volumes/share/x.rs") };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let real = |p: &Path| {
+            asked.borrow_mut().push(p.to_path_buf());
+            Some(p.to_path_buf())
+        };
+        assert!(!within(std::slice::from_ref(&root), &far, real));
+        assert!(asked.borrow().is_empty(), "looked at {:?}", asked.borrow());
+        assert!(within(std::slice::from_ref(&root), &root.join("a.rs"), real));
+        assert!(asked.borrow().contains(&root.join("a.rs")));
+        let leads_out = |p: &Path| Some(if p == root.join("link.rs") { far.clone() } else { p.to_path_buf() });
+        assert!(!within(std::slice::from_ref(&root), &root.join("link.rs"), leads_out));
     }
 
     #[test]
