@@ -1000,7 +1000,7 @@ pub async fn run(
     let mut backlog = Vec::new();
     let init = agent.handshake(&fs, &mut backlog).await?;
     let cwd = config.cwd.display().to_string();
-    let (mcp, skipped) = acp_mcp_servers(&config.mcp_servers, &init);
+    let (mcp, skipped, left_out) = acp_mcp_servers(&config.mcp_servers, &init);
     if !skipped.is_empty() {
         tracing::info!("{}: no HTTP MCP support, leaving out {}", agent.name, skipped.join(", "));
     }
@@ -1087,6 +1087,9 @@ pub async fn run(
         events.send(ev).await?;
     }
     if let Some(notice) = skipped_notice {
+        events.send(AgentEvent::Notice(notice)).await?;
+    }
+    for notice in left_out {
         events.send(AgentEvent::Notice(notice)).await?;
     }
     if let Some(notice) = agent.db_notice.take() {
@@ -1877,6 +1880,39 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_script_server_goes_to_acp_agents_through_cmd_on_windows_only() {
+        let npx = |args: &[&str]| crate::McpServer::stdio("fs", "npx", args.iter().map(|a| a.to_string()).collect(), vec![("K".into(), "v".into())]);
+        let found = |name: &str| (name == "npx").then(|| PathBuf::from("C:\\n\\npx.cmd"));
+        let init = json!({});
+        // macOS and Linux: as the user wrote it, whatever the lookup finds (compared as values).
+        let servers = [npx(&["-y", "srv"])];
+        let (out, skipped, left_out) = acp_mcp_servers_with(&servers, &init, false, found);
+        assert_eq!(out, json!([{"name":"fs","command":"npx","args":["-y","srv"],"env":[{"name":"K","value":"v"}]}]));
+        assert!(skipped.is_empty() && left_out.is_empty());
+        // Windows: `npx` is `npx.cmd`, which cmd.exe starts; the env goes along as it was.
+        let (out, _, left_out) = acp_mcp_servers_with(&[npx(&["-y", "srv"])], &init, true, found);
+        assert_eq!(out, json!([{"name":"fs","command":"cmd","args":["/c","npx","-y","srv"],"env":[{"name":"K","value":"v"}]}]));
+        assert!(left_out.is_empty());
+        // A real program, or a name nothing is found for, is left alone.
+        let exe = crate::McpServer::stdio("trek", "C:\\Trek\\trek-mcp.exe", vec!["computer".into()], vec![]);
+        let (out, _, left_out) = acp_mcp_servers_with(&[exe, npx(&[])], &init, true, |_| None);
+        assert_eq!(out[0], json!({"name":"trek","command":"C:\\Trek\\trek-mcp.exe","args":["computer"],"env":[]}));
+        assert_eq!(out[1]["command"], "npx");
+        assert!(left_out.is_empty());
+        // One cmd.exe would misread is left out with a notice, and the others still go; the
+        // remote ones are decided as before.
+        let risky = crate::McpServer::stdio("risky", "npx", vec!["a&b".into()], vec![]);
+        let remote = crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![]);
+        let servers = [risky, npx(&["srv"]), remote];
+        let (out, skipped, left_out) = acp_mcp_servers_with(&servers, &init, true, found);
+        assert_eq!(out.as_array().map(Vec::len), Some(1));
+        assert_eq!(out[0]["command"], "cmd");
+        assert_eq!(skipped, ["linear"]);
+        let [notice] = &left_out[..] else { panic!("{left_out:?}") };
+        assert!(notice.starts_with("MCP server risky wasn't started: npx.cmd is a batch script") && notice.contains("argument 1"), "{notice}");
+    }
+
+    #[test]
     fn the_fake_agent_turns_down_servers_in_the_wrong_shape() {
         // What the test above relies on: the stand-in checks `mcpServers` as the spec has it.
         // Claude's `{name: {command…}}` map is refused, as is an HTTP server it didn't ask for.
@@ -1902,9 +1938,9 @@ mod tests {
         let servers = trek_servers();
         let refused = |r: &Value, why: &str| r["error"]["message"].as_str().is_some_and(|m| m.contains(why));
         assert!(refused(&ask(crate::mcp_servers_json_with(&servers[..1], crate::BatchHandOff::CmdWrapper, false, |_| None).0), "must be an array"));
-        let (http, _) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
+        let (http, ..) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
         assert!(refused(&ask(http), "http isn't supported"));
-        let (stdio, skipped) = acp_mcp_servers(&servers, &json!({}));
+        let (stdio, skipped, _) = acp_mcp_servers(&servers, &json!({}));
         assert_eq!(skipped, ["figma-desktop", "linear"], "HTTP is off unless the agent says");
         assert_eq!(ask(stdio)["result"]["sessionId"], "fake-1");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2493,20 +2529,41 @@ mod tests {
 /// Stdio servers are `{name, command, args, env: [{name, value}]}`; remote ones `{type: "http",
 /// name, url, headers: [{name, value}]}`, sent only to an agent whose `initialize` said it takes
 /// them (`agentCapabilities.mcpCapabilities.http`, false unless said). Returns the names of the
-/// remote servers it left out.
-fn acp_mcp_servers<'a>(servers: &'a [crate::McpServer], init: &Value) -> (Value, Vec<&'a str>) {
+/// remote servers it left out, and a notice for each stdio server it can't hand over (left out).
+/// On Windows a command that is a batch script (`npx`, really `npx.cmd`) goes as `cmd /c`, as for
+/// Claude Code: agents start servers with Node's `spawn`, which won't run one. The user's own
+/// settings are never changed, only what's sent.
+fn acp_mcp_servers<'a>(servers: &'a [crate::McpServer], init: &Value) -> (Value, Vec<&'a str>, Vec<String>) {
+    acp_mcp_servers_with(servers, init, cfg!(windows), |name| detect::which_in(detect::login_path(), name))
+}
+
+/// `acp_mcp_servers` with the platform and the lookup of a command name as arguments, so both
+/// platforms' output is tested on either.
+fn acp_mcp_servers_with<'a>(
+    servers: &'a [crate::McpServer],
+    init: &Value,
+    windows: bool,
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> (Value, Vec<&'a str>, Vec<String>) {
     let pairs = |p: &[(String, String)]| p.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>();
     let http = init["agentCapabilities"]["mcpCapabilities"]["http"] == true;
     let mut skipped = vec![];
+    let mut left_out = vec![];
     let mut out = vec![];
     for m in servers {
         match &m.transport {
-            crate::McpTransport::Stdio { command, args, env } => out.push(json!({ "name": m.name, "command": command, "args": args, "env": pairs(env) })),
+            crate::McpTransport::Stdio { command, args, env } => match crate::agent_stdio_command(crate::BatchHandOff::CmdWrapper, command, args, windows, &resolve) {
+                Ok(handed) => {
+                    let (command, args) = handed.unwrap_or_else(|| (command.clone(), args.clone()));
+                    out.push(json!({ "name": m.name, "command": command, "args": args, "env": pairs(env) }));
+                }
+                Err(problem) => left_out.push(crate::mcp_left_out_notice(&m.name, &problem)),
+            },
             crate::McpTransport::Http { url, headers } if http => out.push(json!({ "type": "http", "name": m.name, "url": url, "headers": pairs(headers) })),
             crate::McpTransport::Http { .. } => skipped.push(m.name.as_str()),
         }
     }
-    (Value::Array(out), skipped)
+    (Value::Array(out), skipped, left_out)
 }
 
 /// What the user is told about remote MCP servers `agent` couldn't be given: once per agent and
