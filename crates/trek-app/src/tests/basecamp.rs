@@ -77,7 +77,7 @@ fn a_fresh_install_is_invited_to_start_and_esc_goes_back() {
         assert_eq!(draft, Route::Draft { project: None }, "a new thread starts in no project");
         // ⌘⇧H opens it with the sidebar folded away too; Esc goes back where it was opened from.
         trek.update(cx, |ws, _| ws.sidebar_collapsed = true);
-        trek.press(cx, "cmd-shift-h");
+        trek.press(cx, "secondary-shift-h");
         trek.render(cx);
         assert!(trek.visible(cx, "basecamp"));
         assert!(!trek.visible(cx, "open-basecamp"), "the sidebar stays folded");
@@ -310,7 +310,7 @@ fn the_week_the_palette_and_the_clock() {
     run(async |cx| {
         let trek = open(cx);
         // ⌘K finds it.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.type_text(cx, "Basecamp");
         trek.press(cx, "enter");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Basecamp);
@@ -386,7 +386,7 @@ fn all_time_reaches_back_to_the_first_thing_done() {
             assert!(trek.visible(cx, ("basecamp-project", 1usize)));
         }
         // Today's leaves the old thread out; ⌘K on Basecamp switches the range.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.type_text(cx, "Basecamp: Today");
         trek.press(cx, "enter");
         let today = recap(&trek, cx);

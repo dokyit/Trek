@@ -183,7 +183,7 @@ fn stopping_while_a_card_is_up_clears_it() {
         let id = trek.send(cx, "permission");
         trek.wait_needs_you(cx, &id).await;
         assert!(trek.visible(cx, "deny"));
-        trek.press(cx, "cmd-.");
+        trek.press(cx, "secondary-.");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(!trek.visible(cx, "deny"));
         assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.is_empty() && ws.needs_you_count() == 0));
@@ -202,7 +202,7 @@ fn the_working_bar_follows_the_thread_on_screen() {
         // The build shows live in the bar, not (yet) in the transcript.
         assert!(trek.visible(cx, "live-group"));
         assert_eq!(trek.rows(cx), ["user"]);
-        trek.press(cx, "cmd-n");
+        trek.press(cx, "secondary-n");
         assert_eq!(trek.working_bar(cx), None, "a draft has no working bar");
         let other = trek.send(cx, "meanwhile, explain");
         trek.wait_done(cx, &other, RunState::Idle).await;
@@ -495,7 +495,7 @@ fn stopping_a_turn_returns_queued_follow_ups_to_the_composer() {
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.working_bar(cx).is_some());
         trek.send(cx, "and deploy it");
-        trek.press(cx, "cmd-.");
+        trek.press(cx, "secondary-.");
         trek.wait_done(cx, &id, RunState::Idle).await;
         let items = trek.items(cx, &id);
         assert!(matches!(items.last(), Some(Item::Notice { text }) if text == "Interrupted"), "{items:?}");
@@ -527,10 +527,10 @@ fn keyboard_shortcuts_reach_their_actions() {
         let id = trek.send(cx, "hello");
         trek.wait_done(cx, &id, RunState::Idle).await;
 
-        trek.press(cx, "cmd-shift-a");
+        trek.press(cx, "secondary-shift-a");
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.hand_holding)), Some(HandHolding::AutoAcceptEdits));
         assert!(trek.visible(cx, "settle"), "the title bar offers Settle");
-        trek.press(cx, "cmd-e");
+        trek.press(cx, "secondary-e");
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some())));
         assert!(!trek.visible(cx, "settle"));
         // The title bar is a cached view: a workspace change alone brings the button back.
@@ -538,19 +538,19 @@ fn keyboard_shortcuts_reach_their_actions() {
         assert!(trek.visible(cx, "settle"));
 
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.press(cx, "cmd-j");
+        trek.press(cx, "secondary-j");
         assert!(panel.read_with(cx, |p, _| p.open));
-        trek.press(cx, "cmd-j");
+        trek.press(cx, "secondary-j");
         assert!(!panel.read_with(cx, |p, _| p.open));
 
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
 
-        trek.press(cx, "cmd-n");
+        trek.press(cx, "secondary-n");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: None });
 
-        trek.press(cx, "cmd-,");
+        trek.press(cx, "secondary-,");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(SettingsPage::General));
     });
 }

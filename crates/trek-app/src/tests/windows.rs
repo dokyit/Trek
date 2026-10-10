@@ -65,7 +65,7 @@ fn a_reopened_main_window_starts_afresh() {
         trek.update(cx, |ws, cx| ws.open_thread_at(&id, ItemRef::Id(hit), cx));
         assert!(trek.visible(cx, ("answer", 503usize)));
         // The palette is up (the browser hides under it) when the window closes.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         assert!(trek.read(cx, |ws, _| ws.overlay_open));
         close_main(&trek, cx);
         assert!(!trek.read(cx, |ws, _| ws.overlay_open), "nothing covers the tools panel any more");
@@ -130,7 +130,7 @@ fn a_reopened_main_window_takes_the_keys() {
         let view = trek_window(cx, main);
         assert_eq!(cx.read(|cx| view.read(cx).composer.read(cx).text(cx)), "hello");
         // Its shortcuts work as well.
-        cx.update_window(main, |_, window, cx| gpui_kit::test::TestWindowExt::press(window, "cmd-b", cx)).expect("window");
+        cx.update_window(main, |_, window, cx| gpui_kit::test::TestWindowExt::press(window, "secondary-b", cx)).expect("window");
         cx.run_until_parked();
         assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
     });
