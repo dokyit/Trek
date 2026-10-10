@@ -8,6 +8,10 @@
 //!   exit [<code>]          exit with `code` (0 when absent or not a number); later args ignored
 //!   fake-acp               run the stand-in ACP agent
 //!   fake-mcp [<mode>]      run the stand-in MCP server
+//!   serve <dir> [<port>]   the files in `dir` over HTTP on 127.0.0.1 (see `serve`)
+//!   minisign-keygen <dir>  a test update-signing key (see `minisign`); prints the key line
+//!   minisign-sign <seed file> <file> <trusted comment>
+//!                          sign `file` into `<file>.minisig` with that key
 
 use std::io::{Read, Write};
 
@@ -57,8 +61,43 @@ pub fn run() -> i32 {
             crate::fake_mcp::run(args.next());
             0
         }
+        Some("serve") => match args.next() {
+            Some(dir) => crate::serve::run(dir.into(), args.next().and_then(|p| p.parse().ok()).unwrap_or(0)),
+            None => {
+                eprintln!("fixture serve <dir> [<port>]");
+                2
+            }
+        },
+        Some("minisign-keygen") => match args.next().map(|d| crate::minisign::keygen(std::path::Path::new(&d))) {
+            Some(Ok(line)) => {
+                println!("{line}");
+                0
+            }
+            Some(Err(e)) => {
+                eprintln!("fixture minisign-keygen: {e}");
+                1
+            }
+            None => {
+                eprintln!("fixture minisign-keygen <dir>");
+                2
+            }
+        },
+        Some("minisign-sign") => {
+            let rest: Vec<String> = args.collect();
+            let [seed, file, comment] = rest.as_slice() else {
+                eprintln!("fixture minisign-sign <seed file> <file> <trusted comment>");
+                return 2;
+            };
+            match crate::minisign::sign(seed.as_ref(), file.as_ref(), comment) {
+                Ok(_) => 0,
+                Err(e) => {
+                    eprintln!("fixture minisign-sign: {e}");
+                    1
+                }
+            }
+        }
         other => {
-            eprintln!("fixture: expected sleep, cat, echo, print, stderr, exit, fake-acp or fake-mcp, not {other:?}");
+            eprintln!("fixture: expected sleep, cat, echo, print, stderr, exit, fake-acp, fake-mcp, serve, minisign-keygen or minisign-sign, not {other:?}");
             2
         }
     }
