@@ -81,14 +81,31 @@ pub fn pointer_off_window(window: &mut Window, cx: &mut App) {
 pub fn let_go_of_hover(window: &mut Window, cx: &mut App) {
     #[cfg(windows)]
     {
-        let inside = Bounds::new(point(px(0.), px(0.)), window.viewport_size()).contains(&window.mouse_position());
-        if legacy_pointer() || !inside || window.is_window_hovered() || cursor_over(window) != Some(false) {
+        let inside = pointer_inside(window);
+        // The system is asked last, and only when GPUI has been told the pointer left: most frames
+        // cost a comparison.
+        if legacy_pointer() || !should_let_go(inside, window.is_window_hovered(), || cursor_over(window)) {
             return;
         }
         window.defer(cx, pointer_off_window);
     }
     #[cfg(not(windows))]
     let _ = (window, cx);
+}
+
+/// Whether GPUI has the pointer inside the window's viewport.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub fn pointer_inside(window: &Window) -> bool {
+    Bounds::new(point(px(0.), px(0.)), window.viewport_size()).contains(&window.mouse_position())
+}
+
+/// `let_go_of_hover`'s question: GPUI has the pointer `inside`, the window has been told it left
+/// (`!window_hovered`), and the system has the cursor over another window or none
+/// (`cursor_over() == Some(false)`; `Some(true)` is this window's own frame or a web view in it).
+/// Once the pointer is moved off, it isn't inside, so the move is made once.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub fn should_let_go(inside: bool, window_hovered: bool, cursor_over: impl FnOnce() -> Option<bool>) -> bool {
+    inside && !window_hovered && cursor_over() == Some(false)
 }
 
 /// Whether a control in the title bar's row asks Windows to keep its press from moving the window.
@@ -163,10 +180,27 @@ pub fn caption_over_overlays(window: &Window, cx: &App) -> Option<AnyElement> {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: it carries gpui's `test` macro, which would take `#[test]`'s place.
-    use super::TITLE_BAR_HEIGHT_PX;
+    use super::{TITLE_BAR_HEIGHT_PX, should_let_go};
 
     #[test]
     fn the_title_bar_height_is_the_one_the_title_bar_draws() {
         assert_eq!(gpui_kit::px(TITLE_BAR_HEIGHT_PX), gpui_kit::component::TITLE_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn hover_is_let_go_only_for_a_pointer_gone_to_another_window() {
+        // Told it left, and the cursor is over another window or the desktop: let go.
+        assert!(should_let_go(true, false, || Some(false)));
+        // Moved off already (the move it makes puts the pointer at -1, -1): once, never again.
+        assert!(!should_let_go(false, false, || Some(false)));
+        // Still hovered (a drag with the button held keeps the window's pointer captured).
+        assert!(!should_let_go(true, true, || Some(false)));
+        // Over this window still: its frame, or a web view inside it.
+        assert!(!should_let_go(true, false, || Some(true)));
+        // A window with no handle can't say: nothing moves.
+        assert!(!should_let_go(true, false, || None));
+        // The system is only asked when GPUI has been told the pointer left.
+        assert!(!should_let_go(true, true, || panic!("asked the system on a hovered window")));
+        assert!(!should_let_go(false, false, || panic!("asked the system with the pointer outside")));
     }
 }
