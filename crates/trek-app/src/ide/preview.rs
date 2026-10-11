@@ -198,7 +198,8 @@ fn probe(path: &Path, kind: Kind) -> std::io::Result<Probe> {
             let _ = file.read(&mut [0u8; 1])?;
         }
     }
-    let pixels = if kind == Kind::Image { crate::image_preview::pixels(path) } else { None };
+    // Not the remembered size: the file may have been rewritten since it was last open here.
+    let pixels = if kind == Kind::Image { crate::image_preview::pixels_now(path) } else { None };
     Ok(Probe { bytes: meta.len(), pixels })
 }
 
@@ -238,6 +239,8 @@ enum Web {
     Made(Box<dyn WebSurface>),
     /// No web view could be made (no WebView2 runtime): the note says so.
     Unavailable,
+    /// A PDF too big to hand over whole (`WHOLE_LIMIT`): its own app shows it.
+    TooBig,
 }
 
 pub struct PreviewView {
@@ -253,6 +256,9 @@ pub struct PreviewView {
     drag: Option<(Point<Pixels>, Point<Pixels>, bool)>,
     /// Where the image is drawn, as last laid out.
     area: Bounds<Pixels>,
+    /// The image's own cache: GPUI's global one keeps a path's picture for the whole run, so a
+    /// file rewritten since (an agent's chart) would open as it was.
+    images: Entity<RetainAllImageCache>,
     web: Web,
     /// Whether the workbench has the tab on screen (the web view shows only then).
     shown: bool,
@@ -284,6 +290,7 @@ impl PreviewView {
             scroll: ScrollHandle::new(),
             drag: None,
             area: Bounds::default(),
+            images: RetainAllImageCache::new(cx),
             web: Web::None,
             shown: false,
             app: None,
@@ -330,6 +337,7 @@ impl PreviewView {
                 self.status = Status::Ready;
                 match self.kind {
                     Kind::Text => cx.emit(PreviewEvent::Reopen { fetched: true }),
+                    Kind::Document if p.bytes > WHOLE_LIMIT => self.web = Web::TooBig,
                     Kind::Document | Kind::Media => {
                         self.web = match make_web(&self.path, window, cx) {
                             Some(web) => {
@@ -378,7 +386,8 @@ impl PreviewView {
     pub fn note_text(&self) -> Option<String> {
         match (&self.status, self.kind, &self.web) {
             (Status::Unreadable(why), ..) => Some(why.clone()),
-            (Status::Ready, Kind::Binary, _) | (Status::Ready, Kind::Document | Kind::Media, Web::Unavailable) => Some(self.cant_show()),
+            (Status::Ready, Kind::Binary, _) | (Status::Ready, Kind::Document | Kind::Media, Web::Unavailable | Web::TooBig) => Some(self.cant_show()),
+            (Status::Ready, Kind::Image, _) if self.undecodable() => Some(self.cant_show()),
             _ => None,
         }
     }
@@ -387,6 +396,12 @@ impl PreviewView {
     pub fn status_items(&self) -> (String, Option<String>, Option<String>) {
         let pixels = self.pixels.map(|(w, h)| format!("{w} × {h}"));
         (kind_label(&self.path, self.kind), pixels, self.bytes.map(crate::image_preview::file_size))
+    }
+
+    /// An image whose header gives no size isn't one Trek can draw (an SVG has none to give): a
+    /// damaged file, or a format it doesn't decode. It's said, not left a blank tab.
+    fn undecodable(&self) -> bool {
+        self.kind == Kind::Image && self.pixels.is_none() && extension(&self.path).as_deref() != Some("svg")
     }
 
     fn open_label(&self) -> String {
@@ -561,7 +576,7 @@ impl PreviewView {
                                     .w(at.size.width)
                                     .h(at.size.height)
                                     .cursor(if grabbing { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
-                                    .child(img(path).size_full())
+                                    .child(img(path).image_cache(&self.images).size_full())
                                     .on_mouse_down(MouseButton::Left, press),
                             ),
                         ),
@@ -574,8 +589,8 @@ impl PreviewView {
                 // itself; after it, it's placed where a click measures it to be.
                 let image = div().id("ide-preview-image").test_support().when(zoomable, |el| el.cursor(CursorStyle::PointingHand)).on_mouse_down(MouseButton::Left, press);
                 let image = match layout {
-                    Some(l) => image.absolute().left(l.fit.origin.x - self.area.origin.x).top(l.fit.origin.y - self.area.origin.y).w(l.fit.size.width).h(l.fit.size.height).child(img(path).size_full()),
-                    None => image.absolute().top(px(PAD)).left(px(PAD)).right(px(PAD)).bottom(px(PAD)).child(img(path).size_full().object_fit(ObjectFit::ScaleDown)),
+                    Some(l) => image.absolute().left(l.fit.origin.x - self.area.origin.x).top(l.fit.origin.y - self.area.origin.y).w(l.fit.size.width).h(l.fit.size.height).child(img(path).image_cache(&self.images).size_full()),
+                    None => image.absolute().top(px(PAD)).left(px(PAD)).right(px(PAD)).bottom(px(PAD)).child(img(path).image_cache(&self.images).size_full().object_fit(ObjectFit::ScaleDown)),
                 };
                 stage.child(image).into_any_element()
             }
@@ -641,20 +656,23 @@ impl Render for PreviewView {
                 self.note(Icon::new(IconName::TriangleAlert), why.clone(), None, buttons, cx)
             }
             Status::Ready => match (self.kind, &self.web) {
-                (Kind::Image, _) => self.image(window, cx),
+                (Kind::Image, _) if !self.undecodable() => self.image(window, cx),
                 (Kind::Document | Kind::Media, Web::Made(web)) => v_flex()
                     .size_full()
                     .child(self.header(cx))
                     .child(div().id("ide-preview-web").test_support().flex_1().min_h_0().child(web.element()))
                     .into_any_element(),
-                (Kind::Document | Kind::Media, Web::Unavailable) => {
-                    let hint = if cfg!(windows) {
+                (Kind::Document | Kind::Media, Web::Unavailable | Web::TooBig) => {
+                    let too_big = matches!(self.web, Web::TooBig);
+                    let hint = if too_big {
+                        "A PDF this big is left to its own app."
+                    } else if cfg!(windows) {
                         "PDFs, video and audio show in Microsoft Edge WebView2, which couldn't be started on this PC."
                     } else {
                         "PDFs, video and audio show in the system's web view, which isn't available."
                     };
                     let mut buttons = vec![self.open_button().into_any_element(), self.reveal_button().into_any_element()];
-                    if cfg!(windows) {
+                    if cfg!(windows) && !too_big {
                         buttons.push(Button::new("ide-preview-get-webview2").small().ghost().label("Get WebView2").on_click(|_, _, cx| cx.open_url(crate::panels::browser::WEBVIEW2_DOWNLOAD)).into_any_element());
                     }
                     self.note(Icon::new(IconName::File), self.cant_show(), Some(hint.to_string()), buttons, cx)
@@ -723,7 +741,7 @@ fn file_path(path: &Path) -> String {
 fn media_page(path: &Path) -> String {
     let tag = if is_audio(path) { "audio" } else { "video" };
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body{{margin:0;height:100%;background:#000}}body{{display:flex;align-items:center;justify-content:center}}video{{max-width:100%;max-height:100%}}audio{{width:min(520px,90%)}}</style></head><body><{tag} src=\"{}\" controls preload=\"metadata\"></{tag}></body></html>",
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body{{margin:0;height:100%;background:#000}}body{{display:flex;align-items:center;justify-content:center}}video{{max-width:100%;max-height:100%}}audio{{width:min(520px,90%)}}</style></head><body><{tag} src=\"{}\" controls controlslist=\"nodownload\" disablepictureinpicture preload=\"metadata\"></{tag}></body></html>",
         file_path(path)
     )
 }
@@ -738,6 +756,7 @@ fn answer(path: &Path, asked: &str, range: Option<&str>) -> wry::http::Response<
         return wry::http::Response::builder()
             .header("Content-Type", "text/html; charset=utf-8")
             .header("Content-Security-Policy", MEDIA_CSP)
+            .header("X-Content-Type-Options", "nosniff")
             .header("Cache-Control", "no-store")
             .body(media_page(path).into_bytes())
             .unwrap_or_default();
@@ -751,6 +770,11 @@ fn file_origin(windows: bool) -> String {
 
 /// The largest piece of a file one answer carries: players ask for the rest as they need it.
 const CHUNK: u64 = 4 << 20;
+
+/// The biggest file answered whole (a request with no `Range`, as a PDF's first is): it's held in
+/// memory twice over while the web view takes it, and a file past this would bring Trek down
+/// asking for the room. A bigger PDF is left to its own app; players ask for video in pieces.
+const WHOLE_LIMIT: u64 = 256 << 20;
 
 /// The first and last byte `range` (a `Range` header) asks for of a file `len` long: `None` for
 /// the whole file, `Err` when it asks for none of it.
@@ -782,7 +806,8 @@ fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
     let fail = |status: u16| wry::http::Response::builder().status(status).body(Vec::new()).unwrap_or_default();
     let Ok(mut file) = std::fs::File::open(path) else { return fail(404) };
     let Ok(len) = file.metadata().map(|m| m.len()) else { return fail(404) };
-    let base = || wry::http::Response::builder().header("Content-Type", mime).header("Accept-Ranges", "bytes").header("Cache-Control", "no-store");
+    // `nosniff`: a file called .pdf that holds a web page is still only offered as a PDF.
+    let base = || wry::http::Response::builder().header("Content-Type", mime).header("X-Content-Type-Options", "nosniff").header("Accept-Ranges", "bytes").header("Cache-Control", "no-store");
     match parse_range(range, len) {
         Ok(Some((start, end))) => {
             let mut body = vec![0; (end - start + 1) as usize];
@@ -791,6 +816,7 @@ fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
             }
             base().status(206).header("Content-Range", format!("bytes {start}-{end}/{len}")).body(body).unwrap_or_default()
         }
+        Ok(None) if len > WHOLE_LIMIT => fail(413),
         Ok(None) => {
             let mut body = Vec::with_capacity(len as usize);
             if file.read_to_end(&mut body).is_err() {
@@ -873,7 +899,7 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has a `test` macro of its own.
-    use super::{CHUNK, Kind, MEDIA_CSP, answer, cloud_app, file_origin, file_url, kind, kind_label, parse_range, serve, unreadable_words};
+    use super::{CHUNK, Kind, MEDIA_CSP, WHOLE_LIMIT, answer, cloud_app, file_origin, file_url, kind, kind_label, parse_range, serve, unreadable_words};
     use std::path::Path;
 
     #[test]
@@ -965,6 +991,12 @@ mod tests {
         assert_eq!(whole.status(), 200);
         assert_eq!(whole.headers()["content-type"], "video/mp4");
         assert_eq!(whole.body(), b"0123456789");
+        assert_eq!(whole.headers()["x-content-type-options"], "nosniff");
+        // Whole, a file is held in memory: past the limit only pieces are handed over.
+        let huge = dir.join("huge.pdf");
+        std::fs::File::create(&huge).unwrap().set_len(WHOLE_LIMIT + 1).unwrap();
+        assert_eq!(serve(&huge, None).status(), 413, "no 256 MB allocation to answer a request");
+        assert_eq!(serve(&huge, Some("bytes=0-9")).body(), &[0u8; 10]);
         let part = serve(&file, Some("bytes=2-4"));
         assert_eq!(part.status(), 206);
         assert_eq!(part.headers()["content-range"], "bytes 2-4/10");
@@ -990,7 +1022,8 @@ mod tests {
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
         assert_eq!(page.headers()["content-security-policy"], MEDIA_CSP);
         let html = String::from_utf8(page.body().clone()).unwrap();
-        assert!(html.contains("<video src=\"/my%20clip.mp4\" controls"), "{html}");
+        assert!(html.contains("<video src=\"/my%20clip.mp4\" controls controlslist=\"nodownload\""), "{html}");
+        assert_eq!(page.headers()["x-content-type-options"], "nosniff");
         assert!(!html.contains("autoplay") && !html.contains("<script"), "{html}");
         assert!(String::from_utf8(answer(&song, "/", None).body().clone()).unwrap().contains("<audio src=\"/song.mp3\" controls"));
         // The file itself under any other path; a PDF is the file even at `/`.

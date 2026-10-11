@@ -207,12 +207,19 @@ impl IdeWorkbench {
     /// while the window shows the editor and nothing Trek draws (a palette, a menu) is over it.
     pub(super) fn sync_previews(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let on_screen = !ws.overlay_open && (ws.ide() || matches!(ws.route, crate::workspace::Route::Editor { .. }));
+        let on_screen = !ws.overlay_open && self.menus_open == 0 && (ws.ide() || matches!(ws.route, crate::workspace::Route::Editor { .. }));
         let front = self.tabs.get(self.active).map(EditorTab::id);
         let previews: Vec<(bool, Entity<PreviewView>)> = self.tabs.iter().filter_map(|t| t.preview_view().map(|p| (Some(t.id()) == front, p.clone()))).collect();
         for (in_front, p) in previews {
             p.update(cx, |p, cx| p.set_shown(on_screen && in_front, cx));
         }
+    }
+
+    /// A tab's menu opened or closed. It hangs over the editor, where a native web view would
+    /// draw over it.
+    fn tab_menu(&mut self, opened: bool, cx: &mut Context<Self>) {
+        self.menus_open = if opened { self.menus_open + 1 } else { self.menus_open.saturating_sub(1) };
+        self.sync_previews(cx);
     }
 
     /// Put `tab` in place of the preview tab when `preview` (and there's a clean one), else
@@ -512,8 +519,25 @@ impl IdeWorkbench {
                         }
                     }))
                     .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(id, window, cx)))
-                    .context_menu(move |menu, _, _| {
-                        let act = |label: &'static str, f: fn(&mut IdeWorkbench, EntityId, &mut Window, &mut Context<IdeWorkbench>)| {
+                    .context_menu(move |menu, _, cx| {
+                        // Counted once, whether it's dismissed, replaced by another or dropped.
+                        let open = std::rc::Rc::new(std::cell::Cell::new(true));
+                        let _ = me.update(cx, |this, cx| this.tab_menu(true, cx));
+                        let (on_dismiss, on_release) = (me.clone(), me.clone());
+                        let (dismissed, released) = (open.clone(), open);
+                        cx.subscribe(&cx.entity(), move |_, _, _: &DismissEvent, cx| {
+                            if dismissed.replace(false) {
+                                let _ = on_dismiss.update(cx, |this, cx| this.tab_menu(false, cx));
+                            }
+                        })
+                        .detach();
+                        cx.on_release(move |_, cx| {
+                            if released.replace(false) {
+                                let _ = on_release.update(cx, |this, cx| this.tab_menu(false, cx));
+                            }
+                        })
+                        .detach();
+                        let act =|label: &'static str, f: fn(&mut IdeWorkbench, EntityId, &mut Window, &mut Context<IdeWorkbench>)| {
                             let me = me.clone();
                             PopupMenuItem::new(label).on_click(move |_, window, cx| {
                                 let _ = me.update(cx, |this, cx| f(this, id, window, cx));

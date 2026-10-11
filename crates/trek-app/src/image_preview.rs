@@ -164,7 +164,13 @@ fn thumb_bounds(path: &Path, window: &Window, cx: &App) -> Option<Bounds<Pixels>
 pub fn pixels(path: &Path) -> Option<(u32, u32)> {
     static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Option<(u32, u32)>>>> = std::sync::LazyLock::new(Default::default);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    *seen.entry(path.to_path_buf()).or_insert_with(|| image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok())
+    *seen.entry(path.to_path_buf()).or_insert_with(|| pixels_now(path))
+}
+
+/// `pixels`, read from the file now: for one that may have changed since it was last looked at
+/// (the editor's previews), where a remembered size would be the old picture's.
+pub fn pixels_now(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
 }
 
 /// How wide a tile `height` tall shows `path` in its own proportions, between `min` and `max`

@@ -1656,6 +1656,107 @@ fn a_pdf_shows_in_the_web_view_which_hides_when_the_editor_does() {
 }
 
 #[test]
+fn a_pdf_on_the_lone_editor_screen_shows_in_agents_mode_and_hides_when_the_route_moves_on() {
+    run(async |cx| {
+        crate::ide::preview::fake_web(true);
+        let trek = open(cx);
+        let pdf = trek.project.join("paper.pdf");
+        std::fs::write(&pdf, MINIMAL_PDF).unwrap();
+        // The harness's own editor screen (a file opened from a thread, Agents mode): the one
+        // tab is in front without anything having activated it.
+        assert_eq!(trek.read(cx, |ws, _| ws.mode), Mode::Agents);
+        trek.update(cx, |ws, cx| ws.open_editor(pdf.clone(), None, cx));
+        trek.render(cx);
+        let ide = ide(&trek, cx);
+        let shown = |cx: &TestAppContext| cx.read(|cx| ide.read(cx).active_preview().and_then(|p| p.read(cx).web_shown()));
+        assert_eq!(shown(cx), Some(true), "the lone editor screen shows its web view");
+        trek.update(cx, |ws, cx| ws.navigate(Route::Notes, cx));
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(false), "another page over it");
+    });
+}
+
+#[test]
+fn a_tabs_menu_is_never_under_the_web_view() {
+    run(async |cx| {
+        crate::ide::preview::fake_web(true);
+        let trek = open(cx);
+        let pdf = trek.project.join("paper.pdf");
+        std::fs::write(&pdf, MINIMAL_PDF).unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(pdf.clone(), None, cx));
+        trek.render(cx);
+        let ide = ide(&trek, cx);
+        let shown = |cx: &TestAppContext| cx.read(|cx| ide.read(cx).active_preview().and_then(|p| p.read(cx).web_shown()));
+        assert_eq!(shown(cx), Some(true));
+
+        // The menu hangs down over the editor: a native view would draw over it.
+        trek.window(cx, |window, cx| window.right_click(("ide-tab", 0usize), cx));
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(false), "the tab's menu is open");
+        trek.press(cx, "escape");
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(true), "the menu is gone");
+
+        // A second right click while one is open still leaves it hidden until the last is gone.
+        trek.window(cx, |window, cx| window.right_click(("ide-tab", 0usize), cx));
+        trek.render(cx);
+        trek.window(cx, |window, cx| window.right_click(("ide-tab", 0usize), cx));
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(false));
+        trek.press(cx, "escape");
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(true), "one menu open, one dismissed: none left");
+    });
+}
+
+#[test]
+fn an_image_rewritten_since_it_was_last_open_opens_as_it_is_now() {
+    run(async |cx| {
+        let trek = open(cx);
+        let png = trek.project.join("chart.png");
+        image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 80, 40, 255])).save(&png).unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(png.clone(), None, cx));
+        trek.render(cx);
+        assert_eq!(preview_state(&trek, cx).unwrap().0.1.as_deref(), Some("40 × 30"));
+        trek.press(cx, "secondary-w");
+        trek.render(cx);
+        // An agent draws it again, a different size.
+        image::RgbaImage::from_pixel(20, 50, image::Rgba([10, 80, 200, 255])).save(&png).unwrap();
+        trek.update(cx, |ws, cx| ws.open_editor(png.clone(), None, cx));
+        trek.render(cx);
+        assert_eq!(preview_state(&trek, cx).unwrap().0.1.as_deref(), Some("20 × 50"), "not the size it had before");
+    });
+}
+
+#[test]
+fn an_image_trek_cant_decode_and_a_pdf_too_big_to_hand_over_say_so() {
+    run(async |cx| {
+        crate::ide::preview::fake_web(true);
+        let trek = open(cx);
+        let broken = trek.project.join("broken.png");
+        std::fs::write(&broken, b"this is not a picture").unwrap();
+        let big = trek.project.join("scan.pdf");
+        std::fs::File::create(&big).unwrap().set_len((256 << 20) + 1).unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(broken.clone(), None, cx));
+        trek.render(cx);
+        let (_, note) = preview_state(&trek, cx).unwrap();
+        assert_eq!(note.as_deref(), Some("Trek can't show broken.png (PNG Image, 21 bytes)."));
+        assert!(trek.visible(cx, "ide-preview-open") && trek.visible(cx, "ide-preview-reveal"));
+        assert!(!trek.visible(cx, "ide-preview-image"), "no blank picture");
+
+        trek.update(cx, |ws, cx| ws.open_editor(big.clone(), None, cx));
+        trek.render(cx);
+        let (_, note) = preview_state(&trek, cx).unwrap();
+        assert_eq!(note.as_deref(), Some("Trek can't show scan.pdf (PDF, 268.4 MB)."));
+        assert!(!trek.visible(cx, "ide-preview-web-fake"), "no web view for it");
+        assert!(trek.visible(cx, "ide-preview-open"));
+    });
+}
+
+#[test]
 fn without_a_web_view_a_video_says_trek_cant_show_it() {
     run(async |cx| {
         crate::ide::preview::fake_web(false);
