@@ -159,6 +159,20 @@ pub fn swap(install: &Path, staged: &Path, from: &str, to: &str) -> Result<PathB
 /// `swap`, with `bring` for moving the staged folder next to the install.
 #[doc(hidden)]
 pub fn swap_with(install: &Path, staged: &Path, from: &str, to: &str, bring: &dyn Fn(&Path, &Path) -> std::io::Result<()>) -> Result<PathBuf, String> {
+    swap_guarded(install, staged, from, to, bring, &guarded_folders)
+}
+
+/// `swap_with`, with `guarded` for the folders ransomware protection guards (asked only if
+/// Windows refuses to let the update next to the install).
+#[doc(hidden)]
+pub fn swap_guarded(
+    install: &Path,
+    staged: &Path,
+    from: &str,
+    to: &str,
+    bring: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    guarded: &dyn Fn() -> Vec<(&'static str, PathBuf)>,
+) -> Result<PathBuf, String> {
     if !install.is_absolute() || !staged.is_absolute() {
         return Err("the folders to swap must be full paths; nothing was changed".into());
     }
@@ -172,7 +186,10 @@ pub fn swap_with(install: &Path, staged: &Path, from: &str, to: &str, bring: &dy
         Err(e) if cross_volume(&e) => copy_dir(staged, &incoming),
         other => other,
     }
-    .map_err(|e| format!("couldn't get the update next to {} ({e}); nothing was changed", install.display()))?;
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => refused_next_to(install, &e, guarded_folder_of(install, &guarded())),
+        _ => format!("couldn't get the update next to {} ({e}); nothing was changed", install.display()),
+    })?;
     let old = free_name(install, &format!("old-{from}"));
     if let Err(e) = rename_patiently(install, &old) {
         // The update goes back where it was staged, if it was moved and not copied.
@@ -189,6 +206,81 @@ pub fn swap_with(install: &Path, staged: &Path, from: &str, to: &str, bring: &dy
     match restore(install, &old, to) {
         Ok(()) => Err(format!("{problem}; the previous version is back")),
         Err(back) => Err(format!("{problem}, and {back}")),
+    }
+}
+
+/// Why the update couldn't be brought next to the install when Windows said access denied, and
+/// what to do. Inside a folder ransomware protection (Defender's Controlled folder access) guards,
+/// that is what refused: it lets only programs it trusts write there, and this helper is new to
+/// it each update. Elsewhere it may still be (a folder a user added to it), or a file held open.
+pub fn refused_next_to(install: &Path, e: &std::io::Error, guarded: Option<&str>) -> String {
+    match guarded {
+        Some(folder) => format!(
+            "Windows's ransomware protection (Controlled folder access) wouldn't let Trek put the update next to {}. Move the Trek folder out of {folder} and update again; nothing was changed",
+            install.display()
+        ),
+        None => format!(
+            "couldn't get the update next to {} ({e}). If Windows's ransomware protection (Controlled folder access) guards that folder, move the Trek folder to one of its own and update again; nothing was changed",
+            install.display()
+        ),
+    }
+}
+
+/// The guarded folder (by name) that `install` is in, if any.
+pub fn guarded_folder_of(install: &Path, guarded: &[(&'static str, PathBuf)]) -> Option<&'static str> {
+    guarded.iter().find(|(_, folder)| within(install, folder)).map(|&(name, _)| name)
+}
+
+/// The folders ransomware protection guards by default, by name: Documents, Desktop, Pictures,
+/// Videos, Music and Favorites where Windows says they are (in OneDrive when it backs them up),
+/// and in OneDrive either way. trek-core's `update::guarded_folders` is the same list.
+#[cfg(windows)]
+pub fn guarded_folders() -> Vec<(&'static str, PathBuf)> {
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Favorites, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos};
+    let known = [
+        ("Documents", FOLDERID_Documents),
+        ("Desktop", FOLDERID_Desktop),
+        ("Pictures", FOLDERID_Pictures),
+        ("Videos", FOLDERID_Videos),
+        ("Music", FOLDERID_Music),
+        ("Favorites", FOLDERID_Favorites),
+    ];
+    let onedrive: Vec<PathBuf> = std::env::var_os("USERPROFILE")
+        .map(|p| PathBuf::from(p).join("OneDrive"))
+        .into_iter()
+        .chain(["OneDrive", "OneDriveConsumer", "OneDriveCommercial"].into_iter().filter_map(std::env::var_os).map(PathBuf::from))
+        .collect();
+    let mut places = vec![];
+    for (name, id) in known {
+        places.extend(known_folder(&id).map(|p| (name, p)));
+        places.extend(onedrive.iter().map(|d| (name, d.join(name))));
+    }
+    places.retain(|(_, p)| p.is_absolute());
+    places
+}
+
+#[cfg(not(windows))]
+pub fn guarded_folders() -> Vec<(&'static str, PathBuf)> {
+    vec![]
+}
+
+/// Where a known folder is (`SHGetKnownFolderPath`, which follows it to OneDrive).
+#[cfg(windows)]
+fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+    let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: a valid folder id and out pointer; on success `path` is a NUL-terminated string the
+    // shell allocated, read up to its NUL, and freed (as it must be, whatever the result) once.
+    unsafe {
+        let found = SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut path) == 0 && !path.is_null();
+        let result = found.then(|| {
+            let len = (0..).take_while(|&i| *path.add(i) != 0).count();
+            PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(path, len)))
+        });
+        CoTaskMemFree(path as *const _);
+        result
     }
 }
 
