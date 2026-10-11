@@ -109,7 +109,9 @@ thread busy throughout), and was stopped there.
 Now an answer of 6 KB or more is drawn in parts of at least 2 KB, each a row with its own
 document (`answer_parts` in `crates/trek-app/src/thread_view.rs`). The list lays out only the
 parts on screen, and streaming re-measures only the last part. Cuts fall only where a new
-block starts at the left margin after a blank line, never inside fenced code, so each part is
+block starts at the left margin after a blank line, never inside fenced code or raw HTML that
+runs on past blank lines, and an answer with link reference definitions (`[1]: https://…`, which
+a document resolves only within itself) isn't cut at all, so each part is
 whole markdown; a part after the first gets the paragraph gap the block would have had, so the
 answer reads as one. A cut depends only on the text before it, so cuts made mid-stream stay put.
 Answers under 6 KB, nearly all of them, are drawn exactly as before.
@@ -123,10 +125,12 @@ the 30-minute run still drifted (frame p95 9 → 23 ms, main-thread stalls up to
 - Mid-turn, a thread's changes are saved a second after they happen. A save rewrites each
   changed row whole and indexes all its text for search again, on the main thread: 6–21 ms for a
   300 KB answer, more beyond, once a second per streaming thread. The save now waits a second
-  more for each 64 KB of its largest changed row, up to ten (`save_delay` in `workspace.rs`), so
+  more for each 64 KB of its largest changed row, up to five (`save_delay` in `workspace.rs`), so
   the main thread spends about the same per second on saves however long the answer gets. The
-  price: a crash mid-stream can lose up to ten seconds of a very long answer instead of one
-  (quitting saves everything, as before).
+  price: a crash mid-stream can lose up to five seconds of an answer over 128 KB instead of one
+  (quitting, stopping, a turn's end, a question and a rewind still save at once). The pass first
+  allowed ten seconds; five is reached at 320 KB, longer than any one answer an agent writes, and
+  keeps the exposure to a few KB of text.
 
 Nothing else measured was worth changing: startup's largest share is GPUI's own platform setup
 (DirectX, DirectComposition and DirectWrite, ~110–150 ms) before Trek's code runs; Trek's part

@@ -308,7 +308,7 @@ fn documents_follow_answers_that_move() {
 
 /// A long answer as agents write them: sections with headings, paragraphs with paths and bold,
 /// lists, and a code block with a blank line in it, about 15 KB.
-fn long_answer() -> String {
+pub(super) fn long_answer() -> String {
     (0..12)
         .map(|s| {
             let para = format!("Section {s} reads `src/server/routes.rs` and changes **three** things in the retry loop, so the log lines up with the trace. ");

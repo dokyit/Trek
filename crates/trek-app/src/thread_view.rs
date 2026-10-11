@@ -98,38 +98,110 @@ const PART_MIN: usize = 2_000;
 /// fall only where a new block begins at the left margin after a blank line, outside fenced
 /// code, so every part is whole markdown, drawn as it would be in one document. A cut depends
 /// only on the text before it and the first character after, so cuts made while an answer
-/// streams stay where they are as it grows. Answers shorter than `SPLIT_FROM` aren't cut.
-fn answer_parts(text: &str) -> Vec<usize> {
+/// streams stay where they are as it grows (but for the one case below). Answers shorter than
+/// `SPLIT_FROM` aren't cut, nor are those with a link reference definition (`[1]: https://…`):
+/// a document resolves `[text][1]` only against the definitions it holds itself, and the
+/// definitions come last. One that arrives late takes the cuts made so far back.
+pub(crate) fn answer_parts(text: &str) -> Vec<usize> {
     let mut cuts = vec![];
     if text.len() < SPLIT_FROM {
         return cuts;
     }
     let (mut start, mut at) = (0, 0);
-    let mut fence: Option<(u8, usize)> = None;
+    let mut open: Option<Raw> = None;
     let mut after_blank = false;
     for line in text.split_inclusive('\n') {
         let here = at;
         at += line.len();
         let body = line.trim_end_matches(['\n', '\r']);
-        let first = body.as_bytes().first().copied();
-        if fence.is_none() && after_blank && here - start >= PART_MIN && first.is_some_and(|b| !b.is_ascii_whitespace()) {
-            cuts.push(here);
-            start = here;
+        if let Some(Raw::Html(end)) = open {
+            if body.to_ascii_lowercase().contains(end) {
+                // The block ends with this line.
+                open = None;
+            }
+            after_blank = false;
+            continue;
         }
-        // A fence opens with three or more backticks or tildes (indented at most three spaces)
-        // and closes with at least as many of the same, and nothing else on the line.
+        let first = body.as_bytes().first().copied();
         let indent = body.len() - body.trim_start_matches(' ').len();
-        let marker = body[indent..].as_bytes();
-        let run = |c: u8| marker.iter().take_while(|b| **b == c).count();
-        let found = [b'`', b'~'].into_iter().map(|c| (c, run(c))).find(|(_, n)| *n >= 3).filter(|_| indent <= 3);
-        fence = match (fence, found) {
-            (None, Some(opened)) => Some(opened),
-            (Some((c, n)), Some((d, m))) if c == d && m >= n && body[indent + m..].trim().is_empty() => None,
+        let rest = &body[indent..];
+        if open.is_none() {
+            if after_blank && here - start >= PART_MIN && first.is_some_and(|b| !b.is_ascii_whitespace()) {
+                cuts.push(here);
+                start = here;
+            }
+            if indent <= 3 && is_definition(rest) {
+                return vec![];
+            }
+        }
+        // A fence opens with three or more backticks or tildes (two dollar signs for math),
+        // indented at most three spaces, and closes with at least as many of the same and nothing
+        // else on the line. An opening one of backticks or dollar signs has none in what follows.
+        let marks = rest.as_bytes();
+        let run = |c: u8| marks.iter().take_while(|b| **b == c).count();
+        let found = [(b'`', 3), (b'~', 3), (b'$', 2)]
+            .into_iter()
+            .map(|(c, least)| (c, run(c), least))
+            .find(|(_, n, least)| n >= least)
+            .filter(|_| indent <= 3)
+            .map(|(c, n, _)| (c, n));
+        open = match (open, found) {
+            (None, Some((c, n))) if matches!(c, b'`' | b'$') && rest[n..].as_bytes().contains(&c) => None,
+            (None, Some((c, n))) => Some(Raw::Fence(c, n)),
+            (Some(Raw::Fence(c, n)), Some((d, m))) if c == d && m >= n && rest[m..].trim().is_empty() => None,
             (open, _) => open,
         };
-        after_blank = fence.is_none() && body.trim().is_empty();
+        if open.is_none() && indent <= 3 {
+            open = html_block_end(rest).map(Raw::Html);
+        }
+        after_blank = open.is_none() && body.trim().is_empty();
     }
     cuts
+}
+
+/// What a cut mustn't fall inside, besides a paragraph: fenced code, and raw HTML that goes on
+/// past blank lines (up to a line holding the end).
+#[derive(Clone, Copy)]
+enum Raw {
+    Fence(u8, usize),
+    Html(&'static str),
+}
+
+/// Whether row `ix` is tinted when a search result scrolled to row `at`: that row, and the other
+/// parts when it's one of a long answer's.
+fn flashes(rows: &[Row], at: usize, ix: usize) -> bool {
+    at == ix || matches!((rows.get(at), rows.get(ix)), (Some(Row::Assistant { ix: a, .. }), Some(Row::Assistant { ix: b, .. })) if a == b)
+}
+
+/// A link reference definition: `[label]: destination`, not a footnote's.
+fn is_definition(line: &str) -> bool {
+    let Some(inner) = line.strip_prefix('[').filter(|r| !r.starts_with('^')) else { return false };
+    let Some(close) = inner.find("]:") else { return false };
+    let label = &inner[..close];
+    !label.trim().is_empty() && !label.contains(['[', ']']) && !inner[close + 2..].trim().is_empty()
+}
+
+/// The text that ends the raw HTML block `line` opens (a comment, `<pre>`, `<script>`, `<style>`,
+/// `<textarea>`, a processing instruction or CDATA: the kinds that blank lines don't end), unless
+/// the line ends it itself.
+fn html_block_end(line: &str) -> Option<&'static str> {
+    if !line.starts_with('<') {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    let (end, from) = if lower.starts_with("<!--") {
+        ("-->", 4)
+    } else if lower.starts_with("<?") {
+        ("?>", 2)
+    } else if lower.starts_with("<![cdata[") {
+        ("]]>", 9)
+    } else {
+        let tag = [("pre", "</pre>"), ("script", "</script>"), ("style", "</style>"), ("textarea", "</textarea>")]
+            .into_iter()
+            .find(|(name, _)| lower.strip_prefix('<').and_then(|r| r.strip_prefix(name)).is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', '>'])))?;
+        (tag.1, 1 + tag.0.len())
+    };
+    (!lower[from..].contains(end)).then_some(end)
 }
 
 /// `rows` (one per answer) with each long answer drawn as its parts, one row each, and
@@ -158,7 +230,7 @@ fn split_long_answers(rows: Vec<Row>, item_row: Vec<usize>, items: &[Item]) -> R
 }
 
 /// Part `n` of `text` cut at `cuts`, or `None` past the last.
-fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
+pub(crate) fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
     let start = if n == 0 { 0 } else { *cuts.get(n - 1)? };
     let end = cuts.get(n).copied().unwrap_or(text.len());
     text.get(start..end)
@@ -1030,12 +1102,19 @@ impl ThreadView {
         let tint = theme.foreground.opacity(0.07);
         let animate = at.animate;
         let width = at.column;
+        // The parts of a long answer flash together, one band down them: it reaches past a part's
+        // edge only where the answer starts or ends.
+        let (reaches_up, reaches_down) = match &row {
+            Row::Assistant { part, last, .. } => (*part == 0, *last),
+            _ => (true, true),
+        };
         let column = |el: Div| {
             let el = el.w_full().max_w(width);
             let el = match flash {
                 // A soft band behind the message that holds briefly, then fades.
                 Some(seq) => {
-                    let band = div().absolute().top(px(-2.)).bottom(px(-2.)).left(px(-12.)).right(px(-12.)).rounded(px(10.)).bg(tint);
+                    let band = div().absolute().top(px(if reaches_up { -2. } else { 0. })).bottom(px(if reaches_down { -2. } else { 0. })).left(px(-12.)).right(px(-12.)).bg(tint);
+                    let band = band.rounded_t(px(if reaches_up { 10. } else { 0. })).rounded_b(px(if reaches_down { 10. } else { 0. }));
                     let band = if animate {
                         band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))).into_any_element()
                     } else {
@@ -2469,7 +2548,8 @@ impl Render for ThreadView {
                 div().relative().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
                         Some(row) => {
-                            let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
+                            // An answer in parts flashes all of them.
+                            let flash = flash.filter(|(at, _)| flashes(&rows.rows, *at, ix)).map(|(_, seq)| seq);
                             let el = ThreadView::render_row(row, ix, flash, &view, &at, cx);
                             match tail.clone().filter(|_| ix == last) {
                                 Some(tail) => v_flex()
@@ -2855,5 +2935,101 @@ mod tests {
         assert_eq!(shape[parts], (4, 0, true), "the short answer stays whole");
         // The long answer maps to its first part; what follows to where it went.
         assert_eq!(rows.item_row, [0, 1, 1 + parts, 2 + parts, 3 + parts]);
+    }
+
+    /// `block` among enough paragraphs to be cut on either side of it.
+    fn around(block: &str) -> (String, std::ops::Range<usize>) {
+        let before = paragraphs(10);
+        let text = format!("{before}{block}\n\n{}", paragraphs(20));
+        (text, before.len()..before.len() + block.len())
+    }
+
+    #[test]
+    fn raw_blocks_that_run_on_past_blank_lines_are_never_cut() {
+        // Blank lines and unindented lines inside; none of it is ever where a part starts.
+        let inside = paragraphs(10);
+        for (open, close) in [("<!--\n", "-->"), ("<pre>\n", "</pre>"), ("<SCRIPT type=\"x\">\n", "</Script>"), ("<style>", "</style>"), ("$$\n", "$$"), ("<?php\n", "?>")] {
+            let (text, block) = around(&format!("{open}{inside}{close}"));
+            let cuts = answer_parts(&text);
+            assert!(!cuts.is_empty(), "{open}: nothing cut at all");
+            for cut in &cuts {
+                assert!(*cut <= block.start || *cut > block.end, "{open}: cut at {cut} inside the block {block:?}");
+            }
+            assert!(cuts.iter().any(|c| *c > block.end), "{open}: nothing cut after the block ends");
+        }
+        // One that ends on its own line (or isn't one: `<pre-x>`) holds nothing back.
+        for line in ["<!-- a note -->", "<pre>x</pre>", "<pre-x>", "<premium>"] {
+            let (text, block) = around(line);
+            assert!(answer_parts(&text).iter().any(|c| *c > block.end), "{line}: held the cuts back");
+        }
+    }
+
+    #[test]
+    fn code_marks_in_a_line_of_prose_are_not_a_fence() {
+        // Inline code starting a line: backticks in what follows the first three.
+        let (text, block) = around("```inline``` starts this paragraph, and `more`.");
+        assert!(answer_parts(&text).iter().any(|c| *c > block.end));
+        // A fence indented four spaces is code, not a fence; its blank lines are indented too.
+        let (text, block) = around("- item\n\n      ```\n      code\n\n      more\n      ```");
+        for cut in answer_parts(&text) {
+            assert!(cut <= block.start || cut > block.end, "cut at {cut} inside {block:?}");
+        }
+        // Indented three, a fence holds its unindented lines and blank ones to the closing mark.
+        let (text, block) = around(&format!("   ```\n{}   ```", paragraphs(10)));
+        for cut in answer_parts(&text) {
+            assert!(cut <= block.start || cut > block.end, "cut at {cut} inside {block:?}");
+        }
+    }
+
+    #[test]
+    fn link_reference_definitions_keep_an_answer_whole_footnotes_and_code_do_not() {
+        let prose = format!("{}See [the docs][1] and a note.[^1]\n\n{}", paragraphs(15), paragraphs(15));
+        assert!(!answer_parts(&prose).is_empty());
+        // A definition at the end (as they're written) takes every cut back, however many were made.
+        assert_eq!(answer_parts(&format!("{prose}[1]: https://example.com/docs \"Docs\"\n")), Vec::<usize>::new());
+        assert_eq!(answer_parts(&format!("{prose}   [a b]:<https://example.com/>\n")), Vec::<usize>::new());
+        // Not one: a footnote's, a task, an indented line (code), and one inside a fence.
+        for line in ["[^1]: A footnote, and what it says.", "[x] done: yes", "    [1]: https://example.com", "[1]:"] {
+            assert!(!answer_parts(&format!("{prose}{line}\n\n{}", paragraphs(10))).is_empty(), "{line}");
+        }
+        assert!(!answer_parts(&format!("{prose}```\n[1]: https://example.com\n```\n\n{}", paragraphs(10))).is_empty());
+    }
+
+    #[test]
+    fn a_crlf_answer_is_cut_where_an_lf_one_is() {
+        let lf = paragraphs(60);
+        let crlf = lf.replace('\n', "\r\n");
+        let (a, b) = (answer_parts(&lf), answer_parts(&crlf));
+        assert!(a.len() >= 5);
+        // Cut after the same paragraph, once the \r that each line gained is counted (a part has
+        // to hold 2 KB, which a gained byte per line can satisfy sooner).
+        for cut in &b {
+            assert!(crlf[..*cut].ends_with("\r\n\r\n") && crlf[*cut..].starts_with("Paragraph"), "{:?}", &crlf[cut - 6..cut + 6]);
+        }
+        assert!(b.len() >= a.len());
+    }
+
+    #[test]
+    fn the_threshold_is_exact() {
+        let text = paragraphs(60);
+        assert!(answer_parts(&text[..SPLIT_FROM - 1]).is_empty());
+        assert!(!answer_parts(&text[..SPLIT_FROM]).is_empty(), "6,000 bytes are cut");
+        // The same text, a byte either side: the parts are the same (the first cut is the same).
+        assert_eq!(answer_parts(&text[..SPLIT_FROM])[0], answer_parts(&text[..SPLIT_FROM + 1])[0]);
+    }
+
+    #[test]
+    fn every_part_of_a_long_answer_flashes_for_a_search_result_in_it() {
+        let key = || gpui_kit::SharedString::from("a");
+        let rows: Vec<Row> = vec![
+            Row::TurnEnd { ix: 0 },
+            Row::Assistant { ix: 1, key: key(), part: 0, last: false },
+            Row::Assistant { ix: 1, key: key(), part: 1, last: true },
+            Row::Assistant { ix: 4, key: key(), part: 0, last: true },
+        ];
+        // The result scrolled to the first part: both are tinted; the other answer, and what's before, aren't.
+        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 1, ix)), [false, true, true, false]);
+        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 3, ix)), [false, false, false, true]);
+        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 0, ix)), [true, false, false, false]);
     }
 }

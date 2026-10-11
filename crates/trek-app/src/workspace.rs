@@ -3947,7 +3947,7 @@ impl Workspace {
             });
         }
         // Mid-turn, what changed is saved a second later (only changed rows are written), so a
-        // crash loses a second at most (up to ten while a very long answer streams: `save_delay`).
+        // crash loses a second at most (up to five while a very long answer streams: `save_delay`).
         // A turn that stops to ask is saved as it stops: the user may well leave it waiting, or quit.
         if !finished {
             if asked {
@@ -6349,11 +6349,14 @@ fn item_bytes(item: &Item) -> usize {
 /// How long a save mid-turn waits after a change, when the largest changed row holds `largest`
 /// bytes. A save rewrites a changed row whole and indexes all its text for search again, on the
 /// main thread: an answer streaming for half an hour grows past a megabyte, and saving it every
-/// second stalled the window more each minute. A second for anything up to 64 KB, as ever (a
-/// crash loses that much at most); a second more for each 64 KB beyond, up to ten.
+/// second stalled the window more each minute. A second for anything under 128 KB, as ever, and
+/// a second more for each 64 KB beyond, up to five (reached at 320 KB, where a save costs about
+/// 20 ms): an answer is that long only once, and a crash then loses the last five seconds of
+/// it at most, a few KB of text.
 fn save_delay(largest: usize) -> Duration {
     const PER_SECOND: usize = 64 * 1024;
-    Duration::from_secs((largest / PER_SECOND).clamp(1, 10) as u64)
+    const LONGEST: usize = 5;
+    Duration::from_secs((largest / PER_SECOND).clamp(1, LONGEST) as u64)
 }
 
 /// Convenience for views.
@@ -6575,10 +6578,12 @@ mod tests {
         // Small rows: a second, as ever.
         assert_eq!(save_delay(0), s(1));
         assert_eq!(save_delay(64 * 1024 - 1), s(1));
+        assert_eq!(save_delay(128 * 1024 - 1), s(1));
         assert_eq!(save_delay(128 * 1024), s(2));
+        assert_eq!(save_delay(256 * 1024), s(4));
+        // Never more than five: that's all a crash can cost of an answer.
         assert_eq!(save_delay(320 * 1024), s(5));
-        // Never more than ten.
-        assert_eq!(save_delay(5_000_000), s(10));
+        assert_eq!(save_delay(5_000_000), s(5));
         assert_eq!(item_bytes(&Item::Assistant { text: "abc".into() }), 3);
         assert_eq!(item_bytes(&Item::TurnEnd { at: 0, took_secs: 1 }), 0);
         let tool = Item::Tool { id: "t".into(), title: "Read".into(), detail: "a.rs".into(), output: "xyz".into(), status: ToolStatus::Done };
