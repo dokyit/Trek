@@ -145,11 +145,13 @@ pub fn ms(d: Duration) -> String {
 }
 
 /// A frame at 60 Hz: one that takes longer misses the display's refresh.
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub const BUDGET: Duration = Duration::from_micros(16_667);
 
 /// Samples summed up: how many, the median, the 95th percentile and the worst (nearest rank),
-/// and how many took longer than `budget`.
+/// and how many took longer than `budget`. (For the `perf` commands of a `shots` build.)
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub struct Summary {
     pub n: usize,
     pub p50: Duration,
@@ -158,6 +160,7 @@ pub struct Summary {
     pub over: usize,
 }
 
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 pub fn summarize(samples: &[Duration], budget: Duration) -> Summary {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
@@ -171,6 +174,7 @@ pub fn summarize(samples: &[Duration], budget: Duration) -> Summary {
     Summary { n: sorted.len(), p50: rank(0.5), p95: rank(0.95), max: sorted.last().copied().unwrap_or_default(), over: sorted.iter().filter(|d| **d > budget).count() }
 }
 
+#[cfg_attr(not(feature = "shots"), allow(dead_code))]
 impl Summary {
     /// As a log line's `key=value` pairs, under `prefix` (`frame_`, `latency_`).
     pub fn pairs(&self, prefix: &str) -> String {
