@@ -17,10 +17,12 @@ pub mod serve;
 /// `std::process::Command::new` or `tokio::process::Command::new` on either platform.
 ///
 /// Unit tests run from `target/<profile>/deps/`, so the binaries live two levels up in
-/// `target/<profile>/`. `cargo test --workspace` builds them, but `cargo test -p <crate>`
-/// doesn't build another crate's bins: if `name` isn't there it is built once per process
-/// with `cargo build -p trek-test-fixtures` (CARGO_TARGET_DIR honoured through the
-/// environment; a `--release` test run builds `--release`).
+/// `target/<profile>/`. `cargo test --workspace` builds them before it runs anything (this
+/// crate's `tests/bins.rs` names them, which is what makes cargo build them), but
+/// `cargo test -p <crate>` doesn't build another crate's bins: if `name` isn't there it is
+/// built once per process with `cargo build -p trek-test-fixtures` (CARGO_TARGET_DIR honoured
+/// through the environment; a `--release` test run builds `--release`). That build can take
+/// tens of seconds cold, so a test with a deadline should call `bin` before it starts its clock.
 ///
 /// The path is rendered with `/` separators (it still names the same file on Windows) so a
 /// test can hand it to code that spots a path by its slashes, e.g. `AddedAgent::resolve`.
@@ -80,13 +82,6 @@ mod tests {
         let mut c = Command::new(bin("fixture"));
         c.args(args);
         c
-    }
-
-    #[test]
-    fn the_binaries_are_found() {
-        for name in ["fixture", "fake-acp", "fake-mcp"] {
-            assert!(bin(name).is_file(), "{name}");
-        }
     }
 
     #[test]

@@ -1563,6 +1563,14 @@ mod tests {
     /// The ACP agent id that runs the fake-acp fixture binary (see `launch_spec`).
     pub(super) const FAKE: &str = "test-fake";
 
+    /// The fake agent's id, once its binary exists. A `cargo test -p trek-agents` run on a cold
+    /// target builds it on first use, and that build must not count against the 20 s a test then
+    /// waits for the agent's first event (it took 20 s on a cold macOS runner and did).
+    fn fake_agent() -> AgentId {
+        trek_test_fixtures::bin("fake-acp");
+        AgentId::Acp(FAKE.into())
+    }
+
     /// The next event from the fake agent running in `dir`. A stall says what the agent had been
     /// sent, from its own log, because "stalled" alone can't tell an agent that never started
     /// (no log) from one that was asked and never answered.
@@ -1583,7 +1591,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: None,
             effort: Effort::Off,
@@ -1693,7 +1701,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         trek_core::paths::isolate(dir.join("data"));
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: None,
             effort: Effort::Off,
@@ -1744,7 +1752,7 @@ mod tests {
         let models = r#"{"models":{"a":["low","medium","high"],"b":["high","default"],"c":[]},"current":"c"}"#;
         std::fs::write(dir.join("fake-acp-config.json"), models).unwrap();
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: Some("a".into()),
             effort: Effort::High,
@@ -1815,7 +1823,7 @@ mod tests {
             std::fs::write(dir.join("fake-acp-mcp.json"), r#"{"http":true}"#).unwrap();
         }
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: None,
             effort: Effort::Off,
