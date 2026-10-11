@@ -148,46 +148,57 @@ fn settings_has_the_switch_the_updates_and_update_all() {
 }
 
 #[test]
-fn an_update_only_an_administrator_terminal_can_run_is_shown_with_its_command_and_never_run() {
+fn update_all_runs_the_updates_windows_asks_for_too_last_and_together() {
     run(async |cx| {
         let trek = open(cx);
-        let runs = found(&trek, cx);
-        // OpenCode installed with Chocolatey: `choco upgrade` needs an administrator terminal.
-        let choco = trek.read(cx, |ws, _| {
-            let opencode = ws.agent_updates.found.iter().find(|v| v.id == "opencode").cloned().unwrap();
-            AgentVersion {
-                id: "opencode-choco".into(),
-                install: trek_core::agent_update::Install::Chocolatey { package: "opencode".into() },
-                command: Some(
-                    trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "opencode", "-y"])
-                        .left_to_the_user("OpenCode is installed with Chocolatey, which upgrades only from an administrator terminal."),
-                ),
-                ..opencode
-            }
-        });
+        found(&trek, cx);
+        let batches = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        // OpenCode installed with Chocolatey and Codex machine-wide with WinGet: both upgrade as
+        // an administrator. Listed first, they still go last, in one script (one prompt).
+        let admin = |of: &AgentVersion, id: &str, command: trek_core::agent_update::UpdateCommand| AgentVersion { id: id.into(), command: Some(command.as_admin()), ..of.clone() };
         trek.update(cx, |ws, cx| {
-            ws.agent_updates.found.push(choco);
+            let u = &mut ws.agent_updates;
+            let opencode = u.found.iter().find(|v| v.id == "opencode").cloned().unwrap();
+            let codex = u.found.iter().find(|v| v.id == "codex").cloned().unwrap();
+            u.found.insert(0, admin(&opencode, "opencode-choco", trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "opencode", "-y"])));
+            u.found.insert(1, admin(&codex, "codex-winget", trek_core::agent_update::UpdateCommand::new("winget", &["upgrade", "--id", "OpenAI.Codex"])));
+            u.runner = Runner::Recorded(batches.clone());
             cx.notify();
         });
         trek.click(cx, "agent-updates");
         trek.render(cx);
-        // The row says what to run and why, and has a Copy button where the others have Update.
+        // An Update button like the others' (no command to copy).
         assert!(trek.visible(cx, "agent-update-row-opencode-choco"));
-        assert!(trek.visible(cx, "agent-update-copy-opencode-choco"));
-        assert!(!trek.visible(cx, "agent-update-opencode-choco"), "no Update button");
-        assert!(trek.visible(cx, "agent-update-opencode"), "the others have theirs");
-        assert_eq!(trek.read(cx, |ws, _| ws.agent_updates.pending()), 5, "it's an update out all the same");
-        // Not asked for, by hand or by Update all.
-        assert!(!trek.update(cx, |ws, _| ws.agent_updates.request("opencode-choco")));
-        assert!(!trek.read(cx, |ws, _| ws.agent_updates.updatable().contains(&"opencode-choco".to_string())));
+        assert!(trek.visible(cx, "agent-update-opencode-choco"));
+        assert!(!trek.visible(cx, "agent-update-copy-opencode-choco"));
         trek.click(cx, "agent-updates-all");
-        trek.wait(cx, "every other update to finish", |ws| ["codex", "opencode", "pi", "mock"].iter().all(|id| matches!(ws.agent_updates.job(id), Some(Job::Updated { .. } | Job::Failed { .. })))).await;
-        assert_eq!(runs.load(Ordering::SeqCst), 4, "nothing ran for Chocolatey's");
-        assert_eq!(job(&trek, cx, "opencode-choco"), None);
-        // Copy puts the command on the clipboard.
+        trek.wait(cx, "every update to finish", |ws| ws.agent_updates.found.iter().all(|v| matches!(ws.agent_updates.job(&v.id), Some(Job::Updated { .. })))).await;
+        let batches = batches.lock().unwrap().clone();
+        assert_eq!(batches, [vec!["codex"], vec!["opencode"], vec!["pi"], vec!["mock"], vec!["opencode-choco", "codex-winget"]]);
         trek.render(cx);
-        trek.click(cx, "agent-update-copy-opencode-choco");
-        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("choco upgrade opencode -y"));
+        assert!(trek.visible(cx, "agent-updated-opencode-choco") && trek.visible(cx, "agent-updated-codex-winget"));
+        assert!(!trek.visible(cx, "agent-updates-all"), "nothing left");
+    });
+}
+
+#[test]
+fn a_declined_prompt_is_said_in_words_and_can_be_retried() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        trek.update(cx, |ws, cx| {
+            let u = &mut ws.agent_updates;
+            for v in u.found.iter_mut().filter(|v| v.id == "opencode") {
+                v.command = v.command.take().map(|c| c.as_admin());
+            }
+            u.runner = Runner::Fake(Arc::new(|_: &AgentVersion| Outcome::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() }));
+            ws.update_agent("opencode", cx);
+        });
+        trek.wait(cx, "OpenCode's update to fail", |ws| matches!(ws.agent_updates.job("opencode"), Some(Job::Failed { .. }))).await;
+        assert_eq!(job(&trek, cx, "opencode"), Some(Job::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() }));
+        trek.click(cx, "agent-updates");
+        trek.render(cx);
+        assert!(trek.visible(cx, "agent-update-opencode"), "Retry");
     });
 }
 

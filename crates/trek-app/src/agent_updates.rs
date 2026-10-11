@@ -7,7 +7,7 @@
 //! something to install) and on Settings > Agents: one row per agent with installed → latest and
 //! an Update button, MonoCode's harness updates in Trek's design.
 
-use crate::workspace::{Hold, Workspace, WorkspaceEvent};
+use crate::workspace::{Hold, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -45,9 +45,35 @@ pub enum Runner {
     /// Tests: runs until let go, then reaches the newest version.
     #[cfg(test)]
     Gated(async_channel::Receiver<()>),
+    /// Tests: notes the rows of each run (one, or a batch run as an administrator) and reaches
+    /// the newest version.
+    #[cfg(test)]
+    Recorded(std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>),
 }
 
 impl Runner {
+    /// Run the updates of `vs`, started together: a batch of updates run as an administrator
+    /// goes in one script, so Windows asks once (`run_elevated`); anything else is one update.
+    /// The outcomes are in `vs`' order.
+    pub async fn run_all(&self, vs: Vec<AgentVersion>) -> Vec<Outcome> {
+        let elevated = vs.iter().all(|v| v.command.as_ref().is_some_and(|c| c.elevated));
+        match self {
+            Runner::Real if vs.len() > 1 && elevated => trek_core::agent_update::run_elevated(&vs).await,
+            #[cfg(test)]
+            Runner::Recorded(runs) => {
+                runs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(vs.iter().map(|v| v.id.clone()).collect());
+                vs.iter().map(|v| Outcome::Updated { version: v.latest.clone().unwrap_or_default(), output: String::new() }).collect()
+            }
+            _ => {
+                let mut outcomes = Vec::with_capacity(vs.len());
+                for v in vs {
+                    outcomes.push(self.run(v).await);
+                }
+                outcomes
+            }
+        }
+    }
+
     pub async fn run(&self, v: AgentVersion) -> Outcome {
         match self {
             Runner::Real => trek_core::agent_update::run_update(&v).await,
@@ -65,6 +91,8 @@ impl Runner {
                 let _ = gate.recv().await;
                 Outcome::Updated { version: v.latest.clone().unwrap_or_default(), output: String::new() }
             }
+            #[cfg(test)]
+            Runner::Recorded(_) => Box::pin(self.run_all(vec![v])).await.pop().unwrap_or(Outcome::Failed { summary: String::new(), output: String::new() }),
         }
     }
 }
@@ -111,6 +139,10 @@ impl AgentUpdates {
             // waiting for it.
             if std::env::var_os("TREK_MOCK_AGENT").is_some() {
                 found.push(mock_agent_row());
+            }
+            // On Windows, one whose package manager runs as an administrator, as Chocolatey's does.
+            if cfg!(windows) {
+                found.push(mock_admin_row());
             }
             return Self { found, checked_at: trek_core::store::now_ms(), runner: Runner::Mock, mock: true, output_open: open_output(), ..Default::default() };
         }
@@ -161,15 +193,14 @@ impl AgentUpdates {
     pub fn updatable(&self) -> Vec<String> {
         self.found
             .iter()
-            .filter(|v| v.update_available() && !left_to_the_user(v) && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. })))
+            .filter(|v| v.update_available() && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. })))
             .map(|v| v.id.clone())
             .collect()
     }
 
-    /// Ask for row `id`'s update; `false` when there's none to install, it's the user's to run
-    /// (an administrator's terminal), or it's already asked for.
+    /// Ask for row `id`'s update; `false` when there's none to install, or it's already asked for.
     pub fn request(&mut self, id: &str) -> bool {
-        let ready = self.found.iter().any(|v| v.id == id && v.update_available() && !left_to_the_user(v));
+        let ready = self.found.iter().any(|v| v.id == id && v.update_available());
         if !ready || matches!(self.jobs.get(id), Some(Job::Queued | Job::Running | Job::Updated { .. })) {
             return false;
         }
@@ -189,14 +220,25 @@ impl AgentUpdates {
         }
     }
 
-    /// The next update to start, if one can start now: one at a time (package managers lock
-    /// their folders), in the order asked, skipping agents with a turn or background work
-    /// running (`busy`, given an agent key).
-    pub fn next(&self, busy: impl Fn(&str) -> bool) -> Option<String> {
+    /// The next updates to start, if any can start now, skipping agents with a turn or background
+    /// work running (`busy`, given an agent key). One at a time (package managers lock their
+    /// folders), in the order asked; those run as an administrator last, all of them together
+    /// (one script, so Windows asks once), once no other can start.
+    pub fn next(&self, busy: impl Fn(&str) -> bool) -> Option<Vec<String>> {
         if self.running() || self.stale {
             return None;
         }
-        self.order.iter().find(|id| self.jobs.get(*id) == Some(&Job::Queued) && !self.agent_of(id).is_some_and(&busy)).cloned()
+        let ready = |id: &&String| self.jobs.get(*id) == Some(&Job::Queued) && !self.agent_of(id).is_some_and(&busy);
+        if let Some(id) = self.order.iter().filter(ready).find(|id| !self.elevated(id)) {
+            return Some(vec![id.clone()]);
+        }
+        let batch: Vec<String> = self.order.iter().filter(ready).cloned().collect();
+        (!batch.is_empty()).then_some(batch)
+    }
+
+    /// Row `id`'s update runs as an administrator: Windows asks to allow it.
+    pub fn elevated(&self, id: &str) -> bool {
+        self.found.iter().any(|v| v.id == id && v.command.as_ref().is_some_and(|c| c.elevated))
     }
 
     pub fn start(&mut self, id: &str) -> Option<AgentVersion> {
@@ -285,12 +327,6 @@ impl AgentUpdates {
     }
 }
 
-/// `v`'s update is a command for the user to run themselves (it needs an administrator's
-/// terminal, or is the vendor's installer with a wizard): Trek shows it and never runs it.
-fn left_to_the_user(v: &AgentVersion) -> bool {
-    v.command.as_ref().is_some_and(|c| c.manual.is_some())
-}
-
 /// `TREK_OPEN_AGENT_UPDATES=<row>` (rather than `1`) opens that row's output once it has one,
 /// for design review of a failure.
 fn open_output() -> Option<String> {
@@ -322,6 +358,47 @@ pub fn mock_agent_row() -> AgentVersion {
     }
 }
 
+/// A made-up Chocolatey install, upgraded as an administrator (`TREK_AGENT_UPDATES=mock` on
+/// Windows), for design review of how such a row reads.
+pub fn mock_admin_row() -> AgentVersion {
+    AgentVersion {
+        id: "droid".into(),
+        agent: "droid".into(),
+        name: AgentId::from_key("droid").display_name(),
+        binary: r"C:\ProgramData\chocolatey\bin\droid.exe".into(),
+        installed: Some("0.233.0".into()),
+        latest: Some("0.237.0".into()),
+        install: trek_core::agent_update::Install::Chocolatey { package: "droid".into() },
+        command: Some(trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "droid", "-y"]).as_admin()),
+        error: None,
+    }
+}
+
+/// What a row says under its name, and whether it's a failure: how it's installed (and that
+/// Windows will ask, for an update run as an administrator), or how its update goes.
+pub fn detail(v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, stale: bool) -> (String, bool) {
+    let agent = AgentId::from_key(&v.agent);
+    let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
+    let admin = v.command.as_ref().is_some_and(|c| c.elevated);
+    let via = match v.install {
+        trek_core::agent_update::Install::Native => "Via its own installer".to_string(),
+        ref i => format!("Via {}", i.label()),
+    };
+    let line = match job {
+        None if admin => format!("{via} · Windows will ask to allow it"),
+        None => via,
+        Some(Job::Queued) if stale => "Checks what's installed first".into(),
+        Some(Job::Queued) if hold == Some(Hold::Turn) => format!("Waits for {}'s turn to end", agent.display_name()),
+        Some(Job::Queued) if hold == Some(Hold::Background) => format!("Waits for {}'s background tasks to end", agent.display_name()),
+        Some(Job::Queued) => "Next, after the update under way".into(),
+        Some(Job::Running) if admin => format!("Running {shown} as an administrator"),
+        Some(Job::Running) => format!("Running {shown}"),
+        Some(Job::Updated { .. }) => "New sessions use it".into(),
+        Some(Job::Failed { summary, .. }) => return (summary.clone(), true),
+    };
+    (line, false)
+}
+
 /// The card's footer line, as MonoCode puts it.
 pub const WHY: &str = "New models often need the latest version.";
 
@@ -345,22 +422,9 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
         _ => format!("{} → {}", v.installed.as_deref().unwrap_or("?"), v.latest.as_deref().unwrap_or("?")),
     };
     // What the row says under the name.
-    let instruction = v.command.as_ref().and_then(|c| c.instruction());
-    let (detail, tone): (String, Hsla) = match job {
-        // Its update is the user's to run: what to run, and why Trek doesn't.
-        None if instruction.is_some() => (instruction.clone().unwrap_or_default(), muted),
-        None => match v.install {
-            trek_core::agent_update::Install::Native => ("Via its own installer".into(), muted),
-            ref i => (format!("Via {}", i.label()), muted),
-        },
-        Some(Job::Queued) if stale => ("Checks what's installed first".into(), muted),
-        Some(Job::Queued) if hold == Some(Hold::Turn) => (format!("Waits for {}'s turn to end", agent.display_name()), muted),
-        Some(Job::Queued) if hold == Some(Hold::Background) => (format!("Waits for {}'s background tasks to end", agent.display_name()), muted),
-        Some(Job::Queued) => ("Next, after the update under way".into(), muted),
-        Some(Job::Running) => (format!("Running {shown}"), muted),
-        Some(Job::Updated { .. }) => ("New sessions use it".into(), muted),
-        Some(Job::Failed { summary, .. }) => (summary.clone(), crate::palette::red(cx)),
-    };
+    let admin = v.command.as_ref().is_some_and(|c| c.elevated);
+    let (detail, failed) = detail(v, job, hold, stale);
+    let tone = if failed { crate::palette::red(cx) } else { muted };
     let output = match job {
         Some(Job::Updated { output, .. } | Job::Failed { output, .. }) if !output.trim().is_empty() => Some(output.clone()),
         _ => None,
@@ -369,28 +433,13 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
         let (ws, key) = (ws.clone(), key.clone());
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| ws.update(cx, |ws, cx| ws.update_agent(&key, cx))
     };
-    let copy = {
-        let (ws, shown) = (ws.clone(), shown.clone());
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            ws.update(cx, |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(shown.clone()));
-                cx.emit(WorkspaceEvent::Toast { message: format!("Copied {shown}"), undo: None });
-            })
-        }
-    };
+    let runs = if admin { format!("Runs {shown} as an administrator") } else { format!("Runs {shown}") };
     let control = match job {
-        None if instruction.is_some() => Button::new(SharedString::from(format!("agent-update-copy-{key}")))
-            .small()
-            .outline()
-            .label("Copy")
-            .tooltip(SharedString::from(format!("Copies {shown}")))
-            .on_click(copy)
-            .into_any_element(),
         None | Some(Job::Failed { .. }) => Button::new(SharedString::from(format!("agent-update-{key}")))
             .small()
             .outline()
             .label(if job.is_some() { "Retry" } else { "Update" })
-            .tooltip(SharedString::from(format!("Runs {shown}")))
+            .tooltip(SharedString::from(runs))
             .on_click(update)
             .into_any_element(),
         Some(Job::Running) => h_flex()
@@ -556,11 +605,68 @@ pub fn badge(u: &AgentUpdates, enabled: bool) -> Option<(usize, bool)> {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
-    use super::{AgentUpdates, Job, badge};
-    use trek_core::agent_update::{CHECK_EVERY_MS, Install, Outcome, UpdateCommand, mock_versions};
+    use super::{AgentUpdates, Job, badge, detail, mock_admin_row};
+    use crate::workspace::Hold;
+    use trek_core::agent_update::{AgentVersion, CHECK_EVERY_MS, Install, Outcome, UpdateCommand, mock_versions};
 
     fn updates() -> AgentUpdates {
         AgentUpdates { found: mock_versions(), ..Default::default() }
+    }
+
+    /// What `next` gives to start: these rows, together.
+    fn batch(ids: &[&str]) -> Option<Vec<String>> {
+        Some(ids.iter().map(|id| id.to_string()).collect())
+    }
+
+    /// A row like `of`, as `id`, upgraded as an administrator.
+    fn admin(of: &AgentVersion, id: &str) -> AgentVersion {
+        AgentVersion { id: id.into(), command: Some(UpdateCommand::new("choco", &["upgrade", id, "-y"]).as_admin()), install: Install::Chocolatey { package: id.into() }, ..of.clone() }
+    }
+
+    #[test]
+    fn updates_run_as_an_administrator_go_last_and_together() {
+        let mut u = updates();
+        let codex = u.found[0].clone();
+        u.found.insert(0, admin(&codex, "codex-choco"));
+        u.found.push(admin(&codex, "codex-scoop"));
+        // None is left to the user: Update all asks for every row.
+        assert_eq!(u.updatable(), ["codex-choco", "codex", "opencode", "pi", "codex-scoop"]);
+        for id in u.updatable() {
+            assert!(u.request(&id));
+        }
+        assert!(u.elevated("codex-choco") && !u.elevated("codex"));
+        // The others first, one at a time, in the order asked, whatever their place.
+        for id in ["codex", "opencode", "pi"] {
+            assert_eq!(u.next(|_| false), batch(&[id]));
+            u.start(id);
+            assert_eq!(u.next(|_| false), None, "one at a time");
+            u.finish(id, Outcome::Updated { version: "9.9.9".into(), output: String::new() });
+        }
+        // Then those Windows asks for, all at once: one prompt.
+        assert_eq!(u.next(|_| false), batch(&["codex-choco", "codex-scoop"]));
+        // One that's busy waits for a batch of its own; another can still go now.
+        let mut u2 = AgentUpdates { found: vec![admin(&codex, "a"), AgentVersion { agent: "opencode".into(), ..admin(&codex, "b") }], ..Default::default() };
+        assert!(u2.request("a") && u2.request("b"));
+        assert_eq!(u2.next(|agent| agent == "codex"), batch(&["b"]));
+        // A non-elevated update waiting on a turn doesn't hold the batch back.
+        let mut u3 = updates();
+        u3.found.push(admin(&u3.found[1].clone(), "opencode-choco"));
+        assert!(u3.request("codex") && u3.request("opencode-choco"));
+        assert_eq!(u3.next(|agent| agent == "codex"), batch(&["opencode-choco"]));
+    }
+
+    #[test]
+    fn a_row_says_windows_will_ask_and_never_what_to_copy() {
+        let row = mock_admin_row();
+        assert_eq!(detail(&row, None, None, false), ("Via Chocolatey · Windows will ask to allow it".to_string(), false));
+        assert_eq!(detail(&row, Some(&Job::Running), None, false).0, "Running choco upgrade droid -y as an administrator");
+        let failed = Job::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() };
+        assert_eq!(detail(&row, Some(&failed), None, false), ("Windows didn't allow it (you cancelled the prompt).".to_string(), true));
+        // The others read as before.
+        let codex = &mock_versions()[0];
+        assert_eq!(detail(codex, None, None, false), ("Via npm".to_string(), false));
+        assert_eq!(detail(codex, Some(&Job::Running), None, false).0, "Running npm install -g @openai/codex@latest");
+        assert_eq!(detail(codex, Some(&Job::Queued), Some(Hold::Turn), false).0, "Waits for Codex's turn to end");
     }
 
     #[test]
@@ -575,7 +681,7 @@ mod tests {
         assert!(!u.request("claude"), "nothing to install");
         // Codex is mid-turn: OpenCode goes first.
         let busy = |a: &str| a == "codex";
-        assert_eq!(u.next(busy).as_deref(), Some("opencode"));
+        assert_eq!(u.next(busy), batch(&["opencode"]));
         u.start("opencode");
         assert!(u.updating("opencode"));
         assert!(!u.updating("codex"));
@@ -584,13 +690,13 @@ mod tests {
         assert_eq!(u.job("opencode"), Some(&Job::Updated { from: Some("1.18.32".into()), to: "1.18.34".into(), output: String::new() }));
         assert_eq!(u.pending(), 2);
         assert_eq!(u.found.iter().find(|v| v.agent == "opencode").unwrap().installed.as_deref(), Some("1.18.34"));
-        assert_eq!(u.next(busy).as_deref(), Some("pi"));
+        assert_eq!(u.next(busy), batch(&["pi"]));
         u.start("pi");
         u.finish("pi", Outcome::Failed { summary: "npm stopped with code 1.".into(), output: "EACCES".into() });
         // Codex still busy: it waits; once its turn ends, it's next.
         assert_eq!(u.next(busy), None);
         assert!(u.queued());
-        assert_eq!(u.next(|_| false).as_deref(), Some("codex"));
+        assert_eq!(u.next(|_| false), batch(&["codex"]));
         // A failed one can be asked again (Codex is still asked for); an updated one is done.
         assert_eq!(u.updatable(), ["pi"]);
         assert!(u.request("pi"));
@@ -649,7 +755,7 @@ mod tests {
         u.checked(fresh, 1);
         assert!(!u.stale);
         assert_eq!(u.job("opencode"), None, "nothing left to install");
-        assert_eq!(u.next(|_| false).as_deref(), Some("codex"));
+        assert_eq!(u.next(|_| false), batch(&["codex"]));
         assert_eq!(u.start("codex").unwrap().command.unwrap().shown(), "codex update", "the command of the install that's there now");
     }
 
