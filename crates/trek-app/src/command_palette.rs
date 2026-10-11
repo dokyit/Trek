@@ -65,7 +65,9 @@ enum Action {
 }
 
 /// What a Mac's menus offer that nothing else in the palette did. Windows draws no menu bar, so
-/// the palette is where they are, beside their shortcuts.
+/// the palette is where they are, beside their shortcuts. Not Close Window: the palette is the
+/// main window's (a thread window's ⌘K opens it there), where the menu's Close Window is off, and
+/// closing the main window on Windows ends Trek.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowCommand {
     /// The thread on screen, in a window of its own.
@@ -75,7 +77,6 @@ enum WindowCommand {
     /// The composer's plan mode, for the thread on screen or the next one.
     TogglePlan,
     Minimize,
-    CloseWindow,
     Quit,
 }
 
@@ -768,8 +769,7 @@ impl CommandPalette {
             add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Map)), "Plan mode", Action::Window(WindowCommand::TogglePlan)).hint(keys::hint(Id::TogglePlan)).checked(plan), "toggle plan before acting read only");
         }
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Minus)), "Minimize window", Action::Window(WindowCommand::Minimize)).hint(keys::hint(Id::Minimize)), "hide taskbar");
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::X)), "Close window", Action::Window(WindowCommand::CloseWindow)), "window");
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Power)), if cfg!(windows) { "Exit Trek" } else { "Quit Trek" }, Action::Window(WindowCommand::Quit)).hint(keys::hint(Id::Quit)), "quit exit close app");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Power)), crate::words::words().quit_app, Action::Window(WindowCommand::Quit)).hint(keys::hint(Id::Quit)), "quit exit close app");
         out
     }
 
@@ -862,7 +862,6 @@ impl CommandPalette {
                     ws.set_prefs_in(&scope, prefs, cx);
                 }),
                 WindowCommand::Minimize => window.minimize_window(),
-                WindowCommand::CloseWindow => window.remove_window(),
                 WindowCommand::Quit => window.dispatch_action(Box::new(crate::Quit), cx),
             },
         }
