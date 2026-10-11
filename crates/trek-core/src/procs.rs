@@ -357,6 +357,23 @@ pub fn children(pid: u32) -> Vec<u32> {
     win::children(pid)
 }
 
+/// Some process under `root` (its children, theirs, …) runs the program at `image`: an
+/// installer has got as far as starting the CLI it installed. False when none does, when `root`
+/// is gone, or when the processes can't be listed.
+#[cfg(windows)]
+pub fn runs_under(root: u32, image: &Path) -> bool {
+    let Some(root) = i32::try_from(root).ok().and_then(win::Proc::open) else { return false };
+    let key = |p: &Path| p.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").to_lowercase();
+    let want = key(image);
+    win::descendants(&root).is_some_and(|tree| tree.iter().any(|p| p.image().is_some_and(|i| key(&i) == want)))
+}
+
+/// Never on Unix: nothing there needs it.
+#[cfg(not(windows))]
+pub fn runs_under(_root: u32, _image: &Path) -> bool {
+    false
+}
+
 /// When process `pid` started (unix seconds), if it runs.
 #[cfg(target_os = "macos")]
 fn start_time(pid: i32) -> Option<i64> {
@@ -511,6 +528,17 @@ mod win {
                 // SAFETY: a handle this owns, with PROCESS_TERMINATE.
                 unsafe { TerminateProcess(self.handle.as_raw_handle(), 1) };
             }
+        }
+
+        /// The program it runs, as a Win32 path (`C:\…\devin.exe`).
+        pub(super) fn image(&self) -> Option<std::path::PathBuf> {
+            use std::os::windows::ffi::OsStringExt as _;
+            use windows_sys::Win32::System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
+            let mut buf = vec![0u16; 32 * 1024];
+            let mut n = buf.len() as u32;
+            // SAFETY: a handle with query rights, and a buffer of `n` units.
+            let ok = unsafe { QueryFullProcessImageNameW(self.handle.as_raw_handle(), PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) } != 0;
+            ok.then(|| std::ffi::OsString::from_wide(&buf[..n as usize]).into())
         }
     }
 
