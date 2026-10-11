@@ -24,13 +24,14 @@ mod lsp_client;
 mod editor;
 mod file_icon;
 mod fonts;
+mod format;
 mod ide;
 mod image_preview;
 mod integrations;
 mod ipc;
 mod keys;
-#[cfg(windows)]
 mod languages;
+#[cfg(windows)]
 mod job;
 mod mascot;
 mod md;
@@ -257,8 +258,8 @@ fn main() {
         #[cfg(windows)]
         cx.set_app_identity(winsys::APP_ID, winsys::APP_NAME);
         gpui_kit::init(cx);
-        perf::phase("kit");
         languages::register_highlights();
+        perf::phase("kit");
         // The families the theme names must be known before it's applied and anything is laid out.
         fonts::register(cx);
         perf::phase("fonts");

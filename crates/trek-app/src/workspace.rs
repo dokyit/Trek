@@ -804,6 +804,15 @@ impl PanelTool {
     }
 }
 
+/// What can be done to the file in front in the editor from outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorCommand {
+    /// Close its tab (asking first about unsaved edits), or the file shown on its own.
+    Close,
+    /// Run the language's formatter over it.
+    Format,
+}
+
 pub enum WorkspaceEvent {
     /// Open (or focus) a right-panel tool.
     OpenTool(PanelTool),
@@ -826,6 +835,8 @@ pub enum WorkspaceEvent {
     /// Open `path` in the in-app editor, at `line` when given (Explorer, `trek://edit`).
     /// `preview`: in the editor, a tab the next preview replaces until it's edited or kept.
     OpenEditor { path: PathBuf, line: Option<u32>, preview: bool },
+    /// Do something to the file in front in the editor (the palette, the header's ×).
+    Editor(EditorCommand),
     /// Attach an image to the composer (e.g. a browser screenshot).
     AttachImage(std::path::PathBuf),
     /// Follow-ups held for a turn that stopped or failed go back into the composer showing `thread`.
@@ -1149,6 +1160,9 @@ pub struct Workspace {
     pub at_turn_end: Option<Box<dyn FnOnce()>>,
     /// Where Basecamp goes back to (Esc): the screen it was opened from.
     basecamp_back: Option<Route>,
+    /// Where a file opened on its own (Agents mode, from the Explorer) goes back to when it's
+    /// closed: the screen it was opened from.
+    editor_back: Option<Route>,
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
@@ -1478,6 +1492,7 @@ impl Workspace {
             #[cfg(test)]
             at_turn_end: None,
             basecamp_back: None,
+            editor_back: None,
             applied_defaults,
             tasks: vec![],
             restart_countdown: None,
@@ -2112,6 +2127,9 @@ impl Workspace {
             // The old copy of Trek may have been deleted by hand since it was last looked at.
             self.recheck_old_copy(cx);
         }
+        if matches!(route, Route::Editor { .. }) && !matches!(self.route, Route::Editor { .. }) {
+            self.editor_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
+        }
         if route == Route::Basecamp && self.route != Route::Basecamp {
             self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
             // Plan limits for its "Left on" tiles (asked at most every 30 seconds).
@@ -2397,6 +2415,16 @@ impl Workspace {
             Some(Route::Thread(id)) if self.thread(&id).is_none() => self.new_thread(cx),
             Some(route) => self.navigate(route, cx),
             None => self.new_thread(cx),
+        }
+    }
+
+    /// A file shown on its own (Agents mode) is closed: back to the screen it was opened from (a
+    /// thread that's gone since: a new one).
+    pub fn leave_editor(&mut self, cx: &mut Context<Self>) {
+        match self.editor_back.take() {
+            Some(Route::Thread(id)) if self.thread(&id).is_none() => self.new_thread(cx),
+            Some(route @ (Route::Thread(_) | Route::Draft { .. } | Route::Basecamp | Route::Notes | Route::Settings(_))) => self.navigate(route, cx),
+            _ => self.new_thread(cx),
         }
     }
 
