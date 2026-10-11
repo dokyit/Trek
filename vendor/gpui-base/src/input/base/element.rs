@@ -1988,6 +1988,12 @@ impl<M: InputModeKind> TextElement<M> {
                 let shaped_line = window
                     .text_system()
                     .shape_line(sub_line, font_size, &line_runs, None);
+                // Trek: a tab keeps the width of its stop on Windows too.
+                let shaped_line = crate::input::with_tab_stops(
+                    shaped_line,
+                    state.mode.tab_size().tab_size,
+                    window,
+                );
 
                 line_has_background |= has_background(&line_runs);
                 wrapped_lines.push(shaped_line);

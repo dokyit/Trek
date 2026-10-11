@@ -42,6 +42,7 @@ mod screens;
 mod sidebar;
 mod snapshots;
 mod tabs;
+mod tab_stops;
 mod titlebar;
 mod upkeep;
 mod usage;
