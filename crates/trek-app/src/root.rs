@@ -366,12 +366,13 @@ impl TrekWindow {
             self.ide.update(cx, |ide, cx| ide.open(path, line, false, window, cx));
             return;
         }
-        let view = self.ide.update(cx, |ide, cx| ide.editor_for(&path, window, cx));
+        self.ide.update(cx, |ide, cx| ide.view_for(&path, window, cx));
         self.workspace.update(cx, |ws, cx| {
             ws.ide_file_seen(&path);
             ws.navigate(Route::Editor { path }, cx);
         });
-        if let Some(line) = line {
+        // A preview (an image, a PDF) has no lines to go to.
+        if let Some((line, view)) = line.zip(self.editor(cx)) {
             view.update(cx, |e, cx| e.goto_line(line, window, cx));
         }
         cx.notify();
@@ -1350,7 +1351,7 @@ impl TrekWindow {
             Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
             Route::Notes => self.notes.clone().into_any_element(),
             Route::Editor { path } => {
-                let ev = self.ide.update(cx, |ide, cx| ide.editor_for(&path, window, cx));
+                let ev = self.ide.update(cx, |ide, cx| ide.view_for(&path, window, cx));
                 v_flex()
                     .size_full()
                     .min_w_0()
