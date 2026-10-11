@@ -6,7 +6,9 @@
 //! the package manager that installed them; Homebrew formulae and casks (macOS only) are asked of
 //! formulae.brew.sh (a third-party tap's formula of its GitHub repository) and updated with
 //! `brew upgrade`; WinGet packages (Windows: Claude Code's and Copilot CLI's) are asked of
-//! winget-pkgs and updated with `winget upgrade`, Chocolatey's of its repository with `choco
+//! `winget` itself (`winget`: what its source has, which is what it installs from; winget-pkgs,
+//! a few hours ahead of it, only when it can't answer) and updated with `winget upgrade`,
+//! Chocolatey's of its repository with `choco
 //! upgrade` (as an administrator: Windows asks the user first, `elevated`); anything else came
 //! from the vendor's own installer, whose release feed says what's newest and whose CLI updates
 //! itself (`claude update`, `grok update`, …), or, where it doesn't (Devin on Windows), Trek
@@ -23,6 +25,7 @@
 //! (`carry_over`), and the results are cached (`Snapshot`) so a launch shows them at once.
 
 use crate::detect::{login_path, which};
+use crate::feeds::{Feeds, Reply};
 use crate::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -575,9 +578,9 @@ pub enum Source {
     Formula(String),
     TapFormula { tap: String, formula: String },
     Cask(String),
-    /// A WinGet package: the versions WinGet's community source (winget-pkgs) has manifests for.
-    /// The vendor's release reaches it hours or days later, and `winget upgrade` installs only
-    /// what's there.
+    /// A WinGet package: the versions WinGet's community source has, as `winget` says (what
+    /// `winget upgrade` installs from), or else as winget-pkgs has manifests for, which is a few
+    /// hours ahead of it. The vendor's release reaches either hours or days later.
     Winget(String),
     /// A Chocolatey package: the community repository's latest, which may lag the vendor's too.
     Chocolatey(String),
@@ -684,10 +687,7 @@ pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
         Source::TapFormula { .. } => plain(body.lines().find_map(|l| l.trim().strip_prefix("version ").map(|v| v.trim().trim_matches('"').to_string()))),
         // A version's folder is named as the version ("2.1.292", Copilot's "v1.0.95"); a folder
         // of another name is another package (`GitHub.Copilot.Prerelease`).
-        Source::Winget(_) => newest(json()?.as_array()?.iter().filter(|e| e["type"] == "dir").filter_map(|e| {
-            let name = e["name"].as_str()?;
-            parse_version(name).filter(|v| v == name.trim_start_matches(['v', 'V']))
-        })),
+        Source::Winget(_) => newest(json()?.as_array()?.iter().filter(|e| e["type"] == "dir").filter_map(|e| crate::winget::version_row(e["name"].as_str()?))),
         // An OData feed: `<d:Version>1.19.0</d:Version>` in its one entry.
         Source::Chocolatey(_) => newest(body.split("<d:Version>").skip(1).filter_map(|rest| parse_version(rest.split('<').next()?))),
         Source::Feed(feed) => match feed {
@@ -956,7 +956,8 @@ fn needs_admin(path: &Path) -> bool {
 fn winget_exits(h: &Harness) -> Vec<(i32, String)> {
     let name = h.name();
     vec![
-        // The check reads winget-pkgs, which WinGet's own source index follows by a few hours.
+        // The check asks `winget` first; it falls back to winget-pkgs, which WinGet's own source
+        // index follows by a few hours (and `winget` itself may be a few minutes behind its source).
         (0x8A15002Bu32 as i32, format!("WinGet's package list doesn't have this version of {name} yet. Trek tries again on its next check.")),
         (0x8A150019u32 as i32, format!("WinGet needs an administrator to upgrade {name}.")),
         (0x8A150010u32 as i32, format!("WinGet has no installer of {name} for this computer.")),
@@ -1065,19 +1066,36 @@ fn client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-async fn fetch_latest(client: &reqwest::Client, source: &Source) -> Result<Latest, String> {
+/// Why there's no version from a feed that asked to be left alone when no answer of it was kept
+/// either (what the check before found stays, `carry_over`). A limit with an answer kept is no
+/// error: that answer is used, and the row says nothing of it.
+const LIMITED: &str = "The release feed is rate-limited, so Trek asks again later";
+
+async fn fetch_latest(feeds: &Feeds, source: &Source) -> Result<Latest, String> {
+    fetch_from(feeds, source, urls(source), "winget").await
+}
+
+/// `fetch_latest`, from `urls` (and WinGet's `winget` program): a WinGet package is asked of
+/// WinGet itself, which is what `winget upgrade` installs from, and of winget-pkgs only when it
+/// can't say; every other feed is asked through the cache (`Feeds`).
+async fn fetch_from(feeds: &Feeds, source: &Source, urls: Vec<String>, winget: &str) -> Result<Latest, String> {
+    if let Source::Winget(id) = source
+        && let Some(latest) = crate::winget::latest(winget, id).await
+    {
+        return Ok(latest);
+    }
     let mut last = "Nothing to ask".to_string();
-    for url in urls(source) {
-        match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => match r.text().await {
-                Ok(body) => match parse_latest(source, &body) {
-                    Some(l) => return Ok(l),
-                    None => last = format!("No version in {url}"),
-                },
-                Err(e) => last = format!("Couldn't read {url}: {e}"),
+    for url in urls {
+        match feeds.get(&url).await {
+            // A feed that's out of requests answers with what it said last, as of then.
+            Ok(Reply::Body(body) | Reply::Remembered { body, .. }) => match parse_latest(source, &body) {
+                Some(l) => return Ok(l),
+                None => last = format!("No version in {url}"),
             },
-            Ok(r) => last = format!("{url} answered {}", r.status()),
+            Ok(Reply::Limited { .. }) => last = LIMITED.into(),
+            Ok(Reply::Refused(status)) => last = format!("{url} answered {status}"),
             Err(e) if e.is_connect() || e.is_timeout() => last = "Offline, or the release feed didn't answer".into(),
+            Err(e) if e.is_body() || e.is_decode() => last = format!("Couldn't read {url}: {e}"),
             Err(e) => last = format!("Couldn't reach {url}: {e}"),
         }
     }
@@ -1109,7 +1127,7 @@ fn claude_channel_stable() -> bool {
 
 /// Check one agent: `None` when its agent isn't installed (Trek doesn't detect it), or what's
 /// on PATH under its name is another tool (another package, another formula).
-pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion> {
+pub async fn check(h: &Harness, feeds: &Feeds) -> Option<AgentVersion> {
     which(h.detected_by())?;
     let binary = which(h.binary)?;
     let resolved = std::fs::canonicalize(&binary).unwrap_or_else(|_| binary.clone());
@@ -1123,7 +1141,7 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
         s => s,
     });
     let latest = match source {
-        Some(s) => fetch_latest(client, &s).await,
+        Some(s) => fetch_latest(feeds, &s).await,
         None => Err("Its vendor publishes no release feed Trek can read".into()),
     };
     let auto_updates = latest.as_ref().is_ok_and(|l| l.auto_updates);
@@ -1142,8 +1160,10 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
 
 /// Check every agent CLI on this computer, side by side. Takes a few seconds; never fails as a whole.
 pub async fn check_all() -> Vec<AgentVersion> {
-    let client = client();
-    futures::future::join_all(HARNESSES.iter().map(|h| check(h, &client))).await.into_iter().flatten().collect()
+    let feeds = Feeds::open(client());
+    let found = futures::future::join_all(HARNESSES.iter().map(|h| check(h, &feeds))).await.into_iter().flatten().collect();
+    feeds.save();
+    found
 }
 
 /// How an update went.
@@ -1413,6 +1433,11 @@ fn replace_entry(new: &Path, entry: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What the card says when Windows' prompt was turned down, and when it gave up unanswered
+/// (`elevated::refused` tells them apart by how long it was up; Windows words both the same).
+pub const DECLINED: &str = "Windows didn't allow it (the prompt was cancelled).";
+pub const UNANSWERED: &str = "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer.";
+
 /// Run the updates of `vs` that are run as an administrator (`UpdateCommand::elevated`), together:
 /// one script, so Windows asks once. Each is then told apart (its own output and exit code) and
 /// verified as `run_update` verifies. The outcomes are in `vs`' order.
@@ -1468,8 +1493,8 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
                 };
                 let dir = run.dir().to_path_buf();
                 match ran {
-                    Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| "Windows didn't allow it (you cancelled the prompt).".into()),
-                    Err(Failure::Unanswered) => fail_all(&mut outcomes, &|_| "Windows didn't allow it: no one answered its prompt in time.".into()),
+                    Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| DECLINED.into()),
+                    Err(Failure::Unanswered) => fail_all(&mut outcomes, &|_| UNANSWERED.into()),
                     Err(Failure::Other(e)) => fail_all(&mut outcomes, &|c| format!("Couldn't run {} as an administrator: {e}", c.shown())),
                     ran => {
                         let stopped = match ran {
@@ -2580,14 +2605,14 @@ mod tests {
         }
         let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..2], (0, Duration::ZERO), cancelled));
         for o in &outcomes {
-            assert_eq!(*o, Outcome::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() });
+            assert_eq!(*o, Outcome::Failed { summary: "Windows didn't allow it (the prompt was cancelled).".into(), output: String::new() });
         }
         // Nobody there: the prompt gave up (Windows says the same as for a "No", only later).
         fn unanswered(_: &Path, _: Duration) -> Result<u32, Failure> {
             Err(Failure::Unanswered)
         }
         let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), unanswered));
-        assert_eq!(outcomes[0], Outcome::Failed { summary: "Windows didn't allow it: no one answered its prompt in time.".into(), output: String::new() });
+        assert_eq!(outcomes[0], Outcome::Failed { summary: "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer.".into(), output: String::new() });
         assert!(matches!(crate::elevated::refused(Duration::from_secs(4)), Failure::Cancelled));
         assert!(matches!(crate::elevated::refused(Duration::from_secs(122)), Failure::Unanswered));
         // Past its time, with what it started out of Trek's reach.
@@ -2748,6 +2773,88 @@ mod tests {
         let cmd = update_command(claude, &winget, Path::new(r"C:\x\claude.exe"), false, Some("2.1.1")).unwrap();
         assert_eq!(cmd.program, Path::new("winget"));
         assert_eq!(cmd.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
+    }
+
+    /// A WinGet package is asked of `winget` first (what `winget upgrade` installs from), and of
+    /// winget-pkgs only when `winget` can't say; a feed that's out of requests is no failure.
+    #[test]
+    #[cfg(windows)]
+    fn a_winget_package_is_asked_of_winget_and_only_then_of_winget_pkgs() {
+        use crate::feeds::tests::{reply, serve};
+        let root = std::env::temp_dir().join(format!("trek-winget-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A `winget` that says what a real one said (and keeps what it was asked), or fails.
+        let table = "Found Claude Code [Anthropic.ClaudeCode]\r\nVersion\r\n-------\r\n2.1.292\r\n2.1.291\r\n";
+        std::fs::write(root.join("table.txt"), table).unwrap();
+        let winget = |name: &str, exit: i32| {
+            let script = root.join(name);
+            let asked = root.join(format!("{name}.asked"));
+            std::fs::write(&script, format!("@echo off\r\n>\"{}\" echo %*\r\ntype \"{}\"\r\nexit /b {exit}\r\n", asked.display(), root.join("table.txt").display())).unwrap();
+            (script.display().to_string(), asked)
+        };
+        let source = Source::Winget("Anthropic.ClaudeCode".into());
+        let listing = |version: &str| format!(r#"[{{"name":"{version}","type":"dir"}}]"#);
+        let ask = |feeds: &Feeds, program: &str, url: &str| crate::runtime().block_on(fetch_from(feeds, &source, vec![url.to_string()], program));
+        let memory = || Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
+
+        // `winget` answers: its newest version, asked with exactly what a lookup needs, and
+        // winget-pkgs (which has a newer one) not asked at all.
+        let (base, seen) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296"))]);
+        let (ok, asked) = winget("ok.cmd", 0);
+        assert_eq!(ask(&memory(), &ok, &format!("{base}/pkgs")).unwrap().version, "2.1.292");
+        assert_eq!(std::fs::read_to_string(asked).unwrap().trim(), "show --exact --id Anthropic.ClaudeCode --versions --source winget --disable-interactivity --accept-source-agreements");
+        assert!(seen.lock().unwrap().is_empty(), "winget-pkgs wasn't asked");
+
+        // It fails, or isn't there: winget-pkgs is asked, through the cache.
+        let (broken, _) = winget("broken.cmd", 1);
+        let missing = root.join("no-such-winget.exe").display().to_string();
+        for program in [broken, missing] {
+            let (base, seen) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296"))]);
+            assert_eq!(ask(&memory(), &program, &format!("{base}/pkgs")).unwrap().version, "2.1.296", "{program}");
+            assert_eq!(seen.lock().unwrap().len(), 1);
+        }
+
+        // winget-pkgs out of requests: the answer kept from before stands, and says nothing; with
+        // none kept the reason is said once, as no failure of the feed.
+        let reset = (crate::store::now_ms() / 1000 + 3600).to_string();
+        let limited = reply("403 Forbidden", &[("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset)], r#"{"message":"API rate limit exceeded"}"#);
+        let (base, _) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296")), limited.clone()]);
+        let (url, feeds) = (format!("{base}/pkgs"), memory());
+        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296");
+        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296", "limited: the kept answer");
+        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296", "and not asked again");
+        let (base, seen) = serve(vec![limited]);
+        assert_eq!(ask(&memory(), "no-such-winget", &format!("{base}/pkgs")), Err(LIMITED.to_string()));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other feeds are asked through the cache too: GitHub's release feed, say.
+    #[test]
+    fn a_github_release_feed_is_asked_with_its_etag_and_a_limit_keeps_its_last_answer() {
+        use crate::feeds::tests::{reply, serve};
+        let release = |tag: &str| format!(r#"{{"tag_name":"{tag}"}}"#);
+        let reset = (crate::store::now_ms() / 1000 + 600).to_string();
+        let (base, seen) = serve(vec![
+            reply("200 OK", &[("etag", "W/\"a\"".into())], &release("v0.9.1")),
+            reply("304 Not Modified", &[], ""),
+            reply("403 Forbidden", &[("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset)], r#"{"message":"API rate limit exceeded"}"#),
+        ]);
+        let source = Source::Feed(Feed::GitHub("o/r"));
+        let feeds = Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
+        let ask = || crate::runtime().block_on(fetch_from(&feeds, &source, vec![format!("{base}/releases/latest")], "winget"));
+        assert_eq!(ask().unwrap().version, "0.9.1");
+        assert_eq!(ask().unwrap().version, "0.9.1", "a 304 is the kept answer");
+        assert!(seen.lock().unwrap()[1].contains("if-none-match: w/\"a\""), "{}", seen.lock().unwrap()[1]);
+        assert_eq!(ask().unwrap().version, "0.9.1", "out of requests: the last answer, not a 403");
+        assert_eq!(ask().unwrap().version, "0.9.1");
+        assert_eq!(seen.lock().unwrap().len(), 3, "and the fourth wasn't asked");
+        // Offline stays what it was.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let feeds = Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
+        let offline = crate::runtime().block_on(fetch_from(&feeds, &source, vec![format!("http://127.0.0.1:{port}/x")], "winget"));
+        assert_eq!(offline, Err("Offline, or the release feed didn't answer".into()));
     }
 
     #[test]

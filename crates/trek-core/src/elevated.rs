@@ -43,9 +43,29 @@ const PATH_LIMIT: usize = 7500;
 /// checked to still be a window when the prompt is asked for.
 static OWNER_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
-/// Say which window owns the prompts Windows asks for (`0` when there's none).
+/// Say which window owns the prompts Windows asks for (`0` when there's none). The app says so
+/// each time it opens its main window (it closes to the tray and opens again as a new window), so
+/// the last one stored is the one that's there.
 pub fn set_owner_window(hwnd: isize) {
     OWNER_WINDOW.store(hwnd, Ordering::Relaxed);
+}
+
+/// The window set by `set_owner_window`, if it is still one of this process's own: Windows
+/// reuses the number of a destroyed window, so a stale one may now be another program's, which
+/// must never own Trek's prompt.
+#[cfg(windows)]
+fn prompt_owner() -> Option<isize> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+    let owner = OWNER_WINDOW.load(Ordering::Relaxed);
+    if owner == 0 {
+        return None;
+    }
+    let hwnd = owner as *mut std::ffi::c_void;
+    let mut process = 0u32;
+    // SAFETY: both only ask about a handle, which may be one no window has any more.
+    let ours = unsafe { IsWindow(hwnd) != 0 && GetWindowThreadProcessId(hwnd, &mut process) != 0 && process == GetCurrentProcessId() };
+    ours.then_some(owner)
 }
 
 /// One command of the script.
@@ -297,9 +317,15 @@ pub type Launch = fn(&Path, Duration) -> Result<u32, Failure>;
 
 /// What a "not allowed" from Windows' prompt was, by how long it was up: a refusal comes in
 /// seconds, the prompt giving up unanswered at about two minutes (122 s on Windows 11, 2026-10-11).
+/// The elapsed time is the only signal Windows gives: `ShellExecuteExW` fails with
+/// `ERROR_CANCELLED` for both, and says nothing about the secure desktop it was shown on.
 pub fn refused(after: Duration) -> Failure {
-    if after >= Duration::from_secs(100) { Failure::Unanswered } else { Failure::Cancelled }
+    if after >= UNANSWERED_AFTER { Failure::Unanswered } else { Failure::Cancelled }
 }
+
+/// A "not allowed" this late is the prompt giving up, not someone's "No": under the two minutes
+/// it waits, with room for the time it took to appear, and far over how long a "No" takes.
+const UNANSWERED_AFTER: Duration = Duration::from_secs(100);
 
 /// Run the script at `script` as an administrator, through Windows' UAC prompt, and wait up to
 /// `timeout` for it. Blocks: call it off the async runtime.
@@ -311,7 +337,7 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
     use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
     use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
     use windows_sys::Win32::UI::Shell::{SEE_MASK_NO_CONSOLE, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SW_HIDE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
     let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let verb = wide("runas".as_ref());
     let file = wide(cmd_exe().as_os_str());
@@ -322,10 +348,10 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
     // SAFETY: all zeroes is a valid SHELLEXECUTEINFOW (integers, null pointers and handles).
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    // Trek's window owns the prompt, if it's still there.
-    let owner = OWNER_WINDOW.load(Ordering::Relaxed);
-    // SAFETY: IsWindow only asks whether a handle is one.
-    if owner != 0 && unsafe { IsWindow(owner as *mut std::ffi::c_void) } != 0 {
+    // Trek's window owns the prompt, if it's still there. (This runs on the blocking pool, never
+    // the UI's thread: the shell may send the owner messages, and the UI thread must be free to
+    // answer them.)
+    if let Some(owner) = prompt_owner() {
         info.hwnd = owner as *mut std::ffi::c_void;
     }
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE | SEE_MASK_NOASYNC;
@@ -410,6 +436,48 @@ pub fn run_plain(script: &Path, timeout: Duration) -> Result<u32, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_not_allowed_is_told_from_the_prompt_giving_up_by_how_long_it_took() {
+        for secs in [0, 4, 30, 99] {
+            assert!(matches!(refused(Duration::from_secs(secs)), Failure::Cancelled), "{secs} s");
+        }
+        for secs in [100, 122, 600] {
+            assert!(matches!(refused(Duration::from_secs(secs)), Failure::Unanswered), "{secs} s");
+        }
+    }
+
+    /// The prompt is owned by Trek's own main window while there is one: the last one stored
+    /// (the window closed to the tray and opened again is a new one), never a stale number that
+    /// another program's window may have been given since, and nothing when none is set.
+    #[test]
+    #[cfg(windows)]
+    fn the_prompt_is_owned_by_the_latest_main_window_and_only_a_window_of_trek() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetShellWindow, HWND_MESSAGE};
+        // The only test that stores a window (the others never ask Windows for a prompt).
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        // SAFETY: a predefined class, a message-only window of this thread, destroyed below.
+        let make = || unsafe { CreateWindowExW(0, class.as_ptr(), std::ptr::null(), 0, 0, 0, 0, 0, HWND_MESSAGE, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null()) } as isize;
+        let (first, second) = (make(), make());
+        assert!(first != 0 && second != 0 && first != second);
+        set_owner_window(0);
+        assert_eq!(prompt_owner(), None, "none set");
+        set_owner_window(first);
+        assert_eq!(prompt_owner(), Some(first));
+        // The window opened again stores itself: it is the owner from then on.
+        set_owner_window(second);
+        assert_eq!(prompt_owner(), Some(second));
+        // SAFETY: the windows made above, on the thread that made them.
+        unsafe { DestroyWindow(second as *mut std::ffi::c_void) };
+        assert_eq!(prompt_owner(), None, "a window that's gone owns nothing");
+        // A window that exists but is another program's (the shell's) isn't Trek's to own a prompt.
+        set_owner_window(unsafe { GetShellWindow() } as isize);
+        assert_eq!(prompt_owner(), None, "another program's window");
+        set_owner_window(0x7fff_fff0);
+        assert_eq!(prompt_owner(), None, "a number that's no window");
+        set_owner_window(0);
+        unsafe { DestroyWindow(first as *mut std::ffi::c_void) };
+    }
 
     #[test]
     fn what_cant_be_quoted_for_cmd_is_refused() {
