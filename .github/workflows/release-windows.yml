@@ -56,8 +56,10 @@ permissions:
   contents: write
 
 # One Windows publish per release at a time; re-running the same one replaces its assets.
+# A dry run (release.yml's) queues apart: a group keeps one pending run, so sharing it could
+# cancel a real publish that was waiting.
 concurrency:
-  group: release-windows-${{ github.event.release.tag_name || inputs.channel }}
+  group: release-windows-${{ github.event.release.tag_name || inputs.channel }}${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
 
 env:
