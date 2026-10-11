@@ -175,9 +175,17 @@ reuses the binaries already in the release target dir for exercising the script 
 
 Windows binaries are **not Authenticode-signed** - there is no certificate yet - so SmartScreen shows a
 one-time warning on first launch (**More info** > **Run anyway**). The minisign signature still gates
-updates: the updater verifies it before touching the install folder. To install, the user unzips
-anywhere their account can write (not `Program Files`) and runs `trek.exe`; `trek-update.exe` swaps
-the install folder on update, which is why it must stay user-writable.
+updates: the updater verifies it before touching the install folder. To install, the user unzips into a
+folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or
+`%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or `Program Files`), and runs
+`trek.exe`; `trek-update.exe` swaps the install folder on update, which is why it must stay
+user-writable. Documents and Desktop look like folders the user owns, but Defender's Controlled folder
+access (ransomware protection), when it's on, lets only programs it trusts write there, and judges the
+`trek-update.exe` each update brings on its own.
+
+`release.sh` writes no install line into the notes; a hand-written `--notes` file that has one should
+say the same, e.g. "Unzip it into a folder of its own that Windows doesn't guard, such as
+C:\Users\<you>\Trek (not Documents, Desktop, Downloads or Program Files), and run trek.exe."
 
 ## How an update installs
 
@@ -244,6 +252,24 @@ The steps above, with these differences:
   or WindowsApps, a folder it or its parent can't be written to, and a folder that holds anything besides
   Trek's three files (unzipped straight into Downloads, say: the whole folder is what gets replaced), or
   one that is a junction or symlink. Settings → Updates says which and what to do.
+- **Ransomware protection**: inside Documents, Desktop, Pictures, Videos, Music or Favorites (where
+  `SHGetKnownFolderPath` says they are, OneDrive included, and in OneDrive either way) while Controlled
+  folder access is on (`EnableControlledFolderAccess` = 1 under `HKLM\SOFTWARE\Microsoft\Windows
+  Defender\Windows Defender Exploit Guard\Controlled Folder Access`, or its twin under
+  `HKLM\SOFTWARE\Policies\…`, which wins; both read without administrator rights) **and** Defender is
+  scanning in real time (the setting enforces nothing otherwise: `DisableRealtimeMonitoring`,
+  `DisableAntiSpyware` and `DisableAntiVirus`, setting and policy, aren't 1, and Windows Security's
+  list of antivirus products, `HKLM\SOFTWARE\Microsoft\Security Center\Provider\Av`, has Defender on
+  and no other product on beside it), Settings → Updates says to move Trek out. With real-time
+  protection switched off, nothing is guarded, whatever the setting says. If any of that can't be read
+  or is ambiguous (Defender passive under another antivirus, say), a refused write there decides, and
+  no refused write means no blocker. A refused write
+  (this, or a folder Trek can't write to) is asked again on **Check now**: Defender judges each program
+  as it runs, and the user may turn it off. If the helper is still turned away (access denied bringing
+  the update next to the install), its toast says the same.
+- **A release without this platform's build**: the manifest lists each platform's build as it's
+  published, the Mac's first. A newer version with no `windows-x86_64` entry yet shows "Trek <version> is
+  out; the Windows build is on its way. Check again in a while." and is checked again within the hour.
 
 A file added to the Windows release must first be added to `TREK_FILES` (trek-core `update.rs` and
 `trek-update`) in an earlier release: older versions refuse a zip, and a folder, holding a file they

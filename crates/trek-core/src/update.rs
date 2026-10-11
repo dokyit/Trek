@@ -105,17 +105,79 @@ pub enum Blocker {
     /// Windows: Trek's folder is a link (a junction or symlink) to another folder. An update
     /// would replace the link and not the folder behind it, so it never happens there.
     LinkedFolder,
+    /// Windows: Trek is in a folder Windows's ransomware protection (Defender's Controlled folder
+    /// access) guards. Defender lets only programs it trusts write there and judges each one on
+    /// its own, so the `trek-update.exe` an update brings is turned away even when Trek isn't.
+    GuardedFolder(KnownFolder),
 }
 
 impl Blocker {
-    pub fn message(self) -> &'static str {
+    pub fn message(self) -> String {
         match self {
-            Blocker::DevBuild => "This is a development build. It updates when you rebuild it.",
-            Blocker::Translocated => "macOS is running Trek from a read-only copy. Move Trek to Applications to get updates.",
-            Blocker::ReadOnlyLocation => "Trek can't write to the folder it's in, so it can't update itself. Move it to a folder you own to get updates.",
-            Blocker::ProtectedFolder => "Trek is in Program Files, which only an administrator can change, so it can't update itself there. Move the Trek folder to one you own to get updates.",
-            Blocker::SharedFolder => "Trek's folder has other files in it, and an update replaces the whole folder, so Trek can't update itself there. Put Trek's three files in a folder of their own to get updates.",
-            Blocker::LinkedFolder => "Trek is running from a link to its folder, so it can't update itself. Start Trek from the folder itself to get updates.",
+            Blocker::DevBuild => "This is a development build. It updates when you rebuild it.".into(),
+            Blocker::Translocated => "macOS is running Trek from a read-only copy. Move Trek to Applications to get updates.".into(),
+            Blocker::ReadOnlyLocation => "Trek can't write to the folder it's in, so it can't update itself. Move it to a folder you own to get updates.".into(),
+            Blocker::ProtectedFolder => "Trek is in Program Files, which only an administrator can change, so it can't update itself there. Move the Trek folder to one you own to get updates.".into(),
+            Blocker::SharedFolder => "Trek's folder has other files in it, and an update replaces the whole folder, so Trek can't update itself there. Put Trek's three files in a folder of their own to get updates.".into(),
+            Blocker::LinkedFolder => "Trek is running from a link to its folder, so it can't update itself. Start Trek from the folder itself to get updates.".into(),
+            Blocker::GuardedFolder(folder) => guarded_message(folder, std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| p.is_absolute()).as_deref()),
+        }
+    }
+
+    /// Decided by whether Windows let Trek write just now, which can change while Trek runs: a
+    /// check the user asks for asks again (`blocker_now`). The rest are where Trek is, which
+    /// doesn't.
+    pub fn may_pass(self) -> bool {
+        matches!(self, Blocker::ReadOnlyLocation | Blocker::GuardedFolder(_))
+    }
+}
+
+/// `GuardedFolder`'s message, suggesting a folder in the user's profile (`home`), which
+/// Controlled folder access doesn't guard.
+fn guarded_message(folder: KnownFolder, home: Option<&Path>) -> String {
+    let suggestion = home.map(|h| h.join("Trek").display().to_string()).unwrap_or_else(|| r"C:\Users\<you>\Trek".into());
+    format!(
+        "Trek is in {}, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there. Move the Trek folder to one of its own, such as {suggestion}, to get updates.",
+        folder.name()
+    )
+}
+
+/// The folders Controlled folder access guards for every user unless told otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownFolder {
+    Documents,
+    Desktop,
+    Pictures,
+    Videos,
+    Music,
+    Favorites,
+}
+
+impl KnownFolder {
+    const ALL: [KnownFolder; 6] = [KnownFolder::Documents, KnownFolder::Desktop, KnownFolder::Pictures, KnownFolder::Videos, KnownFolder::Music, KnownFolder::Favorites];
+
+    /// As File Explorer names it, which is also its folder's name in the profile and in OneDrive.
+    pub fn name(self) -> &'static str {
+        match self {
+            KnownFolder::Documents => "Documents",
+            KnownFolder::Desktop => "Desktop",
+            KnownFolder::Pictures => "Pictures",
+            KnownFolder::Videos => "Videos",
+            KnownFolder::Music => "Music",
+            KnownFolder::Favorites => "Favorites",
+        }
+    }
+
+    /// Its value under `HKCU\…\Explorer\User Shell Folders`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn shell_folder_value(self) -> &'static str {
+        match self {
+            KnownFolder::Documents => "Personal",
+            KnownFolder::Desktop => "Desktop",
+            KnownFolder::Pictures => "My Pictures",
+            KnownFolder::Videos => "My Video",
+            KnownFolder::Music => "My Music",
+            KnownFolder::Favorites => "Favorites",
         }
     }
 }
@@ -129,18 +191,40 @@ pub const LOCAL_UPDATES_ENV: &str = "TREK_UPDATE_LOCAL_BUNDLE";
 
 pub fn blocker() -> Option<Blocker> {
     if cfg!(windows) {
-        // Settled once: the checks touch the disk, and the Updates page asks on every frame.
-        static WINDOWS: std::sync::OnceLock<Option<Blocker>> = std::sync::OnceLock::new();
-        return *WINDOWS.get_or_init(|| {
-            let Some(root) = install_root() else { return Some(Blocker::DevBuild) };
-            let release = std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || !is_cargo_output(&root);
-            windows_blocker_for(&root, release, &protected_folders())
-        });
+        return windows_blocker(false);
     }
     static RELEASE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let Some(bundle) = running_bundle() else { return Some(Blocker::DevBuild) };
     let release = *RELEASE.get_or_init(|| std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || is_release(&bundle));
     blocker_for(&bundle, release)
+}
+
+/// `blocker`, asking Windows again if the answer was one that may pass (`Blocker::may_pass`): for
+/// a check the user asked for. (macOS asks every time anyway.)
+pub fn blocker_now() -> Option<Blocker> {
+    if cfg!(windows) { windows_blocker(true) } else { blocker() }
+}
+
+/// Settled once, as the checks touch the disk and the Updates page asks on every frame; with
+/// `again`, an answer that may pass is asked again. One create and one delete of a file, and a
+/// registry value.
+fn windows_blocker(again: bool) -> Option<Blocker> {
+    static WINDOWS: std::sync::Mutex<Option<Option<Blocker>>> = std::sync::Mutex::new(None);
+    let mut settled = WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(b) = *settled
+        && !(again && b.is_some_and(Blocker::may_pass))
+    {
+        return b;
+    }
+    let b = match install_root() {
+        None => Some(Blocker::DevBuild),
+        Some(root) => {
+            let release = std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || !is_cargo_output(&root);
+            windows_blocker_for(&root, release, &protected_folders(), &guarded_folders(), controlled_folder_access())
+        }
+    };
+    *settled = Some(b);
+    b
 }
 
 fn blocker_for(bundle: &Path, release: bool) -> Option<Blocker> {
@@ -174,14 +258,21 @@ fn writable(path: &Path) -> bool {
 /// for writing (without truncating it).
 #[cfg(windows)]
 fn writable(path: &Path) -> bool {
-    if path.is_dir() {
-        let probe = path.join(format!(".trek-write-test-{}", std::process::id()));
-        let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
-        let _ = std::fs::remove_file(&probe);
-        ok
-    } else {
-        std::fs::OpenOptions::new().write(true).open(path).is_ok()
-    }
+    if path.is_dir() { probe_dir(path).is_ok() } else { std::fs::OpenOptions::new().write(true).open(path).is_ok() }
+}
+
+/// Create and remove a file in `dir`: whether Windows lets this program write there, ACLs and
+/// Controlled folder access (which answers per program) both.
+fn probe_dir(dir: &Path) -> std::io::Result<()> {
+    let probe = dir.join(format!(".trek-write-test-{}", std::process::id()));
+    let made = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).map(drop);
+    let _ = std::fs::remove_file(&probe);
+    made
+}
+
+/// Writing in `dir` was refused (access denied), not merely failed.
+fn write_refused(dir: &Path) -> bool {
+    probe_dir(dir).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
 /// The `.app` bundle we're running from, if any.
@@ -217,7 +308,207 @@ fn protected_folders() -> Vec<PathBuf> {
     ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"].into_iter().filter_map(std::env::var_os).map(PathBuf::from).filter(|p| p.is_absolute()).collect()
 }
 
-fn windows_blocker_for(root: &Path, release: bool, protected: &[PathBuf]) -> Option<Blocker> {
+/// The folders Controlled folder access guards by default (`KnownFolder`), for this user: where
+/// Windows says they are (in OneDrive when it backs them up), and their OneDrive twins either
+/// way. Folders a user added to it are in a registry key only administrators can read.
+fn guarded_folders() -> Vec<(KnownFolder, PathBuf)> {
+    let dirs = directories::UserDirs::new();
+    // SHGetKnownFolderPath, which follows a folder moved to OneDrive.
+    let known = |f: KnownFolder| -> Option<PathBuf> {
+        let dirs = dirs.as_ref()?;
+        match f {
+            KnownFolder::Documents => dirs.document_dir(),
+            KnownFolder::Desktop => dirs.desktop_dir(),
+            KnownFolder::Pictures => dirs.picture_dir(),
+            KnownFolder::Videos => dirs.video_dir(),
+            KnownFolder::Music => dirs.audio_dir(),
+            KnownFolder::Favorites => None,
+        }
+        .map(Path::to_path_buf)
+    };
+    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let onedrive = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"].into_iter().filter_map(std::env::var_os).map(PathBuf::from);
+    let onedrive: Vec<PathBuf> = profile.iter().map(|p| p.join("OneDrive")).chain(onedrive).collect();
+    guarded_places(|f| known(f).into_iter().chain(shell_folder(f)).collect(), &onedrive)
+}
+
+/// Each guarded folder where `known` says it is, and in each of the `onedrive` folders.
+fn guarded_places(known: impl Fn(KnownFolder) -> Vec<PathBuf>, onedrive: &[PathBuf]) -> Vec<(KnownFolder, PathBuf)> {
+    let mut places: Vec<(KnownFolder, PathBuf)> = vec![];
+    for f in KnownFolder::ALL {
+        for p in known(f).into_iter().chain(onedrive.iter().map(|d| d.join(f.name()))) {
+            if p.is_absolute() && !places.iter().any(|(_, q)| inside(q, &p) && inside(&p, q)) {
+                places.push((f, p));
+            }
+        }
+    }
+    places
+}
+
+/// A known folder as `HKCU\…\User Shell Folders` has it (`%USERPROFILE%` and the like expanded).
+#[cfg(windows)]
+fn shell_folder(f: KnownFolder) -> Option<PathBuf> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders").ok()?;
+    let raw: String = key.get_value(f.shell_folder_value()).ok()?;
+    Some(PathBuf::from(expand_env(&raw, |k| std::env::var(k).ok())))
+}
+
+#[cfg(not(windows))]
+fn shell_folder(_: KnownFolder) -> Option<PathBuf> {
+    None
+}
+
+/// `%NAME%`s replaced by `var(NAME)`; one with no value stays as it is.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn expand_env(s: &str, var: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else { break };
+        let name = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start]);
+        match var(name).filter(|_| !name.is_empty()) {
+            Some(v) => out.push_str(&v),
+            None => out.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether Controlled folder access is keeping programs out of the guarded folders right now:
+/// `Some(true)` when it's on and Defender is scanning in real time (it enforces nothing
+/// otherwise), `Some(false)` when it's off, only auditing, or Defender isn't scanning, `None` when
+/// Trek can't tell. (On this laptop everything it reads is readable without administrator
+/// rights; the list of folders a user added to it isn't.)
+#[cfg(windows)]
+fn controlled_folder_access() -> Option<bool> {
+    const KEY: &str = r"Windows Defender\Windows Defender Exploit Guard\Controlled Folder Access";
+    let setting = cfa_setting(
+        registry_dword(&format!(r"SOFTWARE\Policies\Microsoft\{KEY}"), "EnableControlledFolderAccess"),
+        registry_dword(&format!(r"SOFTWARE\Microsoft\{KEY}"), "EnableControlledFolderAccess"),
+    );
+    cfa_enforced(setting, real_time_protection)
+}
+
+#[cfg(not(windows))]
+fn controlled_folder_access() -> Option<bool> {
+    None
+}
+
+/// A `REG_DWORD` under `HKLM`, in the 64-bit view where Defender keeps its own (`Err`: it
+/// couldn't be read; `Ok(None)`: not set).
+#[cfg(windows)]
+fn registry_dword(key: &str, name: &str) -> Result<Option<u32>, ()> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+    let key = match winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(key, KEY_READ | KEY_WOW64_64KEY) {
+        Ok(k) => k,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    match key.get_value::<u32, _>(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+/// Whether Defender is scanning in real time: from the switches that turn it off (Windows
+/// Security's, and Group Policy's) and from Windows Security's own account of the antivirus
+/// products (`Provider\Av`, which Windows Security keeps for its page). `None`: can't tell.
+#[cfg(windows)]
+fn real_time_protection() -> Option<bool> {
+    const DEFENDER: &str = r"SOFTWARE\Microsoft\Windows Defender";
+    const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows Defender";
+    let off = [
+        registry_dword(&format!(r"{DEFENDER}\Real-Time Protection"), "DisableRealtimeMonitoring"),
+        registry_dword(&format!(r"{POLICY}\Real-Time Protection"), "DisableRealtimeMonitoring"),
+        registry_dword(DEFENDER, "DisableAntiSpyware"),
+        registry_dword(POLICY, "DisableAntiSpyware"),
+        registry_dword(DEFENDER, "DisableAntiVirus"),
+        registry_dword(POLICY, "DisableAntiVirus"),
+    ];
+    real_time_state(&off, antivirus_products())
+}
+
+/// Windows Security's list of antivirus products and their states: `(GUID, state)`.
+#[cfg(windows)]
+fn antivirus_products() -> Result<Vec<(String, u32)>, ()> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+    let list = winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(r"SOFTWARE\Microsoft\Security Center\Provider\Av", KEY_READ | KEY_WOW64_64KEY).map_err(|_| ())?;
+    let mut products = vec![];
+    for name in list.enum_keys().flatten() {
+        // A product whose state can't be read is one Trek can't say anything about.
+        let state = list.open_subkey_with_flags(&name, KEY_READ).and_then(|k| k.get_value::<u32, _>("STATE")).map_err(|_| ())?;
+        products.push((name, state));
+    }
+    Ok(products)
+}
+
+/// Defender's own entry in Windows Security's list of antivirus products.
+#[cfg_attr(not(windows), allow(dead_code))]
+const DEFENDER_PRODUCT: &str = "{D68DDC3A-831F-4fae-9E44-DA132C1ACF46}";
+
+/// Whether an antivirus product's state (`STATE`, Windows Security's `productState`: 0x61100 for
+/// Defender on and up to date, 0x60100 off) says it's switched on.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn product_is_on(state: u32) -> bool {
+    state & 0xF000 == 0x1000
+}
+
+/// Is Defender scanning in real time? `off` are the values that switch it off (`Err`: couldn't be
+/// read), `products` Windows Security's antivirus list. Off if anything says so. On only if
+/// nothing is unreadable, Windows Security lists Defender as on and no other product claims to be
+/// on too (Defender then runs passively under it, and enforces nothing). Anything else: `None`,
+/// and a refused write decides.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn real_time_state(off: &[Result<Option<u32>, ()>], products: Result<Vec<(String, u32)>, ()>) -> Option<bool> {
+    if off.iter().any(|v| *v == Ok(Some(1))) {
+        return Some(false);
+    }
+    let products = products.ok()?;
+    let (defender, others): (Vec<_>, Vec<_>) = products.iter().partition(|(guid, _)| guid.eq_ignore_ascii_case(DEFENDER_PRODUCT));
+    match defender.first() {
+        Some(&&(_, state)) if !product_is_on(state) => Some(false),
+        Some(_) if off.iter().all(Result::is_ok) && !others.iter().any(|&&(_, state)| product_is_on(state)) => Some(true),
+        _ => None,
+    }
+}
+
+/// `setting` (`cfa_setting`) turned into whether it enforces anything: only if it's on does
+/// `real_time` (asked then) matter.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cfa_enforced(setting: Option<bool>, real_time: impl FnOnce() -> Option<bool>) -> Option<bool> {
+    match setting {
+        Some(true) => real_time(),
+        other => other,
+    }
+}
+
+/// `EnableControlledFolderAccess` from the policy and from Defender's own setting (`Err`: it
+/// couldn't be read; `Ok(None)`: not set) to on, off, or unknown. 1 blocks; 0 is off, 2 audits,
+/// 3 and 4 are about disk sectors, not folders.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cfa_setting(policy: Result<Option<u32>, ()>, setting: Result<Option<u32>, ()>) -> Option<bool> {
+    match (policy, setting) {
+        (Ok(Some(v)), _) => Some(v == 1),
+        (Ok(None), Ok(v)) => Some(v == Some(1)),
+        // The policy can't be read: the setting can still say it's on.
+        (Err(()), Ok(Some(1))) => Some(true),
+        _ => None,
+    }
+}
+
+/// The guarded folder Trek is in, if Controlled folder access keeps updates out of it: it's on,
+/// or, when Trek can't tell, writing there was just refused.
+fn guarded_by(root: &Path, guarded: &[(KnownFolder, PathBuf)], cfa_on: Option<bool>) -> Option<KnownFolder> {
+    let &(folder, _) = guarded.iter().find(|(_, p)| inside(root, p))?;
+    let on = cfa_on.unwrap_or_else(|| write_refused(root) || root.parent().is_some_and(write_refused));
+    on.then_some(folder)
+}
+
+fn windows_blocker_for(root: &Path, release: bool, protected: &[PathBuf], guarded: &[(KnownFolder, PathBuf)], cfa_on: Option<bool>) -> Option<Blocker> {
     let windows_apps = root.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"));
     if !release {
         Some(Blocker::DevBuild)
@@ -225,6 +516,8 @@ fn windows_blocker_for(root: &Path, release: bool, protected: &[PathBuf]) -> Opt
         Some(Blocker::ProtectedFolder)
     } else if is_link(root) {
         Some(Blocker::LinkedFolder)
+    } else if let Some(folder) = guarded_by(root, guarded, cfa_on) {
+        Some(Blocker::GuardedFolder(folder))
     } else if !own_folder(root) {
         Some(Blocker::SharedFolder)
     } else if !writable(root) || !root.parent().is_some_and(writable) {
@@ -387,9 +680,22 @@ async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest>
     serde_json::from_slice(&bytes).with_context(|| format!("unreadable update manifest at {url}"))
 }
 
-/// Returns `Some` when any of the feeds has a build for this platform newer than this one (the
-/// newest of them). Feeds that fail are skipped unless all of them do.
-pub async fn check(urls: &[String]) -> Result<Option<AvailableUpdate>> {
+/// What a check found.
+#[derive(Debug, Clone)]
+pub enum Found {
+    /// Nothing newer than this version.
+    Nothing,
+    /// The newest build for this platform newer than this one.
+    Update(AvailableUpdate),
+    /// A newer version is out, but not yet its build for this platform: each platform's build is
+    /// added to the release on its own (the Mac's first, Windows's some minutes later).
+    Coming(semver::Version),
+}
+
+/// The newest build for this platform newer than this one across the feeds or, if there's none, a
+/// newer version whose build for this platform isn't out yet. Feeds that fail are skipped unless
+/// all of them do.
+pub async fn check(urls: &[String]) -> Result<Found> {
     let client = http()?;
     let results = futures::future::join_all(urls.iter().map(|u| fetch_manifest(&client, u))).await;
     newest(results, &current_version(), skipped_version(&crate::paths::updates_dir()).as_ref())
@@ -400,19 +706,22 @@ fn skipped_version(updates: &Path) -> Option<semver::Version> {
     semver::Version::parse(std::fs::read_to_string(updates.join(SKIP_MARKER)).ok()?.trim()).ok()
 }
 
-/// The newest build above `current` across the feeds' manifests, `skipped` aside; the first
-/// error only if every feed failed.
-fn newest(results: Vec<Result<Manifest>>, current: &semver::Version, skipped: Option<&semver::Version>) -> Result<Option<AvailableUpdate>> {
+/// The newest build above `current` across the feeds' manifests, `skipped` aside, else the newest
+/// version above it still waiting for this platform's build; the first error only if every feed
+/// failed.
+fn newest(results: Vec<Result<Manifest>>, current: &semver::Version, skipped: Option<&semver::Version>) -> Result<Found> {
     let mut best: Option<AvailableUpdate> = None;
+    let mut coming: Option<semver::Version> = None;
     let mut first_error = None;
     let mut any_ok = false;
     for result in results {
         match result.and_then(|m| newer_than(m, current)) {
             Ok(found) => {
-                let found = found.filter(|u| skipped != Some(&u.version));
                 any_ok = true;
-                if let Some(u) = found.filter(|u| best.as_ref().is_none_or(|b| u.version > b.version)) {
-                    best = Some(u);
+                match found {
+                    Found::Update(u) if skipped != Some(&u.version) && best.as_ref().is_none_or(|b| u.version > b.version) => best = Some(u),
+                    Found::Coming(v) if skipped != Some(&v) && coming.as_ref().is_none_or(|c| v > *c) => coming = Some(v),
+                    _ => {}
                 }
             }
             Err(e) => {
@@ -420,22 +729,25 @@ fn newest(results: Vec<Result<Manifest>>, current: &semver::Version, skipped: Op
             }
         }
     }
-    match (any_ok, first_error) {
-        (false, Some(e)) => Err(e),
-        _ => Ok(best),
+    match (any_ok, first_error, best, coming) {
+        (false, Some(e), _, _) => Err(e),
+        (_, _, Some(u), _) => Ok(Found::Update(u)),
+        (_, _, None, Some(v)) => Ok(Found::Coming(v)),
+        _ => Ok(Found::Nothing),
     }
 }
 
-/// The manifest's build for this platform, if it's newer than `current`. Never a downgrade.
-fn newer_than(manifest: Manifest, current: &semver::Version) -> Result<Option<AvailableUpdate>> {
+/// The manifest's build for this platform, if it's newer than `current`, or that version if it's
+/// newer but has no build for this platform yet. Never a downgrade.
+fn newer_than(manifest: Manifest, current: &semver::Version) -> Result<Found> {
     let version = semver::Version::parse(manifest.version.trim().trim_start_matches('v'))?;
     if version <= *current {
-        return Ok(None);
+        return Ok(Found::Nothing);
     }
     let Some(artifact) = manifest.platforms.get(&platform_key()).cloned() else {
-        return Ok(None);
+        return Ok(Found::Coming(version));
     };
-    Ok(Some(AvailableUpdate { version, notes: manifest.notes.trim().to_string(), pub_date: manifest.pub_date, artifact }))
+    Ok(Found::Update(AvailableUpdate { version, notes: manifest.notes.trim().to_string(), pub_date: manifest.pub_date, artifact }))
 }
 
 /// Download into a new download folder, reporting progress in 0.0..=1.0. Returns the archive only
@@ -1151,19 +1463,56 @@ mod tests {
         }
     }
 
+    /// What a check found, in a word and a version.
+    fn found(f: Found) -> (&'static str, String) {
+        match f {
+            Found::Nothing => ("nothing", String::new()),
+            Found::Update(u) => ("update", u.version.to_string()),
+            Found::Coming(v) => ("coming", v.to_string()),
+        }
+    }
+
+    /// `manifest(v)` with only another platform's build in it.
+    fn elsewhere(v: &str) -> Manifest {
+        let mut m = manifest(v);
+        let artifact = m.platforms.remove(&platform_key()).unwrap();
+        m.platforms.insert(if cfg!(windows) { "darwin-aarch64".into() } else { "windows-x86_64".into() }, artifact);
+        m
+    }
+
     #[test]
     fn only_newer_versions_for_this_platform_count() {
         let current = semver::Version::parse("0.2.0").unwrap();
-        assert!(newer_than(manifest("0.1.9"), &current).unwrap().is_none());
-        assert!(newer_than(manifest("0.2.0"), &current).unwrap().is_none(), "same version");
-        assert!(newer_than(manifest("0.2.1-beta.1"), &current).unwrap().is_some());
-        assert!(newer_than(manifest("0.2.0-beta.3"), &current).unwrap().is_none(), "a prerelease of this version is older");
-        let found = newer_than(manifest("v0.3.0"), &current).unwrap().unwrap();
-        assert_eq!((found.version.to_string(), found.notes.as_str()), ("0.3.0".into(), "- fixed things"));
-        let mut other = manifest("9.0.0");
-        other.platforms.clear();
-        assert!(newer_than(other, &current).unwrap().is_none());
+        let newer = |m: Manifest| found(newer_than(m, &current).unwrap());
+        assert_eq!(newer(manifest("0.1.9")).0, "nothing");
+        assert_eq!(newer(manifest("0.2.0")).0, "nothing", "same version");
+        assert_eq!(newer(manifest("0.2.1-beta.1")).0, "update");
+        assert_eq!(newer(manifest("0.2.0-beta.3")).0, "nothing", "a prerelease of this version is older");
+        let Found::Update(u) = newer_than(manifest("v0.3.0"), &current).unwrap() else { panic!("0.3.0 is newer") };
+        assert_eq!((u.version.to_string(), u.notes.as_str()), ("0.3.0".into(), "- fixed things"));
         assert!(newer_than(manifest("soon"), &current).is_err());
+    }
+
+    #[test]
+    fn a_newer_version_without_this_platforms_build_is_on_its_way_not_up_to_date() {
+        // The Mac's release.sh writes the manifest; the Windows build is added to it some minutes later.
+        let current = semver::Version::parse("0.4.1-beta.1").unwrap();
+        assert_eq!(found(newer_than(elsewhere("0.4.1-beta.2"), &current).unwrap()), ("coming", "0.4.1-beta.2".into()));
+        assert_eq!(found(newer_than(elsewhere("0.4.1-beta.1"), &current).unwrap()).0, "nothing", "not newer: nothing, whatever's in it");
+        let mut empty = manifest("9.0.0");
+        empty.platforms.clear();
+        assert_eq!(found(newer_than(empty, &current).unwrap()), ("coming", "9.0.0".into()));
+
+        // Across feeds: a build to install beats one on its way, whichever is newer; the newest of
+        // those on their way is the one named.
+        let feeds = |list: Vec<Manifest>| found(newest(list.into_iter().map(Ok).collect(), &current, None).unwrap());
+        assert_eq!(feeds(vec![elsewhere("0.4.1-beta.2"), manifest("0.4.0")]), ("coming", "0.4.1-beta.2".into()));
+        assert_eq!(feeds(vec![elsewhere("0.5.0-beta.1"), elsewhere("0.4.1-beta.2")]), ("coming", "0.5.0-beta.1".into()));
+        assert_eq!(feeds(vec![elsewhere("0.5.0-beta.1"), manifest("0.4.1")]), ("update", "0.4.1".into()));
+        assert_eq!(feeds(vec![manifest("0.4.1-beta.1"), manifest("0.4.0")]), ("nothing", String::new()));
+        // A version rolled back from isn't named either.
+        let skipped = semver::Version::parse("0.4.1-beta.2").unwrap();
+        assert_eq!(found(newest(vec![Ok(elsewhere("0.4.1-beta.2"))], &current, Some(&skipped)).unwrap()).0, "nothing");
     }
 
     #[test]
@@ -1233,12 +1582,12 @@ mod tests {
     fn the_newest_feed_wins_and_failing_feeds_are_skipped() {
         let current = semver::Version::parse("0.2.0").unwrap();
         let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Err(anyhow!("offline")), Ok(manifest("0.2.1"))], &current, None).unwrap();
-        assert_eq!(picked.unwrap().version.to_string(), "0.3.0-beta.1");
+        assert_eq!(found(picked), ("update", "0.3.0-beta.1".into()));
         // A version rolled back from isn't offered again; the next best is.
         let skipped = semver::Version::parse("0.3.0-beta.1").unwrap();
         let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Ok(manifest("0.2.1"))], &current, Some(&skipped)).unwrap();
-        assert_eq!(picked.unwrap().version.to_string(), "0.2.1");
-        assert!(newest(vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))], &current, None).unwrap().is_none(), "one feed answered: up to date");
+        assert_eq!(found(picked), ("update", "0.2.1".into()));
+        assert_eq!(found(newest(vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))], &current, None).unwrap()).0, "nothing", "one feed answered: up to date");
         let all_failed = newest(vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))], &current, None);
         assert_eq!(all_failed.err().unwrap().to_string(), "no release yet");
     }
@@ -1458,30 +1807,32 @@ mod tests {
         let (root, program_files) = (dir.join("Programs").join("Trek"), dir.join("Program Files"));
         trek_folder(&root);
         let protected = [program_files.clone()];
-        assert_eq!(windows_blocker_for(&root, true, &protected), None);
-        assert_eq!(windows_blocker_for(&root, false, &protected), Some(Blocker::DevBuild));
+        // Nothing guarded by ransomware protection here (`a_windows_install_in_a_guarded_folder_says_so`).
+        let blocker_for = |root: &Path, release: bool, protected: &[PathBuf]| windows_blocker_for(root, release, protected, &[], Some(false));
+        assert_eq!(blocker_for(&root, true, &protected), None);
+        assert_eq!(blocker_for(&root, false, &protected), Some(Blocker::DevBuild));
 
         // Program Files, however it's spelled, and Windows's app store folder.
         let installed = program_files.join("Trek");
         trek_folder(&installed);
-        assert_eq!(windows_blocker_for(&installed, true, &protected), Some(Blocker::ProtectedFolder));
+        assert_eq!(blocker_for(&installed, true, &protected), Some(Blocker::ProtectedFolder));
         let shouting = PathBuf::from(installed.to_string_lossy().to_uppercase());
-        assert_eq!(windows_blocker_for(&shouting, true, &protected), Some(Blocker::ProtectedFolder));
+        assert_eq!(blocker_for(&shouting, true, &protected), Some(Blocker::ProtectedFolder));
         let store = dir.join("WindowsApps").join("Trek_1.0_x64");
         trek_folder(&store);
-        assert_eq!(windows_blocker_for(&store, true, &[]), Some(Blocker::ProtectedFolder));
+        assert_eq!(blocker_for(&store, true, &[]), Some(Blocker::ProtectedFolder));
 
         // Unzipped straight into Downloads: the folder isn't Trek's to replace.
         std::fs::write(root.join("holiday.jpg"), "x").unwrap();
-        assert_eq!(windows_blocker_for(&root, true, &protected), Some(Blocker::SharedFolder));
+        assert_eq!(blocker_for(&root, true, &protected), Some(Blocker::SharedFolder));
         std::fs::remove_file(root.join("holiday.jpg")).unwrap();
         std::fs::create_dir(root.join("projects")).unwrap();
-        assert_eq!(windows_blocker_for(&root, true, &protected), Some(Blocker::SharedFolder));
+        assert_eq!(blocker_for(&root, true, &protected), Some(Blocker::SharedFolder));
         std::fs::remove_dir(root.join("projects")).unwrap();
         std::fs::remove_file(root.join("trek-mcp.exe")).unwrap();
-        assert_eq!(windows_blocker_for(&root, true, &protected), None, "an older release's folder, without a file, is still Trek's own");
+        assert_eq!(blocker_for(&root, true, &protected), None, "an older release's folder, without a file, is still Trek's own");
         std::fs::remove_file(root.join("trek.exe")).unwrap();
-        assert_eq!(windows_blocker_for(&root, true, &protected), Some(Blocker::SharedFolder), "no trek.exe: not an install");
+        assert_eq!(blocker_for(&root, true, &protected), Some(Blocker::SharedFolder), "no trek.exe: not an install");
 
         assert!(is_cargo_output(&{
             let target = dir.join("target").join("debug");
@@ -1490,10 +1841,193 @@ mod tests {
             target.join("deps")
         }));
         assert!(!is_cargo_output(&root));
-        for b in [Blocker::ProtectedFolder, Blocker::SharedFolder] {
+        for b in [Blocker::ProtectedFolder, Blocker::SharedFolder, Blocker::GuardedFolder(KnownFolder::Desktop)] {
             assert!(b.message().ends_with("to get updates."), "{b:?} says what to do");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Refuse creating files in `dir` (or allow it again), as Controlled folder access does to a
+    /// program it doesn't trust: access denied.
+    fn refuse_writes(dir: &Path, refuse: bool) {
+        #[cfg(windows)]
+        {
+            // A deny entry for Everyone on the folder itself (not inherited): no file or folder
+            // can be added to it.
+            let mut icacls = std::process::Command::new("icacls");
+            icacls.arg(dir);
+            if refuse { icacls.args(["/deny", "*S-1-1-0:(WD,AD)"]) } else { icacls.args(["/remove:d", "*S-1-1-0"]) };
+            let out = icacls.output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(if refuse { 0o555 } else { 0o755 })).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_windows_install_in_a_guarded_folder_says_so() {
+        let dir = scratch("win-guarded");
+        let documents = dir.join("OneDrive").join("Documents");
+        let root = documents.join("Trek").join("Trek-0.4.1-beta.1-windows-x86_64");
+        trek_folder(&root);
+        let guarded = [(KnownFolder::Desktop, dir.join("OneDrive").join("Desktop")), (KnownFolder::Documents, documents.clone())];
+        let blocked = |root: &Path, cfa_on: Option<bool>| windows_blocker_for(root, true, &[], &guarded, cfa_on);
+        let in_documents = Some(Blocker::GuardedFolder(KnownFolder::Documents));
+
+        // Controlled folder access on: certain, whether or not Trek itself may write there (each
+        // program is judged on its own, and the helper an update brings is a new one).
+        assert_eq!(blocked(&root, Some(true)), in_documents);
+        assert_eq!(blocked(&root, Some(false)), None, "off, or only auditing: it updates as anywhere else");
+        assert_eq!(blocked(&root, None), None, "can't tell, and writing there works: it tries");
+        let elsewhere = dir.join("Trek");
+        trek_folder(&elsewhere);
+        assert_eq!(blocked(&elsewhere, Some(true)), None, "not in a guarded folder");
+        assert_eq!(blocked(&documents, Some(true)), in_documents, "unzipped straight into Documents");
+
+        // After Program Files and links, before a folder holding more than Trek: moving Trek to a
+        // folder of its own deals with both.
+        assert_eq!(windows_blocker_for(&root, true, &[documents.clone()], &guarded, Some(true)), Some(Blocker::ProtectedFolder));
+        std::fs::write(root.join("notes.txt"), "x").unwrap();
+        assert_eq!(blocked(&root, Some(true)), in_documents);
+        std::fs::remove_file(root.join("notes.txt")).unwrap();
+
+        // Can't tell, and writing there is refused: guarded. Outside a guarded folder (or with it
+        // off) the same refusal is a folder Trek can't write to.
+        refuse_writes(&root, true);
+        let (unknown, off) = (blocked(&root, None), blocked(&root, Some(false)));
+        refuse_writes(&root, false);
+        assert_eq!((unknown, off), (in_documents, Some(Blocker::ReadOnlyLocation)));
+        assert!(probe_dir(&root).is_ok() && std::fs::read_dir(&root).unwrap().count() == 3, "and the probe leaves nothing behind");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_guarded_folder_message_names_the_folder_and_one_to_move_to() {
+        let m = Blocker::GuardedFolder(KnownFolder::Documents).message();
+        assert!(m.starts_with("Trek is in Documents, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there."), "{m}");
+        assert!(guarded_message(KnownFolder::Pictures, None).contains(r"such as C:\Users\<you>\Trek, to get updates."));
+        if cfg!(windows) {
+            assert_eq!(
+                guarded_message(KnownFolder::Desktop, Some(Path::new(r"C:\Users\tobyj"))),
+                r"Trek is in Desktop, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there. Move the Trek folder to one of its own, such as C:\Users\tobyj\Trek, to get updates."
+            );
+        }
+        assert!(Blocker::GuardedFolder(KnownFolder::Music).may_pass() && Blocker::ReadOnlyLocation.may_pass());
+        assert!(!Blocker::SharedFolder.may_pass() && !Blocker::DevBuild.may_pass(), "where Trek is doesn't change while it runs");
+    }
+
+    #[test]
+    fn guarded_folders_are_where_windows_says_and_in_onedrive() {
+        let p = |s: &str| PathBuf::from(if cfg!(windows) { format!("C:{s}") } else { s.replace('\\', "/") });
+        // Documents moved to OneDrive (Known Folder Move); Favorites only in the registry.
+        let known = |f: KnownFolder| match f {
+            KnownFolder::Documents => vec![p(r"\Users\me\OneDrive\Documents")],
+            KnownFolder::Favorites => vec![p(r"\Users\me\Favorites"), PathBuf::from("relative")],
+            _ => vec![],
+        };
+        let places = guarded_places(known, &[p(r"\Users\me\OneDrive"), p(r"\Users\me\OneDrive - Work")]);
+        let of = |f: KnownFolder| places.iter().filter(|(k, _)| *k == f).map(|(_, path)| path.clone()).collect::<Vec<_>>();
+        assert_eq!(of(KnownFolder::Documents), [p(r"\Users\me\OneDrive\Documents"), p(r"\Users\me\OneDrive - Work\Documents")], "each once");
+        assert_eq!(of(KnownFolder::Pictures), [p(r"\Users\me\OneDrive\Pictures"), p(r"\Users\me\OneDrive - Work\Pictures")]);
+        assert_eq!(of(KnownFolder::Favorites)[0], p(r"\Users\me\Favorites"), "a relative path is never a guarded folder");
+        assert_eq!(places.len(), 1 + 6 * 2);
+    }
+
+    #[test]
+    fn controlled_folder_access_is_on_only_when_it_blocks() {
+        assert_eq!(cfa_setting(Ok(None), Ok(Some(1))), Some(true));
+        assert_eq!(cfa_setting(Ok(None), Ok(Some(2))), Some(false), "audit mode blocks nothing");
+        assert_eq!(cfa_setting(Ok(None), Ok(Some(0))), Some(false));
+        assert_eq!(cfa_setting(Ok(None), Ok(None)), Some(false), "never set: off");
+        assert_eq!(cfa_setting(Ok(Some(0)), Ok(Some(1))), Some(false), "Group Policy wins");
+        assert_eq!(cfa_setting(Ok(Some(1)), Err(())), Some(true));
+        assert_eq!(cfa_setting(Err(()), Ok(Some(1))), Some(true));
+        assert_eq!(cfa_setting(Err(()), Ok(Some(0))), None, "a policy Trek can't read may turn it on");
+        assert_eq!(cfa_setting(Ok(None), Err(())), None);
+        assert_eq!(expand_env(r"%USERPROFILE%\Favorites", |k| (k == "USERPROFILE").then(|| r"C:\Users\me".into())), r"C:\Users\me\Favorites");
+        assert_eq!(expand_env(r"%NOPE%\x %", |_| None), r"%NOPE%\x %");
+    }
+
+    #[test]
+    fn controlled_folder_access_enforces_nothing_while_defender_isnt_scanning() {
+        // Tobias's laptop, 2026-10-11: the setting says on, real-time protection was switched off.
+        let defender = |state: u32| (DEFENDER_PRODUCT.to_lowercase(), state);
+        let (on, off_state) = (0x61100, 0x60100);
+        assert!(product_is_on(on) && !product_is_on(off_state));
+        let no_switches = [Ok(None), Ok(None), Ok(Some(0)), Ok(None), Ok(Some(0)), Ok(None)];
+        let third_party = ("{00000000-0000-0000-0000-000000000001}".to_string(), on);
+
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on)])), Some(true));
+        // Switched off in Windows Security: its switch, or its entry in the antivirus list.
+        let switched = [Ok(Some(1)), Ok(None), Ok(None), Ok(None), Ok(None), Ok(None)];
+        assert_eq!(real_time_state(&switched, Ok(vec![defender(on)])), Some(false));
+        assert_eq!(real_time_state(&switched, Err(())), Some(false), "whatever else can't be read");
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(off_state)])), Some(false));
+        // Group Policy, or an antispyware switch an old installer left behind.
+        for at in 0..no_switches.len() {
+            let mut one = no_switches.clone();
+            one[at] = Ok(Some(1));
+            assert_eq!(real_time_state(&one, Ok(vec![defender(on)])), Some(false), "switch {at}");
+        }
+        // Can't tell: a value or the list unreadable, Defender not in it, or another product on
+        // beside it (Defender runs passively under it).
+        let mut unreadable = no_switches.clone();
+        unreadable[3] = Err(());
+        assert_eq!(real_time_state(&unreadable, Ok(vec![defender(on)])), None);
+        assert_eq!(real_time_state(&no_switches, Err(())), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![])), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![third_party.clone()])), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on), third_party.clone()])), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on), (third_party.0.clone(), off_state)])), Some(true), "a product that's off beside it changes nothing");
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(off_state), third_party])), Some(false), "primary elsewhere, Defender off");
+
+        // The setting only matters when it's on, and then only while Defender is scanning.
+        let asked = std::cell::Cell::new(0);
+        let enforced = |setting, real_time: Option<bool>| {
+            asked.set(0);
+            let answer = cfa_enforced(setting, || {
+                asked.set(asked.get() + 1);
+                real_time
+            });
+            (answer, asked.get())
+        };
+        assert_eq!(enforced(Some(true), Some(true)), (Some(true), 1));
+        assert_eq!(enforced(Some(true), Some(false)), (Some(false), 1), "on, but nothing scans: nothing is guarded");
+        assert_eq!(enforced(Some(true), None), (None, 1), "can't tell: a refused write decides");
+        assert_eq!(enforced(Some(false), Some(true)), (Some(false), 0), "off or auditing: real-time protection isn't asked");
+        assert_eq!(enforced(None, Some(true)), (None, 0));
+    }
+
+    /// `trek-update` can't use Trek's list (it has no dependency on it), so it keeps its own: they
+    /// must name the same folders, or the helper's words and Settings would disagree.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_and_trek_guard_the_same_folders() {
+        let same = |a: &Path, b: &Path| inside(a, b) && inside(b, a);
+        let trek: Vec<(&str, PathBuf)> = guarded_folders().into_iter().map(|(f, p)| (f.name(), p)).collect();
+        let helper = trek_update::guarded_folders();
+        assert!(!helper.is_empty());
+        for (name, path) in &helper {
+            assert!(trek.iter().any(|(n, p)| n == name && same(p, path)), "Trek doesn't guard {name} {}: {trek:?}", path.display());
+        }
+        for (name, path) in &trek {
+            assert!(helper.iter().any(|(n, p)| n == name && same(p, path)), "the helper doesn't guard {name} {}: {helper:?}", path.display());
+        }
+    }
+
+    /// What this laptop says, for the record: run with `--ignored --nocapture`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "reads this machine's settings"]
+    fn print_this_machines_guarded_folders() {
+        println!("controlled folder access enforced: {:?}", controlled_folder_access());
+        println!("real-time protection: {:?}, antivirus products {:x?}", real_time_protection(), antivirus_products());
+        for (f, p) in guarded_folders() {
+            println!("{f:?}: {}", p.display());
+        }
     }
 
     #[cfg(windows)]
@@ -1762,10 +2296,12 @@ mod tests {
         let dir = scratch("link-root");
         let (real, link) = (dir.join("real"), dir.join("Trek"));
         trek_folder(&real);
-        assert_eq!(windows_blocker_for(&real, true, &[]), None);
+        assert_eq!(windows_blocker_for(&real, true, &[], &[], Some(false)), None);
         junction(&link, &real);
         assert!(is_link(&link) && !is_link(&real));
-        assert_eq!(windows_blocker_for(&link, true, &[]), Some(Blocker::LinkedFolder));
+        // Before a guarded folder too: starting Trek from the folder itself comes first.
+        let guarded = [(KnownFolder::Documents, dir.clone())];
+        assert_eq!(windows_blocker_for(&link, true, &[], &guarded, Some(true)), Some(Blocker::LinkedFolder));
         assert!(Blocker::LinkedFolder.message().ends_with("to get updates."));
         let _ = std::fs::remove_dir_all(dir);
     }

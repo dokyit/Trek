@@ -213,6 +213,56 @@ fn a_copy_that_fails_leaves_the_install_alone() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Defender's Controlled folder access turning the helper away from Documents (Tobias's beta.1 →
+/// beta.2, 2026-10-11): access denied, and the toast says what to do about it.
+#[test]
+fn ransomware_protection_refusing_the_update_says_to_move_trek_out_of_the_guarded_folder() {
+    let (dir, install, staged, _) = tree("guarded");
+    let refused = |_: &Path, _: &Path| Err(if cfg!(windows) { std::io::Error::from_raw_os_error(5) } else { std::io::Error::from(std::io::ErrorKind::PermissionDenied) });
+    // The install's parent is a guarded folder ("Apps" standing in for Documents).
+    let documents = || vec![("Desktop", dir.join("Desktop")), ("Documents", dir.join("Apps"))];
+    let e = trek_update::swap_guarded(&install, &staged, "0.4.0", "0.4.1", &refused, &documents).unwrap_err();
+    assert_eq!(
+        e,
+        format!(
+            "Windows's ransomware protection (Controlled folder access) wouldn't let Trek put the update next to {}. Move the Trek folder out of Documents and update again; nothing was changed",
+            install.display()
+        )
+    );
+    assert_eq!((version(&install), version(&staged)), ("0.4.0".into(), "0.4.1".into()));
+    assert_eq!(std::fs::read_dir(install.parent().unwrap()).unwrap().count(), 1, "nothing next to the install");
+
+    // Not in a folder it guards by default (one a user added, a file held open): both, as maybes.
+    let e = trek_update::swap_guarded(&install, &staged, "0.4.0", "0.4.1", &refused, &|| vec![]).unwrap_err();
+    assert!(e.starts_with(&format!("couldn't get the update next to {} (", install.display())), "{e}");
+    assert!(e.ends_with("If Windows's ransomware protection (Controlled folder access) guards that folder, move the Trek folder to one of its own and update again; nothing was changed"), "{e}");
+    // The real list of folders, through `swap_with`: a temporary folder is in none of them.
+    let e = trek_update::swap_with(&install, &staged, "0.4.0", "0.4.1", &refused).unwrap_err();
+    assert!(e.starts_with("couldn't get the update next to") && e.contains("Controlled folder access"), "{e}");
+    if cfg!(windows) {
+        assert!(e.contains("os error 5"), "{e}");
+    }
+
+    // What the toast on the next start says: the helper's sentence, whole.
+    let note = format!("Trek 0.4.1 didn't install: {}.", trek_update::refused_next_to(&install, &std::io::Error::from_raw_os_error(5), Some("Documents")));
+    assert!(note.ends_with("Move the Trek folder out of Documents and update again; nothing was changed."), "{note}");
+    // Other failures read as before.
+    let gone = |_: &Path, _: &Path| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert!(!trek_update::swap_guarded(&install, &staged, "0.4.0", "0.4.1", &gone, &documents).unwrap_err().contains("ransomware"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn the_guarded_folders_are_found_where_windows_keeps_them() {
+    let folders = trek_update::guarded_folders();
+    for name in ["Documents", "Desktop", "Pictures", "Videos", "Music", "Favorites"] {
+        assert!(folders.iter().any(|(n, p)| *n == name && p.is_absolute()), "{name}: {folders:?}");
+    }
+    assert_eq!(trek_update::guarded_folder_of(&folders[0].1.join("Trek"), &folders), Some("Documents"));
+    assert_eq!(trek_update::guarded_folder_of(&std::env::temp_dir().join("Trek"), &folders), None);
+}
+
 /// What `swap` does when the update is on another volume: copied, not moved, and only then does
 /// the install move aside.
 #[test]
