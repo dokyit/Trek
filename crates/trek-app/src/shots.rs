@@ -39,6 +39,13 @@
 //! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
 //! `rewind [n] [keep]` (undo the n-th turn from the end, 1 = the latest, as its Undo does; `keep`
 //! leaves the files).
+//!
+//! Measurements (with `TREK_PERF=1`; each logs one `perf:` line, see `perf.rs`): `perf frames
+//! <ms> <label>` (every frame painted meanwhile, and how late the main thread answers a 5 ms
+//! timer, `lag_`), `perf scroll <element id> <px> <steps> <label>`
+//! (a wheel step of `px` over that element each 60 Hz frame, each step timed to its paint),
+//! `perf type <count> <label>` (`count` characters typed one at a time into the focused field,
+//! each timed to its paint) and `perf mark <label>`.
 //! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
@@ -70,6 +77,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
+                    "perf" => perf(&workspace, arg, cx).await,
                     "quit" => quit(cx),
                     _ => cx.update(|cx| run(&workspace, verb, arg, cx)),
                 };
@@ -306,6 +314,129 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
         Ok(times.len() as u32)
     });
     Recording { stop, task }
+}
+
+/// What `perf type` types, over and over: words and spaces, as prose is typed.
+const TYPED: &str = "the quick brown fox jumps over the lazy dog while the agent reads the build log ";
+
+/// `perf frames|scroll|type|mark …` (see the header): input dispatched as events, never real OS
+/// input, and each step waits for the frame that shows it.
+async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    use crate::perf::{BUDGET, ms, summarize};
+    anyhow::ensure!(crate::perf::on(), "perf: launch with TREK_PERF=1");
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let args: Vec<&str> = arg.split_whitespace().collect();
+    let num = |i: usize, what: &str| -> anyhow::Result<u64> { args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf: {arg:?}: bad or missing {what}")) };
+    let frame_pairs = |frames: &[crate::perf::Frame]| {
+        let took: Vec<Duration> = frames.iter().map(crate::perf::Frame::took).collect();
+        let s = summarize(&took, BUDGET);
+        format!("frames={} {}", s.n, s.pairs("frame_"))
+    };
+    match args.first().copied() {
+        Some("mark") => tracing::info!("perf: mark label={}", args.get(1).unwrap_or(&"-")),
+        Some("frames") => {
+            let span = num(1, "<ms>")?;
+            let label = args.get(2).unwrap_or(&"frames");
+            crate::perf::record();
+            // Beside the frames, how late the main thread comes back to a 5 ms timer: work done
+            // outside a frame (a save, a parse) shows there and not in frame times.
+            let stop = Arc::new(AtomicBool::new(false));
+            let sampler = {
+                let stop = stop.clone();
+                cx.spawn(async move |cx| {
+                    let mut lags = vec![];
+                    while !stop.load(Ordering::Relaxed) {
+                        let asked = Instant::now();
+                        cx.background_executor().timer(Duration::from_millis(5)).await;
+                        lags.push(asked.elapsed().saturating_sub(Duration::from_millis(5)));
+                    }
+                    lags
+                })
+            };
+            cx.background_executor().timer(Duration::from_millis(span)).await;
+            stop.store(true, Ordering::Relaxed);
+            let lags = sampler.await;
+            let frames = crate::perf::take_recorded();
+            tracing::info!("perf: frames label={label} ms={span} {} {}", frame_pairs(&frames), summarize(&lags, BUDGET).pairs("lag_"));
+        }
+        Some("scroll") => {
+            let id = *args.get(1).ok_or_else(|| anyhow::anyhow!("perf scroll <element id> <px> <steps> <label>"))?;
+            let dy: f32 = args.get(2).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf scroll: bad or missing <px>"))?;
+            let steps = num(3, "<steps>")?;
+            let label = args.get(4).unwrap_or(&"scroll");
+            // The pointer goes over the element once, as a hand on a wheel stays put: over the
+            // middle of what's on screen of it (a tall row's own middle can be off the window).
+            let position = main.update(cx, |_, window, cx| -> anyhow::Result<Point<Pixels>> {
+                pointer(window, "hover", id, cx)?;
+                let id = element_id(id);
+                let found = gpui_kit::base::test_support::snapshots(window).into_iter().find(|s| s.path().last() == Some(&id));
+                let bounds = found.ok_or_else(|| anyhow::anyhow!("perf scroll: {id:?} went away"))?.bounds();
+                Ok(bounds.intersect(&Bounds::new(point(px(0.), px(0.)), window.viewport_size())).center())
+            })??;
+            crate::perf::record();
+            let (mut latency, mut unpainted) = (vec![], 0);
+            for _ in 0..steps {
+                let began = Instant::now();
+                let (tx, rx) = crate::perf::next_frame();
+                main.update(cx, |_, window, cx| {
+                    let event = ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.), px(-dy))), ..Default::default() };
+                    window.dispatch_event(event.to_platform_input(), cx);
+                })?;
+                match painted_within(tx, rx, Duration::from_millis(500), cx).await {
+                    Some(f) => latency.push(f.painted.saturating_duration_since(began)),
+                    // Nothing to draw (the end of the list), or no frame in time.
+                    None => unpainted += 1,
+                }
+                let spent = began.elapsed();
+                if spent < BUDGET {
+                    cx.background_executor().timer(BUDGET - spent).await;
+                }
+            }
+            let frames = crate::perf::take_recorded();
+            let l = summarize(&latency, BUDGET);
+            tracing::info!("perf: scroll label={label} steps={steps} unpainted={unpainted} {} {}", frame_pairs(&frames), l.pairs("latency_"));
+        }
+        Some("type") => {
+            let count = num(1, "<count>")? as usize;
+            let label = args.get(2).unwrap_or(&"type");
+            crate::perf::record();
+            let (mut latency, mut unpainted) = (vec![], 0);
+            for c in TYPED.chars().cycle().take(count) {
+                let began = Instant::now();
+                let (tx, rx) = crate::perf::next_frame();
+                let typed = main.update(cx, |_, window, cx| {
+                    window.focused(cx).is_some() && window.dispatch_keystroke(Keystroke { modifiers: Modifiers::default(), key: String::new(), key_char: Some(c.to_string()) }, cx)
+                })?;
+                anyhow::ensure!(typed, "perf type: nothing has the keyboard (focus a field first)");
+                match painted_within(tx, rx, Duration::from_millis(500), cx).await {
+                    Some(f) => latency.push(f.painted.saturating_duration_since(began)),
+                    None => unpainted += 1,
+                }
+                // About 20 keys a second, a fast typist's pace.
+                let spent = began.elapsed();
+                if spent < Duration::from_millis(50) {
+                    cx.background_executor().timer(Duration::from_millis(50) - spent).await;
+                }
+            }
+            let frames = crate::perf::take_recorded();
+            let l = summarize(&latency, BUDGET);
+            tracing::info!("perf: type label={label} keys={count} unpainted={unpainted} {} {} latency_mean={}", frame_pairs(&frames), l.pairs("latency_"), ms(latency.iter().sum::<Duration>() / latency.len().max(1) as u32));
+        }
+        _ => anyhow::bail!("perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | mark <label>"),
+    }
+    Ok(())
+}
+
+/// The frame `perf::next_frame` was armed for, or `None` after `limit`.
+async fn painted_within(tx: async_channel::Sender<Option<crate::perf::Frame>>, rx: async_channel::Receiver<Option<crate::perf::Frame>>, limit: Duration, cx: &mut AsyncApp) -> Option<crate::perf::Frame> {
+    let executor = cx.background_executor().clone();
+    let timeout = cx.background_executor().spawn(async move {
+        executor.timer(limit).await;
+        let _ = tx.try_send(None);
+    });
+    let frame = rx.recv().await.ok().flatten();
+    drop(timeout);
+    frame
 }
 
 fn quit(cx: &mut AsyncApp) -> anyhow::Result<()> {
