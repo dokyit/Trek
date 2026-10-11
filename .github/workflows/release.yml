@@ -118,6 +118,37 @@ jobs:
           "$RUNNER_TEMP/minisign/minisign" -v
           echo "$RUNNER_TEMP/minisign" >> "$GITHUB_PATH"
 
+      - name: EXPERIMENT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          cd "$RUNNER_TEMP"; mkdir exp; cd exp
+          echo "--- gh version"; gh --version | head -1
+          echo "--- gh auth status"; gh auth status; echo "exit $?"
+          echo "--- gh release view"; gh release view beta --repo dokyit/Trek --json tagName --jq .tagName; echo "exit $?"
+          echo "--- gen locked key"; printf 'hunter2\nhunter2\n' | minisign -G -f -p l.pub -s l.key; echo "exit $?"
+          echo "--- gen unlocked key"; minisign -G -W -f -p u.pub -s u.key </dev/null; echo "exit $?"
+          for k in l u; do
+            echo "--- locked? $k.key: $(python3 -c 'import base64,sys; l=open(sys.argv[1]).read().splitlines(); print(int(base64.b64decode(l[1])[2:4] == b"Sc"))' $k.key 2>/dev/null || echo 0)"
+          done
+          echo hello > f
+          echo "--- sign locked, password from env through zsh print (as release.sh)"
+          TREK_MINISIGN_PASSWORD=hunter2 zsh -c 'print -r -- "$TREK_MINISIGN_PASSWORD" | minisign -S -s l.key -m f -x f.l.minisig -t "T" >/dev/null'; echo "exit $?"
+          minisign -V -q -p l.pub -m f -x f.l.minisig; echo "verify exit $?"
+          echo "--- sign locked, wrong password (must fail)"
+          TREK_MINISIGN_PASSWORD=wrong zsh -c 'print -r -- "$TREK_MINISIGN_PASSWORD" | minisign -S -s l.key -m f -x f.w.minisig -t "T" >/dev/null'; echo "exit $?"
+          echo "--- sign unlocked, </dev/null (as release.sh's else branch)"
+          minisign -S -s u.key -m f -x f.u.minisig -t T </dev/null >/dev/null; echo "exit $?"
+          minisign -V -q -p u.pub -m f -x f.u.minisig; echo "verify exit $?"
+          echo "--- base64 round trip, wrapped and not"
+          head -c 3000 /dev/urandom > r.bin
+          base64 -i r.bin > r1.b64; base64 -b 76 -i r.bin > r2.b64; wc -l r1.b64 r2.b64
+          printf '%s' "$(cat r1.b64)" | base64 --decode | cmp - r.bin; echo "unwrapped exit $?"
+          printf '%s' "$(cat r2.b64)" | base64 --decode | cmp - r.bin; echo "wrapped exit $?"
+          echo "--- openssl"; which openssl; openssl version
+          exit 1
+
       # Who the release commit and tags are by.
       - name: Git identity
         run: |
