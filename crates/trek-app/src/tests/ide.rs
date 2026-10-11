@@ -1523,3 +1523,225 @@ fn a_narrow_ai_side_bar_keeps_send_inside_the_input() {
         assert!(send.left() >= input.left());
     });
 }
+
+/// The preview in front: (what the status bar says, what its note says).
+fn preview_state(trek: &Trek, cx: &TestAppContext) -> Option<((String, Option<String>, Option<String>), Option<String>)> {
+    let ide = ide(trek, cx);
+    cx.read(|cx| ide.read(cx).active_preview().map(|p| (p.read(cx).status_items(), p.read(cx).note_text())))
+}
+
+#[test]
+fn an_image_opens_as_a_preview_and_the_status_bar_gives_its_size() {
+    run(async |cx| {
+        let trek = open(cx);
+        let png = trek.project.join("shot.png");
+        image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 80, 40, 255])).save(&png).unwrap();
+        let notes = trek.project.join("notes.rs");
+        std::fs::write(&notes, "fn notes() {}\n").unwrap();
+        editor_on_draft(&trek, cx);
+
+        // A single click in the Explorer: a preview tab, the image in it, no editor.
+        trek.click(cx, png.display().to_string());
+        trek.render(cx);
+        assert_eq!(tabs(&trek, cx), vec![(png.clone(), true)]);
+        assert!(trek.visible(cx, "ide-preview-image"), "the image is drawn");
+        assert_eq!(active_file(&trek, cx), None, "no editor on an image");
+        let size = std::fs::metadata(&png).unwrap().len();
+        let ((kind, pixels, bytes), note) = preview_state(&trek, cx).expect("a preview in front");
+        assert_eq!((kind.as_str(), pixels.as_deref(), note), ("PNG Image", Some("40 × 30"), None));
+        assert_eq!(bytes, Some(format!("{size} bytes")));
+        assert!(trek.visible(cx, "ide-status-pixels") && trek.visible(cx, "ide-status-size") && trek.visible(cx, "ide-status-kind"));
+
+        // The next single click takes the preview tab's place; opening the image again on purpose
+        // adds a tab of its own, and opening it once more finds that one.
+        trek.click(cx, notes.display().to_string());
+        trek.render(cx);
+        assert_eq!(tabs(&trek, cx), vec![(notes.clone(), true)]);
+        trek.update(cx, |ws, cx| ws.open_editor(png.clone(), None, cx));
+        trek.update(cx, |ws, cx| ws.open_editor(png.clone(), None, cx));
+        trek.render(cx);
+        assert_eq!(tabs(&trek, cx), vec![(notes.clone(), true), (png.clone(), false)]);
+
+        // × closes it like any tab.
+        trek.click(cx, ("ide-tab-close", 1usize));
+        trek.render(cx);
+        assert_eq!(tabs(&trek, cx), vec![(notes, true)]);
+    });
+}
+
+#[test]
+fn a_file_that_isnt_text_says_so_and_editing_keys_do_nothing_there() {
+    run(async |cx| {
+        let trek = open(cx);
+        let blob = trek.project.join("blob.txt");
+        std::fs::write(&blob, b"abc\0def").unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(blob.clone(), None, cx));
+        trek.render(cx);
+
+        // Read as text, it has a NUL: the editor gives way to a note, in the same tab.
+        assert_eq!(tabs(&trek, cx), vec![(blob.clone(), false)]);
+        assert_eq!(active_file(&trek, cx), None);
+        let ((kind, _, _), note) = preview_state(&trek, cx).expect("a preview in its place");
+        assert_eq!(kind, "TXT File");
+        assert_eq!(note.as_deref(), Some("Trek can't show blob.txt (TXT file, 7 bytes)."));
+        assert!(trek.visible(cx, "ide-preview-words"));
+        assert!(trek.visible(cx, "ide-preview-open"), "Open in its default app");
+        assert!(trek.visible(cx, "ide-preview-reveal"), "Reveal in Explorer / Finder");
+        assert!(trek.visible(cx, "ide-status-kind"));
+
+        // Save, keep or undo a hunk, ⌘K, add to chat: none of them has anything to act on.
+        for key in [crate::keys::Id::SaveFile, crate::keys::Id::KeepHunk, crate::keys::Id::UndoHunk, crate::keys::Id::InlineEdit, crate::keys::Id::AddSelectionToChat] {
+            trek.press(cx, &crate::keys::keystroke(key));
+        }
+        trek.render(cx);
+        assert_eq!(std::fs::read(&blob).unwrap(), b"abc\0def", "nothing written");
+        assert_eq!(tabs(&trek, cx), vec![(blob.clone(), false)]);
+        assert!(preview_state(&trek, cx).is_some(), "still the note, nothing broke");
+
+        // ⌘W closes it.
+        trek.press(cx, "secondary-w");
+        trek.render(cx);
+        assert!(tabs(&trek, cx).is_empty());
+    });
+}
+
+#[test]
+fn a_pdf_shows_in_the_web_view_which_hides_when_the_editor_does() {
+    run(async |cx| {
+        crate::ide::preview::fake_web(true);
+        let trek = open(cx);
+        let pdf = trek.project.join("paper.pdf");
+        std::fs::write(&pdf, MINIMAL_PDF).unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(pdf.clone(), None, cx));
+        trek.render(cx);
+
+        assert_eq!(tabs(&trek, cx), vec![(pdf.clone(), false)]);
+        assert!(trek.visible(cx, "ide-preview-header"), "a line over it");
+        assert!(trek.visible(cx, "ide-preview-name"));
+        assert!(trek.visible(cx, "ide-preview-open") && trek.visible(cx, "ide-preview-reveal"));
+        assert!(trek.visible(cx, "ide-preview-web-fake"), "the web view under it");
+        let ((kind, _, bytes), _) = preview_state(&trek, cx).unwrap();
+        assert_eq!((kind.as_str(), bytes.is_some()), ("PDF", true));
+        let ide = ide(&trek, cx);
+        let shown = |cx: &TestAppContext| cx.read(|cx| ide.read(cx).active_preview().and_then(|p| p.read(cx).web_shown()));
+        assert_eq!(shown(cx), Some(true));
+
+        // The native view floats over the window: off while Agents shows, a palette is over it,
+        // or another tab is in front.
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Agents, cx));
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(false), "Agents mode");
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
+        trek.render(cx);
+        assert_eq!(shown(cx), Some(true));
+        trek.update(cx, |ws, cx| {
+            ws.overlay_open = true;
+            cx.notify();
+        });
+        assert_eq!(shown(cx), Some(false), "something drawn over it");
+        trek.update(cx, |ws, cx| {
+            ws.overlay_open = false;
+            cx.notify();
+        });
+        assert_eq!(shown(cx), Some(true));
+        let other = trek.project.join("other.rs");
+        std::fs::write(&other, "\n").unwrap();
+        trek.update(cx, |ws, cx| ws.open_editor(other.clone(), None, cx));
+        trek.render(cx);
+        let pdf_preview = cx.read(|cx| ide.read(cx).tabs.iter().find_map(|t| t.preview_view().cloned())).unwrap();
+        assert_eq!(cx.read(|cx| pdf_preview.read(cx).web_shown()), Some(false), "another tab in front");
+    });
+}
+
+#[test]
+fn without_a_web_view_a_video_says_trek_cant_show_it() {
+    run(async |cx| {
+        crate::ide::preview::fake_web(false);
+        let trek = open(cx);
+        let clip = trek.project.join("clip.mp4");
+        std::fs::write(&clip, b"\0\0\0\x18ftypmp42").unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(clip.clone(), None, cx));
+        trek.render(cx);
+        let (_, note) = preview_state(&trek, cx).unwrap();
+        assert_eq!(note.as_deref(), Some("Trek can't show clip.mp4 (MP4 Video, 12 bytes)."));
+        assert!(trek.visible(cx, "ide-preview-open") && trek.visible(cx, "ide-preview-reveal"));
+        assert_eq!(trek.visible(cx, "ide-preview-get-webview2"), cfg!(windows), "WebView2 offered on Windows");
+        assert!(!trek.visible(cx, "ide-preview-web-fake"));
+    });
+}
+
+#[test]
+fn a_file_trek_cant_read_says_why_and_retry_opens_it_once_it_can() {
+    run(async |cx| {
+        let trek = open(cx);
+        let locked = trek.project.join("locked.txt");
+        std::fs::write(&locked, "hello\n").unwrap();
+        let held = hold_unreadable(&locked);
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(locked.clone(), None, cx));
+        trek.render(cx);
+
+        let (_, note) = preview_state(&trek, cx).expect("a note in the editor's place");
+        let note = note.unwrap();
+        assert!(note.starts_with("Can't read locked.txt: "), "{note}");
+        assert!(trek.visible(cx, "ide-preview-retry"));
+        assert_eq!(active_file(&trek, cx), None, "no empty editor");
+
+        // Readable again: Retry opens it in the editor, in the same tab.
+        drop(held);
+        trek.click(cx, "ide-preview-retry");
+        trek.render(cx);
+        assert_eq!(tabs(&trek, cx), vec![(locked.clone(), false)]);
+        assert_eq!(active_file(&trek, cx), Some(locked));
+        assert!(preview_state(&trek, cx).is_none());
+    });
+}
+
+/// Something that keeps `path` from being read until it's dropped: a handle that shares nothing
+/// on Windows, no permissions elsewhere.
+fn hold_unreadable(path: &std::path::Path) -> impl Drop {
+    struct Held(Option<std::fs::File>, std::path::PathBuf);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.take();
+            if cfg!(unix) {
+                set_mode(&self.1, 0o644);
+            }
+        }
+    }
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let _ = (path, mode);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let file = std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap();
+        Held(Some(file), path.to_path_buf())
+    }
+    #[cfg(unix)]
+    {
+        set_mode(path, 0o000);
+        Held(None, path.to_path_buf())
+    }
+}
+
+/// A one-page PDF that says "Trek".
+const MINIMAL_PDF: &[u8] = b"%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length 41>>stream
+BT /F1 36 Tf 40 60 Td (Trek) Tj ET
+endstream endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+trailer<</Root 1 0 R>>
+%%EOF
+";
