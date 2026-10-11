@@ -189,7 +189,9 @@ const GEMINI: Hint = Hint::same("npm i -g @google/gemini-cli");
 const KIMI: Hint = Hint::same("npm i -g @moonshot-ai/kimi-code");
 const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
 const GROK: Hint = Hint { unix: "curl -fsSL https://x.ai/cli/install.sh | bash", windows: "irm https://x.ai/cli/install.ps1 | iex" };
-const DEVIN: Hint = Hint { unix: "curl -fsSL https://cli.devin.ai/install.sh | bash", windows: "irm https://static.devin.ai/cli/install.ps1 | iex" };
+// The line `devin update` itself prints on Windows. The script's own usage note still names
+// static.devin.ai/cli/install.ps1, which answers 403 now (2026-10-11).
+const DEVIN: Hint = Hint { unix: "curl -fsSL https://cli.devin.ai/install.sh | bash", windows: "irm https://cli.devin.ai/install.ps1 | iex" };
 // Goose's installer for Windows is a script to download and run; it supports x86-64 only.
 const GOOSE: Hint = Hint {
     unix: "brew install block-goose-cli",
@@ -337,7 +339,7 @@ mod tests {
         assert_eq!(win("claude-code"), "irm https://claude.ai/install.ps1 | iex");
         assert_eq!(win("cursor"), "irm 'https://cursor.com/install?win32=true' | iex");
         assert_eq!(win("grok"), "irm https://x.ai/cli/install.ps1 | iex");
-        assert_eq!(win("devin"), "irm https://static.devin.ai/cli/install.ps1 | iex");
+        assert_eq!(win("devin"), "irm https://cli.devin.ai/install.ps1 | iex");
         assert_eq!(win("droid"), "irm https://app.factory.ai/cli/windows | iex");
         // OpenCode has no PowerShell installer: npm, which its documentation lists.
         assert_eq!(win("opencode"), "npm i -g opencode-ai");
