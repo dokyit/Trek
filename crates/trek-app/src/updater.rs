@@ -46,6 +46,10 @@ pub enum UpdateAction {
     Move,
     /// A move waiting on agents: go now, stopping them.
     MoveNow,
+    /// After a move: delete the copy Trek left behind.
+    RemoveOldCopy,
+    /// After a move: leave the old copy where it is, and stop offering to remove it.
+    DismissOldCopy,
 }
 
 impl UpdateAction {
@@ -57,6 +61,8 @@ impl UpdateAction {
             UpdateAction::RestartNow => "Restart now",
             UpdateAction::Move => "Move Trek to its own folder",
             UpdateAction::MoveNow => "Move now",
+            UpdateAction::RemoveOldCopy => "Remove old copy",
+            UpdateAction::DismissOldCopy => "Dismiss",
         }
     }
 
@@ -72,9 +78,52 @@ impl UpdateAction {
 pub struct UpdateView {
     pub line: String,
     pub action: Option<UpdateAction>,
+    /// A second step, quieter, beside the first (the Updates page shows it; the sidebar's updater
+    /// keeps to one button).
+    pub secondary: Option<UpdateAction>,
     /// Checking or downloading: the action button spins.
     pub busy: bool,
     pub progress: Option<f32>,
+}
+
+/// The copy of Trek left in the folder it moved out of, while the Updates page offers to remove it
+/// (`trek_core::update::relocate::at_launch`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OldCopy {
+    pub from: PathBuf,
+    /// Where Trek runs now.
+    pub to: PathBuf,
+    /// What the move did to the user's shortcuts, which this launch knows only when the move was
+    /// its own.
+    pub shortcuts: crate::shortcuts::Report,
+    /// Windows turned the removal away: the rest is the user's.
+    pub refused: bool,
+}
+
+/// What Trek says about a move: where it runs now, and what became of the user's shortcuts.
+/// (`said` has no full stop; this adds it.)
+pub fn with_shortcuts(said: &str, shortcuts: &crate::shortcuts::Report) -> String {
+    let mut out = said.to_string();
+    if let Some(changed) = shortcuts.changed_clause() {
+        out = format!("{out}, and {changed}");
+    }
+    out.push('.');
+    if let Some(left) = shortcuts.left_sentence() {
+        out = format!("{out} {left}");
+    }
+    out
+}
+
+/// The Updates page's offer to remove the old copy: its own line and steps, beside the page's usual.
+pub fn describe_old_copy(old: &OldCopy) -> UpdateView {
+    let runs = format!("Trek now runs from {}", old.to.display());
+    if old.refused {
+        // The one thing left to the user, and only when Windows refuses.
+        let line = format!("{} Windows wouldn't let Trek remove the copy in {}; delete it yourself when convenient.", with_shortcuts(&runs, &old.shortcuts), old.from.display());
+        return UpdateView { line, action: Some(UpdateAction::DismissOldCopy), secondary: None, busy: false, progress: None };
+    }
+    let line = with_shortcuts(&format!("{runs}. The copy in {} isn't needed any more", old.from.display()), &old.shortcuts);
+    UpdateView { line, action: Some(UpdateAction::RemoveOldCopy), secondary: Some(UpdateAction::DismissOldCopy), busy: false, progress: None }
 }
 
 /// Identifies a check or download by the state it started in; one that finishes after the
@@ -275,13 +324,15 @@ pub struct Changes {
 
 /// The updater's status line and next action for a state.
 pub fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<Blocker>) -> UpdateView {
-    let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, busy: false, progress: None };
+    let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, secondary: None, busy: false, progress: None };
     if let Some(blocker) = blocker {
         // Windows: Trek can move itself out of where it is, in one click.
         if crate::words::is_windows() && blocker.movable() {
             // The cause only: the message's advice to move the folder by hand would contradict
-            // the button.
-            return view(format!("{} {}", blocker.cause(), trek_core::update::relocate::moves_line()), Some(UpdateAction::Move));
+            // the button. One Windows may lift (it refused a write; the user may have told it to
+            // let Trek be) can be asked again beside the move (`blocker_now`).
+            let line = format!("{} {}", blocker.cause(), trek_core::update::relocate::moves_line());
+            return UpdateView { secondary: blocker.may_pass().then_some(UpdateAction::Check), ..view(line, Some(UpdateAction::Move)) };
         }
         // One Windows may lift (it refused a write) can be asked again; where Trek is can't.
         return view(blocker.message(), blocker.may_pass().then_some(UpdateAction::Check));
@@ -309,6 +360,7 @@ pub fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shortcuts::Report;
     use trek_core::update::Artifact;
 
     const HOUR: i64 = 60 * 60 * 1000;
@@ -385,6 +437,22 @@ mod tests {
                 assert!(!v.busy && v.progress.is_none());
             }
         }
+        // Check now beside the move when Windows may lift what's in the way; the move alone when
+        // it can't (where Trek is can't change, and neither can who shares the folder).
+        for (blocker, secondary) in [
+            (Blocker::GuardedFolder(KnownFolder::Documents), Some(UpdateAction::Check)),
+            (Blocker::ReadOnlyLocation, Some(UpdateAction::Check)),
+            (Blocker::SharedFolder, None),
+            (Blocker::ProtectedFolder, None),
+        ] {
+            for status in [UpdateStatus::Idle, UpdateStatus::UpToDate, UpdateStatus::Failed("Couldn't check for updates: offline".into())] {
+                assert_eq!(describe_update(&status, true, Some(blocker)).secondary, secondary, "{blocker:?} in {status:?}");
+            }
+        }
+        // And nothing else has a second button.
+        for status in [UpdateStatus::Idle, UpdateStatus::UpToDate, UpdateStatus::Available { version: "0.2.1".into() }, UpdateStatus::Checking] {
+            assert_eq!(describe_update(&status, true, None).secondary, None);
+        }
         assert_eq!(UpdateAction::Move.label(), "Move Trek to its own folder");
         assert!(UpdateAction::Move.is_primary() && UpdateAction::Restart.is_primary() && !UpdateAction::MoveNow.is_primary() && !UpdateAction::Check.is_primary());
         // Not for what moving doesn't help: a build run from a checkout, a link to the folder.
@@ -396,8 +464,54 @@ mod tests {
         drop(_platform);
         let _mac = crate::words::pretend(false);
         let v = describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation));
-        assert_eq!((v.action, v.line), (Some(UpdateAction::Check), Blocker::ReadOnlyLocation.message()));
+        assert_eq!((v.action, v.secondary, v.line), (Some(UpdateAction::Check), None, Blocker::ReadOnlyLocation.message()));
         assert_eq!(describe_update(&UpdateStatus::Idle, true, Some(Blocker::SharedFolder)).action, None);
+    }
+
+    fn old_copy(shortcuts: Report, refused: bool) -> OldCopy {
+        let dir = std::env::temp_dir();
+        OldCopy { from: dir.join("Documents").join("Trek"), to: dir.join("Programs").join("Trek"), shortcuts, refused }
+    }
+
+    fn changed(n: usize) -> Report {
+        Report { changed: (0..n).map(|i| PathBuf::from(format!("Trek {i}.lnk"))).collect(), left: vec![] }
+    }
+
+    #[test]
+    fn after_a_move_the_old_copy_is_offered_for_removal_or_dismissal() {
+        let old = old_copy(Report::default(), false);
+        let v = describe_old_copy(&old);
+        assert_eq!(v.line, format!("Trek now runs from {}. The copy in {} isn't needed any more.", old.to.display(), old.from.display()));
+        assert_eq!((v.action, v.secondary, v.busy, v.progress), (Some(UpdateAction::RemoveOldCopy), Some(UpdateAction::DismissOldCopy), false, None));
+        assert_eq!((UpdateAction::RemoveOldCopy.label(), UpdateAction::DismissOldCopy.label()), ("Remove old copy", "Dismiss"));
+        assert!(!UpdateAction::RemoveOldCopy.is_primary() && !UpdateAction::DismissOldCopy.is_primary(), "tidying up isn't the page's main step");
+
+        // What became of the user's shortcuts is in the same sentence, in the singular too.
+        let one = describe_old_copy(&old_copy(changed(1), false));
+        assert!(one.line.ends_with("isn't needed any more, and 1 shortcut now points at the new copy."), "{}", one.line);
+        let two = describe_old_copy(&old_copy(changed(2), false));
+        assert!(two.line.ends_with("isn't needed any more, and 2 shortcuts now point at the new copy."), "{}", two.line);
+    }
+
+    #[test]
+    fn an_old_copy_windows_refused_to_remove_is_the_users_to_delete() {
+        let old = old_copy(Report::default(), true);
+        let v = describe_old_copy(&old);
+        assert_eq!(v.line, format!("Trek now runs from {}. Windows wouldn't let Trek remove the copy in {}; delete it yourself when convenient.", old.to.display(), old.from.display()));
+        assert_eq!((v.action, v.secondary), (Some(UpdateAction::DismissOldCopy), None), "nothing left to try: Dismiss clears the note");
+        let with = describe_old_copy(&old_copy(changed(2), true));
+        assert!(with.line.starts_with(&format!("Trek now runs from {}, and 2 shortcuts now point at the new copy. Windows wouldn't let Trek remove", old.to.display())), "{}", with.line);
+    }
+
+    #[test]
+    fn shortcuts_that_couldnt_be_changed_are_said_after_the_move() {
+        let left = crate::shortcuts::Left { lnk: PathBuf::from("Trek.lnk"), place: "on your Desktop", refused: true, why: "Access is denied.".into() };
+        let report = Report { changed: vec![PathBuf::from("Trek.lnk")], left: vec![left] };
+        assert_eq!(
+            with_shortcuts("Trek now runs from here", &report),
+            "Trek now runs from here, and 1 shortcut now points at the new copy. Windows wouldn't let Trek change the shortcut \"Trek\" on your Desktop, so it still starts the old copy."
+        );
+        assert_eq!(with_shortcuts("Trek now runs from here", &Report::default()), "Trek now runs from here.");
     }
 
     #[test]

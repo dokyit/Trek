@@ -13,8 +13,9 @@
 //! 2. `start_copy`: leave `relocated-from` in the updates folder and start the copy's helper, which
 //!    waits for this process to exit (as for an update's restart) and starts the copy. The caller
 //!    quits.
-//! 3. `take_relocation`: the copy, at its launch, finds the note and says where it runs now;
-//!    `remove_old_copy` is the toast's button.
+//! 3. `at_launch` (`take_relocation`): the copy, at its launch, finds the note and says where it
+//!    runs now, and keeps a note of the old copy until it is dealt with; `remove_old_copy` is the
+//!    button on the toast and on the Updates page.
 
 use super::{HELPER_EXE, INSTALL_FAILED, TREK_EXE, TREK_FILES, current_version, exe_version, helper_command, inside, install_root, is_link, own_folder, spawn_detached};
 use anyhow::{Context as _, Result, bail};
@@ -29,6 +30,10 @@ pub const MOVE_KEEP_ENV: &str = "TREK_RELOCATE_KEEP";
 /// What the Trek that moved leaves for the one that runs from the copy: two lines, the folder it
 /// left and the folder it went to.
 const MOVED_MARKER: &str = "relocated-from";
+/// The old copy, while it is still offered for removal: the folder it left and the one it went to,
+/// as the marker has them, kept after the marker is read so that a Trek restarted before the old
+/// copy was dealt with still offers it. Removed with the old copy, or when the user dismisses it.
+const OLD_COPY_NOTE: &str = "old-copy";
 /// A file mid-copy is called this until its copy is checked.
 const PART: &str = ".relocating";
 /// How many folders (`Trek`, `Trek-2`, …) are tried before giving up.
@@ -273,6 +278,99 @@ fn take_relocation_in(updates: &Path, here: &Path) -> Option<Moved> {
 
 fn same_folder(a: &Path, b: &Path) -> bool {
     inside(a, b) && inside(b, a)
+}
+
+/// What `at_launch` found: where Trek moved from, and whether this launch is the first since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relocated {
+    pub moved: Moved,
+    /// The note the move left was read now (not an earlier launch's): the time to point the user's
+    /// shortcuts at this copy.
+    pub fresh: bool,
+}
+
+/// At launch: the move that brought Trek here, and the old copy that still stands. The note of the
+/// move (`take_relocation`) is read once, so the old copy is kept in a note of its own until it is
+/// dealt with (removed, or dismissed on the Updates page) and offered again at each launch.
+pub fn at_launch() -> Option<Relocated> {
+    at_launch_in(&crate::paths::updates_dir(), &install_root()?)
+}
+
+fn at_launch_in(updates: &Path, here: &Path) -> Option<Relocated> {
+    if let Some(moved) = take_relocation_in(updates, here) {
+        let _ = std::fs::write(updates.join(OLD_COPY_NOTE), format!("{}\n{}\n", moved.from.display(), moved.to.display()));
+        return Some(Relocated { moved, fresh: true });
+    }
+    old_copy_in(updates, here).map(|moved| Relocated { moved, fresh: false })
+}
+
+/// The old copy an earlier launch of this Trek left a note about, if it still holds Trek's files.
+/// A note about another Trek's move (a build run from a checkout, sharing the data folder) is left
+/// for it; one that has nothing to offer any more goes.
+fn old_copy_in(updates: &Path, here: &Path) -> Option<Moved> {
+    let note = updates.join(OLD_COPY_NOTE);
+    let text = std::fs::read_to_string(&note).ok()?;
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let moved = lines.next().zip(lines.next()).map(|(from, to)| Moved { from: PathBuf::from(from), to: PathBuf::from(to) });
+    let Some(moved) = moved else {
+        let _ = std::fs::remove_file(&note);
+        return None;
+    };
+    if !same_folder(&moved.to, here) {
+        return None;
+    }
+    if inside(here, &moved.from) || inside(&moved.from, here) || !old_copy_remains(&moved.from) {
+        let _ = std::fs::remove_file(&note);
+        return None;
+    }
+    Some(moved)
+}
+
+/// `old` still holds a copy of Trek: a folder with `trek.exe` in it, not a link to one.
+pub fn old_copy_remains(old: &Path) -> bool {
+    !is_link(old) && old.join(TREK_EXE).is_file()
+}
+
+/// The old copy is dealt with (or the user doesn't want to hear about it): no more offers at launch.
+pub fn forget_old_copy() {
+    let _ = std::fs::remove_file(crate::paths::updates_dir().join(OLD_COPY_NOTE));
+}
+
+/// `trek.exe` in a folder of Trek's, as a shortcut's target says it.
+pub fn exe_in(folder: &Path) -> PathBuf {
+    folder.join(TREK_EXE)
+}
+
+/// A folder where a user's shortcuts to Trek may be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutFolder {
+    /// Where it is, as a sentence says it ("on your Desktop").
+    pub place: &'static str,
+    pub dir: PathBuf,
+    /// How many levels of folders inside it hold shortcuts too.
+    pub depth: u32,
+}
+
+/// The user's own Start menu, Desktop and taskbar pins, where Windows says they are. (Not the
+/// ones every user shares: those are the administrator's to change.)
+pub fn shortcut_folders() -> Vec<ShortcutFolder> {
+    // The same way the guarded folders are found (`SHGetKnownFolderPath`, through `directories`).
+    let roaming = directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf());
+    let desktop = directories::UserDirs::new().and_then(|d| d.desktop_dir().map(Path::to_path_buf));
+    shortcut_folders_in(roaming, desktop)
+}
+
+fn shortcut_folders_in(roaming: Option<PathBuf>, desktop: Option<PathBuf>) -> Vec<ShortcutFolder> {
+    let mut folders = vec![];
+    if let Some(roaming) = roaming.filter(|p| p.is_absolute()) {
+        let microsoft = roaming.join("Microsoft");
+        folders.push(ShortcutFolder { place: "in your Start menu", dir: microsoft.join("Windows").join("Start Menu").join("Programs"), depth: 2 });
+        folders.push(ShortcutFolder { place: "pinned to your taskbar", dir: microsoft.join("Internet Explorer").join("Quick Launch").join("User Pinned").join("TaskBar"), depth: 0 });
+    }
+    if let Some(desktop) = desktop.filter(|p| p.is_absolute()) {
+        folders.push(ShortcutFolder { place: "on your Desktop", dir: desktop, depth: 1 });
+    }
+    folders
 }
 
 /// What became of the old copy.
@@ -585,6 +683,12 @@ mod tests {
         assert_eq!(env_of(&cmd, "TREK_BACKGROUND"), Some(Some("1".into())), "behind other windows, as this one was");
         assert_eq!(mover_command(&prepared, 1, &dir, true, &env).get_envs().find(|(k, _)| *k == "TREK_BACKGROUND"), None);
 
+        // An ordinary install's move: the copy starts with none of Trek's own settings, so it is
+        // the user's Trek that registers `trek://` for itself at its launch (`register_trek_protocol`
+        // leaves it to a process that has a data folder or a capture folder of its own).
+        let plain = mover_command(&prepared, 1, &dir, true, &vars(&[("PATH", "x"), ("USERPROFILE", "C:/Users/me")]));
+        assert!(plain.get_envs().all(|(k, _)| !k.to_string_lossy().starts_with("TREK_")), "{:?}", plain.get_envs().collect::<Vec<_>>());
+
         // A capture run asks for its variables to follow it.
         let kept = mover_command(&prepared, 1, &dir, true, &vars(&[("TREK_SHOT_DIR", "D:/shots"), ("TREK_RELOCATE_KEEP", "TREK_SHOT_DIR, PATH, TREK_NOT_SET"), ("PATH", "x")]));
         assert_eq!(env_of(&kept, "TREK_SHOT_DIR"), Some(Some("D:/shots".into())));
@@ -640,6 +744,82 @@ mod tests {
         assert_eq!(take_relocation_in(&dir, &to), None);
         assert!(!dir.join(MOVED_MARKER).exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_old_copy_is_offered_again_at_the_next_launch_until_it_is_dealt_with() {
+        let dir = scratch("old-copy");
+        let (updates, here) = (dir.join("updates"), dir.join("Programs").join("Trek"));
+        let from = dir.join("Documents").join("Trek");
+        std::fs::create_dir_all(&updates).unwrap();
+        trek_folder(&from, "old");
+        trek_folder(&here, "new");
+        let moved = Moved { from: from.clone(), to: here.clone() };
+        std::fs::write(updates.join(MOVED_MARKER), format!("{}\n{}\n", from.display(), here.display())).unwrap();
+
+        // The launch that reads the move: fresh, so the shortcuts are pointed here.
+        assert_eq!(at_launch_in(&updates, &here), Some(Relocated { moved: moved.clone(), fresh: true }));
+        assert!(!updates.join(MOVED_MARKER).exists(), "the move is said once");
+        // The next launches: the old copy still stands, and is offered, but nothing is fresh.
+        for _ in 0..2 {
+            assert_eq!(at_launch_in(&updates, &here), Some(Relocated { moved: moved.clone(), fresh: false }));
+        }
+        // Another Trek sharing the data folder leaves the note for the one it names.
+        assert_eq!(at_launch_in(&updates, &dir.join("Checkout")), None);
+        assert!(updates.join(OLD_COPY_NOTE).exists());
+
+        // Dismissed or removed (`forget_old_copy`): no more offers.
+        std::fs::remove_file(updates.join(OLD_COPY_NOTE)).unwrap();
+        assert_eq!(at_launch_in(&updates, &here), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_old_copy_with_nothing_left_to_offer_is_forgotten() {
+        let dir = scratch("old-copy-gone");
+        let (updates, here) = (dir.join("updates"), dir.join("Programs").join("Trek"));
+        let from = dir.join("Documents").join("Trek");
+        std::fs::create_dir_all(&updates).unwrap();
+        trek_folder(&here, "new");
+        let note = |from: &Path, to: &Path| std::fs::write(updates.join(OLD_COPY_NOTE), format!("{}\n{}\n", from.display(), to.display())).unwrap();
+
+        // Removed by hand (or by the toast of an earlier run): not there.
+        note(&from, &here);
+        assert_eq!(at_launch_in(&updates, &here), None);
+        assert!(!updates.join(OLD_COPY_NOTE).exists());
+        // A folder with something else in it isn't Trek's any more.
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("notes.txt"), "mine").unwrap();
+        note(&from, &here);
+        assert_eq!(at_launch_in(&updates, &here), None);
+        assert!(!updates.join(OLD_COPY_NOTE).exists());
+        // Trek runs from the folder it once left (moved back, or the note is stale).
+        trek_folder(&from, "old");
+        note(&from, &here);
+        assert_eq!(at_launch_in(&updates, &from), None, "not this Trek's note");
+        assert!(updates.join(OLD_COPY_NOTE).exists(), "left for the Trek it names");
+        note(&from, &from);
+        assert_eq!(at_launch_in(&updates, &from), None);
+        assert!(!updates.join(OLD_COPY_NOTE).exists(), "the offer would be to remove where Trek runs");
+        // A damaged note goes.
+        std::fs::write(updates.join(OLD_COPY_NOTE), "one line\n").unwrap();
+        assert_eq!(at_launch_in(&updates, &here), None);
+        assert!(!updates.join(OLD_COPY_NOTE).exists());
+        assert!(old_copy_remains(&from) && !old_copy_remains(&dir.join("nowhere")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_users_own_shortcut_folders_are_the_start_menu_the_desktop_and_the_taskbar_pins() {
+        let (roaming, desktop) = (std::env::temp_dir().join("Roaming"), std::env::temp_dir().join("OneDrive").join("Desktop"));
+        let folders = shortcut_folders_in(Some(roaming.clone()), Some(desktop.clone()));
+        let found: Vec<_> = folders.iter().map(|f| (f.place, f.dir.clone(), f.depth)).collect();
+        let start = roaming.join("Microsoft").join("Windows").join("Start Menu").join("Programs");
+        let pinned = roaming.join("Microsoft").join("Internet Explorer").join("Quick Launch").join("User Pinned").join("TaskBar");
+        assert_eq!(found, [("in your Start menu", start, 2), ("pinned to your taskbar", pinned, 0), ("on your Desktop", desktop, 1)]);
+        // What Windows doesn't say, or says without a full path, isn't searched.
+        assert!(shortcut_folders_in(None, Some(PathBuf::from("Desktop"))).is_empty());
+        assert!(shortcut_folders_in(None, None).is_empty());
     }
 
     #[test]

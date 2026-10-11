@@ -4,7 +4,7 @@
 use super::SettingsView;
 use crate::palette;
 use crate::ui;
-use crate::workspace::Route;
+use crate::workspace::{Route, UpdateAction};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -841,6 +841,30 @@ impl SettingsView {
                 .label(action.label())
                 .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx))))
         });
+        // A quiet step beside it (Check now, next to the move): the page's ghost button.
+        let secondary = view.secondary.map(|action| {
+            Button::new("update-secondary")
+                .small()
+                .ghost()
+                .label(action.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx))))
+        });
+        // The old copy Trek left when it moved: a row of its own, so an update on offer keeps its button.
+        let old_copy = ws.old_copy_view().map(|old| {
+            let button = |id: &'static str, action: UpdateAction, primary: bool, cx: &mut Context<Self>| {
+                Button::new(id)
+                    .small()
+                    .when(primary, |b| b.outline())
+                    .when(!primary, |b| b.ghost())
+                    .label(action.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx))))
+            };
+            let controls = h_flex()
+                .gap(px(6.))
+                .children(old.secondary.map(|a| button("old-copy-secondary", a, false, cx)))
+                .children(old.action.map(|a| button("old-copy-action", a, true, cx)));
+            ui::group(vec![Self::row("The old copy of Trek", old.line, controls, cx)], cx)
+        });
         let header = h_flex()
             .gap(px(14.))
             .pb(px(24.))
@@ -856,9 +880,13 @@ impl SettingsView {
                         el.child(div().mt(px(6.)).h(px(4.)).max_w(px(280.)).rounded_full().bg(theme.foreground.opacity(0.08)).child(div().h_full().rounded_full().bg(palette::ember(cx)).w(relative(p))))
                     }),
             )
-            .children(action.map(|b| div().flex_none().child(b)))
+            .child(h_flex().flex_none().gap(px(6.)).children(secondary).children(action))
             .into_any_element();
-        let mut page = vec![header];
+        let mut page = vec![];
+        if let Some(old_copy) = old_copy {
+            page.push(div().pb(px(24.)).child(old_copy).into_any_element());
+        }
+        page.push(header);
         if let Some(changes) = pending {
             let title = match changes.releases.as_slice() {
                 [one] => format!("What's new in Trek {}", one.version),
