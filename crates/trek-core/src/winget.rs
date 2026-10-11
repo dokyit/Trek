@@ -13,8 +13,9 @@
 use crate::agent_update::{Latest, parse_version};
 use std::time::Duration;
 
-/// A first run may have WinGet bring its source up to date first.
-const TIMEOUT: Duration = Duration::from_secs(45);
+/// A first run may have WinGet bring its source up to date first (a few seconds); the whole
+/// check waits for the slowest agent, so a `winget` that hangs isn't waited for long.
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One `winget` at a time: its commands queue on the source database anyway, and each of Trek's
 /// WinGet installs asking at once would only have them wait on one another.
