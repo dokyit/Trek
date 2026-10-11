@@ -450,13 +450,20 @@ impl Trek {
     /// `wait`, for work that is slow by design (a test that makes git crawl) and gets a longer
     /// limit than the usual 20 s.
     pub async fn wait_up_to(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool) {
+        self.wait_explained(cx, what, limit, until, |_| String::new()).await;
+    }
+
+    /// `wait_up_to`, whose failure also says what `explain` finds in the workspace then.
+    pub async fn wait_explained(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool, explain: impl Fn(&Workspace) -> String) {
         let deadline = Instant::now() + limit;
         loop {
             cx.run_until_parked();
             if self.ws.read_with(cx, |ws, _| until(ws)) {
                 return;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for {what}: {}", self.ws.read_with(cx, |ws, _| explain(ws)));
+            }
             cx.background_executor.timer(Duration::from_millis(5)).await;
         }
     }
