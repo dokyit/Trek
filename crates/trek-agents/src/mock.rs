@@ -97,9 +97,21 @@ fn new_id(kind: &str) -> String {
 /// Sessions at their usage limit: session id → when it resets (unix ms).
 static LIMITS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::default);
 
+/// Sessions whose limit holds until `lift_limit`, whatever the real time: the reset it reports
+/// stays what it was, but the mock doesn't let a message through once that time has passed.
+static HELD: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(Default::default);
+
 /// Lift session `id`'s usage limit now, as if it had reset (tests run on a clock of their own).
 pub fn lift_limit(id: &str) {
     LIMITS.lock().unwrap().remove(id);
+    HELD.lock().unwrap().remove(id);
+}
+
+/// Keep session `id`'s limit in force until `lift_limit`, however long a loaded machine takes
+/// (the limit's reset is on the real clock; a test's app clock is its own, so on a slow machine
+/// the real reset could pass before the test got to the message it sends into the limit).
+pub fn hold_limit(id: &str) {
+    HELD.lock().unwrap().insert(id.to_string());
 }
 
 /// The messages the mock remembers in session `id`, oldest first.
@@ -647,8 +659,10 @@ impl Session {
         self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
         let mut script = Script::parse(text, self.plan);
         // Until the limit resets, every prompt meets it.
-        if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| *u > trek_core::store::now_ms()) {
-            script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()) as u64));
+        let held = HELD.lock().unwrap().contains(&self.native_id);
+        if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| held || *u > trek_core::store::now_ms()) {
+            // (A held limit past its reset keeps the reset it first reported: `limit` finds it.)
+            script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()).max(0) as u64));
         }
         match self.play(script, text).await {
             Ok(()) => {}
@@ -2617,6 +2631,27 @@ mod tests {
             m.prompt("explain the startup").await;
             let again = m.turn().await;
             assert!(again.contains(&AgentEvent::LimitReached { message: message.clone(), resets_at: Some(*at), scope: crate::LimitScope::Session }));
+            lift_limit(native_id);
+            m.prompt("explain the startup").await;
+            assert!(matches!(m.turn().await.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
+        });
+    }
+
+    #[test]
+    fn a_held_limit_outlasts_its_reset_with_the_reset_it_first_gave() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            let started = m.until(|e| matches!(e, AgentEvent::Started { .. })).await;
+            let Some(AgentEvent::Started { native_id, .. }) = started.last() else { panic!() };
+            m.prompt("mock:limit 100ms").await;
+            let first = m.turn().await;
+            let Some(AgentEvent::LimitReached { resets_at: Some(at), .. }) = first.iter().find(|e| matches!(e, AgentEvent::LimitReached { .. })) else { panic!("{first:?}") };
+            hold_limit(native_id);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(trek_core::store::now_ms() > *at, "the real reset has passed");
+            m.prompt("explain the startup").await;
+            let again = m.turn().await;
+            assert!(matches!(again.iter().find(|e| matches!(e, AgentEvent::LimitReached { .. })), Some(AgentEvent::LimitReached { resets_at: Some(r), .. }) if r == at), "{again:?}");
             lift_limit(native_id);
             m.prompt("explain the startup").await;
             assert!(matches!(m.turn().await.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
