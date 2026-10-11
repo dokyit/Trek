@@ -148,6 +148,50 @@ fn settings_has_the_switch_the_updates_and_update_all() {
 }
 
 #[test]
+fn an_update_only_an_administrator_terminal_can_run_is_shown_with_its_command_and_never_run() {
+    run(async |cx| {
+        let trek = open(cx);
+        let runs = found(&trek, cx);
+        // OpenCode installed with Chocolatey: `choco upgrade` needs an administrator terminal.
+        let choco = trek.read(cx, |ws, _| {
+            let opencode = ws.agent_updates.found.iter().find(|v| v.id == "opencode").cloned().unwrap();
+            AgentVersion {
+                id: "opencode-choco".into(),
+                install: trek_core::agent_update::Install::Chocolatey { package: "opencode".into() },
+                command: Some(
+                    trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "opencode", "-y"])
+                        .left_to_the_user("OpenCode is installed with Chocolatey, which upgrades only from an administrator terminal."),
+                ),
+                ..opencode
+            }
+        });
+        trek.update(cx, |ws, cx| {
+            ws.agent_updates.found.push(choco);
+            cx.notify();
+        });
+        trek.click(cx, "agent-updates");
+        trek.render(cx);
+        // The row says what to run and why, and has a Copy button where the others have Update.
+        assert!(trek.visible(cx, "agent-update-row-opencode-choco"));
+        assert!(trek.visible(cx, "agent-update-copy-opencode-choco"));
+        assert!(!trek.visible(cx, "agent-update-opencode-choco"), "no Update button");
+        assert!(trek.visible(cx, "agent-update-opencode"), "the others have theirs");
+        assert_eq!(trek.read(cx, |ws, _| ws.agent_updates.pending()), 5, "it's an update out all the same");
+        // Not asked for, by hand or by Update all.
+        assert!(!trek.update(cx, |ws, _| ws.agent_updates.request("opencode-choco")));
+        assert!(!trek.read(cx, |ws, _| ws.agent_updates.updatable().contains(&"opencode-choco".to_string())));
+        trek.click(cx, "agent-updates-all");
+        trek.wait(cx, "every other update to finish", |ws| ["codex", "opencode", "pi", "mock"].iter().all(|id| matches!(ws.agent_updates.job(id), Some(Job::Updated { .. } | Job::Failed { .. })))).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 4, "nothing ran for Chocolatey's");
+        assert_eq!(job(&trek, cx, "opencode-choco"), None);
+        // Copy puts the command on the clipboard.
+        trek.render(cx);
+        trek.click(cx, "agent-update-copy-opencode-choco");
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("choco upgrade opencode -y"));
+    });
+}
+
+#[test]
 fn while_an_agent_updates_no_session_of_it_starts_and_messages_wait() {
     run(async |cx| {
         let trek = open(cx);
