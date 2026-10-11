@@ -327,3 +327,21 @@ fn format_document_is_in_the_palette_beside_its_keys() {
         assert!(rows.iter().any(|(label, hint)| label == "Format document" && *hint == want), "{rows:?}");
     });
 }
+
+// ───────────────────────── tabs or spaces ─────────────────────────
+
+#[test]
+fn the_tab_key_types_a_tab_in_a_makefile_and_go_and_spaces_elsewhere() {
+    run(async |cx| {
+        let trek = open(cx);
+        for (name, typed) in [("Makefile", "\t"), ("main.go", "\t"), ("main.rs", "    ")] {
+            let file = trek.project.join(name);
+            std::fs::write(&file, "x\n").unwrap();
+            trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
+            let editor = loaded(&trek, cx).await;
+            focus_editor_text(&trek, cx, &editor);
+            trek.press(cx, "tab");
+            assert_eq!(buffer_of(&editor, cx), format!("{typed}x\n"), "Tab in {name}");
+        }
+    });
+}

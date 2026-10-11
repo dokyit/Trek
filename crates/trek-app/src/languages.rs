@@ -10,10 +10,17 @@ use std::path::Path;
 pub struct Language {
     pub name: &'static str,
     pub grammar: &'static str,
+    /// Indented with tab characters, which the Tab key types (Go, Makefiles: a recipe indented
+    /// with spaces is an error to `make`, and `gofmt` writes tabs); else with spaces.
+    pub hard_tabs: bool,
 }
 
 const fn lang(name: &'static str, grammar: &'static str) -> Language {
-    Language { name, grammar }
+    Language { name, grammar, hard_tabs: false }
+}
+
+const fn tabbed(name: &'static str, grammar: &'static str) -> Language {
+    Language { name, grammar, hard_tabs: true }
 }
 
 const PLAIN: Language = lang("Plain Text", "text");
@@ -54,7 +61,7 @@ pub fn register_highlights() {
 pub fn of(path: &Path) -> Language {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
     match name.as_str() {
-        "makefile" | "gnumakefile" => return lang("Makefile", "make"),
+        "makefile" | "gnumakefile" => return tabbed("Makefile", "make"),
         "cmakelists.txt" => return lang("CMake", "cmake"),
         "dockerfile" => return lang("Dockerfile", "text"),
         ".bashrc" | ".bash_profile" | ".zshrc" | ".profile" => return lang("Shell Script", "bash"),
@@ -70,7 +77,7 @@ pub fn of(path: &Path) -> Language {
         "js" | "mjs" | "cjs" => lang("JavaScript", "javascript"),
         "jsx" => lang("JavaScript JSX", "javascript"),
         "py" | "pyi" | "pyw" => lang("Python", "python"),
-        "go" => lang("Go", "go"),
+        "go" => tabbed("Go", "go"),
         "c" | "h" => lang("C", "c"),
         "cc" | "cpp" | "cxx" | "hpp" | "hxx" | "hh" => lang("C++", "cpp"),
         "cs" => lang("C#", "csharp"),
@@ -98,7 +105,7 @@ pub fn of(path: &Path) -> Language {
         "css" => lang("CSS", "css"),
         "scss" => lang("SCSS", "css"),
         "sh" | "bash" | "zsh" => lang("Shell Script", "bash"),
-        "mk" => lang("Makefile", "make"),
+        "mk" => tabbed("Makefile", "make"),
         "cmake" => lang("CMake", "cmake"),
         "diff" | "patch" => lang("Diff", "diff"),
         // Named as the user knows them, though nothing here colours them yet.
@@ -239,6 +246,16 @@ mod tests {
         assert_eq!(colours("notes.txt", "hello"), 0);
         assert_eq!(colours("a.graphql", "type A { b: Int }"), 0);
         assert_eq!(colours("a.proto", "message A { int32 b = 1; }"), 0);
+    }
+
+    #[test]
+    fn go_and_makefiles_are_indented_with_tabs_and_the_rest_with_spaces() {
+        for tabs in ["main.go", "Makefile", "rules.mk", "GNUmakefile"] {
+            assert!(of(Path::new(tabs)).hard_tabs, "{tabs}");
+        }
+        for spaces in ["main.rs", "a.py", "a.cs", "a.ts", "CMakeLists.txt", "notes.txt", "a.yaml"] {
+            assert!(!of(Path::new(spaces)).hard_tabs, "{spaces}");
+        }
     }
 
     #[test]

@@ -190,7 +190,10 @@ impl EditorView {
         // The extension names the file's language to the language servers; the grammar that
         // colours it is the table's (`.h`, `.mjs`, `Makefile` have none under that name).
         let lang = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
-        let grammar = crate::languages::of(&path).grammar;
+        let (grammar, hard_tabs) = {
+            let language = crate::languages::of(&path);
+            (language.grammar, language.hard_tabs)
+        };
         // Empty and read-only until the file is read, off the main thread: a big file, one
         // iCloud evicted, or a device or pipe someone named mustn't hold up the window.
         let state = cx.new(|cx| {
@@ -200,7 +203,7 @@ impl EditorView {
                 .searchable(true)
                 // Code scrolls sideways: a wrap mid-identifier reads as two lines that aren't.
                 .soft_wrap(false)
-                .tab_size(TabSize { tab_size: 4, hard_tabs: false });
+                .tab_size(TabSize { tab_size: 4, hard_tabs });
             s.set_readonly(true, cx);
             s
         });
