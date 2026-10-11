@@ -317,5 +317,7 @@ fn a_pointer_taken_off_the_window_lets_the_held_rows_go() {
         cx.run_until_parked();
         trek.render(cx);
         assert!(row_y(&trek, cx, &newcomer).is_some(), "the list caught up with it");
+        // And the pointer is outside the window now, so the next frame doesn't move it again.
+        assert!(!trek.window(cx, |window, _| crate::chrome::pointer_inside(window)), "moved off once, not on every frame");
     });
 }
