@@ -23,6 +23,7 @@ mod inbox;
 mod keys;
 mod lifecycle;
 mod limits;
+mod long_answers;
 mod look;
 mod mcp;
 mod motion;
