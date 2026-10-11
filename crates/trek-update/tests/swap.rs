@@ -183,13 +183,150 @@ fn a_locked_file_fails_the_swap_and_leaves_or_puts_everything_back() {
     drop(held);
     assert_eq!((version(&install), version(&staged)), ("0.4.0".into(), "0.4.1".into()));
 
-    // In the update: the install moved aside already, and goes back.
+    // In the update: it can't be brought next to the install, which hasn't been touched.
     let held = lock(&staged.join("trek-mcp.exe"));
     let e = swap(&install, &staged, "0.4.0", "0.4.1").unwrap_err();
-    assert!(e.contains("couldn't move the update into") && e.contains("previous version is back"), "{e}");
+    assert!(e.contains("couldn't get the update next to") && e.contains("nothing was changed"), "{e}");
     drop(held);
     assert_eq!(version(&install), "0.4.0");
-    assert!(!install.with_file_name("Trek.old-0.4.0").exists());
+    assert_eq!(std::fs::read_dir(install.parent().unwrap()).unwrap().count(), 1, "nothing next to the install");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A copy across volumes can fail half way (a file held open, a full disk); the install, which
+/// the copy never touches, is as it was.
+#[cfg(windows)]
+#[test]
+fn a_copy_that_fails_leaves_the_install_alone() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let (dir, install, staged, _) = tree("copy-fails");
+    let other_volume = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(17));
+    // Exclusive: it can't be read, so it can't be copied.
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(staged.join("trek-update.exe")).unwrap();
+    let e = trek_update::swap_with(&install, &staged, "0.4.0", "0.4.1", &other_volume).unwrap_err();
+    assert!(e.contains("couldn't get the update next to") && e.contains("nothing was changed"), "{e}");
+    drop(held);
+    assert_eq!((version(&install), version(&staged)), ("0.4.0".into(), "0.4.1".into()));
+    // What the failed copy left is named for Trek to delete, and holds only Trek's files.
+    let names: Vec<String> = std::fs::read_dir(install.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().all(|n| n == "Trek" || n.starts_with("Trek.old-incoming-")), "{names:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What `swap` does when the update is on another volume: copied, not moved, and only then does
+/// the install move aside.
+#[test]
+fn an_update_on_another_volume_is_copied_next_to_the_install_before_anything_moves() {
+    let (dir, install, staged, _) = tree("cross-volume");
+    let other_volume = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(if cfg!(windows) { 17 } else { 18 }));
+    let old = trek_update::swap_with(&install, &staged, "0.4.0", "0.4.1", &other_volume).unwrap();
+    assert_eq!((version(&install), version(&old)), ("0.4.1".into(), "0.4.0".into()));
+    assert_eq!(version(&staged), "0.4.1", "a copy leaves the staged folder for Trek to delete");
+    assert_eq!(std::fs::read_dir(install.parent().unwrap()).unwrap().count(), 2, "the install and the old one: no copy left over");
+    assert_eq!(std::fs::read(install.join("trek.exe")).unwrap(), std::fs::read(trek_test_fixtures::bin("fixture")).unwrap());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn only_full_paths_to_trek_folders_one_not_inside_the_other_are_swapped() {
+    let (dir, install, staged, _) = tree("paths");
+    let unchanged = |what: &str| {
+        assert_eq!((version(&install), version(&staged)), ("0.4.0".into(), "0.4.1".into()), "{what}");
+        assert_eq!(std::fs::read_dir(install.parent().unwrap()).unwrap().count(), 1, "{what}: nothing next to the install");
+    };
+    assert!(swap(Path::new("Trek"), &staged, "0.4.0", "0.4.1").unwrap_err().contains("full paths"));
+    assert!(swap(&install, Path::new("stage"), "0.4.0", "0.4.1").unwrap_err().contains("full paths"));
+    unchanged("relative");
+    // The install is the update, or one holds the other.
+    assert!(swap(&install, &install, "0.4.0", "0.4.1").unwrap_err().contains("one inside the other"));
+    let inside = install.join("..").join("Trek").join("trek-mcp.exe");
+    assert!(swap(&install, &inside, "0.4.0", "0.4.1").is_err());
+    let upper = PathBuf::from(install.to_string_lossy().to_uppercase());
+    if cfg!(windows) {
+        assert!(swap(&install, &upper, "0.4.0", "0.4.1").unwrap_err().contains("one inside the other"), "however it's spelled");
+    }
+    // An update folder that holds anything else (say, a Downloads that has a trek.exe in it).
+    std::fs::write(staged.join("holiday.jpg"), "x").unwrap();
+    let e = swap(&install, &staged, "0.4.0", "0.4.1").unwrap_err();
+    assert!(e.contains("isn't Trek's own folder") && e.contains("holds more than Trek"), "{e}");
+    std::fs::remove_file(staged.join("holiday.jpg")).unwrap();
+    unchanged("stray file in the update");
+    // A drive root is never a Trek folder.
+    assert!(swap(Path::new(r"C:\"), &staged, "0.4.0", "0.4.1").is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_install_that_is_a_link_is_never_swapped() {
+    let (dir, install, staged, _) = tree("link");
+    let link = dir.join("Apps").join("Link");
+    let made = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(&install).output().unwrap();
+    assert!(made.status.success());
+    let e = swap(&link, &staged, "0.4.0", "0.4.1").unwrap_err();
+    assert!(e.contains("is a link") && e.contains("nothing was changed"), "{e}");
+    assert_eq!((version(&install), version(&staged)), ("0.4.0".into(), "0.4.1".into()));
+    // Through the link works for what's inside it: its folder is a real one.
+    assert_eq!(version(&link), "0.4.0");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// If the previous version has gone (something deleted it between the swap and the rollback), the
+/// install, the new version even if it's a broken one, is left in its place: moving it aside for a
+/// folder that isn't there would leave no Trek at all.
+#[test]
+fn restore_with_nothing_to_put_back_leaves_the_install_in_place() {
+    let (dir, install, staged, _) = tree("restore-gone");
+    let old = swap(&install, &staged, "0.4.0", "0.4.1").unwrap();
+    std::fs::remove_dir_all(&old).unwrap();
+    let e = restore(&install, &old, "0.4.1").unwrap_err();
+    assert!(e.contains("isn't in") && e.contains("left as it is"), "{e}");
+    assert_eq!(version(&install), "0.4.1");
+    assert_eq!(std::fs::read_dir(install.parent().unwrap()).unwrap().count(), 1, "nothing was moved aside");
+    // An old folder with no trek.exe in it (a part) isn't a version to put back either.
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(old.join("trek-mcp.exe"), "part").unwrap();
+    assert!(restore(&install, &old, "0.4.1").is_err());
+    assert_eq!(version(&install), "0.4.1");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The rollback's second rename failing must not leave the install's place empty.
+#[cfg(windows)]
+#[test]
+fn restore_that_cant_finish_puts_the_failed_update_back_rather_than_nothing() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let (dir, install, staged, _) = tree("restore-locked");
+    let old = swap(&install, &staged, "0.4.0", "0.4.1").unwrap();
+    let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(old.join("trek-mcp.exe")).unwrap();
+    let e = restore(&install, &old, "0.4.1").unwrap_err();
+    assert!(e.contains("couldn't put the previous version back") && e.contains("Trek.old-0.4.0"), "{e}");
+    drop(held);
+    assert_eq!((version(&install), version(&old)), ("0.4.1".into(), "0.4.0".into()), "a Trek in its place, the other where the error says");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A Trek that doesn't quit in time: nothing is changed, Trek isn't started again, and the next
+/// start says why.
+#[cfg(windows)]
+#[test]
+fn a_trek_that_wont_quit_leaves_everything_as_it_is() {
+    let (dir, install, staged, updates) = tree("wont-quit");
+    let mut trek = std::process::Command::new(trek_test_fixtures::bin("fixture")).args(["sleep", "30"]).spawn().unwrap();
+    let mut p = plan(&install, &staged, &updates, Some(&["exit", "0"]));
+    p.pid = trek.id();
+    let mut lines = vec![];
+    let started = std::time::Instant::now();
+    let code = trek_update::run_waiting(&p, std::time::Duration::from_millis(700), &mut |l| lines.push(l.to_string()));
+    let _ = trek.kill();
+    let _ = trek.wait();
+    assert_eq!(code, 1);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(600) && started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!((version(&install), version(&staged)), ("0.4.0".into(), "0.4.1".into()));
+    assert_eq!(std::fs::read_dir(install.parent().unwrap()).unwrap().count(), 1);
+    assert!(!lines.iter().any(|l| l.starts_with("started")), "{lines:?}");
+    let note = std::fs::read_to_string(updates.join("install-failed")).unwrap();
+    assert!(note.contains("still running") && note.contains("nothing was changed"), "{note}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
