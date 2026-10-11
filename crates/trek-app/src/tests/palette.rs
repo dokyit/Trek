@@ -117,10 +117,12 @@ fn the_palette_has_the_window_commands_a_menu_bar_would() {
     run(async |cx| {
         let trek = open(cx);
         assert!(listed_for(&trek, cx, "minimize").contains(&"Minimize window".to_string()));
-        assert!(listed_for(&trek, cx, "close window").contains(&"Close window".to_string()));
-        let quit = if cfg!(windows) { "Exit Trek" } else { "Quit Trek" };
-        assert!(listed_for(&trek, cx, "quit").contains(&quit.to_string()));
-        assert!(listed_for(&trek, cx, "exit").contains(&quit.to_string()));
+        // Each platform's own word for it, found by either.
+        for (windows, quit) in [(true, "Exit Trek"), (false, "Quit Trek")] {
+            let _platform = crate::words::pretend(windows);
+            assert!(listed_for(&trek, cx, "quit").contains(&quit.to_string()), "{quit}");
+            assert!(listed_for(&trek, cx, "exit").contains(&quit.to_string()), "{quit}");
+        }
         // About, Settings and Check for Updates were in the menu too: they were already here.
         assert!(listed_for(&trek, cx, "about").contains(&"Settings: About".to_string()));
         assert!(listed_for(&trek, cx, "settings general").contains(&"Settings: General".to_string()));
@@ -129,7 +131,7 @@ fn the_palette_has_the_window_commands_a_menu_bar_would() {
 }
 
 #[test]
-fn quitting_and_closing_the_window_run_from_the_palette() {
+fn quitting_runs_from_the_palette() {
     run(async |cx| {
         let trek = open(cx);
         let heard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -137,10 +139,21 @@ fn quitting_and_closing_the_window_run_from_the_palette() {
         cx.update(|cx| {
             cx.on_action(move |_: &crate::Quit, _| seen.store(true, std::sync::atomic::Ordering::SeqCst));
         });
-        choose(&trek, cx, "quit", if cfg!(windows) { "Exit Trek" } else { "Quit Trek" });
+        choose(&trek, cx, "quit", crate::words::words().quit_app);
         assert!(heard.load(std::sync::atomic::Ordering::SeqCst), "the palette's Quit asked the app to quit");
-        choose(&trek, cx, "close window", "Close window");
-        assert!(cx.update(|cx| cx.windows().is_empty()), "the window closed");
+    });
+}
+
+/// The palette is the main window's (a thread window's ⌘K opens it there), and the menu's Close
+/// Window is off over the main window: on Windows, closing it would end Trek with no Exit asked for.
+#[test]
+fn the_palette_never_offers_to_close_the_main_window() {
+    run(async |cx| {
+        let trek = open(cx);
+        thread_on_screen(&trek, cx);
+        for query in ["close window", "close", "window"] {
+            assert!(!listed_for(&trek, cx, query).iter().any(|l| l == "Close window"), "{query:?}");
+        }
     });
 }
 
