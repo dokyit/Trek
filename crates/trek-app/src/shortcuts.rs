@@ -105,13 +105,36 @@ fn shortcut_files(folder: &ShortcutFolder) -> Vec<PathBuf> {
             let path = entry.path();
             if kind.is_dir() && depth < folder.depth {
                 pending.push((path, depth + 1));
-            } else if kind.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+            } else if kind.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) && !is_in_the_cloud(&entry) {
                 found.push(path);
             }
         }
     }
     found.sort();
     found
+}
+
+/// A shortcut OneDrive keeps online only (Files On-Demand): reading it would download it, which
+/// isn't Trek's to start for a file it has no reason to think is its own.
+fn is_in_the_cloud(entry: &std::fs::DirEntry) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        entry.metadata().is_ok_and(|m| is_online_only(m.file_attributes()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        false
+    }
+}
+
+/// `FILE_ATTRIBUTE_OFFLINE`, `…_RECALL_ON_OPEN` or `…_RECALL_ON_DATA_ACCESS`: the data isn't on the disk.
+fn is_online_only(attributes: u32) -> bool {
+    const OFFLINE: u32 = 0x0000_1000;
+    const RECALL_ON_OPEN: u32 = 0x0004_0000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    attributes & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
 }
 
 /// `link` as it should be once `old_exe` is at `new_exe`; `None` if it starts something else. The
@@ -360,6 +383,20 @@ mod tests {
         }
         // Nothing to compare when the old exe is no path at all.
         assert_eq!(moved_link(&link(""), Path::new(""), new), None);
+    }
+
+    #[test]
+    fn a_shortcut_kept_online_only_is_not_downloaded_to_be_looked_at() {
+        assert!(is_online_only(0x0040_0020), "a OneDrive placeholder (recall on data access, archive)");
+        assert!(is_online_only(0x0004_0000) && is_online_only(0x1000));
+        assert!(!is_online_only(0x20), "an ordinary file (archive)");
+        assert!(!is_online_only(0x0000_0001 | 0x0000_0020 | 0x0020_0000), "read-only, pinned and kept on the disk: it's there");
+        // A file that is on the disk is looked at (the walk asks the real attributes).
+        let dir = scratch("online");
+        std::fs::write(dir.join("Trek.lnk"), "x").unwrap();
+        let entry = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap();
+        assert!(!is_in_the_cloud(&entry));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
