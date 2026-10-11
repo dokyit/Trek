@@ -479,7 +479,10 @@ impl WindowTitle {
                     .child(self.left_cluster(None, true, if layout.primary_open { 1. } else { 0. }, cx))
                     .child(crate::chrome::no_drag("mode-switch", mode_switch(crate::workspace::Mode::Editor, cx)))
                     .child(
-                        h_flex().flex_1().min_w_0().justify_center().child(crate::chrome::no_drag(
+                        // The pill is laid over the room left (absolute): `TitleBar` keeps its row
+                        // at least as wide as what's in it, so a 420 px pill counted in it would
+                        // push the toggles and Windows's caption buttons off a narrow window.
+                        div().flex_1().min_w_0().h_full().relative().child(h_flex().absolute().top_0().bottom_0().left_0().right_0().justify_center().items_center().child(crate::chrome::no_drag(
                             "command-center",
                             h_flex()
                                 .id("command-center")
@@ -504,9 +507,12 @@ impl WindowTitle {
                                 .child(div().text_color(theme.muted_foreground.opacity(0.7)).child(crate::keys::shared("⌘P")))
                                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::QuickOpen), cx)),
                         )
+                        // Unlike the buttons, the pill gives way (the area is `flex_none` otherwise).
+                        .flex_shrink(1.)
+                        .min_w_0()
                         .w(px(420.))
                         .max_w(relative(1.)),
-                    ))
+                    )))
                     .child(crate::chrome::no_drag(
                         "layout-toggles",
                         h_flex()

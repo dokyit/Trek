@@ -162,6 +162,28 @@ fn every_control_in_the_editors_title_bar_is_in_a_no_drag_area() {
 }
 
 #[test]
+fn a_narrow_editor_window_narrows_the_command_center_and_keeps_its_toggles() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Editor, cx));
+        cx.run_until_parked();
+        let width = 760.;
+        cx.simulate_window_resize(trek.window, gpui_kit::size(px(width), px(640.)));
+        trek.render(cx);
+        // The pill gives way: the layout toggles and Settings stay on screen, left of where
+        // Windows's caption buttons are (which a full-width pill pushed off the window).
+        let (area, pill) = area_and_control(&trek, cx, "command-center");
+        assert!(area.size.width < px(420.) && area.size.width > px(40.), "the Command Center narrows: {area:?}");
+        assert!(holds(area, pill), "{area:?} holds {pill:?}");
+        for id in ["toggle-primary", "toggle-panel", "toggle-ai", "ide-settings"] {
+            assert!(trek.visible(cx, id), "{id} is on screen");
+            assert!(right(&trek, cx, id) <= px(width - RIGHT_RESERVE), "{id} is left of the caption buttons");
+        }
+        assert!(right(&trek, cx, "command-center") <= x(&trek, cx, "toggle-primary"), "the pill ends before the toggles");
+    });
+}
+
+#[test]
 fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
     run(async |cx| {
         let trek = open(cx);
