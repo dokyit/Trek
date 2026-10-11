@@ -130,6 +130,13 @@ impl Blocker {
     pub fn may_pass(self) -> bool {
         matches!(self, Blocker::ReadOnlyLocation | Blocker::GuardedFolder(_))
     }
+
+    /// Trek can leave the place it's in (`relocate`), on Windows: it copies its own files, which
+    /// takes reading from where it is and writing where the user owns. Not a build run from a
+    /// checkout, and not a folder that is only a link to where Trek really is.
+    pub fn movable(self) -> bool {
+        matches!(self, Blocker::ReadOnlyLocation | Blocker::ProtectedFolder | Blocker::SharedFolder | Blocker::GuardedFolder(_))
+    }
 }
 
 /// `GuardedFolder`'s message, suggesting a folder in the user's profile (`home`), which
@@ -280,6 +287,8 @@ pub fn running_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
 }
+
+pub mod relocate;
 
 // ---------- the Windows install folder ----------
 
