@@ -33,7 +33,6 @@ mod keys;
 mod job;
 mod mascot;
 mod md;
-mod menu_bar;
 mod mentions;
 mod motion;
 mod notes;
@@ -267,8 +266,9 @@ fn main() {
         cx.bind_keys(notes::key_bindings());
         cx.bind_keys(editor::key_bindings());
         app_actions(cx);
-        // macOS has the system's menu bar. Windows draws the same menus in the window (`menu_bar`),
-        // and has no Dock to keep the app up with its main window closed.
+        // macOS has the system's menu bar; Windows has none (its commands are in the palette, the
+        // settings, the context menus and the shortcuts), and no Dock to keep the app up with its
+        // main window closed.
         cx.set_menus(menus());
         if cfg!(windows) {
             root::quit_with_main_window(cx);

@@ -1,0 +1,27 @@
+# media/windows/hittest-beta1.cmds — what 0.4.1-beta.1 answered: with `legacy-pointer on` the title
+# bar's controls are drawn as they were, with nothing keeping a press on them from being a window
+# move. Each line passes when the failure is reproduced, so this suite is the proof that
+# hittest.cmds would catch it. Windows only.
+# Run: pwsh script/capture.ps1 windows/hittest-beta1
+
+pace 0
+theme night
+glass off
+project @REPO@
+send hello
+wait idle 30000
+legacy-pointer on
+# Pressed on, each of these started a window move (and the click never came).
+hittest toggle-sidebar HTCAPTION
+hittest mode-agents HTCAPTION
+hittest mode-editor HTCAPTION
+hittest pop-out HTCAPTION
+hittest toggle-tools HTCAPTION
+hittest settle HTCAPTION
+# Run and Open are menus that take their press for themselves, so the move never started and they
+# worked: the handle, with the press swallowed.
+hittest run-actions HTCAPTION:swallowed
+hittest open-in HTCAPTION:swallowed
+shot hit-beta1
+legacy-pointer off
+hittest mode-editor HTCLIENT

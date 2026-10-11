@@ -34,7 +34,7 @@ $script:LogSubs = $null
 $Verbs = @('route', 'send', 'attach', 'project', 'diff', 'pair', 'push', 'new', 'settled',
     'glass', 'tint', 'theme', 'tools', 'range', 'usage-demo', 'pace', 'wait', 'record',
     'editor', 'agent-install', 'toast', 'click', 'rclick', 'hover', 'elements', 'type',
-    'key', 'scroll', 'resize', 'approve', 'deny', 'answer', 'rewind', 'shot', 'browser', 'perf', 'quit')
+    'key', 'scroll', 'resize', 'hittest', 'realclick', 'realmove', 'realleave', 'legacy-pointer', 'count', 'approve', 'deny', 'answer', 'rewind', 'shot', 'browser', 'perf', 'quit')
 
 function Say([string]$Msg) { Write-Host "$(Get-Date -Format 'HH:mm:ss')  $Msg" }
 function Die([string]$Msg) { [Console]::Error.WriteLine("capture: $Msg"); exit 1 }
@@ -74,14 +74,14 @@ function Test-ListFile([string]$File) {
 function Test-Manifests([string]$Suite) {
     $ok = $true
     if ($Suite -and $Suite -ne 'all') {
-        $name = $Suite -replace '^(mac|ios)/', ''
-        $cmds = "media/mac/$name.cmds"
+        $name = $Suite -replace '^(mac|ios|windows)/', ''
+        $cmds = if (Test-Path "media/mac/$name.cmds") { "media/mac/$name.cmds" } else { "media/windows/$name.cmds" }
         $list = "media/ios/$name.list"
         if (Test-Path $cmds) { return (Test-Cmds (Resolve-Path $cmds).Path) }
         if (Test-Path $list) { return (Test-ListFile (Resolve-Path $list).Path) }
         Die "no manifest named $Suite (see 'capture.ps1 list')"
     }
-    foreach ($f in Get-ChildItem media/mac/*.cmds) { if (-not (Test-Cmds $f.FullName)) { $ok = $false } }
+    foreach ($f in Get-ChildItem media/mac/*.cmds, media/windows/*.cmds) { if (-not (Test-Cmds $f.FullName)) { $ok = $false } }
     foreach ($f in Get-ChildItem media/ios/*.list) { if (-not (Test-ListFile $f.FullName)) { $ok = $false } }
     $ok
 }
@@ -263,9 +263,9 @@ function Encode([string]$Concat, [string]$OutDir) {
     if (Test-Path $poster) { Copy-Item $poster "$OutDir\$base-poster.png" }
 }
 
-function Invoke-MacSuite([string]$Suite) {
-    $file = "media\mac\$Suite.cmds"
-    if (-not (Test-Path $file)) { Die "no manifest media\mac\$Suite.cmds" }
+function Invoke-MacSuite([string]$Suite, [string]$Dir = 'mac') {
+    $file = "media\$Dir\$Suite.cmds"
+    if (-not (Test-Path $file)) { Die "no manifest media\$Dir\$Suite.cmds" }
     if (-not (Test-Cmds $file)) { Die "fix the manifest first (or run 'capture.ps1 check')" }
     $records = [bool]([System.IO.File]::ReadLines($file) | Where-Object { $_ -match '^record\s' } | Select-Object -First 1)
     $ffmpeg = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
@@ -283,6 +283,8 @@ function Invoke-MacSuite([string]$Suite) {
         if (-not (Test-Artifacts $file)) { Die "declared artifacts missing (KEEP=1 keeps $work)" }
         Stop-Trek
         $outdir = "$Out\$Suite"
+        # What a manifest's own checks wrote down (hittest's answers).
+        foreach ($txt in Get-ChildItem -Filter hittest.txt $script:ShotDir) { New-Item -ItemType Directory -Force $outdir | Out-Null; Copy-Item $txt.FullName $outdir; Say "  $($txt.Name)" }
         New-Item -ItemType Directory -Force $outdir | Out-Null
         foreach ($png in Get-ChildItem -Recurse -Filter *.png $script:ShotDir) {
             # Frame sequences are intermediates for the video, not artifacts — unless there's no
@@ -312,6 +314,7 @@ function Invoke-MacSuite([string]$Suite) {
 
 function Show-Suites {
     Get-ChildItem media/mac/*.cmds | ForEach-Object { "  $($_.BaseName)" }
+    Get-ChildItem media/windows/*.cmds | ForEach-Object { "  windows/$($_.BaseName)" }
     Get-ChildItem media/ios/*.list | ForEach-Object { "  $($_.BaseName)" }
 }
 
@@ -325,6 +328,7 @@ videos it declares.
   pwsh script/capture.ps1 check [suite|all]    # lint manifests without launching anything
   pwsh script/capture.ps1 all                  # every macOS suite (iOS needs a Mac)
   pwsh script/capture.ps1 mac/parity           # one suite (media/mac/parity.cmds)
+  pwsh script/capture.ps1 windows/hittest      # a Windows-only suite (media/windows/hittest.cmds)
 
 Knobs (env): BUILD=0 skips the cargo build · SIZE=1280x820 window in points · FPS=15 for
 video assembly · OUT=dist/media · KEEP=1 keeps the scratch work dir · SHOT_TIMEOUT=900s per
@@ -341,6 +345,7 @@ switch -Regex ($Command) {
         break
     }
     '^mac/(.+)$' { Invoke-MacSuite $Matches[1]; break }
+    '^windows/(.+)$' { Invoke-MacSuite $Matches[1] 'windows'; break }
     '^ios/(.+)$' { Die 'iOS capture needs macOS (xcrun simctl)' }
     '^(|help|--help|-h)$' { Show-Help; break }
     default {

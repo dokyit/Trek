@@ -1,0 +1,21 @@
+# media/windows/titlebar.cmds — the title bar and the sidebar on Windows, for before/after frames of
+# a change to either (the DPI is the display's: 125 % on the dev laptop). Windows only.
+# Run: pwsh script/capture.ps1 windows/titlebar     (TREK_BIN=<exe> to compare builds)
+
+pace 0
+theme night
+glass off
+project @REPO@
+send hello
+wait idle 30000
+shot tb-thread-night
+route draft
+shot tb-draft-night
+editor on
+shot tb-editor-night
+editor off
+route settings:general
+shot tb-settings-night
+theme paper
+route first
+shot tb-thread-paper
