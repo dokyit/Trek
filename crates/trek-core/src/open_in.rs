@@ -110,10 +110,8 @@ pub fn spawn(launch: &Launch) -> std::io::Result<()> {
     if let Some(problem) = detect::batch_args_problem(&launch.program, &launch.args) {
         return Err(std::io::Error::other(problem));
     }
-    let mut command = std::process::Command::new(&launch.program);
+    let mut command = crate::procs::command(&launch.program);
     command.args(&launch.args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     // Reaped when it exits, so a long-lived editor doesn't leave a zombie on the Mac or Linux.
     let mut child = command.spawn()?;
     std::thread::spawn(move || child.wait());

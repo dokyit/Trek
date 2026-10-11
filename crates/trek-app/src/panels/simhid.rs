@@ -39,7 +39,7 @@ impl SimLink {
     /// Start the helper for `udid`. Events arrive on the returned channel; frames are decoded on a
     /// background thread and only the newest one is kept while the UI is busy.
     pub fn start(helper: &Path, udid: &str, renderer: SvgRenderer) -> Result<(Arc<SimLink>, async_channel::Receiver<LinkEvent>), String> {
-        let mut child = Command::new(helper)
+        let mut child = trek_core::procs::command(helper)
             .args([udid, &MAX_WIDTH.to_string()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

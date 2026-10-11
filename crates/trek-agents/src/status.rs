@@ -103,7 +103,7 @@ pub async fn claude_commands(cwd: &Path) -> Result<AgentStatus> {
 async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
     let bin = detect::which("claude").context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
     // In a group of its own: the MCP servers it starts go with it.
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = trek_core::procs::async_command(bin);
     command
         .args([
             "-p",
@@ -571,7 +571,7 @@ pub async fn devin_status() -> Result<AgentStatus> {
     #[cfg(not(windows))]
     let missing = "Devin isn't installed (curl -fsSL https://cli.devin.ai/install.sh | bash)";
     let bin = detect::which("devin").context(missing)?;
-    let out = crate::output_group(tokio::process::Command::new(&bin).args(["auth", "status"]).env("PATH", detect::login_path()), None, TIMEOUT)
+    let out = crate::output_group(trek_core::procs::async_command(&bin).args(["auth", "status"]).env("PATH", detect::login_path()), None, TIMEOUT)
         .await
         .context("devin auth status failed")?;
     let mut status = devin_account(&String::from_utf8_lossy(&out.stdout));

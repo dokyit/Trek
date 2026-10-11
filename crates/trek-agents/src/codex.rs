@@ -113,7 +113,7 @@ pub(crate) async fn start_app_server(
     backlog: &mut Vec<Value>,
 ) -> Result<(GroupChild, Rpc, RpcLines, StderrTail)> {
     let bin = detect::which("codex").context("Codex isn't installed (npm i -g @openai/codex)")?;
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = trek_core::procs::async_command(bin);
     command
         .arg("app-server")
         .current_dir(cwd)
