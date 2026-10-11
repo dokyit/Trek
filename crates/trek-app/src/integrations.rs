@@ -3,28 +3,51 @@
 
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
 }
 
 /// Accessibility permission: needed to click and type for the agent.
+#[cfg(target_os = "macos")]
 pub fn accessibility_allowed() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
 /// Screen Recording permission: needed for screenshots of other apps.
+#[cfg(target_os = "macos")]
 pub fn screen_recording_allowed() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
 
+/// Windows has no such permissions: any app may read the screen and send input (to windows
+/// that aren't elevated), so there's nothing to ask for.
+#[cfg(not(target_os = "macos"))]
+pub fn accessibility_allowed() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn screen_recording_allowed() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
 pub const ACCESSIBILITY_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+#[cfg(target_os = "macos")]
 pub const SCREEN_RECORDING_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+// The "Allow…" buttons that open these never show where the check above is always true.
+#[cfg(not(target_os = "macos"))]
+pub const ACCESSIBILITY_PANE: &str = "ms-settings:easeofaccess";
+#[cfg(not(target_os = "macos"))]
+pub const SCREEN_RECORDING_PANE: &str = "ms-settings:privacy";
 
 /// AXe drives simulator touches (taps, swipes, typing).
 pub fn axe_path() -> Option<PathBuf> {
@@ -53,8 +76,8 @@ pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
             out.push(("Claude Code", names));
         }
     }
-    // Codex: `[mcp_servers.<name>]` tables in ~/.codex/config.toml.
-    if let Ok(text) = std::fs::read_to_string(home.join(".codex/config.toml")) {
+    // Codex: `[mcp_servers.<name>]` tables in config.toml of its home (`~/.codex`, or `$CODEX_HOME`).
+    if let Ok(text) = std::fs::read_to_string(trek_core::import::codex::codex_home_for(&home).join("config.toml")) {
         let mut names: Vec<String> = text
             .lines()
             .filter_map(|l| l.trim().strip_prefix("[mcp_servers.")?.strip_suffix(']').map(str::to_string))

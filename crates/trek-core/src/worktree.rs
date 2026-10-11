@@ -557,7 +557,8 @@ mod tests {
     fn repo(name: &str) -> PathBuf {
         let dir = tmp().join("repos").join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+        // `core.autocrlf=false`: Git for Windows defaults to true, which would hand the tests CRLF files.
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "core.autocrlf", "false"], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
             git(&dir, args).unwrap();
         }
         write(&dir, "README.md", "hello\n");
@@ -566,6 +567,17 @@ mod tests {
         git(&dir, &["add", "-A"]).unwrap();
         git(&dir, &["commit", "-qm", "init"]).unwrap();
         dir
+    }
+
+    /// The folder as git spells it: symlinks resolved (`/tmp` is `/private/tmp` on macOS), and on
+    /// Windows without the `\\?\` prefix `canonicalize` adds, which git never writes.
+    fn real_path(p: &Path) -> PathBuf {
+        let real = p.canonicalize().unwrap();
+        let text = real.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(plain) if !plain.starts_with("UNC\\") => PathBuf::from(plain),
+            _ => real,
+        }
     }
 
     fn write(dir: &Path, rel: &str, text: &str) {
@@ -604,7 +616,7 @@ mod tests {
         assert!(!wt.path.join(".env.local").exists());
         assert!(!wt.path.join("local.cfg").exists());
         assert_eq!(git(&wt.path, &["branch", "--show-current"]).unwrap().trim(), "trek/add-a-verbose-flag");
-        assert_eq!(main_checkout(&wt.path).unwrap(), r.canonicalize().unwrap());
+        assert_eq!(main_checkout(&wt.path).unwrap(), real_path(&r));
         assert_eq!(main_checkout(&r), None);
         assert_eq!(checkout_root(&wt.path.join("src")), wt.path);
         // The same words again get a branch of their own.
@@ -807,12 +819,33 @@ mod tests {
     }
 
     /// A stand-in for `gh`: records its arguments, says what the real one says.
-    fn fake_gh(dir: &Path, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        let bin = dir.join(format!("gh-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}.args\"\n{script}\n", bin.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
+    /// `sh` is the script's body for a shell, `cmd` the same for `cmd.exe`.
+    fn fake_gh(dir: &Path, sh: &str, cmd: &str) -> PathBuf {
+        let id = uuid::Uuid::new_v4().simple();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let bin = dir.join(format!("gh-{id}"));
+            std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}.args\"\n{sh}\n", bin.display())).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = cmd;
+            bin
+        }
+        #[cfg(windows)]
+        {
+            let bin = dir.join(format!("gh-{id}.cmd"));
+            // One argument per line, as the shell version prints them (`%~1` drops the quotes).
+            // Only for `pr create`: cmd.exe expands an argument into the line it parses, so the
+            // `--jq` filter of `pr view` (quotes, `|`) would run as commands.
+            let script = format!(
+                "@echo off\r\ntype nul > \"{args}.args\"\r\nif not \"%~2\"==\"create\" goto done\r\n:next\r\nif \"%~1\"==\"\" goto done\r\n>> \"{args}.args\" echo %~1\r\nshift\r\ngoto next\r\n:done\r\n{body}\r\n",
+                args = bin.display(),
+                body = cmd.replace('\n', "\r\n"),
+            );
+            let _ = sh;
+            std::fs::write(&bin, script).unwrap();
+            bin
+        }
     }
 
     #[test]
@@ -824,7 +857,7 @@ mod tests {
         let wt = create(&r, "pr", &[]).unwrap();
         write(&wt.path, "x.txt", "x\n");
         commit(&wt.path, "X").unwrap();
-        let gh = fake_gh(&tmp(), "echo 'Creating pull request for trek/pr into main'\necho\necho https://github.com/o/r/pull/7");
+        let gh = fake_gh(&tmp(), "echo 'Creating pull request for trek/pr into main'\necho\necho https://github.com/o/r/pull/7", "echo Creating pull request for trek/pr into main\necho.\necho https://github.com/o/r/pull/7");
         let url = create_pr_with(&gh, &wt, "Add x", "Body").unwrap();
         assert_eq!(url, "https://github.com/o/r/pull/7");
         let args = std::fs::read_to_string(format!("{}.args", gh.display())).unwrap();
@@ -832,12 +865,12 @@ mod tests {
         // Pushed first, with its upstream set.
         assert_eq!(review(&wt).unwrap().unpushed, Some(0));
         // gh failing, or saying nothing useful, is an error with its words.
-        assert!(create_pr_with(&fake_gh(&tmp(), "echo 'no access' >&2; exit 1"), &wt, "t", "b").unwrap_err().to_string().contains("no access"));
-        assert!(create_pr_with(&fake_gh(&tmp(), "echo done"), &wt, "t", "b").is_err());
+        assert!(create_pr_with(&fake_gh(&tmp(), "echo 'no access' >&2; exit 1", "echo no access 1>&2\nexit /b 1"), &wt, "t", "b").unwrap_err().to_string().contains("no access"));
+        assert!(create_pr_with(&fake_gh(&tmp(), "echo done", "echo done"), &wt, "t", "b").is_err());
         // The open one is found; none (or a closed one: gh prints nothing) is none.
-        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo https://github.com/o/r/pull/7"), &wt).as_deref(), Some("https://github.com/o/r/pull/7"));
-        assert_eq!(find_pr_with(&fake_gh(&tmp(), "true"), &wt), None);
-        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo 'no pull requests found' >&2; exit 1"), &wt), None);
+        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo https://github.com/o/r/pull/7", "echo https://github.com/o/r/pull/7"), &wt).as_deref(), Some("https://github.com/o/r/pull/7"));
+        assert_eq!(find_pr_with(&fake_gh(&tmp(), "true", "rem"), &wt), None);
+        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo 'no pull requests found' >&2; exit 1", "echo no pull requests found 1>&2\nexit /b 1"), &wt), None);
     }
 
     #[test]

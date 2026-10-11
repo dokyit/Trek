@@ -40,13 +40,13 @@ impl ToolSet for Orchestrate {
     }
 }
 
-/// Run one tool call against Trek. `handle` receives the connection's socket as soon as it's
+/// Run one tool call against Trek. `keep` receives a handle on the connection as soon as it's
 /// open, so a cancel can shut it down.
-fn call(client: Option<&trek_ipc::Client>, name: &str, args: &Value, handle: Option<&dyn Fn(std::os::unix::net::UnixStream)>) -> rpc::ToolResult {
+fn call(client: Option<&trek_ipc::Client>, name: &str, args: &Value, keep: Option<&dyn Fn(trek_ipc::Handle)>) -> rpc::ToolResult {
     let client = client.ok_or("These tools work only in agents that Trek started (Trek's connection details are missing).")?;
     let mut conn = client.connect()?;
-    if let (Some(handle), Ok(stream)) = (handle, conn.handle()) {
-        handle(stream);
+    if let (Some(keep), Ok(handle)) = (keep, conn.handle()) {
+        keep(handle);
     }
     let result = conn.call(name, args)?;
     // Trek answers with JSON; agents read it best as indented text.
@@ -60,8 +60,8 @@ fn call(client: Option<&trek_ipc::Client>, name: &str, args: &Value, handle: Opt
 /// Serve stdin/stdout like `main`, with tool calls on threads of their own.
 pub fn serve(tools: Orchestrate) {
     let out = Arc::new(Mutex::new(std::io::stdout()));
-    // Calls in flight, by request id (as JSON): whether the client cancelled it, and its socket.
-    let inflight: Arc<Mutex<HashMap<String, (bool, Option<std::os::unix::net::UnixStream>)>>> = Default::default();
+    // Calls in flight, by request id (as JSON): whether the client cancelled it, and its connection.
+    let inflight: Arc<Mutex<HashMap<String, (bool, Option<trek_ipc::Handle>)>>> = Default::default();
     let client = Arc::new(tools.client.clone());
     let mut tools = tools;
     let mut server = rpc::Server::new();
@@ -78,10 +78,10 @@ pub fn serve(tools: Orchestrate) {
         // A cancelled call: drop its connection; Trek stops waiting on its behalf.
         if let Some(m) = msg.as_ref().filter(|m| m["method"] == "notifications/cancelled") {
             let key = m["params"]["requestId"].to_string();
-            if let Some((cancelled, stream)) = inflight.lock().unwrap().get_mut(&key) {
+            if let Some((cancelled, handle)) = inflight.lock().unwrap().get_mut(&key) {
                 *cancelled = true;
-                if let Some(stream) = stream.take() {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                if let Some(handle) = handle.take() {
+                    let _ = handle.shutdown();
                 }
             }
             continue;
@@ -114,11 +114,11 @@ pub fn serve(tools: Orchestrate) {
         let (out, inflight, client) = (out.clone(), inflight.clone(), client.clone());
         std::thread::spawn(move || {
             eprintln!("trek-mcp: tools/call {name}");
-            let keep = |stream: std::os::unix::net::UnixStream| {
+            let keep = |handle: trek_ipc::Handle| {
                 match inflight.lock().unwrap().get_mut(&key) {
                     // Cancelled before it connected.
-                    Some((true, _)) => _ = stream.shutdown(std::net::Shutdown::Both),
-                    Some((false, slot)) => *slot = Some(stream),
+                    Some((true, _)) => _ = handle.shutdown(),
+                    Some((false, slot)) => *slot = Some(handle),
                     None => {}
                 }
             };
@@ -161,29 +161,39 @@ mod tests {
 
     #[test]
     fn calls_reach_trek_and_come_back_as_text() {
-        use std::io::BufReader;
-        use std::os::unix::net::UnixListener;
-        let dir = std::env::temp_dir().join(format!("trek-mcp-orch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.sock");
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).unwrap();
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        // A socket on Unix, a pipe on Windows (named as Trek's are: clients refuse others),
+        // listened on as Trek does.
+        #[cfg(unix)]
+        let path = std::env::temp_dir().join(format!("trek-mcp-orch-{}.sock", std::process::id()));
+        #[cfg(windows)]
+        let path = trek_ipc::pipe_name(0).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut listener = {
+            let _enter = rt.enter();
+            trek_ipc::server::Listener::bind(&path).unwrap()
+        };
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut r = BufReader::new(stream.try_clone().unwrap());
-            let mut w = stream;
-            let _hello = trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap();
-            w.write_all(trek_ipc::encode(&json!({"ok": true})).as_bytes()).unwrap();
-            let req: Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
-            assert_eq!(req["method"], "task_status");
-            assert_eq!(req["params"]["id"], "abc");
-            w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(json!({"id": "abc", "status": "done"})))).as_bytes()).unwrap();
+            rt.block_on(async {
+                let (rd, mut w) = tokio::io::split(listener.accept().await.unwrap());
+                let mut r = tokio::io::BufReader::new(rd);
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                w.write_all(trek_ipc::encode(&json!({"ok": true})).as_bytes()).await.unwrap();
+                line.clear();
+                r.read_line(&mut line).await.unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["method"], "task_status");
+                assert_eq!(req["params"]["id"], "abc");
+                w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(json!({"id": "abc", "status": "done"})))).as_bytes()).await.unwrap();
+            })
         });
-        let mut tools = Orchestrate { client: Some(trek_ipc::Client { socket: path, token: "t".into(), session: "s".into() }) };
+        let mut tools = Orchestrate { client: Some(trek_ipc::Client { socket: path.clone(), token: "t".into(), session: "s".into() }) };
         let out = tools.call("task_status", &json!({"id": "abc"})).unwrap();
         let text = out[0]["text"].as_str().unwrap();
         assert!(text.contains("\"status\": \"done\""), "{text}");
         server.join().unwrap();
-        let _ = std::fs::remove_dir_all(dir);
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(path);
     }
 }

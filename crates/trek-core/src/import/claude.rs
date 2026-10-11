@@ -1,7 +1,13 @@
 //! Claude Code sessions: `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`.
+//!
+//! The slug is the project's path with every character that isn't a letter or digit turned into
+//! `-` (`/Users/me/app` is `-Users-me-app`, `C:\Users\me\app` is `C--Users-me-app`). That can't be
+//! reversed: `-` may have been `\`, `/`, `.`, `_`, a space or a real `-`. So the folder name is
+//! never read back; a session's own `cwd` (recorded on its lines, in the system's own path syntax)
+//! says where it ran.
 
 use super::{
-    Evidence, ImportedThread, Transcript, classify, clip, file_mtime_ms, is_injected, is_interruption, is_temp_dir,
+    Evidence, ImportedThread, Transcript, classify, clip, file_mtime_ms, is_injected, is_interruption, is_temp_dir, recorded_path,
     is_title_request, legacy_is_injected, legacy_title_from, ms_from_rfc3339, source_title, title_from, unwrap_pasted, user_text,
 };
 use crate::store::{Item, ResumePoint, ToolStatus};
@@ -172,7 +178,7 @@ fn index_file(path: &Path, updated: i64, min_updated: i64, held: &HashSet<String
             continue;
         }
         if cwd.is_none() {
-            cwd = v["cwd"].as_str().map(PathBuf::from);
+            cwd = v["cwd"].as_str().map(recorded_path);
         }
         if branch.is_none() {
             branch = v["gitBranch"].as_str().filter(|b| !b.is_empty()).map(String::from);
@@ -620,6 +626,10 @@ mod tests {
 
     /// A session file in Claude Code's format: conversation lines get the usual envelope.
     fn session(dir: &Scratch, id: &str, cwd: &str, entrypoint: &str, lines: &[Value]) -> PathBuf {
+        session_in(dir, "-Users-me-code-app", id, cwd, entrypoint, lines)
+    }
+
+    fn session_in(dir: &Scratch, folder: &str, id: &str, cwd: &str, entrypoint: &str, lines: &[Value]) -> PathBuf {
         let body: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -634,7 +644,7 @@ mod tests {
                 l.to_string()
             })
             .collect();
-        dir.write(&format!("-Users-me-code-app/{id}.jsonl"), &(body.join("\n") + "\n"))
+        dir.write(&format!("{folder}/{id}.jsonl"), &(body.join("\n") + "\n"))
     }
 
     fn user(content: impl Into<Value>, at: &str) -> Value {
@@ -657,6 +667,39 @@ mod tests {
 
     fn index(path: &Path) -> ImportedThread {
         index_file(path, 1, 0, &HashSet::new()).expect("indexed")
+    }
+
+    /// Project folders on either system, scanned wherever Trek runs (a synced home): the folder
+    /// name is never turned back into a path, the session's recorded `cwd` is the project.
+    #[test]
+    fn the_project_is_the_recorded_cwd_not_the_folder_name() {
+        let dir = Scratch::new();
+        let chat = [user("fix the login bug", "2026-10-01T10:00:00Z"), reply("fixed", "2026-10-01T10:01:00Z")];
+        // `-` stands for `\`, `/`, `.`, `_`, a space and a real `-` alike, so `C--Users-me-my-app`
+        // could be `C:\Users\me\my-app`, `…\my.app`, `…\my app` or `…\my\app`: only the cwd knows.
+        let cases = [
+            ("C--Users-me-my-app", "win-hyphen", r"C:\Users\me\my-app"),
+            ("C--Users-me-my-app", "win-dot", r"C:\Users\me\my.app"),
+            ("C--Users-me-my-app", "win-space", r"C:\Users\me\my app"),
+            ("C--Users-me-my-app", "win-nested", r"C:\Users\me\my\app"),
+            ("D--work-API_v2", "win-other-drive", r"D:\work\API_v2"),
+            ("-Users-me-my-app", "mac-hyphen", "/Users/me/my-app"),
+            ("-Users-me-my-app", "mac-dot", "/Users/me/my.app"),
+            ("-Users-me--config-app", "mac-hidden", "/Users/me/.config/app"),
+        ];
+        for (folder, id, cwd) in cases {
+            session_in(&dir, folder, id, cwd, "cli", &chat);
+        }
+        let found = scan_root(&dir.0, 0, &HashSet::new());
+        assert_eq!(found.len(), cases.len());
+        for (_, id, cwd) in cases {
+            let t = found.iter().find(|t| t.native_id == id).expect(id);
+            assert_eq!(t.cwd.as_deref(), Some(Path::new(cwd)), "{id}");
+            assert_eq!(t.skip, None, "{id}");
+        }
+        // A session that never recorded a folder isn't given one guessed from its folder's name.
+        let bare = dir.write("C--Users-me-my-app/bare.jsonl", &format!("{}\n", user("hello", "2026-10-01T10:00:00Z")));
+        assert_eq!(index(&bare).cwd, None);
     }
 
     #[test]

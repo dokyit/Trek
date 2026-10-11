@@ -17,24 +17,11 @@ use trek_core::notes::{self, Block, Edit, Note};
 
 actions!(notes, [Bold, Italic, Underline, Strike, Bullets, Numbers, Checklist, Heading1, Heading2, Quote, Code, ToggleCheck, NewNote]);
 
-const CONTEXT: &str = "NoteEditor";
+pub(crate) const CONTEXT: &str = "NoteEditor";
 
+/// The notes' shortcuts, from the table in `keys.rs`.
 pub fn key_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("cmd-b", Bold, Some(CONTEXT)),
-        KeyBinding::new("cmd-i", Italic, Some(CONTEXT)),
-        KeyBinding::new("cmd-u", Underline, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-x", Strike, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-8", Bullets, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-7", Numbers, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-9", Checklist, Some(CONTEXT)),
-        KeyBinding::new("cmd-alt-1", Heading1, Some(CONTEXT)),
-        KeyBinding::new("cmd-alt-2", Heading2, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-.", Quote, Some(CONTEXT)),
-        KeyBinding::new("cmd-e", Code, Some(CONTEXT)),
-        KeyBinding::new("cmd-enter", ToggleCheck, Some(CONTEXT)),
-        KeyBinding::new("cmd-n", NewNote, Some("Notes")),
-    ]
+    crate::keys::bindings(crate::keys::Group::Notes)
 }
 
 /// Text colours and highlights a note can use: a name, the text colour, the highlight.
@@ -142,6 +129,8 @@ struct Format {
     group: u8,
 }
 
+// The tips are written for a Mac; `tool` and the "More formatting" menu localize them.
+// keys: localized where used
 const FORMATS: [Format; 11] = [
     Format { id: "note-bold", icon: crate::assets::Lucide::Bold, tip: "Bold (⌘B)", act: |t, w, cx| t.wrap("**", "**", w, cx), tier: 0, group: 0 },
     Format { id: "note-italic", icon: crate::assets::Lucide::Italic, tip: "Italic (⌘I)", act: |t, w, cx| t.wrap("*", "*", w, cx), tier: 0, group: 0 },
@@ -155,6 +144,7 @@ const FORMATS: [Format; 11] = [
     Format { id: "note-quote", icon: crate::assets::Lucide::Quote, tip: "Quote (⌘⇧.)", act: |t, w, cx| t.block(Block::Quote, w, cx), tier: 2, group: 2 },
     Format { id: "note-code", icon: crate::assets::Lucide::Code, tip: "Code (⌘E)", act: |t, w, cx| t.wrap("`", "`", w, cx), tier: 2, group: 2 },
 ];
+// keys: end
 
 pub struct NotesView {
     workspace: Entity<Workspace>,
@@ -189,6 +179,9 @@ impl NotesView {
             async {}
         })
         .detach();
+        // And when the main window goes, which takes this view and its pending save with it: a
+        // closed main window on macOS, or any quit on Windows, which closes the windows first.
+        cx.on_release(|this: &mut Self, _| this.flush()).detach();
         let mut subscriptions = vec![cx.subscribe_in(&editor, window, |this, state, event: &InputEvent, window, cx| match event {
             InputEvent::Change => {
                 let (body, selection) = Self::read(state, cx);
@@ -427,7 +420,7 @@ impl NotesView {
     }
 
     fn tool(&self, id: &'static str, icon: impl Into<Icon>, tip: &'static str, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)) -> AnyElement {
-        crate::ui::icon_button(id, icon, tip).on_click(cx.listener(move |this, _, window, cx| f(this, window, cx))).into_any_element()
+        crate::ui::icon_button(id, icon, crate::keys::shared(tip)).on_click(cx.listener(move |this, _, window, cx| f(this, window, cx))).into_any_element()
     }
 
     fn divider(cx: &App) -> AnyElement {
@@ -501,8 +494,8 @@ impl NotesView {
             .gap(px(1.))
             .border_b_1()
             .border_color(theme.foreground.opacity(0.06))
-            .child(crate::ui::icon_button("note-undo", crate::assets::Lucide::Undo2, "Undo (⌘Z)").disabled(self.history.past.is_empty()).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))))
-            .child(crate::ui::icon_button("note-redo", crate::assets::Lucide::Redo2, "Redo (⇧⌘Z)").disabled(self.history.future.is_empty()).on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))))
+            .child(crate::ui::icon_button("note-undo", crate::assets::Lucide::Undo2, crate::keys::shared("Undo (⌘Z)")).disabled(self.history.past.is_empty()).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))))
+            .child(crate::ui::icon_button("note-redo", crate::assets::Lucide::Redo2, crate::keys::shared("Redo (⇧⌘Z)")).disabled(self.history.future.is_empty()).on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))))
             .children(FORMATS.iter().enumerate().flat_map(|(i, f)| {
                 // A divider before each group that has a tool showing.
                 let starts_group = i == 0 || FORMATS[i - 1].group != f.group;
@@ -518,7 +511,7 @@ impl NotesView {
                     menu = menu.min_w(px(200.));
                     for f in &hidden {
                         let (me, act) = (me.clone(), f.act);
-                        menu = menu.item(PopupMenuItem::new(f.tip).icon(Icon::new(f.icon)).on_click(move |_, window, cx| {
+                        menu = menu.item(PopupMenuItem::new(crate::keys::shared(f.tip)).icon(Icon::new(f.icon)).on_click(move |_, window, cx| {
                             let _ = me.update(cx, |this, cx| act(this, window, cx));
                         }));
                     }
@@ -624,7 +617,7 @@ impl NotesView {
                     .border_b_1()
                     .border_color(theme.foreground.opacity(0.06))
                     .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Notes"))
-                    .child(crate::ui::icon_button("note-new", crate::assets::Lucide::SquarePen, "New note (⌘N)").on_click(cx.listener(|this, _, window, cx| this.new_note(window, cx)))),
+                    .child(crate::ui::icon_button("note-new", crate::assets::Lucide::SquarePen, crate::keys::shared("New note (⌘N)")).on_click(cx.listener(|this, _, window, cx| this.new_note(window, cx)))),
             )
             .child(
                 v_flex()
@@ -636,7 +629,7 @@ impl NotesView {
                     .p(px(6.))
                     .gap(px(2.))
                     .when(self.notes.is_empty(), |el| {
-                        el.child(div().p(px(12.)).text_xs().text_color(theme.muted_foreground).child("No notes yet. Start typing, or press ⌘N."))
+                        el.child(div().p(px(12.)).text_xs().text_color(theme.muted_foreground).child(crate::keys::shared("No notes yet. Start typing, or press ⌘N.")))
                     })
                     .children(self.notes.iter().map(|n| {
                         let active = Some(&n.id) == self.current.as_ref();

@@ -1,7 +1,7 @@
 //! Codex threads: index in `~/.codex/state_5.sqlite`, transcripts in rollout JSONL files.
 
 use super::{
-    Evidence, ImportedThread, Transcript, classify, clip, codex_attachments, codex_request, copies_message, is_injected, is_temp_dir,
+    Evidence, ImportedThread, Transcript, classify, clip, codex_attachments, codex_request, copies_message, is_injected, is_temp_dir, recorded_path,
     is_title_request, legacy_title_from, ms_from_rfc3339, source_title, strip_block, title_from, user_text,
 };
 use crate::store::{Item, ResumePoint, ToolStatus};
@@ -13,8 +13,30 @@ use std::collections::HashSet;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
+/// Codex's data folder: `$CODEX_HOME` when set (Codex's documented override, on every platform),
+/// else `~/.codex`.
+pub fn codex_home() -> PathBuf {
+    codex_home_for(&crate::paths::home())
+}
+
+/// [`codex_home`] for a given home folder. An isolated process (a test, a capture run) never
+/// follows `CODEX_HOME` out of its throwaway home to the user's real folder.
+pub fn codex_home_for(home: &Path) -> PathBuf {
+    let env = if crate::paths::isolated() { None } else { std::env::var_os("CODEX_HOME") };
+    resolve_codex_home(env.as_deref(), home)
+}
+
+fn resolve_codex_home(env: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf {
+    // Codex treats an empty value as unset; a relative one is taken from the working folder, which
+    // isn't stable for Trek, so it isn't followed.
+    match env.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir,
+        _ => home.join(".codex"),
+    }
+}
+
 fn db() -> Option<Connection> {
-    let home = crate::paths::home().join(".codex");
+    let home = codex_home();
     // Newest state db wins (state_5 today; tolerate future bumps).
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(&home)
         .ok()?
@@ -116,7 +138,7 @@ fn rollout_originator(path: &Path) -> Option<String> {
 }
 
 fn thread_from(row: &Row) -> ImportedThread {
-    let cwd = row.cwd.as_deref().map(PathBuf::from);
+    let cwd = row.cwd.as_deref().map(recorded_path);
     let first = row.first.as_deref().filter(|f| !f.trim().is_empty());
     // Codex Desktop sometimes leaves the index's column empty; the rollout records it.
     let originator = match row.originator.as_str() {
@@ -614,6 +636,24 @@ mod tests {
     }
 
     #[test]
+    fn windows_folders_come_without_the_verbatim_prefix() {
+        let f = Fixture::new();
+        let prompts = ["try this", "and that"];
+        // Codex on Windows records the folder as `\\?\C:\…`; Trek's projects are `C:\…`.
+        f.thread("verbatim", &[("cwd", r"\\?\C:\Users\me\code\app")], &prompts);
+        f.thread("unc", &[("cwd", r"\\?\UNC\nas\share\app")], &prompts);
+        f.thread("plain", &[("cwd", r"C:\Users\me\code\app")], &prompts);
+        f.thread("mac", &[("cwd", "/Users/me/code/app")], &prompts);
+        // Both spellings of a temp folder are still found.
+        f.thread("temp", &[("cwd", r"\\?\C:\Users\me\AppData\Local\Temp\run"), ("source", "exec")], &prompts);
+        assert_eq!(f.get("verbatim").cwd, Some(PathBuf::from(r"C:\Users\me\code\app")));
+        assert_eq!(f.get("unc").cwd, Some(PathBuf::from(r"\\nas\share\app")));
+        assert_eq!(f.get("plain").cwd, f.get("verbatim").cwd);
+        assert_eq!(f.get("mac").cwd, Some(PathBuf::from("/Users/me/code/app")));
+        assert_eq!(f.get("temp").skip, Some(Skip::TempDir));
+    }
+
+    #[test]
     fn a_missing_originator_is_read_from_the_rollout() {
         let f = Fixture::new();
         let tmp = [("cwd", "/private/tmp/scratch-experiment")];
@@ -880,5 +920,22 @@ mod tests {
         // Cache writes are part of the input too (GPT-5.6 and later price them apart).
         let written = json!({ "input_tokens": 20000, "cached_input_tokens": 4000, "cache_write_input_tokens": 12000, "output_tokens": 50, "reasoning_output_tokens": 20, "total_tokens": 20050 });
         assert_eq!(tokens(&written), TokenUsage { input: 4000, output: 50, cache_read: 4000, cache_write: 12000 });
+    }
+
+    #[test]
+    fn codex_home_follows_codex_home_when_it_names_a_folder() {
+        let home = Path::new("/Users/me");
+        let os = std::ffi::OsStr::new;
+        assert_eq!(resolve_codex_home(None, home), home.join(".codex"));
+        assert_eq!(resolve_codex_home(Some(os("")), home), home.join(".codex"));
+        // Codex resolves a relative one against the working folder, which Trek's isn't stable.
+        assert_eq!(resolve_codex_home(Some(os("codex-data")), home), home.join(".codex"));
+        #[cfg(windows)]
+        {
+            assert_eq!(resolve_codex_home(Some(os(r"D:\agents\codex")), Path::new(r"C:\Users\me")), PathBuf::from(r"D:\agents\codex"));
+            assert_eq!(resolve_codex_home(None, Path::new(r"C:\Users\me")), PathBuf::from(r"C:\Users\me\.codex"));
+        }
+        #[cfg(not(windows))]
+        assert_eq!(resolve_codex_home(Some(os("/data/codex")), home), PathBuf::from("/data/codex"));
     }
 }

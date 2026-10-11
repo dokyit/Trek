@@ -1,7 +1,7 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
-use crate::{AgentEvent, Billing, Command, Decision, GroupChild, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, Prompt, Question, SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -97,6 +97,13 @@ const UNUSED_NOTIFICATIONS: &[&str] = &[
     "thread/status/changed",
 ];
 
+/// End an app-server: its stdin first, the cue to exit and on Windows the only gentle one (see
+/// `GroupChild::terminate`), then the group.
+async fn stop(mut child: GroupChild, rpc: Rpc) {
+    drop(rpc);
+    child.terminate().await;
+}
+
 /// Spawn `codex app-server` in `cwd` and complete the initialize handshake. Messages that
 /// arrive before the handshake completes are left in `backlog`. The experimental API is on
 /// for Plan mode (`collaborationMode`).
@@ -128,7 +135,7 @@ pub(crate) async fn start_app_server(
         )
         .await?;
     if let Err(e) = startup_response(&mut lines, id, backlog, "initialize").await {
-        child.terminate().await;
+        stop(child, rpc).await;
         return Err(if e.to_string().contains("exited") { stderr.exited("Codex") } else { e });
     }
     rpc.send(&json!({ "method": "initialized" })).await?;
@@ -265,8 +272,12 @@ fn readable_error(msg: &str) -> String {
         .unwrap_or_else(|| msg.to_string())
 }
 
-/// `/bin/zsh -lc 'touch a.txt'` → `touch a.txt`: the command as the model wrote it.
+/// `/bin/zsh -lc 'touch a.txt'` → `touch a.txt`: the command as the model wrote it. On Windows
+/// Codex wraps in `powershell.exe -NoProfile -Command <script>` (or `pwsh`, or `cmd.exe /c`).
 fn unwrap_shell(cmd: &str) -> String {
+    if let Some(script) = unwrap_windows_shell(cmd) {
+        return script;
+    }
     for flag in [" -lc ", " -c "] {
         let Some(i) = cmd.find(flag) else { continue };
         if !matches!(cmd[..i].rsplit('/').next(), Some("sh" | "bash" | "zsh")) {
@@ -282,6 +293,65 @@ fn unwrap_shell(cmd: &str) -> String {
         return rest.to_string();
     }
     cmd.to_string()
+}
+
+/// What Codex puts ahead of a PowerShell script so its output comes back as UTF-8: not part of the
+/// command the model wrote.
+const POWERSHELL_UTF8_PRELUDES: [&str; 2] = ["[Console]::OutputEncoding=[System.Text.Encoding]::UTF8", "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}"];
+
+/// `powershell.exe -NoProfile -Command 'Get-ChildItem'` → `Get-ChildItem`, and likewise for `pwsh`
+/// and `cmd.exe /c`: the program may be a path (quoted when it has spaces), in any case, with or
+/// without `.exe`. `None` when `cmd` isn't one of those wrappers.
+fn unwrap_windows_shell(cmd: &str) -> Option<String> {
+    let (program, mut rest) = next_word(cmd)?;
+    let name = program.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    let powershell = matches!(name, "powershell" | "pwsh");
+    if !powershell && name != "cmd" {
+        return None;
+    }
+    let script = loop {
+        let (word, after) = next_word(rest)?;
+        match word.to_ascii_lowercase().as_str() {
+            "-command" | "-c" if powershell => break after,
+            "/c" if !powershell => break after,
+            "-noprofile" | "-nologo" | "-noninteractive" | "-executionpolicybypass" | "-noexit" if powershell => rest = after,
+            "-executionpolicy" | "-ep" if powershell => rest = next_word(after)?.1,
+            "/d" | "/s" | "/q" if !powershell => rest = after,
+            _ => return None,
+        }
+    };
+    let script = script.trim();
+    if script.is_empty() {
+        return None;
+    }
+    let script = if script.len() >= 2 && script.starts_with('\'') && script.ends_with('\'') {
+        script[1..script.len() - 1].replace("'\"'\"'", "'").replace("''", "'")
+    } else if script.len() >= 2 && script.starts_with('"') && script.ends_with('"') {
+        script[1..script.len() - 1].replace("\\\"", "\"").replace("`\"", "\"").replace("\"\"", "\"")
+    } else {
+        script.to_string()
+    };
+    let mut script = script.as_str();
+    if powershell {
+        for prelude in POWERSHELL_UTF8_PRELUDES {
+            if let Some(after) = script.strip_prefix(prelude) {
+                script = after.trim_start_matches([';', ' ', '\r', '\n']);
+            }
+        }
+    }
+    Some(script.to_string())
+}
+
+/// The first word of `s` (a quoted one without its quotes) and what follows it.
+fn next_word(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if let Some(inner) = s.strip_prefix(['\'', '"']) {
+        let end = inner.find(&s[..1])?;
+        return Some((&inner[..end], &inner[end + 1..]));
+    }
+    let end = s.find(char::is_whitespace).unwrap_or(s.len());
+    (end > 0).then(|| (&s[..end], &s[end..]))
 }
 
 fn command_text(v: &Value) -> String {
@@ -358,8 +428,14 @@ fn mcp_title(item: &Value) -> String {
 /// `mcp_servers` for Codex's config: the shared shape for stdio servers, `url` and
 /// `http_headers` for remote ones, with a tool timeout where a server needs longer than Codex's
 /// default minute.
-fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
-    let mut out = mcp_servers_json(servers);
+///
+/// Along with a notice for each server that can't be handed to Codex (left out).
+fn codex_mcp_servers(servers: &[crate::McpServer]) -> (Value, Vec<String>) {
+    codex_mcp_servers_with(servers, mcp_servers_json(servers, BatchHandOff::ResolvedPath))
+}
+
+/// `codex_mcp_servers` on top of the servers' JSON as handed over (see `mcp_servers_json_with`).
+fn codex_mcp_servers_with(servers: &[crate::McpServer], (mut out, left_out): (Value, Vec<String>)) -> (Value, Vec<String>) {
     for s in servers {
         let Some(entry) = out.get_mut(&s.name) else { continue };
         if let crate::McpTransport::Http { url, headers } = &s.transport {
@@ -373,7 +449,7 @@ fn codex_mcp_servers(servers: &[crate::McpServer]) -> Value {
             entry["tool_timeout_sec"] = json!(secs);
         }
     }
-    out
+    (out, left_out)
 }
 
 fn tool_output(item: &Value) -> String {
@@ -560,7 +636,24 @@ struct Session {
     background: Vec<String>,
     /// Codex's own ids for the terminals commands run in, by item id: what stopping one takes.
     processes: HashMap<String, String>,
+    /// Windows (a field so both platforms' behaviour is tested on either).
+    windows: bool,
+    /// The user has been told Codex's Windows sandbox isn't set up.
+    sandbox_told: bool,
 }
+
+/// A command Codex's Windows sandbox couldn't start: its sandbox hasn't had the one-time setup,
+/// and every command under Supervised or Auto fails before it starts, with an output that says
+/// the sandbox's "setup refresh had errors" (Codex 0.162.0).
+fn sandbox_not_set_up(item: &Value, windows: bool) -> bool {
+    windows
+        && item["type"] == "commandExecution"
+        && item["status"] == "failed"
+        && item["aggregatedOutput"].as_str().is_some_and(|o| o.contains("setup refresh had errors"))
+}
+
+/// What the user is told when `sandbox_not_set_up`.
+const SANDBOX_SETUP_NOTICE: &str = "Codex's Windows sandbox needs its one-time setup, so its commands fail before they start. Run codex once in a terminal and accept the sandbox setup it asks for, or set this thread's access to Full access.";
 
 impl Session {
     fn new(thread_id: String, config: &SessionConfig, opened: &Value, next_id: i64) -> Self {
@@ -595,6 +688,8 @@ impl Session {
             commands: HashMap::new(),
             background: vec![],
             processes: HashMap::new(),
+            windows: cfg!(windows),
+            sandbox_told: false,
         }
     }
 
@@ -1179,7 +1274,13 @@ impl Session {
             Some("commandExecution") => {
                 self.command_gone(&id, out);
                 let output = item["aggregatedOutput"].as_str().map(|o| clip(o, 8000)).unwrap_or_else(declined);
-                AgentEvent::ToolFinished { id, output, ok: status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0 }
+                let ok = status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0;
+                out.events.push(AgentEvent::ToolFinished { id, output, ok });
+                // Said once after the first command it hit, not at every one.
+                if sandbox_not_set_up(item, self.windows) && !std::mem::replace(&mut self.sandbox_told, true) {
+                    out.events.push(AgentEvent::Notice(SANDBOX_SETUP_NOTICE.into()));
+                }
+                return;
             }
             Some("fileChange") => {
                 let (added, removed) = change_lines(item);
@@ -1314,7 +1415,7 @@ pub async fn run(
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
     let mut backlog = Vec::new();
-    let (mut child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
+    let (child, mut rpc, mut lines, stderr) = start_app_server(&config.cwd, UNUSED_NOTIFICATIONS, &mut backlog).await?;
     // Which login the session uses (ChatGPT plan or API key); answered alongside thread/start.
     let account_req = rpc.request("account/read", json!({})).await?;
 
@@ -1327,7 +1428,11 @@ pub async fn run(
     }
     if !config.mcp_servers.is_empty() {
         // Config overrides merge with the user's own `mcp_servers` (verified against 0.160).
-        params["config"] = json!({ "mcp_servers": codex_mcp_servers(&config.mcp_servers) });
+        let (servers, left_out) = codex_mcp_servers(&config.mcp_servers);
+        for notice in left_out {
+            let _ = events.send(AgentEvent::Notice(notice)).await;
+        }
+        params["config"] = json!({ "mcp_servers": servers });
     }
     let mut lost = false;
     // The thread couldn't be cut back or forked where asked: a new one, with the recap.
@@ -1341,7 +1446,7 @@ pub async fn run(
                     match cut_back(&mut rpc, &mut lines, &mut backlog, &thread, &at).await {
                         Ok(()) => Some(r),
                         Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
-                            child.terminate().await;
+                            stop(child, rpc).await;
                             return Err(e);
                         }
                         Err(e) => {
@@ -1353,7 +1458,7 @@ pub async fn run(
                 }
                 Ok(r) => Some(r),
                 Err(e) if e.downcast_ref::<ResponseTimeout>().is_some() => {
-                    child.terminate().await;
+                    stop(child, rpc).await;
                     return Err(e);
                 }
                 // Codex no longer has the thread (its rollout was deleted): carry on in a new one.
@@ -1379,7 +1484,7 @@ pub async fn run(
             match startup_response(&mut lines, id, &mut backlog, "thread/start").await {
                 Ok(r) => r,
                 Err(e) => {
-                    child.terminate().await;
+                    stop(child, rpc).await;
                     return Err(e);
                 }
             }
@@ -1413,7 +1518,7 @@ pub async fn run(
         }
         for ev in std::mem::take(&mut out.events) {
             if events.send(ev).await.is_err() {
-                child.terminate().await;
+                stop(child, rpc).await;
                 return Ok(());
             }
         }
@@ -1436,7 +1541,7 @@ pub async fn run(
             }
         }
     }
-    child.terminate().await;
+    stop(child, rpc).await;
     Ok(())
 }
 
@@ -1512,7 +1617,8 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let mut backlog = Vec::new();
     let (mut child, mut rpc, mut lines, _) = start_app_server(&trek_core::paths::home(), &[], &mut backlog).await?;
     let out = fetch_models(&mut rpc, &mut lines, &mut backlog).await;
-    child.terminate().await;
+    // A probe that opened no thread: Codex has nothing to save.
+    child.kill_now().await;
     out
 }
 
@@ -1605,17 +1711,24 @@ mod tests {
         events.iter().filter(|e| matches!(e, AgentEvent::TurnComplete { .. })).count()
     }
 
+    /// `codex_mcp_servers` where nothing is handed over differently: not Windows.
+    fn as_written(servers: &[crate::McpServer]) -> Value {
+        let (out, left_out) = codex_mcp_servers_with(servers, crate::mcp_servers_json_with(servers, BatchHandOff::ResolvedPath, false, |_| Some("C:\\n\\npx.cmd".into())));
+        assert!(left_out.is_empty());
+        out
+    }
+
     #[test]
     fn slow_mcp_tools_get_a_longer_timeout() {
         let server = |name: &str, timeout| crate::McpServer { tool_timeout_secs: timeout, ..crate::McpServer::stdio(name, "trek-mcp", vec![], vec![]) };
-        let out = codex_mcp_servers(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
+        let out = as_written(&[server("trek-orchestrate", Some(1900)), server("fs", None)]);
         assert_eq!(out["trek-orchestrate"]["tool_timeout_sec"], 1900);
         assert!(out["fs"].get("tool_timeout_sec").is_none(), "others keep Codex's default");
     }
 
     #[test]
     fn remote_mcp_servers_use_codexs_url_keys() {
-        let out = codex_mcp_servers(&[
+        let out = as_written(&[
             crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]),
             crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
             // A command's environment (its tokens) goes in `env`, as Codex's config has it.
@@ -1785,6 +1898,37 @@ mod tests {
         assert_eq!(unwrap_shell("bash -c \"echo \\\"hi\\\"\""), "echo \"hi\"");
         assert_eq!(unwrap_shell("/bin/zsh -lc 'echo '\\''x'\\'''"), "echo 'x'");
         assert_eq!(unwrap_shell("ls -c foo"), "ls -c foo");
+    }
+
+    #[test]
+    fn windows_shell_wrappers_are_unwrapped() {
+        // Codex's own flags: `-NoProfile -Command`, the script as one argument.
+        assert_eq!(unwrap_shell("powershell.exe -NoProfile -Command 'Get-ChildItem'"), "Get-ChildItem");
+        assert_eq!(unwrap_shell("powershell.exe -Command Get-ChildItem -Force"), "Get-ChildItem -Force");
+        assert_eq!(unwrap_shell("pwsh -NoLogo -NoProfile -Command \"Get-Content a.txt\""), "Get-Content a.txt");
+        assert_eq!(unwrap_shell("PowerShell -c 'ls'"), "ls");
+        assert_eq!(unwrap_shell("powershell -ExecutionPolicy Bypass -NoProfile -Command 'ls'"), "ls");
+        // A full path, quoted when it has spaces.
+        assert_eq!(unwrap_shell(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command 'dir'"), "dir");
+        assert_eq!(unwrap_shell(r"'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -Command 'dir'"), "dir");
+        assert_eq!(unwrap_shell(r#""C:\Program Files\PowerShell\7\pwsh.exe" -Command dir"#), "dir");
+        // Quotes inside: `''` in single quotes (and the POSIX spelling), `\"` and `""` in double quotes.
+        assert_eq!(unwrap_shell("powershell.exe -Command 'Write-Output ''hi'''"), "Write-Output 'hi'");
+        assert_eq!(unwrap_shell("powershell.exe -Command 'Write-Output '\"'\"'hi'\"'\"''"), "Write-Output 'hi'");
+        assert_eq!(unwrap_shell(r#"powershell.exe -Command "Write-Output \"hi\"""#), "Write-Output \"hi\"");
+        assert_eq!(unwrap_shell(r#"powershell.exe -Command "Write-Output ""hi""""#), "Write-Output \"hi\"");
+        // The UTF-8 line Codex puts ahead of the script isn't the model's.
+        assert_eq!(unwrap_shell("powershell.exe -NoProfile -Command '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\nGet-Date'"), "Get-Date");
+        assert_eq!(unwrap_shell("powershell.exe -Command '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Date'"), "Get-Date");
+        // cmd.exe.
+        assert_eq!(unwrap_shell("cmd.exe /c dir /b"), "dir /b");
+        assert_eq!(unwrap_shell("cmd /d /s /c \"echo hi\""), "echo hi");
+        assert_eq!(unwrap_shell(r"C:\Windows\System32\cmd.exe /C type a.txt"), "type a.txt");
+        // Not wrappers: another program, or PowerShell running a file.
+        assert_eq!(unwrap_shell("powershell.exe -File a.ps1"), "powershell.exe -File a.ps1");
+        assert_eq!(unwrap_shell("cargo test -c foo"), "cargo test -c foo");
+        assert_eq!(unwrap_shell("powershell.exe"), "powershell.exe");
+        assert_eq!(unwrap_shell("cmd.exe /c"), "cmd.exe /c");
     }
 
     #[test]
@@ -2513,6 +2657,35 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_sandbox_without_its_setup_is_explained_once() {
+        // Recorded (Codex 0.162.0, Windows, Auto): every command fails before it starts.
+        let said = "Failed to create unified exec process: helper_unknown_error: setup refresh had errors";
+        let done = |id: &str, status: &str, output: &str| {
+            json!({"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"commandExecution","id":id,"command":"Get-Content -Raw -LiteralPath .\\hello.txt","cwd":"C:\\p","status":status,"commandActions":[],"aggregatedOutput":output,"exitCode":-1}}})
+        };
+        let notices = |out: &Out| out.events.iter().filter(|e| matches!(e, AgentEvent::Notice(_))).count();
+        let mut s = session("t", false);
+        s.windows = true;
+        let out = feed(&mut s, &[done("e1", "failed", said)]);
+        assert!(matches!(&out.events[..], [AgentEvent::ToolFinished { ok: false, .. }, AgentEvent::Notice(n)] if n == SANDBOX_SETUP_NOTICE && n.contains("one-time setup") && n.contains("Full access")), "{:?}", out.events);
+        // Once per session, however many commands hit it.
+        let out = feed(&mut s, &[done("e2", "failed", said)]);
+        assert!(matches!(&out.events[..], [AgentEvent::ToolFinished { ok: false, .. }]), "{:?}", out.events);
+        // Narrowly: other failures, and other output, are Codex's own business.
+        let mut s = session("t", false);
+        s.windows = true;
+        let out = feed(&mut s, &[done("e3", "failed", "command not found"), done("e4", "completed", "setup refresh had errors"), done("e5", "declined", "")]);
+        assert_eq!(notices(&out), 0, "{:?}", out.events);
+        // Not the same words from another item, nor on macOS and Linux.
+        assert!(!sandbox_not_set_up(&json!({"type":"agentMessage","status":"failed","aggregatedOutput":said}), true));
+        let item = done("e6", "failed", said)["params"]["item"].clone();
+        assert!(sandbox_not_set_up(&item, true) && !sandbox_not_set_up(&item, false));
+        let mut s = session("t", false);
+        s.windows = false;
+        assert_eq!(notices(&feed(&mut s, &[done("e7", "failed", said)])), 0);
+    }
+
+    #[test]
     fn a_background_command_is_stopped_through_its_terminal() {
         let mut s = session("t", false);
         let started = json!({"method":"item/started","params":{"threadId":"t","turnId":"u","item":{"type":"commandExecution","id":"exec-1","command":"npm run dev","cwd":"/tmp","processId":"46444","source":"unifiedExecStartup","status":"inProgress","commandActions":[]}}});
@@ -2552,7 +2725,8 @@ mod tests {
 
 /// Against the real Codex: a message sent mid-turn steers the running turn. Costs a few cents of
 /// the user's plan, so it only runs on request:
-/// `cargo test -p trek-agents codex_live -- --ignored --nocapture` (Codex must be signed in).
+/// `cargo test -p trek-agents codex_live -- --ignored --nocapture` (Codex must be signed in;
+/// `TREK_LIVE_CODEX_ACCESS=full` runs it without Codex's sandbox).
 #[cfg(test)]
 mod live {
     use crate::{AgentEvent, Command, SessionConfig, start};
@@ -2569,7 +2743,9 @@ mod live {
             cwd,
             model: Some(std::env::var("TREK_LIVE_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".into())),
             effort: Effort::Low,
-            hand_holding: HandHolding::Auto,
+            // Codex's sandbox on Windows needs its own one-time setup; where that hasn't been done
+            // every command fails before it starts ("setup refresh had errors"). `full` skips it.
+            hand_holding: if std::env::var("TREK_LIVE_CODEX_ACCESS").as_deref() == Ok("full") { HandHolding::FullAccess } else { HandHolding::Auto },
             plan: false,
             read_only: false,
             resume: None,

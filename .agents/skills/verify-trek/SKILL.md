@@ -8,7 +8,7 @@ metadata:
 
 # Verify Trek
 
-Run the CLI from the checkout or worktree being verified. Its state is keyed to `git rev-parse --show-toplevel`, so it builds that checkout. JSON is the default output; add `--human` for readable text.
+Run the CLI from the checkout or worktree being verified. Its state is keyed to `git rev-parse --show-toplevel`, so it builds that checkout. JSON is the default output; add `--human` for readable text. On Windows the driver is `scripts/trek-dev.ps1` — run it with `pwsh` in place of `./scripts/trek-dev` (same subcommands and output).
 
 The driver always launches with `TREK_SHOT_DIR`, a throwaway `TREK_DATA_DIR`, imports and notifications off, and `direct:mock` as the only agent. Never replace those safeguards or point the driver at a normal Trek process: imported threads can resume real sessions.
 

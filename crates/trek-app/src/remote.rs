@@ -181,7 +181,8 @@ impl Addresses {
     /// CLI names (`asked`), else a 100.64/10 address on a tunnel (`utun…`): that range alone is
     /// also carrier-grade NAT, which hotspots and some ISPs hand out on Wi-Fi.
     pub(crate) fn from_interfaces(interfaces: &[(String, Ipv4Addr)], asked: Option<Ipv4Addr>) -> Self {
-        let tunnel = |name: &str| name.starts_with("utun");
+        // macOS names tunnels `utun…`; Tailscale's Windows adapter is called "Tailscale".
+        let tunnel = |name: &str| name.starts_with("utun") || name.get(..9).is_some_and(|n| n.eq_ignore_ascii_case("tailscale"));
         let shared = |ip: &Ipv4Addr| {
             let [a, b, ..] = ip.octets();
             a == 100 && (64..128).contains(&b)
@@ -199,9 +200,22 @@ impl Addresses {
 fn tailscale_ip() -> Option<Ipv4Addr> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
-    let app = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
-    let cli = trek_core::detect::which("tailscale").or_else(|| app.is_file().then_some(app))?;
-    let mut child = Command::new(cli).args(["ip", "-4"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    #[cfg(windows)]
+    let (app, name) = (PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"), "tailscale.exe");
+    #[cfg(not(windows))]
+    let (app, name) = (PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"), "tailscale");
+    // On Windows the installer's own copy first: a `tailscale` further down PATH may be another
+    // tailnet's (a second install, a build) rather than the one whose adapter is up.
+    let installed = app.is_file().then_some(app);
+    let cli = if cfg!(windows) { installed.or_else(|| trek_core::detect::which(name)) } else { trek_core::detect::which(name).or(installed) }?;
+    let mut command = Command::new(cli);
+    command.args(["ip", "-4"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().ok()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
@@ -217,7 +231,12 @@ fn tailscale_ip() -> Option<Ipv4Addr> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    out.lines().find_map(|l| l.trim().parse().ok())
+    first_ipv4(&out)
+}
+
+/// The first IPv4 address on a line of `tailscale ip -4`'s output (one per line, CRLF on Windows).
+pub(crate) fn first_ipv4(output: &str) -> Option<Ipv4Addr> {
+    output.lines().find_map(|l| l.trim().parse().ok())
 }
 
 /// Where the server listens and what the pairing code tells phones to dial: the same address,
@@ -231,6 +250,23 @@ pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings:
 }
 
 /// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
+#[cfg(windows)]
+fn interface_addresses() -> Vec<(String, Ipv4Addr)> {
+    // Adapters of virtual switches and machines: private addresses, but not ones a phone reaches
+    // this PC at (WSL and Hyper-V's `vEthernet (…)` would be taken for the Wi-Fi).
+    let virtual_adapter = |name: &str| ["vEthernet", "VMware", "VirtualBox", "Loopback"].iter().any(|v| name.starts_with(v));
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(a) if !a.ip.is_loopback() && !virtual_adapter(&i.name) => Some((i.name, a.ip)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
+#[cfg(not(windows))]
 fn interface_addresses() -> Vec<(String, Ipv4Addr)> {
     let mut out = vec![];
     // SAFETY: getifaddrs hands back a list we only read, then free with freeifaddrs.
@@ -277,7 +313,20 @@ fn uuid_like() -> String {
     format!("{:016x}{:08x}", h.finish(), std::process::id())
 }
 
+/// The PC's name: its DNS host name (`COMPUTERNAME` when Windows doesn't answer).
+#[cfg(windows)]
+fn computer_name() -> String {
+    use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    // SAFETY: `buf` is `len` wide characters long; on success `len` is how many were written.
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) } != 0;
+    let name = if ok { String::from_utf16_lossy(&buf[..len as usize]) } else { std::env::var("COMPUTERNAME").unwrap_or_default() };
+    if name.trim().is_empty() { "PC".to_string() } else { name }
+}
+
 /// "Tobias's MacBook Pro", as Sharing settings name it.
+#[cfg(not(windows))]
 fn computer_name() -> String {
     std::process::Command::new("scutil")
         .args(["--get", "ComputerName"])
@@ -286,7 +335,7 @@ fn computer_name() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Mac".to_string())
+        .unwrap_or_else(|| crate::words::words().computer.to_string())
 }
 
 impl Workspace {
@@ -535,7 +584,7 @@ impl Workspace {
         if let Some(key) = &req.agent {
             let agent = AgentId::from_key(key);
             if !self.ready_agents().contains(&agent) {
-                return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
+                return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
             }
             if agent != prefs.agent {
                 // Another agent starts on its default model, as its model menu shows first.
@@ -590,7 +639,7 @@ impl Workspace {
             id => Some(self.project(id).map(|p| p.path.clone()).ok_or_else(|| tr::HostError::not_found("No such project"))?),
         };
         if !self.ready_agents().contains(&agent) {
-            return Err(tr::HostError::not_found(format!("{} isn't set up on this Mac", agent.display_name())));
+            return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
         }
         let images = save_uploads(&req.images)?;
         let hand_holding = req.access.map(|a| hand_holding(a, &self.settings)).transpose()?;
@@ -647,7 +696,7 @@ impl Workspace {
                         if let Some(remote) = self.remote.as_mut() {
                             remote.answered.remove(&(id.clone(), req.request_id.clone()));
                         }
-                        return Err(tr::HostError::bad_request("Allowing for a whole session from the phone is off on this Mac (Settings › Phone). Allow just this once, or turn it on there."));
+                        return Err(tr::HostError::bad_request(format!("Allowing for a whole session from the phone is off on {} (Settings › Phone). Allow just this once, or turn it on there.", crate::words::words().this_computer)));
                     }
                     tr::Decision::AllowForSession => trek_agents::Decision::AllowForSession,
                     tr::Decision::Deny => trek_agents::Decision::Deny,
@@ -1593,7 +1642,7 @@ fn hand_holding(access: tr::Access, settings: &trek_core::settings::Settings) ->
         tr::Access::AutoAcceptEdits => trek_core::HandHolding::AutoAcceptEdits,
         tr::Access::Auto => trek_core::HandHolding::Auto,
         tr::Access::FullAccess if settings.permissions.full_access_unlocked => trek_core::HandHolding::FullAccess,
-        tr::Access::FullAccess => return Err(tr::HostError::bad_request("Full access is locked on this Mac: unlock it in Trek's Permissions settings first.")),
+        tr::Access::FullAccess => return Err(tr::HostError::bad_request(format!("Full access is locked on {}: unlock it in Trek's Permissions settings first.", crate::words::words().this_computer))),
     })
 }
 

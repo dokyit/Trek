@@ -79,11 +79,12 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
         trek.render(cx);
         assert!(trek.visible(cx, "command-error"));
 
-        // The name field has focus on this tab.
+        // The name field has focus on this tab. The program is a real binary so it's found.
+        let fake = trek_test_fixtures::bin("fake-acp").display().to_string();
         trek.click(cx, "command-name");
         trek.type_text(cx, "Local Bot");
         trek.click(cx, "command-program");
-        trek.type_text(cx, "/bin/sh");
+        trek.type_text(cx, &fake);
         trek.click(cx, "arg-add");
         trek.render(cx);
         trek.type_text(cx, "-c");
@@ -97,7 +98,7 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
         assert!(trek.visible(cx, gpui_kit::SharedString::from(format!("enable-{key}"))), "a row on the Agents page");
         let added = trek.read(cx, |ws, _| ws.settings.added_agents.clone());
         assert_eq!(added.len(), 1);
-        assert_eq!((added[0].name.as_str(), added[0].command.as_str(), added[0].args.as_slice()), ("Local Bot", "/bin/sh", &["-c".to_string()][..]));
+        assert_eq!((added[0].name.as_str(), added[0].command.as_str(), added[0].args.as_slice()), ("Local Bot", fake.as_str(), &["-c".to_string()][..]));
         assert_eq!(agent.display_name(), "Local Bot");
 
         // Saved: a Trek started afresh (nothing known in this process) knows it by name.

@@ -1,8 +1,9 @@
 //! Trek's end of the local channel its agents' `trek-mcp orchestrate` servers call (see
 //! `trek_ipc` for the protocol). One socket per Trek process, in a folder only the user can
-//! enter; a connection must come from the same user, carry this process's token and name a
-//! session Trek started. Calls go to the workspace (`Workspace::handle_call`) on the main thread;
-//! their answers come back here. Nothing that passes through is logged.
+//! enter (on Windows a named pipe only the user can open); a connection must come from the same
+//! user, carry this process's token and name a session Trek started. Calls go to the workspace
+//! (`Workspace::handle_call`) on the main thread; their answers come back here. Nothing that
+//! passes through is logged.
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -12,8 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
-/// How long a new connection has to say hello.
-const HELLO_WITHIN: Duration = Duration::from_secs(5);
+/// How long a new connection has to say hello. Shorter in tests, so the one that waits it out
+/// doesn't hold them up; not shorter than a loaded runner can take to get a thread running
+/// (a client that stalls past it is dropped, and its test fails with "closed").
+const HELLO_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 5 });
 /// How long `delegate_task` with `wait` waits unless asked otherwise, and the bounds it may ask for.
 pub const WAIT_DEFAULT: Duration = Duration::from_secs(600);
 /// Shorter in tests, so a wait that runs out doesn't hold them up.
@@ -43,6 +46,7 @@ pub enum Reply {
 type Sessions = Arc<Mutex<HashMap<String, Option<String>>>>;
 
 pub struct IpcServer {
+    /// The socket's path, or the pipe's name on Windows.
     pub path: PathBuf,
     token: String,
     sessions: Sessions,
@@ -50,34 +54,24 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    /// Listen in `dir` (or a shorter private folder when its path is too long for a socket).
+    /// Listen in `dir` (or a shorter private folder when its path is too long for a socket). On
+    /// Windows, on a named pipe of its own instead, which lives in no folder.
     pub fn start(dir: &Path) -> std::io::Result<(IpcServer, async_channel::Receiver<Call>)> {
         static N: AtomicUsize = AtomicUsize::new(0);
-        let pid = std::process::id();
-        let name = format!("trek-{pid}-{}.sock", N.fetch_add(1, Ordering::Relaxed));
-        let dir = trek_ipc::socket_dir(dir, &name)?;
-        sweep(&dir);
-        let path = dir.join(&name);
-        let _ = std::fs::remove_file(&path);
-        let std_listener = std::os::unix::net::UnixListener::bind(&path)?;
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std_listener.set_nonblocking(true)?;
+        let path = address(dir, N.fetch_add(1, Ordering::Relaxed))?;
         let token = trek_ipc::token()?;
         let sessions: Sessions = Default::default();
         let (calls_tx, calls) = async_channel::unbounded();
         let rt = trek_core::runtime();
-        let listener = {
+        let mut listener = {
             let _enter = rt.enter();
-            tokio::net::UnixListener::from_std(std_listener)?
+            trek_ipc::server::Listener::bind(&path)?
         };
         let (tok, sess) = (Arc::<str>::from(token.as_str()), sessions.clone());
         let listener = rt.spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok((stream, _)) => _ = tokio::spawn(serve(stream, tok.clone(), sess.clone(), calls_tx.clone())),
+                    Ok(stream) => _ = tokio::spawn(serve(stream, tok.clone(), sess.clone(), calls_tx.clone())),
                     // Out of file descriptors, say: the error comes straight back, so pause
                     // rather than spin.
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -124,8 +118,27 @@ impl IpcServer {
 impl Drop for IpcServer {
     fn drop(&mut self) {
         self.listener.abort();
+        // A pipe goes by itself, with its last instance.
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Where server number `n` of this process listens: a socket in `dir` (once sockets left by
+/// Trek processes that have gone are cleared out of it).
+#[cfg(unix)]
+fn address(dir: &Path, n: usize) -> std::io::Result<PathBuf> {
+    let name = format!("trek-{}-{n}.sock", std::process::id());
+    let dir = trek_ipc::socket_dir(dir, &name)?;
+    sweep(&dir);
+    Ok(dir.join(name))
+}
+
+/// Where server number `n` of this process listens: a pipe, named by `trek_ipc::pipe_name` (at
+/// random in part, and with this process's id, which clients check).
+#[cfg(windows)]
+fn address(_dir: &Path, n: usize) -> std::io::Result<PathBuf> {
+    trek_ipc::pipe_name(n)
 }
 
 /// A session key when the system's random source can't be read (it always can on macOS).
@@ -134,6 +147,8 @@ fn uuid_like() -> String {
 }
 
 /// Remove sockets left by Trek processes that have gone (a crash leaves its socket behind).
+/// Pipes need none of this: they go with their process.
+#[cfg(unix)]
 fn sweep(dir: &Path) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name();
@@ -166,18 +181,17 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::R
     String::from_utf8(buf).map(Some).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame isn't UTF-8"))
 }
 
-async fn write(w: &mut tokio::net::unix::OwnedWriteHalf, v: &Value) -> std::io::Result<()> {
+async fn write(w: &mut tokio::io::WriteHalf<trek_ipc::server::Stream>, v: &Value) -> std::io::Result<()> {
     w.write_all(trek_ipc::encode(v).as_bytes()).await
 }
 
 /// One connection: the hello, then requests one at a time.
-async fn serve(stream: tokio::net::UnixStream, token: Arc<str>, sessions: Sessions, calls: async_channel::Sender<Call>) {
-    use std::os::fd::AsRawFd as _;
+async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sessions, calls: async_channel::Sender<Call>) {
     // Another user's process gets nothing, not even an error.
-    if trek_ipc::peer_uid(stream.as_raw_fd()).ok() != Some(trek_ipc::my_uid()) {
+    if !trek_ipc::server::peer_is_me(&stream) {
         return;
     }
-    let (rd, mut w) = stream.into_split();
+    let (rd, mut w) = tokio::io::split(stream);
     let mut r = tokio::io::BufReader::new(rd);
     let hello = match tokio::time::timeout(HELLO_WITHIN, read_frame(&mut r)).await {
         Ok(Ok(Some(line))) => serde_json::from_str::<Value>(&line).ok(),
@@ -302,8 +316,12 @@ mod tests {
     #[test]
     fn only_trek_s_own_sessions_get_in() {
         let (server, calls) = IpcServer::start(&dir()).unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        assert_eq!(std::fs::metadata(&server.path).unwrap().permissions().mode() & 0o777, 0o600, "only the user can connect");
+        // (A pipe's DACL is checked in trek-ipc's tests.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&server.path).unwrap().permissions().mode() & 0o777, 0o600, "only the user can connect");
+        }
         let key = server.open_session(Some("thread-1"));
         let answers = answer_with(calls, |c| vec![Reply::Done(Ok(json!({ "echo": c.params.clone() })))]);
 
@@ -324,7 +342,18 @@ mod tests {
 
         let path = server.path.clone();
         drop(server);
+        #[cfg(unix)]
         assert!(!path.exists(), "the socket goes with the server");
+        // A pipe goes once the runtime has dropped the listener's task, a moment later. (Asking
+        // whether it exists would open it.)
+        #[cfg(windows)]
+        {
+            let started = std::time::Instant::now();
+            while trek_ipc::Stream::connect(&path).is_ok() {
+                assert!(started.elapsed() < Duration::from_secs(5), "the pipe goes with the server");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         let seen = answers.join().unwrap();
         assert_eq!(seen.iter().map(|(t, m, _)| (t.as_str(), m.as_str())).collect::<Vec<_>>(), [("thread-1", "task_status"), ("thread-2", "list_models")]);
     }
@@ -335,7 +364,7 @@ mod tests {
         let (server, calls) = IpcServer::start(&dir()).unwrap();
         let key = server.open_session(Some("t"));
         let _answers = answer_with(calls, |_| vec![Reply::Done(Ok(json!("fine")))]);
-        let mut s = std::os::unix::net::UnixStream::connect(&server.path).unwrap();
+        let mut s = trek_ipc::Stream::connect(&server.path).unwrap();
         s.write_all(trek_ipc::encode(&trek_ipc::hello(&server.token, &key)).as_bytes()).unwrap();
         let mut r = BufReader::new(s.try_clone().unwrap());
         let mut line = String::new();
@@ -360,6 +389,18 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_that_says_nothing_is_closed_after_a_while() {
+        use std::io::Read as _;
+        let (server, _calls) = IpcServer::start(&dir()).unwrap();
+        let mut s = trek_ipc::Stream::connect(&server.path).unwrap();
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 64];
+        assert_eq!(s.read(&mut buf).unwrap_or(0), 0, "closed without a word");
+        let waited = started.elapsed();
+        assert!(waited >= HELLO_WITHIN - Duration::from_millis(100) && waited < HELLO_WITHIN + Duration::from_secs(5), "{waited:?}");
+    }
+
+    #[test]
     fn a_waiting_call_returns_the_answer_or_running_when_time_is_up() {
         let (server, calls) = IpcServer::start(&dir()).unwrap();
         let key = server.open_session(Some("t"));
@@ -380,8 +421,42 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_secs(WAIT_MIN));
         assert_eq!(out["id"], "child-2");
         assert_eq!(out["status"], "running");
-        // The connection gave up waiting: the workspace sees nobody listening any more.
-        assert!(held.lock().unwrap()[0].is_closed());
+        // The connection gave up waiting: the workspace sees nobody listening any more, once
+        // the closed side of the channel reaches it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !held.lock().unwrap()[0].is_closed() {
+            assert!(std::time::Instant::now() < deadline, "the workspace still waits on the caller's behalf");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_call_given_up_stops_trek_waiting() {
+        let (server, calls) = IpcServer::start(&dir()).unwrap();
+        let key = server.open_session(Some("t"));
+        let held: Arc<Mutex<Vec<async_channel::Sender<Reply>>>> = Default::default();
+        let keep = held.clone();
+        let _answers = answer_with(calls, move |c| {
+            keep.lock().unwrap().push(c.reply.clone());
+            vec![Reply::Waiting("child".into(), WAIT_DEFAULT)]
+        });
+        // As trek-mcp gives up a call its client cancelled: shut the connection from another thread.
+        let mut conn = server.client(&key).connect().unwrap();
+        let handle = conn.handle().unwrap();
+        let call = std::thread::spawn(move || conn.call("delegate_task", &json!({"wait": true})));
+        let started = std::time::Instant::now();
+        let soon = |what: &str| {
+            assert!(started.elapsed() < Duration::from_secs(30), "{what}");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        while held.lock().unwrap().is_empty() {
+            soon("the call reaches the workspace");
+        }
+        handle.shutdown().unwrap();
+        assert!(call.join().unwrap().is_err());
+        while !held.lock().unwrap()[0].is_closed() {
+            soon("Trek stops waiting on the caller's behalf");
+        }
     }
 
     #[test]

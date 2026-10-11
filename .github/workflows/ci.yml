@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows-port]
   pull_request:
   workflow_dispatch:
 
@@ -54,8 +54,54 @@ jobs:
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
 
       # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
+      # `--no-fail-fast`: one run reports every failing test binary, not just the first.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
+
+      # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
+      # `-D warnings` above doesn't turn them into errors).
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+  # The Windows port runs the same suite as the Mac (Phase 5 of the port): the runner's Git for
+  # Windows, PowerShell 7 and Windows PowerShell cover what the tests spawn.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    # Slower than the Mac: a cold build of the whole workspace plus the ConPTY tests' waits.
+    timeout-minutes: 120
+    steps:
+      # Deep build paths under the runner's workspace can pass MAX_PATH.
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
+
+      # The PowerShell twin of the Mac's `zsh -n` over the shell scripts.
+      - name: Scripts parse
+        run: |
+          foreach ($f in Get-ChildItem script\*.ps1, script\lib\*.ps1, script\tests\*.ps1 -ErrorAction SilentlyContinue) {
+            [void][scriptblock]::Create((Get-Content -Raw -LiteralPath $f.FullName))
+          }
+
+      # Assertions over the release-manifest merge the Windows release runs (the step above
+      # only checks syntax).
+      - name: Script tests
+        run: script\tests\release-manifest.Tests.ps1
+
+      # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
+      # `--no-fail-fast`: one run reports every failing test binary, not just the first.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
 
       # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
       # `-D warnings` above doesn't turn them into errors).

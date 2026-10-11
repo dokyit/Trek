@@ -24,7 +24,7 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
         (ws.thread_windows.get(id).copied(), ws.thread(id).is_some(), ws.thread_windows.len())
     };
     if let Some(handle) = existing {
-        if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+        if handle.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok() {
             return;
         }
     }
@@ -40,7 +40,7 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
         window_min_size: Some(size(px(520.), px(440.))),
         app_id: Some("dev.trek.Trek".into()),
         focus,
-        show: focus,
+        show: focus || crate::system::SHOW_BEHIND,
         ..TitleBar::window_options()
     };
     let thread_id = id.to_string();
@@ -69,8 +69,8 @@ pub struct ThreadWindow {
     composer_changed: bool,
     /// The window title as last set (the thread's title).
     title: String,
-    /// Whether the window was last told to blur what's behind it (liquid glass).
-    glass_applied: Option<bool>,
+    /// What the window was last told about its glass (`ui::apply_glass`).
+    glass_applied: Option<crate::ui::GlassState>,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `system::hidden_frames`).
     _hidden_frames: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -114,6 +114,20 @@ impl ThreadWindow {
                 }
             }),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
+            cx.observe_window_appearance(window, |this, _, cx| {
+                crate::ui::colours_changed(&mut this.glass_applied);
+                cx.notify();
+            }),
+            // Dragged to a display of another scale, it has its own icons cut again, as the main
+            // window does (its taskbar button is its own).
+            {
+                let mut scale = window.scale_factor();
+                cx.observe_window_bounds(window, move |_, window, cx| {
+                    if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor()) {
+                        crate::system::scale_changed(window, cx);
+                    }
+                })
+            },
             // With nothing focused, keys reach none of the window's shortcuts (⌘W included): the
             // composer takes focus back when what had it leaves (an answered question's text field).
             cx.on_focus_lost(window, |this, window, cx| this.composer.update(cx, |c, cx| c.focus(window, cx))),
@@ -198,7 +212,7 @@ impl Render for ThreadWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
-        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
         crate::root::place_toasts(self.composer.read(cx).height().max(px(120.)) + px(16.), window, cx);
         if self.workspace.read(cx).title_reveal(&self.id).is_some() {
             window.request_animation_frame();
@@ -268,5 +282,6 @@ impl Render for ThreadWindow {
                 ),
             )
             .child(self.preview.clone())
+            .children(self.preview.read(cx).is_open().then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
     }
 }

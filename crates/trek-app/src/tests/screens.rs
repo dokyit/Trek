@@ -150,7 +150,7 @@ fn every_screen_renders_in_both_themes() {
             // The palette over it, then the right panel's tools. The terminal (a shell), the
             // browser (a native web view) and the simulator (Xcode's tools) reach outside the
             // test, so only the panels drawn by Trek alone are opened here.
-            trek.press(cx, "cmd-k");
+            trek.press(cx, "secondary-k");
             trek.render(cx);
             assert!(trek.visible(cx, "palette"));
             trek.press(cx, "escape");
@@ -177,7 +177,7 @@ fn the_palette_moves_by_keyboard_and_keeps_the_selection_in_view() {
             populate(&ws.store, 30);
             ws.reload(cx);
         });
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         assert!(trek.visible(cx, "palette"));
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
@@ -217,7 +217,7 @@ fn the_palette_moves_by_keyboard_and_keeps_the_selection_in_view() {
         assert!(!trek.visible(cx, "palette"));
 
         // Escape closes it and gives the keyboard back to the composer.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         assert!(trek.visible(cx, "palette"));
         trek.press(cx, "escape");
         assert!(!trek.visible(cx, "palette"));
@@ -233,12 +233,12 @@ fn a_pasted_screenshot_is_saved_attached_and_sent() {
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
         // Text pastes as text.
         cx.write_to_clipboard(ClipboardItem::new_string("cargo test".into()));
-        trek.press(cx, "cmd-v");
+        trek.press(cx, "secondary-v");
         assert_eq!(trek.composer_text(cx), "cargo test");
         // Image data becomes a file in Trek's data folder, attached to the message.
         let image = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png());
         cx.write_to_clipboard(ClipboardItem::new_image(&image));
-        trek.press(cx, "cmd-v");
+        trek.press(cx, "secondary-v");
         until(cx, "the image to be saved", |cx| composer.read_with(cx, |c, _| c.attached()).0.len() == 1 && composer.read_with(cx, |c, _| c.attached()).1 == 0);
         let path = composer.read_with(cx, |c, _| c.attached()).0[0].clone();
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("png"));
@@ -263,7 +263,7 @@ pub(super) fn runs(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<(Stri
     let sink = seen.clone();
     cx.update(|cx| {
         cx.subscribe(&trek.ws, move |_, event: &WorkspaceEvent, _| {
-            if let WorkspaceEvent::RunInTerminal { command, cwd } = event {
+            if let WorkspaceEvent::RunInTerminal { command, cwd } | WorkspaceEvent::RunProjectAction { command, cwd } = event {
                 sink.borrow_mut().push((command.clone(), cwd.clone()));
             }
         })
@@ -398,7 +398,7 @@ fn image_icons_are_copied_in_and_fall_back_when_gone() {
         // Drawn in the settings row, the title bar, the sidebar and the palette.
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
         trek.render(cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         trek.press(cx, "escape");
         // The copy gone too: the monogram stands in, and nothing breaks.

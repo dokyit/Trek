@@ -781,6 +781,16 @@ pub enum PanelTool {
 
 impl PanelTool {
     pub const ALL: [PanelTool; 6] = [PanelTool::Terminal, PanelTool::Browser, PanelTool::Simulator, PanelTool::Explorer, PanelTool::SideChat, PanelTool::Git];
+
+    /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
+    /// Windows has no Simulator tab.
+    pub fn offered() -> Vec<PanelTool> {
+        Self::offered_on(crate::words::is_windows())
+    }
+
+    pub fn offered_on(windows: bool) -> Vec<PanelTool> {
+        Self::ALL.into_iter().filter(|t| !(windows && *t == PanelTool::Simulator)).collect()
+    }
     pub fn label(self) -> &'static str {
         match self {
             PanelTool::Git => "Git",
@@ -804,9 +814,12 @@ pub enum WorkspaceEvent {
     FocusComposer,
     /// The editor's AI side bar takes the keys (a chat tab switched or opened, the editor shown).
     FocusAiInput,
-    /// Run a shell command in a new terminal tab (an agent install or sign-in, a project action),
-    /// in `cwd` or else the folder on screen, then rescan agents.
+    /// Run one of Trek's own shell commands (an agent install or sign-in) in a new terminal tab,
+    /// in `cwd` or else the folder on screen, then rescan agents. On Windows it runs in PowerShell,
+    /// which these are written for, whatever `[terminal] shell` is.
     RunInTerminal { command: String, cwd: Option<PathBuf> },
+    /// The same for one of the user's project actions, which the shell they chose runs.
+    RunProjectAction { command: String, cwd: Option<PathBuf> },
     /// Insert text at the composer's cursor (e.g. an element picked in the browser).
     InsertIntoComposer(String),
     /// Open `path` in the in-app editor, at `line` when given (Explorer, `trek://edit`).
@@ -914,29 +927,51 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     if run(&["rev-parse", "--is-inside-work-tree"]).is_none() {
         return GitInfo::default();
     }
-    let branch = run(&["branch", "--show-current"]).filter(|b| !b.is_empty());
-    let elsewhere = run(&["worktree", "list", "--porcelain"])
+    // The rest are independent reads, each a process of its own: one after another they're ten
+    // spawns, which on Windows (a hundred milliseconds apiece, or more under a virus scanner) kept
+    // the branch chip off the composer for over a second. Side by side it waits for the slowest.
+    let (branch, worktrees, head, status, ahead, behind, default_branch, branches, remote) = std::thread::scope(|s| {
+        let branch = s.spawn(|| run(&["branch", "--show-current"]).filter(|b| !b.is_empty()));
+        let worktrees = s.spawn(|| run(&["worktree", "list", "--porcelain"]));
+        let head = s.spawn(|| run(&["rev-parse", "--verify", "-q", "HEAD"]));
+        // Every untracked file, not their folders, so the count matches the Git panel's list.
+        let status = s.spawn(|| run(&["status", "--porcelain", "-uall"]));
+        let ahead = s.spawn(|| run(&["rev-list", "--count", "@{u}..HEAD"]));
+        let behind = s.spawn(|| run(&["rev-list", "--count", "HEAD..@{u}"]));
+        let default_branch = s.spawn(|| {
+            run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).and_then(|s| s.split_once('/').map(|(_, b)| b.to_string())).or_else(|| {
+                let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
+                ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
+            })
+        });
+        let branches = s.spawn(|| run(&["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"]));
+        let remote = s.spawn(|| trek_core::store::git_remote(cwd));
+        (
+            branch.join().unwrap_or_default(),
+            worktrees.join().unwrap_or_default(),
+            head.join().unwrap_or_default(),
+            status.join().unwrap_or_default(),
+            ahead.join().unwrap_or_default(),
+            behind.join().unwrap_or_default(),
+            default_branch.join().unwrap_or_default(),
+            branches.join().unwrap_or_default(),
+            remote.join().unwrap_or_default(),
+        )
+    });
+    let elsewhere = worktrees
         .map(|s| s.lines().filter_map(|l| l.strip_prefix("branch refs/heads/")).filter(|b| Some(*b) != branch.as_deref()).map(str::to_string).collect())
         .unwrap_or_default();
     GitInfo {
         is_repo: true,
-        head: run(&["rev-parse", "--verify", "-q", "HEAD"]),
+        head,
         elsewhere,
         branch,
-        // Every untracked file, not their folders, so the count matches the Git panel's list.
-        changed: run(&["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0),
-        ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
-        behind: run(&["rev-list", "--count", "HEAD..@{u}"]).and_then(|s| s.parse().ok()).unwrap_or(0),
-        default_branch: run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-            .and_then(|s| s.split_once('/').map(|(_, b)| b.to_string()))
-            .or_else(|| {
-                let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
-                ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
-            }),
-        branches: run(&["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
-            .map(|s| s.lines().map(str::to_string).collect())
-            .unwrap_or_default(),
-        remote: trek_core::store::git_remote(cwd),
+        changed: status.map(|s| s.lines().count()).unwrap_or(0),
+        ahead: ahead.and_then(|s| s.parse().ok()).unwrap_or(0),
+        behind: behind.and_then(|s| s.parse().ok()).unwrap_or(0),
+        default_branch,
+        branches: branches.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default(),
+        remote,
     }
 }
 
@@ -1014,6 +1049,8 @@ pub struct Workspace {
     git_fetched: HashMap<PathBuf, Instant>,
     /// The newest git read asked for, per folder (`refresh_git_at`).
     git_reads: HashMap<PathBuf, u64>,
+    /// Git reads started and not yet landed, stale ones included (`shot` waits for it to reach 0).
+    pub(crate) git_inflight: usize,
     /// Checkouts with a `git switch` running (by checkout root).
     pub(crate) switching: HashSet<PathBuf>,
     /// Bumped when files on disk changed wholesale under the app (another branch or commit
@@ -1223,6 +1260,8 @@ impl Workspace {
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
         let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
         if trek_core::update::blocker().is_none() {
+            // Windows: trek-update couldn't swap the update in, and put this version back.
+            launch_toasts.extend(trek_core::update::take_install_failure());
             // A first launch has nothing new to show; one after an update shows what it brought
             // (from a build older than "What's new", whose setting is still empty).
             if this.settings.updates.seen_notes.is_empty() {
@@ -1359,6 +1398,7 @@ impl Workspace {
             git_info: HashMap::new(),
             git_fetched: HashMap::new(),
             git_reads: HashMap::new(),
+            git_inflight: 0,
             switching: HashSet::new(),
             files_epoch: 0,
             usage_fetch: None,
@@ -1738,18 +1778,24 @@ impl Workspace {
     /// Plain-text report for "Copy diagnostics": versions, detected agents, where settings live.
     #[allow(dead_code)] // for the settings / composer UI
     pub fn diagnostics(&self) -> String {
-        let sw = |flag: &str| {
-            std::process::Command::new("/usr/bin/sw_vers")
-                .arg(flag)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|| "unknown".into())
+        #[cfg(windows)]
+        let os = format!("{} · {}", crate::system::windows_version(), std::env::consts::ARCH);
+        #[cfg(not(windows))]
+        let os = {
+            let sw = |flag: &str| {
+                std::process::Command::new("/usr/bin/sw_vers")
+                    .arg(flag)
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            };
+            format!("macOS {} ({}) · {}", sw("-productVersion"), sw("-buildVersion"), std::env::consts::ARCH)
         };
         let mut out = vec![
             format!("Trek {}", env!("CARGO_PKG_VERSION")),
-            format!("macOS {} ({}) · {}", sw("-productVersion"), sw("-buildVersion"), std::env::consts::ARCH),
+            os,
             format!("Settings: {}", trek_core::paths::settings_file().display()),
             format!("Data: {}", trek_core::paths::data_dir().display()),
             String::new(),
@@ -1904,10 +1950,12 @@ impl Workspace {
             *n += 1;
             *n
         };
+        self.git_inflight += 1;
         let task = cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
             let _ = this.update(cx, |this, cx| {
+                this.git_inflight = this.git_inflight.saturating_sub(1);
                 if this.git_reads.get(&cwd) != Some(&seq) {
                     return;
                 }
@@ -2225,7 +2273,7 @@ impl Workspace {
         if matches!(self.route, Route::Settings(_)) {
             self.navigate(Route::Draft { project: Some(dir.clone()) }, cx);
         }
-        cx.emit(WorkspaceEvent::RunInTerminal { command, cwd: Some(dir) });
+        cx.emit(WorkspaceEvent::RunProjectAction { command, cwd: Some(dir) });
     }
 
     pub fn open_project_settings(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
@@ -2709,10 +2757,18 @@ impl Workspace {
         (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere).then(|| a.background.clone().map(|b| (b, a.background_dim))).flatten()
     }
 
-    /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and macOS
-    /// isn't set to reduce transparency).
+    /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and the
+    /// system allows it: macOS isn't set to Reduce transparency; Windows has Mica, with
+    /// Transparency effects on).
     pub fn glass(&self) -> Option<f32> {
-        if self.backdrop().is_some() || (!cfg!(test) && crate::system::reduce_transparency()) {
+        self.glass_unless(!cfg!(test) && crate::system::reduce_transparency())
+    }
+
+    /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency;
+    /// Windows 10, or 11 with Transparency effects off: `winlook::glass_available`): then the
+    /// window stays opaque.
+    pub fn glass_unless(&self, reduced: bool) -> Option<f32> {
+        if self.backdrop().is_some() || reduced {
             return None;
         }
         self.settings.appearance.glass_tint()
@@ -5713,10 +5769,8 @@ impl Workspace {
         let mut out = vec![];
         if let Some(bin) = trek_mcp_binary() {
             let bin = bin.display().to_string();
-            for (on, family) in [(tools.computer_use, "computer"), (tools.simulator, "simulator")] {
-                if on {
-                    out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], vec![]));
-                }
+            for family in trek_mcp_families(tools.computer_use, tools.simulator, crate::words::is_windows()) {
+                out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], vec![]));
             }
         }
         // Figma's own server in its desktop app: local and without a login, so every agent can
@@ -6013,7 +6067,10 @@ impl Workspace {
         self.updater.status = UpdateStatus::Idle;
         if let Err(e) = trek_core::update::relaunch(&installed, crate::system::app_is_active()) {
             tracing::warn!("relaunch after update failed: {e:#}");
-            self.updater.status = UpdateStatus::Failed("The update is installed. Quit and reopen Trek to start it.".into());
+            // On Windows the relaunch is the install (trek-update swaps the folder once Trek has
+            // quit): nothing changed, and the next check downloads the update again.
+            let message = if cfg!(windows) { format!("Couldn't install the update: {e:#}") } else { "The update is installed. Quit and reopen Trek to start it.".into() };
+            self.updater.status = UpdateStatus::Failed(message);
             cx.notify();
             return;
         }
@@ -6024,8 +6081,10 @@ impl Workspace {
     /// Quitting with an update ready installs it, so the next launch is the new version.
     fn install_on_quit(&mut self) {
         if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } = &self.updater.status {
-            match trek_core::update::install(staged) {
-                Ok(_) => tracing::info!("update installed on quit"),
+            // On Windows `install` gets it ready and `swap_on_exit` has trek-update swap it in once
+            // Trek has exited.
+            match trek_core::update::install(staged).and_then(|installed| trek_core::update::swap_on_exit(&installed)) {
+                Ok(()) => tracing::info!("update installed on quit"),
                 Err(e) => tracing::warn!("update install on quit failed: {e:#}"),
             }
         }
@@ -6198,7 +6257,27 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
 /// Lock `dir` for this process (an advisory `flock` on a file in it, released when the process
 /// ends): `Ok(Some(lock))` to keep while the folder is ours, `Ok(None)` when another process
 /// holds it.
-fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+#[cfg(windows)]
+pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx};
+    // Opened with the default sharing: another Trek opens the file too, and its lock is what says no.
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
+    // SAFETY: LockFileEx on a handle this function owns; an all-zero OVERLAPPED locks from offset 0.
+    let mut overlapped = unsafe { std::mem::zeroed() };
+    // The lock goes when the handle closes, which the system does when the process ends.
+    if unsafe { LockFileEx(file.as_raw_handle(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut overlapped) } != 0 {
+        return Ok(Some(file));
+    }
+    match std::io::Error::last_os_error() {
+        e if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(None),
+        e => Err(e),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd as _;
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
     // SAFETY: flock on a descriptor this function owns.
@@ -6211,13 +6290,25 @@ fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> 
     }
 }
 
+/// The data folder's lock, and which folder it's for, held for as long as the process runs.
+static DATA_FOLDER_LOCK: std::sync::OnceLock<(PathBuf, std::fs::File)> = std::sync::OnceLock::new();
+
+/// Keep the lock on data folder `dir` a launch took before the workspace existed
+/// (`single_instance`). Locks are per open file, so taking it again would find it taken.
+pub fn keep_data_folder_lock(dir: PathBuf, lock: std::fs::File) {
+    let _ = DATA_FOLDER_LOCK.set((dir, lock));
+}
+
 /// Take the data folder for this process, for as long as it runs. False when another Trek has
 /// it (a dev build sharing the folder, say): what that one has open isn't this one's to close.
 fn hold_data_folder() -> bool {
-    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
-    match lock_folder(&trek_core::paths::data_dir()) {
+    let dir = trek_core::paths::data_dir();
+    if DATA_FOLDER_LOCK.get().is_some_and(|(held, _)| *held == dir) {
+        return true;
+    }
+    match lock_folder(&dir) {
         Ok(Some(lock)) => {
-            let _ = LOCK.set(lock);
+            let _ = DATA_FOLDER_LOCK.set((dir, lock));
             true
         }
         Ok(None) => {
@@ -6423,7 +6514,15 @@ pub fn fmt_tokens(n: u64) -> String {
 pub fn trek_mcp_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    [dir.join("trek-mcp"), dir.join("../Resources/trek-mcp")].into_iter().find(|p| p.exists())
+    let name = format!("trek-mcp{}", std::env::consts::EXE_SUFFIX);
+    // `../Resources` is inside the macOS app bundle; Windows keeps it beside `trek.exe`.
+    [dir.join(&name), dir.join("../Resources").join(&name)].into_iter().find(|p| p.exists())
+}
+
+/// Which of Trek's own MCP servers a session is given, by the name `trek-mcp` takes. The
+/// simulator's tools drive Xcode's `simctl`, so a Windows agent isn't offered them.
+fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<&'static str> {
+    [(computer_use, "computer"), (simulator && !windows, "simulator")].into_iter().filter(|(on, _)| *on).map(|(_, family)| family).collect()
 }
 
 /// Whether merging a thread's work settles it: only one sitting idle in the inbox. Merged while
@@ -6440,6 +6539,25 @@ mod tests {
 
     fn q(text: &str, secret: bool) -> Question {
         Question { question: text.into(), header: String::new(), options: vec![("Yes".into(), String::new())], multi: false, secret }
+    }
+
+    #[test]
+    fn the_simulator_is_handed_to_no_agent_on_windows() {
+        assert_eq!(trek_mcp_families(true, true, false), ["computer", "simulator"]);
+        assert_eq!(trek_mcp_families(false, true, false), ["simulator"]);
+        assert_eq!(trek_mcp_families(true, true, true), ["computer"], "its switch may still be on in settings that came from a Mac");
+        assert!(trek_mcp_families(false, true, true).is_empty());
+        assert!(trek_mcp_families(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn windows_has_no_simulator_tab() {
+        assert_eq!(PanelTool::offered_on(false), PanelTool::ALL);
+        let windows = PanelTool::offered_on(true);
+        assert!(!windows.contains(&PanelTool::Simulator));
+        assert_eq!(windows.len(), PanelTool::ALL.len() - 1);
+        // The others keep their order.
+        assert_eq!(windows, PanelTool::ALL.into_iter().filter(|t| *t != PanelTool::Simulator).collect::<Vec<_>>());
     }
 
     #[test]

@@ -12,10 +12,19 @@ struct Applied {
     /// dropped (and by the system when Trek quits or dies).
     awake: Option<Task<Result<ActivityGuard>>>,
     badge: usize,
+    /// The window the badge is on, where it belongs to one (a taskbar button; the Dock tile is the app's).
+    badge_window: Option<AnyWindowHandle>,
+    /// A pending second try at the badge, when the first couldn't be made.
+    badge_retry: Option<Task<()>>,
     menu_bar_icon: bool,
     ui_font_size: f32,
     /// `None` until the first sync, so the chosen icon is put up at launch.
     app_icon: Option<AppIcon>,
+    /// The windows the icon was last put on (Windows: it belongs to each window, so one opened
+    /// later is given it too).
+    icon_windows: Vec<AnyWindowHandle>,
+    /// A pending second try at the icon, when a window couldn't take it yet.
+    icon_retry: Option<Task<()>>,
 }
 
 /// Watch the workspace and keep the system in step. The check is a few comparisons per notify,
@@ -25,19 +34,24 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let mut applied = Applied {
         awake: None,
         badge: 0,
+        badge_window: None,
+        badge_retry: None,
         menu_bar_icon: ws.settings.notifications.menu_bar_icon,
         ui_font_size: 0.,
         app_icon: None,
+        icon_windows: Vec::new(),
+        icon_retry: None,
     };
     follow_reduce_motion(&workspace, cx);
     sync(&workspace, &mut applied, cx);
     cx.observe(&workspace, move |workspace, cx| sync(&workspace, &mut applied, cx)).detach();
 }
 
-/// macOS's Reduce motion is on, as last asked.
+/// The system's Reduce motion (macOS) or Animation effects off (Windows) is on, as last asked.
 static SYSTEM_REDUCES_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// macOS's Reduce motion (Accessibility › Display) or Trek's own setting stills every animation:
+/// The system's Reduce motion (macOS: Accessibility › Display; Windows: Accessibility › Visual
+/// effects › Animation effects, off) or Trek's own setting stills every animation:
 /// `Workspace::motion` reads both, and gpui's and gpui-component's own (toasts coming and going,
 /// dialogs sliding in) read the app's flag, which follows either. Nothing tells gpui when the
 /// system's changes, so it's asked every couple of seconds; Trek's setting is followed in `sync`.
@@ -71,7 +85,14 @@ fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     if cfg!(test) {
         return;
     }
-    let on = SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed) || workspace.read(cx).settings.appearance.reduce_motion;
+    reduce_motion_as(SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed), workspace, cx);
+}
+
+/// Set the app's reduce-motion flag from what the system asks (`system`) and Trek's own setting:
+/// either one stills every animation. Split from the read so that a test can say what the system
+/// asked, as the clock is told in the motion tests.
+pub(crate) fn reduce_motion_as(system: bool, workspace: &Entity<Workspace>, cx: &mut App) {
+    let on = system || workspace.read(cx).settings.appearance.reduce_motion;
     if cx.reduce_motion() != on {
         cx.set_reduce_motion(on)
     }
@@ -85,22 +106,51 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     let menu_bar_icon = ws.settings.notifications.menu_bar_icon;
     let ui_font_size = ws.settings.appearance.ui_font_size();
     let app_icon = ws.settings.appearance.app_icon;
+    let main = ws.main_window;
 
     if awake != applied.awake.is_some() {
         applied.awake = awake.then(|| cx.prevent_idle_sleep("Agents are working in Trek"));
         tracing::debug!("keep awake: {awake}");
     }
-    if badge != applied.badge {
-        applied.badge = badge;
-        set_dock_badge(badge);
+    // A taskbar badge sits on a window's button, so a window opened after the count rose (or
+    // reopened) needs it put up again; the Dock tile belongs to the app.
+    let moved = cfg!(windows) && badge > 0 && main != applied.badge_window;
+    if badge != applied.badge || moved {
+        applied.badge_retry = None;
+        // Not noted as applied until it was: the taskbar button may not exist yet (a window just
+        // opened), or the window be busy. Ask again soon rather than wait for a change.
+        if set_dock_badge(badge, main, cx) {
+            applied.badge = badge;
+            applied.badge_window = main;
+        } else if main.is_some() {
+            let workspace = workspace.downgrade();
+            applied.badge_retry = Some(cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let _ = workspace.update(cx, |_, cx| cx.notify());
+            }));
+        }
     }
     if ui_font_size != applied.ui_font_size {
         applied.ui_font_size = ui_font_size;
         apply_ui_font_size(ui_font_size, cx);
     }
-    if applied.app_icon != Some(app_icon) {
+    // The Dock tile is the app's, so the icon is put up once per choice; a Windows icon is each
+    // window's, so a window that wasn't there when it was chosen needs it put on too.
+    let windows = if cfg!(windows) { cx.windows() } else { Vec::new() };
+    if applied.app_icon != Some(app_icon) || windows != applied.icon_windows {
         applied.app_icon = Some(app_icon);
-        set_app_icon(app_icon);
+        applied.icon_retry = None;
+        // A window may be busy (it's the one being updated) or not made yet: ask again soon.
+        if set_app_icon(app_icon, cx) {
+            applied.icon_windows = windows;
+        } else {
+            applied.icon_windows.clear();
+            let workspace = workspace.downgrade();
+            applied.icon_retry = Some(cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let _ = workspace.update(cx, |_, cx| cx.notify());
+            }));
+        }
     }
     if menu_bar_icon != applied.menu_bar_icon {
         applied.menu_bar_icon = menu_bar_icon;
@@ -115,20 +165,33 @@ pub fn apply_ui_font_size(size: f32, cx: &mut App) {
     }
 }
 
-/// Show `count` on the Dock tile (cleared at 0). Must run on the main thread; a no-op elsewhere.
+/// Show `count` on the Dock tile (cleared at 0). Must run on the main thread. Whether it was
+/// shown; `main` is the main window, which only the taskbar's badge belongs to.
 #[cfg(all(target_os = "macos", not(test)))]
-fn set_dock_badge(count: usize) {
+fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -> bool {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::NSString;
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else { return true };
     let tile = NSApplication::sharedApplication(mtm).dockTile();
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     tile.setBadgeLabel(label.as_deref());
+    true
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
-fn set_dock_badge(_: usize) {}
+/// The taskbar button's overlay badge, on the main window's button. With no main window there is
+/// no button; the count is put up when one opens.
+#[cfg(all(windows, not(test)))]
+fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, cx: &mut App) -> bool {
+    let Some(main) = main else { return count == 0 };
+    let hwnd = main.update(cx, |_, window, _| crate::winsys::hwnd_of(window)).ok().flatten();
+    hwnd.is_some_and(|hwnd| crate::winsys::set_overlay_badge(hwnd, count))
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows), not(test)))]
+fn set_dock_badge(_: usize, _: Option<AnyWindowHandle>, _: &mut App) -> bool {
+    true
+}
 
 /// The rendered icon for `icon` (`assets/brand`).
 pub fn app_icon_image(icon: AppIcon) -> &'static str {
@@ -140,42 +203,82 @@ pub fn app_icon_image(icon: AppIcon) -> &'static str {
 }
 
 /// Show `icon` in the Dock while Trek runs. The bundle's own icon (Ember) is what Finder and a
-/// quit app's Dock tile show: macOS only lets a running app change its tile.
+/// quit app's Dock tile show: macOS only lets a running app change its tile. Whether it was put
+/// up (the Windows one, below, asks again when a window couldn't take it).
 #[cfg(all(target_os = "macos", not(test)))]
-fn set_app_icon(icon: AppIcon) {
+fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
     use objc2::{AllocAnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else { return };
+    let Some(mtm) = MainThreadMarker::new() else { return true };
+    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else { return true };
     let data = NSData::with_bytes(&bytes);
     let image = NSImage::initWithData(NSImage::alloc(), &data);
     // SAFETY: on the main thread (`mtm`), with an image AppKit retains; `None` puts the bundle's
     // icon back.
     unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image.as_deref()) };
+    true
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
-fn set_app_icon(_: AppIcon) {}
+/// On Windows the icon is each window's (`WM_SETICON`) and its class's, taken from the exe's icon
+/// resources (`winsys::icon_resource`): the taskbar button and title bar show it while Trek runs,
+/// and the exe's own icon (Explorer, a shortcut) stays Ember.
+#[cfg(all(windows, not(test)))]
+fn set_app_icon(icon: AppIcon, cx: &mut App) -> bool {
+    let resource = crate::winsys::icon_resource(icon);
+    let mut all = true;
+    for handle in cx.windows() {
+        let hwnd = handle.update(cx, |_, window, _| crate::winsys::hwnd_of(window)).ok().flatten();
+        all &= hwnd.is_some_and(|hwnd| crate::winsys::set_window_icon(hwnd, resource));
+    }
+    all
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows), not(test)))]
+fn set_app_icon(_: AppIcon, _: &mut App) -> bool {
+    true
+}
+
+/// `window` is on a display of another scale than it was (dragged there, or the display's scale
+/// changed): on Windows its icons, cut for the old scale, are put on again at the new one's size.
+/// Called from the window's own update, so it asks the window rather than updating it.
+pub fn scale_changed(window: &Window, cx: &App) {
+    #[cfg(test)]
+    SCALE_CHANGES.with(|n| n.set(n.get() + 1));
+    #[cfg(all(windows, not(test)))]
+    if let (Some(workspace), Some(hwnd)) = (cx.try_global::<crate::workspace::GlobalWorkspace>(), crate::winsys::hwnd_of(window)) {
+        let icon = workspace.0.read(cx).settings.appearance.app_icon;
+        crate::winsys::set_window_icon(hwnd, crate::winsys::icon_resource(icon));
+    }
+    #[cfg(not(all(windows, not(test))))]
+    let _ = (window, cx);
+}
 
 #[cfg(test)]
-fn set_app_icon(icon: AppIcon) {
+fn set_app_icon(icon: AppIcon, _: &mut App) -> bool {
     APP_ICON.with(|i| i.set(Some(icon)));
+    true
 }
 
 #[cfg(test)]
 thread_local! {
     /// What tests would have shown on the Dock tile (each GPUI test runs on its own thread).
     pub static DOCK_BADGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The window tests were last asked to put the badge on (or take it from).
+    pub static BADGE_ON: std::cell::Cell<Option<AnyWindowHandle>> = const { std::cell::Cell::new(None) };
     /// Alert sounds tests would have played.
     pub static SOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The Dock icon tests would have shown.
     pub static APP_ICON: std::cell::Cell<Option<AppIcon>> = const { std::cell::Cell::new(None) };
+    /// How many times a window's icons would have been cut again for another display's scale.
+    pub static SCALE_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-fn set_dock_badge(count: usize) {
+fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, _: &mut App) -> bool {
     DOCK_BADGE.with(|b| b.set(count));
+    BADGE_ON.with(|w| w.set(main));
+    true
 }
 
 /// macOS's Reduce Transparency is on (Accessibility › Display): liquid glass stays off. Asked at
@@ -195,8 +298,14 @@ pub fn reduce_transparency() -> bool {
     })
 }
 
+/// Where the system won't have glass: on Windows, a Windows without Mica (10, or 11 before 22H2)
+/// or with Transparency effects off (`winlook`), as macOS's Reduce Transparency does. The window
+/// stays opaque.
 #[cfg(not(target_os = "macos"))]
 pub fn reduce_transparency() -> bool {
+    #[cfg(windows)]
+    return !crate::winlook::glass_now();
+    #[cfg(not(windows))]
     false
 }
 
@@ -206,7 +315,13 @@ fn reduce_motion() -> bool {
     objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows's Animation effects are off (Settings › Accessibility › Visual effects).
+#[cfg(windows)]
+fn reduce_motion() -> bool {
+    crate::winlook::reduce_motion()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn reduce_motion() -> bool {
     false
 }
@@ -220,9 +335,29 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// Tests' folders are their own: gone for good, not into the user's Trash.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(test)]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(Into::into)
+}
+
+/// The Recycle Bin (Windows) or the XDG trash (Linux).
+#[cfg(all(not(target_os = "macos"), not(test)))]
+pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
+    trek_core::paths::trash(path)
+}
+
+/// `std::fs::canonicalize`, but without the `\\?\` prefix Windows puts on a drive path: git, the
+/// agents and the user all write that path as `C:\dir`, and the two spellings aren't prefixes of
+/// each other.
+pub fn canonical(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let real = std::fs::canonicalize(path).ok()?;
+    if cfg!(windows) {
+        let plain = real.to_str().and_then(|p| p.strip_prefix(r"\\?\")).filter(|p| p.as_bytes().get(1) == Some(&b':'));
+        if let Some(plain) = plain {
+            return Some(std::path::PathBuf::from(plain));
+        }
+    }
+    Some(real)
 }
 
 /// Whether Trek is the frontmost app (a relaunch after an update comes back to the front only then).
@@ -233,7 +368,20 @@ pub fn app_is_active() -> bool {
     MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the window in front is one of Trek's.
+#[cfg(windows)]
+pub fn app_is_active() -> bool {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    // SAFETY: plain calls; a null window (none in front) is passed over, and `pid` is writable.
+    unsafe {
+        let front = GetForegroundWindow();
+        let mut pid = 0u32;
+        !front.is_null() && GetWindowThreadProcessId(front, &mut pid) != 0 && pid == GetCurrentProcessId()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn app_is_active() -> bool {
     true
 }
@@ -257,8 +405,69 @@ pub fn order_back(window: &Window) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Whether a window that isn't to take focus (`focus: false`, a launch in the background) is
+/// still opened shown. On macOS it's opened hidden and `order_back` shows it; GPUI on Windows
+/// keeps a window opened with `show: false` hidden until it's activated, and shows one opened
+/// with `show: true, focus: false` without activating it.
+pub const SHOW_BEHIND: bool = cfg!(windows);
+
+/// Send `window` to the bottom of the stack without activating it, behind every other app's
+/// windows (it's been opened shown, see `SHOW_BEHIND`).
+#[cfg(windows)]
+pub fn order_back(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: `hwnd` is the live window GPUI created for this `window`, and this is its thread;
+    // the call changes only the z-order, and doesn't activate it.
+    unsafe { SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn order_back(_: &Window) {}
+
+/// Bring `window` to the front and give it focus, restoring it if it's minimized. On Windows
+/// without GPUI's `activate_window`, which presses and releases Alt through `SendInput` to win
+/// the foreground: a keystroke that lands in whatever app the user is in. Plain
+/// `SetForegroundWindow` works when Trek may take the foreground (the user just clicked Trek's
+/// tray icon or a banner, or a second launch passed its right on, see `single_instance`); when
+/// it may not, Windows flashes Trek's taskbar button instead, which is the polite outcome.
+///
+/// Deferred until the update that asked is over, as GPUI's own `activate_window` is (it spawns):
+/// restoring and activating a window send it `WM_SIZE`, `WM_ACTIVATE` and the like at once, and
+/// its callbacks can't reach the app (or this window) while they're being updated, so they'd be
+/// dropped.
+#[cfg(windows)]
+pub fn activate_window(window: &mut Window, cx: &mut App) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+    let hwnd = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(win32)) => win32.hwnd.get() as windows_sys::Win32::Foundation::HWND,
+        // GPUI's test platform: no system window behind it. (Never GPUI's own activation on a
+        // real one: that is the one that sends the Alt key.)
+        #[cfg(test)]
+        _ => return window.activate_window(),
+        #[cfg(not(test))]
+        _ => return,
+    };
+    cx.defer(move |_| {
+        // SAFETY: `hwnd` is the window GPUI created for the `window` above, and this is its thread;
+        // if it has closed since, both calls fail harmlessly.
+        unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn activate_window(window: &mut Window, _: &mut App) {
+    window.activate_window();
+}
 
 /// Liquid glass from the system (macOS 26 and later): an `NSGlassEffectView` under the window's
 /// content, which frosts whatever is behind the window. `on` adds it (once), off removes it.
@@ -433,19 +642,24 @@ pub mod lately {
 /// for minutes, and Trek crawled meanwhile).
 #[cfg(not(test))]
 pub fn play_alert_sound() {
-    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     static PLAYING: AtomicBool = AtomicBool::new(false);
     if PLAYING.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(|| {
-        let _ = Command::new("/usr/bin/afplay")
-            .arg("/System/Library/Sounds/Glass.aiff")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        #[cfg(windows)]
+        crate::winsys::play_notification_sound();
+        #[cfg(not(windows))]
+        {
+            use std::process::{Command, Stdio};
+            let _ = Command::new("/usr/bin/afplay")
+                .arg("/System/Library/Sounds/Glass.aiff")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         PLAYING.store(false, Ordering::SeqCst);
     });
 }
@@ -453,6 +667,34 @@ pub fn play_alert_sound() {
 #[cfg(test)]
 pub fn play_alert_sound() {
     SOUNDS.with(|n| n.set(n.get() + 1));
+}
+
+/// The Windows release as Settings › About shows it: "Windows 11 24H2 (26100)". Read from the
+/// registry: `ProductName` there still says "Windows 10" on 11, so the build number (22000 and
+/// up is 11) names the major version.
+#[cfg(windows)]
+pub fn windows_version() -> String {
+    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    fn value(name: &str) -> Option<String> {
+        let key: Vec<u16> = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion".encode_utf16().chain([0]).collect();
+        let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let mut buf = [0u16; 128];
+        let mut size = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: both names end in a NUL; `buf` is `size` bytes long, and `size` is how many are
+        // written (the terminator included) on success.
+        let status = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size) };
+        if status != 0 {
+            return None;
+        }
+        let chars = (size as usize / 2).saturating_sub(1).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..chars])).filter(|s| !s.is_empty())
+    }
+    let build = value("CurrentBuild");
+    let major = if build.as_deref().and_then(|b| b.parse::<u32>().ok()).is_some_and(|b| b >= 22000) { "Windows 11" } else { "Windows 10" };
+    let mut out = major.to_string();
+    out.extend(value("DisplayVersion").map(|v| format!(" {v}")));
+    out.extend(build.map(|b| format!(" ({b})")));
+    out
 }
 
 /// How to tell the user a thread needs them or finished.

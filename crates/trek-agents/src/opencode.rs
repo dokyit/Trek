@@ -241,9 +241,21 @@ fn config_sources(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> (Vec<Path
     for dir in dirs.iter().filter(|d| d.ends_with(".opencode") || Some(*d) == config_dir.as_ref()) {
         files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| dir.join(f)));
     }
-    let managed = PathBuf::from("/Library/Application Support/opencode");
+    let managed = managed_dir(env);
     files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| managed.join(f)));
     (files, dirs)
+}
+
+/// The folder an administrator's config goes in: `%ProgramData%\opencode` on Windows,
+/// `/Library/Application Support/opencode` on macOS. The global config and the data folder are
+/// `~/.config/opencode` and `~/.local/share/opencode` on Windows too: OpenCode finds them from the
+/// home folder, not from `%APPDATA%`.
+fn managed_dir(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+    if cfg!(windows) {
+        env("ProgramData").filter(|p| !p.is_empty()).map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from).join("opencode")
+    } else {
+        PathBuf::from("/Library/Application Support/opencode")
+    }
 }
 
 /// Markdown agents under `dir`: `(name, text)`.
@@ -570,8 +582,11 @@ mod tests {
         assert!(!is_1x_version(""));
     }
 
+    // The next five items drive a `/bin/sh` fake and macOS's `/usr/bin/sqlite3`; a Windows fake and
+    // sqlite come with the Phase 2 OpenCode work.
     /// A folder with an `opencode` that acts as 1.x does when asked for its schema: it creates
     /// `OPENCODE_DB` (as 1.18.35 does, from the recorded schema), and only in a home of its own.
+    #[cfg(unix)]
     fn fake_1x(dir: &Path) -> PathBuf {
         let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-core/fixtures/opencode-1x-empty.sql");
         let bin = dir.join("opencode");
@@ -590,6 +605,7 @@ mod tests {
     }
 
     /// Run `sql` on the database at `path` (macOS's own sqlite3).
+    #[cfg(unix)]
     fn sqlite(path: &Path, sql: &str) {
         use std::io::Write as _;
         let mut child = std::process::Command::new("/usr/bin/sqlite3").arg(path).stdin(std::process::Stdio::piped()).spawn().unwrap();
@@ -597,6 +613,7 @@ mod tests {
         assert!(child.wait().unwrap().success());
     }
 
+    #[cfg(unix)]
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("trek-agents-opencode-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -604,6 +621,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn opencode_2s_database_is_shared_with_1x() {
         let dir = temp_dir("share");
@@ -622,6 +640,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_database_that_cant_be_shared_leaves_1x_its_own() {
         let dir = temp_dir("refuse");
@@ -798,6 +817,24 @@ mod tests {
         assert!(files.contains(&root.join("app/opencode.json")));
         assert!(!files.contains(&root.parent().unwrap().join("opencode.json")), "stops at the repository root");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn managed_config_is_where_the_system_keeps_it() {
+        let set = |_: &str| Some(r"D:\Data".to_string());
+        let unset = |_: &str| None;
+        let blank = |_: &str| Some(String::new());
+        if cfg!(windows) {
+            assert_eq!(managed_dir(&set), PathBuf::from(r"D:\Data").join("opencode"));
+            assert_eq!(managed_dir(&unset), PathBuf::from(r"C:\ProgramData\opencode"));
+            assert_eq!(managed_dir(&blank), PathBuf::from(r"C:\ProgramData\opencode"));
+        } else {
+            assert_eq!(managed_dir(&set), PathBuf::from("/Library/Application Support/opencode"));
+        }
+        let (files, _) = config_sources(Path::new("/Users/me/app"), &unset);
+        assert!(files.contains(&managed_dir(&unset).join("opencode.json")));
+        // The user's own config is under their home on every platform.
+        assert!(files.contains(&trek_core::paths::home().join(".config/opencode/opencode.json")));
     }
 
     #[test]

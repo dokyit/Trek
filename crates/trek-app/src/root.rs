@@ -5,6 +5,7 @@ use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
+use crate::panels::terminal::Job;
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
@@ -53,8 +54,8 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
-    /// Whether the window was last told to blur what's behind it (liquid glass).
-    glass_applied: Option<bool>,
+    /// What the window was last told about its glass (`ui::apply_glass`).
+    pub(crate) glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
     /// second ⌘B mid-way turns it round where it is.
     pub(crate) sidebar_motion: SharedSpring,
@@ -118,7 +119,20 @@ impl TrekWindow {
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
         let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), Scope::Main, window, cx));
         let handle = window.window_handle();
-        workspace.update(cx, |ws, _| ws.main_window = Some(handle));
+        // Notified: what follows a window (the taskbar badge) is put on the new one.
+        workspace.update(cx, |ws, cx| {
+            ws.main_window = Some(handle);
+            cx.notify();
+        });
+        // The next launch opens the main window where this one is left.
+        let mut scale = window.scale_factor();
+        cx.observe_window_bounds(window, move |_, window, cx| {
+            crate::window_place::remember(window, cx);
+            if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor()) {
+                crate::system::scale_changed(window, cx);
+            }
+        })
+        .detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -169,13 +183,17 @@ impl TrekWindow {
                     this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
                     this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
-                WorkspaceEvent::RunInTerminal { command, cwd } if this.workspace.read(cx).ide() => {
-                    let (command, cwd) = (command.clone(), cwd.clone());
-                    this.ide.update(cx, |ide, cx| ide.run_command(command, cwd, window, cx));
-                }
-                WorkspaceEvent::RunInTerminal { command, cwd } => {
-                    let (command, cwd) = (command.clone(), cwd.clone());
-                    this.right_panel.update(cx, |p, cx| p.run_command(command, cwd, window, cx));
+                WorkspaceEvent::RunInTerminal { command, cwd } | WorkspaceEvent::RunProjectAction { command, cwd } => {
+                    let job = match event {
+                        WorkspaceEvent::RunProjectAction { .. } => Job::Action(command.clone()),
+                        _ => Job::Setup(command.clone()),
+                    };
+                    let cwd = cwd.clone();
+                    if this.workspace.read(cx).ide() {
+                        this.ide.update(cx, |ide, cx| ide.run_command(job, cwd, window, cx));
+                    } else {
+                        this.right_panel.update(cx, |p, cx| p.run_command(job, cwd, window, cx));
+                    }
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
                 WorkspaceEvent::OpenEditor { path, line, preview } if this.workspace.read(cx).main_window == Some(window.window_handle()) => {
@@ -228,12 +246,14 @@ impl TrekWindow {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
                 }
+                crate::ui::colours_changed(&mut this.glass_applied);
+                this.workspace.update(cx, |_, cx| cx.notify());
             }),
         ];
         // TREK_OPEN_TOOL=browser (or terminal, explorer, git, side-chat) opens that tool at launch.
         if let Ok(name) = std::env::var("TREK_OPEN_TOOL") {
             let name = name.trim().to_lowercase();
-            if let Some(tool) = crate::workspace::PanelTool::ALL.into_iter().find(|t| t.label().to_lowercase().replace(' ', "-") == name) {
+            if let Some(tool) = crate::workspace::PanelTool::offered().into_iter().find(|t| t.label().to_lowercase().replace(' ', "-") == name) {
                 let panel = right_panel.clone();
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
@@ -365,6 +385,8 @@ pub struct WindowTitle {
     right_panel: Entity<RightPanel>,
     /// The window's sidebar spring: the title's left part widens and narrows with the sidebar.
     sidebar_motion: SharedSpring,
+    /// Trek's menus, in the title bar where the system has no menu bar (Windows).
+    menu_bar: Option<Entity<crate::menu_bar::MenuBar>>,
     _subscription: Vec<Subscription>,
 }
 
@@ -372,7 +394,27 @@ impl WindowTitle {
     fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, sidebar_motion: SharedSpring, cx: &mut Context<Self>) -> Self {
         // The panel opening can make the sidebar step aside, which moves the title's left edge.
         let _subscription = vec![cx.observe(&workspace, |_, _, cx| cx.notify()), cx.observe(&right_panel, |_, _, cx| cx.notify())];
-        Self { workspace, right_panel, sidebar_motion, _subscription }
+        let menu_bar = crate::chrome::IN_WINDOW_MENUS.then(|| cx.new(|cx| crate::menu_bar::MenuBar::new(workspace.clone(), cx)));
+        Self { workspace, right_panel, sidebar_motion, menu_bar, _subscription }
+    }
+
+    /// The title bar's left end: the sidebar's toggle (Agents), Trek's mark and its wordmark, which
+    /// the menus take the place of where there's no system menu bar. `shown` is how far out the
+    /// sidebar under it is (1 out): the cluster is as wide as the sidebar, as far as that's out
+    /// (the menus can take more).
+    fn left_cluster(&self, toggle: Option<AnyElement>, wordmark: bool, shown: f32, cx: &App) -> Div {
+        let theme = cx.theme();
+        let menus = self.menu_bar.clone();
+        let width = crate::chrome::left_cluster(SIDEBAR_WIDTH);
+        h_flex()
+            .gap_2()
+            .when(shown > 0., |el| el.min_w(px(width * shown)))
+            .when(shown >= 1. && menus.is_none(), |el| el.w(px(width)))
+            .flex_none()
+            .children(toggle)
+            .child(crate::brand::logo_mark(px(15.)))
+            .when(menus.is_none() && wordmark, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")))
+            .children(menus)
     }
 }
 
@@ -382,6 +424,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     h_flex()
         .id("mode-switch")
+        .test_support()
         .flex_none()
         .h(px(26.))
         .p(px(2.))
@@ -438,15 +481,8 @@ impl WindowTitle {
                     .items_center()
                     .gap_2()
                     .pr_2()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .when(layout.primary_open, |el| el.w(px(SIDEBAR_WIDTH - 80.)))
-                            .flex_none()
-                            // The layout toggles are on the right, as VS Code and Cursor have them.
-                            .child(crate::brand::logo_mark(px(15.)))
-                            .child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")),
-                    )
+                    // The layout toggles are on the right, as VS Code and Cursor have them.
+                    .child(self.left_cluster(None, true, if layout.primary_open { 1. } else { 0. }, cx))
                     .child(mode_switch(crate::workspace::Mode::Editor, cx))
                     .child(
                         h_flex().flex_1().min_w_0().justify_center().child(
@@ -471,7 +507,7 @@ impl WindowTitle {
                                 .child(Icon::new(IconName::Search).size(px(13.)))
                                 .when_some(folder, |el, f| el.child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(f)).child("—"))
                                 .child(div().min_w_0().truncate().child("Go to file, command…"))
-                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child("⌘P"))
+                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child(crate::keys::shared("⌘P")))
                                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::QuickOpen), cx)),
                         ),
                     )
@@ -554,22 +590,13 @@ impl Render for WindowTitle {
                 .items_center()
                 .gap_2()
                 .pr_2()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        // As wide as the sidebar under it, as far as that's out.
-                        .when(shown > 0., |el| el.min_w(px((SIDEBAR_WIDTH - 80.) * shown)))
-                        .when(shown >= 1., |el| el.w(px(SIDEBAR_WIDTH - 80.)))
-                        .flex_none()
-                        .child(
-                            crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
-                                let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
-                                toggle_sidebar(&ws, &panel, window, cx)
-                            })),
-                        )
-                        .child(crate::brand::logo_mark(px(15.)))
-                        .when(!narrow, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek"))),
-                )
+                .child({
+                    let toggle = crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
+                        let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
+                        toggle_sidebar(&ws, &panel, window, cx)
+                    }));
+                    self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
+                })
                 .child(mode_switch(crate::workspace::Mode::Agents, cx))
                 .child(
                     h_flex()
@@ -630,12 +657,21 @@ fn launch_size() -> Option<Size<Pixels>> {
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
+    let min = size(px(760.), px(520.));
+    // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
+    // window every time).
+    let (display_id, window_bounds) = match launch_size() {
+        Some(asked) => (None, WindowBounds::centered(asked, cx)),
+        None if std::env::var_os("TREK_SHOT_DIR").is_some() => (None, WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        None => crate::window_place::initial(size(px(1280.), px(820.)), min, focus, cx),
+    };
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(launch_size().unwrap_or(size(px(1280.), px(820.))), cx)),
-        window_min_size: Some(size(px(760.), px(520.))),
+        window_bounds: Some(window_bounds),
+        display_id,
+        window_min_size: Some(min),
         app_id: Some("dev.trek.Trek".into()),
         focus,
-        show: focus,
+        show: focus || crate::system::SHOW_BEHIND,
         ..TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
@@ -644,6 +680,14 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         }
         if let Some(error) = workspace.update(cx, |ws, _| ws.store_error.take()) {
             window.on_next_frame(move |window, cx| database_error(&error, window, cx));
+        }
+        // Where the app ends with its main window, its close button is the Quit command, the
+        // same way out as the menu's: `quit` closes the windows itself and ends the app after.
+        if cx.has_global::<QuitWithMainWindow>() {
+            window.on_window_should_close(cx, |_, cx| {
+                quit(cx);
+                false
+            });
         }
         cx.new(|cx| TrekWindow::new(workspace, window, cx))
     })?;
@@ -666,7 +710,7 @@ fn database_error(error: &str, window: &mut Window, cx: &mut App) {
 /// Bring the main window forward, reopening it if it was closed.
 pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
     let main = workspace.read(cx).main_window;
-    if main.is_some_and(|m| m.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if main.is_some_and(|m| m.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     if let Err(e) = open_main(workspace, true, cx) {
@@ -718,13 +762,61 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     .detach();
     let ws = workspace.downgrade();
     cx.on_window_closed(move |cx, id| {
-        let _ = ws.update(cx, |ws, cx| {
-            if let Some(main) = ws.main_window.filter(|m| m.window_id() == id) {
-                ws.main_window_closed(main, cx);
-            }
-        });
+        let closed_main = ws
+            .update(cx, |ws, cx| match ws.main_window.filter(|m| m.window_id() == id) {
+                Some(main) => {
+                    ws.main_window_closed(main, cx);
+                    true
+                }
+                None => false,
+            })
+            .unwrap_or(false);
+        if closed_main && cx.has_global::<QuitWithMainWindow>() {
+            cx.dispatch_action(&crate::Quit);
+        }
     })
     .detach();
+}
+
+/// Set on an app that ends with its main window: Windows has no Dock to keep Trek alive with no
+/// window open, and the thread windows left would be a Trek with nothing to bring the main
+/// window back. (On macOS the app stays, and the Dock icon reopens the main window.)
+struct QuitWithMainWindow;
+
+impl Global for QuitWithMainWindow {}
+
+/// The quit is Trek's own (`quit`), not GPUI's, which quits the moment the last window is gone,
+/// with no time for what `quit` waits for.
+pub fn quit_with_main_window(cx: &mut App) {
+    cx.set_global(QuitWithMainWindow);
+    cx.set_quit_mode(QuitMode::Explicit);
+}
+
+/// End the app: the agents' sessions first.
+///
+/// On Windows the windows go first too, and the quit follows them after a moment. A window's
+/// native state is let go by a task its drop queues, and one still queued as the loop ends never
+/// runs: a text field in focus has handed the window the handle it takes the keys by, which is
+/// then left holding the field's state when GPUI drops its entities (a `shots` build, or a test,
+/// panics with "Exited with leaked handles" there). A window being updated can't be removed from
+/// inside that update, so the work waits for the current one to finish; and a window closed by its
+/// own close button has its task queued already, which the moment lets run.
+pub fn quit(cx: &mut App) {
+    crate::workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
+    if cfg!(windows) {
+        cx.defer(|cx| {
+            for window in cx.windows() {
+                let _ = window.update(cx, |_, window, _| window.remove_window());
+            }
+            cx.spawn(async |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    } else {
+        cx.quit();
+    }
 }
 
 /// The Trek window with keyboard focus; `None` when another app is in front.
@@ -748,6 +840,8 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         crate::system::play_alert_sound();
     }
     if alert.banner {
+        #[cfg(all(windows, not(test)))]
+        register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
         cx.show_system_notification(SystemNotification { tag: attention_tag(thread), title: message.clone().into(), body: SharedString::default(), actions: Vec::new() });
@@ -758,6 +852,18 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         let note = crate::toast::Toast::new(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
         let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
     }
+}
+
+/// Windows shows a toast under its AppUserModelID's name and icon, which Trek, being no installed
+/// app, registers itself: once a run, before the first toast.
+#[cfg(all(windows, not(test)))]
+fn register_toast_identity() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(png) = crate::assets::brand_bytes("brand/icon.png") {
+            crate::winsys::register_toast_identity(crate::winsys::APP_ID, crate::winsys::APP_NAME, &png);
+        }
+    });
 }
 
 const ATTENTION_TAG: &str = "trek-attention-";
@@ -785,7 +891,7 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
         return show_main(workspace.clone(), cx);
     }
     let own = workspace.read(cx).thread_windows.get(thread).copied();
-    if own.is_some_and(|w| w.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if own.is_some_and(|w| w.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     // In the editor it opens in the AI side bar.
@@ -878,7 +984,9 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, dir: std::path::
     })
 }
 
-/// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
+/// "Open in" menu for the project folder: the file manager, the terminal, and editors that are
+/// installed. On a Mac the apps are launched through `open -a`; on Windows each is found through
+/// the registry and PATH (`trek_core::open_in`) and started with the folder as its argument.
 pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     gpui_kit::component::button::Button::new("open-in")
@@ -890,8 +998,22 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
             let mut menu = menu.min_w(px(180.));
             // Checked when the menu opens, not on every frame of the title bar.
+            if cfg!(windows) {
+                let folder = dir.clone();
+                menu = menu.item(PopupMenuItem::new(crate::words::words().file_manager).on_click(move |_, _, cx| cx.open_with_system(&folder)));
+                for target in trek_core::open_in::windows_targets() {
+                    let (label, dir) = (target.label, dir.clone());
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
+                        let Some(launch) = target.launch(&dir) else { return tracing::warn!("open in {label}: {} isn't an absolute path", dir.display()) };
+                        if let Err(e) = trek_core::open_in::spawn(&launch) {
+                            tracing::warn!("open in {label}: {e}");
+                        }
+                    }));
+                }
+                return menu;
+            }
             let apps = [
-                ("Finder", "Finder"),
+                (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
                 ("Terminal", "Terminal"),
                 ("Ghostty", "Ghostty"),
                 ("Zed", "Zed"),
@@ -900,7 +1022,7 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
                 ("Xcode", "Xcode"),
             ]
             .into_iter()
-            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists());
+            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists()); // words: ok
             for (label, app) in apps {
                 let dir = dir.clone();
                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
@@ -954,7 +1076,7 @@ impl Render for TrekWindow {
         place_toasts(toast_bottom, window, cx);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
-        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
         let ide = self.workspace.read(cx).ide();
         let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
         let shown = sidebar_shown(&self.sidebar_motion, collapsed, motion, now, window);
@@ -1005,6 +1127,13 @@ impl Render for TrekWindow {
         v_flex()
             .id("trek-window")
             .key_context("TrekWindow")
+            // The menus hear Alt held, and a press anywhere in the window, from here: a focused
+            // element only gets the modifiers and presses it's in the path of.
+            .when_some(self.title.read(cx).menu_bar.clone(), |el, bar| {
+                let held = bar.clone();
+                el.on_modifiers_changed(move |ev, _, cx| held.update(cx, |bar, cx| bar.modifiers_changed(ev.modifiers, cx)))
+                    .capture_any_mouse_down(move |_, _, cx| bar.update(cx, |bar, _| bar.mouse_pressed()))
+            })
             // Panel resizing: follow the pointer anywhere in the window until the button is released.
             .when(dragging, |el| {
                 el.cursor(CursorStyle::ResizeLeftRight)
@@ -1180,6 +1309,8 @@ impl Render for TrekWindow {
             .child(self.palette.clone())
             .child(self.preview.clone())
             .children(crate::motion::leaving_sheet(window, cx))
+            // Windows: the caption buttons stay reachable over what covers the title bar.
+            .children((self.palette.read(cx).open || self.preview.read(cx).is_open()).then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
             .into_any_element()
     }
 }

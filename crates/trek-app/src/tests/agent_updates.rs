@@ -88,7 +88,8 @@ fn an_update_waits_for_its_agents_running_turn() {
     run(async |cx| {
         let trek = open(cx);
         let runs = found(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        // Running through the checks below: a loaded runner can take seconds to reach them.
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the turn to start", |ws| ws.turn_running(&tid)).await;
         trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
@@ -359,7 +360,9 @@ fn an_update_waits_for_its_agents_background_work() {
         let trek = open(cx);
         let runs = found(&trek, cx);
         // Answered, with a dev server left running: replacing the CLI would end it.
-        let id = trek.send(cx, "mock:server 800ms");
+        // Serving through the Queued checks below (a click and two frames): a runner busy with
+        // other builds can take well over eight seconds to reach them, so it serves for fifteen.
+        let id = trek.send(cx, "mock:server 15s");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty() && !ws.turn_running(&id)));
         trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
@@ -396,7 +399,7 @@ fn an_update_waiting_on_a_dev_server_doesnt_hold_back_trek_restarting() {
         cx.executor().advance_clock(crate::workspace::RESTART_GRACE);
         cx.run_until_parked();
         let status = trek.read(cx, |ws, _| ws.updater.status.clone());
-        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains(super::harness::INSTALL_BLOCKED)), "{status:?}");
         assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty()), "the server was still running");
     });
 }
@@ -408,7 +411,10 @@ fn a_parent_whose_agent_updated_while_its_sub_agent_reported_still_wakes() {
         found(&trek, cx);
         let (release, gate) = async_channel::bounded::<()>(1);
         trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
-        let id = trek.send(cx, "mock:delegate mock:long 600ms");
+        // Long enough that a loaded runner still finds the job Queued while the sub-agent works:
+        // it can't be asked for before the parent's answer, and the sub-agent's clock runs from
+        // its start, so a stall of seconds between the two would otherwise let it finish first.
+        let id = trek.send(cx, "mock:delegate mock:long 15s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none() && !ws.children(&p).is_empty()).await;
         // Asked for while the sub-agent (the same agent) works: it starts as that turn ends, so

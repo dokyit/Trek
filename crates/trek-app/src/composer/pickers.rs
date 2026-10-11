@@ -766,7 +766,7 @@ pub(crate) fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<Any
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(div().flex_1().child(title))
-                    .child("↑↓ to move · ↩ to pick · esc"),
+                    .child(crate::keys::shared("↑↓ to move · ↩ to pick · esc")),
             )
             .when(items.is_empty(), |el| el.child(div().px(px(10.)).py(px(8.)).text_sm().text_color(theme.muted_foreground).child(empty)))
             .child(v_flex().id("picker-list").test_support().max_h(px(280.)).overflow_y_scroll().track_scroll(&p.picker_scroll).children(items.into_iter().enumerate().map(|(i, item)| {

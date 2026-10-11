@@ -22,6 +22,12 @@ use trek_core::settings::{NotifyMode, Settings, ThemeChoice};
 use trek_core::store::{Item, Store};
 use trek_core::{AgentId, HandHolding, RunState};
 
+/// The fonts the app registers at startup (`fonts::register`), for the tests' text system: the
+/// theme names them, and GPUI can't lay out a line in a family it hasn't got.
+fn add_fonts() {
+    TEXT.get().expect("text system").add_fonts(crate::fonts::files()).expect("Trek's fonts register");
+}
+
 /// CoreText, so text lays out as in the app. `MacPlatform` must be made on the main thread and
 /// tests run on worker threads, so it's made before `main`.
 static TEXT: OnceLock<Arc<dyn PlatformTextSystem>> = OnceLock::new();
@@ -31,7 +37,24 @@ static TEXT: OnceLock<Arc<dyn PlatformTextSystem>> = OnceLock::new();
 fn load_text_system() {
     let platform = gpui_macos::MacPlatform::new(true);
     let _ = TEXT.set(gpui_kit::Platform::text_system(&platform));
+    add_fonts();
     // Lives for the whole process; dropping it would tear down state the text system shares.
+    std::mem::forget(platform);
+}
+
+/// DirectWrite, so text lays out as in the app. `WindowsPlatform::new(true)` (headless) hands out
+/// GPUI's no-op text system, so this makes the full platform: it needs a DirectX device (a GPU, or
+/// the WARP software adapter), initialises OLE for the calling thread, and creates GPUI's hidden
+/// message-only window (no visible window is ever shown). As on macOS it's made before `main` and
+/// kept for the process; DirectWrite's factory is free-threaded, so the worker threads the tests
+/// run on can use the text system it hands out.
+#[cfg(windows)]
+#[ctor::ctor(unsafe)]
+fn load_text_system() {
+    let platform = gpui_windows::WindowsPlatform::new(false).expect("DirectWrite text system for the UI tests");
+    let _ = TEXT.set(gpui_kit::Platform::text_system(&platform));
+    add_fonts();
+    // Lives for the whole process, as on macOS: it owns the message window the text system's devices belong to.
     std::mem::forget(platform);
 }
 
@@ -50,6 +73,47 @@ fn isolate_process() {
     let _ = std::fs::create_dir_all(&home);
     // SAFETY: before `main`, so before any other thread could be reading the environment.
     unsafe { std::env::set_var("HOME", &home) };
+    // On Windows the user's folders come from these, not HOME: an agent CLI, a git subprocess or a
+    // shell would otherwise find the real `.claude`, `.codex`, `AppData\Roaming` and the rest.
+    #[cfg(windows)]
+    {
+        let (roaming, local) = (home.join("AppData").join("Roaming"), home.join("AppData").join("Local"));
+        let _ = std::fs::create_dir_all(&roaming);
+        let _ = std::fs::create_dir_all(&local);
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var("APPDATA", &roaming);
+            std::env::set_var("LOCALAPPDATA", &local);
+        }
+    }
+}
+
+/// Whether a process with this id is still running (a folder named for it is then in use).
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks whether the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The Windows twin: a process that can't be opened is gone, unless it is only that we're denied;
+/// one that can be opened is running until its exit code says otherwise. (A finished process whose
+/// handle someone still holds is "gone" too: its files are no longer in use.)
+#[cfg(windows)]
+fn process_exists(pid: i32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain calls; the handle is closed before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0;
+        let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(handle);
+        running
+    }
 }
 
 /// This process's throwaway data folder. Isolation is set up on first use; folders left by test
@@ -62,8 +126,7 @@ pub fn data_dir() -> &'static PathBuf {
         for entry in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
             let name = entry.file_name();
             let Some(pid) = name.to_str().and_then(|n| n.strip_prefix(PREFIX)).and_then(|p| p.parse::<i32>().ok()) else { continue };
-            // SAFETY: signal 0 only checks whether the process exists.
-            if unsafe { libc::kill(pid, 0) } != 0 {
+            if !process_exists(pid) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
@@ -112,6 +175,22 @@ pub fn settings() -> Settings {
 
 pub fn mock() -> AgentId {
     AgentId::Direct(trek_core::catalog::MOCK_PROVIDER.into())
+}
+
+/// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
+/// the staged update the tests name isn't there (Windows checks that before anything else).
+pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "the downloaded update is gone" } else { "not running from an app bundle" };
+
+/// `root` with `rel` (written with `/`, as the tests write paths) under it, with the platform's
+/// separators throughout: a path joined as `root.join("a/b")` mixes them on Windows, and so isn't
+/// the string the app builds from its own components.
+pub fn join(root: &std::path::Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
+/// `path` with symlinks resolved, as git and the app write it (no `\\?\` prefix on Windows).
+pub fn canonical(path: &std::path::Path) -> PathBuf {
+    crate::system::canonical(path).expect("a folder that exists")
 }
 
 /// A fresh, empty folder to use as a project.

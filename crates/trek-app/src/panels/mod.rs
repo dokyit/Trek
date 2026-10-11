@@ -1,6 +1,6 @@
 //! Right panel (Synara-style): tabs of tools — Terminal, Browser, Simulator, Explorer, Side chat, Git.
 
-mod browser;
+pub(crate) mod browser;
 pub mod explorer;
 pub mod ide_search;
 pub(crate) mod git;
@@ -134,8 +134,8 @@ impl RightPanel {
             PanelTool::Git => View::Git(cx.new(|cx| git::GitPanel::new(ws, window, cx))),
             PanelTool::Explorer => View::Explorer(cx.new(|cx| explorer::ExplorerPanel::new(ws, cx))),
             PanelTool::Terminal => {
-                let cwd = ws.read(cx).current_cwd();
-                View::Terminal(cx.new(|cx| terminal::TerminalPanel::new(cwd, cx)))
+                let (cwd, shell) = (ws.read(cx).current_cwd(), ws.read(cx).settings.terminal.shell.clone());
+                View::Terminal(cx.new(|cx| terminal::TerminalPanel::new(cwd, shell, cx)))
             }
             PanelTool::Browser => View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx))),
             PanelTool::SideChat => View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx))),
@@ -157,14 +157,16 @@ impl RightPanel {
         }
     }
 
-    /// Run a setup command (install / sign in) in a fresh terminal tab, then rescan agents.
-    pub fn run_command(&mut self, command: String, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Run a setup command (install / sign in) or a project action in a fresh terminal tab, then
+    /// rescan agents.
+    pub fn run_command(&mut self, job: terminal::Job, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.launcher_open = false;
         let cwd = cwd.or_else(|| self.workspace.read(cx).current_cwd());
+        let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
         let view = cx.new(|cx| {
-            let mut t = terminal::TerminalPanel::with_command(cwd, Some(command), cx);
+            let mut t = terminal::TerminalPanel::with_command(cwd, job, shell, cx);
             t.on_exit(move |cx| {
                 let _ = ws.update(cx, |ws, cx| ws.detect_agents(cx));
             });
@@ -192,6 +194,15 @@ impl RightPanel {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// The Browser tool, if it's open (the shots harness's `browser` command).
+    #[cfg(any(test, feature = "shots"))]
+    pub fn browser(&self) -> Option<Entity<browser::BrowserPanel>> {
+        self.tabs.iter().find_map(|t| match &t.view {
+            View::Browser(b) => Some(b.clone()),
+            _ => None,
+        })
     }
 
     /// The tab in front, by its id.
@@ -270,7 +281,7 @@ impl RightPanel {
     /// The + menu's rows: a tool per row.
     fn launcher_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        PanelTool::ALL
+        PanelTool::offered()
             .into_iter()
             .map(|tool| {
                 h_flex()
@@ -295,7 +306,7 @@ impl RightPanel {
     fn tool_grid(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let cols = if self.width >= 420. { 2 } else { 1 };
-        let tiles = PanelTool::ALL.into_iter().map(|tool| {
+        let tiles = PanelTool::offered().into_iter().map(|tool| {
             h_flex()
                 .id(SharedString::from(format!("tool-tile-{}", tool.label())))
                 .test_support()

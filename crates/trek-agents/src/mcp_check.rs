@@ -41,7 +41,13 @@ fn page(result: &Value) -> (Vec<String>, Option<String>) {
 
 async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: Duration) -> Result<Vec<String>, String> {
     use std::process::Stdio;
-    let mut cmd = tokio::process::Command::new(command);
+    // A name is looked up the way the PATH the server gets would (on Windows `npx` is `npx.cmd`),
+    // a path used as written. A `.cmd` can't be given every argument, which they hear.
+    let program = program_for(command, env);
+    if let Some(problem) = trek_core::detect::batch_args_problem(&program, args) {
+        return Err(problem);
+    }
+    let mut cmd = tokio::process::Command::new(&program);
     // The login shell's PATH (where npx and uvx are), unless the server sets its own.
     cmd.args(args).env("PATH", trek_core::detect::login_path()).envs(env.iter().map(|(k, v)| (k, v)));
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -72,6 +78,19 @@ async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: 
             None => format!("No answer within {} seconds.", limit.as_secs()),
         }),
     }
+}
+
+/// What to start for `command`: a bare name found on the PATH the server is started with (the
+/// login PATH, or its own `PATH` from `env`), else the name itself, which then fails to start
+/// with the usual "isn't installed"; a path is used as written.
+fn program_for(command: &str, env: &[(String, String)]) -> std::path::PathBuf {
+    if trek_core::detect::is_bare_name(command) {
+        let own = env.iter().find(|(k, _)| k == "PATH" || (cfg!(windows) && k.eq_ignore_ascii_case("PATH"))).map(|(_, v)| v.as_str());
+        if let Some(found) = trek_core::detect::which_in(own.unwrap_or_else(|| trek_core::detect::login_path()), command) {
+            return found;
+        }
+    }
+    command.into()
 }
 
 enum Talk {
@@ -256,7 +275,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn fake(mode: &str, env: Vec<(String, String)>) -> McpServer {
-        McpServer::stdio("fake", "perl", vec![concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/fake-mcp.pl").into(), mode.into()], env)
+        McpServer::stdio("fake", trek_test_fixtures::bin("fake-mcp").display().to_string(), vec![mode.into()], env)
     }
 
     #[tokio::test]
@@ -275,6 +294,30 @@ mod tests {
         assert_eq!(list_tools(&fake("refuse", vec![])).await.unwrap_err(), "It said: Unsupported protocol version");
         let err = list_tools(&McpServer::stdio("x", "trek-no-such-mcp-server", vec![], vec![])).await.unwrap_err();
         assert_eq!(err, "trek-no-such-mcp-server isn't installed, or isn't on your PATH.");
+    }
+
+    /// A name is looked up on the `PATH` the server gets, as a shell script there (on Windows this
+    /// is `tests_cmd_args`, with a `.cmd`: `npx` is `npx.cmd`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_name_is_found_on_the_path_the_server_gets() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("trek mcp check bare {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tool-launcher");
+        std::fs::write(&file, format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", trek_test_fixtures::bin("fake-mcp").display())).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.display().to_string();
+        let server = McpServer::stdio("x", "tool-launcher", vec!["ok".into()], vec![("PATH".into(), path)]);
+        assert_eq!(list_tools(&server).await.unwrap(), ["echo", "add", "get_time"]);
+        // Written as a path, it's used as written.
+        let server = McpServer::stdio("x", file.display().to_string(), vec!["ok".into()], vec![]);
+        assert_eq!(list_tools(&server).await.unwrap(), ["echo", "add", "get_time"]);
+        // A name that isn't there still says what was written.
+        let server = McpServer::stdio("x", "tool-launcher", vec![], vec![("PATH".into(), String::new())]);
+        assert_eq!(list_tools(&server).await.unwrap_err(), "tool-launcher isn't installed, or isn't on your PATH.");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

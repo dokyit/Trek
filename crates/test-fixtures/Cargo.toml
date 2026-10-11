@@ -1,0 +1,17 @@
+[package]
+name = "trek-test-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Binaries the test suite spawns in place of Perl scripts and shell tools: a fake ACP agent, a fake MCP server, and small utilities (sleep, cat, echo, exit)."
+
+[dependencies]
+serde_json.workspace = true
+# A test update-signing key (src/minisign.rs): Ed25519 from the ring reqwest already builds, base64
+# for minisign's text format.
+ring = "0.17"
+base64 = "0.22"
+
+[dev-dependencies]
+minisign-verify = "0.2"

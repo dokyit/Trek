@@ -373,6 +373,31 @@ pub fn id_from_name(name: &str) -> String {
     id.trim_end_matches('-').trim_start_matches(['.', '_']).chars().take(64).collect()
 }
 
+/// What follows `~/` (or on Windows `~\`) at the start of `command`.
+fn home_relative(command: &str, windows: bool) -> Option<&str> {
+    command.strip_prefix("~/").or_else(|| command.strip_prefix("~\\").filter(|_| windows))
+}
+
+/// Whether `command` is a full path on this platform: `/opt/x/agent`; on Windows a drive (`C:\x`,
+/// `D:/x`) or a network share (`\\server\share\x`). A rooted path with no drive (`\x`) isn't.
+fn is_full_path(command: &str, windows: bool) -> bool {
+    if !windows {
+        return command.starts_with('/');
+    }
+    let b = command.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    drive || command.starts_with(r"\\") || command.starts_with("//")
+}
+
+/// A program is its name on the PATH or a full path, not a path from somewhere (`./agent`,
+/// `.\agent.exe`, `tools/agent`) that depends on where Trek was started.
+fn check_command(command: &str, windows: bool) -> Result<()> {
+    if crate::detect::is_bare_name_on(command, windows) || is_full_path(command, windows) || home_relative(command, windows).is_some() {
+        return Ok(());
+    }
+    bail!("Give the program's full path, or just its name if it's on your PATH.");
+}
+
 /// Check what the user typed for an agent of their own and make it one. `id` is optional (made
 /// from the name); `taken` are the ids already in use.
 pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<EnvVar>, taken: &[String]) -> Result<AddedAgent> {
@@ -394,9 +419,7 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
     if command.is_empty() {
         bail!("Say which program starts the agent: its name on your PATH, or its full path.");
     }
-    if command.contains('/') && !Path::new(command).is_absolute() && !command.starts_with("~/") {
-        bail!("Give the program's full path, or just its name if it's on your PATH.");
-    }
+    check_command(command, cfg!(windows))?;
     let mut seen = std::collections::HashSet::new();
     for v in &env {
         let ok = v.name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && v.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -407,7 +430,7 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
             bail!("{} is set twice.", v.name);
         }
     }
-    let command = match command.strip_prefix("~/") {
+    let command = match home_relative(command, cfg!(windows)) {
         Some(rest) => crate::paths::home().join(rest).display().to_string(),
         None => command.to_string(),
     };
@@ -424,11 +447,19 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
 
 impl AddedAgent {
     /// The program to start, if it's here: a full path that exists, or a name found on PATH.
+    ///
+    /// On Windows a name finds the file under any of `PATHEXT`'s extensions (`npx` is `npx.cmd`),
+    /// which `detect::batch_args_problem` then checks the arguments for before it starts.
     pub fn resolve(&self) -> Option<PathBuf> {
-        if self.command.contains('/') {
-            Some(PathBuf::from(&self.command)).filter(|p| p.is_file())
+        self.resolve_in(crate::detect::login_path())
+    }
+
+    /// `resolve`, a name looked up on `path`.
+    fn resolve_in(&self, path: &str) -> Option<PathBuf> {
+        if crate::detect::is_bare_name(&self.command) {
+            crate::detect::which_in(path, &self.command)
         } else {
-            crate::detect::which(&self.command)
+            Some(PathBuf::from(&self.command)).filter(|p| p.is_file())
         }
     }
 
@@ -438,7 +469,7 @@ impl AddedAgent {
             (AgentSource::Registry, Some("npx")) => "npx isn't on your PATH: install Node.js to run it.".into(),
             (AgentSource::Registry, Some("uvx")) => "uvx isn't on your PATH: install uv to run it.".into(),
             (AgentSource::Registry, _) => "Its download is gone. Remove it and add it again from the ACP Registry.".into(),
-            (AgentSource::Command, _) if self.command.contains('/') => format!("{} doesn't exist.", crate::paths::tildify(Path::new(&self.command))),
+            (AgentSource::Command, _) if !crate::detect::is_bare_name(&self.command) => format!("{} doesn't exist.", crate::paths::tildify(Path::new(&self.command))),
             (AgentSource::Command, _) => format!("{} isn't on your PATH.", self.command),
         }
     }
@@ -456,7 +487,7 @@ impl AddedAgent {
 
     /// The command line it runs, for Settings: `npx -y @scope/agent@1.2.3 --acp`.
     pub fn command_line(&self) -> String {
-        let program = if self.command.contains('/') { crate::paths::tildify(Path::new(&self.command)) } else { self.command.clone() };
+        let program = if !crate::detect::is_bare_name(&self.command) { crate::paths::tildify(Path::new(&self.command)) } else { self.command.clone() };
         std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
     }
 }
@@ -636,7 +667,7 @@ pub enum Progress {
 pub async fn install(agent: &RegistryAgent, progress: &(dyn Fn(Progress) + Send + Sync)) -> Result<AddedAgent> {
     // Downloads and package managers stay out of tests and design reviews.
     anyhow::ensure!(!crate::paths::isolated(), "Agents aren't installed from a test process.");
-    let plan = plan(agent, current_target()).ok_or_else(|| anyhow!("{} has no build for this Mac.", agent.name))?;
+    let plan = plan(agent, current_target()).ok_or_else(|| anyhow!("{} has no build for {}.", agent.name, if cfg!(windows) { "this PC" } else { "this Mac" }))?; // the app's `words` table, which core can't reach
     let home = agents_dir().join(&agent.id);
     std::fs::create_dir_all(&home)?;
     let mut added = AddedAgent {
@@ -699,8 +730,13 @@ fn keep_icon(agent: &RegistryAgent, home: &Path) -> Option<String> {
 /// Fetch the package and its dependencies into npm's cache now, so the agent's first start
 /// doesn't spend its handshake time downloading. Runs only `node -e ""`, nothing of the package.
 async fn warm_npx(npx: &Path, package: &str) -> Result<()> {
+    // On Windows `npx` is `npx.cmd`, which cmd.exe starts (see `detect::which`).
+    let args = ["-y", "--package", package, "--", "node", "-e", ""];
+    if let Some(problem) = crate::detect::batch_args_problem(npx, args) {
+        bail!("npx can't fetch {package}: {problem}");
+    }
     let run = tokio::process::Command::new(npx)
-        .args(["-y", "--package", package, "--", "node", "-e", ""])
+        .args(args)
         .env("PATH", crate::detect::login_path())
         .current_dir(crate::paths::home())
         .stdin(std::process::Stdio::null())
@@ -791,7 +827,7 @@ async fn download_and_unpack(t: &BinaryTarget, home: &Path, root: &Path, segment
 }
 
 /// Unpack `archive` into `into` (a raw binary is the command itself) and make the command
-/// executable. Every entry is checked first: none may land outside `into`.
+/// executable. Every entry is checked as it is read: none may land outside `into`.
 async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[String]) -> Result<()> {
     std::fs::create_dir_all(into)?;
     let exe = segments.iter().fold(into.to_path_buf(), |p, s| p.join(s));
@@ -803,20 +839,9 @@ async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[Stri
             std::fs::copy(archive, &exe)?;
         }
         ArchiveKind::Tar | ArchiveKind::Zip => {
-            // bsdtar reads tar (any compression) and zip alike, and by itself refuses absolute
-            // paths, `..` and writing through symlinks; the listing is checked as well.
-            let list = tokio::process::Command::new("/usr/bin/tar").arg("-tf").arg(archive).output().await?;
-            if !list.status.success() {
-                bail!("The download isn't an archive Trek can open");
-            }
-            let entries = String::from_utf8_lossy(&list.stdout);
-            if let Some(bad) = entries.lines().map(str::trim).filter(|e| !e.is_empty() && *e != "./").find(|e| command_segments(e).is_none()) {
-                bail!("The archive has a file outside its folder ({bad}), so it wasn't installed");
-            }
-            let out = tokio::process::Command::new("/usr/bin/tar").arg("-xf").arg(archive).arg("-C").arg(into).output().await?;
-            if !out.status.success() {
-                bail!("Couldn't unpack the download: {}", String::from_utf8_lossy(&out.stderr).trim());
-            }
+            // On a blocking thread: the archive can be large, and the readers aren't async.
+            let (archive, into) = (archive.to_path_buf(), into.to_path_buf());
+            tokio::task::spawn_blocking(move || if kind == ArchiveKind::Zip { unpack_zip(&archive, &into) } else { unpack_tar(&archive, &into) }).await??;
         }
     }
     if !exe.is_file() {
@@ -828,6 +853,112 @@ async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[Stri
         let mut perms = std::fs::metadata(&exe)?.permissions();
         perms.set_mode(perms.mode() | 0o755);
         std::fs::set_permissions(&exe, perms)?;
+    }
+    Ok(())
+}
+
+fn outside(name: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("The archive has a file outside its folder ({name}), so it wasn't installed")
+}
+
+/// Unpack a `.tar.gz`, `.tgz` or `.tar` into `into`. An entry that is absolute, climbs out with
+/// `..`, or links (symbolically or hard) to something outside `into` refuses the whole archive;
+/// the install folder is a staging one that is discarded then. On Windows symlinks are skipped
+/// (making one needs a privilege), and a file's mode is what the archive says elsewhere.
+fn unpack_tar(archive: &Path, into: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let not_an_archive = |_| anyhow!("The download isn't an archive Trek can open");
+    let mut file = std::fs::File::open(archive)?;
+    let mut magic = [0u8; 6];
+    let n = file.read(&mut magic)?;
+    std::io::Seek::rewind(&mut file)?;
+    let reader: Box<dyn std::io::Read> = match &magic[..n] {
+        [0x1f, 0x8b, ..] => Box::new(flate2::read::GzDecoder::new(file)),
+        [b'B', b'Z', b'h', ..] | [0xfd, b'7', b'z', b'X', b'Z', 0] => bail!("Trek opens .tar.gz, .tgz, .tar and .zip downloads, and this one is compressed another way"),
+        _ => Box::new(file),
+    };
+    let mut tar = tar::Archive::new(reader);
+    for entry in tar.entries().map_err(not_an_archive)? {
+        let mut entry = entry.map_err(not_an_archive)?;
+        let path = entry.path()?.into_owned();
+        let name = path.to_string_lossy().into_owned();
+        let Some(segments) = command_segments(&name) else {
+            // `./` is the archive's own folder.
+            if name.trim_start_matches("./").trim_matches('/').is_empty() {
+                continue;
+            }
+            return Err(outside(name));
+        };
+        let kind = entry.header().entry_type();
+        if kind.is_symlink() || kind.is_hard_link() {
+            let target = entry.link_name()?.map(|t| t.into_owned()).ok_or_else(|| outside(&name))?;
+            let inside = if kind.is_hard_link() {
+                command_segments(&target.to_string_lossy()).is_some()
+            } else {
+                // Relative to the folder the link is in.
+                link_stays_inside(&segments[..segments.len() - 1], &target)
+            };
+            if !inside {
+                return Err(outside(format!("{name} → {}", target.display())));
+            }
+            if cfg!(windows) && kind.is_symlink() {
+                continue;
+            }
+        }
+        if !entry.unpack_in(into)? {
+            return Err(outside(name));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a symlink in the folder `dir` (path segments inside the install) pointing at `target`
+/// resolves, by its spelling alone, to somewhere inside it.
+fn link_stays_inside(dir: &[String], target: &Path) -> bool {
+    use std::path::Component;
+    let mut at = dir.len();
+    for part in target.components() {
+        match part {
+            Component::Normal(_) => at += 1,
+            Component::CurDir => {}
+            Component::ParentDir if at > 0 => at -= 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Unpack a `.zip` into `into`. Names that aren't safe (`enclosed_name`: absolute, or reaching out
+/// with `..`) refuse the archive. A symlink entry is skipped, never created. On Unix a file keeps
+/// the permission bits its entry has.
+fn unpack_zip(archive: &Path, into: &Path) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(archive)?)).map_err(|_| anyhow!("The download isn't an archive Trek can open"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| anyhow!("Couldn't unpack the download: {e}"))?;
+        // The name as written is held to the same rule as a tar's, as well as `enclosed_name`.
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            return Err(outside("a name that isn't text"));
+        };
+        if name.trim_start_matches("./").trim_matches('/').is_empty() {
+            continue; // the archive's own folder
+        }
+        let Some(rel) = entry.enclosed_name().filter(|_| command_segments(&name).is_some()) else {
+            return Err(outside(name));
+        };
+        let dest = into.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else if entry.is_file() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::io::copy(&mut entry, &mut std::fs::File::create(&dest)?)?;
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode & 0o777))?;
+            }
+        }
     }
     Ok(())
 }
@@ -926,12 +1057,62 @@ mod tests {
         assert!(custom("A", "", "x", vec![], vec![], &["a".into()]).is_err(), "taken");
         assert!(custom("A", "", "", vec![], vec![], &[]).is_err());
         assert!(custom("A", "", "bin/agent", vec![], vec![], &[]).is_err(), "relative paths are ambiguous");
+        // An absolute path looks different on each system.
+        let abs = if cfg!(windows) { r"C:\opt\a" } else { "/opt/a" };
         let env = |n: &str| vec![EnvVar { name: n.into(), value: "v".into(), secret: false }];
-        assert!(custom("A", "", "/opt/a", vec![], env("API_KEY"), &[]).is_ok());
-        assert!(custom("A", "", "/opt/a", vec![], env("1BAD"), &[]).is_err());
-        let a = custom("A", "", "/opt/a", vec![], env("TOKEN"), &[]).unwrap();
+        assert!(custom("A", "", abs, vec![], env("API_KEY"), &[]).is_ok());
+        assert!(custom("A", "", abs, vec![], env("1BAD"), &[]).is_err());
+        let a = custom("A", "", abs, vec![], env("TOKEN"), &[]).unwrap();
         assert_eq!(a.launch_env(), [("TOKEN".to_string(), "v".to_string())]);
-        assert_eq!(a.command_line(), "/opt/a");
+        assert_eq!(a.command_line(), abs);
+    }
+
+    #[test]
+    fn a_program_is_a_name_or_a_full_path_on_either_system() {
+        let ok = |c: &str, windows| check_command(c, windows).is_ok();
+        // Names, and full paths as each system writes them.
+        for c in ["my-agent", "npx", "agent.exe", "~/bin/agent"] {
+            assert!(ok(c, false) && ok(c, true), "{c}");
+        }
+        assert!(ok("/opt/x/agent", false));
+        for c in [r"C:\tools\agent.exe", "D:/x/agent", r"\\server\share\agent.exe", r"~\bin\agent.exe"] {
+            assert!(ok(c, true), "{c}");
+        }
+        // Not full: relative to wherever Trek happens to be, or rooted without a drive.
+        for c in [r".\agent.exe", "./agent", "bin/agent", r"tools\agent.exe", r"\agent.exe", "/opt/x/agent", "C:agent.exe", "agent/x.exe"] {
+            assert!(!ok(c, true), "{c}");
+        }
+        for c in ["./agent", "bin/agent", "../agent"] {
+            assert!(!ok(c, false), "{c}");
+        }
+        assert_eq!(check_command("bin/agent", false).unwrap_err().to_string(), "Give the program's full path, or just its name if it's on your PATH.");
+        // The same through `custom`, on this system.
+        let abs = if cfg!(windows) { r"C:\opt\a.exe" } else { "/opt/a" };
+        assert_eq!(custom("A", "", abs, vec![], vec![], &[]).unwrap().command, abs);
+        assert!(custom("A", "", r".\agent.exe", vec![], vec![], &[]).is_err() == cfg!(windows));
+        assert_eq!(custom("A", "", "npx", vec![], vec![], &[]).unwrap().command, "npx");
+        let home = custom("A", "", if cfg!(windows) { r"~\bin\a.exe" } else { "~/bin/a" }, vec![], vec![], &[]).unwrap();
+        assert!(Path::new(&home.command).starts_with(crate::paths::home()), "{}", home.command);
+    }
+
+    #[test]
+    fn a_name_finds_its_script_and_a_path_is_used_as_written() {
+        let dir = std::env::temp_dir().join(format!("trek added agent {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `npx` is `npx.cmd` on Windows.
+        let script = dir.join(if cfg!(windows) { "npx.cmd" } else { "npx" });
+        std::fs::write(&script, "").unwrap();
+        let path = std::env::join_paths([dir.as_path()]).unwrap().to_string_lossy().into_owned();
+        let added = |command: &str| AddedAgent { command: command.into(), ..Default::default() };
+        assert_eq!(added("npx").resolve_in(&path), Some(script.clone()));
+        assert_eq!(added("uvx").resolve_in(&path), None);
+        assert_eq!(added(&script.display().to_string()).resolve_in(""), Some(script.clone()));
+        assert_eq!(added(&dir.join("gone").display().to_string()).resolve_in(&path), None);
+        // What Settings says is missing is the path for a path, whichever slash it has.
+        assert!(added(&dir.join("gone").display().to_string()).missing().ends_with("doesn't exist."));
+        assert_eq!(added("npx").missing(), "npx isn't on your PATH.");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -942,35 +1123,127 @@ mod tests {
         assert_eq!(archive_kind("https://x/agent"), ArchiveKind::Raw);
     }
 
+    /// A tar entry named `name` whatever the name is: the `tar` crate's own `set_path` refuses the
+    /// hostile ones these tests need.
+    fn tar_entry(b: &mut tar::Builder<Vec<u8>>, name: &str, kind: tar::EntryType, mode: u32, link: Option<&str>, data: &[u8]) {
+        let mut h = tar::Header::new_gnu();
+        h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+        if let Some(link) = link {
+            h.as_gnu_mut().unwrap().linkname[..link.len()].copy_from_slice(link.as_bytes());
+        }
+        h.set_entry_type(kind);
+        h.set_mode(mode);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+
+    fn tar_gz(path: &Path, build: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
+        let mut b = tar::Builder::new(Vec::new());
+        build(&mut b);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &b.into_inner().unwrap()).unwrap();
+        std::fs::write(path, gz.finish().unwrap()).unwrap();
+    }
+
+    fn zip_of(path: &Path, files: &[(&str, u32)]) {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, mode) in files {
+            let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).unix_permissions(*mode);
+            z.start_file(*name, options).unwrap();
+            std::io::Write::write_all(&mut z, b"#!/bin/sh\necho hi\n").unwrap();
+        }
+        z.finish().unwrap();
+    }
+
     #[test]
     fn archives_unpack_inside_their_folder_and_nowhere_else() {
         let dir = std::env::temp_dir().join(format!("trek-registry-unpack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let src = dir.join("src");
-        std::fs::create_dir_all(src.join("bin")).unwrap();
-        std::fs::write(src.join("bin/agent"), "#!/bin/sh\necho hi\n").unwrap();
-        let tar = |name: &str, extra: &[&str]| {
-            let archive = dir.join(name);
-            let ok = std::process::Command::new("/usr/bin/tar").arg("-czf").arg(&archive).args(extra).arg("-C").arg(&src).arg("bin").status().unwrap().success();
-            assert!(ok);
-            archive
-        };
+        std::fs::create_dir_all(&dir).unwrap();
         let rt = crate::runtime();
-        let good = tar("good.tar.gz", &[]);
+        let cmd = ["bin".to_string(), "agent".to_string()];
+        let script: &[u8] = b"#!/bin/sh\necho hi\n";
+        let refused = |archive: &Path, kind: ArchiveKind, out: &str| {
+            let err = rt.block_on(unpack(archive, kind, &dir.join(out), &cmd)).expect_err(&format!("{out} was accepted"));
+            assert!(err.to_string().contains("outside its folder"), "{out}: {err}");
+        };
+
+        // A tar.gz: the folder, then the command in it (no exec bit in the archive).
+        let good = dir.join("good.tar.gz");
+        tar_gz(&good, |b| {
+            tar_entry(b, "./", tar::EntryType::Directory, 0o755, None, &[]);
+            tar_entry(b, "./bin/", tar::EntryType::Directory, 0o755, None, &[]);
+            tar_entry(b, "./bin/agent", tar::EntryType::Regular, 0o644, None, script);
+            tar_entry(b, "./bin/alias", tar::EntryType::Symlink, 0o777, Some("agent"), &[]);
+        });
         let into = dir.join("out");
-        rt.block_on(unpack(&good, ArchiveKind::Tar, &into, &["bin".into(), "agent".into()])).unwrap();
+        rt.block_on(unpack(&good, ArchiveKind::Tar, &into, &cmd)).unwrap();
         let exe = into.join("bin/agent");
-        assert!(exe.is_file());
+        assert_eq!(std::fs::read(&exe).unwrap(), script);
         #[cfg(unix)]
-        assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&exe).unwrap().permissions()) & 0o111, 0);
+        {
+            assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&exe).unwrap().permissions()) & 0o111, 0);
+            assert_eq!(std::fs::read_link(into.join("bin/alias")).unwrap(), Path::new("agent"), "a link that stays inside is kept");
+        }
         // The command must be in it.
         let missing = rt.block_on(unpack(&good, ArchiveKind::Tar, &dir.join("out2"), &["agent".into()]));
         assert!(missing.unwrap_err().to_string().contains("no agent"));
-        // An entry that climbs out is refused before anything is written.
-        let evil = tar("evil.tar.gz", &["-s", "|^bin|../escaped|"]);
-        let err = rt.block_on(unpack(&evil, ArchiveKind::Tar, &dir.join("out3"), &["bin".into(), "agent".into()])).unwrap_err();
-        assert!(err.to_string().contains("outside its folder"), "{err}");
+        // A plain, uncompressed tar is read too.
+        let plain = dir.join("plain.tar");
+        let mut b = tar::Builder::new(Vec::new());
+        tar_entry(&mut b, "bin/agent", tar::EntryType::Regular, 0o755, None, script);
+        std::fs::write(&plain, b.into_inner().unwrap()).unwrap();
+        rt.block_on(unpack(&plain, ArchiveKind::Tar, &dir.join("out-plain"), &cmd)).unwrap();
+
+        // An entry that climbs out, is absolute, or links out is refused, and nothing lands outside.
+        let hostile: [(&str, &str, tar::EntryType, Option<&str>); 6] = [
+            ("up", "../escaped/agent", tar::EntryType::Regular, None),
+            ("deep", "bin/../../escaped/agent", tar::EntryType::Regular, None),
+            ("abs", "/escaped/agent", tar::EntryType::Regular, None),
+            ("drive", "C:/escaped/agent", tar::EntryType::Regular, None),
+            ("symlink", "bin/out", tar::EntryType::Symlink, Some("../../escaped")),
+            ("hardlink", "bin/out", tar::EntryType::Link, Some("../escaped/agent")),
+        ];
+        for (name, entry, kind, link) in hostile {
+            let archive = dir.join(format!("{name}.tar.gz"));
+            tar_gz(&archive, |b| {
+                tar_entry(b, "bin/agent", tar::EntryType::Regular, 0o755, None, script);
+                tar_entry(b, entry, kind, 0o644, link, script);
+            });
+            refused(&archive, ArchiveKind::Tar, &format!("out-{name}"));
+        }
+        // An absolute symlink too, and nothing was written through a link that was refused.
+        let absolute = dir.join("absolute.tar.gz");
+        tar_gz(&absolute, |b| tar_entry(b, "bin/out", tar::EntryType::Symlink, 0o777, Some("/etc"), &[]));
+        refused(&absolute, ArchiveKind::Tar, "out-absolute");
+        assert!(!dir.join("escaped").exists() && !into.join("..").join("escaped").exists());
+
+        // A zip: the same.
+        let zip = dir.join("good.zip");
+        zip_of(&zip, &[("bin/agent", 0o644), ("bin/readme.txt", 0o644)]);
+        let zout = dir.join("zout");
+        rt.block_on(unpack(&zip, ArchiveKind::Zip, &zout, &cmd)).unwrap();
+        assert_eq!(std::fs::read(zout.join("bin/agent")).unwrap(), script);
+        assert!(zout.join("bin/readme.txt").is_file());
+        #[cfg(unix)]
+        assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(zout.join("bin/agent")).unwrap().permissions()) & 0o111, 0);
+        assert!(rt.block_on(unpack(&zip, ArchiveKind::Zip, &dir.join("zout2"), &["agent".into()])).unwrap_err().to_string().contains("no agent"));
+        for (name, entry) in [("zup", "../escaped/agent"), ("zdeep", "bin/../../escaped/agent"), ("zabs", "/escaped/agent")] {
+            let archive = dir.join(format!("{name}.zip"));
+            zip_of(&archive, &[("bin/agent", 0o755), (entry, 0o644)]);
+            refused(&archive, ArchiveKind::Zip, &format!("out-{name}"));
+        }
         assert!(!dir.join("escaped").exists());
+
+        // Not an archive, or one compressed in a way Trek doesn't read.
+        let junk = dir.join("junk");
+        std::fs::write(&junk, vec![b'x'; 2000]).unwrap();
+        assert!(rt.block_on(unpack(&junk, ArchiveKind::Tar, &dir.join("out-junk"), &cmd)).unwrap_err().to_string().contains("isn't an archive"));
+        assert!(rt.block_on(unpack(&junk, ArchiveKind::Zip, &dir.join("out-junk-zip"), &cmd)).unwrap_err().to_string().contains("isn't an archive"));
+        let xz = dir.join("a.tar.xz");
+        std::fs::write(&xz, [0xfd, b'7', b'z', b'X', b'Z', 0, 1, 2, 3]).unwrap();
+        assert!(rt.block_on(unpack(&xz, ArchiveKind::Tar, &dir.join("out-xz"), &cmd)).unwrap_err().to_string().contains("compressed another way"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

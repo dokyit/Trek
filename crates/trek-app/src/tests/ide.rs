@@ -47,13 +47,13 @@ fn switching_modes_keeps_the_harness_route_and_the_editor_state() {
         assert_eq!(active_file(&trek, cx).as_deref(), Some(file.as_path()));
 
         // ⌥⌘E back to Agents: the harness is where it was.
-        trek.press(cx, "alt-cmd-e");
+        trek.press(cx, &crate::keys::keystroke(crate::keys::Id::SwitchMode));
         trek.render(cx);
         assert_eq!(trek.read(cx, |ws, _| (ws.mode, ws.route.clone())), (Mode::Agents, Route::Draft { project: Some(trek.project.clone()) }));
         assert!(!trek.visible(cx, "ide-workbench"));
 
         // And into the editor again: the file is still open there.
-        trek.press(cx, "alt-cmd-e");
+        trek.press(cx, &crate::keys::keystroke(crate::keys::Id::SwitchMode));
         trek.render(cx);
         assert_eq!(trek.read(cx, |ws, _| ws.mode), Mode::Editor);
         assert_eq!(tabs(&trek, cx), vec![(file.clone(), false)]);
@@ -188,12 +188,12 @@ fn closing_a_dirty_tab_asks_first_and_the_close_button_only_closes() {
         let editor = trek.root.read_with(cx, |r, cx| r.editor(cx)).unwrap();
         trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.insert("edit ", window, cx))));
         cx.run_until_parked();
-        trek.press(cx, "cmd-w");
+        trek.press(cx, "secondary-w");
         assert!(cx.has_pending_prompt(), "closing a dirty tab asks first");
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         assert_eq!(tabs(&trek, cx).len(), 1, "Cancel keeps it");
-        trek.press(cx, "cmd-w");
+        trek.press(cx, "secondary-w");
         cx.simulate_prompt_answer("Don't Save");
         cx.run_until_parked();
         assert!(tabs(&trek, cx).is_empty());
@@ -204,7 +204,7 @@ fn closing_a_dirty_tab_asks_first_and_the_close_button_only_closes() {
         let editor = trek.root.read_with(cx, |r, cx| r.editor(cx)).unwrap();
         trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.insert("saved ", window, cx))));
         cx.run_until_parked();
-        trek.press(cx, "cmd-w");
+        trek.press(cx, "secondary-w");
         cx.simulate_prompt_answer("Save");
         cx.run_until_parked();
         assert!(tabs(&trek, cx).is_empty());
@@ -246,7 +246,7 @@ fn cmd_p_lists_the_folders_files() {
         std::fs::write(trek.project.join("README.md"), "# hi\n").unwrap();
         editor_on_draft(&trek, cx);
 
-        trek.press(cx, "cmd-p");
+        trek.press(cx, "secondary-p");
         trek.render(cx);
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
         assert!(palette.read_with(cx, |p, _| p.open && p.files_only), "⌘P opens Quick Open");
@@ -262,7 +262,7 @@ fn cmd_p_lists_the_folders_files() {
         assert_eq!(active_file(&trek, cx), Some(trek.project.join("src/needle.rs")));
 
         // `>` lists commands.
-        trek.press(cx, "cmd-p");
+        trek.press(cx, "secondary-p");
         trek.type_live(cx, ">switch");
         trek.render(cx);
         assert!(labels(cx).contains(&"Switch to Agents".to_string()));
@@ -305,8 +305,8 @@ fn layout_toggles_hide_regions_and_are_kept() {
         let trek = open(cx);
         editor_on_draft(&trek, cx);
         assert!(trek.visible(cx, "ide-primary") && trek.visible(cx, "ide-ai") && !trek.visible(cx, "ide-panel"));
-        trek.press(cx, "cmd-b");
-        trek.press(cx, "alt-cmd-b");
+        trek.press(cx, "secondary-b");
+        trek.press(cx, &crate::keys::keystroke(crate::keys::Id::ToggleAiBar));
         trek.render(cx);
         assert!(!trek.visible(cx, "ide-primary") && !trek.visible(cx, "ide-ai"));
         trek.click(cx, "toggle-panel");
@@ -315,8 +315,8 @@ fn layout_toggles_hide_regions_and_are_kept() {
         let layout = trek.read(cx, |ws, _| ws.settings.ide.layout.clone());
         assert!(!layout.primary_open && !layout.ai_open && layout.panel_open, "kept in settings: {layout:?}");
         // ⌘B and ⌘J are the harness's own again there.
-        trek.press(cx, "alt-cmd-e");
-        trek.press(cx, "cmd-b");
+        trek.press(cx, &crate::keys::keystroke(crate::keys::Id::SwitchMode));
+        trek.press(cx, "secondary-b");
         assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
     });
 }
@@ -356,7 +356,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 
 /// The project as a git repository with one commit (`README.md`).
 fn make_repo(trek: &Trek) {
-    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
         git(&trek.project, args);
     }
     std::fs::write(trek.project.join("README.md"), "hello\n").unwrap();
@@ -387,7 +387,7 @@ fn the_ai_input_sends_the_current_file_and_picked_lines_and_continues_the_chat()
         let (from, to) = ("fn greet() {}\n".len(), "fn greet() {}\nfn wave() {}\nfn nod() {}".len());
         state.update(cx, |s, cx| s.set_selected_range(from..to, cx));
         trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.focus(window, cx)));
-        trek.press(cx, "cmd-shift-l");
+        trek.press(cx, "secondary-shift-l");
         trek.render(cx);
         assert!(trek.visible(cx, "ai-chip-0"), "the picked lines' chip");
         let attached = ai_input(&trek, cx).read_with(cx, |i, _| i.attached());
@@ -416,18 +416,18 @@ fn return_queues_while_a_turn_runs_and_cmd_return_steers() {
     run(async |cx| {
         let trek = open(cx);
         editor_on_draft(&trek, cx);
-        let id = ai_send(&trek, cx, "mock:long 3s", "enter");
+        let id = ai_send(&trek, cx, "mock:long 8s", "enter");
         trek.wait(cx, "the turn to start", |ws| ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { .. })))).await;
         ai_send(&trek, cx, "then the docs", "enter");
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "Return queues it for after the turn");
         trek.render(cx);
         assert!(trek.visible(cx, ("ai-queued", 0usize)));
-        ai_send(&trek, cx, "use the fast path", "cmd-enter");
+        ai_send(&trek, cx, "use the fast path", "secondary-enter");
         assert_eq!(sent(&trek, cx, &id).last().map(String::as_str), Some("use the fast path"), "⌘Return steers the turn now");
         assert!(trek.read(cx, |ws, _| ws.turn_running(&id)));
         // ⌘⇧⌫ with nothing typed and nothing pending stops the turn; what was queued for after
         // it comes back to the input.
-        trek.press(cx, "cmd-shift-backspace");
+        trek.press(cx, "secondary-shift-backspace");
         trek.wait_done(cx, &id, RunState::Idle).await;
         trek.render(cx);
         assert_eq!(ai_input(&trek, cx).read_with(cx, |i, cx| i.text(cx)), "then the docs");
@@ -542,7 +542,7 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         assert_eq!(trek.read(cx, |ws, _| ws.pending_files(&id).iter().map(|f| (f.added, f.removed)).collect::<Vec<_>>()), [(1, 0)]);
 
         // No Undo while a turn runs: it would race the agent.
-        ai_send(&trek, cx, "mock:long 2s", "enter");
+        ai_send(&trek, cx, "mock:long 8s", "enter");
         trek.wait(cx, "the turn to start", |ws| ws.turn_running(&id)).await;
         trek.update(cx, |ws, cx| ws.undo_files(&id, None, cx));
         assert_eq!(std::fs::read_to_string(&two).unwrap(), "# Notes\n\n- Note 1\n- Note 2\n", "refused while the turn runs");
@@ -688,7 +688,7 @@ fn review_opens_the_pending_diff_in_a_diff_tab_and_keep_all_clears_it() {
         // ⌘Return with nothing typed keeps everything; the tab says there's nothing left.
         let input = ai_input(&trek, cx);
         trek.window(cx, |window, cx| input.update(cx, |c, cx| c.focus(window, cx)));
-        trek.press(cx, "cmd-enter");
+        trek.press(cx, "secondary-enter");
         trek.wait(cx, "all kept", |ws| ws.review(&id).is_none()).await;
         assert!(trek.project.join("one.md").exists());
         diff_rows(&trek, cx, "the review to empty", |r| r.is_empty()).await;
@@ -828,14 +828,14 @@ fn the_editor_shows_a_reviews_hunks_and_keeps_or_undoes_them_one_at_a_time() {
         let e = editor(&trek, cx);
         trek.window(cx, |window, cx| e.update(cx, |e, cx| e.goto_line(1, window, cx)));
         focus_editor(&trek, cx);
-        trek.press(cx, "cmd-y");
+        trek.press(cx, &crate::keys::keystroke(crate::keys::Id::KeepHunk));
         wait_editor(&trek, cx, "one hunk left", |e, _| e.pending_hunks() == 1).await;
         assert!(std::fs::read_to_string(&notes).unwrap().starts_with("LINE ONE\n"));
         assert_eq!(pending(&trek, cx, &id), ["notes.md"]);
 
         // ⌘N over the hunks is a new chat, as everywhere: it undoes nothing.
         let before = std::fs::read_to_string(&notes).unwrap();
-        trek.press(cx, "cmd-n");
+        trek.press(cx, "secondary-n");
         assert_eq!(trek.read(cx, |ws, _| ws.ide_chat.tabs.len()), 2, "a new chat");
         assert_eq!(std::fs::read_to_string(&notes).unwrap(), before, "nothing undone");
         trek.update(cx, |ws, cx| ws.ide_select_chat(0, cx));
@@ -845,7 +845,7 @@ fn the_editor_shows_a_reviews_hunks_and_keeps_or_undoes_them_one_at_a_time() {
         // ⌥⌘⌫ undoes the other: out of the file, and with nothing left the review is over. The
         // toast can put it back.
         let shown = super::rewind::toasts(&trek, cx);
-        trek.press(cx, "alt-cmd-backspace");
+        trek.press(cx, &crate::keys::keystroke(crate::keys::Id::UndoHunk));
         trek.wait(cx, "the review to close", |ws| ws.review(&id).is_none()).await;
         let expected = format!("LINE ONE\n{}", (2..=12).map(|i| format!("line {i}\n")).collect::<String>());
         assert_eq!(std::fs::read_to_string(&notes).unwrap(), expected);
@@ -983,7 +983,7 @@ fn cmd_k_in_the_editor_asks_for_an_inline_edit_that_comes_back_as_a_hunk() {
         // ⌘K outside the editor is still the palette.
         let input = ai_input(&trek, cx);
         trek.window(cx, |window, cx| input.update(cx, |c, cx| c.focus(window, cx)));
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
         assert!(palette.read_with(cx, |p, _| p.open));
         trek.press(cx, "escape");
@@ -993,7 +993,7 @@ fn cmd_k_in_the_editor_asks_for_an_inline_edit_that_comes_back_as_a_hunk() {
         let state = editor(&trek, cx).read_with(cx, |e, _| e.text_state());
         state.update(cx, |s, cx| s.set_selected_range("fn greet() {}\n".len().."fn greet() {}\nfn wave() {}\nfn nod() {}".len(), cx));
         focus_editor(&trek, cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         assert!(editor(&trek, cx).read_with(cx, |e, _| e.inline_open()), "the prompt card opens");
         assert!(trek.visible(cx, "editor-inline"));
@@ -1009,7 +1009,7 @@ fn cmd_k_in_the_editor_asks_for_an_inline_edit_that_comes_back_as_a_hunk() {
         assert!(asked.starts_with("mark them\n\n<trek-context>"), "{asked}");
         assert!(asked.contains("\nutil.rs:2-3\n```rs\nfn wave() {}\nfn nod() {}\n```"), "the lines go along: {asked}");
         assert_eq!(trek_core::inline_edit::parse(&asked), Some(("util.rs".to_string(), (2, 3))));
-        assert_eq!(ai_rows(&trek, cx)[0], "user: mark them [⌘K edit, util.rs:2–3]");
+        assert_eq!(ai_rows(&trek, cx)[0], format!("user: mark them [{}, util.rs:2–3]", crate::keys::localize("⌘K edit")));
         assert_eq!(std::fs::read_to_string(&util).unwrap(), "fn greet() {}\nfn wave() {} // edited\nfn nod() {} // edited\n");
         trek.wait(cx, "util.rs pending", |ws| ws.pending_files(&id).len() == 1).await;
         wait_editor(&trek, cx, "the edit as a hunk", |e, _| e.pending_hunks() == 1).await;
@@ -1037,7 +1037,7 @@ fn a_dirty_buffer_keeps_its_edits_when_an_agent_writes_the_file() {
         assert!(e.read_with(cx, |e, _| e.dirty()));
         // ⌘S warns first: the file changed under it.
         focus_editor(&trek, cx);
-        trek.press(cx, "cmd-s");
+        trek.press(cx, "secondary-s");
         assert_eq!(std::fs::read_to_string(&notes).unwrap(), "# Notes\n\n- Note 1\n- Note 2\n", "not written over yet");
     });
 }
@@ -1056,7 +1056,7 @@ fn the_explorer_leaves_out_what_git_ignores_and_opens_folders_with_their_files()
         editor_on_draft(&trek, cx);
         trek.update(cx, |ws, cx| ws.open_editor(trek.project.join("src/a.rs"), None, cx));
         trek.render(cx);
-        let shown = |trek: &Trek, cx: &mut TestAppContext, f: &str| trek.visible(cx, trek.project.join(f).display().to_string());
+        let shown = |trek: &Trek, cx: &mut TestAppContext, f: &str| trek.visible(cx, super::harness::join(&trek.project, f).display().to_string());
         assert!(shown(&trek, cx, "src") && shown(&trek, cx, "src/a.rs"), "the opened file's folder shows open, with its files");
         assert!(shown(&trek, cx, ".gitignore") && shown(&trek, cx, "target"), "only what git ignores goes");
         assert!(!shown(&trek, cx, "build") && !shown(&trek, cx, "debug.log"));
@@ -1154,7 +1154,7 @@ fn the_explorer_makes_renames_and_trashes_files_and_tabs_follow() {
         trek.type_text(cx, "b.rs");
         trek.press(cx, "enter");
         trek.render(cx);
-        let b = trek.project.join("src/b.rs");
+        let b = super::harness::join(&trek.project, "src/b.rs");
         assert!(b.is_file(), "made");
         assert_eq!(active_file(&trek, cx).as_deref(), Some(b.as_path()), "and opened");
         assert!(trek.visible(cx, b.display().to_string()));
@@ -1176,7 +1176,7 @@ fn the_explorer_makes_renames_and_trashes_files_and_tabs_follow() {
 
         // Rename: the open tab follows the file.
         trek.window(cx, |window, cx| explorer.update(cx, |e, cx| e.begin_rename(b.clone(), window, cx)));
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.type_text(cx, "c.rs");
         trek.press(cx, "enter");
         trek.render(cx);
@@ -1242,7 +1242,7 @@ fn cmd_k_edits_go_to_the_files_own_chat_and_leave_the_open_one_alone() {
         trek.update(cx, |ws, cx| ws.open_editor(util.clone(), None, cx));
         trek.render(cx);
         focus_editor(&trek, cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         assert!(trek.visible(cx, "editor-inline-chat"));
         assert_eq!(trek.read(cx, |ws, _| ws.inline_target(&util).0), "Inline edits · util.rs", "the card says where it goes");
@@ -1334,7 +1334,7 @@ fn editing_a_message_asks_about_files_puts_the_draft_aside_and_keeps_text_on_fai
         trek.render(cx);
         trek.click(cx, "ai-edit-restore");
         trek.window(cx, |window, cx| input.update(cx, |c, cx| c.focus(window, cx)));
-        trek.press(cx, "cmd-a");
+        trek.press(cx, "secondary-a");
         trek.type_text(cx, "mock:write two.md");
         trek.press(cx, "enter");
         trek.wait_done(cx, &id, RunState::Idle).await;
@@ -1397,7 +1397,7 @@ fn trek_commands_and_send_with_cmd_enter_work_in_the_side_bar() {
         trek.type_text(cx, "lines");
         assert!(trek.read(cx, |ws, _| ws.ide_chat.is_draft()), "Return didn't send");
         assert_eq!(input.read_with(cx, |c, cx| c.text(cx)), "two\nlines");
-        trek.press(cx, "cmd-enter");
+        trek.press(cx, "secondary-enter");
         let new = trek.read(cx, |ws, _| ws.ide_chat.active_thread().map(str::to_string)).expect("⌘↩ sent it");
         trek.wait_done(cx, &new, RunState::Idle).await;
         assert!(sent(&trek, cx, &new)[0].starts_with("two\nlines"));

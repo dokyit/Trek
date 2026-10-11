@@ -70,6 +70,36 @@ fn tailscale_is_the_tunnel_it_names_not_any_shared_address() {
     assert_eq!(Addresses::from_interfaces(&two, Some("100.99.9.9".parse().unwrap())).tailscale, Some("100.64.0.9".parse().unwrap()));
 }
 
+#[test]
+fn windows_adapters_are_told_apart_by_their_friendly_names() {
+    use crate::remote::Addresses;
+    let ifs = |list: &[(&str, &str)]| -> Vec<(String, std::net::Ipv4Addr)> { list.iter().map(|(n, ip)| (n.to_string(), ip.parse().unwrap())).collect() };
+    let pc = ifs(&[("Ethernet", "169.254.3.4"), ("Wi-Fi", "192.168.1.20"), ("Tailscale", "100.101.1.2"), ("Local Area Connection* 9", "192.168.137.1")]);
+    let found = Addresses::from_interfaces(&pc, None);
+    // The Wi-Fi is the first private address that isn't a tunnel; the adapter's own name makes
+    // the tailnet address Tailscale's (case aside), whatever the CLI said or couldn't.
+    assert_eq!((found.lan, found.tailscale), (Some("192.168.1.20".parse().unwrap()), Some("100.101.1.2".parse().unwrap())));
+    assert_eq!(Addresses::from_interfaces(&ifs(&[("tailscale0", "100.101.1.2")]), None).tailscale, Some("100.101.1.2".parse().unwrap()));
+    // Tailscale's adapter is never taken for the LAN, even with a private address on it, and a
+    // 100.x on the Wi-Fi (a hotspot's carrier-grade NAT) is not a tailnet.
+    let tunnel_only = ifs(&[("Tailscale", "192.168.99.1")]);
+    assert_eq!(Addresses::from_interfaces(&tunnel_only, None), Addresses::default());
+    assert_eq!(Addresses::from_interfaces(&ifs(&[("Wi-Fi", "100.72.3.4")]), None), Addresses::default());
+    // A localised name whose ninth byte falls inside a character doesn't trip the prefix check.
+    assert_eq!(Addresses::from_interfaces(&ifs(&[("Локальная сеть", "192.168.1.30")]), None).lan, Some("192.168.1.30".parse().unwrap()));
+}
+
+#[test]
+fn tailscales_answer_is_the_first_address_it_prints() {
+    use crate::remote::first_ipv4;
+    assert_eq!(first_ipv4("100.101.1.2\r\n"), Some("100.101.1.2".parse().unwrap()));
+    assert_eq!(first_ipv4("\n  100.64.0.7 \n100.64.0.8\n"), Some("100.64.0.7".parse().unwrap()));
+    // The CLI says why it can't, on stdout or stderr, when it's stopped or logged out.
+    assert_eq!(first_ipv4("Tailscale is stopped.\n"), None);
+    assert_eq!(first_ipv4("fd7a:115c:a1e0::1\n"), None);
+    assert_eq!(first_ipv4(""), None);
+}
+
 fn send(id: &str, text: &str) -> impl FnOnce(tr::Reply<Option<tr::Open>>) -> tr::HostRequest {
     let req = tr::SendRequest { thread_id: id.to_string(), text: text.to_string(), mode: None, images: vec![] };
     move |reply| tr::HostRequest::Send { req, reply }
@@ -965,7 +995,7 @@ fn the_phone_allows_for_a_whole_session_only_where_the_mac_lets_it() {
         let settings = ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap();
         assert!(!settings.session_approvals);
         let refused = ask(&trek, cx, for_session).unwrap_err();
-        assert!(refused.message.contains("off on this Mac"), "{refused:?}");
+        assert!(refused.message.contains(&format!("off on {}", crate::words::words().this_computer)), "{refused:?}");
         assert_eq!(trek.run_state(cx, &id), RunState::NeedsYou);
         assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.len() == 1 && ws.remote.as_ref().is_none_or(|r| r.answered.is_empty())));
         // Turned on at the Mac, the same answer goes through.

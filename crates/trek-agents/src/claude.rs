@@ -1,7 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
-use crate::{AgentEvent, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
+use crate::{AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail, Step, clip, load_image, mcp_servers_json, plan_row, plan_title};
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -241,14 +241,19 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
 
 /// `mcpServers` for `--mcp-config`, with a per-server `timeout` (ms) where a server's calls may
 /// run long: it lifts both Claude Code's limit on one call and its idle limit (half an hour).
-fn claude_mcp_servers(servers: &[crate::McpServer]) -> Value {
-    let mut out = mcp_servers_json(servers);
+/// Along with a notice for each server that can't be handed to Claude Code (left out).
+fn claude_mcp_servers(servers: &[crate::McpServer]) -> (Value, Vec<String>) {
+    claude_mcp_servers_with(servers, mcp_servers_json(servers, BatchHandOff::CmdWrapper))
+}
+
+/// `claude_mcp_servers` on top of the servers' JSON as handed over (see `mcp_servers_json_with`).
+fn claude_mcp_servers_with(servers: &[crate::McpServer], (mut out, left_out): (Value, Vec<String>)) -> (Value, Vec<String>) {
     for s in servers {
         if let (Some(secs), Some(entry)) = (s.tool_timeout_secs, out.get_mut(&s.name)) {
             entry["timeout"] = json!(secs * 1000);
         }
     }
-    out
+    (out, left_out)
 }
 
 /// A session to cut back that isn't on disk with that message (deleted, or the message is from
@@ -291,14 +296,34 @@ struct Cli {
     stdin: tokio::process::ChildStdin,
     stdout: crate::ProtocolLines<BufReader<tokio::process::ChildStdout>>,
     stderr: StderrTail,
+    /// The notes' file, when they went in one (`notes_in_file`): read when it likes, so kept.
+    _notes: Option<TempFile>,
+}
+
+/// Claude Code from npm is `claude.cmd`, which Windows runs through cmd.exe, and cmd.exe can't be
+/// given an argument with a line break (std won't start it with one; see `detect::batch_args_problem`).
+/// The user's notes often have them, so for `claude.cmd` they go in a file, as
+/// `--append-system-prompt-file`; the same words reach Claude either way. The file is returned to
+/// be kept as long as the process.
+fn notes_in_file(args: &mut [String]) -> Result<Option<TempFile>> {
+    let Some(at) = args.iter().position(|a| a == "--append-system-prompt") else { return Ok(None) };
+    let file = TempFile::write("notes", &args[at + 1])?;
+    args[at] = "--append-system-prompt-file".into();
+    args[at + 1] = file.0.display().to_string();
+    Ok(Some(file))
 }
 
 impl Cli {
     fn spawn(bin: &std::path::Path, config: &SessionConfig, mcp_file: Option<&TempFile>) -> Result<Cli> {
+        let mut args = cli_args(config);
+        let notes = if detect::runs_through_cmd(bin) { notes_in_file(&mut args)? } else { None };
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.args(cli_args(config));
+        cmd.args(args);
         if let Some(file) = mcp_file {
             cmd.arg("--mcp-config").arg(&file.0);
+        }
+        if let Some(problem) = detect::batch_args_problem(bin, cmd.as_std().get_args()) {
+            anyhow::bail!("Claude Code can't start: {problem}");
         }
         cmd.current_dir(&config.cwd)
             .env("PATH", detect::login_path())
@@ -309,7 +334,7 @@ impl Cli {
         let stdin = child.stdin.take().unwrap();
         let stdout = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "claude");
-        Ok(Cli { child, stdin, stdout, stderr })
+        Ok(Cli { child, stdin, stdout, stderr, _notes: notes })
     }
 
     /// Send the `initialize` control request; its id, to know the response.
@@ -317,6 +342,14 @@ impl Cli {
         let init = ctl.request("initialize", json!({}));
         write_line(&mut self.stdin, &init).await?;
         Ok(init["request_id"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// End the process: its stdin first, the cue to exit and on Windows the only gentle one
+    /// (see `GroupChild::terminate`), then the group.
+    async fn stop(self) {
+        let Cli { mut child, stdin, .. } = self;
+        drop(stdin);
+        child.terminate().await;
     }
 }
 
@@ -745,7 +778,11 @@ pub async fn run(
     let mcp_file = if config.mcp_servers.is_empty() {
         None
     } else {
-        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": claude_mcp_servers(&config.mcp_servers) }))?)?)
+        let (servers, left_out) = claude_mcp_servers(&config.mcp_servers);
+        for notice in left_out {
+            let _ = events.send(AgentEvent::Notice(notice)).await;
+        }
+        Some(TempFile::write("mcp", &serde_json::to_string(&json!({ "mcpServers": servers }))?)?)
     };
     let mut cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
     let mut ctl = Control { next_id: 0 };
@@ -873,7 +910,7 @@ pub async fn run(
                     config.resume_at = None;
                     config.fork = false;
                     resumed_at = None;
-                    cli.child.terminate().await;
+                    cli.stop().await;
                     cli = Cli::spawn(&bin, &config, mcp_file.as_ref())?;
                     init_id = cli.initialize(&mut ctl).await?;
                     context_requests.clear();
@@ -969,7 +1006,7 @@ pub async fn run(
             }
         }
     }
-    cli.child.terminate().await;
+    cli.stop().await;
     Ok(())
 }
 
@@ -1074,12 +1111,16 @@ impl TempFile {
 
     fn write_in(dir: &Path, tag: &str, contents: &str) -> Result<Self> {
         use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
         let mut tries = 0;
         loop {
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
             let path = dir.join(format!("trek-{tag}-{}-{nanos}-{tries}.json", std::process::id()));
-            match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Windows has no mode bits: the file inherits the ACL of the user's temp folder.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            match options.open(&path) {
                 Ok(mut file) => {
                     // Removed on failure too.
                     let made = Self(path);
@@ -1268,13 +1309,16 @@ mod tests {
 
     #[test]
     fn mcp_config_is_private_and_removed_on_drop() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("trek-mcp-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = TempFile::write_in(&dir, "mcp", "{\"token\":1}").unwrap();
         let b = TempFile::write_in(&dir, "mcp", "{}").unwrap();
         assert_ne!(a.0, b.0);
-        assert_eq!(std::fs::metadata(&a.0).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&a.0).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert_eq!(std::fs::read_to_string(&a.0).unwrap(), "{\"token\":1}");
         let path = a.0.clone();
         drop(a);
@@ -1732,24 +1776,64 @@ mod tests {
     #[test]
     fn mcp_config_shape() {
         let servers = [crate::McpServer::stdio("fs", "npx", vec!["-y".into(), "srv".into()], vec![("K".into(), "v".into())])];
+        // Not on Windows (here, or with an `npx` that is a `.cmd`): what the user wrote, as before.
+        let as_written = |servers: &[crate::McpServer]| claude_mcp_servers_with(servers, crate::mcp_servers_json_with(servers, BatchHandOff::CmdWrapper, false, |_| Some("C:\\n\\npx.cmd".into())));
         assert_eq!(
-            json!({ "mcpServers": mcp_servers_json(&servers) }),
+            json!({ "mcpServers": as_written(&servers).0 }),
             json!({"mcpServers":{"fs":{"command":"npx","args":["-y","srv"],"env":{"K":"v"}}}})
         );
         // A remote server: Claude Code's own `--transport http` shape.
         let figma = crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]);
         let linear = crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]);
         assert_eq!(
-            claude_mcp_servers(&[figma, linear]),
+            as_written(&[figma, linear]).0,
             json!({
                 "figma-desktop": {"type":"http","url":"http://127.0.0.1:3845/mcp","headers":{}},
                 "linear": {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer t"}},
             })
         );
         let trek = crate::McpServer { tool_timeout_secs: Some(1900), ..crate::McpServer::stdio("trek-orchestrate", "trek-mcp", vec![], vec![]) };
-        let out = claude_mcp_servers(&[trek, servers[0].clone()]);
+        let (out, left_out) = as_written(&[trek, servers[0].clone()]);
+        assert!(left_out.is_empty());
         assert_eq!(out["trek-orchestrate"]["timeout"], 1_900_000, "Trek's tools may wait long on a sub-agent");
         assert!(out["fs"].get("timeout").is_none(), "others keep Claude Code's default");
+    }
+
+    #[test]
+    fn notes_for_a_cmd_go_in_a_file() {
+        let notes = "Verify with ./app check.\nThen say \"done\" & stop at 100%.";
+        let mut args = cli_args(&SessionConfig { instructions: Some(notes.into()), ..config() });
+        let file = notes_in_file(&mut args).unwrap().expect("a file for the notes");
+        assert!(has(&args, &["--append-system-prompt-file", &file.0.display().to_string()]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--append-system-prompt" || a.contains("Verify")), "{args:?}");
+        assert_eq!(std::fs::read_to_string(&file.0).unwrap(), notes);
+        // No notes, no file, and nothing else changes.
+        let mut plain = cli_args(&config());
+        assert!(notes_in_file(&mut plain).unwrap().is_none());
+        assert_eq!(plain, cli_args(&config()));
+    }
+
+    /// Through a stand-in `claude.cmd` (npm's shim, see `tests_cmd_args`), notes with line breaks,
+    /// quotes and `%` reach Claude whole, from the file; the rest of the arguments arrive as given.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn notes_with_line_breaks_reach_a_claude_cmd() {
+        let shims = crate::tests_cmd_args::Shims::new("claude");
+        let notes = "First line\r\nSecond \"quoted\" line & 100% of %PATH%\n";
+        let config = SessionConfig { instructions: Some(notes.into()), cwd: std::env::temp_dir(), ..config() };
+        let mut cli = Cli::spawn(&shims.npm(), &config, None).unwrap();
+        let line = tokio::time::timeout(std::time::Duration::from_secs(30), cli.stdout.next_line()).await.unwrap().unwrap().expect("the stand-in's argv");
+        let argv: Vec<String> = serde_json::from_str(&line).unwrap();
+        let mut expected = cli_args(&config);
+        let at = expected.iter().position(|a| a == "--append-system-prompt").unwrap();
+        let file = PathBuf::from(&argv[2 + at + 1]);
+        expected[at] = "--append-system-prompt-file".into();
+        expected[at + 1] = file.display().to_string();
+        assert_eq!(argv[2..], expected[..], "{argv:?}");
+        // Trimmed, as the flag would have had them.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), notes.trim());
+        cli.stop().await;
+        assert!(!file.exists(), "the notes' file goes with the process");
     }
 
     #[test]

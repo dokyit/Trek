@@ -127,17 +127,24 @@ impl Client {
         Self::spawn(command, &root, language_id)
     }
 
-    /// Run `command` as a server, in a process group of its own.
+    /// Run `command` as a server, in a process group of its own (on Windows, a job object).
     fn spawn(mut command: Command, root: &Path, language_id: &'static str) -> Option<Arc<Self>> {
-        use std::os::unix::process::CommandExt as _;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        crate::job::prepare(&mut command);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .process_group(0)
             .spawn()
             .map_err(|e| tracing::info!("lsp: {:?} failed to spawn: {e}", command.get_program()))
             .ok()?;
+        #[cfg(windows)]
+        crate::job::adopt(&child);
         trek_core::procs::register(child.id() as i32);
         let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
             end_child(child, Duration::ZERO);
@@ -352,7 +359,7 @@ impl Client {
 
     /// The provider bundle one editor installs on its `EditorState`.
     pub fn lsp_for(self: &Arc<Self>, uri: String, workspace: gpui_kit::Entity<crate::workspace::Workspace>) -> Lsp {
-        let doc = std::rc::Rc::new(DocProviders { client: self.clone(), uri, workspace });
+        let doc = std::rc::Rc::new(DocProviders { client: self.clone(), uri, workspace: workspace.downgrade() });
         let mut lsp = Lsp::default();
         lsp.completion_provider = Some(doc.clone());
         lsp.hover_provider = Some(doc.clone());
@@ -362,8 +369,7 @@ impl Client {
             move |params: &lsp_types::ShowDocumentParams, _window, cx| {
                 let Some(path) = path_of_uri(params.uri.as_str()) else { return false };
                 let line = params.selection.map(|r| r.start.line + 1);
-                doc.workspace.update(cx, |ws, cx| ws.open_editor(path, line, cx));
-                true
+                doc.workspace.update(cx, |ws, cx| ws.open_editor(path, line, cx)).is_ok()
             }
         }));
         lsp
@@ -487,10 +493,13 @@ fn end_child(mut child: Child, grace: Duration) {
     while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
         std::thread::sleep(Duration::from_millis(20));
     }
+    #[cfg(unix)]
     if group > 1 {
         // SAFETY: a negative pid asks kill(2) to signal that process group.
         unsafe { libc::kill(-group, libc::SIGKILL) };
     }
+    #[cfg(windows)]
+    crate::job::terminate(child.id());
     let _ = child.kill();
     let _ = child.wait();
     trek_core::procs::unregister(group);
@@ -574,7 +583,8 @@ fn initialize_params(root: &Path) -> Value {
 struct DocProviders {
     client: Arc<Client>,
     uri: String,
-    workspace: gpui_kit::Entity<crate::workspace::Workspace>,
+    /// Weak: the providers live in the editor's state, which the workspace outlives.
+    workspace: gpui_kit::WeakEntity<crate::workspace::Workspace>,
 }
 
 impl DocProviders {
@@ -686,18 +696,39 @@ pub fn uri_for(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream as Socket;
+
+    /// Windows has no socketpair: a connected pair over loopback does the same.
+    #[cfg(windows)]
+    use std::net::TcpStream as Socket;
+
+    #[cfg(unix)]
+    fn socket_pair() -> (Socket, Socket) {
+        Socket::pair().unwrap()
+    }
+
+    #[cfg(windows)]
+    fn socket_pair() -> (Socket, Socket) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let ours = Socket::connect(listener.local_addr().unwrap()).unwrap();
+        let (theirs, _) = listener.accept().unwrap();
+        for socket in [&ours, &theirs] {
+            socket.set_nodelay(true).unwrap();
+        }
+        (ours, theirs)
+    }
 
     /// A client wired to an in-process "server": what it writes, and a handle to write back.
-    fn fake() -> (Arc<Client>, UnixStream, BufReader<UnixStream>) {
-        let (ours, theirs) = UnixStream::pair().unwrap();
+    fn fake() -> (Arc<Client>, Socket, BufReader<Socket>) {
+        let (ours, theirs) = socket_pair();
         theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let client = Client::with_io(ours.try_clone().unwrap(), ours, None, Path::new("/tmp"), "rust");
         let from_client = BufReader::new(theirs.try_clone().unwrap());
         (client, theirs, from_client)
     }
 
-    fn next(from_client: &mut BufReader<UnixStream>) -> Value {
+    fn next(from_client: &mut BufReader<Socket>) -> Value {
         match read_frame(from_client) {
             Frame::Message(msg) => msg,
             other => panic!("expected a message, got {other:?}"),
@@ -813,15 +844,33 @@ mod tests {
     }
 
     /// Whether `pid` is gone (exited and reaped).
+    #[cfg(unix)]
     fn gone(pid: i32) -> bool {
         // SAFETY: signal 0 only checks.
         unsafe { libc::kill(pid, 0) != 0 }
     }
 
+    #[cfg(windows)]
+    fn gone(pid: i32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: plain calls; the handle is closed before returning.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                return true;
+            }
+            let mut code = 0;
+            let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+            CloseHandle(handle);
+            !running
+        }
+    }
+
     #[test]
     fn lsp_server_that_never_answers_is_ended_when_dropped() {
-        let mut command = Command::new("/bin/sleep");
-        command.arg("30");
+        let mut command = Command::new(trek_test_fixtures::bin("fixture"));
+        command.args(["sleep", "30"]);
         let client = Client::spawn(command, Path::new("/tmp"), "rust").unwrap();
         let pid = lock(&client.child).as_ref().unwrap().id() as i32;
         assert!(trek_core::procs::live().contains(&pid));

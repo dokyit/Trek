@@ -17,7 +17,7 @@ use trek_core::worktree::{self, git};
 /// in it again (so the project's defaults and git state are read anew).
 pub(super) fn make_repo(trek: &Trek, cx: &mut TestAppContext) {
     let dir = &trek.project;
-    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+    for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.autocrlf", "false"]] {
         git(dir, args).expect("git");
     }
     std::fs::write(dir.join("README.md"), "hello\n").unwrap();
@@ -407,6 +407,8 @@ fn the_git_tool_keeps_its_place_and_a_turned_down_commit_message() {
         let hook = trek.project.join(".git/hooks/pre-commit");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+        // Git for Windows runs a hook with a shebang through its own sh: no executable bit needed.
+        #[cfg(unix)]
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         trek.click(cx, "git-message");
         trek.type_text(cx, "Add a note");

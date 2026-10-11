@@ -110,6 +110,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Si
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::keys::{self, Id};
 use crate::palette;
 use crate::workspace::{FileReview, Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputState};
@@ -121,7 +122,7 @@ const MAX_FILE_BYTES: u64 = 2_000_000;
 actions!(trek_editor, [SaveFile, InlineEdit, KeepHunk, UndoHunk, NextHunk, PreviousHunk]);
 
 pub fn key_bindings() -> Vec<KeyBinding> {
-    vec![KeyBinding::new("cmd-s", SaveFile, Some("TrekEditor"))]
+    crate::keys::bindings(crate::keys::Group::Editor)
 }
 
 pub struct EditorView {
@@ -153,6 +154,10 @@ pub struct EditorView {
     loading: bool,
     /// Where to put the caret once it's in (a deep link's line).
     pending_line: Option<u32>,
+    /// A line to bring into view (`goto_line`) once there's a layout to measure the viewport by,
+    /// and how far down the text was scrolled when it was asked for (the state's own
+    /// scroll-to-caret moves it by the time that's measured).
+    reveal: Option<(u32, Pixels)>,
     /// Not a file on disk (a Review's diff): read-only, never saved or reloaded.
     pub(crate) scratch: bool,
     /// The review the fills are against, while the AI side bar's chat has this file pending.
@@ -252,6 +257,7 @@ impl EditorView {
             overwrite_armed: None,
             loading: true,
             pending_line: None,
+            reveal: None,
             scratch: false,
             review: None,
             hunks: None,
@@ -304,13 +310,15 @@ impl EditorView {
         self._diag_watch = lsp.as_ref().map(|(client, uri)| {
             let rx = client.watch_diagnostics();
             let uri = uri.clone();
-            let state = state.clone();
-            let (ws, file) = (workspace.clone(), path.clone());
+            // Weak: the language server can speak for as long as the app lives.
+            let state = state.downgrade();
+            let (ws, file) = (workspace.downgrade(), path.clone());
             cx.spawn(async move |_, cx| {
                 while let Ok((u, diags)) = rx.recv().await {
                     if u != uri {
                         continue;
                     }
+                    let (Some(state), Some(ws)) = (state.upgrade(), ws.upgrade()) else { break };
                     cx.update_entity(&state, |s, cx| {
                         let rope = s.text().clone();
                         if let Some(set) = s.diagnostics_mut() {
@@ -366,6 +374,7 @@ impl EditorView {
             overwrite_armed: None,
             loading: false,
             pending_line: None,
+            reveal: None,
             scratch: true,
             review: None,
             hunks: None,
@@ -540,13 +549,47 @@ impl EditorView {
         }
     }
 
-    /// Put the caret on a line (deep links point here) and take the focus.
+    /// Put the caret on a line (deep links point here) and take the focus. The line is brought
+    /// into view too (`reveal_line`), however far along the editor is: left to the state's own
+    /// scroll-to-caret, a line asked for before the first layout stayed off screen, and one asked
+    /// for after it came up at the bottom edge, depending only on which came first.
     pub fn goto_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.pending_line = Some(line);
             return;
         }
+        let scrolled = -self.state.read(cx).scroll_offset().y;
         self.state.update(cx, |s, cx| s.set_cursor_position(Position::new(line.saturating_sub(1), 0), window, cx));
+        self.reveal = Some((line, scrolled));
+        cx.notify();
+    }
+
+    /// Scroll to the line `goto_line` was given, once the viewport is known: left where it is
+    /// when it's all on screen already, else centred (the top of the file when that's as high as
+    /// it goes, the end when that's as low).
+    fn reveal_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((line, shown)) = self.reveal else { return };
+        if self.loading {
+            return;
+        }
+        let state = self.state.read(cx);
+        let (Some(line_height), viewport) = (state.line_height(), state.input_bounds().size.height) else { return };
+        if viewport <= px(0.) || line_height <= px(0.) {
+            return;
+        }
+        self.reveal = None;
+        let row = line.saturating_sub(1) as usize;
+        let rows = state.text().lines_len().max(1);
+        let (top, bottom) = (line_height * row as f32, line_height * (row + 1) as f32);
+        if top >= shown && bottom <= shown + viewport {
+            return;
+        }
+        let farthest = (line_height * rows as f32 - viewport).max(px(0.));
+        let centred = (top + line_height / 2. - viewport / 2.).clamp(px(0.), farthest);
+        let to = point(px(0.), -centred);
+        // After this frame: the offset is taken up at the next layout. (Through `this`, so the
+        // closure holds no handle on the state to be left over if the app quits first.)
+        cx.defer_in(window, move |this, _, cx| this.state.update(cx, |s, cx| s.set_scroll_offset(to, cx)));
     }
 
     /// Take the window's focus (the deferred focus call lands here).
@@ -600,9 +643,16 @@ impl EditorView {
 /// end, or never start), at most `MAX_FILE_BYTES`, and UTF-8.
 fn read_text(path: &Path) -> std::io::Result<String> {
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    // Opening a pipe for reading waits for a writer; not with O_NONBLOCK.
-    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // Opening a pipe for reading waits for a writer; not with O_NONBLOCK. (Windows has no FIFOs:
+    // it opens as it is, and `is_file` below turns devices away.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file"));
@@ -881,7 +931,7 @@ impl EditorView {
                 .cursor_pointer()
                 .text_size(px(12.))
         };
-        let kbd = |k: &'static str, c: Hsla| div().text_size(px(10.5)).text_color(c).child(k);
+        let kbd = |k: String, c: Hsla| div().text_size(px(10.5)).text_color(c).child(k);
         Some(
             h_flex()
                 .id("editor-hunk-bar")
@@ -925,7 +975,7 @@ impl EditorView {
                         .when(busy, |el| el.opacity(0.45).cursor_default())
                         .hover(|s| s.bg(theme.foreground.opacity(0.07)).text_color(theme.foreground))
                         .child("Undo")
-                        .child(kbd("⌥⌘⌫", theme.muted_foreground.opacity(0.7)))
+                        .child(kbd(keys::hint(Id::UndoHunk), theme.muted_foreground.opacity(0.7)))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(false, cx))),
                 )
                 .child(
@@ -934,7 +984,7 @@ impl EditorView {
                         .text_color(gpui_kit::white())
                         .hover(|s| s.opacity(0.9))
                         .child("Keep")
-                        .child(kbd("⌘Y", gpui_kit::white().opacity(0.75)))
+                        .child(kbd(keys::hint(Id::KeepHunk), gpui_kit::white().opacity(0.75)))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(true, cx))),
                 )
                 .into_any_element(),
@@ -1024,7 +1074,7 @@ impl EditorView {
         let (a, b) = card.lines;
         let which = if a == b { format!("Edit line {a}") } else { format!("Edit lines {a}–{b}") };
         let model = prefs.model.clone().unwrap_or_else(|| prefs.agent.display_name());
-        let kbd = |k: &'static str, label: &'static str| h_flex().gap(px(4.)).child(div().text_color(theme.foreground.opacity(0.8)).child(k)).child(label);
+        let kbd = |k: String, label: &'static str| h_flex().gap(px(4.)).child(div().text_color(theme.foreground.opacity(0.8)).child(k)).child(label);
         Some(
             v_flex()
                 .id("editor-inline")
@@ -1062,8 +1112,8 @@ impl EditorView {
                         .gap(px(12.))
                         .text_size(px(11.))
                         .text_color(theme.muted_foreground)
-                        .child(kbd("↵", "Run"))
-                        .child(kbd("Esc", "Cancel"))
+                        .child(kbd(keys::localize("↵").into_owned(), "Run"))
+                        .child(kbd("Esc".into(), "Cancel"))
                         .child(div().flex_1())
                         .child("The change comes back to keep or undo"),
                 )
@@ -1116,6 +1166,7 @@ impl Render for EditorView {
         let dir = self.path.parent().map(trek_core::paths::tildify).unwrap_or_default();
         let dirty = self.dirty;
         let path = self.path.clone();
+        self.reveal_line(window, cx);
         // In the editor the tab, breadcrumbs and ⌘S stand in for this header; a read-only file
         // still says why, in a slim note.
         if self.workspace.read(cx).ide() {
@@ -1171,7 +1222,7 @@ impl Render for EditorView {
                         el.child(div().text_xs().text_color(palette::red(cx)).child(p))
                     })
                     .child(
-                        Button::new("editor-save").ghost().small().label("Save").tooltip("Save (⌘S)")
+                        Button::new("editor-save").ghost().small().label("Save").tooltip(keys::shared("Save (⌘S)"))
                             .when(!dirty, |b| b.disabled(true))
                             .on_click(cx.listener(|this, _, window, cx| this.save(&SaveFile, window, cx))),
                     )

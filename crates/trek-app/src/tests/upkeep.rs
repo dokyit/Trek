@@ -42,7 +42,8 @@ fn onboarding_lists_every_agent_with_the_command_that_sets_it_up() {
         trek.render(cx);
         assert!(trek.visible(cx, "ob-agent-acp-cursor"));
         trek.click(cx, "ob-copy-claude-code");
-        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("npm i -g @anthropic-ai/claude-code"));
+        let install = trek_core::catalog::install_hint("claude-code").unwrap().here();
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some(install));
 
         // Found: connected ones need nothing; one that isn't signed in shows its sign-in command.
         trek.update(cx, |ws, cx| {
@@ -65,7 +66,8 @@ fn the_tools_page_reads_the_mac_off_the_main_thread() {
         // The first frame asks; it doesn't wait for the answer.
         let reading = trek.window(cx, |window, cx| {
             window.render_frame(cx);
-            window.try_find("ax-perm-checking").is_some_and(|e| e.visible()) && window.try_find("tools-reading").is_some()
+            // Windows has no permission to read, so a Mac's "Checking…" under it isn't there.
+            (cfg!(windows) || window.try_find("ax-perm-checking").is_some_and(|e| e.visible())) && window.try_find("tools-reading").is_some()
         });
         assert!(reading, "a loading state until it's read");
         cx.run_until_parked();

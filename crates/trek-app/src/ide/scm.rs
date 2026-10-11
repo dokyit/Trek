@@ -136,7 +136,7 @@ pub struct ScmView {
 
 impl ScmView {
     pub fn new(workspace: Entity<Workspace>, workbench: WeakEntity<IdeWorkbench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let message = cx.new(|cx| InputState::new(window, cx).placeholder("Message (⌘↩ to commit)"));
+        let message = cx.new(|cx| InputState::new(window, cx).placeholder(crate::keys::localize("Message (⌘↩ to commit)").into_owned()));
         let subscriptions = vec![
             cx.observe(&workspace, |this, ws, cx| {
                 let (root, seen) = {
@@ -482,7 +482,7 @@ impl ScmView {
                 };
                 menu.separator()
                     .item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
-                    .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                    .item(PopupMenuItem::new(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
             })
     }
 

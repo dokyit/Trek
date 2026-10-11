@@ -230,10 +230,11 @@ impl SettingsView {
                 vec![
                     Self::row(
                         "Send with",
-                        if s.general.send_with_cmd_enter { "↩ adds a new line; ⌘↩ sends." } else { "↩ sends; ⇧↩ adds a new line." },
+                        crate::keys::shared(if s.general.send_with_cmd_enter { "↩ adds a new line; ⌘↩ sends." } else { "↩ sends; ⇧↩ adds a new line." }),
                         ui::segmented(
                             "send-key",
-                            vec![(false, "↩ Return"), (true, "⌘↩ Command-Return")],
+                            // Windows has no Command key: its second key is Ctrl.
+                            if crate::keys::is_mac() { vec![(false, "↩ Return"), (true, "⌘↩ Command-Return")] } else { vec![(false, "Enter"), (true, "Ctrl+Enter")] },
                             s.general.send_with_cmd_enter,
                             self.setter(|s, v| s.general.send_with_cmd_enter = v),
                             cx,
@@ -242,7 +243,7 @@ impl SettingsView {
                     ),
                     Self::row(
                         "Messages sent while an agent works",
-                        "Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way.",
+                        crate::keys::shared("Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way."),
                         ui::segmented(
                             "follow-up",
                             vec![(FollowUp::Steer, "Steer"), (FollowUp::Queue, "Queue")],
@@ -311,7 +312,7 @@ impl SettingsView {
             Self::heading("System", cx),
             ui::group(
                 vec![Self::row(
-                    "Keep the Mac awake while agents work",
+                    crate::words::words().keep_awake_label,
                     "Stops idle sleep until every running turn has finished. The display can still sleep.",
                     self.switch("prevent-sleep", s.general.prevent_sleep_while_running, |s, v| s.general.prevent_sleep_while_running = v),
                     cx,
@@ -371,7 +372,7 @@ impl SettingsView {
                 .into_any_element()
         };
         let options = [
-            (ThemeChoice::System, "Match macOS"),
+            (ThemeChoice::System, crate::words::words().match_system_theme),
             (ThemeChoice::Night, "Night"),
             (ThemeChoice::Paper, "Paper"),
         ];
@@ -426,7 +427,7 @@ impl SettingsView {
         vec![
             self.theme_tiles(s.appearance.theme, cx),
             Self::heading("App icon", cx),
-            Self::note("Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed.", cx),
+            Self::note(crate::words::words().app_icon_note, cx),
             self.app_icon_tiles(s.appearance.app_icon, cx),
             Self::heading("Material", cx),
             ui::group(
@@ -436,7 +437,7 @@ impl SettingsView {
                         if covered {
                             "Your desktop shows through the window, blurred. Hidden while the background art fills the window."
                         } else {
-                            "Your desktop shows through the window, blurred, under translucent panels. Off while macOS reduces transparency."
+                            crate::words::words().glass_note
                         },
                         self.switch("glass", glass, |s, v| s.appearance.glass = v),
                         cx,
@@ -572,13 +573,13 @@ impl SettingsView {
             ui::group(
                 vec![
                     Self::row(
-                        "Dock badge",
-                        "Count of threads waiting on you, on Trek's Dock icon.",
+                        crate::words::words().badge_label,
+                        crate::words::words().badge_note,
                         self.switch("dock-badge", n.dock_badge, |s, v| s.notifications.dock_badge = v),
                         cx,
                     ),
                     Self::row(
-                        "Menu bar icon",
+                        crate::words::words().tray_label,
                         "The trail fills in while agents work and shows a dot when one needs you.",
                         self.switch("menu-bar-icon", n.menu_bar_icon, |s, v| s.notifications.menu_bar_icon = v),
                         cx,
@@ -590,58 +591,28 @@ impl SettingsView {
     }
 
     pub(super) fn shortcuts_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        const GROUPS: &[(&str, &[(&str, &[&str])])] = &[
-            (
-                "Threads",
-                &[
-                    ("Search threads and commands", &["⌘", "K"]),
-                    ("New thread", &["⌘", "N"]),
-                    ("Open a folder", &["⌘", "O"]),
-                    ("Open the thread in a new window", &["⌘", "⇧", "↩"]),
-                    ("Settle the current thread", &["⌘", "E"]),
-                    ("Stop the agent", &["⌘", "."]),
-                ],
-            ),
-            (
-                "Composer",
-                &[("Send", &["↩"]), ("New line", &["⇧", "↩"]), ("Plan mode", &["⇧", "⇥"]), ("Cycle hand-holding", &["⌘", "⇧", "A"]), ("Commands", &["/"]), ("Mention a file", &["@"]), ("Use a skill", &["$"]), ("Attach a copied image", &["⌘", "V"]), ("Take a snapshot", &["⌘", "⇧", "S"])],
-            ),
-            (
-                "Editor",
-                &[
-                    ("Go to file", &["⌘", "P"]),
-                    ("Edit the picked lines", &["⌘", "K"]),
-                    ("Keep a change", &["⌘", "Y"]),
-                    ("Undo a change", &["⌥", "⌘", "⌫"]),
-                    ("Next or previous change", &["⌥", "⌘", "↓ ↑"]),
-                    ("Keep all changes", &["⌘", "↩"]),
-                    ("Undo all changes (press twice)", &["⌘", "⇧", "⌫"]),
-                    ("New chat", &["⌘", "N"]),
-                    ("Switch to Agents", &["⌥", "⌘", "E"]),
-                ],
-            ),
-            ("Window", &[("Basecamp", &["⌘", "⇧", "H"]), ("Leave Basecamp", &["esc"]), ("Toggle the sidebar", &["⌘", "B"]), ("Toggle the tools panel", &["⌘", "J"]), ("Settings", &["⌘", ","]), ("Close a thread window", &["⌘", "W"]), ("Hide Trek", &["⌘", "H"]), ("Minimize", &["⌘", "M"]), ("Quit", &["⌘", "Q"])]),
-        ];
+        // The keys come from the table in `keys.rs`, spelled for the platform running.
         let send_cmd = self.workspace.read(cx).settings.general.send_with_cmd_enter;
+        let muted = cx.theme().muted_foreground;
         let mut out = vec![];
-        for (gi, (group, items)) in GROUPS.iter().enumerate() {
+        for (gi, (group, items)) in crate::keys::shortcut_groups(crate::keys::is_mac(), send_cmd).into_iter().enumerate() {
             if gi > 0 {
                 out.push(Self::heading(group, cx));
             } else {
                 out.push(div().pb(px(10.)).text_size(px(13.)).font_semibold().child(group.to_string()).into_any_element());
             }
             let rows = items
-                .iter()
-                .map(|(label, keys)| {
-                    let keys: Vec<&str> = match (*label, send_cmd) {
-                        ("Send", true) => vec!["⌘", "↩"],
-                        ("New line", true) => vec!["↩"],
-                        _ => keys.to_vec(),
-                    };
+                .into_iter()
+                .map(|(label, chips)| {
                     h_flex()
+                        .id(SharedString::from(format!("shortcut-{label}")))
+                        .test_support()
                         .h(px(42.))
                         .child(div().flex_1().text_size(px(13.)).child(label.to_string()))
-                        .child(h_flex().gap(px(4.)).children(keys.iter().map(|k| key(k, cx))))
+                        .child(h_flex().gap(px(4.)).children(chips.into_iter().map(|chip| match chip {
+                            crate::keys::Chip::Key(k) => key(&k, cx),
+                            crate::keys::Chip::Word(w) => div().text_size(px(12.)).text_color(muted).child(w).into_any_element(),
+                        })))
                         .into_any_element()
                 })
                 .collect();
@@ -659,7 +630,7 @@ impl SettingsView {
             let from_env = p.env_key.filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
             let id = p.id;
             let status: SharedString = match (saved, from_env) {
-                (true, _) => "Saved in your Keychain".into(),
+                (true, _) => format!("Saved in {}", crate::words::words().your_credential_store).into(),
                 (false, Some(k)) => format!("Using ${k} from your shell").into(),
                 (false, None) => "Not set".into(),
             };
@@ -701,7 +672,7 @@ impl SettingsView {
                                     }
                                     ws.save_settings(cx);
                                 });
-                                crate::toast::push(window, "Saved to your Keychain", cx);
+                                crate::toast::push(window, format!("Saved to {}", crate::words::words().your_credential_store), cx);
                             }
                             Err(e) => crate::toast::push(window, format!("Couldn't save the key: {e}"), cx),
                         }
@@ -785,7 +756,7 @@ impl SettingsView {
                 let view = view.clone();
                 alert
                     .title("Allow Full access?")
-                    .description("Agents will run commands and edit files anywhere on this Mac without asking. Use it only for work you'd trust to run unattended.")
+                    .description(format!("Agents will run commands and edit files anywhere on {} without asking. Use it only for work you'd trust to run unattended.", crate::words::words().this_computer))
                     .confirm()
                     .ok_text("Allow Full access")
                     .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
@@ -846,6 +817,8 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
+        #[cfg(test)]
+        super::shown::text(&view.line);
         let pending = ws.pending_changes();
         // The release history: what this channel has published up to the update on offer.
         let ceiling = ws.updater.offer.as_ref().map(|o| o.version.clone()).filter(|_| pending.is_some()).unwrap_or_else(trek_core::update::current_version);
@@ -961,7 +934,7 @@ impl SettingsView {
             .into_any_element();
         let reveal = {
             let d = data_dir.clone();
-            Button::new("reveal-data").small().outline().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&d))
+            Button::new("reveal-data").small().outline().label(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&d))
         };
         let open_settings = {
             let f = settings_file.clone();
@@ -973,14 +946,19 @@ impl SettingsView {
             let agents: Vec<String> =
                 ws.agents.iter().map(|a| format!("{}: {:?}{}", a.name, a.availability, a.version.as_deref().map(|v| format!(" ({v})")).unwrap_or_default())).collect();
             let settings = shown_settings.clone();
-            // `sw_vers` runs off the main thread; the copy lands when it's answered.
+            // The OS version is asked for off the main thread (`sw_vers`, the registry); the copy
+            // lands when it's answered.
             cx.spawn_in(window, async move |_, cx| {
-                let macos = cx
+                #[cfg(windows)]
+                let os = cx.background_executor().spawn(async { Some(crate::system::windows_version()) }).await;
+                #[cfg(not(windows))]
+                let os = cx
                     .background_executor()
                     .spawn(async { std::process::Command::new("sw_vers").arg("-productVersion").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) })
-                    .await;
+                    .await
+                    .map(|v| format!("macOS {v}"));
                 let mut lines = vec![format!("Trek {}", trek_core::VERSION)];
-                lines.extend(macos.map(|v| format!("macOS {v}")));
+                lines.extend(os);
                 lines.extend(agents);
                 lines.push(format!("Settings: {}", settings.display()));
                 let _ = cx.update(|window, cx| {
@@ -1002,7 +980,7 @@ impl SettingsView {
                 vec![
                     Self::row("Data folder", trek_core::paths::tildify(&data_dir), reveal, cx),
                     Self::row("Settings file", trek_core::paths::tildify(&settings_file), open_settings, cx),
-                    Self::row("Diagnostics", "Version, macOS and agent details, for a bug report.", copy, cx),
+                    Self::row("Diagnostics", format!("Version, {} and agent details, for a bug report.", crate::words::words().os_name), copy, cx),
                 ],
                 cx,
             ),
@@ -1030,7 +1008,7 @@ impl SettingsView {
         let folder = self.data_dir.join("snapshots");
         let reveal = {
             let f = folder.clone();
-            Button::new("snap-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| {
+            Button::new("snap-reveal").small().outline().label(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| {
                 let _ = std::fs::create_dir_all(&f);
                 cx.open_with_system(&f)
             })
@@ -1060,11 +1038,15 @@ impl SettingsView {
                 Button::new("snap-perm").small().outline().label("Allow Screen Recording").on_click(|_, _, cx| cx.open_url(crate::integrations::SCREEN_RECORDING_PANE)).into_any_element()
             }
         };
-        vec![
-            ui::group(
+        let words = crate::words::words();
+        // Where Snipping Tool does the capturing, it decides the mode and the file's format, and
+        // has no shadow, sound or hiding of Trek to set: a sentence says so in place of those rows.
+        let capture = match words.snipping_tool_note {
+            Some(note) => Self::note(note, cx),
+            None => ui::group(
                 vec![
                     Self::row(
-                        "⌘⇧S takes",
+                        crate::keys::localize("⌘⇧S takes").into_owned(),
                         "The + menu in the composer offers all three.",
                         ui::segmented(
                             "snap-mode",
@@ -1076,7 +1058,7 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row("Hide Trek while capturing", "Trek steps aside so you can pick the window behind it.", self.switch("snap-hide", p.hide_trek, |s, v| s.snapshots.hide_trek = v), cx),
-                    Self::row("Window shadow", "Keep macOS's drop shadow around window snapshots.", self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
+                    Self::row("Window shadow", words.window_shadow_note.unwrap_or_default(),self.switch("snap-shadow", p.window_shadow, |s, v| s.snapshots.window_shadow = v), cx),
                     Self::row("Shutter sound", "", self.switch("snap-sound", p.sound, |s, v| s.snapshots.sound = v), cx),
                     Self::row(
                         "Format",
@@ -1087,6 +1069,11 @@ impl SettingsView {
                 ],
                 cx,
             ),
+        };
+        // The system's permission to capture the screen, where it has one.
+        let permission = words.screen_recording.map(|(label, note)| [Self::heading("Permission", cx), ui::group(vec![Self::row(label, note, permission, cx)], cx)]);
+        let mut page = vec![
+            capture,
             Self::heading("Storage", cx),
             ui::group(
                 vec![
@@ -1111,10 +1098,10 @@ impl SettingsView {
                 ],
                 cx,
             ),
-            Self::heading("Permission", cx),
-            ui::group(vec![Self::row("Screen Recording", "macOS asks once; snapshots of other apps need it.", permission, cx)], cx),
-            div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element(),
-        ]
+        ];
+        page.extend(permission.into_iter().flatten());
+        page.push(div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element());
+        page
     }
 
     pub(super) fn skills_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1206,22 +1193,23 @@ impl SettingsView {
                 let mut menu = menu
                     .min_w(px(190.))
                     .item(PopupMenuItem::new("Open SKILL.md").on_click(move |_, _, cx| cx.open_with_system(&md)))
-                    .item(PopupMenuItem::new("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&dir)));
+                    .item(PopupMenuItem::new(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&dir)));
                 if s2.source.editable() {
-                    menu = menu.separator().item(PopupMenuItem::new("Move to Trash").icon(IconName::Delete).on_click(move |_, window, cx| {
+                    let trash = crate::words::words().trash;
+                    menu = menu.separator().item(PopupMenuItem::new(format!("Move to {trash}")).icon(IconName::Delete).on_click(move |_, window, cx| {
                         let s3 = s2.clone();
                         let view = view.clone();
                         window.open_alert_dialog(cx, move |alert, _, _| {
                             let (s4, view) = (s3.clone(), view.clone());
                             alert
-                                .title(format!("Move “{}” to the Trash?", s3.name))
-                                .description("Every agent stops loading it. You can restore it from the Trash.")
+                                .title(format!("Move “{}” to the {trash}?", s3.name))
+                                .description(format!("Every agent stops loading it. You can restore it from the {trash}."))
                                 .confirm()
-                                .ok_text("Move to Trash")
+                                .ok_text(format!("Move to {trash}"))
                                 .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
                                 .on_ok(move |_, window, cx| {
                                     match trek_core::skills::trash(&s4) {
-                                        Ok(()) => crate::toast::push(window, format!("Moved {} to the Trash", s4.name), cx),
+                                        Ok(()) => crate::toast::push(window, format!("Moved {} to the {trash}", s4.name), cx),
                                         Err(e) => crate::toast::push(window, format!("{e}"), cx),
                                     }
                                     view.update(cx, |this, cx| this.skills_changed(cx));
@@ -1435,7 +1423,7 @@ impl SettingsView {
         };
         let reveal = {
             let p = path.clone();
-            Button::new("project-reveal").small().outline().label("Show in Finder").on_click(move |_, _, cx| cx.reveal_path(&p))
+            Button::new("project-reveal").small().outline().label(crate::words::words().show_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&p))
         };
 
         // New-thread defaults; "Trek default" clears the override.

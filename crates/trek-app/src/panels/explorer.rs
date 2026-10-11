@@ -520,7 +520,7 @@ fn row_menu(menu: PopupMenu, me: WeakEntity<ExplorerPanel>, ws: &Entity<Workspac
             .item(act("Delete", Box::new(move |this, window, cx| this.delete(delete.clone(), window, cx))))
             .separator()
     };
-    menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+    menu.item(PopupMenuItem::new(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
         .item(copy("Copy Path", path.display().to_string()))
         .item(copy("Copy Relative Path", relative))
 }

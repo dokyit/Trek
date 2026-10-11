@@ -41,7 +41,7 @@ fn a_second_toggle_turns_the_sidebar_round_where_it_is() {
         moving(cx);
         trek.render(cx);
         assert_eq!(sidebar(&trek, cx), 1.);
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         frame(&trek, cx, 60);
         let folding = sidebar(&trek, cx);
         assert!(folding > 0.1 && folding < 0.9, "part-way: {folding}");
@@ -50,7 +50,7 @@ fn a_second_toggle_turns_the_sidebar_round_where_it_is() {
         assert!(x < px(0.) && x > px(-crate::root::SIDEBAR_WIDTH), "{x:?}");
 
         // ⌘B again, mid-fold: it turns round from where it is, at the speed it had.
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         trek.render(cx);
         let turned = sidebar(&trek, cx);
         assert!((turned - folding).abs() < 0.01, "no jump at the turn: {folding} → {turned}");
@@ -93,16 +93,98 @@ fn switching_to_the_editor_crosses_over_and_turns_round() {
     });
 }
 
+/// What a page's loading line is in a window of its own, with the app's motion as it is.
+struct Line(bool);
+
+impl gpui_kit::Render for Line {
+    fn render(&mut self, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<Self>) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{ParentElement as _, Styled as _};
+        gpui_kit::div().relative().size_full().child(crate::panels::browser::loading_line(self.0, gpui_kit::hsla(0.05, 0.9, 0.5, 1.)))
+    }
+}
+
+#[test]
+fn a_loading_line_with_reduced_motion_is_still_there_and_not_sliding() {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, point, size};
+    run(async |cx| {
+        let _trek = open(cx);
+        moving(cx);
+        let mut shown = vec![];
+        for still in [false, true] {
+            let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(600.), px(100.)) })), ..Default::default() };
+            let (window, _) = cx.update(|cx| gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Line(still)))).expect("window");
+            frame_in(cx, window, 0);
+            shown.push(in_window(cx, window, |w, _| {
+                let (line, bar) = (w.find("browser-loading").bounds(), w.find("browser-loading-bar").bounds());
+                (line.size.width.as_f32(), bar.size.width.as_f32(), bar.origin.x.as_f32() - line.origin.x.as_f32())
+            }));
+        }
+        // Sliding: a third of the line wide, starting off its left end. Still: all of it, in place.
+        let ((line, moving, at), (_, still, at_still)) = (shown[0], shown[1]);
+        assert!((moving - 0.32 * line).abs() < 2. && at < 0., "{shown:?}");
+        assert!((still - line).abs() < 1. && at_still.abs() < 1., "{shown:?}");
+    });
+}
+
+/// Windows's Animation effects switch off (`winlook::reduces_motion(false)`) is Reduce motion:
+/// with the read injected, as the clock is, it stills what Trek's own setting does, and puts
+/// motion back when the switch does.
+#[test]
+fn the_systems_animation_effects_off_stills_everything_the_setting_does() {
+    run(async |cx| {
+        let trek = open(cx);
+        moving(cx);
+        trek.render(cx);
+        assert!(trek.read(cx, |ws, cx| ws.motion(cx)));
+        let system_off = |cx: &mut TestAppContext, animation_effects: bool| cx.update(|cx| crate::system::reduce_motion_as(crate::winlook::reduces_motion(animation_effects), &trek.ws, cx));
+
+        system_off(cx, false);
+        assert!(!trek.read(cx, |ws, cx| ws.motion(cx)), "the system's switch alone is enough");
+        assert!(cx.update(|cx| cx.reduce_motion()), "and GPUI's and the components' own animations follow it");
+        trek.press(cx, "secondary-b");
+        assert_eq!(sidebar(&trek, cx), 0., "folded at once");
+        trek.press(cx, "secondary-b");
+        assert_eq!(sidebar(&trek, cx), 1., "and out at once");
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
+        trek.render(cx);
+        assert_eq!(editor_in(&trek, cx), 1.);
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Agents, cx));
+        trek.render(cx);
+        trek.press(cx, "secondary-k");
+        assert!(trek.visible(cx, "palette"));
+        trek.press(cx, "escape");
+        assert!(!trek.visible(cx, "palette"), "gone at once");
+
+        // Animation effects back on: motion is back.
+        system_off(cx, true);
+        assert!(trek.read(cx, |ws, cx| ws.motion(cx)));
+        assert!(!cx.update(|cx| cx.reduce_motion()));
+        trek.press(cx, "secondary-b");
+        frame(&trek, cx, 60);
+        let folding = sidebar(&trek, cx);
+        assert!(folding > 0.1 && folding < 0.9, "part-way again: {folding}");
+        frame(&trek, cx, 1_000);
+
+        // Trek's own setting holds it still with the system's switch on; the two don't undo each other.
+        trek.update(cx, |ws, _| ws.settings.appearance.reduce_motion = true);
+        system_off(cx, true);
+        assert!(!trek.read(cx, |ws, cx| ws.motion(cx)) && cx.update(|cx| cx.reduce_motion()));
+        system_off(cx, false);
+        assert!(!trek.read(cx, |ws, cx| ws.motion(cx)));
+    });
+}
+
 #[test]
 fn reduce_motion_puts_everything_where_it_goes_at_once() {
     run(async |cx| {
         // Trek's own setting, with the system's off.
         let trek = open_with(cx, |s| s.appearance.reduce_motion = true);
         moving(cx);
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         assert_eq!(sidebar(&trek, cx), 0.);
         assert!(!trek.visible(cx, "sidebar"));
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         assert!(trek.visible(cx, "sidebar"));
 
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
@@ -112,7 +194,7 @@ fn reduce_motion_puts_everything_where_it_goes_at_once() {
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Agents, cx));
         trek.render(cx);
 
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         assert!(trek.visible(cx, "palette"));
         trek.press(cx, "escape");
         assert!(!trek.visible(cx, "palette"), "gone at once, nothing left to fade");
@@ -243,7 +325,7 @@ fn the_palette_stays_while_it_fades_then_goes() {
     run(async |cx| {
         let trek = open(cx);
         moving(cx);
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         frame(&trek, cx, 1_000);
         assert!(trek.visible(cx, "palette"));
         trek.press(cx, "escape");
@@ -326,7 +408,10 @@ fn the_add_agent_sheet_leaves_rather_than_vanishing() {
         trek.window(cx, |window, cx| crate::add_agent::open(ws, crate::add_agent::Tab::Command, window, cx));
         frame(&trek, cx, 1_000);
         assert!(trek.visible(cx, "add-agent-sheet"));
-        trek.click(cx, "command-cancel");
+        // Esc is a real close path: the dialog's on_close runs sheet_left at once, so the leave
+        // is registered before the next frame draws. A pointer click on the cancel button is
+        // hit-tested against the live tree and a loaded runner has missed it.
+        trek.press(cx, "escape");
         trek.render(cx);
         assert!(trek.window(cx, |window, cx| !window.has_active_dialog(cx)), "the dialog is down");
         assert!(trek.visible(cx, "sheet-leaving"), "its sheet is drawn once more as it goes");
@@ -558,7 +643,7 @@ fn a_click_on_a_row_as_it_fades_away_does_nothing() {
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), route, "the archived thread doesn't open");
 
         // The sidebar folding away (⌘B) is out of reach too.
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         frame(&trek, cx, 60);
         assert!(trek.visible(cx, "sidebar"));
         trek.click(cx, format!("live-line-{}", ids[0]));
@@ -573,7 +658,7 @@ fn a_click_on_the_palette_as_it_goes_does_nothing() {
         moving(cx);
         quiet(&trek, cx, "Recent", 60_000);
         let route = trek.read(cx, |ws, _| ws.route.clone());
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         frame(&trek, cx, 1_000);
         trek.press(cx, "escape");
         frame(&trek, cx, 40);
@@ -613,19 +698,26 @@ fn a_click_as_the_preview_shrinks_back_goes_to_what_is_under_it() {
 
 #[test]
 fn a_click_on_a_sheet_as_it_leaves_does_nothing() {
+    use gpui_kit::test::TestWindowExt as _;
     run(async |cx| {
         let trek = open(cx);
         moving(cx);
         let ws = trek.ws.clone();
         trek.window(cx, |window, cx| crate::add_agent::open(ws, crate::add_agent::Tab::Command, window, cx));
         frame(&trek, cx, 1_000);
-        trek.click(cx, "command-cancel");
-        trek.render(cx);
-        assert!(trek.visible(cx, "sheet-leaving"));
-        // "Add agent" on the empty form would complain; on its way out it does nothing.
-        trek.click(cx, "command-add");
-        trek.render(cx);
-        assert!(!trek.visible(cx, "command-error"));
+        trek.window(cx, |window, cx| {
+            // Esc is a real close path: the dialog's on_close runs sheet_left at once, so the
+            // leave is registered before the next frame draws. A pointer click on the cancel
+            // button is hit-tested against the live tree and a loaded runner has missed it;
+            // close_dialog pops the dialog without running on_close.
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.find("sheet-leaving").visible(), "the sheet is on its way out");
+            // "Add agent" on the empty form would complain; on its way out it does nothing.
+            window.click("command-add", cx);
+            window.render_frame(cx);
+            assert!(!window.try_find("command-error").is_some_and(|e| e.visible()));
+        });
         assert!(trek.window(cx, |window, cx| !window.has_active_dialog(cx)));
     });
 }
@@ -639,7 +731,7 @@ fn undo_on_a_toast_as_it_goes_does_nothing() {
         cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
         trek.window(cx, |window, _| window.activate_window());
         cx.run_until_parked();
-        trek.press(cx, "cmd-e");
+        trek.press(cx, "secondary-e");
         let settled = |trek: &Trek, cx: &mut TestAppContext| trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some()));
         assert!(settled(&trek, cx));
         frame(&trek, cx, 1_000);

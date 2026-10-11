@@ -44,6 +44,7 @@ pub fn text(s: impl Into<String>) -> Value {
     json!({ "type": "text", "text": s.into() })
 }
 
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub fn image_png(base64: String) -> Value {
     json!({ "type": "image", "data": base64, "mimeType": "image/png" })
 }
@@ -183,13 +184,17 @@ pub fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 // ---- argument helpers shared by tool families ----
+// Computer use (macOS and Windows) and the Simulator (macOS) take points and images; `orchestrate`
+// doesn't.
 
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub fn arg_f64(args: &Value, key: &str) -> Result<f64, String> {
     args.get(key)
         .and_then(Value::as_f64)
         .ok_or_else(|| format!("Missing or non-numeric argument `{key}`"))
 }
 
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub fn opt_f64(args: &Value, key: &str) -> Result<Option<f64>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -197,17 +202,20 @@ pub fn opt_f64(args: &Value, key: &str) -> Result<Option<f64>, String> {
     }
 }
 
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Missing or non-string argument `{key}`"))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
 }
 
 /// Read `{x, y}` from `args[key]`.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub fn arg_point(args: &Value, key: &str) -> Result<(f64, f64), String> {
     let p = args
         .get(key)
@@ -218,6 +226,7 @@ pub fn arg_point(args: &Value, key: &str) -> Result<(f64, f64), String> {
     ))
 }
 
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub fn point_schema(desc: &str) -> Value {
     json!({
         "type": "object",

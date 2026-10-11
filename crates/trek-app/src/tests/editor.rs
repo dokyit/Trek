@@ -1,6 +1,7 @@
 //! The in-app editor: a project file opens editable, marks dirty on change, and saves back.
 
 use super::harness::{open, run};
+use gpui_kit::test::TestWindowExt as _;
 use crate::workspace::{PanelTool, Route};
 
 #[test]
@@ -108,7 +109,7 @@ fn cmd_k_in_the_ide_finds_files() {
         trek.update(cx, |ws, cx| ws.toggle_ide(cx));
         trek.render(cx);
 
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         trek.render(cx);
         trek.type_live(cx, "needle");
         trek.render(cx);
@@ -126,7 +127,7 @@ fn cmd_shift_f_searches_the_folder() {
         std::fs::write(trek.project.join("searchable.txt"), "the quick brown fox\n").unwrap();
         trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
         trek.update(cx, |ws, cx| ws.toggle_ide(cx));
-        trek.press(cx, "cmd-shift-f");
+        trek.press(cx, "secondary-shift-f");
         trek.render(cx);
         trek.type_live(cx, "quick brown");
         // The scan runs on a worker thread — poll for the hit row.
@@ -185,14 +186,22 @@ async fn loaded(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext) 
 fn pipes_devices_and_huge_files_open_read_only_without_hanging() {
     run(async |cx| {
         let trek = open(cx);
-        // A pipe nobody writes to: reading it would wait for ever.
-        let fifo = trek.project.join("pipe");
-        let c = std::ffi::CString::new(fifo.display().to_string()).unwrap();
-        // SAFETY: a plain path, a plain mode.
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
         let big = trek.project.join("big.log");
         std::fs::File::create(&big).unwrap().set_len(2_000_001).unwrap();
-        for (path, why) in [(fifo, "Not a file"), (std::path::PathBuf::from("/dev/zero"), "Not a file"), (big, "Too big")] {
+        let mut cases = Vec::new();
+        // Unix only: Windows has no FIFOs or device files to open by path.
+        #[cfg(unix)]
+        {
+            // A pipe nobody writes to: reading it would wait for ever.
+            let fifo = trek.project.join("pipe");
+            let c = std::ffi::CString::new(fifo.display().to_string()).unwrap();
+            // SAFETY: a plain path, a plain mode.
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+            cases.push((fifo, "Not a file"));
+            cases.push((std::path::PathBuf::from("/dev/zero"), "Not a file"));
+        }
+        cases.push((big, "Too big"));
+        for (path, why) in cases {
             trek.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx));
             let editor = loaded(&trek, cx).await;
             let (problem, text) = editor.read_with(cx, |e, cx| (e.problem().map(str::to_string), e.text_state().read(cx).value().to_string()));
@@ -216,24 +225,36 @@ fn a_deep_link_lands_on_its_line_once_the_file_is_read() {
 
 #[test]
 fn saving_replaces_the_file_whole_and_keeps_its_permissions_and_links() {
-    use std::os::unix::fs::PermissionsExt as _;
     run(async |cx| {
         let trek = open(cx);
         let file = trek.project.join("run.sh");
         std::fs::write(&file, "echo one\n").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The executable bit is Unix's: a Windows file has none to keep.
+        #[cfg(unix)]
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let link = trek.project.join("link.sh");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&file, &link).unwrap();
+        // Making a link takes Developer Mode or an elevated process on Windows: without either, the
+        // file is edited directly and the link checks are skipped.
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&file, &link).is_ok();
+        #[cfg(unix)]
+        let linked = true;
         // Edited through the link.
-        trek.update(cx, |ws, cx| ws.open_editor(link.clone(), None, cx));
+        let opened = if linked { link.clone() } else { file.clone() };
+        trek.update(cx, |ws, cx| ws.open_editor(opened.clone(), None, cx));
         let editor = loaded(&trek, cx).await;
         trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.insert("set -e\n", window, cx))));
         cx.run_until_parked();
         editor.update(cx, |e, cx| e.save_now(cx));
         assert!(!editor.read_with(cx, |e, _| e.dirty()));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "set -e\necho one\n");
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755, "still runs");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o755, "still runs");
+        if linked {
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+        }
         let left: Vec<String> = std::fs::read_dir(&trek.project).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains("trek-save")).collect();
         assert!(left.is_empty(), "no temporary file left behind: {left:?}");
     });
@@ -273,5 +294,84 @@ fn a_file_that_changes_on_disk_again_warns_again_before_its_overwritten() {
         editor.update(cx, |e, cx| e.save_now(cx));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited mine\n");
         assert!(!editor.read_with(cx, |e, _| e.dirty()));
+    });
+}
+
+/// The rows on screen and the scroll offset (px, down is positive) of `editor`'s text.
+fn on_screen(editor: &gpui_kit::Entity<crate::editor::EditorView>, cx: &gpui_kit::TestAppContext) -> (std::ops::Range<usize>, f32) {
+    editor.read_with(cx, |e, cx| {
+        let state = e.text_state();
+        let state = state.read(cx);
+        (state.visible_row_range().expect("laid out"), -state.scroll_offset().y.as_f32())
+    })
+}
+
+/// Open `file` at `line` and come back with the rows on screen once the editor has settled.
+/// `painted_first`: a frame is drawn while the file is still being read, so the editor has been
+/// laid out (empty) by the time the text arrives; otherwise the text arrives before the first frame.
+async fn opened_at(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, file: &std::path::Path, line: u32, painted_first: bool) -> (std::ops::Range<usize>, f32) {
+    trek.update(cx, |ws, cx| ws.open_editor(file.to_path_buf(), Some(line), cx));
+    if painted_first {
+        trek.window(cx, |window, cx| window.render_frame(cx));
+    }
+    let editor = loaded(trek, cx).await;
+    for _ in 0..4 {
+        trek.render(cx);
+    }
+    on_screen(&editor, cx)
+}
+
+#[test]
+fn opening_at_a_line_shows_it_whichever_comes_first_the_frame_or_the_file() {
+    run(async |cx| {
+        let trek = open(cx);
+        let mut seen = vec![];
+        for painted_first in [false, true] {
+            // A file of its own each time round, so the editor is a fresh one.
+            let file = trek.project.join(format!("long-{painted_first}.rs"));
+            std::fs::write(&file, (1..=200).map(|n| format!("// line {n}\n")).collect::<String>()).unwrap();
+            // Line 40 is past the first screen: it comes up in the middle, neither at the bottom
+            // edge (as when the editor had been laid out by the time the text arrived) nor off
+            // screen (as when it hadn't).
+            let (rows, offset) = opened_at(&trek, cx, &file, 40, painted_first).await;
+            assert!(rows.contains(&39), "painted_first={painted_first}: line 40 is on screen, rows {rows:?}");
+            assert!(39 - rows.start > 5 && rows.end - 39 > 5, "painted_first={painted_first}: line 40 is clear of both edges, rows {rows:?}");
+            seen.push((rows.clone(), offset));
+            // Asked for again on a line that's on screen already, nothing moves.
+            let (again, _) = opened_at(&trek, cx, &file, 41, painted_first).await;
+            assert_eq!(again, rows, "painted_first={painted_first}");
+            // Near the top of the file the top is as high as it goes; at the end, the end.
+            let (top, offset) = opened_at(&trek, cx, &file, 3, painted_first).await;
+            assert_eq!((top.start, offset), (0, 0.), "painted_first={painted_first}");
+            let (end, _) = opened_at(&trek, cx, &file, 200, painted_first).await;
+            assert!(end.contains(&199), "painted_first={painted_first}: the last line is on screen, rows {end:?}");
+            // The caret is on the line, as ever.
+            let editor = trek.root.read_with(cx, |r, cx| r.editor(cx)).expect("editor");
+            assert_eq!(editor.read_with(cx, |e, cx| e.caret(cx)).0, 200);
+        }
+        assert_eq!(seen[0], seen[1], "the same scroll whichever came first");
+    });
+}
+
+#[test]
+fn quitting_with_a_file_open_at_a_line_leaves_no_handle_on_its_editor() {
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("quit.rs");
+        std::fs::write(&file, (1..=200).map(|n| format!("// line {n}\n")).collect::<String>()).unwrap();
+        trek.update(cx, |ws, cx| ws.open_editor(file.clone(), Some(40), cx));
+        let editor = loaded(&trek, cx).await;
+        // A frame that asks for the scroll, and the quit before it is taken up.
+        trek.update(cx, |ws, cx| ws.open_editor(file.clone(), Some(150), cx));
+        trek.window(cx, |window, cx| window.render_frame(cx));
+        let (state, ws) = (editor.read_with(cx, |e, _| e.text_state().downgrade()), trek.ws.downgrade());
+        drop((editor, trek));
+        cx.update(|cx| {
+            cx.shutdown();
+            cx.clear_globals();
+        });
+        cx.run_until_parked();
+        state.assert_released();
+        ws.assert_released();
     });
 }

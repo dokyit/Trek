@@ -21,6 +21,8 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// Make the project a git repo with one commit: `notes.txt` saying "v1".
 fn git_project(dir: &Path) {
     git(dir, &["init", "-q", "-b", "main"]);
+    // Git for Windows defaults to autocrlf=true: a restore would write CRLF over the tests' LF files.
+    git(dir, &["config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("notes.txt"), "v1\n").unwrap();
     git(dir, &["add", "-A"]);
     git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
@@ -658,7 +660,7 @@ fn imported_threads_rewind_and_fork_their_agents_session() {
 /// The whole path with a real agent: checkpoints, a rewind that restores files and cuts the
 /// agent's session back, and a fork. Not run by default (it costs a few tiny turns):
 /// `TREK_LIVE_AGENT=claude` (claude-haiku-4-5) or `codex` (gpt-5.6-luna), with
-/// `cargo test -p trek-app live_rewind -- --ignored`. Works in /tmp/trek-timetravel-e2e.
+/// `cargo test -p trek-app live_rewind -- --ignored`. Works in `trek-timetravel-e2e` in the temp folder.
 #[test]
 #[ignore = "live: runs a real agent"]
 fn live_rewind_and_fork() {
@@ -672,7 +674,7 @@ fn live_rewind_and_fork() {
             s.general.default_model = Some(model.into());
             s.general.default_effort = Effort::Low;
         });
-        let project = std::path::PathBuf::from("/tmp/trek-timetravel-e2e").join(format!("app-{}", agent.key()));
+        let project = std::env::temp_dir().join("trek-timetravel-e2e").join(format!("app-{}", agent.key()));
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(&project).unwrap();
         git_project(&project);
@@ -685,6 +687,10 @@ fn live_rewind_and_fork() {
             let deadline = Instant::now() + Duration::from_secs(240);
             loop {
                 cx.run_until_parked();
+                // The file the second turn makes is allowed when the agent asks.
+                if let Some(rid) = trek.read(cx, |ws, _| ws.pending_request(id).map(|p| p.request_id.clone())) {
+                    trek.update(cx, |ws, cx| ws.respond(id, &rid, trek_agents::Decision::Allow, cx));
+                }
                 let state = trek.read(cx, |ws, _| (ws.thread(id).map(|t| t.run_state), ws.turn_running(id)));
                 match state {
                     (Some(RunState::Idle), false) => return,
@@ -706,17 +712,24 @@ fn live_rewind_and_fork() {
             ws.reload(cx);
         });
         std::fs::write(project.join("notes.txt"), "v2\n").unwrap();
-        let banana_text = "Just for this conversation (don't save it to memory or to any file), also remember the word BANANA. Reply with just OK.";
+        // This turn changes a file (made.txt): only what a turn changed goes back with it, not
+        // the user's own edits (notes.txt) around it.
+        let banana_text = "Just for this conversation (don't save the word to memory), also remember the word BANANA. Also create the file made.txt in this folder containing the single line banana. Reply with just OK.";
         trek.update(cx, |ws, cx| ws.send_to(&id, banana_text.into(), vec![], cx));
         done(cx, &id).await;
+        assert_eq!(read(&project, "made.txt").map(|s| s.trim().to_string()).as_deref(), Some("banana"), "the agent made the file: {:?}", trek.items(cx, &id));
+        // Each turn is checkpointed as it starts and as it ends; the end of the second lands in
+        // the background, so the user's later edit waits for it (as the mock tests' do).
+        trek.wait(cx, "the second turn's end checkpoint", |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)).await;
         std::fs::write(project.join("notes.txt"), "v3\n").unwrap();
-        assert_eq!(trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap().len()), 2);
 
         let banana = trek.read(cx, |ws, _| ws.live[&id].items.ids()[user_ix(&trek, cx, &id, banana_text)].clone());
         let point = trek.read(cx, |ws, _| ws.live[&id].items.get(ws.live[&id].items.position(&banana).unwrap()).cloned());
         assert!(matches!(point, Some(Item::User { resume: Some(ResumePoint { after: Some(_), .. }), .. })), "found in the agent's files: {point:?}");
         assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &banana, true, cx)).is_some());
-        files(&trek, cx, "notes.txt restored", |_| read(&project, "notes.txt").as_deref() == Some("v2\n")).await;
+        files(&trek, cx, "made.txt gone", |_| read(&project, "made.txt").is_none()).await;
+        trek.wait(cx, "the restore to finish", |ws| ws.live.get(&id).is_some_and(|l| l.git_jobs_idle())).await;
+        assert_eq!(read(&project, "notes.txt").as_deref(), Some("v3\n"), "the user's edit stays");
         assert!(matches!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Native { fork: false, .. })));
         let ask = "List every word I asked you to remember, comma separated, nothing else.";
         trek.update(cx, |ws, cx| ws.send_to(&id, ask.into(), vec![], cx));
@@ -733,6 +746,52 @@ fn live_rewind_and_fork() {
         let (a, b) = trek.read(cx, |ws, _| (ws.thread(&id).unwrap().native_id.clone(), ws.thread(&fork).unwrap().native_id.clone()));
         assert!(a.is_some() && b.is_some() && a != b, "the fork has a session of its own");
         println!("live {}: ok (sessions {a:?}, fork {b:?})", agent.key());
+    });
+}
+
+/// One turn with the real OpenCode through the app: it answers and the thread settles. Not run by
+/// default (one tiny turn on a free model): `TREK_LIVE_AGENT=opencode cargo test -p trek-app
+/// live_opencode -- --ignored`, with `TREK_LIVE_OPENCODE_MODEL` to pick another model. Needs a
+/// model OpenCode can use here (`opencode run -m <model> hi` answers): when it can't, OpenCode
+/// ends the turn over ACP with zero tokens and no words, and this fails on the empty reply.
+#[test]
+#[ignore = "live: runs a real agent"]
+fn live_opencode_turn() {
+    assert_eq!(std::env::var("TREK_LIVE_AGENT").as_deref(), Ok("opencode"), "needs TREK_LIVE_AGENT=opencode");
+    let model = std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into());
+    run(async |cx| {
+        let trek = open_with(cx, |s| {
+            s.general.default_agent = AgentId::OpenCode.key();
+            s.general.default_model = Some(model.clone());
+            s.general.default_effort = Effort::Low;
+        });
+        let project = std::env::temp_dir().join("trek-timetravel-e2e").join("app-opencode");
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).unwrap();
+        git_project(&project);
+        trek.update(cx, |ws, cx| {
+            ws.store.ensure_project(&project).unwrap();
+            ws.reload(cx);
+            ws.navigate(Route::Draft { project: Some(project.clone()) }, cx);
+        });
+        trek.update(cx, |ws, cx| ws.send("Reply with just OK.".into(), vec![], cx));
+        let id = trek.thread_id(cx);
+        let deadline = Instant::now() + Duration::from_secs(240);
+        loop {
+            cx.run_until_parked();
+            let state = trek.read(cx, |ws, _| (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id)));
+            match state {
+                (Some(RunState::Idle), false) => break,
+                (Some(RunState::Failed), _) => panic!("the turn failed: {:?}", trek.items(cx, &id)),
+                _ => {}
+            }
+            assert!(Instant::now() < deadline, "timed out: {:?}", trek.items(cx, &id));
+            cx.background_executor.timer(Duration::from_millis(50)).await;
+        }
+        let answer = trek.answers(cx, &id);
+        assert!(!answer.trim().is_empty(), "the reply: {:?}", trek.items(cx, &id));
+        assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::Assistant { .. })));
+        println!("live opencode: ok ({} chars)", answer.len());
     });
 }
 

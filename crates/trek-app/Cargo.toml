@@ -17,7 +17,7 @@ shots = ["gpui-kit/test-support"]
 tokio.workspace = true
 trek-core.workspace = true
 trek-agents.workspace = true
-trek-ipc.workspace = true
+trek-ipc = { workspace = true, features = ["server"] }
 trek-remote = { path = "../trek-remote" }
 reqwest.workspace = true
 # The pairing QR code in Settings › Phone, drawn as squares.
@@ -60,11 +60,50 @@ objc2-avf-audio = "0.3"
 objc2-speech = "0.3"
 block2 = "0.6"
 
+[target.'cfg(windows)'.dependencies]
+# LockFileEx on the data folder, a job object per language server, the registry for the OS name,
+# the session's idle time and lock state for push notifications' away-detection, and the exe's
+# icon resources for the windows' icons, at the size their display's scale wants (HiDpi).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The adapters and their addresses for the phone pairing screen (getifaddrs has no Windows twin).
+if-addrs = "0.13"
+# The taskbar button's overlay badge (ITaskbarList3), and snapshots: Snipping Tool's overlay (ShellExecuteW)
+# and the clipboard it leaves the image on. The version GPUI's Windows platform uses.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# The browser panel's WebView2 calls wry doesn't wrap (history, error pages, CapturePreview): the
+# webview2-com and windows versions wry 0.53 is built on, so its ICoreWebView2 is the same type.
+webview2-com = "0.38"
+windows-61 = { package = "windows", version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# The app icon in trek.exe (build.rs), through the Windows SDK's rc.exe.
+embed-resource = "3"
+
 [dev-dependencies]
 # Headless UI tests (src/tests): GPUI's test platform, plus CoreText from the macOS platform so
 # text lays out as it does in the app.
 gpui-kit = { workspace = true, features = ["test-support"] }
 ctor = "1"
+trek-test-fixtures.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The Windows twin of gpui_macos: DirectWrite, so the tests' text lays out as in the app.
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.7" }

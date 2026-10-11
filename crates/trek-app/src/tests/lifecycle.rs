@@ -171,7 +171,7 @@ fn commit(dir: &Path, file: &str, date: Option<&str>) {
 fn repo_on_a_feature_branch() -> std::path::PathBuf {
     let dir = new_project("repo");
     git(&dir, &["init", "-q", "-b", "main"]);
-    for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test"), ("commit.gpgsign", "false")] {
+    for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test"), ("commit.gpgsign", "false"), ("core.autocrlf", "false")] {
         git(&dir, &["config", k, v]);
     }
     commit(&dir, "README.md", Some("2020-01-01T09:00:00"));
@@ -404,7 +404,8 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
 fn queued_follow_ups_go_out_one_turn_each_in_order() {
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
-        let id = trek.send(cx, "mock:long 2s");
+        // Running while the follow-ups queue behind it: a loaded runner can take seconds.
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         trek.send(cx, "first follow-up");
@@ -421,7 +422,7 @@ fn queued_follow_ups_go_out_one_turn_each_in_order() {
                 _ => None,
             })
             .collect();
-        assert_eq!(order, ["mock:long 2s", "end", "first follow-up", "end", "second follow-up", "end"]);
+        assert_eq!(order, ["mock:long 8s", "end", "first follow-up", "end", "second follow-up", "end"]);
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0);
     });
 }
@@ -547,6 +548,13 @@ fn an_error_that_ends_nothing_leaves_the_turn_running() {
         assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 1, "the follow-up still waits its turn");
         let done = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { error: None }];
         trek.update(cx, |ws, cx| ws.apply_events(&id, done, cx));
+        // The turn ended cleanly, so the follow-up goes out in its place and the thread isn't
+        // "finished" yet. The mock agent answers it on the runtime's threads, in real time: the
+        // test waits for that second turn instead of reading the alerts while it may still run.
+        assert_eq!(trek.read(cx, |ws, _| ws.queued(&id)), 0, "the follow-up went out when the turn ended");
+        assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::User { text, .. } if text == "then the tests")));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // One alert, for the follow-up's turn: the first one's end said nothing.
         assert_eq!(*alerts.borrow(), [format!("Finished: {}", trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()))]);
         assert!(matches!(trek.items(cx, &id).iter().find(|i| matches!(i, Item::Error { .. })), Some(Item::Error { text }) if text.contains("/x.png")));
 

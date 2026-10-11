@@ -112,11 +112,12 @@ impl Restored {
 fn git_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let exec_path = Command::new("git").arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
+        let git = crate::git::git_program();
+        let exec_path = Command::new(git).arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
         exec_path
             .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("git"))
             .filter(|p| p.exists())
-            .unwrap_or_else(|| PathBuf::from("git"))
+            .unwrap_or_else(|| git.to_path_buf())
     })
 }
 
@@ -170,7 +171,7 @@ impl Repo {
         if let Some(repo) = Repo::find(dir) {
             return Ok(repo);
         }
-        let out = base_command(dir).args(["rev-parse", "--show-toplevel"]).output().context("couldn't run git")?;
+        let out = base_command(dir).args(["rev-parse", "--show-toplevel"]).output().map_err(crate::git::run_error)?;
         let why = String::from_utf8_lossy(&out.stderr);
         let why = why.lines().find(|l| l.starts_with("fatal:") || l.starts_with("error:")).unwrap_or(why.trim()).trim();
         bail!("git can't open {}: {}", dir.display(), if why.is_empty() { "unknown error" } else { why })
@@ -210,7 +211,7 @@ impl Repo {
         if input.is_some() {
             c.stdin(Stdio::piped());
         }
-        let mut child = c.spawn().context("couldn't run git")?;
+        let mut child = c.spawn().map_err(crate::git::run_error)?;
         // Fed from a thread of its own: git may write more than a pipe holds before it has read
         // all of it, and waiting on the write while nothing drains its output would hang both.
         let feed = match input {
@@ -655,7 +656,7 @@ impl Repo {
         let index = TempIndex::new();
         let merged = (|| -> Result<bool> {
             let blob = self.run(None, &["--literal-pathspecs", "hash-object", "-w", "--", path], None)?;
-            let mode = if std::fs::metadata(&file).is_ok_and(|m| { use std::os::unix::fs::PermissionsExt as _; m.permissions().mode() & 0o111 != 0 }) { "100755" } else { "100644" };
+            let mode = self.file_mode(&file, path);
             self.run(Some(&index), &["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")], None)?;
             // Stat data for the entry, so the file reads as matching it.
             self.output(Some(&index), &["update-index", "-q", "--refresh"], None, None)?;
@@ -669,6 +670,23 @@ impl Repo {
         // Not cleanly: what was there goes back, conflict markers and all gone.
         std::fs::write(&file, &before).context("put the file back")?;
         bail!("the lines around it changed since, so it can't be taken out by itself ({first})")
+    }
+
+    /// The git tree mode of the file at `path` (`file` on disk): executable or not.
+    #[cfg(unix)]
+    fn file_mode(&self, file: &Path, _path: &str) -> &'static str {
+        use std::os::unix::fs::PermissionsExt as _;
+        if std::fs::metadata(file).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) { "100755" } else { "100644" }
+    }
+
+    /// The git tree mode of the file at `path`. Windows has no execute bit to read, and git
+    /// (`core.filemode=false`) keeps a tracked file's mode from the index, so that's where it is
+    /// read from; a file the index doesn't have is an ordinary one.
+    #[cfg(windows)]
+    fn file_mode(&self, _file: &Path, path: &str) -> &'static str {
+        let staged = self.run(None, &["--literal-pathspecs", "ls-files", "--stage", "--", path], None).unwrap_or_default();
+        // "<mode> <object> <stage>\t<path>"
+        if staged.split_whitespace().next() == Some("100755") { "100755" } else { "100644" }
     }
 
     /// A tree like `base` with one hunk of `path` (`patch`, as `file_diff` cut it) taken in: a
@@ -877,6 +895,9 @@ mod tests {
             std::fs::create_dir_all(dir.join("keep")).unwrap();
             let s = Scratch(dir);
             s.git(&["init", "-q", "-b", "main"]);
+            // Git for Windows defaults to autocrlf, which would give back CRLF for the LF files
+            // these tests write.
+            s.git(&["config", "core.autocrlf", "false"]);
             s.write("a.txt", "one\n");
             std::fs::write(s.0.join("bin.dat"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
             s.write(".gitignore", "*.log\n");
@@ -1318,6 +1339,7 @@ mod tests {
     fn nested_repo(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         git_in(dir, &["init", "-q", "-b", "main"]);
+        git_in(dir, &["config", "core.autocrlf", "false"]);
         std::fs::write(dir.join("lib.rs"), "// vendored\n").unwrap();
         git_in(dir, &["add", "-A"]);
         git_in(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "v"]);
@@ -1358,22 +1380,59 @@ mod tests {
         let sha = repo.snapshot("t", "u").unwrap();
         s.write("locked/new.txt", "made by the turn\n");
         s.write("a.txt", "two\n");
-        use std::os::unix::fs::PermissionsExt as _;
         let locked = s.0.join("locked");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // A read-only folder can still be written to on Windows (the attribute only marks it for
+        // the shell); a file open elsewhere without delete sharing can't be removed.
+        #[cfg(windows)]
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_SHARE_READ: u32 = 1;
+            std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(locked.join("new.txt")).unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
         let restored = repo.restore(&sha, "t").unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert_eq!(restored.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["locked/new.txt"]);
         assert_eq!(restored.restored(), 1);
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"), "the other file came back");
         assert!(restored.undo.is_some());
     }
 
+    /// Windows files have no execute bit; git keeps the mode the index has for a tracked file
+    /// (`core.filemode=false`), and a checkpoint must not lose it.
+    #[cfg(windows)]
+    #[test]
+    fn a_tracked_executable_stays_executable_in_a_checkpoint() {
+        let s = Scratch::new(false);
+        s.write("run.sh", "#!/bin/sh\n");
+        s.git(&["add", "-A"]);
+        s.git(&["update-index", "--chmod=+x", "run.sh"]);
+        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
+        let repo = s.repo();
+        let mode = |sha: &str, path: &str| s.git(&["ls-tree", sha, "--", path]).split_whitespace().next().unwrap_or_default().to_string();
+        let sha = repo.snapshot("t", "u").unwrap();
+        assert_eq!((mode(&sha, "run.sh"), mode(&sha, "a.txt")), ("100755".into(), "100644".into()));
+        s.write("run.sh", "#!/bin/sh\necho changed\n");
+        s.write("new.sh", "#!/bin/sh\n");
+        let sha = repo.snapshot("t", "v").unwrap();
+        assert_eq!((mode(&sha, "run.sh"), mode(&sha, "new.sh")), ("100755".into(), "100644".into()), "tracked keeps its mode, untracked is ordinary");
+        assert_eq!((repo.file_mode(&s.0.join("run.sh"), "run.sh"), repo.file_mode(&s.0.join("new.sh"), "new.sh")), ("100755", "100644"));
+    }
+
     #[test]
     fn a_snapshot_that_takes_too_long_is_stopped() {
         let s = Scratch::new(true);
         // A clean filter that hangs (an LFS server that doesn't answer, say).
-        s.git(&["config", "filter.slow.clean", "sleep 5; cat"]);
+        let filter = format!("\"{}\" cat --delay 5", trek_test_fixtures::bin("fixture").display());
+        s.git(&["config", "filter.slow.clean", &filter]);
         s.write(".gitattributes", "*.big filter=slow\n");
         s.write("data.big", "lots\n");
         let started = std::time::Instant::now();

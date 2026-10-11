@@ -1,5 +1,9 @@
 //! Trek — every agent, one trail.
 
+// A release build on Windows is a GUI program: no console window behind it. (A dev build keeps
+// its console, where the log goes.)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod activity;
 mod add_agent;
 mod agent_updates;
@@ -9,6 +13,7 @@ mod background_strip;
 mod basecamp;
 mod brand;
 mod changes_card;
+mod chrome;
 mod command_palette;
 mod composer;
 mod cost;
@@ -18,12 +23,17 @@ mod logging;
 mod lsp_client;
 mod editor;
 mod file_icon;
+mod fonts;
 mod ide;
 mod image_preview;
 mod integrations;
 mod ipc;
+mod keys;
+#[cfg(windows)]
+mod job;
 mod mascot;
 mod md;
+mod menu_bar;
 mod mentions;
 mod motion;
 mod notes;
@@ -33,10 +43,12 @@ mod palette;
 mod push;
 mod remote;
 mod root;
+mod screenclip;
 mod settings_view;
 #[cfg(feature = "shots")]
 mod shots;
 mod sidebar;
+mod single_instance;
 mod system;
 mod tabs;
 mod thread_view;
@@ -47,9 +59,14 @@ mod tray;
 mod ui;
 mod updater;
 mod visualization;
+mod window_place;
+mod winlook;
+mod words;
 mod workspace;
 mod working_bar;
 mod worktree_ui;
+#[cfg(any(windows, test))]
+mod winsys;
 
 #[cfg(test)]
 mod tests;
@@ -186,65 +203,29 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+/// Trek's key bindings: the table in `keys.rs`, which has each platform's keys.
 fn key_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-h", HideApp, None),
-        KeyBinding::new("cmd-m", Minimize, None),
-        // ⌘N only ever makes something new: never an undo, whatever has focus.
-        KeyBinding::new("cmd-n", NewThread, None),
-        KeyBinding::new("cmd-o", OpenFolder, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
-        KeyBinding::new("cmd-e", SettleThread, None),
-        KeyBinding::new("shift-tab", TogglePlan, Some("Composer")),
-        KeyBinding::new("cmd-shift-s", TakeSnapshot, None),
-        KeyBinding::new("cmd-shift-a", CycleHandHolding, None),
-        KeyBinding::new("cmd-.", Interrupt, None),
-        KeyBinding::new("cmd-j", ToggleRightPanel, None),
-        // Not in the editor's text, where ⌘K is an inline edit (below).
-        KeyBinding::new("cmd-k", OpenPalette, Some("!IdeEditor")),
-        KeyBinding::new("cmd-shift-enter", OpenInNewWindow, None),
-        KeyBinding::new("cmd-shift-h", OpenBasecamp, None),
-        KeyBinding::new("escape", basecamp::Leave, Some("Basecamp")),
-        KeyBinding::new("cmd-shift-j", OpenNotes, None),
-        // ⌥⌘E switches Agents ⇄ Editor. ⌘⇧E is the Explorer, in the editor only (as in VS Code).
-        KeyBinding::new("alt-cmd-e", SwitchMode, None),
-        KeyBinding::new("cmd-shift-e", ToggleIde, Some("TrekIde")),
-        KeyBinding::new("cmd-shift-f", ToggleIdeSearch, Some("TrekWindow")),
-        KeyBinding::new("cmd-p", QuickOpen, None),
-        KeyBinding::new("alt-cmd-b", ToggleAiBar, None),
-        KeyBinding::new("ctrl-`", ToggleTerminal, None),
-        KeyBinding::new("ctrl-shift-g", FocusScm, None),
-        // The editor's selection to the AI side bar: ⌘⇧L the chat in front, ⌘L a new one.
-        KeyBinding::new("cmd-shift-l", AddSelectionToChat, Some("TrekIde")),
-        KeyBinding::new("cmd-l", AddSelectionToNewChat, Some("TrekIde")),
-        // In the editor's text: ⌘K edits the picked lines inline (elsewhere it's the palette);
-        // with a review's hunks in the file, ⌘Y keeps the one the bar is on and ⌥⌘⌫ undoes it
-        // (its toast takes that back), ⌥⌘↑/↓ step between them.
-        KeyBinding::new("cmd-k", editor::InlineEdit, Some("IdeEditor")),
-        KeyBinding::new("cmd-y", editor::KeepHunk, Some("IdeEditor && hunks")),
-        KeyBinding::new("alt-cmd-backspace", editor::UndoHunk, Some("IdeEditor && hunks")),
-        KeyBinding::new("alt-cmd-down", editor::NextHunk, Some("IdeEditor && hunks")),
-        KeyBinding::new("alt-cmd-up", editor::PreviousHunk, Some("IdeEditor && hunks")),
-        // In the AI input: undo every pending change, or stop the turn (⌘↩, its pair, comes
-        // through the input's Enter).
-        KeyBinding::new("cmd-shift-backspace", ide::ai::UndoAllOrStop, Some("AiInput")),
-        // Only thread windows close with ⌘W; the main window stays put.
-        KeyBinding::new("cmd-w", CloseWindow, Some("ThreadWindow")),
-        // In the main window ⌘W closes the tab in front; the window stays put.
-        KeyBinding::new("cmd-w", CloseTab, Some("TrekWindow")),
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-    ]
+    keys::bindings(keys::Group::App)
 }
 
 fn main() {
     logging::init();
 
+    // On Windows, one Trek per data folder: a second launch hands its links and paths to the
+    // running one and exits (macOS does this itself, through `on_open_urls` and `on_reopen`).
+    let single_instance::Primary { lock, forwarded, own } = match single_instance::claim() {
+        single_instance::Claim::Primary(primary) => primary,
+        single_instance::Claim::Forwarded => std::process::exit(0),
+        single_instance::Claim::Failed(why) => {
+            single_instance::tell(&why);
+            std::process::exit(1)
+        }
+    };
+
     // `trek://` links (editors, browsers) arrive as bare strings with no App context;
     // they wait on a channel until the app's update loop picks them up.
     let (links_tx, links_rx) = async_channel::unbounded::<String>();
+    let forwarded_links = links_tx.clone();
     let app = gpui_kit::application().with_assets(assets::Assets);
     #[cfg(all(feature = "shots", target_os = "macos"))]
     if std::env::var_os("TREK_SHOT_DIR").is_some() {
@@ -266,7 +247,12 @@ fn main() {
         }
     });
     app.run(|cx| {
+        // Windows toasts need an identity (the AppUserModelID) set before any window opens.
+        #[cfg(windows)]
+        cx.set_app_identity(winsys::APP_ID, winsys::APP_NAME);
         gpui_kit::init(cx);
+        // The families the theme names must be known before it's applied and anything is laid out.
+        fonts::register(cx);
         toast::init(cx);
         let _ = ThemeRegistry::global_mut(cx).load_themes_from_str(&assets::theme_json());
 
@@ -274,7 +260,12 @@ fn main() {
         cx.bind_keys(notes::key_bindings());
         cx.bind_keys(editor::key_bindings());
         app_actions(cx);
+        // macOS has the system's menu bar. Windows draws the same menus in the window (`menu_bar`),
+        // and has no Dock to keep the app up with its main window closed.
         cx.set_menus(menus());
+        if cfg!(windows) {
+            root::quit_with_main_window(cx);
+        }
 
         // A capture run must never reach the user's data or accounts: TREK_SHOT_DIR isolates the
         // process (all storage under TREK_DATA_DIR, no Keychain, only the mock agent can start).
@@ -286,6 +277,12 @@ fn main() {
                 .unwrap_or_else(|| std::env::temp_dir().join(format!("trek-shots-{}", std::process::id())));
             trek_core::paths::isolate(dir);
         }
+        if let Some(lock) = lock {
+            workspace::keep_data_folder_lock(trek_core::paths::data_dir(), lock);
+        }
+        // Windows has no bundle to say which app opens `trek://`: Trek says so itself.
+        #[cfg(windows)]
+        winsys::register_trek_protocol();
         let ws = workspace::init(cx);
         ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         tray::init(ws.clone(), cx);
@@ -300,6 +297,7 @@ fn main() {
         let background = std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1");
         root::init(ws.clone(), cx);
         root::open_main(ws.clone(), !background, cx).expect("open window");
+        single_instance::hear(forwarded, own, ws.clone(), forwarded_links, cx);
         #[cfg(feature = "shots")]
         shots::init(ws.clone(), cx);
         // TREK_OPEN_THREAD_WINDOW=<thread id> also opens that thread in a window of its own, for
@@ -320,10 +318,7 @@ fn main() {
 /// Actions the app handles itself. Windows handle the rest of these; with none open, the menu and
 /// shortcuts reopen the main window.
 fn app_actions(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| {
-        workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
-        cx.quit();
-    });
+    cx.on_action(|_: &Quit, cx| root::quit(cx));
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
     cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
