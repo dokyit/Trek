@@ -6,6 +6,10 @@ use crate::workspace::{McpCheck, Route, SettingsPage};
 use trek_agents::McpTransport;
 use trek_core::settings::secrets;
 
+// A test's servers have names of its own: in an isolated process the tokens are kept in memory
+// (`secrets`), one store for every test running beside each other, so two tests adding, editing
+// and removing "fake" took each other's token away.
+
 /// The `fixture` binary; `fixture fake-mcp ok` is the stand-in MCP server.
 fn fake() -> String {
     trek_test_fixtures::bin("fixture").display().to_string()
@@ -23,7 +27,7 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let config = serde_json::json!({
             "mcpServers": {
-                "fake": { "command": fake(), "args": ["fake-mcp", "ok"], "env": { "FAKE_TOKEN": "abc" } },
+                "pasted": { "command": fake(), "args": ["fake-mcp", "ok"], "env": { "FAKE_TOKEN": "abc" } },
                 "remote": { "url": format!("http://{free}/mcp"), "headers": { "Authorization": "Bearer t" } },
             }
         })
@@ -35,14 +39,14 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
 
         // Both are saved, with the names of their env vars and headers only.
         let saved = trek.read(cx, |ws, _| ws.settings.tools.mcp_servers.clone());
-        assert_eq!(saved.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["fake", "remote"]);
+        assert_eq!(saved.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["pasted", "remote"]);
         assert_eq!((saved[0].env[0].name.as_str(), saved[0].env[0].value.as_str(), saved[0].env[0].secret), ("FAKE_TOKEN", "", true));
         assert_eq!((saved[1].headers[0].name.as_str(), saved[1].headers[0].secret), ("Authorization", true));
         assert!(!format!("{saved:?}").contains("abc") && !format!("{saved:?}").contains("Bearer"), "no token in the settings");
         // A session gets them back from the Keychain.
         let servers = trek.read(cx, |ws, _| ws.mcp_servers());
-        let fake = servers.iter().find(|s| s.name == "fake").expect("fake is passed on");
-        assert_eq!(fake.env(), [("FAKE_TOKEN".to_string(), "abc".to_string())]);
+        let pasted = servers.iter().find(|s| s.name == "pasted").expect("pasted is passed on");
+        assert_eq!(pasted.env(), [("FAKE_TOKEN".to_string(), "abc".to_string())]);
         let remote = servers.iter().find(|s| s.name == "remote").expect("remote is passed on");
         assert!(matches!(&remote.transport, McpTransport::Http { headers, .. } if headers == &[("Authorization".to_string(), "Bearer t".to_string())]));
 
@@ -50,7 +54,7 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         // tools (env_ok only shows with FAKE_TOKEN set), and the remote one unreachable.
         trek.wait(cx, "both checks", |ws| ws.mcp_checks.values().all(|c| !matches!(c, McpCheck::Checking(_))) && ws.mcp_checks.len() == 2).await;
         let checks = trek.read(cx, |ws, _| ws.mcp_checks.clone());
-        assert_eq!(checks["fake"], McpCheck::Works(vec!["echo".into(), "add".into(), "get_time".into(), "env_ok".into()]));
+        assert_eq!(checks["pasted"], McpCheck::Works(vec!["echo".into(), "add".into(), "get_time".into(), "env_ok".into()]));
         assert!(matches!(&checks["remote"], McpCheck::Failed(why) if why.starts_with("Couldn't reach it")), "{checks:?}");
         trek.render(cx);
         assert!(trek.visible(cx, "mcp-status-0") && trek.visible(cx, "mcp-status-1"), "each row says how its check went");
@@ -70,21 +74,21 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         assert!(trek.visible(cx, "mcp-editing"));
         trek.click(cx, "mcp-name");
         trek.press(cx, "secondary-a");
-        trek.type_text(cx, "fake2");
+        trek.type_text(cx, "pasted2");
         trek.click(cx, "mcp-add");
         trek.render(cx);
         assert!(!trek.visible(cx, "mcp-editing"), "saved, the row is for adding again");
         let saved = trek.read(cx, |ws, _| ws.settings.tools.mcp_servers.clone());
-        assert_eq!((saved.len(), saved[0].name.as_str(), saved[0].args.len()), (2, "fake2", 2));
+        assert_eq!((saved.len(), saved[0].name.as_str(), saved[0].args.len()), (2, "pasted2", 2));
         assert_eq!(saved[0].resolved_env(), [("FAKE_TOKEN".to_string(), "abc".to_string())]);
-        assert_eq!(secrets::mcp_env("fake", "FAKE_TOKEN"), None, "nothing is left under the old name");
-        trek.wait(cx, "the edited server's check", |ws| matches!(ws.mcp_checks.get("fake2"), Some(McpCheck::Works(_)))).await;
+        assert_eq!(secrets::mcp_env("pasted", "FAKE_TOKEN"), None, "nothing is left under the old name");
+        trek.wait(cx, "the edited server's check", |ws| matches!(ws.mcp_checks.get("pasted2"), Some(McpCheck::Works(_)))).await;
 
         // Removed, its tokens go too.
         trek.click(cx, "mcp-del-1");
         trek.click(cx, "mcp-del-0");
         assert!(trek.read(cx, |ws, _| ws.settings.tools.mcp_servers.is_empty()));
-        assert_eq!(secrets::mcp_env("fake2", "FAKE_TOKEN"), None);
+        assert_eq!(secrets::mcp_env("pasted2", "FAKE_TOKEN"), None);
         assert_eq!(secrets::mcp_header("remote", "Authorization"), None);
     });
 }
