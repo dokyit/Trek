@@ -60,6 +60,8 @@ enum Action {
     SwitchMode(crate::workspace::Mode),
     /// The editor's layout toggles, as their shortcuts do.
     Dispatch(IdeCommand),
+    /// Something done to the file in front.
+    Editor(crate::workspace::EditorCommand),
     /// The thread and window commands a menu bar has (`WindowCommand`).
     Window(WindowCommand),
 }
@@ -127,7 +129,7 @@ pub(crate) struct Entry {
     /// A second line: the matching excerpt of a message.
     snippet: Option<(SharedString, Vec<Range<usize>>)>,
     /// Quiet text on the right: a shortcut, a project, a folder.
-    hint: Option<SharedString>,
+    pub(crate) hint: Option<SharedString>,
     checked: bool,
     /// A thread's project on the right: name, look, and the worktree branch it runs on.
     project: Option<(String, ui::ProjectLook, Option<String>)>,
@@ -282,9 +284,9 @@ fn path_tail(path: &str, max: usize) -> String {
     if path.chars().count() <= max {
         return path.to_string();
     }
+    let sep = if path.contains('\\') { "\\" } else { "/" };
     let mut tail: Vec<&str> = vec![];
     let mut len = 2;
-    let sep = if path.contains('\\') { "\\" } else { "/" };
     for part in path.rsplit(['/', '\\']).filter(|p| !p.is_empty()) {
         let n = part.chars().count() + 1;
         if !tail.is_empty() && len + n > max {
@@ -697,6 +699,12 @@ impl CommandPalette {
         } else {
             add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Switch to Editor", Action::SwitchMode(crate::workspace::Mode::Editor)).hint(keys::hint(Id::SwitchMode)), "ide code files workbench mode layout");
         }
+        // The file in front: in the editor, or on its own in Agents mode.
+        if ws.ide() || matches!(ws.route, Route::Editor { .. }) {
+            use crate::workspace::EditorCommand;
+            add(Entry::new(c, icon(Icon::new(IconName::Close)), "Close file", Action::Editor(EditorCommand::Close)).hint(keys::hint(Id::CloseTab)), "editor tab exit leave back");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Format document", Action::Editor(EditorCommand::Format)).hint(keys::hint(Id::FormatDocument)), "editor prettier rustfmt black gofmt indent tidy");
+        }
         add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint(keys::hint(Id::OpenFolder)), "project add repository");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint(keys::hint(Id::OpenBasecamp)), "recap today week all time summary inbox review usage tokens stats");
         // On Basecamp, the span its recap covers.
@@ -841,6 +849,7 @@ impl CommandPalette {
             }),
             Action::OpenFile(path) => ws.update(cx, |ws, cx| ws.open_editor(path, None, cx)),
             Action::SwitchMode(mode) => ws.update(cx, |ws, cx| ws.set_mode(mode, cx)),
+            Action::Editor(command) => ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(command))),
             Action::Dispatch(command) => window.dispatch_action(
                 match command {
                     IdeCommand::PrimaryBar => Box::new(crate::ToggleSidebar),
@@ -1140,6 +1149,10 @@ mod tests {
         assert_eq!(path_tail("~/Documents/Documents - Toby's MacBook Air/Direct", 30), "…/Direct");
         assert_eq!(path_tail("~/Documents/Projects/Clients/acme/web", 30), "…/Projects/Clients/acme/web");
         assert_eq!(path_tail("~/a/an-uncommonly-long-project-folder-name", 30), "…/an-uncommonly-long-project-folder-name");
+        // A Windows path is cut at its own separator, and keeps it.
+        assert_eq!(path_tail("~\\Code\\trek", 30), "~\\Code\\trek");
+        assert_eq!(path_tail("~\\Documents\\Projects\\Clients\\acme\\web", 30), "…\\Projects\\Clients\\acme\\web");
+        assert_eq!(path_tail("C:\\Users\\me\\OneDrive\\Documents\\FC 24 LE v24.1.1.0", 30), "…\\FC 24 LE v24.1.1.0");
     }
 
     #[test]
@@ -1149,10 +1162,6 @@ mod tests {
         // Children: [Threads label, t0, t1, Projects label, p0, Commands label, c0, c1].
         let up: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i, true).unwrap()).collect();
         assert_eq!(up, [0, 2, 3, 5, 7]);
-        // A Windows path is cut at its own separator, and keeps it.
-        assert_eq!(path_tail("~\\Code\\trek", 30), "~\\Code\\trek");
-        assert_eq!(path_tail("~\\Documents\\Projects\\Clients\\acme\\web", 30), "…\\Projects\\Clients\\acme\\web");
-        assert_eq!(path_tail("C:\\Users\\me\\OneDrive\\Documents\\FC 24 LE v24.1.1.0", 30), "…\\FC 24 LE v24.1.1.0");
         // Going down, a group's first row is the target, not the label above it (the top row
         // still brings the list's first label).
         let down: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i, false).unwrap()).collect();

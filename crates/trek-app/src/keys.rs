@@ -258,6 +258,8 @@ pub enum Id {
     UndoAllOrStop,
     CloseWindow,
     CloseTab,
+    /// Windows' other way to close a tab, as in every editor there.
+    CloseTabCtrlF4,
     NextTab,
     PreviousTab,
     NoteBold,
@@ -274,6 +276,7 @@ pub enum Id {
     NoteToggleCheck,
     NewNote,
     SaveFile,
+    FormatDocument,
     /// The text fields' own redo (the kit binds it): ⇧⌘Z on a Mac, Ctrl+Y on Windows.
     Redo,
 }
@@ -390,6 +393,7 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         row(CloseWindow, App, "cmd-w", Same, Some("ThreadWindow"), act!(crate::CloseWindow)),
         // In the main window ⌘W closes the tab in front; the window stays put.
         row(CloseTab, App, "cmd-w", Same, Some("TrekWindow"), act!(crate::CloseTab)),
+        Binding { id: CloseTabCtrlF4, group: App, mac: None, windows: Keys("ctrl-f4"), context: Some("TrekWindow"), build: act!(crate::CloseTab) },
         // Standard on Windows too.
         row(NextTab, App, "ctrl-tab", Same, None, act!(crate::NextTab)),
         row(PreviousTab, App, "ctrl-shift-tab", Same, None, act!(crate::PreviousTab)),
@@ -410,6 +414,8 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         row(NewNote, Notes, "cmd-n", Same, Some("Notes"), act!(crate::notes::NewNote)),
         // The editor.
         row(SaveFile, Editor, "cmd-s", Same, Some("TrekEditor"), act!(crate::editor::SaveFile)),
+        // VS Code's: the same on both (no ⌘ or Ctrl in it).
+        row(FormatDocument, Editor, "alt-shift-f", Same, Some("TrekEditor"), act!(crate::editor::FormatDocument)),
         // Not Trek's.
         row(Redo, System, "cmd-shift-z", Keys("ctrl-y"), None, None),
     ]
@@ -652,6 +658,7 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
         &[
             ("Go to file", Bound(Id::QuickOpen)),
             ("Edit the picked lines", Bound(Id::InlineEdit)),
+            ("Format the document", Bound(Id::FormatDocument)),
             ("Keep a change", Bound(Id::KeepHunk)),
             ("Undo a change", Bound(Id::UndoHunk)),
             ("Next or previous change", Hunks),
@@ -669,6 +676,7 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
             ("Toggle the sidebar", Bound(Id::ToggleSidebar)),
             ("Toggle the tools panel", Bound(Id::ToggleRightPanel)),
             ("Settings", Bound(Id::OpenSettings)),
+            ("Close the file or thread tab in front", Bound(Id::CloseTab)),
             ("Close a thread window", Bound(Id::CloseWindow)),
             ("Hide Trek", Bound(Id::HideApp)),
             ("Minimize", Bound(Id::Minimize)),
@@ -763,9 +771,9 @@ mod tests {
     #[test]
     fn what_the_mac_binds_is_what_it_always_has() {
         let mac: Vec<String> = TABLE.iter().filter(|b| b.build.is_some()).filter_map(|b| resolve(b, true)).map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default())).collect();
-        // The 37 in main.rs, the 13 in notes.rs and the 1 in editor.rs.
-        assert_eq!(mac.len(), 37 + 13 + 1);
-        for (keys, ctx) in [("cmd-q", ""), ("alt-cmd-e", ""), ("cmd-k", "!IdeEditor"), ("cmd-k", "IdeEditor"), ("alt-cmd-backspace", "IdeEditor && hunks"), ("ctrl-`", ""), ("cmd-shift-.", "NoteEditor"), ("cmd-s", "TrekEditor")] {
+        // The 37 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
+        assert_eq!(mac.len(), 37 + 13 + 2);
+        for (keys, ctx) in [("cmd-q", ""), ("alt-cmd-e", ""), ("cmd-k", "!IdeEditor"), ("cmd-k", "IdeEditor"), ("alt-cmd-backspace", "IdeEditor && hunks"), ("ctrl-`", ""), ("cmd-shift-.", "NoteEditor"), ("cmd-s", "TrekEditor"), ("alt-shift-f", "TrekEditor"), ("cmd-w", "TrekWindow"), ("cmd-w", "ThreadWindow")] {
             let want = format!("{keys}|{ctx}");
             assert!(mac.contains(&want), "{want}");
         }
@@ -829,6 +837,24 @@ mod tests {
             (Id::Redo, "ctrl-y"),
         ];
         assert_eq!(different, want.iter().map(|(i, k)| (*i, k.to_string())).collect::<Vec<_>>());
+    }
+
+    /// Ctrl+W closes the tab or file in front in the main window and a thread window in its own
+    /// (never the other), and Ctrl+F4 is the same as Ctrl+W on Windows only.
+    #[test]
+    fn closing_a_tab_and_closing_a_thread_window_are_told_apart_by_the_window() {
+        let at = |id: Id, mac: bool| resolve(row_of(id).unwrap(), mac).map(|r| (r.keystroke, r.context));
+        // On Windows Ctrl+W is the shell's (delete a word) while the terminal panel has the keys.
+        for (mac, w, tab, window) in [(true, "cmd-w", "TrekWindow", "ThreadWindow"), (false, "ctrl-w", "(TrekWindow) && !Terminal", "(ThreadWindow) && !Terminal")] {
+            assert_eq!(at(Id::CloseTab, mac), Some((w.into(), Some(tab.into()))));
+            assert_eq!(at(Id::CloseWindow, mac), Some((w.into(), Some(window.into()))));
+        }
+        assert_eq!(at(Id::CloseTabCtrlF4, false), Some(("ctrl-f4".into(), Some("TrekWindow".into()))));
+        assert_eq!(at(Id::CloseTabCtrlF4, true), None);
+        assert_eq!(hint_for(Id::CloseTab, false), "Ctrl+W");
+        assert_eq!(hint_for(Id::CloseTab, true), "⌘W");
+        assert_eq!(hint_for(Id::FormatDocument, false), "Alt+Shift+F");
+        assert_eq!(hint_for(Id::FormatDocument, true), "⌥⇧F");
     }
 
     #[test]
@@ -991,6 +1017,7 @@ mod tests {
             [
                 "Go to file: ⌘ P",
                 "Edit the picked lines: ⌘ K",
+                "Format the document: ⌥ ⇧ F",
                 "Keep a change: ⌘ Y",
                 "Undo a change: ⌥ ⌘ ⌫",
                 "Next or previous change: ⌥ ⌘ ↓ ↑",
@@ -1008,6 +1035,7 @@ mod tests {
                 "Toggle the sidebar: ⌘ B",
                 "Toggle the tools panel: ⌘ J",
                 "Settings: ⌘ ,",
+                "Close the file or thread tab in front: ⌘ W",
                 "Close a thread window: ⌘ W",
                 "Hide Trek: ⌘ H",
                 "Minimize: ⌘ M",
@@ -1033,6 +1061,8 @@ mod tests {
             keys(2, "Next or previous change"),
             [Chip::Key("Alt".into()), Chip::Key("F5".into()), Chip::Word("or"), Chip::Key("Alt".into()), Chip::Key("Shift".into()), Chip::Key("F5".into())]
         );
+        assert_eq!(keys(2, "Format the document"), k(&["Alt", "Shift", "F"]));
+        assert_eq!(keys(3, "Close the file or thread tab in front"), k(&["Ctrl", "W"]));
         assert_eq!(keys(3, "Leave Basecamp"), k(&["Esc"]));
         let window: Vec<&str> = page[3].1.iter().map(|(n, _)| *n).collect();
         assert!(!window.contains(&"Hide Trek") && !window.contains(&"Minimize"), "{window:?}");
@@ -1046,8 +1076,8 @@ mod tests {
     fn both_platforms_bindings_build() {
         for mac in both() {
             let n: usize = [Group::App, Group::Notes, Group::Editor].into_iter().map(|g| bindings_for(g, mac).len()).sum();
-            // Windows drops Hide and Minimize and adds Ctrl+Shift+P.
-            assert_eq!(n, if mac { 51 } else { 51 - 2 + 1 }, "mac: {mac}");
+            // Windows drops Hide and Minimize and adds Ctrl+Shift+P and Ctrl+F4.
+            assert_eq!(n, if mac { 52 } else { 52 - 2 + 2 }, "mac: {mac}");
         }
     }
 
