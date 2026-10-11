@@ -102,6 +102,9 @@ pub enum Blocker {
     /// Windows: Trek's folder holds more than Trek (it was unzipped straight into Downloads, say).
     /// An update replaces the whole folder, so it never happens there.
     SharedFolder,
+    /// Windows: Trek's folder is a link (a junction or symlink) to another folder. An update
+    /// would replace the link and not the folder behind it, so it never happens there.
+    LinkedFolder,
 }
 
 impl Blocker {
@@ -112,6 +115,7 @@ impl Blocker {
             Blocker::ReadOnlyLocation => "Trek can't write to the folder it's in, so it can't update itself. Move it to a folder you own to get updates.",
             Blocker::ProtectedFolder => "Trek is in Program Files, which only an administrator can change, so it can't update itself there. Move the Trek folder to one you own to get updates.",
             Blocker::SharedFolder => "Trek's folder has other files in it, and an update replaces the whole folder, so Trek can't update itself there. Put Trek's three files in a folder of their own to get updates.",
+            Blocker::LinkedFolder => "Trek is running from a link to its folder, so it can't update itself. Start Trek from the folder itself to get updates.",
         }
     }
 }
@@ -219,6 +223,8 @@ fn windows_blocker_for(root: &Path, release: bool, protected: &[PathBuf]) -> Opt
         Some(Blocker::DevBuild)
     } else if windows_apps || protected.iter().any(|p| inside(root, p)) {
         Some(Blocker::ProtectedFolder)
+    } else if is_link(root) {
+        Some(Blocker::LinkedFolder)
     } else if !own_folder(root) {
         Some(Blocker::SharedFolder)
     } else if !writable(root) || !root.parent().is_some_and(writable) {
@@ -241,6 +247,11 @@ fn inside(path: &Path, folder: &Path) -> bool {
     !folder.is_empty() && path.starts_with(&folder)
 }
 
+/// `path` itself is a symlink or junction (not merely reached through one).
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
 /// A folder of Trek's own: `trek.exe`, and nothing that isn't one of Trek's files.
 fn own_folder(dir: &Path) -> bool {
     dir.join(TREK_EXE).is_file() && only_trek_files(dir)
@@ -254,6 +265,19 @@ fn only_trek_files(dir: &Path) -> bool {
             let name = e.file_name().to_string_lossy().to_lowercase();
             e.file_type().is_ok_and(|t| t.is_file()) && (TREK_FILES.contains(&name.as_str()) || name.starts_with(".trek-write-test-"))
         })
+    })
+}
+
+/// How long after it starts a Trek leaves what an update left behind. `trek-update` watches the new
+/// Trek for its first five seconds and puts the previous folder back if it dies: that folder must
+/// still be there.
+const CLEAN_OLD_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `clean_old_installs`, once `delay` has passed, on a thread of its own.
+fn clean_old_installs_later(root: PathBuf, delay: std::time::Duration) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        clean_old_installs(&root);
     })
 }
 
@@ -1035,7 +1059,7 @@ pub fn after_launch() -> Option<String> {
     if cfg!(windows)
         && let Some(root) = install_root()
     {
-        clean_old_installs(&root);
+        clean_old_installs_later(root, CLEAN_OLD_AFTER);
     }
     after_launch_in(&crate::paths::updates_dir())
 }
@@ -1526,6 +1550,12 @@ mod tests {
         refused(&[("trek.exe", "@C:/Windows/System32/cmd.exe")], "isn't Trek (trek.exe)");
         refused(&[("trek.exe", "x"), ("trek-mcp.exe", "x"), ("trek-update.exe", "x"), ("readme.txt", "x")], "more in it than Trek");
         refused(&[("TREK.EXE", "x")], "isn't Trek");
+        refused(&[(r"..\trek.exe", "x")], "isn't Trek");
+        refused(&[(r"stage\trek.exe", "x")], "isn't Trek");
+        refused(&[("trek.exe/..", "x")], "isn't Trek");
+        refused(&[("trek.exe:evil", "x")], "isn't Trek");
+        refused(&[("/trek.exe", "x")], "isn't Trek");
+        assert!(!dir.join("trek.exe").exists() && !dir.join("evil").exists(), "nothing lands outside the stage folder");
         let big = "x".repeat(600 * 1024);
         refused(&[("trek.exe", &big), ("trek-mcp.exe", &big)], "larger than Trek could be");
         assert!(unpack(&[]).unwrap_err().contains("no trek.exe"));
@@ -1561,6 +1591,13 @@ mod tests {
             assert!(e.to_string().contains(why), "{e}");
             assert!(!archive.parent().unwrap().exists(), "a refused update leaves nothing behind");
         }
+        // The resource carries the whole semver, pre-release and all: a beta isn't its release.
+        let beta = || [("trek.exe", "0.4.1-beta.1"), ("trek-mcp.exe", "x"), ("trek-update.exe", "x")];
+        let archive = download(&beta());
+        assert!(stage_zip(&archive, &v("0.4.1-beta.1"), &v("0.4.0"), &nobody, version_of).is_ok());
+        discard(&archive.with_file_name("stage"));
+        let archive = download(&beta());
+        assert!(stage_zip(&archive, &v("0.4.1"), &v("0.4.0"), &nobody, version_of).unwrap_err().to_string().contains("not 0.4.1"));
         let archive = download(&[("trek.exe", "0.4.1"), ("trek-mcp.exe", "x"), ("trek-update.exe", "x"), ("evil.dll", "x")]);
         assert!(stage_zip(&archive, &v("0.4.1"), &v("0.4.0"), &nobody, version_of).is_err());
         assert!(!archive.parent().unwrap().exists());
@@ -1666,6 +1703,83 @@ mod tests {
         left.sort();
         assert_eq!(left, ["Other.old-1", "Trek", "Trek.old-notes.txt", "Trek.old-photos", "Trek.older"]);
         assert!(mine.join("cat.jpg").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_folder_named_like_a_leftover_that_holds_anything_of_theirs_survives() {
+        let dir = scratch("old-mixed");
+        let root = dir.join("Trek");
+        trek_folder(&root);
+        // Trek's three files and one more, or Trek's files inside a folder: not what an update left.
+        let mixed = dir.join("Trek.old-backup");
+        trek_folder(&mixed);
+        std::fs::write(mixed.join("notes.txt"), "mine").unwrap();
+        let nested = dir.join("Trek.old-nested");
+        trek_folder(&nested.join("Trek"));
+        let hidden = dir.join("Trek.old-hidden");
+        trek_folder(&hidden);
+        std::fs::write(hidden.join("desktop.ini"), "[.ShellClassInfo]").unwrap();
+        clean_old_installs(&root);
+        assert!(mixed.join("notes.txt").exists() && nested.join("Trek").join("trek.exe").exists() && hidden.join("desktop.ini").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A junction `link` to `target`, made as a user would (`mklink /J`).
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_leftover_that_is_a_junction_is_never_followed() {
+        let dir = scratch("old-junction");
+        let root = dir.join("Trek");
+        trek_folder(&root);
+        // A junction to somewhere that holds only Trek's files (the worst case: nothing in it
+        // would stop the delete) and to a folder of the user's own.
+        let (elsewhere, theirs) = (dir.join("elsewhere"), dir.join("theirs"));
+        trek_folder(&elsewhere);
+        std::fs::create_dir(&theirs).unwrap();
+        std::fs::write(theirs.join("cat.jpg"), "x").unwrap();
+        junction(&dir.join("Trek.old-0.4.0"), &elsewhere);
+        junction(&dir.join("Trek.old-theirs"), &theirs);
+        clean_old_installs(&root);
+        for f in TREK_FILES {
+            assert!(elsewhere.join(f).exists(), "{f} was deleted through a junction");
+        }
+        assert!(theirs.join("cat.jpg").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_trek_folder_that_is_a_link_is_never_updated() {
+        let dir = scratch("link-root");
+        let (real, link) = (dir.join("real"), dir.join("Trek"));
+        trek_folder(&real);
+        assert_eq!(windows_blocker_for(&real, true, &[]), None);
+        junction(&link, &real);
+        assert!(is_link(&link) && !is_link(&real));
+        assert_eq!(windows_blocker_for(&link, true, &[]), Some(Blocker::LinkedFolder));
+        assert!(Blocker::LinkedFolder.message().ends_with("to get updates."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn leftovers_are_cleared_a_while_after_start_not_during_the_helpers_watch() {
+        // trek-update watches a new Trek for five seconds and may need the previous folder back.
+        assert!(CLEAN_OLD_AFTER >= std::time::Duration::from_secs(15));
+        let dir = scratch("old-later");
+        let root = dir.join("Trek");
+        trek_folder(&root);
+        trek_folder(&dir.join("Trek.old-0.4.0"));
+        let handle = clean_old_installs_later(root, std::time::Duration::from_millis(400));
+        assert!(dir.join("Trek.old-0.4.0").exists(), "not at start");
+        handle.join().unwrap();
+        assert!(!dir.join("Trek.old-0.4.0").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

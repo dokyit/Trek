@@ -183,19 +183,21 @@ The steps above, with these differences:
   version is the advertised one and newer than the running one. A refusal deletes the download folder.
 - **Install**: Windows won't let Trek replace the folder it runs from. On **Restart to update** (or on
   quit) Trek starts `trek-update.exe` from the staged folder and exits. The helper waits up to a minute
-  for Trek to exit (then gives up, changing nothing), renames the install to `<install>.old-<version>`,
-  moves the staged folder into its place (a copy if it's on another drive), checks `trek.exe` is there
+  for Trek to exit (then gives up, changing nothing), brings the staged folder next to the install (a
+  rename, or a copy if it's on another drive: `<install>.old-incoming-<version>`), renames the install to
+  `<install>.old-<version>` and the update into its place, checks `trek.exe` is there
   and, on a restart, starts it. If any step fails, or the new Trek exits with an error in its first five
   seconds, it puts the previous folder back, starts it, and leaves `updates\install-failed`, which Trek
   shows as a toast; a new version that wouldn't start also goes into `updates\skip-version`. Renames are
   retried for about two seconds (antivirus scans hold files). The helper deletes nothing; it logs to
   `%LOCALAPPDATA%\Trek\logs\update.log` (`<TREK_DATA_DIR>\logs\update.log` when that's set).
-- **After**: the new Trek deletes `<install>.old-*` (only folders holding nothing but Trek's files) and
-  the download folders of Trek processes that are gone.
+- **After**: half a minute after it starts (the helper watches it for five seconds and may need the
+  previous folder back), the new Trek deletes `<install>.old-*` (only folders holding nothing but Trek's
+  files, never a link) and, at once, the download folders of Trek processes that are gone.
 - **When it can't**: a `cargo` build (the exe is in a folder with `.fingerprint`), Trek in Program Files
   or WindowsApps, a folder it or its parent can't be written to, and a folder that holds anything besides
-  Trek's three files (unzipped straight into Downloads, say: the whole folder is what gets replaced).
-  Settings → Updates says which and what to do.
+  Trek's three files (unzipped straight into Downloads, say: the whole folder is what gets replaced), or
+  one that is a junction or symlink. Settings → Updates says which and what to do.
 
 A file added to the Windows release must first be added to `TREK_FILES` (trek-core `update.rs` and
 `trek-update`) in an earlier release: older versions refuse a zip, and a folder, holding a file they

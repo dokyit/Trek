@@ -108,11 +108,17 @@ function Cleanup {
     if (-not $Keep) { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Work }
 }
 
+# The run starts by emptying $Work and ends by removing it: only ever a folder this script made.
+$Marker = Join-Path $Work '.trek-update-e2e'
+if ((Test-Path $Work) -and -not (Test-Path $Marker) -and (Get-ChildItem -Force $Work | Select-Object -First 1)) {
+    throw "$Work exists and isn't an update-e2e scratch folder (no .trek-update-e2e in it); name an empty or new folder in TREK_E2E_DIR"
+}
 $outcome = 'timeout'
 try {
     StopAll (TestProcesses)
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Work
     New-Item -ItemType Directory -Force $Install, (Join-Path $Work 'serve'), $Data | Out-Null
+    New-Item -ItemType File $Marker | Out-Null
     Expand-Archive -Path $Old -DestinationPath $Install
     $From = VersionOf (Join-Path $Install 'trek.exe')
     $manifestFile = 'stable.json', 'beta.json', 'nightly.json' | ForEach-Object { Join-Path $New $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -210,7 +216,7 @@ menu_bar_icon = false
         $u = Get-Content -Raw $updateLog
         $outcome -eq 'rolled back' -and $now -eq $From -and $u -match "couldn't move" -and $u -match 'started .*trek\.exe'
     } else {
-        # The previous version moved to Trek.old-<version>, which the new one deletes on start.
+        # The previous version moved to Trek.old-<version>, which the new one deletes half a minute after it starts.
         $outcome -eq 'updated' -and $now -eq $To -and $running -and (Get-Content -Raw $updateLog) -match "previous version is in .*Trek\.old-$([regex]::Escape($From))"
     }
     if ($pass) {

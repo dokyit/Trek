@@ -6034,7 +6034,7 @@ impl Workspace {
         if let Err(e) = trek_core::update::relaunch(&installed, crate::system::app_is_active()) {
             tracing::warn!("relaunch after update failed: {e:#}");
             // On Windows the relaunch is the install (trek-update swaps the folder once Trek has
-            // quit): nothing changed, and quitting tries again.
+            // quit): nothing changed, and the next check downloads the update again.
             let message = if cfg!(windows) { format!("Couldn't install the update: {e:#}") } else { "The update is installed. Quit and reopen Trek to start it.".into() };
             self.updater.status = UpdateStatus::Failed(message);
             cx.notify();

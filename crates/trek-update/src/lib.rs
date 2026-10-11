@@ -9,8 +9,10 @@
 //! ```
 //!
 //! 1. Waits up to a minute for Trek to exit. Still running: gives up and changes nothing.
-//! 2. Renames the install to `<install>.old-<from>`, moves the staged folder into its place (a
-//!    rename on one volume, a copy across volumes) and checks `trek.exe` is there.
+//! 2. Brings the staged folder next to the install (`<install>.old-incoming-<to>`: a rename on one
+//!    volume, a copy across volumes), renames the install to `<install>.old-<from>`, renames the
+//!    update into its place and checks `trek.exe` is there. Both are refused unless they hold
+//!    Trek's files and nothing else, and the install isn't a link.
 //! 3. With `--relaunch`, starts the new `trek.exe`. If it won't start, or exits with an error in
 //!    its first seconds, the old version goes back, the new one is recorded in
 //!    `<updates>/skip-version` (Trek won't offer it again) and the old one is started.
@@ -87,9 +89,15 @@ fn version_tag(v: &std::ffi::OsStr) -> String {
 
 /// Do what `plan` says; the process's exit code. `log` gets a line for each step.
 pub fn run(plan: &Plan, log: &mut dyn FnMut(&str)) -> i32 {
+    run_waiting(plan, WAIT_FOR_TREK, log)
+}
+
+/// `run`, giving Trek `wait` to exit.
+pub fn run_waiting(plan: &Plan, wait: Duration, log: &mut dyn FnMut(&str)) -> i32 {
     log(&format!("Trek {} in {} (pid {}) → {}", plan.from, plan.install.display(), plan.pid, if plan.to.is_empty() { "a restart" } else { &plan.to }));
-    if !wait_for_exit(plan.pid, WAIT_FOR_TREK) {
-        log("Trek is still running after a minute; nothing was changed");
+    if !wait_for_exit(plan.pid, wait) {
+        // Trek is running still, so is not started again; the next start says what happened.
+        fail(plan, "Trek was still running after a minute; nothing was changed", log);
         return 1;
     }
     let Some(staged) = &plan.staged else {
@@ -140,18 +148,40 @@ fn fail(plan: &Plan, why: &str, log: &mut dyn FnMut(&str)) {
 
 /// Swap `staged` in for `install`; returns where the replaced version is now. When it fails,
 /// the install is as it was (or the error says where the previous version is).
+///
+/// The update is brought next to the install first (`<install>.old-incoming-<to>`: a rename on one
+/// volume, a copy across volumes, which takes seconds), so the install is out of its place for the
+/// time of two renames only, whichever volume the update is on.
 pub fn swap(install: &Path, staged: &Path, from: &str, to: &str) -> Result<PathBuf, String> {
-    if !staged.join("trek.exe").is_file() {
-        return Err(format!("{} has no trek.exe; nothing was changed", staged.display()));
+    swap_with(install, staged, from, to, &rename_patiently)
+}
+
+/// `swap`, with `bring` for moving the staged folder next to the install.
+#[doc(hidden)]
+pub fn swap_with(install: &Path, staged: &Path, from: &str, to: &str, bring: &dyn Fn(&Path, &Path) -> std::io::Result<()>) -> Result<PathBuf, String> {
+    if !install.is_absolute() || !staged.is_absolute() {
+        return Err("the folders to swap must be full paths; nothing was changed".into());
     }
+    if within(staged, install) || within(install, staged) {
+        return Err(format!("{} and {} are one inside the other; nothing was changed", install.display(), staged.display()));
+    }
+    own_folder(staged).map_err(|e| format!("the update isn't Trek's own folder: {e}"))?;
     own_folder(install)?;
-    let old = free_name(install, &format!("old-{from}"));
-    rename_patiently(install, &old).map_err(|e| format!("couldn't move {} aside ({e}); nothing was changed", install.display()))?;
-    let moved = match rename_patiently(staged, install) {
-        Err(e) if cross_volume(&e) => copy_dir(staged, install),
+    let incoming = free_name(install, &format!("old-incoming-{to}"));
+    match bring(staged, &incoming) {
+        Err(e) if cross_volume(&e) => copy_dir(staged, &incoming),
         other => other,
-    };
-    let problem = match moved {
+    }
+    .map_err(|e| format!("couldn't get the update next to {} ({e}); nothing was changed", install.display()))?;
+    let old = free_name(install, &format!("old-{from}"));
+    if let Err(e) = rename_patiently(install, &old) {
+        // The update goes back where it was staged, if it was moved and not copied.
+        if !staged.exists() {
+            let _ = rename_patiently(&incoming, staged);
+        }
+        return Err(format!("couldn't move {} aside ({e}); nothing was changed", install.display()));
+    }
+    let problem = match rename_patiently(&incoming, install) {
         Ok(()) if install.join("trek.exe").is_file() => return Ok(old),
         Ok(()) => format!("{} had no trek.exe after the move", install.display()),
         Err(e) => format!("couldn't move the update into {} ({e})", install.display()),
@@ -163,17 +193,44 @@ pub fn swap(install: &Path, staged: &Path, from: &str, to: &str) -> Result<PathB
 }
 
 /// Put the previous version back in `install`'s place. Whatever is there now (an update that
-/// failed, part of a copy) moves to `<install>.old-failed-<to>` for Trek to delete.
+/// failed, part of a copy) moves to `<install>.old-failed-<to>` for Trek to delete. Nothing moves
+/// unless the previous version is where `old` says: a folder with nothing to put in its place
+/// would leave no Trek at all.
 pub fn restore(install: &Path, old: &Path, to: &str) -> Result<(), String> {
+    if !old.join("trek.exe").is_file() {
+        return Err(format!("the previous version isn't in {} any more; {} was left as it is", old.display(), install.display()));
+    }
+    let mut aside = None;
     if install.exists() {
         let failed = free_name(install, &format!("old-failed-{to}"));
         rename_patiently(install, &failed).map_err(|e| format!("couldn't move the failed update aside ({e}); the previous version is in {}", old.display()))?;
+        aside = Some(failed);
     }
-    rename_patiently(old, install).map_err(|e| format!("couldn't put the previous version back ({e}); it is in {}", old.display()))
+    match rename_patiently(old, install) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Don't leave the folder with nothing in it: the failed update is better than none.
+            if let Some(failed) = aside {
+                let _ = rename_patiently(&failed, install);
+            }
+            Err(format!("couldn't put the previous version back ({e}); it is in {}", old.display()))
+        }
+    }
 }
 
-/// The install is a folder of Trek's own: `trek.exe` and nothing but Trek's files.
+/// `path` is `folder` or inside it, as Windows compares paths (whatever the case).
+fn within(path: &Path, folder: &Path) -> bool {
+    let parts = |p: &Path| -> Vec<String> { p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect() };
+    let (path, folder) = (parts(path), parts(folder));
+    !folder.is_empty() && path.starts_with(&folder)
+}
+
+/// The install is a folder of Trek's own: `trek.exe` and nothing but Trek's files, and the folder
+/// itself, not a link to one (a rename would replace the link and leave the folder behind it).
 pub fn own_folder(install: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(install).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{} is a link to a folder, so it isn't replaced; nothing was changed", install.display()));
+    }
     if !install.join("trek.exe").is_file() {
         return Err(format!("{} has no trek.exe; nothing was changed", install.display()));
     }
@@ -230,7 +287,10 @@ pub fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_dir(&entry.path(), &dest)?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), &dest)?;
+            let copied = std::fs::copy(entry.path(), &dest)?;
+            if copied != entry.metadata()?.len() || std::fs::metadata(&dest)?.len() != copied {
+                return Err(std::io::Error::other(format!("{} was copied only in part", entry.path().display())));
+            }
         } else {
             return Err(std::io::Error::other(format!("{} is a link", entry.path().display())));
         }
