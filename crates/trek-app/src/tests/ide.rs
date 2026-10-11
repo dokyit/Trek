@@ -555,7 +555,7 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         trek.wait(cx, "the review settled", |ws| ws.review_settled(&id)).await;
         trek.render(cx);
         trek.click(cx, "ai-undo-all");
-        assert!(trek.read(cx, |ws, _| ws.review(&id).is_some_and(|r| r.undo_all_armed())), "asked, not done: {}", trek.read(cx, |ws, _| ws.review_state(&id)));
+        assert!(trek.read(cx, |ws, cx| ws.review(&id).is_some_and(|r| r.undo_all_armed(cx.background_executor().now()))), "asked, not done: {}", trek.read(cx, |ws, _| ws.review_state(&id)));
         assert_eq!(std::fs::read_to_string(&two).unwrap(), "# Notes\n\n- Note 1\n- Note 2\n");
         trek.render(cx);
         trek.click(cx, "ai-undo-all");
@@ -564,6 +564,38 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         trek.render(cx);
         let editor = trek.root.read_with(cx, |r, cx| r.editor(cx)).unwrap();
         assert_eq!(editor.read_with(cx, |e, cx| e.text_state().read(cx).value().to_string()), "# Notes\n\n- Note 1\n", "a clean buffer reloads");
+    });
+}
+
+#[test]
+fn undo_all_asked_goes_stale_with_the_apps_clock_not_the_cpus() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek);
+        editor_on_draft(&trek, cx);
+        let id = ai_send(&trek, cx, "mock:write one.md", "enter");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.wait(cx, "one.md pending", |ws| ws.pending_files(&id).len() == 1 && ws.review_settled(&id)).await;
+        let armed = |trek: &Trek, cx: &mut TestAppContext| trek.read(cx, |ws, cx| ws.review(&id).is_some_and(|r| r.undo_all_armed(cx.background_executor().now())));
+        let one = trek.project.join("one.md");
+
+        trek.render(cx);
+        trek.click(cx, "ai-undo-all");
+        assert!(armed(&trek, cx), "asked: {}", trek.read(cx, |ws, _| ws.review_state(&id)));
+        // However long the machine took to draw those frames, the ask holds until the app's clock
+        // says the window (8 s) is over: then it's an ask again, not an undo.
+        cx.executor().advance_clock(std::time::Duration::from_secs(7));
+        assert!(armed(&trek, cx));
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        assert!(!armed(&trek, cx), "stale");
+        trek.render(cx);
+        trek.click(cx, "ai-undo-all");
+        assert!(armed(&trek, cx), "asked afresh");
+        assert!(one.exists(), "a stale ask undid nothing");
+        trek.render(cx);
+        trek.click(cx, "ai-undo-all");
+        trek.wait(cx, "all undone", |ws| ws.review(&id).is_none()).await;
+        assert!(!one.exists());
     });
 }
 
