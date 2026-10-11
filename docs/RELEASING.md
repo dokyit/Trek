@@ -129,9 +129,61 @@ What it does:
    With `--dry-run` the version bump is undone and nothing leaves the machine; the artifacts stay in
    `dist/release/<version>/`.
 
-Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default `dokyit/Trek`),
+Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_MINISIGN_PASSWORD` (its password, for a run with
+no terminal; otherwise it's asked for), `TREK_RELEASE_REPO` (default `dokyit/Trek`),
 `TREK_SIGN_IDENTITY`, and `TREK_RELEASE_DOWNLOAD_URL` to point the manifest's archive URL somewhere else
 (a staging server).
+
+## Publishing from anywhere
+
+`.github/workflows/release.yml` publishes a whole release without the Mac in the loop: its macOS job runs
+`release.sh` on GitHub's macOS runner, exactly as above, then it calls `release-windows.yml` for the
+Windows half. Start it from any machine with `gh`, or with **Run workflow** on the repository's Actions
+tab:
+
+```sh
+gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta              # on the default branch
+gh workflow run release.yml --ref windows-port -f version=0.4.1-beta.4 -f channel=beta
+gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true  # publish nothing
+```
+
+Inputs: `version`, `channel` (stable, beta or nightly; stable by default), optional `notes` (Markdown, used
+as `--notes`; empty means the commit subjects as usual) and `dry_run`. Run it on the branch you release
+from: a stable release commits `Release v<version>` to that branch and pushes it (as the runner's
+`github-actions[bot]`), and a beta or nightly is built from its head. The macOS job takes about 15 minutes,
+the Windows job about 27 more. Between the two, Trek on Windows sees the new version without a Windows
+build and says "the Windows build is on its way"; Mac users can update at once. If the Windows job fails,
+re-run just that job (or `gh workflow run release-windows.yml` with the same version and channel): it
+only attaches to the release that exists.
+
+A dry run builds, code-signs and minisigns both halves, verifies the signatures against
+`assets/update/minisign.pub`, shows both manifests and SHA-256s in the run's summary, and publishes
+nothing: no commit, no tag, no release. Without the code-signing secrets below it signs with a throwaway
+"Trek Local Signing" that `script/signing-identity.sh` makes on the runner.
+
+Secrets, added once from the Mac that has `~/.trek-signing/` (repository Settings > Secrets and
+variables > Actions, or `gh`):
+
+```sh
+gh secret set TREK_CODESIGN_P12 --body "$(base64 -i ~/.trek-signing/codesign.p12)"
+gh secret set TREK_CODESIGN_P12_PASSWORD < ~/.trek-signing/codesign.p12.password
+gh secret set TREK_MINISIGN_KEY < ~/.trek-signing/minisign.key   # already set for the Windows workflow
+gh secret set TREK_MINISIGN_PASSWORD                              # if the key has a password; gh asks for it
+```
+
+The job imports the p12 into a keychain of its own on the runner (only `/usr/bin/codesign` may use the
+key), signs with it, and deletes that keychain and the key files when it ends, failed or not. A real
+release refuses to run without `TREK_CODESIGN_P12`: a different certificate would reset every user's
+Accessibility and Screen Recording grants. `release.sh` reads the minisign password from
+`TREK_MINISIGN_PASSWORD` when it's set, and asks at the terminal otherwise.
+
+The minisign key is the one secret that matters most (see "Update signing key" above): anyone who can
+push a workflow to this repository can sign with it (true since the Windows workflow got it), so keep
+the repository's write access as tight as the Mac's. Give the key a password and set `TREK_MINISIGN_PASSWORD`; a key without one still
+signs, with release.sh's warning in the log.
+
+The Mac's own way, `script/release.sh` on the Mac, works as before. Run one or the other for a release,
+not both.
 
 ## Windows
 
@@ -144,6 +196,9 @@ beta or nightly, or a re-run of one) drops the Windows entry until the workflow 
 - **Stable**: publishing the `v<version>` release triggers the workflow automatically.
 - **Beta / nightly**: run it by hand once the Mac's prerelease exists under the moving `beta`/`nightly`
   tag: `gh workflow run release-windows.yml -f version=0.3.0-beta.1 -f channel=beta`.
+- **From `release.yml`**: it runs right after the macOS job, whatever the channel. A release that run
+  creates raises no `release: published` event (GitHub doesn't start workflows for its own token's
+  events), so a stable release isn't attached twice.
 
 The job checks out the version's tag (`v<version>`; the moving `nightly` tag for nightlies), builds
 `cargo build --release --locked -p trek-app -p trek-mcp`, smokes it with `cargo test -p trek-core
