@@ -1174,6 +1174,10 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Run `v`'s update command, then ask the CLI its version again: a command that exits fine but
 /// leaves the old version installed failed too.
 pub async fn run_update(v: &AgentVersion) -> Outcome {
+    // One that runs as an administrator goes through `run_elevated`, which checks it.
+    if v.command.as_ref().is_some_and(|c| c.elevated) {
+        return run_elevated(std::slice::from_ref(v)).await.pop().unwrap_or_else(|| no_command(v));
+    }
     run_update_settling(v, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }).await
 }
 
@@ -1181,9 +1185,9 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
 /// between them).
 async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outcome {
     let Some(cmd) = &v.command else { return no_command(v) };
+    // Not here: an administrator's command is checked first (`run_update`, `run_elevated`).
     if cmd.elevated {
-        let mut outcomes = run_elevated_with(std::slice::from_ref(v), settle, crate::elevated::run_as_admin).await;
-        return outcomes.pop().unwrap_or_else(|| no_command(v));
+        return not_trek_command(v);
     }
     let path = cmd.search_path();
     let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else { return not_installed(cmd) };
@@ -1398,12 +1402,21 @@ async fn end_installer(child: &mut tokio::process::Child, pid: u32) {
 /// one script, so Windows asks once. Each is then told apart (its own output and exit code) and
 /// verified as `run_update` verifies. The outcomes are in `vs`' order.
 pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
-    run_elevated_with(vs, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }, crate::elevated::run_as_admin).await
+    // Only what Trek works out itself goes to an administrator; the rest is answered, not run.
+    let fit: Vec<bool> = vs.iter().map(is_what_trek_would_run).collect();
+    let rows: Vec<AgentVersion> = vs.iter().zip(&fit).map(|(v, &fit)| if fit { v.clone() } else { AgentVersion { command: None, ..v.clone() } }).collect();
+    let mut outcomes = run_elevated_with(&rows, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }, crate::elevated::run_as_admin).await;
+    for ((outcome, v), &fit) in outcomes.iter_mut().zip(vs).zip(&fit) {
+        if !fit && v.command.is_some() {
+            *outcome = not_trek_command(v);
+        }
+    }
+    outcomes
 }
 
 /// `run_elevated`, the script started by `launch`.
 async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch: crate::elevated::Launch) -> Vec<Outcome> {
-    use crate::elevated::{Failure, Step, code_file, output_file};
+    use crate::elevated::{Failure, Run, Step, code_file, output_file};
     let mut outcomes: Vec<Option<Outcome>> = vec![None; vs.len()];
     // Each step's row; rows whose program isn't there are answered without running anything.
     let mut steps = vec![];
@@ -1428,18 +1441,17 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
                 outcomes[i] = Some(Outcome::Failed { summary: summary(cmd), output: String::new() });
             }
         };
-        match scratch_dir("elevated") {
+        // The script's folder is the run's alone, and what's in it is held as it was written until
+        // the run is done (`Run`): it is read by an administrator's process after the user says yes.
+        match Run::create(&crate::paths::data_dir().join("tmp")) {
             Err(e) => fail_all(&mut outcomes, &|c| format!("Couldn't write the script that runs {} as an administrator: {e}", c.shown())),
-            Ok(dir) => {
-                let file = dir.join("run.cmd");
-                let written = crate::elevated::script(&dir, &steps).and_then(|text| std::fs::write(&file, text).map_err(|e| e.to_string()));
+            Ok(mut run) => {
+                let written = crate::elevated::script(run.dir(), &steps).and_then(|text| run.seal(&text, steps.len()));
                 let ran = match written {
                     Err(why) => Err(Failure::Other(format!("Trek couldn't write the script for it: {why}"))),
-                    Ok(()) => {
-                        let script = file.clone();
-                        tokio::task::spawn_blocking(move || launch(&script, UPDATE_TIMEOUT)).await.unwrap_or_else(|e| Err(Failure::Other(e.to_string())))
-                    }
+                    Ok(script) => tokio::task::spawn_blocking(move || launch(&script, UPDATE_TIMEOUT)).await.unwrap_or_else(|e| Err(Failure::Other(e.to_string()))),
                 };
+                let dir = run.dir().to_path_buf();
                 match ran {
                     Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| "Windows didn't allow it (you cancelled the prompt).".into()),
                     Err(Failure::Unanswered) => fail_all(&mut outcomes, &|_| "Windows didn't allow it: no one answered its prompt in time.".into()),
@@ -1465,11 +1477,26 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
                         }
                     }
                 }
-                let _ = std::fs::remove_dir_all(&dir);
+                // `run` goes here: its files are let go, and its folder removed.
             }
         }
     }
     outcomes.into_iter().zip(vs).map(|(o, v)| o.unwrap_or_else(|| no_command(v))).collect()
+}
+
+/// `v`'s command is the one Trek itself works out for the install it found (`update_command`),
+/// not something else: what runs as an administrator may only be the package manager's own
+/// upgrade, and the rows come back from `agent-versions.json`, a file any program of the user's
+/// can write. The command is worked out again from the install, and must be the same.
+fn is_what_trek_would_run(v: &AgentVersion) -> bool {
+    let (Some(cmd), Some(h)) = (&v.command, harness(&v.id)) else { return false };
+    h.owns(&v.install)
+        && update_command(h, &v.install, &v.binary, false, v.installed.as_deref())
+            .is_some_and(|own| own.elevated == cmd.elevated && own.program == cmd.program && own.args == cmd.args && own.env == cmd.env && own.path == cmd.path && own.installer == cmd.installer)
+}
+
+fn not_trek_command(v: &AgentVersion) -> Outcome {
+    Outcome::Failed { summary: format!("Trek didn't run the update of {}: its command isn't the one Trek works out for how it's installed. Check again, and then update.", v.name), output: String::new() }
 }
 
 /// Everything a command printed: its stdout, then its stderr on a line of its own (a progress
@@ -2467,6 +2494,42 @@ mod tests {
         // One update on its own (an Update button) goes through the same script.
         assert!(rows[0].command.as_ref().is_some_and(|c| c.elevated));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An administrator's command is only ever the package manager's own upgrade of the install
+    /// Trek found, worked out again when it runs: the rows are read from a file in the data folder,
+    /// which a program of the user's can write.
+    #[test]
+    #[cfg(windows)]
+    fn only_the_package_managers_own_upgrade_runs_as_an_administrator() {
+        let binary = PathBuf::from(r"C:\ProgramData\chocolatey\bin\opencode.exe");
+        let install = Install::Chocolatey { package: "opencode".into() };
+        let own = update_command(h("opencode"), &install, &binary, false, Some("1.2.27")).unwrap();
+        assert!(own.elevated);
+        let row = |command: UpdateCommand, install: Install| AgentVersion { id: "opencode".into(), binary: binary.clone(), install, command: Some(command), ..version("opencode", "1.2.27", Some("1.3.0")) };
+        assert!(is_what_trek_would_run(&row(own.clone(), install.clone())));
+        // Anything else in the file is not run: another program, other arguments, another folder
+        // of programs or variable, another package, the same row asking for more.
+        let swaps: [UpdateCommand; 5] = [
+            UpdateCommand { program: r"C:\Users\me\evil.exe".into(), ..own.clone() },
+            UpdateCommand { args: [own.args.clone(), vec!["--source".into(), "http://evil".into()]].concat(), ..own.clone() },
+            UpdateCommand { path: vec![r"C:\Users\me\evil".into()], ..own.clone() },
+            UpdateCommand { env: vec![("PATHEXT".into(), ".evil".into())], ..own.clone() },
+            UpdateCommand::new("cmd", &["/c", "calc"]).as_admin(),
+        ];
+        for swapped in swaps {
+            assert!(!is_what_trek_would_run(&row(swapped.clone(), install.clone())), "{:?}", swapped.shown());
+            // Said so, and nothing run (this would bring up a prompt if it ran).
+            let Outcome::Failed { summary, output } = crate::runtime().block_on(run_elevated(&[row(swapped.clone(), install.clone())])).remove(0) else { panic!() };
+            assert!(summary.starts_with("Trek didn't run the update of opencode: its command isn't the one Trek works out"), "{summary}");
+            assert_eq!(output, "");
+            assert!(matches!(crate::runtime().block_on(run_update(&row(swapped, install.clone()))), Outcome::Failed { .. }));
+        }
+        // A package that isn't the agent's, an agent Trek doesn't know, and no command at all.
+        let evil = Install::Chocolatey { package: "evil-package".into() };
+        assert!(!is_what_trek_would_run(&row(UpdateCommand::new("choco", &["upgrade", "evil-package", "-y"]).as_admin(), evil)));
+        assert!(!is_what_trek_would_run(&AgentVersion { id: "fake".into(), ..row(own.clone(), install.clone()) }));
+        assert!(!is_what_trek_would_run(&AgentVersion { command: None, ..row(own, install) }));
     }
 
     /// Serve the files in `dir` on 127.0.0.1; their base URL.
