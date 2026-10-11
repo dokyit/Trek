@@ -125,7 +125,9 @@ impl Feeds {
     /// With the cache in the data folder.
     pub fn open(client: reqwest::Client) -> Feeds {
         let path = crate::paths::data_dir().join("cache").join("feeds.json");
-        let cache = std::fs::read_to_string(&path).map(|text| Cache::parse(&text, crate::store::now_ms())).unwrap_or_default();
+        // A file bigger than Trek ever writes isn't Trek's, and isn't read.
+        let sound = std::fs::metadata(&path).is_ok_and(|m| m.len() <= 2 * FILE_CAP as u64);
+        let cache = Some(&path).filter(|_| sound).and_then(|p| std::fs::read_to_string(p).ok()).map(|text| Cache::parse(&text, crate::store::now_ms())).unwrap_or_default();
         Feeds { client, path: Some(path), state: Mutex::new((cache, false)) }
     }
 
@@ -438,6 +440,33 @@ pub(crate) mod tests {
         let feeds = feeds(Cache::default());
         let Err(e) = crate::runtime().block_on(feeds.get(&format!("http://127.0.0.1:{port}/x"))) else { panic!("answered") };
         assert!(e.is_connect(), "{e}");
+    }
+
+    #[test]
+    fn opening_reads_the_data_folders_file_unless_it_is_not_ours() {
+        let dir = std::env::temp_dir().join(format!("trek-feeds-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::isolate_thread(dir.clone());
+        let file = dir.join("cache").join("feeds.json");
+        let kept = |f: &Feeds| f.state().0.entries.len();
+        assert_eq!(kept(&Feeds::open(reqwest::Client::new())), 0, "no file yet");
+        let mut cache = Cache::default();
+        cache.entries.insert("https://a/".into(), entry("\"1\"", "body", crate::store::now_ms()));
+        write(&file, &cache.to_text(crate::store::now_ms())).unwrap();
+        assert_eq!(kept(&Feeds::open(reqwest::Client::new())), 1);
+        // Bigger than Trek writes, or not JSON, or binary: an empty cache, and no panic.
+        write(&file, &" ".repeat(2 * FILE_CAP + 1)).unwrap();
+        assert_eq!(kept(&Feeds::open(reqwest::Client::new())), 0);
+        std::fs::write(&file, [0xff, 0xfe, 0x00, 0x7b]).unwrap();
+        assert_eq!(kept(&Feeds::open(reqwest::Client::new())), 0);
+        // A changed cache is written on `save`, an unchanged one isn't touched.
+        let feeds = Feeds::open(reqwest::Client::new());
+        feeds.save();
+        assert_eq!(std::fs::read(&file).unwrap(), [0xff, 0xfe, 0x00, 0x7b], "nothing changed, nothing written");
+        feeds.state().1 = true;
+        feeds.save();
+        assert_eq!(Cache::parse(&std::fs::read_to_string(&file).unwrap(), NOW), Cache::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
