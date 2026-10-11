@@ -280,6 +280,26 @@ The steps above, with these differences:
   from one that holds more); if Windows refuses it says so, the one thing left to the user. Nothing
   in the old folder is written or changed before that. `TREK_RELOCATE_TO=<folder>` sends the copy
   elsewhere (testing), `TREK_RELOCATE_KEEP=TREK_SHOT_DIR,…` lets named `TREK_*` variables follow it.
+  - **Check now** stays beside the move for a block Windows may lift (ransomware protection, a
+    read-only place): Defender judges each program, and the user may have told it to let Trek be.
+  - **The old copy stays on Settings → Updates** (a row above the page's own status, **Remove old
+    copy** / **Dismiss**), not only on the launch toast, which lasts seconds. `relocated-from` is
+    read once, so the copy writes a second note, `old-copy` (old and new folder), in the updates
+    folder; every launch from the new folder offers the copy again until it's removed, gone, no
+    longer holds `trek.exe`, or dismissed, and opening the page looks again. Another Trek sharing the
+    data folder leaves the note alone.
+  - **Shortcuts**: at the copy's first launch, the `.lnk` files in the user's own Start menu
+    (`%APPDATA%\Microsoft\Windows\Start Menu\Programs`, two folders deep), Desktop (one deep) and
+    taskbar pins (`…\Internet Explorer\Quick Launch\User Pinned\TaskBar`) whose target is exactly the
+    old `trek.exe` (any case, `\\?\` ignored) get the new `trek.exe` as target, and the new folder as
+    the working folder and the new exe as the icon when those were the old copy's (an icon or folder
+    the user chose stays). Nothing else is touched or made; the shortcuts every user shares
+    (`ProgramData`, the public Desktop) are the administrator's. The toast and the page say how many
+    changed. The Desktop is a folder ransomware protection guards, so a change there may be refused:
+    they say which shortcut still starts the old copy, in words. A taskbar pin may need Explorer
+    restarted (or a re-pin) before the taskbar shows the change. `trek://` follows the move by itself:
+    the copy registers it at launch, as every launch does (a process with its own `TREK_DATA_DIR` or
+    `TREK_SHOT_DIR` doesn't).
 - **A release without this platform's build**: the manifest lists each platform's build as it's
   published, the Mac's first. A newer version with no `windows-x86_64` entry yet shows "Trek <version> is
   out; the Windows build is on its way. Check again in a while." and is checked again within the hour.
