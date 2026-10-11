@@ -36,8 +36,9 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # Process ids, start times and trees, for `procs`; an update's version from trek.exe's version
-# resource (`update`).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+# resource (`update`); an agent's update run as an administrator (`elevated`: ShellExecuteExW,
+# which needs the COM and registry types its structure names).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # The user and machine PATH, for a GUI launch that has an older one.
 winreg = "0.55"
 
