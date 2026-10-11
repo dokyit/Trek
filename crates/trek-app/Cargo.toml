@@ -63,7 +63,7 @@ block2 = "0.6"
 [target.'cfg(windows)'.dependencies]
 # LockFileEx on the data folder, a job object per language server, the registry for the OS name,
 # the session's idle time and lock state for push notifications' away-detection, and the exe's
-# icon resources for the windows' icons.
+# icon resources for the windows' icons, at the size their display's scale wants (HiDpi).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
@@ -76,6 +76,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

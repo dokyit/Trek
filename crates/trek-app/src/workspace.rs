@@ -927,29 +927,51 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     if run(&["rev-parse", "--is-inside-work-tree"]).is_none() {
         return GitInfo::default();
     }
-    let branch = run(&["branch", "--show-current"]).filter(|b| !b.is_empty());
-    let elsewhere = run(&["worktree", "list", "--porcelain"])
+    // The rest are independent reads, each a process of its own: one after another they're ten
+    // spawns, which on Windows (a hundred milliseconds apiece, or more under a virus scanner) kept
+    // the branch chip off the composer for over a second. Side by side it waits for the slowest.
+    let (branch, worktrees, head, status, ahead, behind, default_branch, branches, remote) = std::thread::scope(|s| {
+        let branch = s.spawn(|| run(&["branch", "--show-current"]).filter(|b| !b.is_empty()));
+        let worktrees = s.spawn(|| run(&["worktree", "list", "--porcelain"]));
+        let head = s.spawn(|| run(&["rev-parse", "--verify", "-q", "HEAD"]));
+        // Every untracked file, not their folders, so the count matches the Git panel's list.
+        let status = s.spawn(|| run(&["status", "--porcelain", "-uall"]));
+        let ahead = s.spawn(|| run(&["rev-list", "--count", "@{u}..HEAD"]));
+        let behind = s.spawn(|| run(&["rev-list", "--count", "HEAD..@{u}"]));
+        let default_branch = s.spawn(|| {
+            run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).and_then(|s| s.split_once('/').map(|(_, b)| b.to_string())).or_else(|| {
+                let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
+                ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
+            })
+        });
+        let branches = s.spawn(|| run(&["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"]));
+        let remote = s.spawn(|| trek_core::store::git_remote(cwd));
+        (
+            branch.join().unwrap_or_default(),
+            worktrees.join().unwrap_or_default(),
+            head.join().unwrap_or_default(),
+            status.join().unwrap_or_default(),
+            ahead.join().unwrap_or_default(),
+            behind.join().unwrap_or_default(),
+            default_branch.join().unwrap_or_default(),
+            branches.join().unwrap_or_default(),
+            remote.join().unwrap_or_default(),
+        )
+    });
+    let elsewhere = worktrees
         .map(|s| s.lines().filter_map(|l| l.strip_prefix("branch refs/heads/")).filter(|b| Some(*b) != branch.as_deref()).map(str::to_string).collect())
         .unwrap_or_default();
     GitInfo {
         is_repo: true,
-        head: run(&["rev-parse", "--verify", "-q", "HEAD"]),
+        head,
         elsewhere,
         branch,
-        // Every untracked file, not their folders, so the count matches the Git panel's list.
-        changed: run(&["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0),
-        ahead: run(&["rev-list", "--count", "@{u}..HEAD"]).and_then(|s| s.parse().ok()).unwrap_or(0),
-        behind: run(&["rev-list", "--count", "HEAD..@{u}"]).and_then(|s| s.parse().ok()).unwrap_or(0),
-        default_branch: run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-            .and_then(|s| s.split_once('/').map(|(_, b)| b.to_string()))
-            .or_else(|| {
-                let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
-                ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
-            }),
-        branches: run(&["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
-            .map(|s| s.lines().map(str::to_string).collect())
-            .unwrap_or_default(),
-        remote: trek_core::store::git_remote(cwd),
+        changed: status.map(|s| s.lines().count()).unwrap_or(0),
+        ahead: ahead.and_then(|s| s.parse().ok()).unwrap_or(0),
+        behind: behind.and_then(|s| s.parse().ok()).unwrap_or(0),
+        default_branch,
+        branches: branches.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default(),
+        remote,
     }
 }
 
@@ -1027,6 +1049,8 @@ pub struct Workspace {
     git_fetched: HashMap<PathBuf, Instant>,
     /// The newest git read asked for, per folder (`refresh_git_at`).
     git_reads: HashMap<PathBuf, u64>,
+    /// Git reads started and not yet landed, stale ones included (`shot` waits for it to reach 0).
+    pub(crate) git_inflight: usize,
     /// Checkouts with a `git switch` running (by checkout root).
     pub(crate) switching: HashSet<PathBuf>,
     /// Bumped when files on disk changed wholesale under the app (another branch or commit
@@ -1236,6 +1260,8 @@ impl Workspace {
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
         let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
         if trek_core::update::blocker().is_none() {
+            // Windows: trek-update couldn't swap the update in, and put this version back.
+            launch_toasts.extend(trek_core::update::take_install_failure());
             // A first launch has nothing new to show; one after an update shows what it brought
             // (from a build older than "What's new", whose setting is still empty).
             if this.settings.updates.seen_notes.is_empty() {
@@ -1372,6 +1398,7 @@ impl Workspace {
             git_info: HashMap::new(),
             git_fetched: HashMap::new(),
             git_reads: HashMap::new(),
+            git_inflight: 0,
             switching: HashSet::new(),
             files_epoch: 0,
             usage_fetch: None,
@@ -1923,10 +1950,12 @@ impl Workspace {
             *n += 1;
             *n
         };
+        self.git_inflight += 1;
         let task = cx.spawn(async move |this, cx| {
             let c = cwd.clone();
             let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
             let _ = this.update(cx, |this, cx| {
+                this.git_inflight = this.git_inflight.saturating_sub(1);
                 if this.git_reads.get(&cwd) != Some(&seq) {
                     return;
                 }
@@ -2732,7 +2761,14 @@ impl Workspace {
     /// system allows it: macOS isn't set to Reduce transparency; Windows has Mica, with
     /// Transparency effects on).
     pub fn glass(&self) -> Option<f32> {
-        if self.backdrop().is_some() || (!cfg!(test) && crate::system::reduce_transparency()) {
+        self.glass_unless(!cfg!(test) && crate::system::reduce_transparency())
+    }
+
+    /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency;
+    /// Windows 10, or 11 with Transparency effects off: `winlook::glass_available`): then the
+    /// window stays opaque.
+    pub fn glass_unless(&self, reduced: bool) -> Option<f32> {
+        if self.backdrop().is_some() || reduced {
             return None;
         }
         self.settings.appearance.glass_tint()
@@ -6040,7 +6076,10 @@ impl Workspace {
         self.updater.status = UpdateStatus::Idle;
         if let Err(e) = trek_core::update::relaunch(&installed, crate::system::app_is_active()) {
             tracing::warn!("relaunch after update failed: {e:#}");
-            self.updater.status = UpdateStatus::Failed("The update is installed. Quit and reopen Trek to start it.".into());
+            // On Windows the relaunch is the install (trek-update swaps the folder once Trek has
+            // quit): nothing changed, and the next check downloads the update again.
+            let message = if cfg!(windows) { format!("Couldn't install the update: {e:#}") } else { "The update is installed. Quit and reopen Trek to start it.".into() };
+            self.updater.status = UpdateStatus::Failed(message);
             cx.notify();
             return;
         }
@@ -6051,8 +6090,10 @@ impl Workspace {
     /// Quitting with an update ready installs it, so the next launch is the new version.
     fn install_on_quit(&mut self) {
         if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } = &self.updater.status {
-            match trek_core::update::install(staged) {
-                Ok(_) => tracing::info!("update installed on quit"),
+            // On Windows `install` gets it ready and `swap_on_exit` has trek-update swap it in once
+            // Trek has exited.
+            match trek_core::update::install(staged).and_then(|installed| trek_core::update::swap_on_exit(&installed)) {
+                Ok(()) => tracing::info!("update installed on quit"),
                 Err(e) => tracing::warn!("update install on quit failed: {e:#}"),
             }
         }
