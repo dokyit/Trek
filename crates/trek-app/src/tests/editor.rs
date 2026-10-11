@@ -171,7 +171,7 @@ fn clicking_a_file_in_the_explorer_opens_it_in_the_editor() {
 
 /// The editor in front, once its file is read (off the main thread).
 async fn loaded(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext) -> gpui_kit::Entity<crate::editor::EditorView> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         trek.render(cx);
         if let Some(e) = trek.root.read_with(cx, |r, cx| r.editor(cx)).filter(|e| e.read_with(cx, |e, _| !e.loading())) {

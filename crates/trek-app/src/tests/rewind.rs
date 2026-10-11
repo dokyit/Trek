@@ -78,7 +78,7 @@ async fn recall(trek: &Trek, cx: &mut TestAppContext, id: &str) -> String {
 /// Wait (in real time: git runs on other threads) until the open confirmation has checked the files.
 async fn files_checked(trek: &Trek, cx: &mut TestAppContext) -> String {
     let view = trek.thread_view(cx);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         match view.read_with(cx, |v, _| v.confirm_files()) {
@@ -93,7 +93,7 @@ async fn files_checked(trek: &Trek, cx: &mut TestAppContext) -> String {
 
 /// Wait until `f` holds for the project's files.
 async fn files(trek: &Trek, cx: &mut TestAppContext, what: &str, f: impl Fn(&Path) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + super::harness::REAL_TIME_LIMIT;
     while !f(&trek.project) {
         cx.run_until_parked();
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -560,8 +560,11 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
         let trek = open(cx);
         git_project(&trek.project);
         let id = turn(&trek, cx, "apple").await;
-        // A clean filter slow enough that the stop lands while the checkpoint is being taken.
-        git(&trek.project, &["config", "filter.slow.clean", "sleep 1; cat"]);
+        // A clean filter slow enough that the stop lands while the checkpoint is being taken. The
+        // stop follows the send in the same update, so a fraction of a second is slow enough. The
+        // filter runs in every snapshot from here on, and at a second each the test took 13 s of
+        // its 20 s on a loaded two-core machine: a runner's slower git ran out of time.
+        git(&trek.project, &["config", "filter.slow.clean", "sleep 0.3; cat"]);
         std::fs::write(trek.project.join(".gitattributes"), "*.big filter=slow\n").unwrap();
         std::fs::write(trek.project.join("data.big"), "lots\n").unwrap();
         // Stopped before the git work gets to run.
@@ -572,7 +575,7 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
         assert!(!trek.read(cx, |ws, _| ws.turn_running(&id)), "stopped at once");
         assert!(matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text == "Interrupted"));
         // The checkpoint still lands (and the stopped turn's end one); the agent never heard "banana".
-        trek.wait(cx, "the checkpoint", |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)).await;
+        trek.wait_up_to(cx, "the checkpoint", Duration::from_secs(90), |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)).await;
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
     });
 }

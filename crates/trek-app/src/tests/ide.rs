@@ -1,7 +1,7 @@
 //! Trek IDE (Editor mode): the switch and what it carries across, the AI side bar's chats (and
 //! that they're ordinary threads), the editor's tabs, Quick Open and the Explorer's cache.
 
-use super::harness::{Trek, open, run};
+use super::harness::{REAL_TIME_LIMIT, Trek, open, run};
 use crate::ide::IdeWorkbench;
 use crate::workspace::{IdeTab, Mode, Route, Scope};
 use trek_core::store::Item;
@@ -538,7 +538,7 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         // Another edit to the kept file: pending again, against what was kept.
         ai_send(&trek, cx, "mock:write two.md", "enter");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        trek.wait(cx, "two.md pending again", |ws| ws.pending_files(&id).len() == 1).await;
+        trek.wait_explained(cx, "two.md pending again", REAL_TIME_LIMIT, |ws| ws.pending_files(&id).len() == 1, |ws| ws.review_state(&id)).await;
         assert_eq!(trek.read(cx, |ws, _| ws.pending_files(&id).iter().map(|f| (f.added, f.removed)).collect::<Vec<_>>()), [(1, 0)]);
 
         // No Undo while a turn runs: it would race the agent.
@@ -550,10 +550,12 @@ fn keep_and_undo_review_an_agents_changes_file_by_file() {
         trek.wait_done(cx, &id, RunState::Idle).await;
 
         // Undo all, from the bar, asks first: once arms it, again does it. Back to the kept
-        // version; the editor shows it.
+        // version; the editor shows it. The ask is ignored while the review is being counted
+        // again after the turn, so wait for that to be over first.
+        trek.wait(cx, "the review settled", |ws| ws.review_settled(&id)).await;
         trek.render(cx);
         trek.click(cx, "ai-undo-all");
-        assert!(trek.read(cx, |ws, _| ws.review(&id).is_some_and(|r| r.undo_all_armed())), "asked, not done");
+        assert!(trek.read(cx, |ws, _| ws.review(&id).is_some_and(|r| r.undo_all_armed())), "asked, not done: {}", trek.read(cx, |ws, _| ws.review_state(&id)));
         assert_eq!(std::fs::read_to_string(&two).unwrap(), "# Notes\n\n- Note 1\n- Note 2\n");
         trek.render(cx);
         trek.click(cx, "ai-undo-all");
@@ -576,7 +578,7 @@ fn diff_tab(trek: &Trek, cx: &TestAppContext) -> Option<Entity<crate::ide::diff_
 
 /// Wait (in real time) until `f` holds.
 async fn until(cx: &mut TestAppContext, what: &str, f: impl Fn(&mut TestAppContext) -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         if f(cx) {
@@ -766,7 +768,7 @@ fn editor(trek: &Trek, cx: &TestAppContext) -> Entity<crate::editor::EditorView>
 
 /// Wait until the editor in front says `until`.
 async fn wait_editor(trek: &Trek, cx: &mut TestAppContext, what: &str, until: impl Fn(&crate::editor::EditorView, &gpui_kit::App) -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         let e = editor(trek, cx);

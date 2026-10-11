@@ -95,7 +95,9 @@ fn tool_calls_fold_into_summary_rows() {
 fn sub_agents_out_after_the_answer_keep_the_thread_waiting_until_they_report() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "send subagents 3s");
+        // Out for 10 s of real time, which the assertions below must beat: 3 s didn't survive a
+        // loaded machine (the rows were "Done" by the time they were read).
+        let id = trek.send(cx, "send subagents 10s");
         let tid = id.clone();
         trek.wait(cx, "the first turn to end with agents still out", |ws| {
             let l = &ws.live[&tid];
@@ -195,7 +197,9 @@ fn stopping_while_a_card_is_up_clears_it() {
 fn the_working_bar_follows_the_thread_on_screen() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:long 30s");
+        // Longer than any other turn here can take (30 s ran out on a loaded machine while the
+        // other thread's turn was still being waited for): the delete below ends it.
+        let id = trek.send(cx, "mock:long 600s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.visible(cx, "working-bar"));
@@ -518,7 +522,7 @@ fn steered_follow_ups_join_the_running_turn() {
 fn a_message_while_sub_agents_are_out_is_a_turn_of_its_own_and_they_stay_tracked() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "send subagents 3s");
+        let id = trek.send(cx, "send subagents 10s");
         let tid = id.clone();
         trek.wait(cx, "the answer with agents out", |ws| ws.live[&tid].turn_started.is_none() && ws.live[&tid].active_tasks() == 2).await;
         trek.send(cx, "check the auth routes too");

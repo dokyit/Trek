@@ -669,6 +669,31 @@ impl Workspace {
     pub fn review_settled(&self, id: &str) -> bool {
         self.reviews.get(id).is_none_or(|r| r.counted && !r.busy && !r.settling)
     }
+
+    /// What `undo_files` looks at, for a test's failure message.
+    #[cfg(test)]
+    pub fn review_state(&self, id: &str) -> String {
+        match self.reviews.get(id) {
+            Some(r) => {
+                let live = self.live.get(id);
+                format!(
+                    "busy={} git={} counted={} settling={} pending={} turn_running={} git_busy={:?} git_jobs={:?} checkpoint_failed={:?} checkpoints={:?} start={}",
+                    r.busy,
+                    r.git,
+                    r.counted,
+                    r.settling,
+                    r.pending.len(),
+                    self.turn_running(id),
+                    live.map(|l| l.git_busy),
+                    live.map(|l| l.git_jobs.len()),
+                    live.map(|l| l.checkpoint_failed.clone()),
+                    self.store.checkpoints(id).map(|c| c.into_iter().map(|c| c.item_id).collect::<Vec<_>>()),
+                    r.start,
+                )
+            }
+            None => "no review".into(),
+        }
+    }
 }
 
 /// "notes.md", "notes.md and lib.rs", "3 files": what a toast calls `paths`.

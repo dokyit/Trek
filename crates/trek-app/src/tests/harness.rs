@@ -181,6 +181,12 @@ pub fn mock() -> AgentId {
 /// the staged update the tests name isn't there (Windows checks that before anything else).
 pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "the downloaded update is gone" } else { "not running from an app bundle" };
 
+/// How long a test waits, in real time, for work that runs off the main thread (git, the mock
+/// agent, file reads) before it calls it lost. It is only ever spent when something is wrong, so
+/// it is generous: a loaded two-core machine ran the whole suite 4.5 times slower than GitHub's
+/// runner does, and 20 s was not enough for a git job on it.
+pub const REAL_TIME_LIMIT: Duration = Duration::from_secs(60);
+
 /// `root` with `rel` (written with `/`, as the tests write paths) under it, with the platform's
 /// separators throughout: a path joined as `root.join("a/b")` mixes them on Windows, and so isn't
 /// the string the app builds from its own components.
@@ -438,13 +444,26 @@ impl Trek {
 
     /// Wait (in real time; the agent runs on other threads) until `until` holds.
     pub async fn wait(&self, cx: &mut TestAppContext, what: &str, until: impl Fn(&Workspace) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        self.wait_up_to(cx, what, REAL_TIME_LIMIT, until).await;
+    }
+
+    /// `wait`, for work that is slow by design (a test that makes git crawl) and gets a longer
+    /// limit than the usual 20 s.
+    pub async fn wait_up_to(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool) {
+        self.wait_explained(cx, what, limit, until, |_| String::new()).await;
+    }
+
+    /// `wait_up_to`, whose failure also says what `explain` finds in the workspace then.
+    pub async fn wait_explained(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool, explain: impl Fn(&Workspace) -> String) {
+        let deadline = Instant::now() + limit;
         loop {
             cx.run_until_parked();
             if self.ws.read_with(cx, |ws, _| until(ws)) {
                 return;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for {what}: {}", self.ws.read_with(cx, |ws, _| explain(ws)));
+            }
             cx.background_executor.timer(Duration::from_millis(5)).await;
         }
     }
