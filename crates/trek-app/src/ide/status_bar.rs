@@ -80,7 +80,7 @@ impl Render for IdeStatus {
         };
         let editor = self.editor.as_ref().map(|e| {
             let e = e.read(cx);
-            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some())
+            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some(), crate::languages::of(&e.path).hard_tabs)
         });
         let muted = theme.muted_foreground;
         h_flex()
@@ -121,10 +121,10 @@ impl Render for IdeStatus {
                 )
             })
             .child(div().flex_1())
-            .when_some(editor, |el, ((line, col), lang, lsp, read_only)| {
+            .when_some(editor, |el, ((line, col), lang, lsp, read_only, hard_tabs)| {
                 el.child(Self::item("ide-status-caret", cx).child(format!("Ln {line}, Col {col}")))
                     .when(read_only, |el| el.child(Self::item("ide-status-readonly", cx).child("Read-only")))
-                    .child(Self::item("ide-status-indent", cx).child("Spaces: 4"))
+                    .child(Self::item("ide-status-indent", cx).child(if hard_tabs { "Tab Size: 4" } else { "Spaces: 4" }))
                     .child(Self::item("ide-status-encoding", cx).child("UTF-8"))
                     .child(Self::item("ide-status-eol", cx).child("LF"))
                     .child(Self::item("ide-status-language", cx).child(lang))
