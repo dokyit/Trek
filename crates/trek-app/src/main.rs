@@ -30,6 +30,7 @@ mod integrations;
 mod ipc;
 mod keys;
 #[cfg(windows)]
+mod languages;
 mod job;
 mod mascot;
 mod md;
@@ -257,6 +258,7 @@ fn main() {
         cx.set_app_identity(winsys::APP_ID, winsys::APP_NAME);
         gpui_kit::init(cx);
         perf::phase("kit");
+        languages::register_highlights();
         // The families the theme names must be known before it's applied and anything is laid out.
         fonts::register(cx);
         perf::phase("fonts");
