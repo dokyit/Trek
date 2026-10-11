@@ -123,13 +123,17 @@ them through your login shell's `PATH`; Settings → Agents & Subscriptions show
 ### Windows
 
 Download `Trek-<version>-windows-x86_64.zip` from the same [Releases](https://github.com/dokyit/Trek/releases)
-page, unzip it into a folder your account can write (not `Program Files`) and run `trek.exe`. The zip holds
+page, unzip it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or
+`%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or `Program Files`), and run `trek.exe`. The zip holds
 `trek.exe`, `trek-mcp.exe` and `trek-update.exe`, and nothing else. Nothing is Authenticode-signed yet, so
 SmartScreen warns once on first launch: **More info** > **Run anyway**. Trek targets Windows 11 on x64;
 Windows 10 22H2 is best effort, with an opaque window instead of Mica.
 
 Updates are signed with the same minisign key as the Mac's. `trek-update.exe` swaps the install folder when an
 update is installed, after the signature is checked, so your account has to be able to write to that folder.
+Windows's ransomware protection (Controlled folder access, in Windows Security) guards Documents, Desktop,
+Pictures, Videos, Music and Favorites, in OneDrive too, and turns the update away there; Settings → Updates
+says so if Trek is in one.
 Logs are in `%LOCALAPPDATA%\Trek\logs`, one file a day.
 
 Windows differs from the Mac in these ways:

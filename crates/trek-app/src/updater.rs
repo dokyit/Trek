@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use trek_core::settings::Channel;
 use trek_core::changelog::{self, Release};
-use trek_core::update::{AvailableUpdate, Blocker};
+use trek_core::update::{AvailableUpdate, Blocker, Found};
 
 /// A day between background checks.
 const CHECK_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -19,6 +19,9 @@ pub enum UpdateStatus {
     Idle,
     Checking,
     UpToDate,
+    /// A newer version is out without this platform's build yet (it's added to the release some
+    /// minutes after the other's): nothing to download, check again soon.
+    Coming { version: String },
     Available { version: String },
     Downloading { version: String, progress: f32 },
     /// Verified and unpacked at `staged`: installs on "Restart to update" or when Trek quits.
@@ -104,19 +107,26 @@ impl Updater {
 
     /// A check finished. True when what it found should start downloading (`auto_download`).
     /// A background check that fails stays quiet; one the user asked for says why.
-    pub fn finish_check(&mut self, ticket: Ticket, result: Result<Option<AvailableUpdate>, String>, user_initiated: bool, auto_download: bool, now: i64) -> bool {
+    pub fn finish_check(&mut self, ticket: Ticket, result: Result<Found, String>, user_initiated: bool, auto_download: bool, now: i64) -> bool {
         if ticket.0 != self.generation {
             return false;
         }
         match result {
-            Ok(Some(u)) => {
+            Ok(Found::Update(u)) => {
                 self.status = UpdateStatus::Available { version: u.version.to_string() };
                 self.offer = Some(u);
                 auto_download
             }
-            Ok(None) => {
+            Ok(Found::Nothing) => {
                 self.offer = None;
                 self.status = UpdateStatus::UpToDate;
+                false
+            }
+            Ok(Found::Coming(version)) => {
+                self.offer = None;
+                self.status = UpdateStatus::Coming { version: version.to_string() };
+                // This platform's build follows within the hour.
+                self.next_check = Some(now + RETRY_AFTER_MS);
                 false
             }
             Err(e) => {
@@ -139,7 +149,7 @@ impl Updater {
     pub fn check_due(&self, auto_check: bool, now: i64) -> bool {
         auto_check
             && self.next_check.is_none_or(|t| now >= t)
-            && matches!(self.status, UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Available { .. } | UpdateStatus::Failed(_))
+            && matches!(self.status, UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Coming { .. } | UpdateStatus::Available { .. } | UpdateStatus::Failed(_))
     }
 
     /// Start downloading what the last check found. `None` if nothing is on offer or a download
@@ -254,13 +264,17 @@ pub struct Changes {
 pub fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<Blocker>) -> UpdateView {
     let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, busy: false, progress: None };
     if let Some(blocker) = blocker {
-        return view(blocker.message().into(), None);
+        // One Windows may lift (it refused a write) can be asked again; where Trek is can't.
+        return view(blocker.message(), blocker.may_pass().then_some(UpdateAction::Check));
     }
     match status {
         UpdateStatus::Idle if auto_check => view("Trek checks for updates once a day.".into(), Some(UpdateAction::Check)),
         UpdateStatus::Idle => view("Automatic checks are off.".into(), Some(UpdateAction::Check)),
         UpdateStatus::Checking => UpdateView { busy: true, ..view("Checking for updates…".into(), Some(UpdateAction::Check)) },
         UpdateStatus::UpToDate => view(format!("Trek {} is up to date.", trek_core::VERSION), Some(UpdateAction::Check)),
+        UpdateStatus::Coming { version } => {
+            view(format!("Trek {version} is out; the {} build is on its way. Check again in a while.", crate::words::words().build_name), Some(UpdateAction::Check))
+        }
         UpdateStatus::Available { version } => view(format!("Trek {version} is available."), Some(UpdateAction::Download)),
         UpdateStatus::Downloading { version, progress } => {
             UpdateView { busy: true, progress: Some(*progress), ..view(format!("Downloading Trek {version} · {:.0}%", progress * 100.), None) }
@@ -292,7 +306,7 @@ mod tests {
     /// Checked at `now` on `channel` and found `v`, downloaded and staged.
     fn staged(u: &mut Updater, channel: Channel, v: &str, now: i64) -> PathBuf {
         let t = u.begin_check(channel, now).unwrap();
-        assert!(u.finish_check(t, Ok(Some(release(v))), false, true, now));
+        assert!(u.finish_check(t, Ok(Found::Update(release(v))), false, true, now));
         let job = u.begin_download().unwrap();
         let path = PathBuf::from(format!("/tmp/download-1-{v}.noindex/Trek.app"));
         assert_eq!(u.finish_download(job.ticket, v.into(), Ok(path.clone()), now), None);
@@ -317,8 +331,43 @@ mod tests {
     #[test]
     fn builds_that_cant_replace_themselves_offer_nothing() {
         let dev = describe_update(&UpdateStatus::Idle, true, Some(Blocker::DevBuild));
-        assert_eq!((dev.action, dev.line.as_str()), (None, Blocker::DevBuild.message()));
+        assert_eq!((dev.action, dev.line), (None, Blocker::DevBuild.message()));
         assert_eq!(describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::Translocated)).action, None);
+        assert_eq!(describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::SharedFolder)).action, None);
+    }
+
+    #[test]
+    fn a_blocker_windows_may_lift_can_be_checked_again() {
+        // Ransomware protection judges each program as it runs, and may be turned off: "Check now"
+        // asks again (`blocker_now`).
+        let guarded = Blocker::GuardedFolder(trek_core::update::KnownFolder::Documents);
+        let v = describe_update(&UpdateStatus::UpToDate, true, Some(guarded));
+        assert_eq!((v.line, v.action), (guarded.message(), Some(UpdateAction::Check)));
+        assert!(v.action.is_some_and(|a| a.label() == "Check now"));
+        assert_eq!(describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation)).action, Some(UpdateAction::Check));
+    }
+
+    #[test]
+    fn a_release_without_this_platforms_build_yet_says_so_and_is_checked_again_within_the_hour() {
+        let mut u = Updater::default();
+        let t = u.begin_check(Channel::Beta, 0).unwrap();
+        assert!(!u.finish_check(t, Ok(Found::Coming("0.4.1-beta.2".parse().unwrap())), true, true, 0), "nothing to download");
+        assert_eq!((u.status.clone(), u.offer.is_none()), (UpdateStatus::Coming { version: "0.4.1-beta.2".into() }, true));
+        assert!(!u.check_due(true, HOUR - 1));
+        assert!(u.check_due(true, HOUR), "the build follows within the hour");
+        assert!(u.pending_changes(Channel::Beta, None).is_none(), "no notes for what can't be installed yet");
+        for (windows, line) in [
+            (true, "Trek 0.4.1-beta.2 is out; the Windows build is on its way. Check again in a while."),
+            (false, "Trek 0.4.1-beta.2 is out; the Mac build is on its way. Check again in a while."),
+        ] {
+            let _platform = crate::words::pretend(windows);
+            let v = describe_update(&u.status, true, None);
+            assert_eq!((v.line.as_str(), v.action, v.busy), (line, Some(UpdateAction::Check), false));
+        }
+        // And once it's there, it's offered as usual.
+        let t = u.begin_check(Channel::Beta, HOUR).unwrap();
+        assert!(u.finish_check(t, Ok(Found::Update(release("0.4.1-beta.2"))), false, true, HOUR));
+        assert_eq!(u.status, UpdateStatus::Available { version: "0.4.1-beta.2".into() });
     }
 
     #[test]
@@ -328,7 +377,7 @@ mod tests {
         assert!(!u.check_due(false, 0), "automatic checks off");
         let t = u.begin_check(Channel::Stable, 0).unwrap();
         assert!(u.begin_check(Channel::Stable, 0).is_none(), "one at a time");
-        assert!(!u.finish_check(t, Ok(None), false, true, 0));
+        assert!(!u.finish_check(t, Ok(Found::Nothing),false, true, 0));
         assert_eq!(u.status, UpdateStatus::UpToDate);
         assert!(!u.check_due(true, 23 * HOUR));
         assert!(u.check_due(true, 24 * HOUR));
@@ -347,12 +396,12 @@ mod tests {
     fn offers_not_downloaded_are_checked_again() {
         let mut u = Updater::default();
         let t = u.begin_check(Channel::Beta, 0).unwrap();
-        assert!(!u.finish_check(t, Ok(Some(release("0.3.0-beta.1"))), false, false, 0), "automatic downloads off");
+        assert!(!u.finish_check(t, Ok(Found::Update(release("0.3.0-beta.1"))), false, false, 0), "automatic downloads off");
         assert!(!u.check_due(true, HOUR));
         assert!(u.check_due(true, 24 * HOUR));
         // A newer build replaces the offer.
         let t = u.begin_check(Channel::Beta, 24 * HOUR).unwrap();
-        u.finish_check(t, Ok(Some(release("0.3.0-beta.2"))), false, false, 24 * HOUR);
+        u.finish_check(t, Ok(Found::Update(release("0.3.0-beta.2"))), false, false, 24 * HOUR);
         assert_eq!(u.status, UpdateStatus::Available { version: "0.3.0-beta.2".into() });
         // Offline: the offer stays up.
         let t = u.begin_check(Channel::Beta, 48 * HOUR).unwrap();
@@ -365,7 +414,7 @@ mod tests {
     fn a_download_that_fails_offline_is_retried_and_a_bad_release_waits_a_day() {
         let mut u = Updater::default();
         let t = u.begin_check(Channel::Stable, 0).unwrap();
-        u.finish_check(t, Ok(Some(release("0.2.1"))), false, false, 0);
+        u.finish_check(t, Ok(Found::Update(release("0.2.1"))), false, false, 0);
         let job = u.begin_download().unwrap();
         assert!(u.begin_download().is_none(), "already downloading");
         assert!(u.download_progress(job.ticket, 0.5));
@@ -374,7 +423,7 @@ mod tests {
         assert!(u.check_due(true, HOUR));
 
         let t = u.begin_check(Channel::Stable, HOUR).unwrap();
-        u.finish_check(t, Ok(Some(release("0.2.1"))), false, false, HOUR);
+        u.finish_check(t, Ok(Found::Update(release("0.2.1"))), false, false, HOUR);
         let job = u.begin_download().unwrap();
         u.finish_download(job.ticket, "0.2.1".into(), Err(("the update's signature doesn't match".into(), false)), HOUR);
         assert!(!u.check_due(true, 2 * HOUR));
@@ -399,14 +448,14 @@ mod tests {
         let old = u.begin_check(Channel::Beta, 0).unwrap();
         u.drop_update();
         let new = u.begin_check(Channel::Stable, 0).unwrap();
-        assert!(!u.finish_check(old, Ok(Some(release("0.3.0-beta.1"))), false, true, 0), "the beta isn't downloaded");
+        assert!(!u.finish_check(old, Ok(Found::Update(release("0.3.0-beta.1"))), false, true, 0), "the beta isn't downloaded");
         assert_eq!(u.status, UpdateStatus::Checking);
-        u.finish_check(new, Ok(None), false, true, 0);
+        u.finish_check(new, Ok(Found::Nothing),false, true, 0);
         assert_eq!(u.status, UpdateStatus::UpToDate);
 
         // A download still running: stopped, and its staged copy handed back for deletion.
         let t = u.begin_check(Channel::Beta, 0).unwrap();
-        u.finish_check(t, Ok(Some(release("0.3.0-beta.1"))), false, true, 0);
+        u.finish_check(t, Ok(Found::Update(release("0.3.0-beta.1"))), false, true, 0);
         let job = u.begin_download().unwrap();
         assert_eq!(u.drop_update(), None);
         assert!(job.cancel.load(Ordering::Relaxed));

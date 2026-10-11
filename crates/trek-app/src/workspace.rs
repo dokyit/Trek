@@ -5870,7 +5870,10 @@ impl Workspace {
     /// check the user asked for reports. Never runs while an update is downloading or waiting.
     pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
         // A dev build (or one macOS runs from a read-only copy) can't replace itself: don't ask.
-        if trek_core::update::blocker().is_some() {
+        // The user asking asks Windows again whether Trek may write where it is.
+        let blocked = if user_initiated { trek_core::update::blocker_now() } else { trek_core::update::blocker() };
+        if blocked.is_some() {
+            cx.notify();
             return;
         }
         let Some(ticket) = self.updater.begin_check(self.settings.updates.channel, now_ms()) else { return };
