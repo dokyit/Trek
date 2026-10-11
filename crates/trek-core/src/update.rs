@@ -124,6 +124,17 @@ impl Blocker {
         }
     }
 
+    /// Why Trek can't update itself, without what to do about it: `message`'s first sentence,
+    /// for where Trek offers to do the moving itself (`movable`) and the advice would contradict
+    /// the button.
+    pub fn cause(self) -> String {
+        let message = self.message();
+        match message.find(". ") {
+            Some(end) => message[..=end].to_string(),
+            None => message,
+        }
+    }
+
     /// Decided by whether Windows let Trek write just now, which can change while Trek runs: a
     /// check the user asks for asks again (`blocker_now`). The rest are where Trek is, which
     /// doesn't.
@@ -2364,5 +2375,19 @@ mod tests {
         assert!(env.contains(&("TREK_DATA_DIR".into(), "/tmp/trek-data".into())));
         assert_eq!(env.last(), Some(&("TREK_BACKGROUND".into(), "1".into())));
         assert_eq!(env.iter().filter(|(k, _)| k == "TREK_BACKGROUND").count(), 1);
+    }
+
+    #[test]
+    fn a_blockers_cause_is_its_message_without_the_advice() {
+        // Where Trek offers to move itself, the advice to move the folder by hand would
+        // contradict the button: the cause is the first sentence, and only that.
+        for b in [Blocker::ReadOnlyLocation, Blocker::ProtectedFolder, Blocker::SharedFolder, Blocker::GuardedFolder(KnownFolder::Documents)] {
+            let cause = b.cause();
+            assert!(b.movable() && b.message().starts_with(&cause), "{b:?}: {cause}");
+            assert!(cause.ends_with("can't update itself.") || cause.ends_with("can't update itself there."), "{b:?}: {cause}");
+            assert!(!cause.contains("to get updates") && !cause.contains("Move ") && !cause.contains("Put "), "{b:?}: {cause}");
+        }
+        assert_eq!(Blocker::GuardedFolder(KnownFolder::Desktop).cause(), "Trek is in Desktop, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there.");
+        assert_eq!(Blocker::DevBuild.cause(), "This is a development build.");
     }
 }
