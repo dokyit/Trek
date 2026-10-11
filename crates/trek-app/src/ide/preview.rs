@@ -225,8 +225,8 @@ pub trait WebSurface {
     /// On screen or not: a native view floats over GPUI, so it's hidden whenever its tab isn't
     /// what the window shows (another tab, Agents mode, a menu over it).
     fn set_shown(&self, shown: bool, cx: &mut App);
-    /// The native view, for `shots` to capture.
-    #[cfg(feature = "shots")]
+    /// The native view, for `shots` to capture (WebView2's CapturePreview).
+    #[cfg(all(feature = "shots", windows))]
     fn native(&self) -> Option<Entity<gpui_wry::WebView>> {
         None
     }
@@ -365,7 +365,7 @@ impl PreviewView {
     }
 
     /// Its native web view, for `shots` to capture.
-    #[cfg(feature = "shots")]
+    #[cfg(all(feature = "shots", windows))]
     pub fn web_view(&self) -> Option<Entity<gpui_wry::WebView>> {
         match &self.web {
             Web::Made(web) => web.native(),
@@ -707,16 +707,42 @@ impl WebSurface for FakeWeb {
 /// `http://<scheme>.<host>/`, and answers every request there itself.
 const FILE_SCHEME: &str = "trek-file";
 
-/// The address the view loads: the file's name under the scheme (so the PDF viewer can name it).
+/// The file's address under the scheme: its name (so the PDF viewer can name it), encoded.
 fn file_url(path: &Path) -> String {
-    let name: String = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default()
-        .bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect();
-    format!("{}/{name}", file_origin(cfg!(windows)))
+    format!("{}{}", file_origin(cfg!(windows)), file_path(path))
+}
+
+/// `/<name>`, percent-encoded.
+fn file_path(path: &Path) -> String {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    std::iter::once("/".to_string()).chain(name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })).collect()
+}
+
+/// The page a video or a song plays in: the engine's own player, still until it's played (a
+/// media file loaded on its own would start at once, sound and all), on black.
+fn media_page(path: &Path) -> String {
+    let tag = if is_audio(path) { "audio" } else { "video" };
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body{{margin:0;height:100%;background:#000}}body{{display:flex;align-items:center;justify-content:center}}video{{max-width:100%;max-height:100%}}audio{{width:min(520px,90%)}}</style></head><body><{tag} src=\"{}\" controls preload=\"metadata\"></{tag}></body></html>",
+        file_path(path)
+    )
+}
+
+/// Nothing on the media page runs, or loads from anywhere but the file.
+const MEDIA_CSP: &str = "default-src 'none'; media-src 'self'; style-src 'unsafe-inline'";
+
+/// What the view is answered for `asked` (a request's path): the media page at `/` for a video or
+/// a song, else the file, whatever the path names.
+fn answer(path: &Path, asked: &str, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
+    if asked == "/" && kind_by_name(path) == Some(Kind::Media) {
+        return wry::http::Response::builder()
+            .header("Content-Type", "text/html; charset=utf-8")
+            .header("Content-Security-Policy", MEDIA_CSP)
+            .header("Cache-Control", "no-store")
+            .body(media_page(path).into_bytes())
+            .unwrap_or_default();
+    }
+    serve(path, range)
 }
 
 fn file_origin(windows: bool) -> String {
@@ -776,6 +802,8 @@ fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
     }
 }
 
+const PAUSE_JS: &str = "document.querySelectorAll('video,audio').forEach(function(m){m.pause()})";
+
 /// A native web view made for `path`.
 struct NativeWeb(Entity<gpui_wry::WebView>);
 
@@ -784,17 +812,21 @@ impl WebSurface for NativeWeb {
         self.0.clone().into_any_element()
     }
 
+    /// Told whenever it changes (and once as it's made): `WebView::visible` starts out `true` for
+    /// a view built hidden, so it can't say whether the native view shows.
     fn set_shown(&self, shown: bool, cx: &mut App) {
         self.0.update(cx, |v, _| {
-            if shown && !v.visible() {
+            if shown {
                 v.show();
-            } else if !shown && v.visible() {
+            } else {
+                // A hidden view plays on: a video in a tab behind stops when it's left.
+                let _ = v.evaluate_script(PAUSE_JS);
                 v.hide();
             }
         });
     }
 
-    #[cfg(feature = "shots")]
+    #[cfg(all(feature = "shots", windows))]
     fn native(&self) -> Option<Entity<gpui_wry::WebView>> {
         Some(self.0.clone())
     }
@@ -813,16 +845,20 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
     let builder = wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
     #[cfg(not(windows))]
     let builder = wry::WebViewBuilder::new();
+    // A PDF opens as itself, in the engine's viewer; a video or a song in the page that holds it.
+    let start = if kind_by_name(path) == Some(Kind::Media) { origin.clone() } else { file_url(path) };
     let built = builder
-        .with_url(file_url(path))
+        .with_url(start)
         .with_visible(false)
         .with_devtools(false)
         .with_accept_first_mouse(true)
-        // Every request under the scheme gets this file, whatever it names: nothing else is served.
+        // Every request under the scheme gets this file (or its page), whatever it names: nothing
+        // else is served.
         .with_asynchronous_custom_protocol(FILE_SCHEME.into(), move |_, request, responder| {
             let file = file.clone();
+            let asked = request.uri().path().to_string();
             let range = request.headers().get("range").and_then(|r| r.to_str().ok()).map(str::to_string);
-            std::thread::spawn(move || responder.respond(serve(&file, range.as_deref())));
+            std::thread::spawn(move || responder.respond(answer(&file, &asked, range.as_deref())));
         })
         // The file's own page only: a link in a PDF goes nowhere from here.
         .with_navigation_handler(move |url| url.starts_with(&origin))
@@ -837,7 +873,7 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has a `test` macro of its own.
-    use super::{CHUNK, Kind, cloud_app, file_origin, file_url, kind, kind_label, parse_range, serve, unreadable_words};
+    use super::{CHUNK, Kind, MEDIA_CSP, answer, cloud_app, file_origin, file_url, kind, kind_label, parse_range, serve, unreadable_words};
     use std::path::Path;
 
     #[test]
@@ -940,5 +976,27 @@ mod tests {
         assert_eq!(file_url(Path::new("/x/my clip#1.mp4")), format!("{}/my%20clip%231.mp4", file_origin(cfg!(windows))));
         assert_eq!(file_origin(true), "http://trek-file.preview");
         assert_eq!(file_origin(false), "trek-file://preview");
+    }
+
+    #[test]
+    fn video_and_audio_play_in_a_page_that_waits_to_be_played_and_runs_nothing() {
+        let dir = std::env::temp_dir().join(format!("trek-preview-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (clip, song, pdf) = (dir.join("my clip.mp4"), dir.join("song.mp3"), dir.join("paper.pdf"));
+        for f in [&clip, &song, &pdf] {
+            std::fs::write(f, b"bytes").unwrap();
+        }
+        let page = answer(&clip, "/", None);
+        assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
+        assert_eq!(page.headers()["content-security-policy"], MEDIA_CSP);
+        let html = String::from_utf8(page.body().clone()).unwrap();
+        assert!(html.contains("<video src=\"/my%20clip.mp4\" controls"), "{html}");
+        assert!(!html.contains("autoplay") && !html.contains("<script"), "{html}");
+        assert!(String::from_utf8(answer(&song, "/", None).body().clone()).unwrap().contains("<audio src=\"/song.mp3\" controls"));
+        // The file itself under any other path; a PDF is the file even at `/`.
+        assert_eq!(answer(&clip, "/my%20clip.mp4", None).body(), b"bytes");
+        assert_eq!(answer(&clip, "/../../etc/passwd", None).body(), b"bytes", "only ever the one file");
+        assert_eq!(answer(&pdf, "/", None).headers()["content-type"], "application/pdf");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

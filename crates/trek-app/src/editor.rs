@@ -670,7 +670,7 @@ fn read_text(path: &Path) -> std::io::Result<String> {
     // shows a preview of it instead).
     let mut bytes = vec![];
     (&mut file).take(crate::ide::preview::SNIFF as u64).read_to_end(&mut bytes)?;
-    if crate::ide::preview::is_binary(&bytes) {
+    if crate::ide::preview::kind(path, &bytes) == crate::ide::preview::Kind::Binary {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not text"));
     }
     if meta.len() > MAX_FILE_BYTES {
