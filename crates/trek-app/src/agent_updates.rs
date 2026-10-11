@@ -660,8 +660,14 @@ mod tests {
         let row = mock_admin_row();
         assert_eq!(detail(&row, None, None, false), ("Via Chocolatey · Windows will ask to allow it".to_string(), false));
         assert_eq!(detail(&row, Some(&Job::Running), None, false).0, "Running choco upgrade droid -y as an administrator");
-        let failed = Job::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() };
-        assert_eq!(detail(&row, Some(&failed), None, false), ("Windows didn't allow it (you cancelled the prompt).".to_string(), true));
+        // A prompt turned down and one nobody answered are each said as they are, on the row.
+        for (summary, said) in [
+            (trek_core::agent_update::DECLINED, "Windows didn't allow it (the prompt was cancelled)."),
+            (trek_core::agent_update::UNANSWERED, "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer."),
+        ] {
+            let failed = Job::Failed { summary: summary.into(), output: String::new() };
+            assert_eq!(detail(&row, Some(&failed), None, false), (said.to_string(), true));
+        }
         // The others read as before.
         let codex = &mock_versions()[0];
         assert_eq!(detail(codex, None, None, false), ("Via npm".to_string(), false));

@@ -191,11 +191,11 @@ fn a_declined_prompt_is_said_in_words_and_can_be_retried() {
             for v in u.found.iter_mut().filter(|v| v.id == "opencode") {
                 v.command = v.command.take().map(|c| c.as_admin());
             }
-            u.runner = Runner::Fake(Arc::new(|_: &AgentVersion| Outcome::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() }));
+            u.runner = Runner::Fake(Arc::new(|_: &AgentVersion| Outcome::Failed { summary: trek_core::agent_update::DECLINED.into(), output: String::new() }));
             ws.update_agent("opencode", cx);
         });
         trek.wait(cx, "OpenCode's update to fail", |ws| matches!(ws.agent_updates.job("opencode"), Some(Job::Failed { .. }))).await;
-        assert_eq!(job(&trek, cx, "opencode"), Some(Job::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() }));
+        assert_eq!(job(&trek, cx, "opencode"), Some(Job::Failed { summary: "Windows didn't allow it (the prompt was cancelled).".into(), output: String::new() }));
         trek.click(cx, "agent-updates");
         trek.render(cx);
         assert!(trek.visible(cx, "agent-update-opencode"), "Retry");
