@@ -41,6 +41,11 @@ pub enum UpdateAction {
     Restart,
     /// A restart waiting on agents: go now, stopping them.
     RestartNow,
+    /// Windows: Trek is where it can't update itself (a folder ransomware protection guards, say):
+    /// copy itself to the user's programs folder and start from there (`trek_core::update::relocate`).
+    Move,
+    /// A move waiting on agents: go now, stopping them.
+    MoveNow,
 }
 
 impl UpdateAction {
@@ -50,7 +55,15 @@ impl UpdateAction {
             UpdateAction::Download => "Download",
             UpdateAction::Restart => "Restart to update",
             UpdateAction::RestartNow => "Restart now",
+            UpdateAction::Move => "Move Trek to its own folder",
+            UpdateAction::MoveNow => "Move now",
         }
+    }
+
+    /// The step that gets Trek going again (an update, or out of a place it can't update in), not
+    /// one that only looks.
+    pub fn is_primary(self) -> bool {
+        matches!(self, UpdateAction::Restart | UpdateAction::Move)
     }
 }
 
@@ -264,6 +277,10 @@ pub struct Changes {
 pub fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<Blocker>) -> UpdateView {
     let view = |line: String, action: Option<UpdateAction>| UpdateView { line, action, busy: false, progress: None };
     if let Some(blocker) = blocker {
+        // Windows: Trek can move itself out of where it is, in one click.
+        if crate::words::is_windows() && blocker.movable() {
+            return view(format!("{} {}", blocker.message(), trek_core::update::relocate::moves_line()), Some(UpdateAction::Move));
+        }
         // One Windows may lift (it refused a write) can be asked again; where Trek is can't.
         return view(blocker.message(), blocker.may_pass().then_some(UpdateAction::Check));
     }
@@ -330,6 +347,8 @@ mod tests {
 
     #[test]
     fn builds_that_cant_replace_themselves_offer_nothing() {
+        // (Windows offers a move out of a shared folder: `trek_can_move_itself_out_of_where_it_cant_update`.)
+        let _platform = crate::words::pretend(false);
         let dev = describe_update(&UpdateStatus::Idle, true, Some(Blocker::DevBuild));
         assert_eq!((dev.action, dev.line), (None, Blocker::DevBuild.message()));
         assert_eq!(describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::Translocated)).action, None);
@@ -339,12 +358,43 @@ mod tests {
     #[test]
     fn a_blocker_windows_may_lift_can_be_checked_again() {
         // Ransomware protection judges each program as it runs, and may be turned off: "Check now"
-        // asks again (`blocker_now`).
+        // asks again (`blocker_now`). (Windows offers the move instead: `trek_can_move_itself_out_of_where_it_cant_update`.)
+        let _platform = crate::words::pretend(false);
         let guarded = Blocker::GuardedFolder(trek_core::update::KnownFolder::Documents);
         let v = describe_update(&UpdateStatus::UpToDate, true, Some(guarded));
         assert_eq!((v.line, v.action), (guarded.message(), Some(UpdateAction::Check)));
         assert!(v.action.is_some_and(|a| a.label() == "Check now"));
         assert_eq!(describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation)).action, Some(UpdateAction::Check));
+    }
+
+    #[test]
+    fn trek_can_move_itself_out_of_where_it_cant_update() {
+        use trek_core::update::KnownFolder;
+        let _platform = crate::words::pretend(true);
+        let moves = trek_core::update::relocate::moves_line();
+        assert!(moves.starts_with("Trek will move itself to ") && moves.ends_with(" and start from there."), "{moves}");
+        assert!(moves.contains("Programs") && moves.contains("Trek"), "{moves}");
+        for blocker in [Blocker::GuardedFolder(KnownFolder::Documents), Blocker::ReadOnlyLocation, Blocker::SharedFolder, Blocker::ProtectedFolder] {
+            for status in [UpdateStatus::Idle, UpdateStatus::UpToDate, UpdateStatus::Failed("Couldn't check for updates: offline".into())] {
+                let v = describe_update(&status, true, Some(blocker));
+                assert_eq!(v.action, Some(UpdateAction::Move), "{blocker:?} in {status:?}");
+                assert_eq!(v.line, format!("{} {moves}", blocker.message()), "the blocker's message, then where Trek goes");
+                assert!(!v.busy && v.progress.is_none());
+            }
+        }
+        assert_eq!(UpdateAction::Move.label(), "Move Trek to its own folder");
+        assert!(UpdateAction::Move.is_primary() && UpdateAction::Restart.is_primary() && !UpdateAction::MoveNow.is_primary() && !UpdateAction::Check.is_primary());
+        // Not for what moving doesn't help: a build run from a checkout, a link to the folder.
+        for blocker in [Blocker::DevBuild, Blocker::LinkedFolder, Blocker::Translocated] {
+            let v = describe_update(&UpdateStatus::Idle, true, Some(blocker));
+            assert_eq!((v.action, v.line), (None, blocker.message()), "{blocker:?}");
+        }
+        // And not on a Mac, whatever the blocker: its own words and actions are unchanged.
+        drop(_platform);
+        let _mac = crate::words::pretend(false);
+        let v = describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation));
+        assert_eq!((v.action, v.line), (Some(UpdateAction::Check), Blocker::ReadOnlyLocation.message()));
+        assert_eq!(describe_update(&UpdateStatus::Idle, true, Some(Blocker::SharedFolder)).action, None);
     }
 
     #[test]

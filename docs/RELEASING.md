@@ -261,6 +261,19 @@ The steps above, with these differences:
   (this, or a folder Trek can't write to) is asked again on **Check now**: Defender judges each program
   as it runs, and the user may turn it off. If the helper is still turned away (access denied bringing
   the update next to the install), its toast says the same.
+- **Moving out in one click**: for ransomware protection, Program Files, a folder holding more than
+  Trek's files and a folder Trek can't write to, Settings → Updates offers **Move Trek to its own
+  folder** (and so does the launch toast, from a guarded folder, and the toast for an update that
+  ransomware protection turned away). Reading is never refused, only writing, so Trek copies
+  `trek.exe`, `trek-mcp.exe` and `trek-update.exe` to `%LOCALAPPDATA%\Programs\Trek` (an own folder
+  of Trek's with nothing running from it is replaced; otherwise `Trek-2`, …), checks each copy's size
+  and SHA-256 against the original, writes `relocated-from` (the old and the new folder) in the
+  updates folder and starts the copy's `trek-update.exe --relaunch`, which waits for Trek to exit
+  and starts the copy; then Trek quits, after agents finish their turns as for "Restart to update".
+  The copy says where it runs and, on **Remove old copy**, deletes the old folder (only Trek's files
+  from one that holds more); if Windows refuses it says so, the one thing left to the user. Nothing
+  in the old folder is written or changed before that. `TREK_RELOCATE_TO=<folder>` sends the copy
+  elsewhere (testing), `TREK_RELOCATE_KEEP=TREK_SHOT_DIR,…` lets named `TREK_*` variables follow it.
 - **A release without this platform's build**: the manifest lists each platform's build as it's
   published, the Mac's first. A newer version with no `windows-x86_64` entry yet shows "Trek <version> is
   out; the Windows build is on its way. Check again in a while." and is checked again within the hour.
