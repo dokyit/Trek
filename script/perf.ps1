@@ -275,10 +275,13 @@ function Invoke-Stress($Bin) {
             $minute++
             # Now and then a look round, as someone would: Basecamp, the long thread, and one of
             # the streaming threads (titled by its prompt), timed as it streams.
-            Send-Batch $t @('route basecamp', 'wait 1000', 'route title:Long transcript', 'wait 1000', 'route title:mock:stream', 'wait 500', "perf frames 3000 stream-$minute") 120
-            $f = Wait-Perf $t 'frames' 10 { $_.label -eq "stream-$minute" }
+            # A stream that has finished is retitled: then there's no streaming thread to look at.
             $s = & $sample
-            $s | Add-Member -NotePropertyMembers @{ FrameP95 = [double]$f.frame_p95; FrameMax = [double]$f.frame_max; Frames = [int]$f.frames; LagP95 = [double]$f.lag_p95; LagMax = [double]$f.lag_max }
+            try {
+                Send-Batch $t @('route basecamp', 'wait 1000', 'route title:Long transcript', 'wait 1000', 'route title:mock:stream', 'wait 500', "perf frames 3000 stream-$minute") 120
+                $f = Wait-Perf $t 'frames' 10 { $_.label -eq "stream-$minute" }
+                $s | Add-Member -NotePropertyMembers @{ FrameP95 = [double]$f.frame_p95; FrameMax = [double]$f.frame_max; Frames = [int]$f.frames; LagP95 = [double]$f.lag_p95; LagMax = [double]$f.lag_max }
+            } catch { Say "  (no streaming thread to look at: $_)" }
             Say "  $s"
         }
         Send-Batch $t @('wait idle 300000', 'perf frames 3000 stress-end') 400
@@ -287,7 +290,8 @@ function Invoke-Stress($Bin) {
         $exit = Stop-Trek $t
         $leaks = Select-String -Path "$($t.Data)\logs\*.log" -Pattern 'leaked|panic' -SimpleMatch -ErrorAction SilentlyContinue
         Say "  quit: exit $exit; $(@($leaks).Count) leak/panic lines in the log"
-        $samples | Export-Csv -NoTypeInformation "$Out\stress.csv"
+        # Every column, though the first sample (before any streaming) has no frame times.
+        $samples | Select-Object Minute, WorkingSetMB, PrivateMB, Handles, Threads, Frames, FrameP95, FrameMax, LagP95, LagMax | Export-Csv -NoTypeInformation "$Out\stress.csv"
         [pscustomobject]@{ Exit = $exit; LeakLines = @($leaks).Count; First = $samples[0]; Last = $samples[-1]; Peak = ($samples | Sort-Object WorkingSetMB | Select-Object -Last 1) } | ConvertTo-Json | Set-Content "$Out\stress.json"
     }
 }
