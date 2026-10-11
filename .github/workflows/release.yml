@@ -124,13 +124,16 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      # Before a long build, the token must be able to push what release.sh pushes. --dry-run
+      # Before a long build, the token must be able to push what release.sh pushes, and gh must
+      # take it (release.sh's own `gh auth status` runs only for a real release). --dry-run
       # authenticates against the push endpoint and sends nothing (its "[new tag]" line is what
       # it would have done).
-      - name: Push access
+      - name: GitHub access
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHANNEL: ${{ inputs.channel }}
         run: |
+          gh auth status
           git push --dry-run origin "HEAD:refs/tags/trek-push-probe-$GITHUB_RUN_ID"
           if [[ $CHANNEL == stable ]]; then git push --dry-run origin HEAD; fi
 
@@ -163,15 +166,11 @@ jobs:
           keychain="$RUNNER_TEMP/trek-signing.keychain-db"
           keychain_password=$(openssl rand -hex 24)
           echo "::add-mask::$keychain_password"
-          if [[ -n ${P12_BASE64//[[:space:]]/} ]]; then
-            if [[ -z $P12_PASSWORD ]]; then
-              echo "::error::TREK_CODESIGN_P12 is set but TREK_CODESIGN_P12_PASSWORD isn't (docs/RELEASING.md)"
+          if [[ -z ${P12_BASE64//[[:space:]]/} ]]; then
+            if [[ $DRY_RUN != true ]]; then
+              echo "::error::the TREK_CODESIGN_P12 secret is not set; a release is signed with the real \"Trek Local Signing\" (docs/RELEASING.md)"
               exit 1
             fi
-            p12="$RUNNER_TEMP/codesign.p12"
-            printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
-            p12_password=$P12_PASSWORD
-          elif [[ $DRY_RUN == true ]]; then
             echo "• no TREK_CODESIGN_P12 secret: this dry run signs with a throwaway \"Trek Local Signing\""
             dir="$RUNNER_TEMP/throwaway-signing"
             scratch="$RUNNER_TEMP/throwaway.keychain-db"
@@ -180,20 +179,27 @@ jobs:
             TREK_SIGNING_DIR=$dir TREK_SIGNING_KEYCHAIN=$scratch script/signing-identity.sh
             # Gone before the real keychain exists: two identities of one name would be ambiguous.
             security delete-keychain "$scratch"
-            p12="$dir/codesign.p12"
-            p12_password=$(cat "$dir/codesign.p12.password")
-            echo "::add-mask::$p12_password"
-          else
-            echo "::error::the TREK_CODESIGN_P12 secret is not set; a release is signed with the real \"Trek Local Signing\" (docs/RELEASING.md)"
+            # Handed on as the two secrets would be, so the decode and import below are the
+            # ones a real release runs.
+            P12_BASE64=$(base64 < "$dir/codesign.p12")
+            P12_PASSWORD=$(cat "$dir/codesign.p12.password")
+            echo "::add-mask::$P12_PASSWORD"
+            rm -rf "$dir"
+          fi
+          # A password file pasted into `gh secret set` may carry its line ending.
+          p12_password=$(printf '%s' "$P12_PASSWORD" | tr -d '\r\n')
+          if [[ -z $p12_password ]]; then
+            echo "::error::TREK_CODESIGN_P12 is set but TREK_CODESIGN_P12_PASSWORD isn't (docs/RELEASING.md)"
             exit 1
           fi
+          p12="$RUNNER_TEMP/codesign.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$p12" -k "$keychain" -f pkcs12 -P "$p12_password" -T /usr/bin/codesign >/dev/null
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
-          rm -f "$RUNNER_TEMP/codesign.p12"
-          rm -rf "$RUNNER_TEMP/throwaway-signing"
+          rm -f "$p12"
           searched=()
           while IFS= read -r k; do searched+=("$k"); done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
           security list-keychains -d user -s "$keychain" "${searched[@]}"
@@ -252,7 +258,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mac-manifest
-          path: dist/release/${{ inputs.version }}/${{ inputs.channel }}.json
+          # Any version directory: release.sh takes a leading "v" off the version, the input may not.
+          path: dist/release/*/${{ inputs.channel }}.json
           retention-days: 1
           if-no-files-found: error
 
