@@ -150,7 +150,11 @@ impl Harness {
     /// The installer line that is how a Windows install of `binary` updates, when the CLI's own
     /// `update` doesn't: Devin's `irm … | iex` install marks itself (`distribution`, beside its
     /// `bin` folder), and its `devin update` only says to run that line again, then exits 0.
-    /// That installer ends by starting Devin's interactive setup wizard (sign-in, MCP servers).
+    /// That installer ends by starting Devin's interactive setup wizard (sign-in, MCP servers),
+    /// which Trek leaves out (`unattended`).
+    ///
+    /// The other Windows installers Trek runs end without asking anything (Factory's prints "Run
+    /// 'droid' to get started!"; Cursor's, Claude Code's and Grok's CLIs update themselves).
     fn installer_only(&self, binary: &Path) -> Option<&'static str> {
         if !cfg!(windows) || self.agent != "acp:devin" {
             return None;
@@ -683,10 +687,20 @@ pub struct UpdateCommand {
     /// PowerShell (`irm https://… | iex`) and does more than it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    /// Why Trek leaves this one to the user (an upgrade that needs an administrator's terminal,
-    /// or one only the vendor's installer does, wizard and all): it's shown, never run
-    /// (`instruction`).
+    /// Run as an administrator (`run_elevated`): the package manager of an install that's the
+    /// machine's (Chocolatey's, a global Scoop's, a machine-wide WinGet package's) upgrades only
+    /// elevated. Windows asks the user to allow it. Never on macOS.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub elevated: bool,
+    /// The vendor's install script, fetched from this URL when the update runs and run unattended
+    /// (`unattended`): Devin's `irm … | iex`, which ends by starting its setup wizard. The script's
+    /// file is the command's last argument, written as it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer: Option<String>,
+    /// An older Trek's: why it left this command to the user to run. Read only so that
+    /// `Snapshot::load` can drop such a command (this Trek runs it another way, as an
+    /// administrator); never written.
+    #[serde(default, skip_serializing)]
     pub manual: Option<String>,
 }
 
@@ -726,23 +740,38 @@ fn powershell() -> PathBuf {
 
 impl UpdateCommand {
     pub fn new(program: impl Into<PathBuf>, args: &[&str]) -> Self {
-        Self { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), path: vec![], env: vec![], on_exit: vec![], display: None, manual: None }
+        Self {
+            program: program.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            path: vec![],
+            env: vec![],
+            on_exit: vec![],
+            display: None,
+            elevated: false,
+            installer: None,
+            manual: None,
+        }
     }
 
-    /// This command, left to the user for `why`.
-    pub fn left_to_the_user(self, why: impl Into<String>) -> Self {
-        Self { manual: Some(why.into()), ..self }
-    }
-
-    /// What to tell the user of a command Trek doesn't run: why, and the line to run themselves.
-    pub fn instruction(&self) -> Option<String> {
-        self.manual.as_ref().map(|why| format!("{why} Run: {}", self.shown()))
+    /// This command, run as an administrator.
+    pub fn as_admin(self) -> Self {
+        Self { elevated: true, ..self }
     }
 
     /// `script` run by PowerShell, which is how a Windows installer line (`irm … | iex`) and the
     /// package move run where there's no `/bin/sh`. Shown as `shown`.
     pub fn powershell(script: &str, shown: &str) -> Self {
         Self { display: Some(shown.to_string()), ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]) }
+    }
+
+    /// The vendor's install script at `url`, fetched when the update runs and run unattended by
+    /// PowerShell (`installer`). Shown as `shown`, the line the vendor documents.
+    pub fn installer(url: &str, shown: &str) -> Self {
+        Self {
+            display: Some(shown.to_string()),
+            installer: Some(url.to_string()),
+            ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        }
     }
 
     /// The PATH it runs with.
@@ -847,36 +876,47 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
             Some(cmd) => Some(cmd),
             None => Some(UpdateCommand::new(prefix.join("bin/brew"), &["upgrade", "--cask", cask])),
         },
-        // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update themselves.
+        // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update
+        // themselves. One installed for every user (Program Files) upgrades as an administrator.
         Install::Winget { id } => {
-            let upgrade = UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements"]);
-            Some(if needs_admin(binary) {
-                upgrade.left_to_the_user(format!("{} is installed for every user, which WinGet upgrades only from an administrator terminal.", h.name()))
-            } else {
-                UpdateCommand { on_exit: winget_exits(h, native_install(h).as_deref()), ..upgrade }
-            })
+            let upgrade = UpdateCommand { on_exit: winget_exits(h, native_install(h).as_deref()), ..UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements"]) };
+            Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
         }
-        Install::Scoop { app } if needs_admin(binary) => Some(
-            UpdateCommand::new("scoop", &["update", app, "-g"]).left_to_the_user(format!("{} is installed by Scoop for every user, which Scoop updates only from an administrator terminal.", h.name())),
-        ),
+        // A Scoop for every user (ProgramData) updates its apps as an administrator.
+        Install::Scoop { app } if needs_admin(binary) => Some(UpdateCommand::new("scoop", &["update", app, "-g"]).as_admin()),
         Install::Scoop { app } => Some(UpdateCommand::new("scoop", &["update", app])),
-        // Chocolatey installs into ProgramData: upgrading needs an administrator's terminal,
-        // which Trek (a program with no console, never elevated) isn't.
-        Install::Chocolatey { package } => Some(
-            UpdateCommand::new("choco", &["upgrade", package, "-y"]).left_to_the_user(format!("{} is installed with Chocolatey, which upgrades only from an administrator terminal.", h.name())),
-        ),
+        // Chocolatey installs into ProgramData, and upgrades from there as an administrator.
+        Install::Chocolatey { package } => {
+            let upgrade = UpdateCommand::new("choco", &["upgrade", package, "-y"]);
+            Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
+        }
         Install::Native => match h.installer_only(binary) {
-            Some(line) => Some(UpdateCommand::powershell(line, line).left_to_the_user(format!(
-                "{} doesn't update itself on Windows: `{} update` only points to its installer, which also starts {}'s setup wizard, so Trek leaves it to you.",
-                h.name(),
-                h.binary,
-                h.name()
-            ))),
+            // The vendor's installer, the way `irm … | iex` runs it, without the setup wizard it ends in.
+            Some(line) => installer_url(line).map(|url| UpdateCommand::installer(url, line)),
             None => own().or_else(|| {
                 h.installer_line().map(|line| if cfg!(windows) { UpdateCommand::powershell(line, line) } else { UpdateCommand::new("/bin/sh", &["-c", line]) })
             }),
         },
     }
+}
+
+/// The URL of an `irm <url> | iex` line (quoted or not).
+fn installer_url(line: &str) -> Option<&str> {
+    let url = line.strip_prefix("irm ")?.split(" | ").next()?.trim().trim_matches(['\'', '"']);
+    url.starts_with("https://").then_some(url)
+}
+
+/// A vendor's install script without what makes it interactive, so Trek can run it with no one
+/// to answer: Devin's installs, then ends with `& $EntryExe setup`, its setup wizard (sign-in, MCP
+/// servers). Everything before that line is unattended, and stays (the PATH it adds to is the
+/// user's, harmless). `None` when the script doesn't end that way: its vendor changed it, and
+/// what it does last is unknown (`run_installer` runs it as it is, and watches).
+pub fn unattended(script: &str) -> Option<String> {
+    let body = script.trim_end();
+    let (rest, last) = body.rsplit_once('\n').unwrap_or(("", body));
+    let words: Vec<&str> = last.split_whitespace().collect();
+    let setup = matches!(words.as_slice(), ["&", exe, verb] if exe.eq_ignore_ascii_case("$EntryExe") && verb.eq_ignore_ascii_case("setup"));
+    setup.then(|| format!("{}\n", rest.trim_end()))
 }
 
 /// `path` is in a folder only an administrator can write to: Program Files, or ProgramData
@@ -982,6 +1022,12 @@ impl Snapshot {
             }
         }
         snap.agents.retain(|v| !v.id.is_empty());
+        // Commands an older Trek left to the user: this one runs them, as an administrator or
+        // unattended, and the next check works out how. Until then there's none to run (nor to
+        // carry over to a check that can't reach the feed).
+        for v in snap.agents.iter_mut().filter(|v| v.command.as_ref().is_some_and(|c| c.manual.is_some())) {
+            v.command = None;
+        }
         snap
     }
 
@@ -1134,32 +1180,51 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
 /// `run_update`, waiting for a version that hasn't changed yet `settle` (polls, and the time
 /// between them).
 async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outcome {
-    let Some(cmd) = &v.command else {
-        return Outcome::Failed { summary: format!("Trek doesn't know how to update {}.", v.name), output: String::new() };
-    };
-    // Not Trek's to run: the user is told what to run, where (the card normally has no button
-    // for it; this is the same answer should an update be asked for anyway).
-    if let Some(instruction) = cmd.instruction() {
-        return Outcome::Failed { summary: instruction, output: String::new() };
+    let Some(cmd) = &v.command else { return no_command(v) };
+    if cmd.elevated {
+        let mut outcomes = run_elevated_with(std::slice::from_ref(v), settle, crate::elevated::run_as_admin).await;
+        return outcomes.pop().unwrap_or_else(|| no_command(v));
     }
     let path = cmd.search_path();
-    let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else {
-        return Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() };
+    let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else { return not_installed(cmd) };
+    let ran = match &cmd.installer {
+        Some(url) => run_installer(v, cmd, &program, &path, url).await,
+        None => run_command(cmd, &program, &path).await,
     };
-    let mut run = crate::procs::async_command(&program);
-    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").stdin(std::process::Stdio::null()).kill_on_drop(true);
-    let run = run.output();
-    let out = match tokio::time::timeout(UPDATE_TIMEOUT, run).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() },
-        Err(_) => return Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output: String::new() },
-    };
-    let output = all_output(&out.stdout, &out.stderr);
-    if !out.status.success() {
-        if let Some((_, said)) = out.status.code().and_then(|c| cmd.on_exit.iter().find(|(e, _)| *e == c)) {
+    match ran {
+        Ok((code, output)) => conclude(v, cmd, code, output, settle).await,
+        Err(failed) => failed,
+    }
+}
+
+fn no_command(v: &AgentVersion) -> Outcome {
+    Outcome::Failed { summary: format!("Trek doesn't know how to update {}.", v.name), output: String::new() }
+}
+
+fn not_installed(cmd: &UpdateCommand) -> Outcome {
+    Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() }
+}
+
+/// `program` (`cmd`'s, found on `path`) run with `cmd`'s arguments and environment: its exit code
+/// and all it printed.
+async fn run_command(cmd: &UpdateCommand, program: &Path, path: &str) -> Result<(Option<i32>, String), Outcome> {
+    let mut run = crate::procs::async_command(program);
+    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").kill_on_drop(true);
+    run_command_line(cmd, run).await
+}
+
+fn timed_out(cmd: &UpdateCommand) -> Outcome {
+    Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output: String::new() }
+}
+
+/// What an update command that ran came to: its exit code said in words when it failed, or else
+/// the version installed now.
+async fn conclude(v: &AgentVersion, cmd: &UpdateCommand, code: Option<i32>, output: String, settle: (u32, Duration)) -> Outcome {
+    if code != Some(0) {
+        if let Some((_, said)) = code.and_then(|c| cmd.on_exit.iter().find(|(e, _)| *e == c)) {
             return Outcome::Failed { summary: said.clone(), output };
         }
-        let code = out.status.code().map_or("a signal".to_string(), code_words);
+        let code = code.map_or("a signal".to_string(), code_words);
         return Outcome::Failed { summary: format!("{} stopped with {code}.", cmd.shown()), output };
     }
     let Some(h) = harness(&v.id) else { return verify(v, None, output) };
@@ -1187,6 +1252,223 @@ async fn settled_version(v: &AgentVersion, h: &Harness, binary: &Path, polls: u3
         now = installed_version(h, binary).await;
     }
     now
+}
+
+/// A folder of its own for one run's files (a script, its output), under Trek's data folder.
+fn scratch_dir(kind: &str) -> std::io::Result<PathBuf> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let dir = crate::paths::data_dir().join("tmp").join(format!("{kind}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+async fn fetch_text(url: &str) -> Result<String, String> {
+    match client().get(url).send().await {
+        Ok(r) if r.status().is_success() => r.text().await.map_err(|e| format!("couldn't read {url}: {e}")),
+        Ok(r) => Err(format!("{url} answered {}", r.status())),
+        Err(e) if e.is_connect() || e.is_timeout() => Err(format!("{url} didn't answer (offline?)")),
+        Err(e) => Err(format!("couldn't reach {url}: {e}")),
+    }
+}
+
+/// What Trek adds to an installer's output when it ended the installer itself.
+fn ended_note(v: &AgentVersion, version: &str) -> String {
+    format!("Trek ended the installer once {} {version} was in place: the installer no longer ends the way Trek knows, and may have gone on to ask for something.", v.name)
+}
+
+/// The vendor's install script from `url`, run unattended: fetched now, its interactive end
+/// (Devin's setup wizard) cut off (`unattended`), written to a file of its own and run by
+/// PowerShell (`program`, with `cmd`'s arguments, the file last) with nothing on its stdin. A
+/// script that no longer ends the way Trek knows is run as it is, and ended once the CLI it
+/// installs is in place at its new version and running (`watch_installer`): a wizard it starts
+/// can't sit there waiting.
+async fn run_installer(v: &AgentVersion, cmd: &UpdateCommand, program: &Path, path: &str, url: &str) -> Result<(Option<i32>, String), Outcome> {
+    let failed = |summary: String| Outcome::Failed { summary, output: String::new() };
+    let text = fetch_text(url).await.map_err(|e| failed(format!("Couldn't download {}'s installer: {e}.", v.name)))?;
+    let (script, trimmed) = match unattended(&text) {
+        Some(script) => (script, true),
+        None => (text, false),
+    };
+    let dir = scratch_dir("installer").map_err(|e| failed(format!("Couldn't save {}'s installer: {e}", v.name)))?;
+    let file = dir.join("install.ps1");
+    // With a byte-order mark: Windows PowerShell reads a file without one in the ANSI code page.
+    if let Err(e) = std::fs::write(&file, [b"\xEF\xBB\xBF".as_slice(), script.as_bytes()].concat()) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(failed(format!("Couldn't save {}'s installer: {e}", v.name)));
+    }
+    let mut run = crate::procs::async_command(program);
+    run.args(&cmd.args).arg(&file).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").kill_on_drop(true);
+    let ran = if trimmed {
+        run_command_line(cmd, run).await
+    } else {
+        let binary = v.binary.clone();
+        let h = harness(&v.id);
+        watch_installer(v, cmd, run, UPDATE_TIMEOUT, Duration::from_secs(2), move |pid| {
+            let binary = binary.clone();
+            async move {
+                // Only once the installer runs the CLI itself (its copying is done): asking its
+                // version while the file is being replaced could make the copy fail.
+                match h.filter(|_| crate::procs::runs_under(pid, &binary)) {
+                    Some(h) => installed_version(h, &binary).await,
+                    None => None,
+                }
+            }
+        })
+        .await
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    ran
+}
+
+/// `run`, set up for `cmd`, run with nothing on its stdin: its exit code and all it printed.
+async fn run_command_line(cmd: &UpdateCommand, mut run: tokio::process::Command) -> Result<(Option<i32>, String), Outcome> {
+    run.stdin(std::process::Stdio::null());
+    match tokio::time::timeout(UPDATE_TIMEOUT, run.output()).await {
+        Ok(Ok(out)) => Ok((out.status.code(), all_output(&out.stdout, &out.stderr))),
+        Ok(Err(e)) => Err(Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() }),
+        Err(_) => Err(timed_out(cmd)),
+    }
+}
+
+/// Run an installer whose end is unknown, asking `arrived` every `every` (given the installer's
+/// process id) for the version now in place. Once that's what the update is for, the installer
+/// and all it started are ended, and it counts as done (exit 0), with that said in its output.
+async fn watch_installer<F, Fut>(v: &AgentVersion, cmd: &UpdateCommand, mut run: tokio::process::Command, limit: Duration, every: Duration, mut arrived: F) -> Result<(Option<i32>, String), Outcome>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    use tokio::io::AsyncReadExt as _;
+    run.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = run.spawn().map_err(|e| Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() })?;
+    let pid = child.id().unwrap_or_default();
+    fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) -> tokio::task::JoinHandle<Vec<u8>> {
+        tokio::spawn(async move {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out).await;
+            }
+            out
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut ended = None;
+    let code = loop {
+        tokio::select! {
+            status = child.wait() => break status.ok().and_then(|s| s.code()),
+            _ = tokio::time::sleep(every) => {
+                if tokio::time::Instant::now() >= deadline {
+                    end_installer(&mut child, pid).await;
+                    return Err(timed_out(cmd));
+                }
+                if let Some(now) = arrived(pid).await.filter(|now| v.installed.as_ref() != Some(now) && v.latest.as_ref().is_none_or(|l| !is_newer(l, now))) {
+                    end_installer(&mut child, pid).await;
+                    ended = Some(now);
+                    break Some(0);
+                }
+            }
+        }
+    };
+    // What it started may hold its output open: once it's ended, what was read is what there is.
+    let read = |task: tokio::task::JoinHandle<Vec<u8>>| async move { tokio::time::timeout(Duration::from_secs(5), task).await.ok().and_then(Result::ok).unwrap_or_default() };
+    let (out, err) = (read(stdout).await, read(stderr).await);
+    let mut output = all_output(&out, &err);
+    if let Some(now) = ended {
+        output = [output, ended_note(v, &now)].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n");
+    }
+    Ok((code, output))
+}
+
+/// End the installer with the process id `pid` and everything it started.
+async fn end_installer(child: &mut tokio::process::Child, pid: u32) {
+    #[cfg(windows)]
+    {
+        crate::procs::register(pid as i32);
+        crate::procs::end_tree(pid as i32);
+        crate::procs::unregister(pid as i32);
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+/// Run the updates of `vs` that are run as an administrator (`UpdateCommand::elevated`), together:
+/// one script, so Windows asks once. Each is then told apart (its own output and exit code) and
+/// verified as `run_update` verifies. The outcomes are in `vs`' order.
+pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
+    run_elevated_with(vs, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }, crate::elevated::run_as_admin).await
+}
+
+/// `run_elevated`, the script started by `launch`.
+async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch: crate::elevated::Launch) -> Vec<Outcome> {
+    use crate::elevated::{Failure, Step, code_file, output_file};
+    let mut outcomes: Vec<Option<Outcome>> = vec![None; vs.len()];
+    // Each step's row; rows whose program isn't there are answered without running anything.
+    let mut steps = vec![];
+    let mut rows = vec![];
+    for (i, v) in vs.iter().enumerate() {
+        let Some(cmd) = &v.command else {
+            outcomes[i] = Some(no_command(v));
+            continue;
+        };
+        let path = cmd.search_path();
+        let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else {
+            outcomes[i] = Some(not_installed(cmd));
+            continue;
+        };
+        steps.push(Step { program, args: cmd.args.clone(), env: cmd.env.clone(), path });
+        rows.push(i);
+    }
+    if !steps.is_empty() {
+        let fail_all = |outcomes: &mut Vec<Option<Outcome>>, summary: &dyn Fn(&UpdateCommand) -> String| {
+            for &i in &rows {
+                let cmd = vs[i].command.as_ref().expect("a row with a step has a command");
+                outcomes[i] = Some(Outcome::Failed { summary: summary(cmd), output: String::new() });
+            }
+        };
+        match scratch_dir("elevated") {
+            Err(e) => fail_all(&mut outcomes, &|c| format!("Couldn't write the script that runs {} as an administrator: {e}", c.shown())),
+            Ok(dir) => {
+                let file = dir.join("run.cmd");
+                let written = crate::elevated::script(&dir, &steps).and_then(|text| std::fs::write(&file, text).map_err(|e| e.to_string()));
+                let ran = match written {
+                    Err(why) => Err(Failure::Other(format!("Trek couldn't write the script for it: {why}"))),
+                    Ok(()) => {
+                        let script = file.clone();
+                        tokio::task::spawn_blocking(move || launch(&script, UPDATE_TIMEOUT)).await.unwrap_or_else(|e| Err(Failure::Other(e.to_string())))
+                    }
+                };
+                match ran {
+                    Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| "Windows didn't allow it (you cancelled the prompt).".into()),
+                    Err(Failure::Other(e)) => fail_all(&mut outcomes, &|c| format!("Couldn't run {} as an administrator: {e}", c.shown())),
+                    ran => {
+                        let stopped = match ran {
+                            Err(Failure::TimedOut { ended }) => Some(ended),
+                            _ => None,
+                        };
+                        for (step, &i) in rows.iter().enumerate() {
+                            let (v, cmd) = (&vs[i], vs[i].command.as_ref().expect("a row with a step has a command"));
+                            let output = std::fs::read(output_file(&dir, step)).map(|b| all_output(&b, b"")).unwrap_or_default();
+                            let code = std::fs::read_to_string(code_file(&dir, step)).ok().and_then(|c| c.trim().parse::<i32>().ok());
+                            outcomes[i] = Some(match (code, stopped) {
+                                (Some(code), _) => conclude(v, cmd, Some(code), output, settle).await,
+                                (None, Some(true)) => Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output },
+                                (None, Some(false)) => Outcome::Failed {
+                                    summary: format!("{} took longer than 15 minutes. Trek stopped waiting, but Windows doesn't let it end what runs as an administrator: it may still be running.", cmd.shown()),
+                                    output,
+                                },
+                                (None, None) => Outcome::Failed { summary: format!("{} didn't say how it went: the administrator's script stopped before it was done.", cmd.shown()), output },
+                            });
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+    outcomes.into_iter().zip(vs).map(|(o, v)| o.unwrap_or_else(|| no_command(v))).collect()
 }
 
 /// Everything a command printed: its stdout, then its stderr on a line of its own (a progress
@@ -1224,7 +1506,8 @@ pub fn verify(v: &AgentVersion, now: Option<String>, output: String) -> Outcome 
 pub async fn dry_run(v: &AgentVersion) -> Outcome {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
-    Outcome::Updated { version: v.latest.clone().or_else(|| v.installed.clone()).unwrap_or_default(), output: format!("Dry run: Trek would have run `{shown}`. Nothing was changed.") }
+    let how = if v.command.as_ref().is_some_and(|c| c.elevated) { " as an administrator" } else { "" };
+    Outcome::Updated { version: v.latest.clone().or_else(|| v.installed.clone()).unwrap_or_default(), output: format!("Dry run: Trek would have run `{shown}`{how}. Nothing was changed.") }
 }
 
 /// Made-up agents with updates out, as MonoCode's card shows them, for design review
@@ -1878,36 +2161,50 @@ mod tests {
     #[cfg(windows)]
     fn each_windows_install_updates_through_its_own_manager() {
         let bin = |s: &str| PathBuf::from(s);
-        // Scoop: its own `scoop update <app>`, run by Trek.
+        // Scoop: its own `scoop update <app>`, run by Trek as it is.
         let scoop = update_command(h("opencode"), &Install::Scoop { app: "opencode".into() }, &bin(r"C:\Users\me\scoop\shims\opencode.exe"), false, Some("1.2.27")).unwrap();
-        assert_eq!((scoop.shown().as_str(), scoop.manual.as_deref()), ("scoop update opencode", None));
+        assert_eq!((scoop.shown().as_str(), scoop.elevated), ("scoop update opencode", false));
         assert_eq!(scoop.program, Path::new("scoop"));
-        // A machine-wide Scoop (ProgramData) needs an administrator: shown, not run.
+        // A machine-wide Scoop (ProgramData) updates as an administrator: run by Trek, Windows asking.
         let global = update_command(h("opencode"), &Install::Scoop { app: "opencode".into() }, &bin(r"C:\ProgramData\scoop\shims\opencode.exe"), false, None).unwrap();
-        assert_eq!(global.shown(), "scoop update opencode -g");
-        assert!(global.manual.as_deref().is_some_and(|m| m.contains("administrator")), "{:?}", global.manual);
-        // Chocolatey: `choco upgrade <package> -y`, only from an administrator's terminal.
+        assert_eq!((global.shown().as_str(), global.elevated), ("scoop update opencode -g", true));
+        // Chocolatey: `choco upgrade <package> -y`, as an administrator.
         let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, &bin(r"C:\ProgramData\chocolatey\bin\opencode.exe"), false, None).unwrap();
-        assert_eq!(choco.shown(), "choco upgrade opencode -y");
-        assert_eq!(choco.instruction().as_deref(), Some("OpenCode is installed with Chocolatey, which upgrades only from an administrator terminal. Run: choco upgrade opencode -y"));
-        // WinGet: for the user it's run (with its failures said in words); machine-wide, it's shown.
+        assert_eq!((choco.shown().as_str(), choco.elevated), ("choco upgrade opencode -y", true));
+        assert_eq!(choco.program, Path::new("choco"));
+        // WinGet: for the user it's run as it is, machine-wide as an administrator; both with
+        // their failures said in words.
         let winget = Install::Winget { id: "Anthropic.ClaudeCode".into() };
         let user = update_command(h("claude-code"), &winget, &bin(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_x\claude.exe"), false, None).unwrap();
-        assert!(user.manual.is_none() && user.on_exit.iter().any(|(code, _)| *code == -1978335189));
+        assert!(!user.elevated && user.on_exit.iter().any(|(code, _)| *code == -1978335189));
         let machine = update_command(h("claude-code"), &winget, &bin(r"C:\Program Files\WinGet\Links\claude.exe"), false, None).unwrap();
         assert_eq!(machine.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements");
-        assert!(machine.manual.is_some());
+        assert!(machine.elevated && machine.on_exit.iter().any(|(code, _)| *code == -1978335189));
         // The native installer's own `claude update` is run by Trek as before.
         let native = update_command(h("claude-code"), &Install::Native, &bin(r"C:\Users\me\.local\bin\claude.exe"), false, None).unwrap();
-        assert!(native.manual.is_none() && native.args == ["update"]);
+        assert!(!native.elevated && native.args == ["update"]);
+        // No Windows arm is the user's to run any more.
+        for cmd in [&scoop, &global, &choco, &user, &machine, &native] {
+            assert_eq!(cmd.manual, None, "{}", cmd.shown());
+        }
+    }
+
+    #[test]
+    fn nothing_runs_as_an_administrator_on_macos() {
+        // Paths that would need an administrator on Windows mean nothing on macOS.
+        let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, Path::new("/ProgramData/chocolatey/bin/opencode"), false, None).unwrap();
+        let winget = update_command(h("claude-code"), &Install::Winget { id: "Anthropic.ClaudeCode".into() }, Path::new("/Program Files/WinGet/Links/claude"), false, None).unwrap();
+        assert_eq!((choco.elevated, winget.elevated), (cfg!(windows), cfg!(windows)));
+        let brew = update_command(h("opencode"), &Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None }, Path::new("/opt/homebrew/bin/opencode"), false, None).unwrap();
+        assert!(!brew.elevated && brew.installer.is_none());
     }
 
     #[test]
     #[cfg(windows)]
-    fn devin_on_windows_updates_from_its_installer_which_trek_leaves_to_the_user() {
+    fn devin_on_windows_updates_from_its_installer_run_unattended() {
         // `devin update` on an `irm | iex` install exits 0 having done nothing, printing
         // "To update, run: irm https://cli.devin.ai/install.ps1 | iex"; that installer ends in
-        // Devin's interactive setup wizard.
+        // Devin's interactive setup wizard, which Trek leaves out.
         let root = std::env::temp_dir().join(format!("trek-devin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let cli = root.join(r"devin\cli");
@@ -1918,10 +2215,11 @@ mod tests {
         assert_eq!(devin(&Install::Native).args, ["update"]);
         std::fs::write(cli.join("distribution"), "irm-iex\n").unwrap();
         let cmd = devin(&Install::Native);
-        assert_eq!(cmd.shown(), "irm https://static.devin.ai/cli/install.ps1 | iex");
+        assert_eq!(cmd.shown(), "irm https://cli.devin.ai/install.ps1 | iex", "shown as the vendor documents it");
+        assert_eq!(cmd.installer.as_deref(), Some("https://cli.devin.ai/install.ps1"), "fetched when it runs");
         assert_eq!(cmd.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
-        let said = cmd.instruction().unwrap();
-        assert!(said.contains("doesn't update itself on Windows") && said.contains("setup wizard") && said.ends_with("Run: irm https://static.devin.ai/cli/install.ps1 | iex"), "{said}");
+        assert_eq!(cmd.args, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
+        assert!(!cmd.elevated && cmd.manual.is_none());
         // An enterprise portal's install updates through its own updater: `devin update`.
         std::fs::write(cli.join("distribution"), "enterprise-portal").unwrap();
         assert_eq!(devin(&Install::Native).args, ["update"]);
@@ -1975,20 +2273,61 @@ mod tests {
     }
 
     #[test]
-    fn a_command_left_to_the_user_is_told_not_run() {
-        let cmd = UpdateCommand::new("choco", &["upgrade", "opencode", "-y"]).left_to_the_user("It needs an administrator terminal.");
-        assert_eq!(cmd.instruction().as_deref(), Some("It needs an administrator terminal. Run: choco upgrade opencode -y"));
-        assert_eq!(UpdateCommand::new("npm", &["update"]).instruction(), None);
-        // Whether it runs is the runner's: it answers with the instruction, running nothing.
-        let v = AgentVersion { command: Some(cmd), ..version("fake", "1.0.0", Some("1.1.0")) };
-        let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update(&v)) else { panic!() };
-        assert_eq!((summary.as_str(), output.as_str()), ("It needs an administrator terminal. Run: choco upgrade opencode -y", ""));
-        // Snapshots written before there were such commands still load; and round trip with them.
+    fn commands_an_older_trek_left_to_the_user_are_worked_out_again() {
+        // Snapshots written before commands ran as an administrator still load.
         let old: UpdateCommand = serde_json::from_value(serde_json::json!({ "program": "claude", "args": ["update"] })).unwrap();
         assert_eq!(old, UpdateCommand::new("claude", &["update"]));
-        let with = AgentVersion { install: Install::Chocolatey { package: "opencode".into() }, command: Some(v.command.clone().unwrap()), ..v };
-        let back: AgentVersion = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
-        assert_eq!(back, with);
+        // One an older Trek left to the user loads too (its `manual`), and is never written back.
+        let manual = serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "manual": "OpenCode is installed with Chocolatey, which upgrades only from an administrator terminal." });
+        let choco: UpdateCommand = serde_json::from_value(manual.clone()).unwrap();
+        assert!(choco.manual.is_some() && !choco.elevated);
+        assert_eq!(serde_json::to_value(&choco).unwrap(), serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "path": [], "env": [] }));
+        // Loaded from the cache, it's dropped: run as it was, it would fail without an
+        // administrator; the next check works out the command that runs as one.
+        let dir = std::env::temp_dir().join(format!("trek-old-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::isolate_thread(dir.clone());
+        let mut agents = serde_json::to_value(vec![version("opencode", "1.2.27", Some("1.3.0")), version("codex", "0.159.2", Some("0.160.0"))]).unwrap();
+        agents[0]["command"] = manual;
+        agents[1]["command"] = serde_json::json!({ "program": "npm", "args": ["install", "-g", "@openai/codex@latest"] });
+        std::fs::write(crate::paths::data_dir().join("agent-versions.json"), serde_json::json!({ "checked_at": 1, "agents": agents }).to_string()).unwrap();
+        let snap = Snapshot::load();
+        assert_eq!(snap.agents[0].command, None);
+        assert_eq!(snap.agents[1].command.as_ref().map(|c| c.shown()).as_deref(), Some("npm install -g @openai/codex@latest"), "others stay");
+        // Round trips with the new fields.
+        let elevated = AgentVersion { command: Some(UpdateCommand::new("choco", &["upgrade", "opencode", "-y"]).as_admin()), ..version("opencode", "1.2.27", Some("1.3.0")) };
+        let installer = AgentVersion { command: Some(UpdateCommand::installer("https://cli.devin.ai/install.ps1", "irm https://cli.devin.ai/install.ps1 | iex")), ..version("devin", "1", Some("2")) };
+        for v in [elevated, installer] {
+            let back: AgentVersion = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+            assert_eq!(back, v);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn devins_installer_is_run_without_its_setup_wizard() {
+        // The vendor's script as `https://cli.devin.ai/install.ps1` served it on 2026-10-11 (the
+        // same bytes as the `static.devin.ai/cli/install.ps1` copy fetched that morning, which
+        // now answers 403): it ends by running `devin setup`.
+        let vendor = include_str!("../fixtures/devin-install.ps1");
+        assert!(vendor.trim_end().ends_with("& $EntryExe setup"));
+        let trimmed = unattended(vendor).unwrap();
+        assert!(!trimmed.contains("& $EntryExe setup") && !trimmed.contains(" setup\n"), "the wizard is gone");
+        // Everything before it stays: the download, the copy, the marker, the PATH.
+        assert_eq!(trimmed.trim_end(), vendor.trim_end().strip_suffix("& $EntryExe setup").unwrap().trim_end());
+        for kept in ["Invoke-WebRequest -Uri $BundleUrl", "Copy-Item -LiteralPath $InstalledExe -Destination $EntryExe -Force", "Set-Content -LiteralPath $MarkerPath", "$env:Path = \"$EntryBinDir;$env:Path\""] {
+            assert!(trimmed.contains(kept), "{kept}");
+        }
+        // Spacing, letter case and Windows line ends don't matter.
+        assert_eq!(unattended("a\r\nb\r\n  &   $entryexe   SETUP  \r\n\r\n").as_deref(), Some("a\r\nb\n"));
+        // A script that ends any other way is the vendor's changed one: not trimmed (`run_installer`
+        // runs it as it is, and watches it).
+        for changed in ["a\n& $EntryExe setup --yes\n", "a\n& $EntryExe login\n", "a\n& $EntryExe setup\nWrite-Host done\n", "& $Exe setup", ""] {
+            assert_eq!(unattended(changed), None, "{changed:?}");
+        }
+        assert_eq!(installer_url("irm https://cli.devin.ai/install.ps1 | iex"), Some("https://cli.devin.ai/install.ps1"));
+        assert_eq!(installer_url("irm 'https://cursor.com/install?win32=true' | iex"), Some("https://cursor.com/install?win32=true"));
+        assert_eq!(installer_url("curl -fsSL https://x | sh"), None);
     }
 
     /// A fake CLI at `dir\claude.cmd` that says the version in `dir\version.txt`, as `claude --version`
@@ -2055,6 +2394,167 @@ mod tests {
         std::fs::write(root.join("count.txt"), "0").unwrap();
         assert_eq!(crate::runtime().block_on(settled_version(&v, claude, &cli, 0, Duration::ZERO)).as_deref(), Some("2.1.1"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// How many times `counted` started a script.
+    #[cfg(windows)]
+    static LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// The elevated script run as it is (tests never bring up a UAC prompt), counted.
+    #[cfg(windows)]
+    fn counted(script: &Path, limit: Duration) -> Result<u32, crate::elevated::Failure> {
+        LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::elevated::run_plain(script, limit)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn updates_run_as_an_administrator_go_together_in_one_script() {
+        use crate::elevated::Failure;
+        let root = std::env::temp_dir().join(format!("trek-elevated-updates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        crate::paths::isolate_thread(root.join("data"));
+        // Two installs, in folders with what cmd.exe would read as operators; their package manager
+        // a script that upgrades one and fails the other with WinGet's "nothing newer".
+        let odd = root.join("Program Files (x86) & 100%");
+        std::fs::create_dir_all(&odd).unwrap();
+        let (a, b) = (fake_cli(&root.join(r"clis\a"), "1.0.0"), fake_cli(&root.join(r"clis\b"), "1.18.32"));
+        let manager = odd.join("manager.cmd");
+        // Its arguments arrive quoted (`"upgrade"`), as Trek's script passes every one: `%~1`.
+        let script = format!("@echo off\r\nif \"%~1\"==\"upgrade\" (\r\n  >\"{}\" echo 2.0.0\r\n  echo upgraded %~2\r\n  exit /b 0\r\n)\r\necho No newer package found.\r\nexit /b -1978335189\r\n", root.join(r"clis\a\version.txt").display());
+        std::fs::write(&manager, script).unwrap();
+        let admin = |args: &[&str], on_exit: Vec<(i32, String)>| Some(UpdateCommand { on_exit, ..UpdateCommand::new(&manager, args).as_admin() });
+        let rows = [
+            AgentVersion { id: "claude".into(), binary: a, command: admin(&["upgrade", "claude-code"], vec![]), ..version("claude", "1.0.0", Some("2.0.0")) },
+            AgentVersion { id: "opencode".into(), binary: b, command: admin(&["nothing"], winget_exits(h("claude-code"), None)), ..version("opencode", "1.18.32", Some("1.18.34")) },
+            // Its program isn't there: answered without running anything.
+            AgentVersion { command: Some(UpdateCommand::new(odd.join("gone.exe"), &["upgrade"]).as_admin()), ..version("fake", "1", Some("2")) },
+        ];
+        let before = LAUNCHES.load(std::sync::atomic::Ordering::SeqCst);
+        let outcomes = crate::runtime().block_on(run_elevated_with(&rows, (0, Duration::ZERO), counted));
+        assert_eq!(LAUNCHES.load(std::sync::atomic::Ordering::SeqCst) - before, 1, "one script, so one prompt");
+        assert_eq!(outcomes[0], Outcome::Updated { version: "2.0.0".into(), output: "upgraded claude-code".into() });
+        let Outcome::Failed { summary, output } = &outcomes[1] else { panic!("{:?}", outcomes[1]) };
+        assert!(summary.starts_with("WinGet has no newer version of Claude Code yet"), "{summary}");
+        assert_eq!(output, "No newer package found.", "each step's own output");
+        assert_eq!(outcomes[2], Outcome::Failed { summary: format!("{} isn't installed.", odd.join("gone.exe").display()), output: String::new() });
+        // Its files are cleared away.
+        assert_eq!(std::fs::read_dir(root.join(r"data\tmp")).unwrap().count(), 0);
+
+        // The prompt declined: said so for each, and never as a line to copy.
+        fn cancelled(_: &Path, _: Duration) -> Result<u32, Failure> {
+            Err(Failure::Cancelled)
+        }
+        let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..2], (0, Duration::ZERO), cancelled));
+        for o in &outcomes {
+            assert_eq!(*o, Outcome::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() });
+        }
+        // Past its time, with what it started out of Trek's reach.
+        fn stuck(_: &Path, _: Duration) -> Result<u32, Failure> {
+            Err(Failure::TimedOut { ended: false })
+        }
+        let Outcome::Failed { summary, .. } = &crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), stuck))[0] else { panic!() };
+        assert!(summary.contains("took longer than 15 minutes") && summary.contains("may still be running"), "{summary}");
+        // One update on its own (an Update button) goes through the same script.
+        assert!(rows[0].command.as_ref().is_some_and(|c| c.elevated));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Serve the files in `dir` on 127.0.0.1; their base URL.
+    #[cfg(windows)]
+    fn serve(dir: &Path) -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || trek_test_fixtures::serve::serve(listener, dir));
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn an_installer_is_fetched_and_run_without_its_wizard() {
+        let root = std::env::temp_dir().join(format!("trek-installer-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        crate::paths::isolate_thread(root.join("data"));
+        // The installed CLI, which notes when its setup wizard is started.
+        let bin = root.join(r"cli\bin");
+        let cli = fake_cli(&bin, "3000.11.1");
+        std::fs::write(&cli, "@echo off\r\nif \"%1\"==\"setup\" (\r\n  echo started> \"%~dp0setup-ran.txt\"\r\n  exit /b 0\r\n)\r\ntype \"%~dp0version.txt\"\r\n").unwrap();
+        // An installer in the vendor's shape: it installs the new version, then starts the wizard.
+        let served = root.join("served");
+        std::fs::create_dir_all(&served).unwrap();
+        let installer = format!(
+            "$ErrorActionPreference = \"Stop\"\n$EntryExe = '{}'\nSet-Content -LiteralPath '{}' -Value '3000.11.3'\nWrite-Host \"Installed devin v3000.11.3\"\n\n& $EntryExe setup\n",
+            cli.display(),
+            bin.join("version.txt").display()
+        );
+        std::fs::write(served.join("install.ps1"), installer).unwrap();
+        let url = format!("{}/install.ps1", serve(&served));
+        let shown = format!("irm {url} | iex");
+        let v = AgentVersion { id: "claude".into(), binary: cli, command: Some(UpdateCommand::installer(&url, &shown)), ..version("claude", "3000.11.1", Some("3000.11.3")) };
+        let outcome = crate::runtime().block_on(run_update_settling(&v, (0, Duration::ZERO)));
+        assert_eq!(outcome, Outcome::Updated { version: "3000.11.3".into(), output: "Installed devin v3000.11.3".into() });
+        assert!(!bin.join("setup-ran.txt").exists(), "the wizard never started");
+        // An installer that isn't there is said so, with nothing run.
+        let gone = AgentVersion { command: Some(UpdateCommand::installer(&format!("{}/gone.ps1", serve(&served)), &shown)), ..v.clone() };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update_settling(&gone, (0, Duration::ZERO))) else { panic!() };
+        assert!(summary.starts_with("Couldn't download claude's installer:") && summary.contains("404"), "{summary}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Process `pid` hasn't exited.
+    #[cfg(windows)]
+    fn running(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+        // SAFETY: a handle this opens and closes; a wait of 0 only asks.
+        unsafe {
+            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+            CloseHandle(h);
+            alive
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn an_installer_that_ends_another_way_is_ended_once_the_new_version_is_in() {
+        // The vendor's script changed: what it does after installing is unknown, and here it waits
+        // forever (a wizard). Once the new version answers, it and all it started are ended.
+        let fixture = trek_test_fixtures::bin("fixture");
+        let v = version("claude", "3000.11.1", Some("3000.11.3"));
+        let cmd = UpdateCommand::installer("https://example.invalid/install.ps1", "irm https://example.invalid/install.ps1 | iex");
+        let started = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = started.clone();
+        let mut run = crate::procs::async_command(super::powershell());
+        run.args(["-NoProfile", "-NonInteractive", "-Command", &format!("Write-Host 'Installed v3000.11.3'; & '{}' sleep 600", fixture.display())]);
+        let at = std::time::Instant::now();
+        let wizard = fixture.clone();
+        let ran = crate::runtime().block_on(watch_installer(&v, &cmd, run, Duration::from_secs(120), Duration::from_millis(200), move |pid| {
+            // The new version answers once the installer runs the program (its "wizard").
+            let found = crate::procs::runs_under(pid, &wizard);
+            if found {
+                seen.lock().unwrap().extend(crate::procs::children(pid));
+            }
+            async move { found.then(|| "3000.11.3".to_string()) }
+        }));
+        let (code, output) = ran.unwrap();
+        assert!(at.elapsed() < Duration::from_secs(60), "ended, not waited out: {:?}", at.elapsed());
+        assert_eq!(code, Some(0));
+        assert!(output.starts_with("Installed v3000.11.3\n") && output.ends_with(&ended_note(&v, "3000.11.3")), "{output}");
+        let started = started.lock().unwrap().clone();
+        assert!(!started.is_empty());
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(started.iter().all(|p| !running(*p)), "what it started is ended too");
+        // An answer that isn't the version the update is for doesn't end it; its time running out does.
+        let mut run = crate::procs::async_command(super::powershell());
+        run.args(["-NoProfile", "-NonInteractive", "-Command", &format!("& '{}' sleep 600", fixture.display())]);
+        let ran = crate::runtime().block_on(watch_installer(&v, &cmd, run, Duration::from_secs(3), Duration::from_millis(200), |_| async { Some("3000.11.1".to_string()) }));
+        let Err(Outcome::Failed { summary, .. }) = ran else { panic!("{ran:?}") };
+        assert!(summary.ends_with("took longer than 15 minutes, so Trek stopped it."), "{summary}");
     }
 
     #[test]
