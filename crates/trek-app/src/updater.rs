@@ -279,7 +279,9 @@ pub fn describe_update(status: &UpdateStatus, auto_check: bool, blocker: Option<
     if let Some(blocker) = blocker {
         // Windows: Trek can move itself out of where it is, in one click.
         if crate::words::is_windows() && blocker.movable() {
-            return view(format!("{} {}", blocker.message(), trek_core::update::relocate::moves_line()), Some(UpdateAction::Move));
+            // The cause only: the message's advice to move the folder by hand would contradict
+            // the button.
+            return view(format!("{} {}", blocker.cause(), trek_core::update::relocate::moves_line()), Some(UpdateAction::Move));
         }
         // One Windows may lift (it refused a write) can be asked again; where Trek is can't.
         return view(blocker.message(), blocker.may_pass().then_some(UpdateAction::Check));
@@ -378,7 +380,8 @@ mod tests {
             for status in [UpdateStatus::Idle, UpdateStatus::UpToDate, UpdateStatus::Failed("Couldn't check for updates: offline".into())] {
                 let v = describe_update(&status, true, Some(blocker));
                 assert_eq!(v.action, Some(UpdateAction::Move), "{blocker:?} in {status:?}");
-                assert_eq!(v.line, format!("{} {moves}", blocker.message()), "the blocker's message, then where Trek goes");
+                assert_eq!(v.line, format!("{} {moves}", blocker.cause()), "why Trek can't update itself, then where it goes");
+                assert!(!v.line.contains("to get updates"), "no advice to move the folder by hand next to the button: {}", v.line);
                 assert!(!v.busy && v.progress.is_none());
             }
         }
