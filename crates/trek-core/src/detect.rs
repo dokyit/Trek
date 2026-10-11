@@ -132,6 +132,10 @@ fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -
     let program_data = dir("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
     let program_files = dir("ProgramFiles").unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
     let mut dirs: Vec<PathBuf> = [r".local\bin", r".bun\bin", r".cargo\bin", r".opencode\bin", r".factory\bin"].iter().map(|d| home.join(d)).collect();
+    // The vendor installers that add a folder of their own to the user's PATH: Trek's PATH is
+    // worked out once, so one installed while Trek runs is found here on the next check.
+    // Devin's (`irm https://cli.devin.ai/install.ps1 | iex`), Cursor's, Factory's (`~\bin`).
+    dirs.extend([local.join(r"devin\cli\bin"), local.join("cursor-agent"), home.join("bin")]);
     dirs.extend([
         // Scoop's shims, for the user and for the machine (`scoop install -g`).
         dir("SCOOP").unwrap_or_else(|| home.join("scoop")).join("shims"),
@@ -592,6 +596,9 @@ mod tests_paths {
                 r"C:\Users\me\.cargo\bin",
                 r"C:\Users\me\.opencode\bin",
                 r"C:\Users\me\.factory\bin",
+                r"C:\Users\me\AppData\Local\devin\cli\bin",
+                r"C:\Users\me\AppData\Local\cursor-agent",
+                r"C:\Users\me\bin",
                 r"C:\Users\me\scoop\shims",
                 r"C:\ProgramData\scoop\shims",
                 r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links",

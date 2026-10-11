@@ -1,6 +1,7 @@
 //! Checking for and installing agent CLI updates (`crate::agent_updates` holds the state). A
 //! check runs at launch and every 12 hours on Trek's I/O runtime, never on the UI's; updates run
-//! one at a time, each once none of its agent's threads is mid-turn. While one runs, its agent
+//! one at a time, each once none of its agent's threads is mid-turn, and those Windows runs as an
+//! administrator last, together, so it asks once (`AgentUpdates::next`). While one runs, its agent
 //! is left alone: its idle sessions are shut down as it starts, and no session starts and no
 //! message goes to it (they wait, as for a worktree being made) until it's done.
 
@@ -129,20 +130,33 @@ impl Workspace {
             self.check_agent_updates(true, cx);
             return;
         }
-        let Some(id) = self.agent_updates.next(|a| self.agent_busy(a)) else { return };
-        let Some(version) = self.agent_updates.start(&id) else { return };
-        // None of its turns is running: every session it has is idle, and goes now, before its
-        // files are replaced under it.
-        self.stop_sessions_of(&version.agent);
+        // One update, or the batch run as an administrator (one prompt from Windows for all).
+        let Some(ids) = self.agent_updates.next(|a| self.agent_busy(a)) else { return };
+        let (ids, versions): (Vec<String>, Vec<_>) = ids.into_iter().filter_map(|id| self.agent_updates.start(&id).map(|v| (id, v))).unzip();
+        if versions.is_empty() {
+            return;
+        }
+        // None of their turns is running: every session they have is idle, and goes now, before
+        // their files are replaced under them.
+        for v in &versions {
+            self.stop_sessions_of(&v.agent);
+        }
         cx.notify();
         let runner = self.agent_updates.runner.clone();
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(runner.run(version).await).await;
+            let _ = tx.send(runner.run_all(versions).await).await;
         });
         let task = cx.spawn(async move |this, cx| {
-            let Ok(outcome) = rx.recv().await else { return };
-            let _ = this.update(cx, |this, cx| this.agent_updated(&id, outcome, cx));
+            let Ok(outcomes) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| {
+                // Each ends, one outcome or not: a job left running would hold up every update after it.
+                let mut outcomes = outcomes.into_iter();
+                for id in &ids {
+                    let outcome = outcomes.next().unwrap_or_else(|| Outcome::Failed { summary: "Trek lost track of this update.".into(), output: String::new() });
+                    this.agent_updated(id, outcome, cx);
+                }
+            });
         });
         self.keep(task);
     }
