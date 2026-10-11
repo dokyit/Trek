@@ -37,7 +37,9 @@ enum Row {
     User { ix: usize, key: SharedString, open: bool },
     /// End of a response: copy the whole answer, when it finished, how long it took.
     TurnEnd { ix: usize },
-    Assistant { ix: usize, key: SharedString },
+    /// An answer, or one part of a long one (`answer_parts`): `part` from 0, `last` the one that
+    /// grows while it streams.
+    Assistant { ix: usize, key: SharedString, part: usize, last: bool },
     Reasoning { ix: usize, key: SharedString, open: bool },
     Tool { ix: usize, key: SharedString, open: bool, activity: Option<SharedString> },
     /// Consecutive tool calls folded into one summary line ("Ran 3 commands and edited 2 files").
@@ -76,10 +78,168 @@ impl Row {
 }
 
 /// The transcript as rows, and which row shows each item (items without a row of their own,
-/// like a live thought, map to the row after them).
+/// like a live thought, map to the row after them; a long answer to its first part).
 struct Rows {
     rows: Vec<Row>,
     item_row: Vec<usize>,
+    /// Answers drawn in more than one part: (item, parts).
+    split: Vec<(usize, usize)>,
+}
+
+/// An answer at least this long (bytes) is drawn in parts, each a row of its own...
+const SPLIT_FROM: usize = 6_000;
+/// ...of at least this much each. A row is laid out whole whenever it's drawn, and the list only
+/// draws the rows on screen: one row holding a long answer costs a frame in proportion to the
+/// whole answer (a 40 KB one took over 100 ms a frame on Windows), parts only those in view.
+/// While it streams only the last part grows and is measured again.
+const PART_MIN: usize = 2_000;
+
+/// Where a long answer is cut into parts: the offset each part after the first starts at. Cuts
+/// fall only where a new block begins at the left margin after a blank line, outside fenced
+/// code, so every part is whole markdown, drawn as it would be in one document. A cut depends
+/// only on the text before it and the first character after, so cuts made while an answer
+/// streams stay where they are as it grows (but for the one case below). Answers shorter than
+/// `SPLIT_FROM` aren't cut, nor are those with a link reference definition (`[1]: https://…`):
+/// a document resolves `[text][1]` only against the definitions it holds itself, and the
+/// definitions come last. One that arrives late takes the cuts made so far back.
+pub(crate) fn answer_parts(text: &str) -> Vec<usize> {
+    let mut cuts = vec![];
+    if text.len() < SPLIT_FROM {
+        return cuts;
+    }
+    let (mut start, mut at) = (0, 0);
+    let mut open: Option<Raw> = None;
+    let mut after_blank = false;
+    for line in text.split_inclusive('\n') {
+        let here = at;
+        at += line.len();
+        let body = line.trim_end_matches(['\n', '\r']);
+        if let Some(Raw::Html(end)) = open {
+            if body.to_ascii_lowercase().contains(end) {
+                // The block ends with this line.
+                open = None;
+            }
+            after_blank = false;
+            continue;
+        }
+        let first = body.as_bytes().first().copied();
+        let indent = body.len() - body.trim_start_matches(' ').len();
+        let rest = &body[indent..];
+        if open.is_none() {
+            if after_blank && here - start >= PART_MIN && first.is_some_and(|b| !b.is_ascii_whitespace()) {
+                cuts.push(here);
+                start = here;
+            }
+            if indent <= 3 && is_definition(rest) {
+                return vec![];
+            }
+        }
+        // A fence opens with three or more backticks or tildes (two dollar signs for math),
+        // indented at most three spaces, and closes with at least as many of the same and nothing
+        // else on the line. An opening one of backticks or dollar signs has none in what follows.
+        let marks = rest.as_bytes();
+        let run = |c: u8| marks.iter().take_while(|b| **b == c).count();
+        let found = [(b'`', 3), (b'~', 3), (b'$', 2)]
+            .into_iter()
+            .map(|(c, least)| (c, run(c), least))
+            .find(|(_, n, least)| n >= least)
+            .filter(|_| indent <= 3)
+            .map(|(c, n, _)| (c, n));
+        open = match (open, found) {
+            (None, Some((c, n))) if matches!(c, b'`' | b'$') && rest[n..].as_bytes().contains(&c) => None,
+            (None, Some((c, n))) => Some(Raw::Fence(c, n)),
+            (Some(Raw::Fence(c, n)), Some((d, m))) if c == d && m >= n && rest[m..].trim().is_empty() => None,
+            (open, _) => open,
+        };
+        if open.is_none() && indent <= 3 {
+            open = html_block_end(rest).map(Raw::Html);
+        }
+        after_blank = open.is_none() && body.trim().is_empty();
+    }
+    cuts
+}
+
+/// What a cut mustn't fall inside, besides a paragraph: fenced code, and raw HTML that goes on
+/// past blank lines (up to a line holding the end).
+#[derive(Clone, Copy)]
+enum Raw {
+    Fence(u8, usize),
+    Html(&'static str),
+}
+
+/// Whether row `ix` is tinted when a search result scrolled to row `at`: that row, and the other
+/// parts when it's one of a long answer's.
+fn flashes(rows: &[Row], at: usize, ix: usize) -> bool {
+    at == ix || matches!((rows.get(at), rows.get(ix)), (Some(Row::Assistant { ix: a, .. }), Some(Row::Assistant { ix: b, .. })) if a == b)
+}
+
+/// A link reference definition: `[label]: destination`, not a footnote's.
+fn is_definition(line: &str) -> bool {
+    let Some(inner) = line.strip_prefix('[').filter(|r| !r.starts_with('^')) else { return false };
+    let Some(close) = inner.find("]:") else { return false };
+    let label = &inner[..close];
+    !label.trim().is_empty() && !label.contains(['[', ']']) && !inner[close + 2..].trim().is_empty()
+}
+
+/// The text that ends the raw HTML block `line` opens (a comment, `<pre>`, `<script>`, `<style>`,
+/// `<textarea>`, a processing instruction or CDATA: the kinds that blank lines don't end), unless
+/// the line ends it itself.
+fn html_block_end(line: &str) -> Option<&'static str> {
+    if !line.starts_with('<') {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    let (end, from) = if lower.starts_with("<!--") {
+        ("-->", 4)
+    } else if lower.starts_with("<?") {
+        ("?>", 2)
+    } else if lower.starts_with("<![cdata[") {
+        ("]]>", 9)
+    } else {
+        let tag = [("pre", "</pre>"), ("script", "</script>"), ("style", "</style>"), ("textarea", "</textarea>")]
+            .into_iter()
+            .find(|(name, _)| lower.strip_prefix('<').and_then(|r| r.strip_prefix(name)).is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', '>'])))?;
+        (tag.1, 1 + tag.0.len())
+    };
+    (!lower[from..].contains(end)).then_some(end)
+}
+
+/// `rows` (one per answer) with each long answer drawn as its parts, one row each, and
+/// `item_row` (rows by item, as built) following them: an item maps to its first part.
+fn split_long_answers(rows: Vec<Row>, item_row: Vec<usize>, items: &[Item]) -> Rows {
+    let mut out = Vec::with_capacity(rows.len());
+    // Where each row as built went: rows after a split answer move down by its extra parts.
+    let mut moved = Vec::with_capacity(rows.len() + 1);
+    let mut split = vec![];
+    for row in rows {
+        moved.push(out.len());
+        match (&row, items.get(row.item())) {
+            (Row::Assistant { ix, key, .. }, Some(Item::Assistant { text })) if text.len() >= SPLIT_FROM => {
+                let parts = answer_parts(text).len() + 1;
+                if parts > 1 {
+                    split.push((*ix, parts));
+                }
+                out.extend((0..parts).map(|part| Row::Assistant { ix: *ix, key: key.clone(), part, last: part + 1 == parts }));
+            }
+            _ => out.push(row),
+        }
+    }
+    moved.push(out.len());
+    let item_row = item_row.into_iter().map(|r| moved.get(r).copied().unwrap_or(out.len())).collect();
+    Rows { rows: out, item_row, split }
+}
+
+/// Part `n` of `text` cut at `cuts`, or `None` past the last.
+pub(crate) fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
+    let start = if n == 0 { 0 } else { *cuts.get(n - 1)? };
+    let end = cuts.get(n).copied().unwrap_or(text.len());
+    text.get(start..end)
+}
+
+/// The key of part `n` of item `key`'s document: the item's own for the first, so an answer that
+/// grows long enough to be cut keeps the document it had.
+fn part_key(key: &str, n: usize) -> String {
+    if n == 0 { key.to_string() } else { format!("{key}/{n}") }
 }
 
 impl Rows {
@@ -284,6 +444,10 @@ struct Stashed {
 
 struct Markdown {
     state: Entity<TextViewState>,
+    /// The item it shows (by id), and which part of it: a long answer is drawn in parts
+    /// (`answer_parts`), everything else whole (part 0).
+    item: String,
+    part: usize,
     /// The text the document holds. Text that extends it is appended (parsed incrementally, as
     /// it streams); anything else replaces it.
     text: String,
@@ -491,9 +655,19 @@ impl ThreadView {
         // Text added to messages already streaming moves no row: the rows built for the last
         // revision stand for this one (building them reads every item, and this runs for each
         // batch of tokens).
+        // Unless the answer streaming in has just grown a part (`answer_parts`): that's a row.
+        // Where the latest answer is cut, worked out once here for both.
+        let tail_cuts: Option<(usize, Vec<usize>)> = live.filter(|_| !switched && revision != self.revision).and_then(|l| {
+            let ix = l.items.iter().rposition(|i| matches!(i, Item::Assistant { .. }))?;
+            match &l.items[ix] {
+                Item::Assistant { text } => Some((ix, answer_parts(text))),
+                _ => None,
+            }
+        });
         if appended && !switched && end == self.end {
             if let Some((key, rows)) = self.rows_cache.borrow_mut().as_mut() {
-                if key.0 == self.current && key.1 == self.revision && live.is_some_and(|l| l.items.len() == rows.item_row.len()) {
+                let same_parts = tail_cuts.as_ref().is_none_or(|(ix, cuts)| cuts.len() + 1 == rows.split.iter().find(|(i, _)| i == ix).map_or(1, |(_, n)| *n));
+                if key.0 == self.current && key.1 == self.revision && same_parts && live.is_some_and(|l| l.items.len() == rows.item_row.len()) {
                     key.1 = revision;
                 }
             }
@@ -501,17 +675,21 @@ impl ThreadView {
         // Only the documents already built need updating: they follow their item to where it moved
         // and to its new text (while streaming, a longer tail). Those whose item left the
         // transcript go (`None`).
+        // A long answer's parts each have a document of their own, holding their part.
         let mut docs: Vec<(String, Option<(usize, Option<String>)>)> = Vec::new();
         if let Some(l) = live.filter(|_| !switched && revision != self.revision) {
+            // Each answer is cut once, however many of its parts have documents.
+            let mut cuts: HashMap<usize, Vec<usize>> = tail_cuts.into_iter().collect();
             for (key, m) in &self.md {
-                let ix = if l.items.id_at(m.ix) == Some(key.as_str()) { Some(m.ix) } else { l.items.position(key) };
+                let ix = if l.items.id_at(m.ix) == Some(m.item.as_str()) { Some(m.ix) } else { l.items.position(&m.item) };
                 let now = ix.and_then(|ix| match &l.items[ix] {
-                    Item::Assistant { text } | Item::Reasoning { text } | Item::Tool { output: text, .. } => Some((ix, text)),
+                    Item::Assistant { text } => part_of(text, cuts.entry(ix).or_insert_with(|| answer_parts(text)), m.part).map(|t| (ix, t)),
+                    Item::Reasoning { text } | Item::Tool { output: text, .. } if m.part == 0 => Some((ix, text.as_str())),
                     _ => None,
                 });
                 match now {
                     None => docs.push((key.clone(), None)),
-                    Some((ix, text)) if ix != m.ix || *text != m.text => docs.push((key.clone(), Some((ix, (*text != m.text).then(|| text.clone()))))),
+                    Some((ix, text)) if ix != m.ix || text != m.text => docs.push((key.clone(), Some((ix, (text != m.text).then(|| text.to_string()))))),
                     Some(_) => {}
                 }
             }
@@ -714,23 +892,26 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// The markdown document for item `key` (at `ix`), built the first time its row is drawn.
-    fn markdown(&mut self, key: &str, ix: usize, cx: &mut Context<Self>) -> Option<Entity<TextViewState>> {
+    /// The markdown document for part `part` of item `key` (at `ix`; a long answer is drawn in
+    /// parts, anything else whole), built the first time its row is drawn.
+    fn markdown(&mut self, key: &str, part: usize, ix: usize, cx: &mut Context<Self>) -> Option<Entity<TextViewState>> {
         let drawn = self.draws;
-        if let Some(m) = self.md.get_mut(key) {
+        let doc = part_key(key, part);
+        if let Some(m) = self.md.get_mut(&doc) {
             m.drawn = drawn;
             return Some(m.state.clone());
         }
         let ws = self.workspace.read(cx);
         let items = &ws.live.get(self.current.as_ref()?)?.items;
         let text = match (items.id_at(ix) == Some(key)).then(|| items.get(ix)).flatten()? {
+            Item::Assistant { text } => part_of(text, &answer_parts(text), part)?.to_string(),
             // A sub-agent's answer is markdown too.
-            Item::Assistant { text } | Item::Reasoning { text } | Item::Tool { output: text, .. } => text.clone(),
+            Item::Reasoning { text } | Item::Tool { output: text, .. } if part == 0 => text.clone(),
             _ => return None,
         };
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));
         let changed = cx.observe(&state, |_, _, cx| cx.notify());
-        self.md.insert(key.to_string(), Markdown { state: state.clone(), text, ix, drawn, _changed: changed });
+        self.md.insert(doc, Markdown { state: state.clone(), item: key.to_string(), part, text, ix, drawn, _changed: changed });
         if self.md.len() > MD_KEPT {
             // Down to three quarters, so this isn't done for every row scrolled into view.
             let mut by_age: Vec<(u64, String)> = self.md.iter().map(|(k, m)| (m.drawn, k.clone())).collect();
@@ -809,7 +990,7 @@ impl ThreadView {
 
     fn build_rows(&self, cx: &App) -> Rows {
         let ws = self.workspace.read(cx);
-        let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return Rows { rows: vec![], item_row: vec![] } };
+        let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return Rows { rows: vec![], item_row: vec![], split: vec![] } };
         let ids = live.item_ids();
         let (slots, item_row) = layout(&live.items, live.reasoning);
         let rows = slots
@@ -863,7 +1044,7 @@ impl ThreadView {
                         // `TREK_OPEN_BACKGROUND=1` (design review) opens them all.
                         Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) || review_open() },
                         Item::TurnEnd { .. } => Row::TurnEnd { ix },
-                        Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into() },
+                        Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into(), part: 0, last: true },
                         Item::Notice { .. } => Row::Notice { ix },
                         Item::Error { .. } => Row::Error { ix },
                         Item::Limit { .. } => Row::Limit { ix },
@@ -873,7 +1054,7 @@ impl ThreadView {
                 }
             })
             .collect();
-        Rows { rows, item_row }
+        split_long_answers(rows, item_row, &live.items)
     }
 
     /// Everything the agent said between the user's message before `ix` and `ix`.
@@ -893,7 +1074,8 @@ impl ThreadView {
     fn render_row(row: Row, row_ix: usize, flash: Option<u64>, view: &WeakEntity<ThreadView>, at: &RowContext, cx: &mut App) -> AnyElement {
         // Documents and nested rows need the app mutably; everything else only reads it.
         let md = match &row {
-            Row::Assistant { ix, key } | Row::Reasoning { ix, key, open: true } | Row::SubAgent { ix, key, open: true } => view.update(cx, |this, cx| this.markdown(key, *ix, cx)).ok().flatten(),
+            Row::Assistant { ix, key, part, .. } => view.update(cx, |this, cx| this.markdown(key, *part, *ix, cx)).ok().flatten(),
+            Row::Reasoning { ix, key, open: true } | Row::SubAgent { ix, key, open: true } => view.update(cx, |this, cx| this.markdown(key, 0, *ix, cx)).ok().flatten(),
             _ => None,
         };
         let children: Vec<AnyElement> = match &row {
@@ -907,7 +1089,12 @@ impl ThreadView {
             _ => None,
         };
         let cx: &App = cx;
-        let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).cloned() else {
+        // An answer's row draws its document, not the item's text: that isn't copied each frame
+        // (a long answer's is megabytes, and each of its parts on screen would copy all of it).
+        let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).map(|i| match i {
+            Item::Assistant { .. } => Item::Assistant { text: String::new() },
+            i => i.clone(),
+        }) else {
             return div().into_any_element();
         };
         let theme = cx.theme();
@@ -915,12 +1102,19 @@ impl ThreadView {
         let tint = theme.foreground.opacity(0.07);
         let animate = at.animate;
         let width = at.column;
+        // The parts of a long answer flash together, one band down them: it reaches past a part's
+        // edge only where the answer starts or ends.
+        let (reaches_up, reaches_down) = match &row {
+            Row::Assistant { part, last, .. } => (*part == 0, *last),
+            _ => (true, true),
+        };
         let column = |el: Div| {
             let el = el.w_full().max_w(width);
             let el = match flash {
                 // A soft band behind the message that holds briefly, then fades.
                 Some(seq) => {
-                    let band = div().absolute().top(px(-2.)).bottom(px(-2.)).left(px(-12.)).right(px(-12.)).rounded(px(10.)).bg(tint);
+                    let band = div().absolute().top(px(if reaches_up { -2. } else { 0. })).bottom(px(if reaches_down { -2. } else { 0. })).left(px(-12.)).right(px(-12.)).bg(tint);
+                    let band = band.rounded_t(px(if reaches_up { 10. } else { 0. })).rounded_b(px(if reaches_down { 10. } else { 0. }));
                     let band = if animate {
                         band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))).into_any_element()
                     } else {
@@ -1334,11 +1528,25 @@ impl ThreadView {
                 )
                 .into_any_element()
             }
-            (Row::Assistant { ix, .. }, _) => match md {
-                Some(md) => column(div().py_2().child(div().id(("answer-text", ix)).test_support().child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, at.streaming == Some(ix), cx).motion(crate::md::streaming()))))
+            (Row::Assistant { ix, part: 0, last, .. }, _) => match md {
+                Some(md) => column(div().pt_2().when(last, |el| el.pb_2()).child(div().id(("answer-text", ix)).test_support().child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, last && at.streaming == Some(ix), cx).motion(crate::md::streaming()))))
                     .id(("answer", ix))
                     .test_support()
                     .into_any_element(),
+                None => div().into_any_element(),
+            },
+            // A long answer's later parts follow on as its next blocks would: a paragraph's gap
+            // above, the answer's padding below the last.
+            (Row::Assistant { ix, part, last, .. }, _) => match md {
+                Some(md) => column(
+                    div()
+                        .pt(crate::md::Metrics::at(text_size).paragraph_gap)
+                        .when(last, |el| el.pb_2())
+                        .child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, last && at.streaming == Some(ix), cx).motion(crate::md::streaming())),
+                )
+                .id(ElementId::NamedInteger("answer-part".into(), ((ix as u64) << 20) | part as u64))
+                .test_support()
+                .into_any_element(),
                 None => div().into_any_element(),
             },
             (Row::Reasoning { ix, key, open }, _) => column(
@@ -2340,7 +2548,8 @@ impl Render for ThreadView {
                 div().relative().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
                         Some(row) => {
-                            let flash = flash.filter(|(row, _)| *row == ix).map(|(_, seq)| seq);
+                            // An answer in parts flashes all of them.
+                            let flash = flash.filter(|(at, _)| flashes(&rows.rows, *at, ix)).map(|(_, seq)| seq);
                             let el = ThreadView::render_row(row, ix, flash, &view, &at, cx);
                             match tail.clone().filter(|_| ix == last) {
                                 Some(tail) => v_flex()
@@ -2461,13 +2670,14 @@ impl ThreadView {
         self.md.len()
     }
 
-    /// The markdown documents built so far, by where their item is in the transcript now.
+    /// The markdown documents built so far, by where their item is in the transcript now (a long
+    /// answer's parts in order).
     pub(crate) fn markdown_documents(&self, cx: &App) -> Vec<(usize, Entity<TextViewState>)> {
         let ws = self.workspace.read(cx);
         let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return vec![] };
-        let mut docs: Vec<_> = self.md.iter().filter_map(|(key, m)| Some((l.items.position(key)?, m.state.clone()))).collect();
-        docs.sort_by_key(|(ix, _)| *ix);
-        docs
+        let mut docs: Vec<_> = self.md.values().filter_map(|m| Some((l.items.position(&m.item)?, m.part, m.state.clone()))).collect();
+        docs.sort_by_key(|(ix, part, _)| (*ix, *part));
+        docs.into_iter().map(|(ix, _, state)| (ix, state)).collect()
     }
 
     /// The turns' changes as their cards list them, in order: "changes (2): +3 −1", then
@@ -2519,7 +2729,8 @@ impl ThreadView {
                 Row::Wake { .. } => format!("{indent}wake"),
                 Row::User { .. } => format!("{indent}user"),
                 Row::TurnEnd { .. } => format!("{indent}end"),
-                Row::Assistant { .. } => format!("{indent}assistant"),
+                Row::Assistant { part: 0, last: true, .. } => format!("{indent}assistant"),
+                Row::Assistant { part, .. } => format!("{indent}assistant part {}", part + 1),
                 Row::Reasoning { .. } => format!("{indent}thought"),
                 Row::Tool { activity, .. } => format!("{indent}tool{}", activity.as_ref().map(|a| format!(" ({a})")).unwrap_or_default()),
                 Row::ToolGroup { summary, running, .. } => format!("{indent}group: {summary}{}", if *running { " (running)" } else { "" }),
@@ -2548,7 +2759,7 @@ impl ThreadView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Slot, handoff_name, layout, row_of};
+    use super::{PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, part_of, row_of, split_long_answers};
     use trek_core::AgentId;
     use trek_core::store::{Item, ToolStatus};
 
@@ -2623,5 +2834,202 @@ mod tests {
         let (slots, item_row) = layout(&items, None);
         assert_eq!(slots, [Slot::Group(vec![0]), Slot::Item(1), Slot::Group(vec![2, 3]), Slot::Item(4)]);
         assert_eq!(item_row, [0, 1, 2, 2, 3]);
+    }
+
+    /// `n` paragraphs of about 300 bytes, numbered.
+    fn paragraphs(n: usize) -> String {
+        (0..n).map(|i| format!("Paragraph {i}: {}\n\n", "the retry loop backs off and the log lines up. ".repeat(6))).collect()
+    }
+
+    #[test]
+    fn a_short_answer_is_one_part() {
+        assert_eq!(answer_parts(&paragraphs(3)), Vec::<usize>::new());
+        // Just under the line, however many paragraphs it has.
+        let text = paragraphs(40);
+        assert_eq!(answer_parts(&text[..SPLIT_FROM - 1]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_long_answer_is_cut_at_paragraphs_into_parts_of_at_least_the_minimum() {
+        let text = paragraphs(60);
+        let cuts = answer_parts(&text);
+        assert!(cuts.len() >= 5, "{} parts", cuts.len() + 1);
+        let mut start = 0;
+        for (n, &cut) in cuts.iter().enumerate() {
+            assert!(cut - start >= PART_MIN, "part {n} is {} bytes", cut - start);
+            assert!(text[..cut].ends_with("\n\n") && text[cut..].starts_with("Paragraph"), "cut {n} isn't between paragraphs");
+            start = cut;
+        }
+        // The parts put back together are the answer.
+        let parts: String = (0..=cuts.len()).map(|n| part_of(&text, &cuts, n).unwrap()).collect();
+        assert_eq!(parts, text);
+        assert_eq!(part_of(&text, &cuts, cuts.len() + 1), None);
+    }
+
+    #[test]
+    fn fenced_code_is_never_cut() {
+        // A code block with blank lines in it, long enough that a cut would fall inside.
+        let code: String = (0..400).map(|i| if i % 4 == 0 { "\n".to_string() } else { format!("let x{i} = compute({i});\n") }).collect();
+        for fence in ["```", "~~~~"] {
+            let text = format!("{}{fence}rust\n{code}{fence}\n\nAfter the code.\n\n{}", paragraphs(8), paragraphs(20));
+            let open = text.find(fence).unwrap();
+            let close = open + fence.len() + text[open + fence.len()..].find(&format!("\n{fence}\n")).unwrap() + 1;
+            for cut in answer_parts(&text) {
+                assert!(cut <= open || cut > close, "{fence}: cut at {cut} inside the block ({open}..{close})");
+            }
+        }
+        // A fence closes only with as many of its own marks: ``` doesn't close ~~~~.
+        let text = format!("~~~~\n{}```\n\n{}~~~~\n", paragraphs(30), paragraphs(2));
+        assert_eq!(answer_parts(&text), Vec::<usize>::new(), "all of it is one code block");
+    }
+
+    #[test]
+    fn indented_lines_and_list_continuations_are_never_where_a_part_starts() {
+        let item = format!("- an item\n\n    {}\n\n", "a continuation of the item, indented under it. ".repeat(8));
+        let text = format!("{}{}", paragraphs(10), item.repeat(30));
+        for cut in answer_parts(&text) {
+            let first = text[cut..].as_bytes()[0];
+            assert!(!first.is_ascii_whitespace(), "a part starts with {:?}", &text[cut..cut + 12]);
+        }
+    }
+
+    #[test]
+    fn cuts_made_while_an_answer_streams_stay_put_as_it_grows() {
+        let full = format!("{}```\ncode\n\nmore code\n```\n\n{}", paragraphs(30), paragraphs(30));
+        let mut seen: Vec<usize> = vec![];
+        // Every few bytes, as tokens arrive: earlier cuts never move or go.
+        for end in (0..=full.len()).step_by(7).chain([full.len()]) {
+            let cuts = answer_parts(&full[..end]);
+            if end >= SPLIT_FROM {
+                assert!(cuts.starts_with(&seen) || seen.is_empty(), "at {end}: {cuts:?} lost {seen:?}");
+                seen = cuts;
+            }
+        }
+        assert_eq!(seen, answer_parts(&full));
+    }
+
+    #[test]
+    fn rows_after_a_long_answer_move_down_by_its_extra_parts() {
+        let long = paragraphs(60);
+        let items = [user("go"), said(&long), Item::TurnEnd { at: 1, took_secs: 2 }, user("next"), said("short")];
+        let (slots, item_row) = layout(&items, None);
+        let key = |s: &str| gpui_kit::SharedString::from(s.to_string());
+        let rows: Vec<Row> = slots
+            .iter()
+            .map(|s| match (s, &items[match s { Slot::Item(i) => *i, Slot::Group(g) => g[0] }]) {
+                (Slot::Item(ix), Item::Assistant { .. }) => Row::Assistant { ix: *ix, key: key("a"), part: 0, last: true },
+                (Slot::Item(ix), Item::TurnEnd { .. }) => Row::TurnEnd { ix: *ix },
+                (Slot::Item(ix), _) => Row::User { ix: *ix, key: key("u"), open: false },
+                _ => unreachable!(),
+            })
+            .collect();
+        let rows = split_long_answers(rows, item_row, &items);
+        let parts = answer_parts(&long).len() + 1;
+        assert!(parts > 1);
+        assert_eq!(rows.split, [(1, parts)]);
+        assert_eq!(rows.rows.len(), 4 + parts);
+        let shape: Vec<(usize, usize, bool)> = rows.rows.iter().filter_map(|r| match r { Row::Assistant { ix, part, last, .. } => Some((*ix, *part, *last)), _ => None }).collect();
+        assert_eq!(shape.len(), parts + 1);
+        assert_eq!(shape[0], (1, 0, false));
+        assert_eq!(shape[parts - 1], (1, parts - 1, true));
+        assert_eq!(shape[parts], (4, 0, true), "the short answer stays whole");
+        // The long answer maps to its first part; what follows to where it went.
+        assert_eq!(rows.item_row, [0, 1, 1 + parts, 2 + parts, 3 + parts]);
+    }
+
+    /// `block` among enough paragraphs to be cut on either side of it.
+    fn around(block: &str) -> (String, std::ops::Range<usize>) {
+        let before = paragraphs(10);
+        let text = format!("{before}{block}\n\n{}", paragraphs(20));
+        (text, before.len()..before.len() + block.len())
+    }
+
+    #[test]
+    fn raw_blocks_that_run_on_past_blank_lines_are_never_cut() {
+        // Blank lines and unindented lines inside; none of it is ever where a part starts.
+        let inside = paragraphs(10);
+        for (open, close) in [("<!--\n", "-->"), ("<pre>\n", "</pre>"), ("<SCRIPT type=\"x\">\n", "</Script>"), ("<style>", "</style>"), ("$$\n", "$$"), ("<?php\n", "?>")] {
+            let (text, block) = around(&format!("{open}{inside}{close}"));
+            let cuts = answer_parts(&text);
+            assert!(!cuts.is_empty(), "{open}: nothing cut at all");
+            for cut in &cuts {
+                assert!(*cut <= block.start || *cut > block.end, "{open}: cut at {cut} inside the block {block:?}");
+            }
+            assert!(cuts.iter().any(|c| *c > block.end), "{open}: nothing cut after the block ends");
+        }
+        // One that ends on its own line (or isn't one: `<pre-x>`) holds nothing back.
+        for line in ["<!-- a note -->", "<pre>x</pre>", "<pre-x>", "<premium>"] {
+            let (text, block) = around(line);
+            assert!(answer_parts(&text).iter().any(|c| *c > block.end), "{line}: held the cuts back");
+        }
+    }
+
+    #[test]
+    fn code_marks_in_a_line_of_prose_are_not_a_fence() {
+        // Inline code starting a line: backticks in what follows the first three.
+        let (text, block) = around("```inline``` starts this paragraph, and `more`.");
+        assert!(answer_parts(&text).iter().any(|c| *c > block.end));
+        // A fence indented four spaces is code, not a fence; its blank lines are indented too.
+        let (text, block) = around("- item\n\n      ```\n      code\n\n      more\n      ```");
+        for cut in answer_parts(&text) {
+            assert!(cut <= block.start || cut > block.end, "cut at {cut} inside {block:?}");
+        }
+        // Indented three, a fence holds its unindented lines and blank ones to the closing mark.
+        let (text, block) = around(&format!("   ```\n{}   ```", paragraphs(10)));
+        for cut in answer_parts(&text) {
+            assert!(cut <= block.start || cut > block.end, "cut at {cut} inside {block:?}");
+        }
+    }
+
+    #[test]
+    fn link_reference_definitions_keep_an_answer_whole_footnotes_and_code_do_not() {
+        let prose = format!("{}See [the docs][1] and a note.[^1]\n\n{}", paragraphs(15), paragraphs(15));
+        assert!(!answer_parts(&prose).is_empty());
+        // A definition at the end (as they're written) takes every cut back, however many were made.
+        assert_eq!(answer_parts(&format!("{prose}[1]: https://example.com/docs \"Docs\"\n")), Vec::<usize>::new());
+        assert_eq!(answer_parts(&format!("{prose}   [a b]:<https://example.com/>\n")), Vec::<usize>::new());
+        // Not one: a footnote's, a task, an indented line (code), and one inside a fence.
+        for line in ["[^1]: A footnote, and what it says.", "[x] done: yes", "    [1]: https://example.com", "[1]:"] {
+            assert!(!answer_parts(&format!("{prose}{line}\n\n{}", paragraphs(10))).is_empty(), "{line}");
+        }
+        assert!(!answer_parts(&format!("{prose}```\n[1]: https://example.com\n```\n\n{}", paragraphs(10))).is_empty());
+    }
+
+    #[test]
+    fn a_crlf_answer_is_cut_where_an_lf_one_is() {
+        let lf = paragraphs(60);
+        let crlf = lf.replace('\n', "\r\n");
+        let (a, b) = (answer_parts(&lf), answer_parts(&crlf));
+        assert!(a.len() >= 5);
+        // Cut after the same paragraph, once the \r that each line gained is counted (a part has
+        // to hold 2 KB, which a gained byte per line can satisfy sooner).
+        for cut in &b {
+            assert!(crlf[..*cut].ends_with("\r\n\r\n") && crlf[*cut..].starts_with("Paragraph"), "{:?}", &crlf[cut - 6..cut + 6]);
+        }
+        assert!(b.len() >= a.len());
+    }
+
+    #[test]
+    fn the_threshold_is_exact() {
+        let text = paragraphs(60);
+        assert!(answer_parts(&text[..SPLIT_FROM - 1]).is_empty());
+        assert!(!answer_parts(&text[..SPLIT_FROM]).is_empty(), "6,000 bytes are cut");
+        // The same text, a byte either side: the parts are the same (the first cut is the same).
+        assert_eq!(answer_parts(&text[..SPLIT_FROM])[0], answer_parts(&text[..SPLIT_FROM + 1])[0]);
+    }
+
+    #[test]
+    fn every_part_of_a_long_answer_flashes_for_a_search_result_in_it() {
+        let key = || gpui_kit::SharedString::from("a");
+        let rows: Vec<Row> = vec![
+            Row::TurnEnd { ix: 0 },
+            Row::Assistant { ix: 1, key: key(), part: 0, last: false },
+            Row::Assistant { ix: 1, key: key(), part: 1, last: true },
+            Row::Assistant { ix: 4, key: key(), part: 0, last: true },
+        ];
+        // The result scrolled to the first part: both are tinted; the other answer, and what's before, aren't.
+        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 1, ix)), [false, true, true, false]);
+        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 3, ix)), [false, false, false, true]);
+        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 0, ix)), [true, false, false, false]);
     }
 }
