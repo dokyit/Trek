@@ -82,6 +82,9 @@ pub struct Words {
 
     /// The command that ends the app, as the platform's own apps name it (the command palette's).
     pub quit_app: &'static str,
+
+    /// The release a platform downloads, as "the ... build" names it: "Mac", "Windows".
+    pub build_name: &'static str,
 }
 
 const MACOS: Words = Words {
@@ -130,6 +133,8 @@ const MACOS: Words = Words {
     browser_unavailable: "The embedded browser isn't available on this system.",
 
     quit_app: "Quit Trek",
+
+    build_name: "Mac",
 };
 
 const WINDOWS: Words = Words {
@@ -180,6 +185,8 @@ const WINDOWS: Words = Words {
     browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
 
     quit_app: "Exit Trek",
+
+    build_name: "Windows",
 };
 
 /// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
@@ -260,6 +267,7 @@ mod tests {
             dictate_tip,
             browser_unavailable,
             quit_app,
+            build_name,
         } = *w;
         // Said by one platform only: the other's blank is not a blank wording.
         let nothing = "(says nothing)";
@@ -294,6 +302,7 @@ mod tests {
             ("dictate_tip", dictate_tip),
             ("browser_unavailable", browser_unavailable),
             ("quit_app", quit_app),
+            ("build_name", build_name),
         ]
     }
 
@@ -344,6 +353,7 @@ mod tests {
         assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(w.browser_unavailable, "The embedded browser isn't available on this system.");
         assert_eq!(w.quit_app, "Quit Trek");
+        assert_eq!(format!("the {} build", w.build_name), "the Mac build");
         assert_eq!(w.window_shadow_note, Some("Keep macOS's drop shadow around window snapshots."));
         assert_eq!(w.screen_recording, Some(("Screen Recording", "macOS asks once; snapshots of other apps need it.")));
         assert_eq!(w.snipping_tool_note, None, "the Mac's Snapshots page has every row");
@@ -368,6 +378,7 @@ mod tests {
         assert_eq!(w.open_in_viewer, "Open in default app", "Windows has no Preview, or Quick Look");
         assert_eq!(w.dictate_tip, "Press Win+H to dictate");
         assert_eq!(w.quit_app, "Exit Trek", "Windows apps exit; a Mac's quit");
+        assert_eq!(format!("the {} build", w.build_name), "the Windows build");
         assert_eq!(w.window_shadow_note, None, "Snipping Tool has no shadow to keep");
         assert_eq!(w.screen_recording, None, "Windows has no permission to capture the screen");
         assert!(w.snipping_tool_note.is_some_and(|n| n.contains("Snipping Tool decides") && n.contains("PNG")));
