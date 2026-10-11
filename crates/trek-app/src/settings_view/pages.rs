@@ -4,7 +4,7 @@
 use super::SettingsView;
 use crate::palette;
 use crate::ui;
-use crate::workspace::{Route, UpdateAction};
+use crate::workspace::Route;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -835,8 +835,8 @@ impl SettingsView {
         let action = view.action.map(|action| {
             Button::new("update-action")
                 .small()
-                .when(action == UpdateAction::Restart, |b| b.primary())
-                .when(action != UpdateAction::Restart, |b| b.outline())
+                .when(action.is_primary(), |b| b.primary())
+                .when(!action.is_primary(), |b| b.outline())
                 .loading(view.busy)
                 .label(action.label())
                 .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx))))

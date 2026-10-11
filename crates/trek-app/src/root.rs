@@ -926,14 +926,11 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     let front = key_window(cx);
     let Some(target) = notice_window(workspace, front, cx) else { return };
     // Putting files back can be taken back for a while: long enough to see what moved.
-    let restore = matches!(undo, Some(UndoAction::Unrestore { .. }));
+    // (So is moving Trek and clearing the old copy: a button that isn't missed in ten seconds.)
+    let restore = matches!(undo, Some(UndoAction::Unrestore { .. } | UndoAction::MoveTrek | UndoAction::RemoveOldCopy(_)));
     let lifetime = if restore { UNDO_RESTORE_TOAST } else { toast_lifetime(&message, undo.is_some()) };
     let action = undo.map(|action| {
-        let label = match action {
-            UndoAction::CancelRestart => "Not now",
-            UndoAction::MaintainVerification(_) => "Maintain",
-            _ => "Undo",
-        };
+        let label = toast_button_label(&action);
         (action, label)
     });
     // Spent once used: on its way out the toast takes no clicks, and this keeps a second press
@@ -963,6 +960,17 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     .key(key)
     .lifetime(lifetime);
     let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
+}
+
+/// What the button on a toast says.
+pub(crate) fn toast_button_label(action: &UndoAction) -> &'static str {
+    match action {
+        UndoAction::CancelRestart | UndoAction::CancelMove => "Not now",
+        UndoAction::MaintainVerification(_) => "Maintain",
+        UndoAction::MoveTrek => "Move Trek",
+        UndoAction::RemoveOldCopy(_) => "Remove old copy",
+        _ => "Undo",
+    }
 }
 
 /// How long a toast whose Undo puts files back stays up.

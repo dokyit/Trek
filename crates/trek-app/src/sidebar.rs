@@ -5,7 +5,7 @@ use crate::palette;
 use crate::time;
 use crate::ui;
 use crate::worktree_ui::Leave;
-use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, UpdateAction, UpdateStatus, Workspace, WorkspaceEvent};
+use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::menu::DropdownMenu as _;
@@ -1429,8 +1429,8 @@ impl Sidebar {
                     gpui_kit::component::button::Button::new("updater-action")
                         .small()
                         .w_full()
-                        .when(action == UpdateAction::Restart, |b| b.primary())
-                        .when(action != UpdateAction::Restart, |b| b.outline())
+                        .when(action.is_primary(), |b| b.primary())
+                        .when(!action.is_primary(), |b| b.outline())
                         .loading(view.busy)
                         .label(action.label())
                         .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.run_update_action(action, cx)))),
