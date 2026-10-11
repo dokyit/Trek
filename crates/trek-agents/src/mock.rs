@@ -2467,9 +2467,11 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = std::time::Instant::now();
-            m.prompt("mock:stream 300ms").await;
+            // Long enough for more than ten 14 ms steps even when a loaded machine stretches each
+            // pause several times over (300 ms gave 10 or fewer deltas on one).
+            m.prompt("mock:stream 2s").await;
             let events = m.turn().await;
-            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert!(start.elapsed() >= Duration::from_secs(2));
             let streamed: String = events.iter().filter_map(|e| if let AgentEvent::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
             assert!(streamed.starts_with("## Part 1\n\n## How the app starts"), "{streamed}");
             assert_eq!(text(&events), streamed, "one message, sent whole at the end");
