@@ -14,6 +14,7 @@ mod verification;
 mod worktrees;
 mod ide;
 mod review;
+pub(crate) mod relocate;
 
 pub use ide::{ChatMode, IdeChat, IdeTab, Mode};
 pub use review::{FileReview, Review, as_given};
@@ -872,6 +873,12 @@ pub enum UndoAction {
     CancelRestart,
     /// Not an undo: the weekly reminder's way to maintain the project's verification skill.
     MaintainVerification(PathBuf),
+    /// Not an undo: Windows, from a launch toast: move Trek to its own folder (`Workspace::move_trek`).
+    MoveTrek,
+    /// Call off a move to its own folder that's counting down; it waits for a click or for agents.
+    CancelMove,
+    /// Not an undo: after a move, delete the copy of Trek that was left in the old folder.
+    RemoveOldCopy(PathBuf),
 }
 
 /// How long a restart the user asked for while agents worked waits once they're done: they may
@@ -1148,6 +1155,13 @@ pub struct Workspace {
     tasks: Vec<Task<()>>,
     /// A restart the user asked for while agents worked, counting down now that they're done.
     restart_countdown: Option<Task<()>>,
+    /// A move out of a folder Trek can't update itself in (Windows), under way.
+    pub(crate) moving: relocate::Moving,
+    /// What a move does to the machine; tests replace it.
+    pub(crate) mover: relocate::Mover,
+    /// What a test says keeps Trek from updating itself, instead of where the test binary is.
+    #[cfg(test)]
+    pub(crate) blocked: Option<Option<trek_core::update::Blocker>>,
     /// Why Trek's database couldn't be opened, until the main window has said so: this session
     /// runs on an in-memory copy and nothing is saved.
     pub store_error: Option<String>,
@@ -1259,9 +1273,24 @@ impl Workspace {
         }
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
         let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
+        // Toasts with a button: a move out of where Trek is, and the old copy it left.
+        let mut launch_actions: Vec<(String, UndoAction)> = vec![];
+        let windows = crate::words::is_windows();
+        if windows && let Some(moved) = trek_core::update::relocate::take_relocation() {
+            tracing::info!("relocation: now running from {}, moved from {}", moved.to.display(), moved.from.display());
+            match relocate::moved_note(&moved) {
+                (message, Some(undo)) => launch_actions.push((message, undo)),
+                (message, None) => launch_toasts.push(message),
+            }
+        }
         if trek_core::update::blocker().is_none() {
             // Windows: trek-update couldn't swap the update in, and put this version back.
-            launch_toasts.extend(trek_core::update::take_install_failure());
+            if let Some(failure) = trek_core::update::take_install_failure() {
+                match relocate::failure_offer(&failure, windows) {
+                    Some(undo) => launch_actions.push((failure, undo)),
+                    None => launch_toasts.push(failure),
+                }
+            }
             // A first launch has nothing new to show; one after an update shows what it brought
             // (from a build older than "What's new", whose setting is still empty).
             if this.settings.updates.seen_notes.is_empty() {
@@ -1270,12 +1299,16 @@ impl Workspace {
             }
             this.fetch_changelog(cx);
         }
-        if !launch_toasts.is_empty() {
+        launch_actions.extend(relocate::guarded_offer(trek_core::update::blocker(), windows));
+        if !launch_toasts.is_empty() || !launch_actions.is_empty() {
             // Spawned so they land after the window has subscribed to workspace events.
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |_, cx| {
                     for message in launch_toasts {
                         cx.emit(WorkspaceEvent::Toast { message, undo: None });
+                    }
+                    for (message, undo) in launch_actions {
+                        cx.emit(WorkspaceEvent::Toast { message, undo: Some(undo) });
                     }
                 });
             })
@@ -1444,6 +1477,10 @@ impl Workspace {
             applied_defaults,
             tasks: vec![],
             restart_countdown: None,
+            moving: relocate::Moving::default(),
+            mover: relocate::Mover::default(),
+            #[cfg(test)]
+            blocked: None,
             store_error: None,
             clock: Clock::default(),
             limit_timer: None,
@@ -5200,6 +5237,9 @@ impl Workspace {
             }
             UndoAction::Unrestore { .. } => {}
             UndoAction::MaintainVerification(project) => self.start_verification(project, true, cx),
+            UndoAction::MoveTrek => self.move_trek(cx),
+            UndoAction::CancelMove => self.cancel_move(cx),
+            UndoAction::RemoveOldCopy(old) => self.remove_old_copy(old, cx),
             UndoAction::CancelRestart => {
                 self.restart_countdown = None;
                 if let UpdateStatus::RestartPending { version, staged } = self.updater.status.clone() {
@@ -5848,11 +5888,17 @@ impl Workspace {
     // ---------- updates ----------
 
     pub fn update_view(&self) -> UpdateView {
-        crate::updater::describe_update(&self.updater.status, self.settings.updates.auto_check, trek_core::update::blocker())
+        #[cfg(test)]
+        let blocker = self.blocked.unwrap_or_else(trek_core::update::blocker);
+        #[cfg(not(test))]
+        let blocker = trek_core::update::blocker();
+        self.moving_view(crate::updater::describe_update(&self.updater.status, self.settings.updates.auto_check, blocker))
     }
 
     pub fn run_update_action(&mut self, action: UpdateAction, cx: &mut Context<Self>) {
         match action {
+            UpdateAction::Move => self.move_trek(cx),
+            UpdateAction::MoveNow => self.move_now(cx),
             UpdateAction::Check => self.check_for_updates(true, cx),
             UpdateAction::Download => self.download_update(cx),
             UpdateAction::Restart => self.restart_to_update(cx),
@@ -6043,6 +6089,7 @@ impl Workspace {
     /// Once the agents are done, a restart left pending counts down `RESTART_GRACE` first, with a
     /// toast that can call it off.
     fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
+        self.maybe_move(cx);
         if !matches!(self.updater.status, UpdateStatus::RestartPending { .. }) || self.work_in_flight() || self.restart_countdown.is_some() {
             return;
         }
