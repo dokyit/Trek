@@ -1161,6 +1161,36 @@ mod tests {
         assert_eq!((r.window.range, r.window.start, r.window.end, r.window.bucket_ms), (Range::All, w.start, w.end, w.bucket_ms));
     }
 
+    /// CPU time (user and kernel) the calling thread has used: work done, not time waited for a
+    /// core, so a machine busy with other builds doesn't change it much.
+    #[cfg(windows)]
+    fn thread_cpu() -> std::time::Duration {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        // SAFETY: the pseudo-handle for this thread, and locals to write into.
+        unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) };
+        let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+        // FILETIMEs count 100 ns ticks.
+        std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn thread_cpu() -> std::time::Duration {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: plain syscall writing into a local.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    }
+
+    /// Elsewhere, the wall clock: the bound below then holds only on a quiet machine.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    fn thread_cpu() -> std::time::Duration {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
+
     #[test]
     fn all_time_over_a_long_busy_history_is_quick() {
         // Two thousand threads over a year and a half, ten turns each: twenty thousand turns.
@@ -1189,17 +1219,27 @@ mod tests {
             s.save_transcript(&t.id, &mut crate::transcript::Transcript::unsaved(items)).unwrap();
             s.update_thread(&t.id, |t| t.updated_at = start + TURNS as i64 * 600_000).unwrap();
         }
-        let began = std::time::Instant::now();
+        // What's measured is the CPU the work takes, not the time it waits for a core: pinned to
+        // two cores beside 24 busy loops, it took 1 to 17 s of wall time and 0.3 to 0.4 s of CPU
+        // (0.2 s alone). Nothing here runs on another thread (there are no imported histories to
+        // read a few at once), so the calling thread's CPU is all of it.
+        let (began, cpu_began) = (std::time::Instant::now(), thread_cpu());
         let r = recap(&s, Range::All, &today).unwrap();
-        let took = began.elapsed();
+        let (took, cpu) = (began.elapsed(), thread_cpu() - cpu_began);
+        eprintln!("all time: {cpu:?} of CPU, {took:?} in all");
         assert_eq!((r.threads, r.prompts, r.turns), (THREADS, THREADS * TURNS, THREADS * TURNS));
         assert_eq!(r.tokens.total(), (THREADS * TURNS) as u64 * 10_000);
         assert_eq!(r.agent_secs, (THREADS * TURNS) as u64 * 120);
         assert_eq!(r.window.start, at(&tz, "2025-03-31 00:00"));
         assert_eq!(r.buckets.len(), 79, "a week a stretch");
         assert_eq!(r.buckets.iter().map(|b| b.prompts).sum::<usize>(), r.prompts);
-        // A fraction of a second; pricing every report on its own took over one.
-        assert!(took < std::time::Duration::from_secs(3), "all time took {took:?}");
+        // A fraction of a second of work (0.2 s alone); pricing every report on its own took over
+        // one. Ten times what it takes is far from noise and far below a per-report or quadratic
+        // step, which costs seconds on twenty thousand turns.
+        assert!(cpu < std::time::Duration::from_secs(2), "all time took {cpu:?} of CPU ({took:?} in all)");
+        // Only that it finishes: contention can stretch it many times over (up to 17 s with 24
+        // busy loops on two cores), so this catches a hang, not a slow step.
+        assert!(took < std::time::Duration::from_secs(60), "all time took {took:?} (the CPU it used: {cpu:?})");
     }
 
     fn words(spans: &[Span]) -> String {
