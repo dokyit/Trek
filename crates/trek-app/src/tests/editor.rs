@@ -186,8 +186,9 @@ async fn loaded(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext) 
 fn pipes_devices_and_huge_files_open_read_only_without_hanging() {
     run(async |cx| {
         let trek = open(cx);
+        // Text past the editor's limit (a file of NULs would be binary, which a preview shows).
         let big = trek.project.join("big.log");
-        std::fs::File::create(&big).unwrap().set_len(2_000_001).unwrap();
+        std::fs::write(&big, format!("{}\n", "x".repeat(99)).repeat(20_001)).unwrap();
         let mut cases = Vec::new();
         // Unix only: Windows has no FIFOs or device files to open by path.
         #[cfg(unix)]

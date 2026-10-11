@@ -23,6 +23,7 @@ mod editor_group;
 pub(crate) mod git;
 mod layout;
 mod panel;
+pub(crate) mod preview;
 pub(crate) mod scm;
 mod status_bar;
 mod watch;
@@ -115,6 +116,8 @@ impl IdeWorkbench {
                 }
             }
             this.watch_root(window, cx);
+            // Agents mode, another route, a palette over the window: previews' web views hide.
+            this.sync_previews(cx);
             // The editors draw their own header in the harness only.
             if mode != this.mode_seen {
                 this.mode_seen = mode;
@@ -166,12 +169,11 @@ impl IdeWorkbench {
     pub(crate) fn file_moved(&mut self, from: &std::path::Path, to: Option<&std::path::Path>, window: &mut Window, cx: &mut Context<Self>) {
         let front = self.tabs.get(self.active).map(EditorTab::id);
         for tab in self.tabs.clone() {
-            let Some(e) = tab.editor().cloned() else { continue };
-            let path = e.read(cx).path.clone();
+            let Some(path) = tab.file(cx) else { continue };
             let Ok(rest) = path.strip_prefix(from) else { continue };
             let moved = to.map(|t| if rest.as_os_str().is_empty() { t.to_path_buf() } else { t.join(rest) });
             self.canonical.remove(&path);
-            if tab.dirty(cx) {
+            if let Some(e) = tab.editor().filter(|_| tab.dirty(cx)) {
                 if let Some(m) = moved {
                     e.update(cx, |e, cx| {
                         e.path = m;
@@ -209,7 +211,15 @@ impl IdeWorkbench {
         self.activate(ix, cx);
         self.workspace.update(cx, |ws, _| ws.ide_file_seen(&path));
         self.explorer.update(cx, |e, cx| e.reveal(&path, cx));
-        let Some(view) = self.tabs[ix].editor().cloned() else { return };
+        let Some(view) = self.tabs[ix].editor().cloned() else {
+            // A preview opened on purpose takes the keys too (⌘W closes it, ⌃Tab moves on).
+            if let Some(p) = self.tabs[ix].preview_view().filter(|_| !preview) {
+                let handle = p.read(cx).focus_handle(cx);
+                handle.focus(window, cx);
+            }
+            cx.notify();
+            return;
+        };
         if let Some(line) = line {
             view.update(cx, |e, cx| e.goto_line(line, window, cx));
         }
@@ -220,13 +230,18 @@ impl IdeWorkbench {
         cx.notify();
     }
 
-    /// The tab for `path` in the harness's lone editor screen (made if it has none), in front.
-    pub fn editor_for(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) -> Entity<EditorView> {
+    /// The tab for `path` in the harness's lone editor screen (made if it has none), in front: its
+    /// editor, or its preview when the file isn't text.
+    pub fn view_for(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) -> AnyView {
         let ix = self.open_tab(path.to_path_buf(), false, window, cx);
         if ix != self.active {
             self.activate(ix, cx);
         }
-        self.tabs[ix].editor().cloned().expect("a file's tab is an editor")
+        match &self.tabs[ix].view {
+            editor_group::TabView::Editor(e) => e.clone().into(),
+            editor_group::TabView::Preview(p) => p.clone().into(),
+            editor_group::TabView::Diff(d) => d.clone().into(),
+        }
     }
 
     /// Show `view` in the primary side bar (opening the bar if it was hidden).
@@ -331,9 +346,19 @@ impl IdeWorkbench {
         if glass.is_some() { crate::ui::panel_border(glass, cx) } else { cx.theme().border }
     }
 
+    /// The files' tabs (editors and previews): (file, preview).
     #[cfg(test)]
     pub fn tab_paths(&self, cx: &App) -> Vec<(PathBuf, bool)> {
-        self.tabs.iter().filter_map(|t| t.editor().map(|e| (e.read(cx).path.clone(), t.preview))).collect()
+        self.tabs
+            .iter()
+            .filter_map(|t| t.editor().map(|e| e.read(cx).path.clone()).or_else(|| t.preview_view().map(|p| p.read(cx).path.clone())).map(|p| (p, t.preview)))
+            .collect()
+    }
+
+    /// The preview in front, if the tab in front is one.
+    #[cfg(any(test, feature = "shots"))]
+    pub fn active_preview(&self) -> Option<Entity<preview::PreviewView>> {
+        self.tabs.get(self.active).and_then(|t| t.preview_view().cloned())
     }
 }
 

@@ -134,6 +134,9 @@ pub struct EditorView {
     pub(crate) dirty: bool,
     /// Why the file didn't load (too big, unreadable, gone). The view is read-only then.
     problem: Option<String>,
+    /// The file turned out not to be text, or unreadable, as it was first read: the workbench
+    /// takes it and shows a preview in this editor's place (`ide::preview`).
+    pub(crate) not_text: Option<crate::ide::preview::NotText>,
     /// The language server this doc is open on, when one covers its extension.
     lsp: Option<(Arc<crate::lsp_client::Client>, String)>,
     /// Keeps the diagnostics watcher alive.
@@ -247,6 +250,7 @@ impl EditorView {
             saved: String::new(),
             dirty: false,
             problem: None,
+            not_text: None,
             lsp: None,
             _diag_watch: None,
             diff_marks: None,
@@ -273,8 +277,12 @@ impl EditorView {
             this.workspace.update(cx, |ws, _| ws.reveal_hunk = None);
         }
         cx.spawn_in(window, async move |this, cx| {
-            let (text, problem) = cx.background_executor().spawn(async move { load(&path) }).await;
-            let _ = this.update_in(cx, |this, window, cx| this.loaded(text, problem, lang, window, cx));
+            let (text, problem, instead) = cx.background_executor().spawn(async move { load_or_preview(&path) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.not_text = instead;
+                this.loaded(text, problem, lang, window, cx);
+                cx.notify();
+            });
         })
         .detach();
         this
@@ -364,6 +372,7 @@ impl EditorView {
             saved: text.to_string(),
             dirty: false,
             problem: None,
+            not_text: None,
             lsp: None,
             _diag_watch: None,
             diff_marks: None,
@@ -652,16 +661,22 @@ fn read_text(path: &Path) -> std::io::Result<String> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options.open(path)?;
+    let mut file = options.open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file"));
     }
+    // A NUL or bytes that can't be UTF-8 near the start: not text, however big (the editor group
+    // shows a preview of it instead).
+    let mut bytes = vec![];
+    (&mut file).take(crate::ide::preview::SNIFF as u64).read_to_end(&mut bytes)?;
+    if crate::ide::preview::is_binary(&bytes) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not text"));
+    }
     if meta.len() > MAX_FILE_BYTES {
         return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, "too big"));
     }
-    let mut bytes = vec![];
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    file.take(MAX_FILE_BYTES + 1 - bytes.len() as u64).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, "too big"));
     }
@@ -703,8 +718,17 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
 
 /// Read the file; a reason for read-only otherwise.
 fn load(path: &Path) -> (String, Option<String>) {
+    let (text, problem, _) = load_or_preview(path);
+    (text, problem)
+}
+
+/// `load`, and what the editor group shows instead of an editor when the file isn't text at
+/// all, or can't be read (a missing file, one too big or not a file at all stays an editor with
+/// its note).
+fn load_or_preview(path: &Path) -> (String, Option<String>, Option<crate::ide::preview::NotText>) {
+    use crate::ide::preview::NotText;
     match read_text(path) {
-        Ok(t) => (t, None),
+        Ok(t) => (t, None, None),
         Err(e) => {
             let why = match e.kind() {
                 std::io::ErrorKind::FileTooLarge => "Too big to edit — open it in your editor.".to_string(),
@@ -712,7 +736,12 @@ fn load(path: &Path) -> (String, Option<String>) {
                 std::io::ErrorKind::InvalidInput => "Not a file (a device, a pipe or a folder) — Trek edits files only.".to_string(),
                 _ => format!("Can't read it: {e}"),
             };
-            (String::new(), Some(why))
+            let instead = match e.kind() {
+                std::io::ErrorKind::InvalidData => Some(NotText::Binary),
+                std::io::ErrorKind::FileTooLarge | std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound => None,
+                _ => Some(NotText::Unreadable(e)),
+            };
+            (String::new(), Some(why), instead)
         }
     }
 }

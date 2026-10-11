@@ -465,7 +465,7 @@ fn format_of(path: &Path) -> ImageFormat {
 }
 
 /// A file's size as Finder gives it (decimal units).
-fn file_size(bytes: u64) -> String {
+pub(crate) fn file_size(bytes: u64) -> String {
     match bytes {
         b if b >= 1_000_000_000 => format!("{:.1} GB", b as f64 / 1e9),
         b if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
@@ -489,7 +489,7 @@ fn meta(s: &Showing) -> String {
 }
 
 /// Keep a pan offset on the image: offsets run from 0 (top left) down to minus the overhang.
-fn clamp_offset(offset: Point<Pixels>, content: Size<Pixels>, area: Size<Pixels>) -> Point<Pixels> {
+pub(crate) fn clamp_offset(offset: Point<Pixels>, content: Size<Pixels>, area: Size<Pixels>) -> Point<Pixels> {
     let max_x = (content.width - area.width).max(px(0.));
     let max_y = (content.height - area.height).max(px(0.));
     point(offset.x.clamp(-max_x, px(0.)), offset.y.clamp(-max_y, px(0.)))
