@@ -110,16 +110,28 @@ pub fn updates_dir() -> PathBuf {
     dir
 }
 
-/// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`. The part under `~` is
-/// always written with `/` (`C:\Users\me\Documents\x` → `~/Documents/x` on Windows too), not the
-/// half-and-half `~/Documents\x` that `~/` plus the native path would make.
+/// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`, and on Windows
+/// `C:\Users\me\Documents\x` → `~\Documents\x` (PowerShell's own `~`): the folders under `~` are
+/// joined with the platform's separator, never the half-and-half `~/Documents\x` that `~/` plus
+/// the native path would make, and never the Unix form on a PC.
 pub fn tildify(path: &std::path::Path) -> String {
+    tildify_with(path, std::path::MAIN_SEPARATOR_STR)
+}
+
+/// [`tildify`] with `/` on every platform (`~/Documents/x`), for a path put in a message to an
+/// agent: its shell may be Git Bash, where `~\Documents` is no path, and `~/` is one in every
+/// shell Windows has.
+pub fn tildify_for_agents(path: &std::path::Path) -> String {
+    tildify_with(path, "/")
+}
+
+fn tildify_with(path: &std::path::Path, sep: &str) -> String {
     let home = home();
     match path.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
         Ok(rest) => {
             let parts: Vec<_> = rest.components().map(|c| c.as_os_str().to_string_lossy()).collect();
-            format!("~/{}", parts.join("/"))
+            format!("~{sep}{}", parts.join(sep))
         }
         Err(_) => path.display().to_string(),
     }
@@ -199,12 +211,19 @@ mod tests {
     }
 
     #[test]
-    fn a_home_relative_path_is_written_with_slashes_whatever_the_platform() {
+    fn a_home_relative_path_is_written_with_the_platforms_separator() {
         let home = super::home();
-        // Built piece by piece, so on Windows it's `C:\Users\…\Documents\Trek` with backslashes.
-        assert_eq!(super::tildify(&home.join("Documents").join("Trek")), "~/Documents/Trek");
-        assert_eq!(super::tildify(&home.join("a").join("b").join("c.toml")), "~/a/b/c.toml");
+        let (sep, written) = if cfg!(windows) { ('\\', "~\\Documents\\Trek") } else { ('/', "~/Documents/Trek") };
+        // Built piece by piece, so on Windows it's `C:\Users\…\Documents\Trek` with backslashes,
+        // and what's shown has them too, not the Unix form (nor `~/Documents\Trek`).
+        assert_eq!(super::tildify(&home.join("Documents").join("Trek")), written);
+        assert_eq!(super::tildify(&home.join("a").join("b").join("c.toml")), format!("~{sep}a{sep}b{sep}c.toml"));
         assert_eq!(super::tildify(&home), "~");
+        // What an agent is told is the same on both: `~/…` works in every shell.
+        assert_eq!(super::tildify_for_agents(&home.join("Documents").join("Trek")), "~/Documents/Trek");
+        assert_eq!(super::tildify_for_agents(&home), "~");
+        // A name with a space (OneDrive's folders have them) stays whole.
+        assert_eq!(super::tildify(&home.join("OneDrive").join("FC 24 LE v24.1.1.0")), format!("~{sep}OneDrive{sep}FC 24 LE v24.1.1.0"));
         // And a path that merely shares a prefix with the home folder isn't taken for one under it.
         let mut sibling = home.clone().into_os_string();
         sibling.push("-other");
