@@ -575,6 +575,12 @@ pub enum Source {
     Cask(String),
     Feed(Feed),
 }
+    /// A WinGet package: the versions WinGet's community source (winget-pkgs) has manifests for.
+    /// The vendor's release reaches it hours or days later, and `winget upgrade` installs only
+    /// what's there.
+    Winget(String),
+    /// A Chocolatey package: the community repository's latest, which may lag the vendor's too.
+    Chocolatey(String),
 
 /// Where to ask for `h`'s newest version, installed as `install` (at version `installed`);
 /// `None` when its vendor publishes nowhere Trek can read.
@@ -588,8 +594,14 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
         Install::Brew { formula, tap: Some(tap), .. } => Some(Source::TapFormula { tap: tap.clone(), formula: formula.clone() }),
         Install::Cask { cask, .. } => Some(Source::Cask(cask.clone())),
         Install::Volta => h.npm_for(installed).map(|p| Source::Npm(p.into())),
-        // WinGet, Scoop and Chocolatey publish what the vendor's own release feed does.
-        Install::Native | Install::Winget { .. } | Install::Scoop { .. } | Install::Chocolatey { .. } => match h.feed {
+        // What the package manager has, not what the vendor released: an update it can't install
+        // yet isn't one to offer (Claude Code 2.1.296 was out while WinGet still had 2.1.292,
+        // and `winget upgrade` of the install said so by failing).
+        Install::Winget { id } => package_name(id).then(|| Source::Winget(id.clone())),
+        Install::Chocolatey { package } => package_name(package).then(|| Source::Chocolatey(package.clone())),
+        // Scoop's buckets are git repositories it pulls before updating: they follow the
+        // vendor's release closely.
+        Install::Native | Install::Scoop { .. } => match h.feed {
             Feed::Npm => h.npm_for(installed).map(|p| Source::Npm(p.into())),
             feed => Some(Source::Feed(feed)),
         },
@@ -610,6 +622,12 @@ pub fn urls(source: &Source) -> Vec<String> {
         Source::Cask(c) => vec![format!("https://formulae.brew.sh/api/cask/{c}.json")],
         // The feeds name a version, not a download: the same on every platform. Cursor's and
         // Factory's are their install scripts, and each has a Windows one that names it too.
+        // `Publisher.Package` is `manifests/p/Publisher/Package`, a folder per version.
+        Source::Winget(id) => {
+            let first = id.chars().next().map(|c| c.to_ascii_lowercase()).unwrap_or_default();
+            vec![format!("https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/{first}/{}", id.replace('.', "/"))]
+        }
+        Source::Chocolatey(p) => vec![format!("https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'{p}'%20and%20IsLatestVersion&$select=Version")],
         Source::Feed(feed) => match feed {
             Feed::Npm => vec![],
             Feed::ClaudeReleases => vec!["https://downloads.claude.ai/claude-code-releases/latest".into()],
@@ -640,6 +658,16 @@ fn between<'a>(text: &'a str, start: &str, end: char) -> Option<&'a str> {
 
 /// Read the newest version out of `body`, a response from one of `source`'s URLs.
 pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
+/// The newest of `versions`, as a feed that lists several.
+fn newest(versions: impl Iterator<Item = String>) -> Option<Latest> {
+    versions.reduce(|a, b| if is_newer(&b, &a) { b } else { a }).map(|version| Latest { version, auto_updates: false })
+}
+
+/// `name` (a WinGet id, a Chocolatey package) goes into a URL as it is.
+fn package_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
     let json = || serde_json::from_str::<serde_json::Value>(body).ok();
     let plain = |v: Option<String>| v.and_then(|v| parse_version(&v)).map(|version| Latest { version, auto_updates: false });
     match source {
@@ -654,6 +682,14 @@ pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
         Source::TapFormula { .. } => plain(body.lines().find_map(|l| l.trim().strip_prefix("version ").map(|v| v.trim().trim_matches('"').to_string()))),
         Source::Feed(feed) => match feed {
             Feed::Npm => None,
+        // A version's folder is named as the version ("2.1.292", Copilot's "v1.0.95"); a folder
+        // of another name is another package (`GitHub.Copilot.Prerelease`).
+        Source::Winget(_) => newest(json()?.as_array()?.iter().filter(|e| e["type"] == "dir").filter_map(|e| {
+            let name = e["name"].as_str()?;
+            parse_version(name).filter(|v| v == name.trim_start_matches(['v', 'V']))
+        })),
+        // An OData feed: `<d:Version>1.19.0</d:Version>` in its one entry.
+        Source::Chocolatey(_) => newest(body.split("<d:Version>").skip(1).filter_map(|rest| parse_version(rest.split('<').next()?))),
             Feed::ClaudeReleases | Feed::ClaudeStable | Feed::GrokStable => plain(body.lines().next().map(|l| l.trim().to_string())),
             Feed::DevinManifest => plain(json()?["version"].as_str().map(String::from)),
             Feed::CursorInstaller => plain(between(body, "downloads.cursor.com/lab/", '/').map(String::from)),
@@ -879,7 +915,11 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
         // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update
         // themselves. One installed for every user (Program Files) upgrades as an administrator.
         Install::Winget { id } => {
-            let upgrade = UpdateCommand { on_exit: winget_exits(h, native_install(h).as_deref()), ..UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements"]) };
+            let upgrade = UpdateCommand {
+                on_exit: winget_exits(h),
+                // Nothing to ask, or to wait for: it may run where no one can answer.
+                ..UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"])
+            };
             Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
         }
         // A Scoop for every user (ProgramData) updates its apps as an administrator.
@@ -887,7 +927,8 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
         Install::Scoop { app } => Some(UpdateCommand::new("scoop", &["update", app])),
         // Chocolatey installs into ProgramData, and upgrades from there as an administrator.
         Install::Chocolatey { package } => {
-            let upgrade = UpdateCommand::new("choco", &["upgrade", package, "-y"]);
+            // No progress bars: its output is read from a file.
+            let upgrade = UpdateCommand::new("choco", &["upgrade", package, "-y", "--no-progress"]);
             Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
         }
         Install::Native => match h.installer_only(binary) {
@@ -925,28 +966,18 @@ fn needs_admin(path: &Path) -> bool {
     cfg!(windows) && names(path).iter().any(|p| ["program files", "program files (x86)", "programdata"].contains(&p.to_ascii_lowercase().as_str()))
 }
 
-/// Claude Code's own installer's copy (`~\.local\bin\claude.exe`), when there is one beside
-/// the WinGet package's.
-fn native_install(h: &Harness) -> Option<PathBuf> {
-    (cfg!(windows) && h.agent == "claude-code").then(|| crate::paths::home().join(".local").join("bin").join("claude.exe")).filter(|p| p.is_file())
-}
-
-/// What `winget upgrade`'s exit codes (`winget`'s return-codes table) mean, said in words.
-/// `native` is another copy of the CLI, installed by its vendor's own installer, if one exists.
-fn winget_exits(h: &Harness, native: Option<&Path>) -> Vec<(i32, String)> {
+/// What `winget upgrade`'s exit codes (`winget`'s return-codes table) mean, said in words. None
+/// asks the user to type anything: what's left to them is to wait, or to close the agent.
+fn winget_exits(h: &Harness) -> Vec<(i32, String)> {
     let name = h.name();
-    let own = h.self_update.map(|args| format!("{} {}", h.binary, args.join(" ")));
-    let not_applicable = match (native, own) {
-        (Some(native), Some(own)) => format!("WinGet has no newer version of {name} yet. The copy at {} updates itself with `{own}`.", native.display()),
-        _ => format!("WinGet has no newer version of {name} yet: its package source is behind the vendor's release."),
-    };
     vec![
-        (0x8A15002Bu32 as i32, not_applicable),
-        (0x8A150019u32 as i32, format!("WinGet needs an administrator terminal to upgrade {name}.")),
+        // The check reads winget-pkgs, which WinGet's own source index follows by a few hours.
+        (0x8A15002Bu32 as i32, format!("WinGet's package list doesn't have this version of {name} yet. Trek tries again on its next check.")),
+        (0x8A150019u32 as i32, format!("WinGet needs an administrator to upgrade {name}.")),
         (0x8A150010u32 as i32, format!("WinGet has no installer of {name} for this computer.")),
         (0x8A150008u32 as i32, format!("WinGet couldn't download {name}'s update: offline, or the download was blocked.")),
-        (0x8A150045u32 as i32, "WinGet couldn't open its package source: offline, or run `winget source update`.".into()),
-        (0x8A15004Bu32 as i32, "WinGet couldn't open its package sources: offline, or run `winget source update`.".into()),
+        (0x8A150045u32 as i32, "WinGet couldn't open its package source: offline, or it's busy. Try again in a minute.".into()),
+        (0x8A15004Bu32 as i32, "WinGet couldn't open its package sources: offline, or they're busy. Try again in a minute.".into()),
         (0x8A150101u32 as i32, format!("{name} is running somewhere else (a terminal?). Close it and try again.")),
         (0x8A150103u32 as i32, format!("{name}'s files are in use by something else. Close it and try again.")),
     ]
@@ -2123,7 +2154,7 @@ mod tests {
         assert_eq!(h("opencode").reading(choco("opencode")), choco("opencode"));
         assert_eq!((scoop("x").label(), choco("x").label()), ("Scoop", "Chocolatey"));
         // Their versions are the vendor's feed's, as WinGet's are.
-        assert_eq!(source(h("claude-code"), &choco("claude-code"), None), Some(Source::Feed(Feed::ClaudeReleases)));
+        assert_eq!(source(h("claude-code"), &choco("claude-code"), None), Some(Source::Chocolatey("claude-code".into())));
         assert_eq!(source(h("opencode"), &scoop("opencode"), Some("1.2.27")), Some(Source::Npm("opencode-ai".into())));
     }
 
@@ -2198,7 +2229,7 @@ mod tests {
         assert_eq!((global.shown().as_str(), global.elevated), ("scoop update opencode -g", true));
         // Chocolatey: `choco upgrade <package> -y`, as an administrator.
         let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, &bin(r"C:\ProgramData\chocolatey\bin\opencode.exe"), false, None).unwrap();
-        assert_eq!((choco.shown().as_str(), choco.elevated), ("choco upgrade opencode -y", true));
+        assert_eq!((choco.shown().as_str(), choco.elevated), ("choco upgrade opencode -y --no-progress", true));
         assert_eq!(choco.program, Path::new("choco"));
         // WinGet: for the user it's run as it is, machine-wide as an administrator; both with
         // their failures said in words.
@@ -2206,7 +2237,7 @@ mod tests {
         let user = update_command(h("claude-code"), &winget, &bin(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_x\claude.exe"), false, None).unwrap();
         assert!(!user.elevated && user.on_exit.iter().any(|(code, _)| *code == -1978335189));
         let machine = update_command(h("claude-code"), &winget, &bin(r"C:\Program Files\WinGet\Links\claude.exe"), false, None).unwrap();
-        assert_eq!(machine.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements");
+        assert_eq!(machine.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
         assert!(machine.elevated && machine.on_exit.iter().any(|(code, _)| *code == -1978335189));
         // The native installer's own `claude update` is run by Trek as before.
         let native = update_command(h("claude-code"), &Install::Native, &bin(r"C:\Users\me\.local\bin\claude.exe"), false, None).unwrap();
@@ -2243,11 +2274,8 @@ mod tests {
         assert_eq!(devin(&Install::Native).args, ["update"]);
         std::fs::write(cli.join("distribution"), "irm-iex\n").unwrap();
         let cmd = devin(&Install::Native);
-        assert_eq!(cmd.shown(), "irm https://cli.devin.ai/install.ps1 | iex", "shown as the vendor documents it");
-        assert_eq!(cmd.installer.as_deref(), Some("https://cli.devin.ai/install.ps1"), "fetched when it runs");
-        assert_eq!(cmd.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
-        assert_eq!(cmd.args, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
-        assert!(!cmd.elevated && cmd.manual.is_none());
+        assert_eq!((cmd.builtin, cmd.program.as_path(), cmd.elevated), (Some(Builtin::DevinBundle), binary.as_path(), false));
+        assert_eq!(cmd.shown(), "Devin's installer steps, without its setup wizard");
         // An enterprise portal's install updates through its own updater: `devin update`.
         std::fs::write(cli.join("distribution"), "enterprise-portal").unwrap();
         assert_eq!(devin(&Install::Native).args, ["update"]);
@@ -2257,19 +2285,14 @@ mod tests {
     #[test]
     fn winget_failures_are_said_in_words() {
         let claude = h("claude-code");
-        let said = |native: Option<&Path>, code: u32| winget_exits(claude, native).into_iter().find(|(c, _)| *c == code as i32).map(|(_, m)| m);
-        // 0x8A15002B: nothing newer in WinGet's source.
-        assert_eq!(
-            said(Some(Path::new(r"C:\Users\me\.local\bin\claude.exe")), 0x8A15002B).as_deref(),
-            Some(r"WinGet has no newer version of Claude Code yet. The copy at C:\Users\me\.local\bin\claude.exe updates itself with `claude update`.")
-        );
-        assert_eq!(said(None, 0x8A15002B).as_deref(), Some("WinGet has no newer version of Claude Code yet: its package source is behind the vendor's release."));
+        let said = |code: u32| winget_exits(claude).into_iter().find(|(c, _)| *c == code as i32).map(|(_, m)| m);
+        // 0x8A15002B: nothing newer in WinGet's source index yet, which follows winget-pkgs by hours.
+        assert_eq!(said(0x8A15002B).as_deref(), Some("WinGet's package list doesn't have this version of Claude Code yet. Trek tries again on its next check."));
         for code in [0x8A150019, 0x8A150010, 0x8A150008, 0x8A150045, 0x8A15004B, 0x8A150101, 0x8A150103] {
-            assert!(said(None, code).is_some_and(|m| !m.is_empty()), "{code:#X}");
+            assert!(said(code).is_some_and(|m| !m.is_empty()), "{code:#X}");
         }
-        // Without a CLI update command of its own, no copy is pointed to.
-        let copilot = winget_exits(h("acp:github-copilot"), Some(Path::new(r"C:\x\copilot.exe")));
-        assert!(copilot.iter().find(|(c, _)| *c == 0x8A15002Bu32 as i32).is_some_and(|(_, m)| m.contains("`copilot update`")));
+        // Nothing for the user to type.
+        assert!(winget_exits(claude).iter().all(|(_, m)| !m.contains('`')), "{:?}", winget_exits(claude));
         // Any other Windows status is shown the way its documentation writes it.
         assert_eq!(code_words(-1978335189), "code 0x8A15002B (-1978335189)");
         assert_eq!(code_words(1), "code 1");
@@ -2454,7 +2477,7 @@ mod tests {
         let admin = |args: &[&str], on_exit: Vec<(i32, String)>| Some(UpdateCommand { on_exit, ..UpdateCommand::new(&manager, args).as_admin() });
         let rows = [
             AgentVersion { id: "claude".into(), binary: a, command: admin(&["upgrade", "claude-code"], vec![]), ..version("claude", "1.0.0", Some("2.0.0")) },
-            AgentVersion { id: "opencode".into(), binary: b, command: admin(&["nothing"], winget_exits(h("claude-code"), None)), ..version("opencode", "1.18.32", Some("1.18.34")) },
+            AgentVersion { id: "opencode".into(), binary: b, command: admin(&["nothing"], winget_exits(h("claude-code"))), ..version("opencode", "1.18.32", Some("1.18.34")) },
             // Its program isn't there: answered without running anything.
             AgentVersion { command: Some(UpdateCommand::new(odd.join("gone.exe"), &["upgrade"]).as_admin()), ..version("fake", "1", Some("2")) },
         ];
@@ -2463,7 +2486,7 @@ mod tests {
         assert_eq!(LAUNCHES.load(std::sync::atomic::Ordering::SeqCst) - before, 1, "one script, so one prompt");
         assert_eq!(outcomes[0], Outcome::Updated { version: "2.0.0".into(), output: "upgraded claude-code".into() });
         let Outcome::Failed { summary, output } = &outcomes[1] else { panic!("{:?}", outcomes[1]) };
-        assert!(summary.starts_with("WinGet has no newer version of Claude Code yet"), "{summary}");
+        assert!(summary.starts_with("WinGet's package list doesn't have this version of Claude Code yet"), "{summary}");
         assert_eq!(output, "No newer package found.", "each step's own output");
         assert_eq!(outcomes[2], Outcome::Failed { summary: format!("{} isn't installed.", odd.join("gone.exe").display()), output: String::new() });
         // Its files are cleared away.
@@ -2641,10 +2664,10 @@ mod tests {
             file
         };
         // WinGet's 0x8A15002B, as the command says it.
-        let winget = UpdateCommand { on_exit: winget_exits(h("claude-code"), None), ..UpdateCommand::new(fake("winget.cmd", -1978335189), &[]) };
+        let winget = UpdateCommand { on_exit: winget_exits(h("claude-code")), ..UpdateCommand::new(fake("winget.cmd", -1978335189), &[]) };
         let v = AgentVersion { command: Some(winget), ..version("fake", "2.1.292", Some("2.1.296")) };
         let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update(&v)) else { panic!() };
-        assert!(summary.starts_with("WinGet has no newer version of Claude Code yet"), "{summary}");
+        assert!(summary.starts_with("WinGet's package list doesn't have this version of Claude Code yet"), "{summary}");
         assert_eq!(output, "some output\nsome error", "Show output holds stdout and stderr");
         // A status nobody gave words to: its hex, as WinGet's documentation lists them.
         let other = AgentVersion { command: Some(UpdateCommand::new(fake("other.cmd", -1978335140), &[])), ..version("fake", "1", Some("2")) };
@@ -2723,11 +2746,37 @@ mod tests {
         // A package of another id isn't `winget upgrade`d on a guess: it's the vendor's own install.
         assert_eq!(h("codex").reading(Install::Winget { id: "OpenAI.Codex".into() }), Install::Native);
         assert_eq!(claude.reading(Install::Native), Install::Native);
-        // Its versions are the vendor's own feed's.
-        assert_eq!(source(claude, &winget, None), Some(Source::Feed(Feed::ClaudeReleases)));
+        // Its newest is WinGet's, not the vendor's: `winget upgrade` installs only what WinGet has
+        // (Claude Code 2.1.296 was out while WinGet still had 2.1.292, and the upgrade failed).
+        assert_eq!(source(claude, &winget, None), Some(Source::Winget("Anthropic.ClaudeCode".into())));
+        assert_eq!(source(claude, &Install::Winget { id: "Anthropic.Claude Code".into() }, None), None, "an id that doesn't go into a URL as it is");
         let cmd = update_command(claude, &winget, Path::new(r"C:\x\claude.exe"), false, Some("2.1.1")).unwrap();
         assert_eq!(cmd.program, Path::new("winget"));
-        assert_eq!(cmd.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements");
+        assert_eq!(cmd.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
+    }
+
+    #[test]
+    fn winget_and_chocolatey_say_what_they_have() {
+        assert_eq!(urls(&Source::Winget("Anthropic.ClaudeCode".into())), ["https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/a/Anthropic/ClaudeCode"]);
+        assert_eq!(urls(&Source::Winget("GitHub.Copilot".into())), ["https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/GitHub/Copilot"]);
+        // winget-pkgs lists its folders by name, not by version; a subfolder is another package.
+        let folders = r#"[{"name":"2.1.10","type":"dir"},{"name":"2.1.292","type":"dir"},{"name":"2.1.96","type":"dir"},{"name":"Prerelease","type":"dir"},{"name":"9.9.9","type":"file"}]"#;
+        assert_eq!(parse_latest(&Source::Winget("Anthropic.ClaudeCode".into()), folders).unwrap().version, "2.1.292");
+        let copilot = r#"[{"name":"v1.0.93","type":"dir"},{"name":"v1.0.95","type":"dir"}]"#;
+        assert_eq!(parse_latest(&Source::Winget("GitHub.Copilot".into()), copilot).unwrap().version, "1.0.95");
+        assert_eq!(parse_latest(&Source::Winget("x".into()), r#"{"message":"API rate limit exceeded"}"#), None);
+        assert_eq!(parse_latest(&Source::Winget("x".into()), "[]"), None);
+        // Chocolatey's repository, asked for the package's latest.
+        let choco = Source::Chocolatey("opencode".into());
+        assert_eq!(urls(&choco), ["https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'opencode'%20and%20IsLatestVersion&$select=Version"]);
+        let feed = r#"<feed><entry><m:properties><d:Version>1.19.0</d:Version></m:properties></entry></feed>"#;
+        assert_eq!(parse_latest(&choco, feed).unwrap().version, "1.19.0");
+        assert_eq!(parse_latest(&choco, "<feed></feed>"), None, "no such package");
+        // What an id may hold to go into a URL; a package outside it has no source to ask.
+        assert_eq!(source(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, None), Some(choco));
+        assert_eq!(source(h("opencode"), &Install::Chocolatey { package: "a'b".into() }, None), None);
+        // Scoop's buckets follow the vendor's release closely: its feed.
+        assert_eq!(source(h("opencode"), &Install::Scoop { app: "opencode".into() }, Some("1.2.27")), Some(Source::Npm("opencode-ai".into())));
     }
 
     #[test]
