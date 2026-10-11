@@ -125,7 +125,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
       # Before a long build, the token must be able to push what release.sh pushes. --dry-run
-      # authenticates against the push endpoint and sends nothing.
+      # authenticates against the push endpoint and sends nothing (its "[new tag]" line is what
+      # it would have done).
       - name: Push access
         env:
           CHANNEL: ${{ inputs.channel }}
