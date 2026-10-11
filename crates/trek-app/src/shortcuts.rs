@@ -150,15 +150,21 @@ fn moved_link(link: &Link, old_exe: &Path, new_exe: &Path) -> Option<Link> {
     Some(Link { target: new_exe.to_path_buf(), dir, icon, icon_index: link.icon_index })
 }
 
-/// Paths as Windows compares them: without the `\\?\` prefix, either slash, any case.
+/// Paths as Windows compares them: without the `\\?\` prefix, either slash, any case, and a
+/// path that exists in its long form: the shell hands a shortcut's target back as the long
+/// name, while what Trek was started from may be the 8.3 one (`C:\Users\RUNNER~1\…`, as on
+/// GitHub's runners), and those name one file.
 fn same_path(a: &Path, b: &Path) -> bool {
     let plain = |p: &Path| {
-        let s = p.to_string_lossy();
+        let long = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let s = long.to_string_lossy();
         let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
         s.replace('/', r"\").trim_end_matches('\\').to_lowercase()
     };
-    let (a, b) = (plain(a), plain(b));
-    !a.is_empty() && a == b
+    if a.as_os_str().is_empty() || b.as_os_str().is_empty() {
+        return false;
+    }
+    plain(a) == plain(b)
 }
 
 /// Point the user's own shortcuts (Start menu, Desktop, taskbar pins) that start `old_exe` at
@@ -310,7 +316,8 @@ mod tests {
         }
         fn write(&self, lnk: &Path, link: &Link) -> std::io::Result<()> {
             if self.refuses.iter().any(|r| r == lnk) {
-                return Err(std::io::Error::from_raw_os_error(5));
+                // What `io_error` makes of Windows' access-denied; raw code 5 is EIO on Unix.
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
             }
             self.links.borrow_mut().insert(lnk.to_path_buf(), link.clone());
             Ok(())
@@ -575,6 +582,33 @@ mod tests {
                 assert!(same(&ShellLinks.read(&free).unwrap().target, &new));
             });
             // (A read-only file goes with its folder on Windows.)
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// The shell gives a shortcut's target back as the long name; Trek may know its old exe
+        /// by the 8.3 one (GitHub's runners live in `C:\Users\RUNNER~1\…`). Same file, matched.
+        #[test]
+        fn a_shortcut_matches_the_old_exe_through_its_short_name() {
+            use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+            use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+            let (dir, old, new) = places("com-short");
+            let wide: Vec<u16> = old.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            let mut buf = vec![0u16; 1024];
+            // SAFETY: a NUL-terminated path and a buffer of the length given.
+            let len = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+            assert!(len > 0 && len < buf.len(), "a short name for {old:?}");
+            let short = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+            // (A volume with 8.3 names off gives the long name back: the test then only shows
+            // nothing breaks.)
+            let desktop = dir.join("Desktop");
+            std::fs::create_dir_all(&desktop).unwrap();
+            let folders = [ShortcutFolder { place: "on your Desktop", dir: desktop.clone(), depth: 0 }];
+            let report = with_com(|| {
+                make(&desktop.join("Trek.lnk"), &old, old.parent().unwrap(), &old);
+                retarget_in(&folders, &short, &new, &ShellLinks)
+            });
+            assert_eq!(report.changed, [desktop.join("Trek.lnk")], "{:?}", report.left);
+            with_com(|| assert!(same(&ShellLinks.read(&desktop.join("Trek.lnk")).unwrap().target, &new)));
             let _ = std::fs::remove_dir_all(dir);
         }
 
