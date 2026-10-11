@@ -3947,8 +3947,8 @@ impl Workspace {
             });
         }
         // Mid-turn, what changed is saved a second later (only changed rows are written), so a
-        // crash loses a second at most. A turn that stops to ask is saved as it stops: the user
-        // may well leave it waiting, or quit.
+        // crash loses a second at most (up to five while a very long answer streams: `save_delay`).
+        // A turn that stops to ask is saved as it stops: the user may well leave it waiting, or quit.
         if !finished {
             if asked {
                 self.persist_items(id, cx);
@@ -4131,12 +4131,15 @@ impl Workspace {
         self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none() && l.background_agents().next().is_none())
     }
 
-    /// Save `id`'s transcript a second from now, unless a save is on its way already.
+    /// Save `id`'s transcript a second from now (longer once a changed row is large, see
+    /// `save_delay`), unless a save is on its way already.
     fn persist_soon(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(id).filter(|l| l._save_soon.is_none() && l.items.is_dirty()) else { return };
+        let changes = live.items.changes();
+        let delay = save_delay(changes.changed.iter().chain(&changes.appended).map(|(_, item)| item_bytes(item)).max().unwrap_or(0));
         let id = id.to_string();
         live._save_soon = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(l) = this.live.get_mut(&id) {
                     l._save_soon = None;
@@ -4161,7 +4164,13 @@ impl Workspace {
     /// the history is still being read: it has to be written first (`ensure_loaded`).
     fn persist_items(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(id).filter(|l| !l.loading) else { return };
-        match self.store.save_transcript(id, &mut live.items) {
+        let began = std::time::Instant::now();
+        let saved = self.store.save_transcript(id, &mut live.items);
+        if crate::perf::on() && began.elapsed() >= Duration::from_millis(4) {
+            let largest = live.items.iter().rev().take(4).map(item_bytes).max().unwrap_or(0);
+            tracing::info!("perf: save ms={} largest_recent={largest}", crate::perf::ms(began.elapsed()));
+        }
+        match saved {
             Ok(true) => self.index_for_search(cx),
             Ok(false) => {}
             Err(e) => tracing::warn!("save transcript: {e}"),
@@ -6328,6 +6337,28 @@ fn default_prefs_key(s: &Settings) -> (String, Option<String>, Effort, HandHoldi
     (g.default_agent.clone(), g.default_model.clone(), g.default_effort, g.hand_holding)
 }
 
+/// How much text an item holds: what a save writes for it, and indexes for search.
+fn item_bytes(item: &Item) -> usize {
+    match item {
+        Item::User { text, .. } | Item::Assistant { text } | Item::Reasoning { text } | Item::Notice { text } | Item::Error { text } | Item::Limit { text, .. } => text.len(),
+        Item::Tool { title, detail, output, .. } => title.len() + detail.len() + output.len(),
+        Item::TurnEnd { .. } | Item::Handoff { .. } => 0,
+    }
+}
+
+/// How long a save mid-turn waits after a change, when the largest changed row holds `largest`
+/// bytes. A save rewrites a changed row whole and indexes all its text for search again, on the
+/// main thread: an answer streaming for half an hour grows past a megabyte, and saving it every
+/// second stalled the window more each minute. A second for anything under 128 KB, as ever, and
+/// a second more for each 64 KB beyond, up to five (reached at 320 KB, where a save costs about
+/// 20 ms): an answer is that long only once, and a crash then loses the last five seconds of
+/// it at most, a few KB of text.
+fn save_delay(largest: usize) -> Duration {
+    const PER_SECOND: usize = 64 * 1024;
+    const LONGEST: usize = 5;
+    Duration::from_secs((largest / PER_SECOND).clamp(1, LONGEST) as u64)
+}
+
 /// Convenience for views.
 pub fn workspace_global(cx: &App) -> Entity<Workspace> {
     cx.global::<GlobalWorkspace>().0.clone()
@@ -6539,6 +6570,24 @@ mod tests {
 
     fn q(text: &str, secret: bool) -> Question {
         Question { question: text.into(), header: String::new(), options: vec![("Yes".into(), String::new())], multi: false, secret }
+    }
+
+    #[test]
+    fn a_save_mid_turn_waits_longer_as_the_row_it_rewrites_grows() {
+        let s = Duration::from_secs;
+        // Small rows: a second, as ever.
+        assert_eq!(save_delay(0), s(1));
+        assert_eq!(save_delay(64 * 1024 - 1), s(1));
+        assert_eq!(save_delay(128 * 1024 - 1), s(1));
+        assert_eq!(save_delay(128 * 1024), s(2));
+        assert_eq!(save_delay(256 * 1024), s(4));
+        // Never more than five: that's all a crash can cost of an answer.
+        assert_eq!(save_delay(320 * 1024), s(5));
+        assert_eq!(save_delay(5_000_000), s(5));
+        assert_eq!(item_bytes(&Item::Assistant { text: "abc".into() }), 3);
+        assert_eq!(item_bytes(&Item::TurnEnd { at: 0, took_secs: 1 }), 0);
+        let tool = Item::Tool { id: "t".into(), title: "Read".into(), detail: "a.rs".into(), output: "xyz".into(), status: ToolStatus::Done };
+        assert_eq!(item_bytes(&tool), 11);
     }
 
     #[test]

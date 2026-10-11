@@ -1563,6 +1563,27 @@ mod tests {
     /// The ACP agent id that runs the fake-acp fixture binary (see `launch_spec`).
     pub(super) const FAKE: &str = "test-fake";
 
+    /// The fake agent's id, once its binary exists. A `cargo test -p trek-agents` run on a cold
+    /// target builds it on first use, and that build must not count against the 20 s a test then
+    /// waits for the agent's first event (it took 20 s on a cold macOS runner and did).
+    fn fake_agent() -> AgentId {
+        trek_test_fixtures::bin("fake-acp");
+        AgentId::Acp(FAKE.into())
+    }
+
+    /// The next event from the fake agent running in `dir`. A stall says what the agent had been
+    /// sent, from its own log, because "stalled" alone can't tell an agent that never started
+    /// (no log) from one that was asked and never answered.
+    async fn next_event(h: &crate::SessionHandle, dir: &Path) -> AgentEvent {
+        match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await {
+            Ok(event) => event.expect("agent exited"),
+            Err(_) => {
+                let log = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap_or_else(|e| format!("(no log: {e})"));
+                panic!("agent stalled: no event in 20s; its log in {}:\n{log}", dir.display())
+            }
+        }
+    }
+
     #[test]
     fn a_rewound_session_starts_over_with_a_recap() {
         // A rewind or fork of an ACP thread (`Reopen::Recap`): no session to resume, a recap.
@@ -1570,7 +1591,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: None,
             effort: Effort::Off,
@@ -1589,7 +1610,7 @@ mod tests {
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
             let turn = async || loop {
-                match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited") {
+                match next_event(&h, &dir).await {
                     AgentEvent::TurnComplete { error, .. } => return error,
                     AgentEvent::Error(e) => panic!("{e}"),
                     _ => {}
@@ -1662,7 +1683,7 @@ mod tests {
         trek_core::runtime().block_on(async {
             h.commands.send(Command::Prompt { text: "hello".into(), images: vec![] }).await.unwrap();
             loop {
-                match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited") {
+                match next_event(&h, &dir).await {
                     AgentEvent::TurnComplete { error, .. } => break assert_eq!(error, None),
                     AgentEvent::Error(e) => panic!("{e}"),
                     _ => {}
@@ -1680,7 +1701,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         trek_core::paths::isolate(dir.join("data"));
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: None,
             effort: Effort::Off,
@@ -1704,7 +1725,7 @@ mod tests {
                 h.commands.send(Command::Prompt { text: text.into(), images: vec![] }).await.unwrap();
             }
             loop {
-                let ev = tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited");
+                let ev = next_event(&h, &dir).await;
                 let done = matches!(ev, AgentEvent::TurnComplete { .. });
                 seen.push(ev);
                 if done {
@@ -1731,7 +1752,7 @@ mod tests {
         let models = r#"{"models":{"a":["low","medium","high"],"b":["high","default"],"c":[]},"current":"c"}"#;
         std::fs::write(dir.join("fake-acp-config.json"), models).unwrap();
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: Some("a".into()),
             effort: Effort::High,
@@ -1751,7 +1772,7 @@ mod tests {
         let efforts = |model: &str, efforts: &[Effort], effort: Option<Effort>| AgentEvent::Efforts { model: model.into(), efforts: efforts.to_vec(), effort };
         let told = trek_core::runtime().block_on(async {
             let next = async || loop {
-                match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await.expect("agent stalled").expect("agent exited") {
+                match next_event(&h, &dir).await {
                     ev @ AgentEvent::Efforts { .. } => return ev,
                     AgentEvent::Error(e) => panic!("{e}"),
                     _ => {}
@@ -1802,7 +1823,7 @@ mod tests {
             std::fs::write(dir.join("fake-acp-mcp.json"), r#"{"http":true}"#).unwrap();
         }
         let config = SessionConfig {
-            agent: AgentId::Acp(FAKE.into()),
+            agent: fake_agent(),
             cwd: dir.clone(),
             model: None,
             effort: Effort::Off,
