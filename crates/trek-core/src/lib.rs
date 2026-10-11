@@ -8,6 +8,7 @@ pub mod changelog;
 pub mod changes;
 pub mod checkpoint;
 pub mod detect;
+pub mod elevated;
 pub mod git;
 pub mod hunks;
 pub mod import;
