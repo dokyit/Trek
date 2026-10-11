@@ -48,7 +48,7 @@ pub fn legacy_pointer() -> bool {
 
 /// A capture build's cursor: the machine's isn't where a script can put it (a shots window is
 /// driven by events), so `realmove` and `realleave` say where it is. `true` is off the window.
-#[cfg(feature = "shots")]
+#[cfg(all(windows, feature = "shots"))]
 pub static SCRIPTED_CURSOR_AWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the cursor is over the window, as the system has it (`None` where it can't say: a
