@@ -133,7 +133,8 @@ Updates are signed with the same minisign key as the Mac's. `trek-update.exe` sw
 update is installed, after the signature is checked, so your account has to be able to write to that folder.
 Windows's ransomware protection (Controlled folder access, in Windows Security) guards Documents, Desktop,
 Pictures, Videos, Music and Favorites, in OneDrive too, and turns the update away there; Settings → Updates
-says so if Trek is in one.
+says so if Trek is in one, and its **Move Trek to its own folder** button copies Trek to
+`%LOCALAPPDATA%\Programs\Trek` and starts it from there, with an offer to remove the old copy.
 Logs are in `%LOCALAPPDATA%\Trek\logs`, one file a day.
 
 Windows differs from the Mac in these ways:
