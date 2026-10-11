@@ -23,30 +23,7 @@ pub struct IdeStatus {
 
 /// The language a file is in, by its extension, as the status bar names it.
 pub fn language(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or_default() {
-        "rs" => "Rust",
-        "swift" => "Swift",
-        "ts" | "mts" | "cts" => "TypeScript",
-        "tsx" => "TypeScript JSX",
-        "js" | "mjs" | "cjs" => "JavaScript",
-        "jsx" => "JavaScript JSX",
-        "py" => "Python",
-        "go" => "Go",
-        "c" | "h" => "C",
-        "cc" | "cpp" | "hpp" | "cxx" => "C++",
-        "java" => "Java",
-        "kt" | "kts" => "Kotlin",
-        "rb" => "Ruby",
-        "lua" => "Lua",
-        "json" => "JSON",
-        "toml" => "TOML",
-        "yaml" | "yml" => "YAML",
-        "md" | "markdown" => "Markdown",
-        "html" | "htm" => "HTML",
-        "css" => "CSS",
-        "sh" | "bash" | "zsh" => "Shell Script",
-        _ => "Plain Text",
-    }
+    crate::languages::of(path).name
 }
 
 impl IdeStatus {

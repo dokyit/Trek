@@ -187,10 +187,13 @@ impl EditorView {
     pub fn new(workspace: Entity<Workspace>, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let lang = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
         // Empty and read-only until the file is read, off the main thread: a big file, one
+        // The extension names the file's language to the language servers; the grammar that
+        // colours it is the table's (`.h`, `.mjs`, `Makefile` have none under that name).
         // iCloud evicted, or a device or pipe someone named mustn't hold up the window.
+        let grammar = crate::languages::of(&path).grammar;
         let state = cx.new(|cx| {
             let mut s = EditorState::new(window, cx)
-                .language(lang.clone())
+                .language(grammar)
                 .line_number(true)
                 .searchable(true)
                 // Code scrolls sideways: a wrap mid-identifier reads as two lines that aren't.
