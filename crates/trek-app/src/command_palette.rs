@@ -60,6 +60,23 @@ enum Action {
     SwitchMode(crate::workspace::Mode),
     /// The editor's layout toggles, as their shortcuts do.
     Dispatch(IdeCommand),
+    /// The thread and window commands a menu bar has (`WindowCommand`).
+    Window(WindowCommand),
+}
+
+/// What a Mac's menus offer that nothing else in the palette did. Windows draws no menu bar, so
+/// the palette is where they are, beside their shortcuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowCommand {
+    /// The thread on screen, in a window of its own.
+    OpenInNewWindow,
+    /// Interrupt the thread on screen's running turn.
+    StopAgent,
+    /// The composer's plan mode, for the thread on screen or the next one.
+    TogglePlan,
+    Minimize,
+    CloseWindow,
+    Quit,
 }
 
 /// The editor's commands that are window actions.
@@ -735,6 +752,24 @@ impl CommandPalette {
             add(e, &crate::settings_view::page_blurb(page));
         }
         add(Entry::new(c, icon(Icon::new(IconName::RefreshCw)), "Check for updates", Action::CheckForUpdates), "update version release upgrade");
+        // The thread and window commands a Mac's menus have and Windows, with no menu bar, finds here.
+        let running = thread.as_ref().is_some_and(|t| ws.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()));
+        if thread.is_some() {
+            add(
+                Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight)), "Open thread in new window", Action::Window(WindowCommand::OpenInNewWindow)).hint(keys::hint(Id::OpenInNewWindow)),
+                "pop out separate window detach",
+            );
+        }
+        if running {
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Square)), "Stop agent", Action::Window(WindowCommand::StopAgent)).hint(keys::hint(Id::Interrupt)), "interrupt cancel halt abort turn");
+        }
+        if ws.ide() || matches!(ws.route, Route::Thread(_) | Route::Draft { .. }) {
+            let plan = ws.prefs_in(&ws.focused_scope()).plan;
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Map)), "Plan mode", Action::Window(WindowCommand::TogglePlan)).hint(keys::hint(Id::TogglePlan)).checked(plan), "toggle plan before acting read only");
+        }
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Minus)), "Minimize window", Action::Window(WindowCommand::Minimize)).hint(keys::hint(Id::Minimize)), "hide taskbar");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::X)), "Close window", Action::Window(WindowCommand::CloseWindow)), "window");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Power)), if cfg!(windows) { "Exit Trek" } else { "Quit Trek" }, Action::Window(WindowCommand::Quit)).hint(keys::hint(Id::Quit)), "quit exit close app");
         out
     }
 
@@ -817,6 +852,19 @@ impl CommandPalette {
                 ws.check_for_updates(true, cx);
                 ws.navigate(Route::Settings(SettingsPage::Updates), cx);
             }),
+            Action::Window(command) => match command {
+                WindowCommand::OpenInNewWindow => window.dispatch_action(Box::new(crate::OpenInNewWindow), cx),
+                WindowCommand::StopAgent => window.dispatch_action(Box::new(crate::Interrupt), cx),
+                WindowCommand::TogglePlan => ws.update(cx, |ws, cx| {
+                    let scope = ws.focused_scope();
+                    let mut prefs = ws.prefs_in(&scope);
+                    prefs.plan = !prefs.plan;
+                    ws.set_prefs_in(&scope, prefs, cx);
+                }),
+                WindowCommand::Minimize => window.minimize_window(),
+                WindowCommand::CloseWindow => window.remove_window(),
+                WindowCommand::Quit => window.dispatch_action(Box::new(crate::Quit), cx),
+            },
         }
     }
 

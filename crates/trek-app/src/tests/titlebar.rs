@@ -1,7 +1,9 @@
-//! The title bar's chrome per platform: where it leaves room for the window's controls, and on
-//! Windows, where there's no system menu bar, Trek's menus in the window.
+//! The title bar's chrome per platform: where it leaves room for the window's controls, that no
+//! menus are drawn in the window (macOS has its system menu bar, and Windows has none: the
+//! palette, Settings, the context menus and the shortcuts reach every command), and which parts
+//! of the row are the pointer's and which are the window's handle.
 
-use super::harness::{open, run};
+use super::harness::{Trek, open, run};
 use crate::chrome::{LEFT_INSET, RIGHT_RESERVE};
 use crate::root::SIDEBAR_WIDTH;
 use gpui_kit::{AppContext as _, Pixels, TestAppContext, px};
@@ -9,11 +11,11 @@ use gpui_kit::{AppContext as _, Pixels, TestAppContext, px};
 /// The test window's width (`harness::launch`).
 const WIDTH: f32 = 1280.;
 
-fn x(trek: &super::harness::Trek, cx: &mut TestAppContext, id: &'static str) -> Pixels {
+fn x(trek: &Trek, cx: &mut TestAppContext, id: &'static str) -> Pixels {
     trek.bounds(cx, id).unwrap_or_else(|| panic!("{id} is on screen")).origin.x
 }
 
-fn right(trek: &super::harness::Trek, cx: &mut TestAppContext, id: &'static str) -> Pixels {
+fn right(trek: &Trek, cx: &mut TestAppContext, id: &'static str) -> Pixels {
     let b = trek.bounds(cx, id).unwrap_or_else(|| panic!("{id} is on screen"));
     b.origin.x + b.size.width
 }
@@ -43,14 +45,25 @@ fn what_follows_the_toggle_and_mark_starts_where_the_sidebar_ends() {
     run(async |cx| {
         let trek = open(cx);
         let switch = x(&trek, cx, "mode-switch");
-        // The cluster is as wide as the sidebar under it (less the margin), and a gap follows.
+        // The cluster is as wide as the sidebar under it (less the margin), and a gap follows: the
+        // same on both platforms, as nothing but the toggle and the mark are in it.
         assert!(switch >= px(SIDEBAR_WIDTH), "{switch:?}");
-        if !crate::chrome::IN_WINDOW_MENUS {
-            // Within a pixel: macOS lays the gap out at 279 px.
-            near(switch, px(SIDEBAR_WIDTH + 8.));
-        }
+        near(switch, px(SIDEBAR_WIDTH + 8.));
         // And the sidebar itself is where it was.
         assert_eq!(trek.bounds(cx, "sidebar").map(|b| (b.origin.x, b.size.width)), Some((px(0.), px(SIDEBAR_WIDTH))));
+    });
+}
+
+#[test]
+fn no_menus_are_drawn_in_the_window_on_any_platform() {
+    run(async |cx| {
+        let trek = open(cx);
+        for id in ["menu-bar", "menu-dropdown"] {
+            assert!(!trek.visible(cx, id), "{id}");
+        }
+        for ix in 0..5usize {
+            assert!(!trek.visible(cx, ("menu-title", ix)), "menu {ix}");
+        }
     });
 }
 
@@ -77,7 +90,6 @@ fn a_thread_windows_buttons_sit_left_of_the_window_controls() {
 fn macos_keeps_its_system_menus_and_title_bar() {
     run(async |cx| {
         let trek = open(cx);
-        assert!(!trek.visible(cx, ("menu-title", 0usize)), "no menu bar in the window");
         assert_eq!(x(&trek, cx, "toggle-sidebar"), px(80.));
         near(x(&trek, cx, "mode-switch"), px(280.));
         // The system's menus are the ones main sets: the app's menu first, Hide among its items.
@@ -87,66 +99,118 @@ fn macos_keeps_its_system_menus_and_title_bar() {
     });
 }
 
+/// The controls in the title bar's row, each in the area it keeps the window's drag from (`chrome::no_drag`).
+const AGENTS_CONTROLS: [&str; 7] = ["toggle-sidebar", "mode-switch", "run-actions", "open-in", "pop-out", "toggle-tools", "settle"];
+/// The same in the Editor's.
+const EDITOR_CONTROLS: [&str; 3] = ["mode-switch", "command-center", "layout-toggles"];
+
+/// Where `id`'s no-drag area is, and its control inside it.
+fn area_and_control(trek: &Trek, cx: &mut TestAppContext, id: &'static str) -> (gpui_kit::Bounds<Pixels>, gpui_kit::Bounds<Pixels>) {
+    let area = trek.bounds(cx, format!("no-drag-{id}")).unwrap_or_else(|| panic!("{id} has a no-drag area"));
+    let control = trek.bounds(cx, id).unwrap_or_else(|| panic!("{id} is on screen"));
+    (area, control)
+}
+
+/// `inner` lies inside `outer`, give or take a pixel.
+fn holds(outer: gpui_kit::Bounds<Pixels>, inner: gpui_kit::Bounds<Pixels>) -> bool {
+    inner.left() >= outer.left() - px(1.) && inner.right() <= outer.right() + px(1.) && inner.top() >= outer.top() - px(1.) && inner.bottom() <= outer.bottom() + px(1.)
+}
+
+/// Whether `point` is inside any no-drag area of the title bar.
+fn in_a_control(trek: &Trek, cx: &mut TestAppContext, ids: &[&'static str], point: gpui_kit::Point<Pixels>) -> bool {
+    ids.iter().any(|id| trek.bounds(cx, format!("no-drag-{id}")).is_some_and(|b| b.contains(&point)))
+}
+
+/// A thread on screen, so the bar has what a thread gives it (Run, Open, pop-out, Settle).
+fn thread_on_screen(trek: &Trek, cx: &mut TestAppContext) {
+    let id = trek.quiet_thread(cx);
+    trek.update(cx, |ws, cx| ws.navigate(crate::workspace::Route::Thread(id), cx));
+    trek.render(cx);
+}
+
+#[test]
+fn every_control_in_the_agents_title_bar_is_in_a_no_drag_area_that_fits_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        thread_on_screen(&trek, cx);
+        for id in AGENTS_CONTROLS {
+            let (area, control) = area_and_control(&trek, cx, id);
+            // The area is the control and nothing more: a wider one would take the handle's room.
+            assert!(holds(area, control), "{id}: {area:?} holds {control:?}");
+            assert!((area.size.width - control.size.width).abs() <= px(1.) && (area.size.height - control.size.height).abs() <= px(1.), "{id}: {area:?} is the size of {control:?}");
+        }
+    });
+}
+
+#[test]
+fn every_control_in_the_editors_title_bar_is_in_a_no_drag_area() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Editor, cx));
+        cx.run_until_parked();
+        trek.render(cx);
+        for id in EDITOR_CONTROLS {
+            let (area, control) = area_and_control(&trek, cx, id);
+            assert!(holds(area, control), "{id}: {area:?} holds {control:?}");
+        }
+        // The layout toggles and Settings are one area: each of them is inside it.
+        for id in ["toggle-primary", "toggle-panel", "toggle-ai", "ide-settings"] {
+            let b = trek.bounds(cx, id).unwrap_or_else(|| panic!("{id} is on screen"));
+            assert!(in_a_control(&trek, cx, &EDITOR_CONTROLS, b.center()), "{id}");
+        }
+    });
+}
+
+#[test]
+fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
+    run(async |cx| {
+        let trek = open(cx);
+        thread_on_screen(&trek, cx);
+        let mid = px(17.);
+        // Between the mode switch and Run is the thread's title and then nothing: both are the
+        // handle, so a press there moves the window and a double click maximises it.
+        let switch_end = right(&trek, cx, "mode-switch");
+        let run_start = x(&trek, cx, "run-actions");
+        assert!(run_start - switch_end > px(200.), "there's a strip to drag by: {switch_end:?} to {run_start:?}");
+        for at in [switch_end + px(40.), (switch_end + run_start) / 2., run_start - px(20.)] {
+            assert!(!in_a_control(&trek, cx, &AGENTS_CONTROLS, gpui_kit::point(at, mid)), "{at:?} is the handle's");
+        }
+        // The Mac's and Windows's alike: what sits between the controls (the gaps) is the handle's too.
+        let (tools_end, settle_start) = (right(&trek, cx, "toggle-tools"), x(&trek, cx, "settle"));
+        assert!(settle_start > tools_end, "the buttons have a gap between them");
+        assert!(!in_a_control(&trek, cx, &AGENTS_CONTROLS, gpui_kit::point((tools_end + settle_start) / 2., mid)));
+    });
+}
+
+#[test]
+fn a_press_on_the_handle_is_never_swallowed_so_the_window_can_move_and_maximise() {
+    use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, point};
+    run(async |cx| {
+        let trek = open(cx);
+        thread_on_screen(&trek, cx);
+        // Windows hands a press on the handle to the window first, and only does its own thing
+        // (a move; a double click maximises) with one the window left alone.
+        let at = point((right(&trek, cx, "mode-switch") + x(&trek, cx, "run-actions")) / 2., px(17.));
+        let press = |click_count| PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count, first_mouse: false });
+        let (first, second) = trek.window(cx, |window, cx| {
+            let first = window.dispatch_event(press(1), cx).propagate;
+            let second = window.dispatch_event(press(2), cx).propagate;
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: 2 }), cx);
+            (first, second)
+        });
+        assert!(first && second, "a press and a double click on the empty strip reach Windows");
+    });
+}
+
 #[cfg(windows)]
-mod windows_menus {
+mod windows_chrome {
     use super::*;
-    use crate::workspace::Route;
     use gpui_kit::{Capslock, InputEvent as _, Modifiers, ModifiersChangedEvent};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    #[test]
-    fn the_menus_are_titles_in_the_title_bar() {
-        run(async |cx| {
-            let trek = open(cx);
-            for ix in 0..5usize {
-                assert!(trek.visible(cx, ("menu-title", ix)), "menu {ix}");
-            }
-            assert!(!trek.visible(cx, ("menu-title", 5usize)));
-            assert!(!trek.visible(cx, "menu-dropdown"));
-            // After the toggle and the mark, which keep their places.
-            assert!(x(&trek, cx, ("menu-title", 0usize)) > x(&trek, cx, "toggle-sidebar"));
-        });
-    }
-
-    fn x(trek: &super::super::harness::Trek, cx: &mut TestAppContext, id: impl Into<gpui_kit::ElementId>) -> Pixels {
-        trek.bounds(cx, id).expect("on screen").origin.x
-    }
-
-    #[test]
-    fn a_title_opens_its_menu_and_a_second_press_puts_it_away() {
-        run(async |cx| {
-            let trek = open(cx);
-            trek.click(cx, ("menu-title", 2usize));
-            assert!(trek.visible(cx, "menu-dropdown"));
-            // View's rows (a separator is a row): Toggle Sidebar is the sixth.
-            assert!(trek.visible(cx, ("menu-item", 5usize)));
-            trek.click(cx, ("menu-title", 2usize));
-            assert!(!trek.visible(cx, "menu-dropdown"), "the same title again closes it");
-        });
-    }
-
-    #[test]
-    fn choosing_an_item_dispatches_its_action_and_closes_the_menu() {
-        run(async |cx| {
-            let trek = open(cx);
-            assert!(!trek.read(cx, |ws, _| ws.sidebar_collapsed));
-            trek.click(cx, ("menu-title", 2usize));
-            trek.click(cx, ("menu-item", 5usize));
-            assert!(!trek.visible(cx, "menu-dropdown"));
-            assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed), "Toggle Sidebar ran");
-        });
-    }
-
-    /// Whether the menu bar has the keyboard, read from its focus.
-    fn bar_focused(trek: &super::super::harness::Trek, cx: &mut TestAppContext) -> bool {
-        use gpui_kit::test::TestWindowExt as _;
-        trek.render(cx);
-        trek.window(cx, |window, _| window.try_find("menu-bar").is_some_and(|bar| bar.focused() == Some(true)))
-    }
-
     /// Holds Alt down or lets it go, as the platform reports it: a modifiers change.
-    fn alt(trek: &super::super::harness::Trek, cx: &mut TestAppContext, held: bool) {
+    fn alt(trek: &Trek, cx: &mut TestAppContext, held: bool) {
         let modifiers = if held { Modifiers::alt() } else { Modifiers::none() };
         trek.window(cx, |window, cx| {
             window.dispatch_event(ModifiersChangedEvent { modifiers, capslock: Capslock { on: false } }.to_platform_input(), cx);
@@ -156,159 +220,16 @@ mod windows_menus {
     }
 
     #[test]
-    fn escape_puts_the_menu_away_and_a_second_leaves_the_bar() {
+    fn a_tap_of_alt_takes_nothing_with_no_menus_to_take_it_for() {
         run(async |cx| {
             let trek = open(cx);
+            trek.type_text(cx, "hi");
             let focused = trek.window(cx, |window, cx| window.focused(cx));
-            trek.click(cx, ("menu-title", 0usize));
-            assert!(trek.visible(cx, "menu-dropdown"));
-            trek.press(cx, "escape");
-            assert!(!trek.visible(cx, "menu-dropdown"));
-            assert!(bar_focused(&trek, cx), "the bar keeps the keyboard until a second Escape");
-            trek.press(cx, "escape");
-            assert_eq!(trek.window(cx, |window, cx| window.focused(cx)), focused, "the composer has focus again");
-            // And typing still lands in it.
-            trek.type_text(cx, "hi");
-            assert_eq!(trek.composer_text(cx), "hi");
-        });
-    }
-
-    #[test]
-    fn a_tap_of_alt_takes_the_keyboard_with_the_first_title_lit_and_no_menu() {
-        run(async |cx| {
-            let trek = open(cx);
             alt(&trek, cx, true);
             alt(&trek, cx, false);
-            assert!(bar_focused(&trek, cx), "Alt tapped alone focuses the bar");
-            assert!(!trek.visible(cx, "menu-dropdown"), "and opens no menu");
-            // Return opens the lit title: File, whose first row is New Thread (and its marks show).
-            assert!(trek.visible(cx, ("mnemonic-title", 0usize)));
-            trek.press(cx, "enter");
-            assert!(trek.visible(cx, "menu-dropdown"));
-            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 0usize)));
-        });
-    }
-
-    #[test]
-    fn alt_with_a_letter_opens_the_menu_it_marks_even_from_the_composer() {
-        run(async |cx| {
-            let trek = open(cx);
-            trek.type_text(cx, "hi");
-            trek.press(cx, "alt-v");
-            assert!(trek.visible(cx, "menu-dropdown"), "View opens");
-            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 2usize)));
-            assert_eq!(trek.composer_text(cx), "hi", "the letter isn't typed where the composer has focus");
-        });
-    }
-
-    #[test]
-    fn the_arrows_light_titles_with_the_keyboard_and_down_opens_the_lit_one() {
-        run(async |cx| {
-            let trek = open(cx);
-            alt(&trek, cx, true);
-            alt(&trek, cx, false);
-            trek.press(cx, "right");
-            assert!(!trek.visible(cx, "menu-dropdown"), "moving the light opens nothing");
-            trek.press(cx, "down");
-            assert!(trek.visible(cx, "menu-dropdown"));
-            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 1usize)));
-            // With a menu open, the left arrow moves it to File.
-            trek.press(cx, "left");
-            near(x(&trek, cx, "menu-dropdown"), x(&trek, cx, ("menu-title", 0usize)));
-        });
-    }
-
-    #[test]
-    fn with_a_menu_open_a_letter_chooses_the_item_it_marks() {
-        run(async |cx| {
-            let trek = open(cx);
-            trek.press(cx, "alt-f");
-            // File's Settings… is the S.
-            trek.press(cx, "s");
-            assert!(!trek.visible(cx, "menu-dropdown"));
-            assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(crate::workspace::SettingsPage::General)));
-        });
-    }
-
-    #[test]
-    fn holding_alt_underlines_the_marks_without_moving_anything() {
-        run(async |cx| {
-            let trek = open(cx);
-            let plain = trek.bounds(cx, ("menu-title", 0usize)).expect("drawn");
-            assert!(!trek.visible(cx, ("mnemonic-title", 0usize)), "no marks shown with the keyboard elsewhere");
-            alt(&trek, cx, true);
-            assert!(trek.visible(cx, ("mnemonic-title", 0usize)), "underlined while Alt is held");
-            let held = trek.bounds(cx, ("menu-title", 0usize)).expect("drawn");
-            near(held.size.width, plain.size.width);
-            near(held.origin.x, plain.origin.x);
-            // Let go: the tap takes the keyboard, so the marks stay until the bar lets go.
-            alt(&trek, cx, false);
-            assert!(trek.visible(cx, ("mnemonic-title", 0usize)));
-            trek.press(cx, "escape");
-            assert!(!trek.visible(cx, ("mnemonic-title", 0usize)));
-        });
-    }
-
-    #[test]
-    fn a_click_with_alt_held_is_not_a_tap_of_alt() {
-        run(async |cx| {
-            let trek = open(cx);
-            alt(&trek, cx, true);
-            trek.click(cx, "mode-agents");
-            alt(&trek, cx, false);
-            assert!(!bar_focused(&trek, cx), "Alt released after a click doesn't take the keyboard");
-        });
-    }
-
-    #[test]
-    fn a_press_elsewhere_gives_the_keyboard_up() {
-        run(async |cx| {
-            let trek = open(cx);
-            alt(&trek, cx, true);
-            alt(&trek, cx, false);
-            assert!(bar_focused(&trek, cx));
-            trek.click(cx, "mode-agents");
-            assert!(!bar_focused(&trek, cx), "a press outside the bar leaves it");
-            assert!(!trek.visible(cx, ("mnemonic-title", 0usize)), "and the marks go back to plain");
-        });
-    }
-
-    #[test]
-    fn with_a_menu_open_the_pointer_moves_to_other_titles_and_a_press_elsewhere_closes_it() {
-        use gpui_kit::test::TestWindowExt as _;
-        run(async |cx| {
-            let trek = open(cx);
-            trek.click(cx, ("menu-title", 0usize));
-            let first = x(&trek, cx, "menu-dropdown");
-            trek.window(cx, |window, cx| window.hover(("menu-title", 3usize), cx));
-            cx.run_until_parked();
-            assert!(trek.visible(cx, "menu-dropdown"));
-            assert!(x(&trek, cx, "menu-dropdown") > first, "Window's menu is under its own title");
-            trek.click(cx, "mode-agents");
-            assert!(!trek.visible(cx, "menu-dropdown"), "a press elsewhere closes it");
-        });
-    }
-
-    #[test]
-    fn the_arrows_move_between_menus_and_items_and_return_chooses() {
-        run(async |cx| {
-            let trek = open(cx);
-            trek.click(cx, ("menu-title", 0usize));
-            let file = x(&trek, cx, "menu-dropdown");
-            trek.press(cx, "right");
-            assert!(x(&trek, cx, "menu-dropdown") > file, "Thread's menu");
-            trek.press(cx, "left");
-            trek.press(cx, "left");
-            assert!(x(&trek, cx, "menu-dropdown") > file, "left of File is Help, the last: its menu is at the right");
-            trek.press(cx, "right");
-            // File: New Thread, Open Folder…, rule, Settings…, rule, Exit. In this harness the app's
-            // own handlers aren't installed, but the window handles New Thread and Settings….
-            trek.press(cx, "down");
-            trek.press(cx, "down");
-            trek.press(cx, "down");
-            trek.press(cx, "enter");
-            assert!(!trek.visible(cx, "menu-dropdown"));
-            assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(crate::workspace::SettingsPage::General)));
+            assert_eq!(trek.window(cx, |window, cx| window.focused(cx)), focused, "the composer keeps the keys");
+            trek.type_text(cx, " there");
+            assert_eq!(trek.composer_text(cx), "hi there");
         });
     }
 
@@ -320,49 +241,6 @@ mod windows_menus {
             cx.on_action(move |_: &crate::Quit, _| seen.store(true, Ordering::SeqCst));
         });
         heard
-    }
-
-    #[test]
-    fn an_item_nothing_handles_is_off_and_does_nothing() {
-        run(async |cx| {
-            let trek = open(cx);
-            // Exit is the app's own: no window handles Quit, and the harness has no app handler.
-            trek.click(cx, ("menu-title", 0usize));
-            trek.click(cx, ("menu-item", 5usize));
-            assert!(trek.visible(cx, "menu-dropdown"), "a dimmed item doesn't close the menu");
-            trek.press(cx, "escape");
-            // The second Escape leaves the bar, so the next open takes its items afresh.
-            trek.press(cx, "escape");
-            // With a handler it's on offer, and runs.
-            let heard = quit_heard(cx);
-            trek.click(cx, ("menu-title", 0usize));
-            trek.click(cx, ("menu-item", 5usize));
-            assert!(!trek.visible(cx, "menu-dropdown"));
-            assert!(heard.load(Ordering::SeqCst), "Exit asked the app to quit");
-        });
-    }
-
-    #[test]
-    fn the_menu_comes_in_on_a_spring_and_just_appears_without_motion() {
-        run(async |cx| {
-            let trek = open(cx);
-            cx.update(|cx| cx.set_reduce_motion(false));
-            trek.click(cx, ("menu-title", 1usize));
-            cx.executor().advance_clock(std::time::Duration::from_millis(40));
-            trek.render(cx);
-            let early = trek.bounds(cx, "menu-dropdown").expect("drawn, on its way in");
-            cx.executor().advance_clock(std::time::Duration::from_millis(1_000));
-            trek.render(cx);
-            let settled = trek.bounds(cx, "menu-dropdown").expect("drawn");
-            assert!(early.origin.y < settled.origin.y, "it slid down into place: {early:?} → {settled:?}");
-            trek.press(cx, "escape");
-            cx.executor().advance_clock(std::time::Duration::from_millis(40));
-            trek.render(cx);
-            assert!(trek.visible(cx, "menu-dropdown"), "still drawn while it leaves");
-            cx.executor().advance_clock(std::time::Duration::from_millis(1_000));
-            trek.render(cx);
-            assert!(!trek.visible(cx, "menu-dropdown"), "gone once it has left");
-        });
     }
 
     #[test]

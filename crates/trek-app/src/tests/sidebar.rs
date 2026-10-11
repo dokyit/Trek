@@ -294,3 +294,28 @@ fn a_thread_waiting_on_you_is_a_line_high_and_says_what_it_waits_for() {
         assert_eq!(trek.read(cx, |ws, _| crate::sidebar::needs_label(ws, &id)), "Needs approval");
     });
 }
+
+#[test]
+fn a_pointer_taken_off_the_window_lets_the_held_rows_go() {
+    run(async |cx| {
+        let trek = open(cx);
+        let quiet_ids: Vec<String> = (0..3).map(|i| quiet(&trek, cx, &format!("Quiet {i}"), (i as i64 + 1) * 60_000)).collect();
+        trek.render(cx);
+        // The pointer rests on the sidebar and a thread starts asking: its row waits.
+        let at = trek.bounds(cx, format!("card-{}", quiet_ids[0])).or_else(|| trek.bounds(cx, format!("live-line-{}", quiet_ids[0]))).unwrap().center();
+        move_pointer(&trek, cx, at);
+        let newcomer = quiet(&trek, cx, "Newcomer", 5_000);
+        trek.update(cx, |ws, cx| {
+            ws.store.update_thread(&newcomer, |t| t.run_state = RunState::NeedsYou).unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        assert!(row_y(&trek, cx, &newcomer).is_none(), "the newcomer waits for the pointer to leave");
+        // The pointer goes off the window's edge: Windows says so with no move, and the window takes
+        // GPUI's pointer off (`chrome::let_go_of_hover`), as an event off the edge would.
+        trek.window(cx, |window, cx| crate::chrome::pointer_off_window(window, cx));
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(row_y(&trek, cx, &newcomer).is_some(), "the list caught up with it");
+    });
+}

@@ -412,10 +412,153 @@ pub fn play_notification_sound() {
     unsafe { PlaySoundW(alias.as_ptr(), std::ptr::null_mut(), SND_ALIAS | SND_NODEFAULT) };
 }
 
+/// Whether the cursor is over window `hwnd` (or a window inside it, a web view), by what the
+/// system says: the window the cursor is over, by its root. Not the window's own notion of it, which
+/// is told when the cursor comes and goes and so lags a draw behind either.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub fn cursor_over_window(hwnd: isize) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, POINT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, GetCursorPos, WindowFromPoint};
+    let mut at = POINT { x: 0, y: 0 };
+    // SAFETY: plain queries; a handle that isn't a window answers null.
+    unsafe {
+        if GetCursorPos(&mut at) == 0 {
+            return true;
+        }
+        let under = WindowFromPoint(at);
+        !under.is_null() && GetAncestor(under, GA_ROOT) == GetAncestor(hwnd as HWND, GA_ROOT)
+    }
+}
+
+/// What Windows calls a `WM_NCHITTEST` answer: the name of the code, as the SDK spells it.
+#[cfg(any(all(windows, feature = "shots"), test))]
+pub fn hit_name(code: isize) -> &'static str {
+    match code {
+        0 => "HTNOWHERE",
+        1 => "HTCLIENT",
+        2 => "HTCAPTION",
+        8 => "HTMINBUTTON",
+        9 => "HTMAXBUTTON",
+        10 => "HTLEFT",
+        11 => "HTRIGHT",
+        12 => "HTTOP",
+        13 => "HTTOPLEFT",
+        14 => "HTTOPRIGHT",
+        15 => "HTBOTTOM",
+        16 => "HTBOTTOMLEFT",
+        17 => "HTBOTTOMRIGHT",
+        20 => "HTCLOSE",
+        _ => "other",
+    }
+}
+
+/// Where Windows answers `WM_NCHITTEST` for the point `(x, y)` in the window's client area (device
+/// pixels): the same question it asks before every real mouse message, sent to the window's own
+/// procedure, and answered by it. Must be called with no GPUI update in progress (the answer asks
+/// the window what is under the pointer).
+#[cfg(all(windows, feature = "shots"))]
+pub fn hit_test(hwnd: isize, x: i32, y: i32) -> isize {
+    use windows_sys::Win32::Foundation::{HWND, POINT};
+    use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_NCHITTEST};
+    let window = hwnd as HWND;
+    let mut at = POINT { x, y };
+    // SAFETY: a window of this process, asked from its own thread.
+    unsafe {
+        ClientToScreen(window, &mut at);
+        SendMessageW(window, WM_NCHITTEST, 0, ((at.y as u32 as isize & 0xffff) << 16) | (at.x as u32 as isize & 0xffff))
+    }
+}
+
+/// What the window answers when a press on it, with another window in front, asks whether to
+/// activate it (`WM_MOUSEACTIVATE`) and whether to throw the press away: `MA_ACTIVATE` (1) is
+/// "activate it and let the press through", the answer that makes the first click on a window
+/// behind count; `MA_ACTIVATEANDEAT` (2) or either NOACTIVATE would lose it or leave the window
+/// behind. `hit` is what `hit_test` said of the point.
+#[cfg(all(windows, feature = "shots"))]
+pub fn mouse_activate(hwnd: isize, hit: isize) -> &'static str {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_MOUSEACTIVATE};
+    let window = hwnd as HWND;
+    // SAFETY: a window of this process, asked from its own thread; the top-level window is its own.
+    let answer = unsafe { SendMessageW(window, WM_MOUSEACTIVATE, window as usize, ((WM_LBUTTONDOWN as isize) << 16) | (hit & 0xffff)) };
+    match answer {
+        1 => "MA_ACTIVATE",
+        2 => "MA_ACTIVATEANDEAT",
+        3 => "MA_NOACTIVATE",
+        4 => "MA_NOACTIVATEANDEAT",
+        _ => "other",
+    }
+}
+
+/// The pointer arriving at `(x, y)` (client pixels, device pixels) in the window, as a mouse
+/// move: what makes Windows count the window as the one under the pointer.
+#[cfg(all(windows, feature = "shots"))]
+pub fn client_move(hwnd: isize, x: i32, y: i32) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_MOUSEMOVE};
+    // SAFETY: as above.
+    unsafe { SendMessageW(hwnd as HWND, WM_MOUSEMOVE, 0, ((y as u32 as isize & 0xffff) << 16) | (x as u32 as isize & 0xffff)) };
+}
+
+/// Windows telling the window the pointer has left it (`WM_MOUSELEAVE`): sent when a pointer
+/// goes off the window's edge, or onto its frame, without any mouse move for the window to see.
+#[cfg(all(windows, feature = "shots"))]
+pub fn mouse_leave(hwnd: isize) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+    /// `WM_MOUSELEAVE` (windows-sys has it with the common controls only).
+    const WM_MOUSELEAVE: u32 = 0x02A3;
+    // SAFETY: as above.
+    unsafe { SendMessageW(hwnd as HWND, WM_MOUSELEAVE, 0, 0) };
+}
+
+/// A left click at `(x, y)` (client pixels, device pixels) the way the mouse delivers it to a
+/// window that answered `HTCLIENT`: a move, a press, a release, sent to the window's own procedure.
+/// Never input to the desktop: the messages go to one handle. How long the window took over each
+/// (what a pointer waits on before the next).
+#[cfg(all(windows, feature = "shots"))]
+pub fn client_click(hwnd: isize, x: i32, y: i32) -> [std::time::Duration; 3] {
+    use std::time::Instant;
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+    /// `MK_LBUTTON`: the left button is down.
+    const LEFT_DOWN: usize = 0x0001;
+    let window = hwnd as HWND;
+    let at = ((y as u32 as isize & 0xffff) << 16) | (x as u32 as isize & 0xffff);
+    let mut took = [std::time::Duration::ZERO; 3];
+    // SAFETY: as above.
+    unsafe {
+        for (slot, (msg, wparam)) in took.iter_mut().zip([(WM_MOUSEMOVE, 0), (WM_LBUTTONDOWN, LEFT_DOWN), (WM_LBUTTONUP, 0)]) {
+            let start = Instant::now();
+            SendMessageW(window, msg, wparam, at);
+            *slot = start.elapsed();
+        }
+    }
+    took
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{badge_description, badge_rgba, icon_resource, idle_seconds_between, session_is_away};
+    use super::{badge_description, badge_rgba, hit_name, icon_resource, idle_seconds_between, session_is_away};
     use trek_core::settings::AppIcon;
+
+    #[test]
+    fn the_answers_to_a_hit_test_are_named_as_the_sdk_names_them() {
+        // The ones a title bar's answers are (winuser.h's values).
+        for (code, name) in [(0, "HTNOWHERE"), (1, "HTCLIENT"), (2, "HTCAPTION"), (8, "HTMINBUTTON"), (9, "HTMAXBUTTON"), (20, "HTCLOSE"), (12, "HTTOP")] {
+            assert_eq!(hit_name(code), name);
+        }
+        assert_eq!(hit_name(-1), "other", "HTTRANSPARENT and the rest");
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTTOP};
+            for (code, name) in [(HTNOWHERE, "HTNOWHERE"), (HTCLIENT, "HTCLIENT"), (HTCAPTION, "HTCAPTION"), (HTMINBUTTON, "HTMINBUTTON"), (HTMAXBUTTON, "HTMAXBUTTON"), (HTCLOSE, "HTCLOSE"), (HTTOP, "HTTOP")] {
+                assert_eq!(hit_name(code as isize), name);
+            }
+        }
+    }
 
     #[test]
     fn idle_time_is_the_ticks_apart_in_seconds() {

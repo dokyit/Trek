@@ -192,12 +192,15 @@ impl ThreadWindow {
                         )))
                         .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
-                .when_some(folder, |el, dir| el.child(crate::root::open_in_button(dir, narrow)))
+                .when_some(folder, |el, dir| el.child(crate::chrome::no_drag("open-in", crate::root::open_in_button(dir, narrow))))
                 .when_some(settle_id, |el, id| {
-                    el.child(crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
-                        let id = id.clone();
-                        this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
-                    })))
+                    el.child(crate::chrome::no_drag(
+                        "settle",
+                        crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
+                            let id = id.clone();
+                            this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
+                        })),
+                    ))
                 }),
         )
     }
@@ -210,6 +213,7 @@ impl ThreadWindow {
 
 impl Render for ThreadWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::chrome::let_go_of_hover(window, cx);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
