@@ -9,6 +9,7 @@ pub mod changes;
 pub mod checkpoint;
 pub mod detect;
 pub mod elevated;
+pub mod feeds;
 pub mod git;
 pub mod hunks;
 pub mod import;
@@ -32,6 +33,7 @@ pub mod types;
 pub mod update;
 pub mod verification;
 pub mod visualization;
+pub mod winget;
 pub mod worktree;
 
 pub use types::*;
