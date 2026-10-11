@@ -76,6 +76,8 @@ pub struct IdeWorkbench {
     /// Open files' paths with links resolved, as FSEvents names them (read once per file).
     canonical: std::collections::HashMap<PathBuf, PathBuf>,
     mode_seen: Mode,
+    /// Tab menus open: a preview's native web view would cover them, so it steps aside.
+    menus_open: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -157,6 +159,7 @@ impl IdeWorkbench {
             watch: None,
             canonical: Default::default(),
             mode_seen,
+            menus_open: 0,
             _subscriptions: subscriptions,
         };
         this.watch_root(window, cx);
