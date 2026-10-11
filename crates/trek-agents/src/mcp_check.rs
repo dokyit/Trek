@@ -47,7 +47,7 @@ async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: 
     if let Some(problem) = trek_core::detect::batch_args_problem(&program, args) {
         return Err(problem);
     }
-    let mut cmd = tokio::process::Command::new(&program);
+    let mut cmd = trek_core::procs::async_command(&program);
     // The login shell's PATH (where npx and uvx are), unless the server sets its own.
     cmd.args(args).env("PATH", trek_core::detect::login_path()).envs(env.iter().map(|(k, v)| (k, v)));
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());

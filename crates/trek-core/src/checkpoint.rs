@@ -113,7 +113,7 @@ fn git_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let git = crate::git::git_program();
-        let exec_path = Command::new(git).arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
+        let exec_path = crate::procs::command(git).arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
         exec_path
             .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("git"))
             .filter(|p| p.exists())
@@ -851,7 +851,7 @@ fn command_name<'a>(args: &[&'a str]) -> &'a str {
 /// commands in that repo mustn't find it locked), and deaf to git variables Trek may have
 /// inherited.
 fn base_command(dir: &Path) -> Command {
-    let mut c = Command::new(git_bin());
+    let mut c = crate::procs::command(git_bin());
     c.current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")

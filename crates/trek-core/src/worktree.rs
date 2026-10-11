@@ -8,7 +8,6 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 /// Where a thread's checkout lives and what it's built on. Stored on the thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +42,7 @@ pub fn worktrees_dir() -> PathBuf {
 
 /// Run git in `cwd`; its output, or what it said went wrong.
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = crate::procs::command("git")
         .args(args)
         .current_dir(cwd)
         .env("PATH", crate::detect::login_path())
@@ -329,7 +328,7 @@ pub fn github_origin(repo: &Path) -> bool {
 }
 
 fn gh_at(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(bin).args(args).current_dir(dir).env("PATH", crate::detect::login_path()).env("GH_PROMPT_DISABLED", "1").output()?;
+    let out = crate::procs::command(bin).args(args).current_dir(dir).env("PATH", crate::detect::login_path()).env("GH_PROMPT_DISABLED", "1").output()?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {

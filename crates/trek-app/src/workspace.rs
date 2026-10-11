@@ -2022,7 +2022,7 @@ impl Workspace {
                 .spawn(async move {
                     // `--no-guess`: a branch deleted since the menu was drawn isn't quietly
                     // re-made from origin; `--`: a name can't be read as an option.
-                    std::process::Command::new("git").args(["switch", "--no-guess", "--", &branch]).current_dir(&dir).output()
+                    trek_core::procs::command("git").args(["switch", "--no-guess", "--", &branch]).current_dir(&dir).output()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -5400,10 +5400,10 @@ impl Workspace {
                     let path = trek_core::detect::login_path();
                     let gh = trek_core::detect::which("gh");
                     let status = if let (Some(gh), false) = (gh, spec.contains("://")) {
-                        std::process::Command::new(gh).args(["repo", "clone", &spec]).arg(&dest2).env("PATH", path).output()
+                        trek_core::procs::command(gh).args(["repo", "clone", &spec]).arg(&dest2).env("PATH", path).output()
                     } else {
                         let url = if spec.contains("://") || spec.starts_with("git@") { spec.clone() } else { format!("https://github.com/{spec}.git") };
-                        std::process::Command::new("git").args(["clone", &url]).arg(&dest2).env("PATH", path).output()
+                        trek_core::procs::command("git").args(["clone", &url]).arg(&dest2).env("PATH", path).output()
                     };
                     match status {
                         Ok(o) if o.status.success() => Ok(()),

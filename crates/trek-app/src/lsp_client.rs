@@ -122,7 +122,7 @@ impl Client {
             return None;
         };
         tracing::info!("lsp: starting {binary} for {lang} at {}", root.display());
-        let mut command = Command::new(program);
+        let mut command = trek_core::procs::command(program);
         command.args(args).env("PATH", trek_core::detect::login_path());
         Self::spawn(command, &root, language_id)
     }

@@ -42,7 +42,15 @@ impl Output {
 
 /// Run `program args…`, optionally feeding `stdin`, killing it after `timeout`.
 pub fn run(program: &str, args: &[&str], stdin: Option<&str>, timeout: Duration) -> Result<Output, String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program); // spawn: ok
+    // On Windows nothing here runs today (these helpers serve the macOS tools), but if one does,
+    // no console window. (trek-mcp can't use `trek_core::procs`: it doesn't depend on trek-core.)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())

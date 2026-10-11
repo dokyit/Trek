@@ -199,7 +199,7 @@ impl Addresses {
 /// Waits two seconds at most.
 fn tailscale_ip() -> Option<Ipv4Addr> {
     use std::io::Read as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     #[cfg(windows)]
     let (app, name) = (PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"), "tailscale.exe");
     #[cfg(not(windows))]
@@ -208,13 +208,8 @@ fn tailscale_ip() -> Option<Ipv4Addr> {
     // tailnet's (a second install, a build) rather than the one whose adapter is up.
     let installed = app.is_file().then_some(app);
     let cli = if cfg!(windows) { installed.or_else(|| trek_core::detect::which(name)) } else { trek_core::detect::which(name).or(installed) }?;
-    let mut command = Command::new(cli);
+    let mut command = trek_core::procs::command(cli);
     command.args(["ip", "-4"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
     let mut child = command.spawn().ok()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -328,7 +323,7 @@ fn computer_name() -> String {
 /// "Tobias's MacBook Pro", as Sharing settings name it.
 #[cfg(not(windows))]
 fn computer_name() -> String {
-    std::process::Command::new("scutil")
+    trek_core::procs::command("scutil")
         .args(["--get", "ComputerName"])
         .output()
         .ok()
