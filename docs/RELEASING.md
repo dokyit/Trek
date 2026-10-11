@@ -141,25 +141,37 @@ no terminal; otherwise it's asked for), `TREK_RELEASE_REPO` (default `dokyit/Tre
 Windows half. Start it from any machine with `gh`, or with **Run workflow** on the repository's Actions
 tab:
 
+**The first time**, in this order: add the secrets (below), run a dry run, then the real run.
+
 ```sh
-gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta              # on the default branch
-gh workflow run release.yml --ref windows-port -f version=0.4.1-beta.4 -f channel=beta
-gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true  # publish nothing
+gh workflow run release.yml --ref windows-port -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true  # publish nothing
+gh workflow run release.yml --ref windows-port -f version=0.4.1-beta.4 -f channel=beta                  # the real thing
 ```
+
+`--ref` is the branch the workflow file is on and the release is built from. Once `release.yml` is on the
+default branch, `--ref` can go for a release from there, and the **Run workflow** button on the Actions tab
+is the sure way to start it (GitHub documents `workflow_dispatch` as a default-branch feature).
 
 Inputs: `version`, `channel` (stable, beta or nightly; stable by default), optional `notes` (Markdown, used
 as `--notes`; empty means the commit subjects as usual) and `dry_run`. Run it on the branch you release
 from: a stable release commits `Release v<version>` to that branch and pushes it (as the runner's
-`github-actions[bot]`), and a beta or nightly is built from its head. The macOS job takes about 15 minutes,
-the Windows job about 27 more. Between the two, Trek on Windows sees the new version without a Windows
-build and says "the Windows build is on its way"; Mac users can update at once. If the Windows job fails,
-re-run just that job (or `gh workflow run release-windows.yml` with the same version and channel): it
-only attaches to the release that exists.
+`github-actions[bot]`, so CI doesn't run on that commit, and a protected branch would refuse the push
+before anything is published), and a beta or nightly is built from its head. The macOS job takes about 15
+minutes, the Windows job about 27 more. Between the two, Trek on Windows sees the new version without a
+Windows build and says "the Windows build is on its way"; Mac users can update at once.
+
+If the Windows job fails, the release exists with only `darwin-aarch64`: re-run just that job (**Re-run
+failed jobs** on the run, or `gh workflow run release-windows.yml --ref windows-port` with the same version
+and channel). It only attaches to the release that exists and replaces its own assets, so it can be run
+again. If the macOS job fails after pushing the tag but before the release exists, `release.sh` refuses the
+same version again ("tag … already exists"): take the next version, or delete the tag it pushed
+(`git push origin :refs/tags/v<version>`).
 
 A dry run builds, code-signs and minisigns both halves, verifies the signatures against
 `assets/update/minisign.pub`, shows both manifests and SHA-256s in the run's summary, and publishes
 nothing: no commit, no tag, no release. Without the code-signing secrets below it signs with a throwaway
-"Trek Local Signing" that `script/signing-identity.sh` makes on the runner.
+"Trek Local Signing" that `script/signing-identity.sh` makes on the runner. A dry run does not prove the
+real p12, the pushes or the release upload; the first real run is the first time those happen.
 
 Secrets, added once from the Mac that has `~/.trek-signing/` (repository Settings > Secrets and
 variables > Actions, or `gh`):
@@ -175,12 +187,15 @@ The job imports the p12 into a keychain of its own on the runner (only `/usr/bin
 key), signs with it, and deletes that keychain and the key files when it ends, failed or not. A real
 release refuses to run without `TREK_CODESIGN_P12`: a different certificate would reset every user's
 Accessibility and Screen Recording grants. `release.sh` reads the minisign password from
-`TREK_MINISIGN_PASSWORD` when it's set, and asks at the terminal otherwise.
+`TREK_MINISIGN_PASSWORD` when it's set, and asks at the terminal otherwise; on a runner (`CI` set) a key
+with a password and no `TREK_MINISIGN_PASSWORD` stops the job before the build.
 
 The minisign key is the one secret that matters most (see "Update signing key" above): anyone who can
-push a workflow to this repository can sign with it (true since the Windows workflow got it), so keep
-the repository's write access as tight as the Mac's. Give the key a password and set `TREK_MINISIGN_PASSWORD`; a key without one still
-signs, with release.sh's warning in the log.
+push a workflow to this repository can read the secrets (true since the Windows workflow got the key), so
+keep the repository's write access as tight as the Mac's. The key uploaded should carry a password, and
+`TREK_MINISIGN_PASSWORD` should hold it: that protects the key where the secret alone leaks, not against
+someone who can run a workflow, which sees both. A key without a password still signs, with
+`release.sh`'s warning in the log.
 
 The Mac's own way, `script/release.sh` on the Mac, works as before. Run one or the other for a release,
 not both.
