@@ -34,7 +34,7 @@ $script:LogSubs = $null
 $Verbs = @('route', 'send', 'attach', 'project', 'diff', 'pair', 'push', 'new', 'settled',
     'glass', 'tint', 'theme', 'tools', 'range', 'usage-demo', 'pace', 'wait', 'record',
     'editor', 'agent-install', 'toast', 'click', 'rclick', 'hover', 'elements', 'type',
-    'key', 'scroll', 'resize', 'hittest', 'realclick', 'realmove', 'realleave', 'legacy-pointer', 'count', 'approve', 'deny', 'answer', 'rewind', 'shot', 'browser', 'quit')
+    'key', 'scroll', 'resize', 'hittest', 'realclick', 'realmove', 'realleave', 'legacy-pointer', 'count', 'approve', 'deny', 'answer', 'rewind', 'shot', 'browser', 'perf', 'quit')
 
 function Say([string]$Msg) { Write-Host "$(Get-Date -Format 'HH:mm:ss')  $Msg" }
 function Die([string]$Msg) { [Console]::Error.WriteLine("capture: $Msg"); exit 1 }

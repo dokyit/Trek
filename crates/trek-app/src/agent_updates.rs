@@ -7,7 +7,7 @@
 //! something to install) and on Settings > Agents: one row per agent with installed → latest and
 //! an Update button, MonoCode's harness updates in Trek's design.
 
-use crate::workspace::{Hold, Workspace};
+use crate::workspace::{Hold, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -161,14 +161,15 @@ impl AgentUpdates {
     pub fn updatable(&self) -> Vec<String> {
         self.found
             .iter()
-            .filter(|v| v.update_available() && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. })))
+            .filter(|v| v.update_available() && !left_to_the_user(v) && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. })))
             .map(|v| v.id.clone())
             .collect()
     }
 
-    /// Ask for row `id`'s update; `false` when there's none to install or it's already asked for.
+    /// Ask for row `id`'s update; `false` when there's none to install, it's the user's to run
+    /// (an administrator's terminal), or it's already asked for.
     pub fn request(&mut self, id: &str) -> bool {
-        let ready = self.found.iter().any(|v| v.id == id && v.update_available());
+        let ready = self.found.iter().any(|v| v.id == id && v.update_available() && !left_to_the_user(v));
         if !ready || matches!(self.jobs.get(id), Some(Job::Queued | Job::Running | Job::Updated { .. })) {
             return false;
         }
@@ -284,6 +285,12 @@ impl AgentUpdates {
     }
 }
 
+/// `v`'s update is a command for the user to run themselves (it needs an administrator's
+/// terminal, or is the vendor's installer with a wizard): Trek shows it and never runs it.
+fn left_to_the_user(v: &AgentVersion) -> bool {
+    v.command.as_ref().is_some_and(|c| c.manual.is_some())
+}
+
 /// `TREK_OPEN_AGENT_UPDATES=<row>` (rather than `1`) opens that row's output once it has one,
 /// for design review of a failure.
 fn open_output() -> Option<String> {
@@ -338,7 +345,10 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
         _ => format!("{} → {}", v.installed.as_deref().unwrap_or("?"), v.latest.as_deref().unwrap_or("?")),
     };
     // What the row says under the name.
+    let instruction = v.command.as_ref().and_then(|c| c.instruction());
     let (detail, tone): (String, Hsla) = match job {
+        // Its update is the user's to run: what to run, and why Trek doesn't.
+        None if instruction.is_some() => (instruction.clone().unwrap_or_default(), muted),
         None => match v.install {
             trek_core::agent_update::Install::Native => ("Via its own installer".into(), muted),
             ref i => (format!("Via {}", i.label()), muted),
@@ -359,7 +369,23 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
         let (ws, key) = (ws.clone(), key.clone());
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| ws.update(cx, |ws, cx| ws.update_agent(&key, cx))
     };
+    let copy = {
+        let (ws, shown) = (ws.clone(), shown.clone());
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            ws.update(cx, |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(shown.clone()));
+                cx.emit(WorkspaceEvent::Toast { message: format!("Copied {shown}"), undo: None });
+            })
+        }
+    };
     let control = match job {
+        None if instruction.is_some() => Button::new(SharedString::from(format!("agent-update-copy-{key}")))
+            .small()
+            .outline()
+            .label("Copy")
+            .tooltip(SharedString::from(format!("Copies {shown}")))
+            .on_click(copy)
+            .into_any_element(),
         None | Some(Job::Failed { .. }) => Button::new(SharedString::from(format!("agent-update-{key}")))
             .small()
             .outline()

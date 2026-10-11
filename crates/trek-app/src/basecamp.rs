@@ -203,9 +203,11 @@ impl Basecamp {
         let (store, cache) = (ws.store.clone(), ws.basecamp_cache.clone());
         let first = (self.range != Range::All && self.summaries.iter().all(Option::is_none) && !cache.warm()).then_some(self.range);
         let (tx, rx) = async_channel::unbounded::<(bool, Vec<(Range, Summary)>)>();
+        let pass = self.passes;
         cx.background_executor()
             .spawn(async move {
                 let now = chrono::Local::now();
+                let began = std::time::Instant::now();
                 if let Some(range) = first {
                     let window = range.window(&now);
                     match basecamp::Gathered::gather_since(&store, window.start, None) {
@@ -213,10 +215,21 @@ impl Basecamp {
                         Err(e) => tracing::warn!("basecamp: {e:#}"),
                     }
                 }
-                let all = cache.with(&store, |g| summaries(g, &now)).unwrap_or_else(|e| {
-                    tracing::warn!("basecamp: {e:#}");
-                    RANGES.map(|r| (r, Summary::compute(r, &now, r.window(&now), &[]))).to_vec()
-                });
+                let first_ms = began.elapsed();
+                let mut counted = (0, 0);
+                let all = cache
+                    .with(&store, |g| {
+                        counted = (g.threads.len(), g.read);
+                        summaries(g, &now)
+                    })
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("basecamp: {e:#}");
+                        RANGES.map(|r| (r, Summary::compute(r, &now, r.window(&now), &[]))).to_vec()
+                    });
+                if crate::perf::on() {
+                    let (threads, read) = counted;
+                    tracing::info!("perf: basecamp pass={pass} threads={threads} read={read} first={} all={}", crate::perf::ms(first_ms), crate::perf::ms(began.elapsed()));
+                }
                 let _ = tx.send_blocking((true, all));
             })
             .detach();
