@@ -15,7 +15,7 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
     let review = w.review(thread).filter(|r| !r.pending.is_empty())?;
     let busy = w.turn_running(thread);
     let git = review.git;
-    let armed = review.undo_all_armed();
+    let armed = review.undo_all_armed(cx.background_executor().now());
     let n = review.pending.len();
     let (added, removed) = review.totals();
     let theme = cx.theme();
