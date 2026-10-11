@@ -20,6 +20,10 @@ name: Release
 #   TREK_CODESIGN_P12_PASSWORD  ~/.trek-signing/codesign.p12.password
 # A dry run without the two TREK_CODESIGN_* secrets signs with a throwaway identity.
 on:
+  # TEMPORARY: registers this file with GitHub so it can be dispatched from wp/release-ci before
+  # it is on the default branch. Every job is skipped on push. Reverted in the next commit.
+  push:
+    branches: [wp/release-ci]
   workflow_dispatch:
     inputs:
       version:
@@ -63,6 +67,7 @@ env:
 jobs:
   macos:
     name: macOS app
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
