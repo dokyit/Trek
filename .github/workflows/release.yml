@@ -1,0 +1,279 @@
+name: Release
+
+# Publish a whole Trek release from any machine (docs/RELEASING.md, "Publishing from anywhere").
+# The macOS job runs script/release.sh on GitHub's Mac, as the maintainer's Mac would: builds and
+# code-signs Trek.app with "Trek Local Signing", minisigns the archive, tags, and creates (or, for
+# beta and nightly, refreshes) the GitHub release with darwin-aarch64 in <channel>.json. Then the
+# Windows job (release-windows.yml) attaches the Windows zip to that release.
+#
+#   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta
+#   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true
+#
+# Run it on the branch to release from (--ref, or the branch picker): a stable release commits
+# "Release v<version>" to that branch. A dry run builds and signs both halves and publishes
+# nothing: no commit, no tag, no release.
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   TREK_MINISIGN_KEY           the whole ~/.trek-signing/minisign.key file, pasted
+#   TREK_MINISIGN_PASSWORD      that key's password, if it has one
+#   TREK_CODESIGN_P12           base64 of ~/.trek-signing/codesign.p12
+#   TREK_CODESIGN_P12_PASSWORD  ~/.trek-signing/codesign.p12.password
+# A dry run without the two TREK_CODESIGN_* secrets signs with a throwaway identity.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.4.1, 0.4.1-beta.4, 0.4.1-nightly.20261011)'
+        required: true
+        type: string
+      channel:
+        description: 'Release channel'
+        required: true
+        type: choice
+        default: stable
+        options:
+          - stable
+          - beta
+          - nightly
+      notes:
+        description: 'Release notes (Markdown); empty: the commit subjects since the last release'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run: build and sign both halves, publish nothing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# One release per channel at a time. A dry run queues apart, so it never holds up a real one.
+concurrency:
+  group: release-${{ inputs.channel }}${{ inputs.dry_run && '-dry-run' || '' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds don't help a fresh runner and bloat the cache.
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  macos:
+    name: macOS app
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      # Full history and tags: release.sh checks the version against earlier releases' tags and
+      # writes the notes from the commits since the last one. The checkout keeps its token, which
+      # pushes release.sh's tags (and a stable release's commit).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for the whole workspace, shared with ci.yml.
+          shared-key: workspace
+          save-if: false
+
+      # gpui compiles its Metal shaders at build time with `xcrun metal` (see ci.yml).
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      # bundle.sh renders the icons with resvg; iconutil, PlistBuddy, codesign, python3 and gh
+      # are on the image already.
+      - name: Install resvg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: brew install resvg
+
+      # Pinned by hash: this binary signs every update. (The zip's own .minisig verifies with
+      # jedisct1's key, RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3; the hash below
+      # was taken from a copy that did.) An arm64 build, like macos-latest.
+      - name: Install minisign
+        run: |
+          ver=0.12
+          zip="$RUNNER_TEMP/minisign-$ver-macos.zip"
+          curl -fsSL -o "$zip" "https://github.com/jedisct1/minisign/releases/download/$ver/minisign-$ver-macos.zip"
+          expected=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
+          actual=$(shasum -a 256 "$zip" | cut -d' ' -f1)
+          if [[ $actual != "$expected" ]]; then
+            echo "::error::minisign $ver macos sha256 mismatch: got $actual, want $expected"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/minisign"
+          unzip -q -o "$zip" minisign -d "$RUNNER_TEMP/minisign"
+          chmod +x "$RUNNER_TEMP/minisign/minisign"
+          "$RUNNER_TEMP/minisign/minisign" -v
+          echo "$RUNNER_TEMP/minisign" >> "$GITHUB_PATH"
+
+      # Who the release commit and tags are by.
+      - name: Git identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      # Before a long build, the token must be able to push what release.sh pushes. --dry-run
+      # authenticates against the push endpoint and sends nothing.
+      - name: Push access
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          git push --dry-run origin "HEAD:refs/tags/trek-push-probe-$GITHUB_RUN_ID"
+          if [[ $CHANNEL == stable ]]; then git push --dry-run origin HEAD; fi
+
+      # The secret is the key file's whole contents (it is all ASCII). Keys and the keychain live
+      # in RUNNER_TEMP and go in the last step, whatever happens.
+      - name: minisign secret key
+        env:
+          KEY_FILE: ${{ secrets.TREK_MINISIGN_KEY }}
+        run: |
+          if [[ -z ${KEY_FILE//[[:space:]]/} ]]; then
+            echo "::error::the TREK_MINISIGN_KEY secret is not set (docs/RELEASING.md)"
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$KEY_FILE" > "$RUNNER_TEMP/minisign.key"
+          echo "TREK_MINISIGN_KEY=$RUNNER_TEMP/minisign.key" >> "$GITHUB_ENV"
+
+      # "Trek Local Signing" in a keychain of its own: unlocked, codesign allowed to use the key
+      # without a prompt (the partition list), searched before the login keychain. macOS ties
+      # users' Accessibility and Screen Recording grants to this certificate, so a real release
+      # takes the one from the secrets or fails; only a dry run may make a throwaway one, with
+      # script/signing-identity.sh, and it goes through the same import.
+      - name: Code-signing identity
+        env:
+          P12_BASE64: ${{ secrets.TREK_CODESIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.TREK_CODESIGN_P12_PASSWORD }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/trek-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_password"
+          if [[ -n ${P12_BASE64//[[:space:]]/} ]]; then
+            if [[ -z $P12_PASSWORD ]]; then
+              echo "::error::TREK_CODESIGN_P12 is set but TREK_CODESIGN_P12_PASSWORD isn't (docs/RELEASING.md)"
+              exit 1
+            fi
+            p12="$RUNNER_TEMP/codesign.p12"
+            printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
+            p12_password=$P12_PASSWORD
+          elif [[ $DRY_RUN == true ]]; then
+            echo "• no TREK_CODESIGN_P12 secret: this dry run signs with a throwaway \"Trek Local Signing\""
+            dir="$RUNNER_TEMP/throwaway-signing"
+            scratch="$RUNNER_TEMP/throwaway.keychain-db"
+            security create-keychain -p "$keychain_password" "$scratch"
+            security unlock-keychain -p "$keychain_password" "$scratch"
+            TREK_SIGNING_DIR=$dir TREK_SIGNING_KEYCHAIN=$scratch script/signing-identity.sh
+            # Gone before the real keychain exists: two identities of one name would be ambiguous.
+            security delete-keychain "$scratch"
+            p12="$dir/codesign.p12"
+            p12_password=$(cat "$dir/codesign.p12.password")
+            echo "::add-mask::$p12_password"
+          else
+            echo "::error::the TREK_CODESIGN_P12 secret is not set; a release is signed with the real \"Trek Local Signing\" (docs/RELEASING.md)"
+            exit 1
+          fi
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -f pkcs12 -P "$p12_password" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          rm -f "$RUNNER_TEMP/codesign.p12"
+          rm -rf "$RUNNER_TEMP/throwaway-signing"
+          searched=()
+          while IFS= read -r k; do searched+=("$k"); done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+          security list-keychains -d user -s "$keychain" "${searched[@]}"
+          if ! security find-identity -p codesigning "$keychain" | grep -qF '"Trek Local Signing"'; then
+            echo "::error::the p12 holds no \"Trek Local Signing\" identity"
+            exit 1
+          fi
+          echo "• \"Trek Local Signing\" ready in $keychain"
+          echo "TREK_SIGN_IDENTITY=Trek Local Signing" >> "$GITHUB_ENV"
+
+      # Inputs go through env, never straight into the script text.
+      - name: script/release.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          NOTES: ${{ inputs.notes }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=("$VERSION" --channel "$CHANNEL")
+          if [[ -n ${NOTES//[[:space:]]/} ]]; then
+            printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+            args+=(--notes "$RUNNER_TEMP/notes.md")
+          fi
+          if [[ $DRY_RUN == true ]]; then args+=(--dry-run); fi
+          script/release.sh "${args[@]}"
+
+      - name: Summary
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          VERSION=${VERSION#v}
+          out="dist/release/$VERSION"
+          name="Trek-$VERSION-darwin-aarch64.app.tar.gz"
+          sha=$(shasum -a 256 "$out/$name" | cut -d' ' -f1)
+          signer=$(codesign -dv --verbose=2 dist/Trek.app 2>&1 | sed -n 's/^Authority=//p' | head -1)
+          what="published"; [[ $DRY_RUN == true ]] && what="dry run: nothing published"
+          echo "$name  sha256 $sha  (code-signed by \"$signer\")"
+          cat "$out/$CHANNEL.json"
+          {
+            echo "### macOS ($what)"
+            echo
+            echo "\`$name\` sha256 \`$sha\`, code-signed by \"$signer\""
+            echo
+            echo '```json'
+            cat "$out/$CHANNEL.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The Windows dry run merges into this manifest, as a real run merges into the release's.
+      - name: Manifest for the Windows dry run
+        if: inputs.dry_run
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-manifest
+          path: dist/release/${{ inputs.version }}/${{ inputs.channel }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Remove keys and keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/trek-signing.keychain-db" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/throwaway.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/minisign.key" "$RUNNER_TEMP/codesign.p12" "$RUNNER_TEMP/throwaway-signing" "$RUNNER_TEMP/notes.md"
+
+  # Only after the Mac published: release.ps1 -Publish merges into the <channel>.json it made.
+  # (A release created with this run's token raises no `release: published` event, so
+  # release-windows.yml doesn't also start on its own for a stable release.)
+  windows:
+    name: Windows
+    needs: macos
+    uses: ./.github/workflows/release-windows.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      version: ${{ inputs.version }}
+      channel: ${{ inputs.channel }}
+      dry_run: ${{ inputs.dry_run }}
+      manifest_artifact: ${{ inputs.dry_run && 'mac-manifest' || '' }}
