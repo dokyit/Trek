@@ -79,6 +79,9 @@ pub struct Words {
 
     /// The Browser tool when the system's web view can't be made (WebView2 on Windows).
     pub browser_unavailable: &'static str,
+
+    /// The command that ends the app, as the platform's own apps name it (the command palette's).
+    pub quit_app: &'static str,
 }
 
 const MACOS: Words = Words {
@@ -125,6 +128,8 @@ const MACOS: Words = Words {
     dictate_tip: "Dictate",
 
     browser_unavailable: "The embedded browser isn't available on this system.",
+
+    quit_app: "Quit Trek",
 };
 
 const WINDOWS: Words = Words {
@@ -173,6 +178,8 @@ const WINDOWS: Words = Words {
     dictate_tip: "Press Win+H to dictate",
 
     browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
+
+    quit_app: "Exit Trek",
 };
 
 /// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
@@ -252,6 +259,7 @@ mod tests {
             open_in_viewer,
             dictate_tip,
             browser_unavailable,
+            quit_app,
         } = *w;
         // Said by one platform only: the other's blank is not a blank wording.
         let nothing = "(says nothing)";
@@ -285,6 +293,7 @@ mod tests {
             ("open_in_viewer", open_in_viewer),
             ("dictate_tip", dictate_tip),
             ("browser_unavailable", browser_unavailable),
+            ("quit_app", quit_app),
         ]
     }
 
@@ -334,6 +343,7 @@ mod tests {
         assert_eq!(w.open_in_viewer, "Open in Preview");
         assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(w.browser_unavailable, "The embedded browser isn't available on this system.");
+        assert_eq!(w.quit_app, "Quit Trek");
         assert_eq!(w.window_shadow_note, Some("Keep macOS's drop shadow around window snapshots."));
         assert_eq!(w.screen_recording, Some(("Screen Recording", "macOS asks once; snapshots of other apps need it.")));
         assert_eq!(w.snipping_tool_note, None, "the Mac's Snapshots page has every row");
@@ -357,6 +367,7 @@ mod tests {
         assert!(w.firewall_note.is_some_and(|n| n.contains("Windows Firewall") && n.contains("private networks")));
         assert_eq!(w.open_in_viewer, "Open in default app", "Windows has no Preview, or Quick Look");
         assert_eq!(w.dictate_tip, "Press Win+H to dictate");
+        assert_eq!(w.quit_app, "Exit Trek", "Windows apps exit; a Mac's quit");
         assert_eq!(w.window_shadow_note, None, "Snipping Tool has no shadow to keep");
         assert_eq!(w.screen_recording, None, "Windows has no permission to capture the screen");
         assert!(w.snipping_tool_note.is_some_and(|n| n.contains("Snipping Tool decides") && n.contains("PNG")));

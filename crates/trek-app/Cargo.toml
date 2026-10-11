@@ -66,6 +66,7 @@ block2 = "0.6"
 # icon resources for the windows' icons, at the size their display's scale wants (HiDpi).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Security",
     "Win32_Storage_FileSystem",

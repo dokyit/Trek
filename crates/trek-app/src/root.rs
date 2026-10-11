@@ -385,8 +385,6 @@ pub struct WindowTitle {
     right_panel: Entity<RightPanel>,
     /// The window's sidebar spring: the title's left part widens and narrows with the sidebar.
     sidebar_motion: SharedSpring,
-    /// Trek's menus, in the title bar where the system has no menu bar (Windows).
-    menu_bar: Option<Entity<crate::menu_bar::MenuBar>>,
     _subscription: Vec<Subscription>,
 }
 
@@ -394,27 +392,23 @@ impl WindowTitle {
     fn new(workspace: Entity<Workspace>, right_panel: Entity<RightPanel>, sidebar_motion: SharedSpring, cx: &mut Context<Self>) -> Self {
         // The panel opening can make the sidebar step aside, which moves the title's left edge.
         let _subscription = vec![cx.observe(&workspace, |_, _, cx| cx.notify()), cx.observe(&right_panel, |_, _, cx| cx.notify())];
-        let menu_bar = crate::chrome::IN_WINDOW_MENUS.then(|| cx.new(|cx| crate::menu_bar::MenuBar::new(workspace.clone(), cx)));
-        Self { workspace, right_panel, sidebar_motion, menu_bar, _subscription }
+        Self { workspace, right_panel, sidebar_motion, _subscription }
     }
 
-    /// The title bar's left end: the sidebar's toggle (Agents), Trek's mark and its wordmark, which
-    /// the menus take the place of where there's no system menu bar. `shown` is how far out the
-    /// sidebar under it is (1 out): the cluster is as wide as the sidebar, as far as that's out
-    /// (the menus can take more).
+    /// The title bar's left end: the sidebar's toggle (Agents), Trek's mark and its wordmark.
+    /// `shown` is how far out the sidebar under it is (1 out): the cluster is as wide as the
+    /// sidebar, as far as that's out.
     fn left_cluster(&self, toggle: Option<AnyElement>, wordmark: bool, shown: f32, cx: &App) -> Div {
         let theme = cx.theme();
-        let menus = self.menu_bar.clone();
         let width = crate::chrome::left_cluster(SIDEBAR_WIDTH);
         h_flex()
             .gap_2()
             .when(shown > 0., |el| el.min_w(px(width * shown)))
-            .when(shown >= 1. && menus.is_none(), |el| el.w(px(width)))
+            .when(shown >= 1., |el| el.w(px(width)))
             .flex_none()
-            .children(toggle)
+            .children(toggle.map(|toggle| crate::chrome::no_drag("toggle-sidebar", toggle)))
             .child(crate::brand::logo_mark(px(15.)))
-            .when(menus.is_none() && wordmark, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")))
-            .children(menus)
+            .when(wordmark, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")))
     }
 }
 
@@ -483,14 +477,17 @@ impl WindowTitle {
                     .pr_2()
                     // The layout toggles are on the right, as VS Code and Cursor have them.
                     .child(self.left_cluster(None, true, if layout.primary_open { 1. } else { 0. }, cx))
-                    .child(mode_switch(crate::workspace::Mode::Editor, cx))
+                    .child(crate::chrome::no_drag("mode-switch", mode_switch(crate::workspace::Mode::Editor, cx)))
                     .child(
-                        h_flex().flex_1().min_w_0().justify_center().child(
+                        // The pill is laid over the room left (absolute): `TitleBar` keeps its row
+                        // at least as wide as what's in it, so a 420 px pill counted in it would
+                        // push the toggles and Windows's caption buttons off a narrow window.
+                        div().flex_1().min_w_0().h_full().relative().child(h_flex().absolute().top_0().bottom_0().left_0().right_0().justify_center().items_center().child(crate::chrome::no_drag(
+                            "command-center",
                             h_flex()
                                 .id("command-center")
                                 .test_support()
-                                .w(px(420.))
-                                .max_w(relative(1.))
+                                .w_full()
                                 .h(px(26.))
                                 .px(px(10.))
                                 .gap(px(8.))
@@ -509,17 +506,25 @@ impl WindowTitle {
                                 .child(div().min_w_0().truncate().child("Go to file, command…"))
                                 .child(div().text_color(theme.muted_foreground.opacity(0.7)).child(crate::keys::shared("⌘P")))
                                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::QuickOpen), cx)),
-                        ),
-                    )
-                    .child(
+                        )
+                        // Unlike the buttons, the pill gives way (the area is `flex_none` otherwise).
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .w(px(420.))
+                        .max_w(relative(1.)),
+                    )))
+                    .child(crate::chrome::no_drag(
+                        "layout-toggles",
                         h_flex()
+                            .id("layout-toggles")
+                            .test_support()
                             .flex_none()
                             .gap(px(2.))
                             .child(toggle("toggle-primary", IconName::PanelLeft, "Primary side bar (⌘B)", layout.primary_open, Box::new(ToggleSidebar)))
                             .child(toggle("toggle-panel", IconName::PanelBottom, "Panel (⌘J)", layout.panel_open, Box::new(ToggleRightPanel)))
                             .child(toggle("toggle-ai", IconName::PanelRight, "AI side bar (⌥⌘B)", layout.ai_open, Box::new(crate::ToggleAiBar)))
                             .child(crate::ui::icon_button("ide-settings", IconName::Settings, "Settings (⌘,)").on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx))),
-                    ),
+                    )),
             )
             .into_any_element()
     }
@@ -597,7 +602,7 @@ impl Render for WindowTitle {
                     }));
                     self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
                 })
-                .child(mode_switch(crate::workspace::Mode::Agents, cx))
+                .child(crate::chrome::no_drag("mode-switch", mode_switch(crate::workspace::Mode::Agents, cx)))
                 .child(
                     h_flex()
                         .flex_1()
@@ -607,13 +612,13 @@ impl Render for WindowTitle {
                         .gap_2()
                         .text_sm()
                         .when_some(project.clone(), |el, p| {
-                            el.child(div().flex_none().child(crate::ui::project_badge(&p, &look, cx)))
+                            el.child(div().id("title-project").test_support().flex_none().child(crate::ui::project_badge(&p, &look, cx)))
                                 .when(!narrow, |el| {
                                     el.child(div().flex_shrink_1().min_w(px(24.)).truncate().text_color(theme.muted_foreground).child(p))
                                         .child(div().flex_none().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                                 })
                         })
-                        .child(div().min_w_0().font_medium().child(crate::ui::title_text(
+                        .child(div().id("title-text").test_support().min_w_0().font_medium().child(crate::ui::title_text(
                             "window-title",
                             &title,
                             reveal.as_ref().map(|(p, old)| (*p, old.as_str())),
@@ -622,23 +627,26 @@ impl Render for WindowTitle {
                         )))
                         .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
-                .when_some(run_dir, |el, dir| el.child(run_button(actions, dir, project_id, self.workspace.clone())))
-                .when_some(folder, |el, dir| el.child(open_in_button(dir, narrow)))
+                .when_some(run_dir, |el, dir| el.child(crate::chrome::no_drag("run-actions", run_button(actions, dir, project_id, self.workspace.clone()))))
+                .when_some(folder, |el, dir| el.child(crate::chrome::no_drag("open-in", open_in_button(dir, narrow))))
                 .when(thread.is_some(), |el| {
-                    el.child(
-                        crate::ui::icon_button("pop-out", crate::assets::Lucide::SquareArrowOutUpRight, "Open in new window (⌘⇧↩)")
-                            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenInNewWindow), cx)),
-                    )
+                    el.child(crate::chrome::no_drag(
+                        "pop-out",
+                        crate::ui::icon_button("pop-out", crate::assets::Lucide::SquareArrowOutUpRight, "Open in new window (⌘⇧↩)").on_click(|_, window, cx| window.dispatch_action(Box::new(OpenInNewWindow), cx)),
+                    ))
                 })
-                .child(
-                    crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)")
-                        .on_click(cx.listener(|this, _, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx)))),
-                )
+                .child(crate::chrome::no_drag(
+                    "toggle-tools",
+                    crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)").on_click(cx.listener(|this, _, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx)))),
+                ))
                 .when_some(settle_id, |el, id| {
-                    el.child(crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
-                        let id = id.clone();
-                        this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
-                    })))
+                    el.child(crate::chrome::no_drag(
+                        "settle",
+                        crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
+                            let id = id.clone();
+                            this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
+                        })),
+                    ))
                 }),
         )
         .into_any_element()
@@ -1053,6 +1061,7 @@ impl Render for TrekWindow {
         #[cfg(test)]
         crate::tests::rendered("TrekWindow");
         crate::perf::frame_begins();
+        crate::chrome::let_go_of_hover(window, cx);
         let route = self.workspace.read(cx).route.clone();
         // A window too narrow for the sidebar, the chat and the tools panel: the sidebar steps aside.
         let in_settings = matches!(route, Route::Settings(_));
@@ -1128,13 +1137,6 @@ impl Render for TrekWindow {
         v_flex()
             .id("trek-window")
             .key_context("TrekWindow")
-            // The menus hear Alt held, and a press anywhere in the window, from here: a focused
-            // element only gets the modifiers and presses it's in the path of.
-            .when_some(self.title.read(cx).menu_bar.clone(), |el, bar| {
-                let held = bar.clone();
-                el.on_modifiers_changed(move |ev, _, cx| held.update(cx, |bar, cx| bar.modifiers_changed(ev.modifiers, cx)))
-                    .capture_any_mouse_down(move |_, _, cx| bar.update(cx, |bar, _| bar.mouse_pressed()))
-            })
             // Panel resizing: follow the pointer anywhere in the window until the button is released.
             .when(dragging, |el| {
                 el.cursor(CursorStyle::ResizeLeftRight)

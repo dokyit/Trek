@@ -30,12 +30,19 @@
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
+//! `count <element id>[*] <n>` (fails unless n such elements are on screen; `*` ends a prefix),
 //! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
-//! `down down enter`; on Windows `alt` alone takes the keyboard for the menu bar and `alt-f` opens
-//! the menu its F marks, then `down`, `enter` and `escape` work it; `cmd`/`win`/`super` modifiers
-//! are read as `secondary`, so one manifest is right on both platforms), `scroll <element id> <px>`
+//! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
+//! right on both platforms), `scroll <element id> <px>`
 //! (a wheel over that element, positive down the page), `resize <w> <h>` (the main window, logical
-//! px). The thread on screen: `approve` / `deny` its waiting permission, plan
+//! px). On Windows `hittest <element id>|<x> <y> [HTCLIENT|HTCAPTION|…]` asks the window what it
+//! answers to `WM_NCHITTEST` there (to `hittest.txt`; a different answer than the one given fails the
+//! command) and `realclick <element id>|<x> <y>` sends the window the move, press and release of a real
+//! click, to its own handle, where it answers `HTCLIENT` (see `hittest`); `realmove <element id>|<x> <y>`
+//! is the move alone, with the pointer left there, and `realleave` is Windows telling the window
+//! the pointer has left it; `legacy-pointer on|off` handles the pointer as 0.4.1-beta.1 did (every
+//! title bar control the window's handle; a pointer leaving the window leaving the sidebar's rows
+//! held), to show what it did then. The thread on screen: `approve` / `deny` its waiting permission, plan
 //! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
 //! `rewind [n] [keep]` (undo the n-th turn from the end, 1 = the latest, as its Undo does; `keep`
 //! leaves the files).
@@ -76,6 +83,15 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
+                    "hittest" | "realclick" | "realmove" | "realleave" => hittest(&workspace, &dir, verb, arg, cx).await,
+                    "legacy-pointer" => cx.update(|cx| match arg {
+                        "on" | "off" => {
+                            crate::chrome::LEGACY_POINTER.store(arg == "on", Ordering::Relaxed);
+                            cx.refresh_windows();
+                            Ok(())
+                        }
+                        _ => Err(anyhow::anyhow!("legacy-pointer on|off")),
+                    }),
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
                     "perf" => perf(&workspace, arg, cx).await,
                     "quit" => quit(cx),
@@ -188,6 +204,124 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
         .await?;
     tracing::info!("shot: {}", path.display());
     Ok(())
+}
+
+/// `hittest <element id>|<x> <y> [HTCLIENT|HTCAPTION|HTCLOSE …]` (Windows): what the window answers
+/// when Windows asks `WM_NCHITTEST` there — the question asked before every real mouse message,
+/// whose answer decides whether a press clicks what's under it or starts a window drag. An element
+/// is asked at its middle; a point is in logical px from the window's top left, a negative x from
+/// its right edge. The answer goes to `hittest.txt`, and when one is expected a different answer
+/// fails the command. `realclick <element id>|<x> <y>` then sends the window the move, press and
+/// release a mouse delivers (to this window's own handle, never the desktop) — but only where the
+/// answer is `HTCLIENT`: elsewhere a real press is a window drag, and it says so.
+#[cfg(windows)]
+async fn hittest(ws: &Entity<Workspace>, dir: &Path, verb: &str, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    use gpui_kit::test::TestWindowExt as _;
+    use std::io::Write as _;
+    let mut words: Vec<&str> = arg.split_whitespace().collect();
+    // `HTCAPTION` expects the handle (and the press to go through to its move); `HTCAPTION:swallowed`
+    // the handle with the window taking the press for something of its own (a dropdown's).
+    let expected = words.last().filter(|w| w.starts_with("HT")).map(|w| w.to_string());
+    if expected.is_some() {
+        words.pop();
+    }
+    let (expect, swallowed) = match expected.as_deref().map(|e| e.split_once(':').unwrap_or((e, ""))) {
+        Some((code, flag)) => (Some(code.to_string()), flag == "swallowed"),
+        None => (None, false),
+    };
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    if verb == "realleave" {
+        let hwnd = main.update(cx, |_, window, _| crate::winsys::hwnd_of(window))?.ok_or_else(|| anyhow::anyhow!("realleave: no window handle"))?;
+        // The real cursor isn't where a script can put it: the window is told where it is.
+        crate::chrome::SCRIPTED_CURSOR_AWAY.store(true, Ordering::Relaxed);
+        crate::winsys::mouse_leave(hwnd);
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?, "realleave: Windows told the window the pointer left it")?;
+        cx.update(|cx| cx.refresh_windows());
+        return Ok(());
+    }
+    // The window is only asked inside an update; the question itself is sent outside of one, as the
+    // window's procedure updates it to answer.
+    let (hwnd, at, x, y) = main.update(cx, |_, window, cx| -> anyhow::Result<(isize, Point<Pixels>, i32, i32)> {
+        POINTER_SCRIPTED.store(true, Ordering::Relaxed);
+        window.render_frame(cx);
+        let at = match words.as_slice() {
+            [x, y] if x.parse::<f32>().is_ok() && y.parse::<f32>().is_ok() => {
+                let (x, y): (f32, f32) = (x.parse()?, y.parse()?);
+                point(px(if x < 0. { f32::from(window.viewport_size().width) + x } else { x }), px(y))
+            }
+            [id] => {
+                // `card-*` is the one element whose id starts so (a row's id has its thread's in it).
+                let named = |s: &gpui_kit::test::ElementSnapshot| match (id.strip_suffix('*'), s.path().last()) {
+                    (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                    (None, last) => last == Some(&element_id(id)),
+                    _ => false,
+                };
+                let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| named(s) && s.visible()).collect();
+                let [one] = found.as_slice() else { anyhow::bail!("{verb}: {} elements on screen are {id}", found.len()) };
+                let b = one.bounds();
+                b.origin + point(b.size.width / 2., b.size.height / 2.)
+            }
+            _ => anyhow::bail!("{verb} <element id>|<x> <y>{}", if verb == "hittest" { " [HTCLIENT|HTCAPTION|…]" } else { "" }),
+        };
+        // The pointer is there first, as a real one is before it asks: what the window answers comes from what it last saw under the pointer.
+        if verb != "realmove" {
+            window.simulate_mouse_move(at, cx);
+        }
+        let hwnd = crate::winsys::hwnd_of(window).ok_or_else(|| anyhow::anyhow!("{verb}: no window handle"))?;
+        let scale = window.scale_factor();
+        Ok((hwnd, at, (f32::from(at.x) * scale).round() as i32, (f32::from(at.y) * scale).round() as i32))
+    })??;
+    if verb == "realmove" {
+        // Only the move: the pointer is left there, in the window.
+        crate::chrome::SCRIPTED_CURSOR_AWAY.store(false, Ordering::Relaxed);
+        crate::winsys::client_move(hwnd, x, y);
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?, "realmove {} @ {x},{y}", words.join(" "))?;
+        cx.update(|cx| cx.refresh_windows());
+        return Ok(());
+    }
+    let hit = crate::winsys::hit_test(hwnd, x, y);
+    let answer = crate::winsys::hit_name(hit);
+    // On the window's handle a press goes to what Windows does with it (a move; a double click
+    // maximises) only if nothing in the window swallows it first: Windows hands the press to the
+    // window before its own handling, and a window that answers it takes it for its own.
+    let through = if answer == "HTCAPTION" {
+        let press = |click_count| MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count, first_mouse: false };
+        let passed = main.update(cx, |_, window, cx| {
+            let first = window.dispatch_event(PlatformInput::MouseDown(press(1)), cx).propagate;
+            let second = window.dispatch_event(PlatformInput::MouseDown(press(2)), cx).propagate;
+            // Let go off the window: where it was pressed, the release would be a click on whatever
+            // is there (in the beta's title bar, a button).
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: point(px(-100.), px(-100.)), modifiers: Modifiers::default(), click_count: 2 }), cx);
+            first && second
+        })?;
+        Some(passed)
+    } else {
+        None
+    };
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?;
+    writeln!(log, "{verb} {} @ {x},{y} -> {answer}{}", words.join(" "), through.map(|p| if p { " (a press goes through to the window's move and maximize)" } else { " (a press is swallowed in the window)" }).unwrap_or_default())?;
+    if let Some(expect) = expect.filter(|e| e != answer) {
+        anyhow::bail!("{verb} {}: the window answers {answer}, not {expect}", words.join(" "));
+    }
+    anyhow::ensure!(swallowed || through != Some(false), "{verb} {}: the window's handle, but something in the window swallows a press there", words.join(" "));
+    anyhow::ensure!(!swallowed || through == Some(false), "{verb} {}: expected the press swallowed, and it goes through", words.join(" "));
+    if verb == "realclick" {
+        anyhow::ensure!(answer == "HTCLIENT", "realclick {}: the window answers {answer}, so a real press there is a window drag, not a click", words.join(" "));
+        // A press on a window behind first asks whether to activate it and let the press through.
+        let activation = crate::winsys::mouse_activate(hwnd, hit);
+        writeln!(log, "  a press with the window behind: {activation}")?;
+        anyhow::ensure!(activation == "MA_ACTIVATE", "realclick {}: a first click on the window behind answers {activation}, so it would be lost or the window left behind", words.join(" "));
+        crate::chrome::SCRIPTED_CURSOR_AWAY.store(false, Ordering::Relaxed);
+        let [moved, pressed, released] = crate::winsys::client_click(hwnd, x, y);
+        writeln!(log, "  the window took {} ms to take the move, {} ms the press, {} ms the release", moved.as_millis(), pressed.as_millis(), released.as_millis())?;
+        cx.update(|cx| cx.refresh_windows());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn hittest(_: &Entity<Workspace>, _: &Path, verb: &str, _: &str, _: &mut AsyncApp) -> anyhow::Result<()> {
+    anyhow::bail!("{verb}: Windows only (macOS has no WM_NCHITTEST)")
 }
 
 async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
@@ -738,7 +872,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
-    if matches!(verb, "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements") {
+    if matches!(verb, "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements" | "count") {
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             match verb {
@@ -770,6 +904,23 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     pointer(window, "hover", id, cx)?;
                     // Positive is down the page, as a wheel turned towards you.
                     window.scroll(element_id(id), ScrollDelta::Pixels(point(px(0.), px(-dy))), cx);
+                    Ok(())
+                }
+                "count" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    let (id, n) = arg.rsplit_once(' ').ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>"))?;
+                    let n: usize = n.trim().parse()?;
+                    window.render_frame(cx);
+                    let found = gpui_kit::base::test_support::snapshots(window)
+                        .into_iter()
+                        .filter(|s| s.visible())
+                        .filter(|s| match (id.strip_suffix('*'), s.path().last()) {
+                            (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                            (None, last) => last == Some(&element_id(id)),
+                            _ => false,
+                        })
+                        .count();
+                    anyhow::ensure!(found == n, "count {id}: {found} on screen, not {n}");
                     Ok(())
                 }
                 "resize" => {
