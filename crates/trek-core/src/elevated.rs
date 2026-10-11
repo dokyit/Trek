@@ -567,6 +567,9 @@ mod tests {
         assert!(script(Path::new(r"D:\Users\é & (x86)\tmp"), std::slice::from_ref(&step)).is_ok());
     }
 
+    // Windows only: `script` splits the step's PATH as this platform does, and on macOS that
+    // cuts `C:\…` at the colon.
+    #[cfg(windows)]
     #[test]
     fn a_line_longer_than_cmd_reads_is_refused_and_a_long_path_is_split() {
         let path = |n: usize| (0..n).map(|i| format!(r"C:\Tools\folder number {i}")).collect::<Vec<_>>().join(";");
