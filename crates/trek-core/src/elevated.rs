@@ -126,6 +126,9 @@ pub fn cmd_exe() -> PathBuf {
 pub enum Failure {
     /// The user said no to Windows' prompt.
     Cancelled,
+    /// No one answered it: Windows gives up on its prompt after about two minutes, with the
+    /// same error as a "No".
+    Unanswered,
     /// It ran longer than it may; `ended` when Trek could end it.
     TimedOut { ended: bool },
     Other(String),
@@ -134,6 +137,12 @@ pub enum Failure {
 /// How a script is started: as an administrator for real, as it is in tests (which must never
 /// bring up a UAC prompt). Returns cmd.exe's exit code.
 pub type Launch = fn(&Path, Duration) -> Result<u32, Failure>;
+
+/// What a "not allowed" from Windows' prompt was, by how long it was up: a refusal comes in
+/// seconds, the prompt giving up unanswered at about two minutes (122 s on Windows 11, 2026-10-11).
+pub fn refused(after: Duration) -> Failure {
+    if after >= Duration::from_secs(100) { Failure::Unanswered } else { Failure::Cancelled }
+}
 
 /// Run the script at `script` as an administrator, through Windows' UAC prompt, and wait up to
 /// `timeout` for it. Blocks: call it off the async runtime.
@@ -163,6 +172,7 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
     // The shell may hand the verb to COM objects: this thread is set up for them, as its
     // documentation asks, and let go after.
     // SAFETY: plain calls; the strings `info` points to outlive the call.
+    let asked = std::time::Instant::now();
     let (ok, error) = unsafe {
         let com = CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
         let ok = ShellExecuteExW(&mut info) != 0;
@@ -173,7 +183,10 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
         (ok, error)
     };
     if !ok {
-        return Err(if error.raw_os_error() == Some(ERROR_CANCELLED as i32) { Failure::Cancelled } else { Failure::Other(error.to_string()) });
+        return Err(match error.raw_os_error() {
+            Some(code) if code == ERROR_CANCELLED as i32 => refused(asked.elapsed()),
+            _ => Failure::Other(error.to_string()),
+        });
     }
     if info.hProcess.is_null() {
         return Err(Failure::Other("Windows started nothing to wait for".into()));

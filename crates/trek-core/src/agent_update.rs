@@ -1442,6 +1442,7 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
                 };
                 match ran {
                     Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| "Windows didn't allow it (you cancelled the prompt).".into()),
+                    Err(Failure::Unanswered) => fail_all(&mut outcomes, &|_| "Windows didn't allow it: no one answered its prompt in time.".into()),
                     Err(Failure::Other(e)) => fail_all(&mut outcomes, &|c| format!("Couldn't run {} as an administrator: {e}", c.shown())),
                     ran => {
                         let stopped = match ran {
@@ -2449,6 +2450,14 @@ mod tests {
         for o in &outcomes {
             assert_eq!(*o, Outcome::Failed { summary: "Windows didn't allow it (you cancelled the prompt).".into(), output: String::new() });
         }
+        // Nobody there: the prompt gave up (Windows says the same as for a "No", only later).
+        fn unanswered(_: &Path, _: Duration) -> Result<u32, Failure> {
+            Err(Failure::Unanswered)
+        }
+        let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), unanswered));
+        assert_eq!(outcomes[0], Outcome::Failed { summary: "Windows didn't allow it: no one answered its prompt in time.".into(), output: String::new() });
+        assert!(matches!(crate::elevated::refused(Duration::from_secs(4)), Failure::Cancelled));
+        assert!(matches!(crate::elevated::refused(Duration::from_secs(122)), Failure::Unanswered));
         // Past its time, with what it started out of Trek's reach.
         fn stuck(_: &Path, _: Duration) -> Result<u32, Failure> {
             Err(Failure::TimedOut { ended: false })
