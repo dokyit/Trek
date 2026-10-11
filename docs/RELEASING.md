@@ -133,6 +133,52 @@ Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default
 `TREK_SIGN_IDENTITY`, and `TREK_RELEASE_DOWNLOAD_URL` to point the manifest's archive URL somewhere else
 (a staging server).
 
+## Windows
+
+The Mac's `release.sh` publishes first - it creates the release and its `<channel>.json`. Windows then
+attaches to the same release: `.github/workflows/release-windows.yml` runs on `windows-latest` and never
+creates a release itself; it fails if the tag's release doesn't exist yet. The order matters in both
+directions: `release.sh` writes `<channel>.json` with only the Mac's entry, so a Mac publish (a new
+beta or nightly, or a re-run of one) drops the Windows entry until the workflow runs again.
+
+- **Stable**: publishing the `v<version>` release triggers the workflow automatically.
+- **Beta / nightly**: run it by hand once the Mac's prerelease exists under the moving `beta`/`nightly`
+  tag: `gh workflow run release-windows.yml -f version=0.3.0-beta.1 -f channel=beta`.
+
+The job checks out the version's tag (`v<version>`; the moving `nightly` tag for nightlies), builds
+`cargo build --release --locked -p trek-app -p trek-mcp`, smokes it with `cargo test -p trek-core
+--locked`, packs `Trek-<version>-windows-x86_64.zip` - flat: `trek.exe`, `trek-mcp.exe` and
+`trek-update.exe`, nothing else - and signs it with the same minisign key (trusted comment `Trek
+<version> windows-x86_64`). It then downloads the release's `<channel>.json`, adds or replaces the
+`windows-x86_64` entry (keeping the Mac's; a version mismatch, or a manifest with no `darwin-*` entry
+because the Mac hasn't published, fails the job before anything is uploaded) and uploads the zip, its
+`.minisig` and finally the manifest, with `--clobber`. On beta and nightly it also deletes the previous
+build's Windows zip, as `release.sh` does for the Mac's. The merge lives in
+`script/lib/release-manifest.ps1`, shared between the workflow and `script/release.ps1`;
+`script/tests/release-manifest.Tests.ps1` covers it and runs in CI's Windows job.
+
+Secrets the workflow needs (repo Settings > Secrets and variables > Actions):
+
+- `TREK_MINISIGN_KEY`: the contents of `~/.trek-signing/minisign.key`, pasted whole (it is all ASCII).
+- `TREK_MINISIGN_PASSWORD`: that key's password. minisign reads it from stdin, so a non-interactive
+  runner works.
+
+The job downloads `minisign-0.12-win64.zip` from jedisct1/minisign's GitHub release and checks it
+against a pinned SHA-256 before running it; bump the version and hash together.
+
+Local run: `pwsh script/release.ps1 0.4.0` dry-runs on a Windows machine (build, zip, sign if a key is
+configured, manifest in `dist/release/0.4.0/`; nothing is uploaded). `-Publish` does what the workflow
+does against the release that must already exist. `-Key`, `-PubKey` and `-Minisign` point at other keys
+or binaries for testing; publishing always verifies against `assets/update/minisign.pub`. `BUILD=0`
+reuses the binaries already in the release target dir for exercising the script (refused with
+`-Publish`).
+
+Windows binaries are **not Authenticode-signed** - there is no certificate yet - so SmartScreen shows a
+one-time warning on first launch (**More info** > **Run anyway**). The minisign signature still gates
+updates: the updater verifies it before touching the install folder. To install, the user unzips
+anywhere their account can write (not `Program Files`) and runs `trek.exe`; `trek-update.exe` swaps
+the install folder on update, which is why it must stay user-writable.
+
 ## How an update installs
 
 1. Check: on launch, then once a day by the wall clock (sleep counts), and when the channel changes. A
@@ -166,6 +212,47 @@ older published build. `TREK_UPDATE_LOCAL_BUNDLE=1` lets a local bundle update a
 macOS runs translocated from Downloads, nor one in a folder Trek can't write to (a standard account with
 Trek in `/Applications`): Settings → Updates says to move it to a folder you own.
 
+### Windows
+
+The Windows artifact is `Trek-<version>-windows-x86_64.zip` (`windows-aarch64` on Arm), listed in the
+same channel manifests under the platform key `windows-x86_64`, signed the same way (trusted comment
+`Trek <version> windows-x86_64`). The zip is **flat**: exactly `trek.exe`, `trek-mcp.exe` and
+`trek-update.exe` (built with `cargo build --release -p trek-app -p trek-mcp -p trek-update`), nothing
+else, no folder around them; assets are embedded. Trek is installed as the folder holding them, and
+`trek.exe`'s version resource (`ProductVersion`, written by trek-app's `build.rs`) must be the release's
+full semver, as `CFBundleVersion` is on macOS.
+
+The steps above, with these differences:
+
+- **Stage**: the zip unpacks into `updates\download-<pid>-<n>.noindex\stage\` and is refused unless it
+  holds exactly those three files (no folders, links or other names, at most 1 GiB) and `trek.exe`'s
+  version is the advertised one and newer than the running one. A refusal deletes the download folder.
+- **Install**: Windows won't let Trek replace the folder it runs from. On **Restart to update** (or on
+  quit) Trek starts `trek-update.exe` from the staged folder and exits. The helper waits up to a minute
+  for Trek to exit (then gives up, changing nothing), brings the staged folder next to the install (a
+  rename, or a copy if it's on another drive: `<install>.old-incoming-<version>`), renames the install to
+  `<install>.old-<version>` and the update into its place, checks `trek.exe` is there
+  and, on a restart, starts it. If any step fails, or the new Trek exits with an error in its first five
+  seconds, it puts the previous folder back, starts it, and leaves `updates\install-failed`, which Trek
+  shows as a toast; a new version that wouldn't start also goes into `updates\skip-version`. Renames are
+  retried for about two seconds (antivirus scans hold files). The helper deletes nothing; it logs to
+  `%LOCALAPPDATA%\Trek\logs\update.log` (`<TREK_DATA_DIR>\logs\update.log` when that's set).
+- **After**: half a minute after it starts (the helper watches it for five seconds and may need the
+  previous folder back), the new Trek deletes `<install>.old-*` (only folders holding nothing but Trek's
+  files, never a link) and, at once, the download folders of Trek processes that are gone.
+- **When it can't**: a `cargo` build (the exe is in a folder with `.fingerprint`), Trek in Program Files
+  or WindowsApps, a folder it or its parent can't be written to, and a folder that holds anything besides
+  Trek's three files (unzipped straight into Downloads, say: the whole folder is what gets replaced), or
+  one that is a junction or symlink. Settings → Updates says which and what to do.
+
+A file added to the Windows release must first be added to `TREK_FILES` (trek-core `update.rs` and
+`trek-update`) in an earlier release: older versions refuse a zip, and a folder, holding a file they
+don't know.
+
+To roll back by hand on Windows: quit Trek, rename the install folder, rename `<install>.old-<version>`
+back if it's still there (or unzip the previous release in its place), and write the version you left
+into `skip-version` in `%APPDATA%\trek\Trek\data\updates`.
+
 To roll back by hand: quit Trek, then
 
 ```sh
@@ -195,3 +282,25 @@ this test: it restarts as soon as an update is ready instead of waiting for a cl
 are still waited for). The script passes when the old version downloads, verifies, swaps itself and the
 new version starts — or, with `--tamper`, when the damaged archive is refused and the app is untouched —
 and then stops everything it started and deletes its folder.
+
+On Windows, `script/update-e2e.ps1` does the same with zips, plus `-Lock`, which holds a file in the
+install open so the swap fails and must roll back. Without the release key, sign test builds with a
+key of your own (`fixture` makes it; Trek trusts it when built with `TREK_UPDATE_PUBKEY`):
+
+```powershell
+script/update-e2e.ps1 -NewKey $env:TEMP\trek-e2e-key      # prints the key line
+$env:TREK_UPDATE_PUBKEY = '<that line>'
+cargo build --release -p trek-app -p trek-mcp -p trek-update  # once at each version, copying the three .exe files out
+script/update-e2e.ps1 -Pack <old exes> -Key $env:TEMP\trek-e2e-key -Out <old dir>
+script/update-e2e.ps1 -Pack <new exes> -Key $env:TEMP\trek-e2e-key -Out <new dir>
+script/update-e2e.ps1 <old dir>\Trek-<old>-windows-x86_64.zip <new dir>
+script/update-e2e.ps1 <old zip> <new dir> -Tamper checksum
+script/update-e2e.ps1 <old zip> <new dir> -Tamper signature
+script/update-e2e.ps1 <old zip> <new dir> -Lock
+```
+
+The feed is `fixture serve` on 127.0.0.1 (no Python needed), and the test Trek runs from
+`%TEMP%\trek-update-e2e` with its own data folder. Where several checkouts share one target folder,
+each building its own `fixture.exe` into it, copy yours out and name it in `TREK_E2E_FIXTURE`. The
+release builds can skip LTO (`CARGO_PROFILE_RELEASE_LTO=false`) to save time; it changes nothing the
+updater does.

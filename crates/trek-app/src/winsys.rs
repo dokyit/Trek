@@ -121,25 +121,64 @@ pub fn icon_resource(icon: trek_core::settings::AppIcon) -> u16 {
     }
 }
 
+/// The edge, in device pixels, of the small icon (title bar, tray) and the big one (taskbar,
+/// Alt+Tab) on a display at `dpi`: 16 and 32 at 100 %, 20 and 40 at 125 %, 24 and 48 at 150 %,
+/// 32 and 64 at 200 %. Not `GetSystemMetrics`, which answers for the DPI the process started at
+/// (the primary display's) however many displays of other scales there are.
+#[cfg(windows)]
+pub fn icon_edges(dpi: u32) -> (i32, i32) {
+    use windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SM_CXICON, SM_CXSMICON};
+    // SAFETY: a plain query.
+    unsafe { (GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CXICON, dpi)) }
+}
+
+/// The DPI of the display `hwnd` is on now (96 at 100 %).
+#[cfg(windows)]
+fn dpi_of(hwnd: isize) -> u32 {
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    // SAFETY: a plain query about a window handle; 0 for one that isn't a window.
+    match unsafe { GetDpiForWindow(hwnd as windows_sys::Win32::Foundation::HWND) } {
+        0 => 96,
+        dpi => dpi,
+    }
+}
+
+/// The DPI the taskbar (and so its notification area) is drawn at: the display it's on, which
+/// isn't a window's of Trek. The system's when there's no taskbar to ask.
+#[cfg(windows)]
+pub fn taskbar_dpi() -> u32 {
+    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let class: Vec<u16> = "Shell_TrayWnd".encode_utf16().chain([0]).collect();
+    // SAFETY: `class` ends in a NUL; the handle is only asked about its DPI.
+    let taskbar = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+    if taskbar.is_null() {
+        // SAFETY: a plain query.
+        return unsafe { GetDpiForSystem() };
+    }
+    dpi_of(taskbar as isize)
+}
+
 /// Put icon resource `resource` on window `hwnd` (small, for the title bar, and big, for the
 /// taskbar and Alt+Tab) and on the window class GPUI makes every window from, so windows opened
-/// later start with it. Whether the icons could be loaded.
+/// later start with it. Sized for the display the window is on now; a window dragged to a display
+/// of another scale is given its icons again (`system::scale_changed`). Whether the icons could
+/// be loaded.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn set_window_icon(hwnd: isize, resource: u16) -> bool {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GCLP_HICON, GCLP_HICONSM, GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW,
-        SetClassLongPtrW, WM_SETICON,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GCLP_HICON, GCLP_HICONSM, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SendMessageW, SetClassLongPtrW, WM_SETICON};
+    let (small_edge, big_edge) = icon_edges(dpi_of(hwnd));
     // SAFETY: the resource id goes where a name does (MAKEINTRESOURCE); shared icons belong to
     // the system, which keeps them for the life of the process, so there is nothing to free.
     // `hwnd` is a window of this process, asked from its own thread.
     unsafe {
         let module = GetModuleHandleW(std::ptr::null());
-        let load = |w: i32, h: i32| LoadImageW(module, resource as usize as *const u16, IMAGE_ICON, GetSystemMetrics(w), GetSystemMetrics(h), LR_SHARED);
-        let (small, big) = (load(SM_CXSMICON, SM_CYSMICON), load(SM_CXICON, SM_CYICON));
+        let load = |edge: i32| LoadImageW(module, resource as usize as *const u16, IMAGE_ICON, edge, edge, LR_SHARED);
+        let (small, big) = (load(small_edge), load(big_edge));
         if small.is_null() || big.is_null() {
             return false;
         }
@@ -404,6 +443,35 @@ mod tests {
         // service), so only that both calls come back, with a time that makes sense.
         let _ = super::session_locked();
         assert!(super::idle_seconds().is_none_or(|s| (0.0..=f64::from(u32::MAX) / 1000.0).contains(&s)));
+    }
+
+    /// Windows cuts a display's icons by its scale; the small one is what the tray draws
+    /// (`tray::tray_size` picks the glyph), the big one the taskbar's.
+    #[cfg(windows)]
+    #[test]
+    fn icons_are_the_size_the_display_s_scale_wants() {
+        // 100 %, 125 %, 150 %, 175 %, 200 %.
+        assert_eq!([96, 120, 144, 168, 192].map(super::icon_edges), [(16, 32), (20, 40), (24, 48), (28, 56), (32, 64)]);
+    }
+
+    /// The taskbar's DPI is one Windows reports for a real display, never 0 (which would make a
+    /// 0 px icon).
+    #[cfg(windows)]
+    #[test]
+    fn the_taskbar_has_a_dpi() {
+        assert!(super::taskbar_dpi() >= 96);
+    }
+
+    /// Every scale in these tests means something only if the window is told its display's
+    /// scale as it changes: per-monitor v2 awareness, which GPUI's manifest declares and the
+    /// exe carries. (Without it Windows would stretch a 100 % picture on a 150 % display.)
+    #[cfg(windows)]
+    #[test]
+    fn the_exe_is_per_monitor_dpi_aware() {
+        use windows_sys::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext};
+        // SAFETY: plain queries.
+        let aware = unsafe { AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        assert!(aware != 0, "the process isn't per-monitor v2 aware: GPUI's manifest isn't in the exe");
     }
 
     fn lit(pixels: &[u8], white: bool) -> usize {

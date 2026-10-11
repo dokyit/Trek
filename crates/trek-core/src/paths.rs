@@ -110,12 +110,17 @@ pub fn updates_dir() -> PathBuf {
     dir
 }
 
-/// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`.
+/// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`. The part under `~` is
+/// always written with `/` (`C:\Users\me\Documents\x` → `~/Documents/x` on Windows too), not the
+/// half-and-half `~/Documents\x` that `~/` plus the native path would make.
 pub fn tildify(path: &std::path::Path) -> String {
     let home = home();
     match path.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => {
+            let parts: Vec<_> = rest.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+            format!("~/{}", parts.join("/"))
+        }
         Err(_) => path.display().to_string(),
     }
 }
@@ -167,12 +172,18 @@ mod tests {
             // The bin's enumeration trails IFileOperation on change notifications: on a loaded
             // machine the second item hasn't shown yet when the first is already listed. Wait for
             // both rather than read once (CI run 38048787332 saw exactly one).
+            //
+            // The bin lists an item by its display name, which leaves the extension off where
+            // Explorer's "Hide extensions for known file types" is on (the default of a fresh
+            // profile, as on GitHub's runners; off on a developer's machine): "note", not
+            // "note.txt". That, not timing, is why those runs found exactly one item even after
+            // waiting 30 s. The folder is this process's own, so its parent picks the two out.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let items = loop {
                 let items: Vec<_> = trash::os_limited::list()
                     .unwrap()
                     .into_iter()
-                    .filter(|i| i.original_parent.file_name() == dir.file_name() && (i.name == "note.txt" || i.name == "folder"))
+                    .filter(|i| i.original_parent.file_name() == dir.file_name() && ["note.txt", "note", "folder"].contains(&&*i.name.to_string_lossy()))
                     .collect();
                 if items.len() == 2 {
                     break items;
@@ -183,6 +194,20 @@ mod tests {
             trash::os_limited::purge_all(items).unwrap();
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_home_relative_path_is_written_with_slashes_whatever_the_platform() {
+        let home = super::home();
+        // Built piece by piece, so on Windows it's `C:\Users\…\Documents\Trek` with backslashes.
+        assert_eq!(super::tildify(&home.join("Documents").join("Trek")), "~/Documents/Trek");
+        assert_eq!(super::tildify(&home.join("a").join("b").join("c.toml")), "~/a/b/c.toml");
+        assert_eq!(super::tildify(&home), "~");
+        // And a path that merely shares a prefix with the home folder isn't taken for one under it.
+        let mut sibling = home.clone().into_os_string();
+        sibling.push("-other");
+        let sibling = std::path::PathBuf::from(sibling);
+        assert_eq!(super::tildify(&sibling), sibling.display().to_string());
     }
 
     #[test]

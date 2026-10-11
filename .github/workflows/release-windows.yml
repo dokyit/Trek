@@ -1,0 +1,136 @@
+name: Release (Windows)
+
+# Attach the Windows zip to a release the Mac already published (docs/RELEASING.md).
+# script/release.sh on the Mac creates the GitHub release and its <channel>.json with the
+# darwin-aarch64 artifact; this job builds Trek-<version>-windows-x86_64.zip, signs it with
+# the same minisign key, merges the windows-x86_64 entry into that manifest and uploads both.
+# It never creates a release: script/release.ps1 -Publish fails when the release is missing.
+#
+# Publishing a stable release (tag v<version>) runs this automatically; beta and nightly
+# (prereleases under the moving "beta"/"nightly" tags) are run by hand:
+#
+#   gh workflow run release-windows.yml -f version=0.4.0-beta.1 -f channel=beta
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   TREK_MINISIGN_KEY       the whole ~/.trek-signing/minisign.key file, pasted
+#   TREK_MINISIGN_PASSWORD  that key's password
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version of the published release (e.g. 0.4.0 or 0.4.0-beta.1)'
+        required: true
+        type: string
+      channel:
+        description: 'Release channel'
+        required: true
+        type: choice
+        default: stable
+        options:
+          - stable
+          - beta
+          - nightly
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+# One Windows publish per release at a time; re-running the same one replaces its assets.
+concurrency:
+  group: release-windows-${{ github.event.release.tag_name || inputs.channel }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds don't help a fresh runner and bloat the cache.
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  windows:
+    name: Windows zip
+    runs-on: windows-latest
+    timeout-minutes: 120
+    # A published release starts this only for a stable tag; beta and nightly prereleases
+    # (fixed "beta"/"nightly" tags) are attached through workflow_dispatch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
+    steps:
+      # Deep build paths under the runner's workspace can pass MAX_PATH.
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      # Event values go through env, never straight into the script text.
+      - name: Resolve version, channel and ref
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            $version = $env:RELEASE_TAG.TrimStart('v')
+            $channel = 'stable'
+          } else {
+            $version = $env:INPUT_VERSION.TrimStart('v')
+            $channel = $env:INPUT_CHANNEL
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$') { throw "$version is not a semver version" }
+          # What to build: stable and beta versions get a v<version> tag from release.sh;
+          # a nightly only moves the "nightly" tag.
+          $ref = if ($channel -eq 'nightly') { 'nightly' } else { "v$version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for the whole workspace, shared with ci.yml.
+          shared-key: workspace
+          save-if: false
+
+      # The runner image carries the Windows SDK (rc.exe, fxc.exe) that ci.yml's Windows job
+      # builds with too, so minisign is the only thing to install. Pinned by hash: this binary
+      # signs every update.
+      - name: Install minisign
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '0.12'
+          $zip = "$env:RUNNER_TEMP\minisign-$ver-win64.zip"
+          Invoke-WebRequest "https://github.com/jedisct1/minisign/releases/download/$ver/minisign-$ver-win64.zip" -OutFile $zip
+          $expected = '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479'
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "minisign $ver win64 sha256 mismatch: got $actual, want $expected" }
+          Expand-Archive $zip "$env:RUNNER_TEMP\minisign" -Force
+          "TREK_MINISIGN_EXE=$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe" >> $env:GITHUB_ENV
+
+      # The secret is the key file's whole contents (it is all ASCII).
+      - name: minisign secret key
+        env:
+          TREK_MINISIGN_KEY_FILE: ${{ secrets.TREK_MINISIGN_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TREK_MINISIGN_KEY_FILE)) {
+            throw 'the TREK_MINISIGN_KEY secret is not set (docs/RELEASING.md)'
+          }
+          $key = "$env:RUNNER_TEMP\minisign.key"
+          [System.IO.File]::WriteAllText($key, $env:TREK_MINISIGN_KEY_FILE)
+          "TREK_MINISIGN_KEY=$key" >> $env:GITHUB_ENV
+
+      - name: Build, sign and attach
+        env:
+          TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TREK_VERSION: ${{ steps.resolve.outputs.version }}
+          TREK_CHANNEL: ${{ steps.resolve.outputs.channel }}
+        run: >-
+          ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL
+          -Minisign $env:TREK_MINISIGN_EXE -Publish

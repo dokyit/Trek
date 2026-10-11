@@ -114,6 +114,20 @@ impl ThreadWindow {
                 }
             }),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
+            cx.observe_window_appearance(window, |this, _, cx| {
+                crate::ui::colours_changed(&mut this.glass_applied);
+                cx.notify();
+            }),
+            // Dragged to a display of another scale, it has its own icons cut again, as the main
+            // window does (its taskbar button is its own).
+            {
+                let mut scale = window.scale_factor();
+                cx.observe_window_bounds(window, move |_, window, cx| {
+                    if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor()) {
+                        crate::system::scale_changed(window, cx);
+                    }
+                })
+            },
             // With nothing focused, keys reach none of the window's shortcuts (⌘W included): the
             // composer takes focus back when what had it leaves (an answered question's text field).
             cx.on_focus_lost(window, |this, window, cx| this.composer.update(cx, |c, cx| c.focus(window, cx))),
