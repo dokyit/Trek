@@ -401,15 +401,20 @@ mod tests {
 
     #[test]
     fn the_start_folder_and_icon_follow_only_when_they_were_the_old_copys() {
-        let (old, new) = (Path::new(r"C:\Docs\Trek\trek.exe"), Path::new(r"C:\Programs\Trek\trek.exe"));
-        let link = |dir: &str, icon: &str| Link { target: old.to_path_buf(), dir: PathBuf::from(dir), icon: PathBuf::from(icon), icon_index: 3 };
-        let moved = moved_link(&link(r"C:\Docs\Trek", r"C:\DOCS\Trek\trek.exe"), old, new).unwrap();
-        assert_eq!((moved.dir, moved.icon, moved.icon_index), (PathBuf::from(r"C:\Programs\Trek"), new.to_path_buf(), 3));
-        let moved = moved_link(&link("", ""), old, new).unwrap();
-        assert_eq!((moved.dir, moved.icon), (PathBuf::from(r"C:\Programs\Trek"), PathBuf::new()), "no icon of its own: the target's");
+        // Paths of the machine the test runs on: what is a folder's path is the platform's to say.
+        let root = std::env::temp_dir();
+        let (old, new) = (root.join("Docs").join("Trek").join("trek.exe"), root.join("Programs").join("Trek").join("trek.exe"));
+        let (old_dir, new_dir) = (old.parent().unwrap().to_path_buf(), new.parent().unwrap().to_path_buf());
+        let link = |dir: &Path, icon: &Path| Link { target: old.clone(), dir: dir.to_path_buf(), icon: icon.to_path_buf(), icon_index: 3 };
+        let shouting = PathBuf::from(old.to_string_lossy().to_uppercase());
+        let moved = moved_link(&link(&old_dir, &shouting), &old, &new).unwrap();
+        assert_eq!((moved.dir, moved.icon, moved.icon_index), (new_dir.clone(), new.clone(), 3));
+        let moved = moved_link(&link(Path::new(""), Path::new("")), &old, &new).unwrap();
+        assert_eq!((moved.dir, moved.icon), (new_dir, PathBuf::new()), "no icon of its own: the target's");
         // A folder or icon the user chose is theirs.
-        let moved = moved_link(&link(r"D:\Projects", r"D:\Icons\trek.ico"), old, new).unwrap();
-        assert_eq!((moved.dir, moved.icon), (PathBuf::from(r"D:\Projects"), PathBuf::from(r"D:\Icons\trek.ico")));
+        let (projects, icon) = (root.join("Projects"), root.join("Icons").join("trek.ico"));
+        let moved = moved_link(&link(&projects, &icon), &old, &new).unwrap();
+        assert_eq!((moved.dir, moved.icon), (projects, icon));
     }
 
     #[test]
@@ -569,9 +574,7 @@ mod tests {
                 assert!(same(&ShellLinks.read(&guarded).unwrap().target, &old), "left as it was");
                 assert!(same(&ShellLinks.read(&free).unwrap().target, &new));
             });
-            let mut permissions = std::fs::metadata(&guarded).unwrap().permissions();
-            permissions.set_readonly(false);
-            std::fs::set_permissions(&guarded, permissions).unwrap();
+            // (A read-only file goes with its folder on Windows.)
             let _ = std::fs::remove_dir_all(dir);
         }
 
