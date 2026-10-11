@@ -9069,6 +9069,7 @@ dependencies = [
  "tracing",
  "trash",
  "trek-test-fixtures",
+ "trek-update",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",
