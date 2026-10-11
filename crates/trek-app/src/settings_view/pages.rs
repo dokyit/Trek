@@ -954,7 +954,7 @@ impl SettingsView {
                 #[cfg(not(windows))]
                 let os = cx
                     .background_executor()
-                    .spawn(async { std::process::Command::new("sw_vers").arg("-productVersion").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) })
+                    .spawn(async { trek_core::procs::command("sw_vers").arg("-productVersion").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) })
                     .await
                     .map(|v| format!("macOS {v}"));
                 let mut lines = vec![format!("Trek {}", trek_core::VERSION)];

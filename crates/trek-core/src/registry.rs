@@ -735,7 +735,7 @@ async fn warm_npx(npx: &Path, package: &str) -> Result<()> {
     if let Some(problem) = crate::detect::batch_args_problem(npx, args) {
         bail!("npx can't fetch {package}: {problem}");
     }
-    let run = tokio::process::Command::new(npx)
+    let run = crate::procs::async_command(npx)
         .args(args)
         .env("PATH", crate::detect::login_path())
         .current_dir(crate::paths::home())

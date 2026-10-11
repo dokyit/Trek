@@ -578,7 +578,7 @@ pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) ->
 }
 
 fn run<'a>(program: &str, args: impl IntoIterator<Item = &'a OsStr>) -> Result<()> {
-    let out = std::process::Command::new(program).args(args).output()?;
+    let out = crate::procs::command(program).args(args).output()?;
     if !out.status.success() {
         bail!("{program} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -826,7 +826,9 @@ fn helper_command(
     relaunch: Option<bool>,
     vars: impl Iterator<Item = (String, String)>,
 ) -> std::process::Command {
-    let mut cmd = std::process::Command::new(helper);
+    // Not `procs::command`: the helper is started detached (`spawn_detached`), which is not the
+    // same as windowless, and must stay so.
+    let mut cmd = std::process::Command::new(helper); // spawn: detached
     cmd.arg("--pid").arg(pid.to_string()).arg("--install").arg(root).arg("--from").arg(crate::VERSION).arg("--updates").arg(updates);
     if let Some(staged) = staged {
         cmd.arg("--staged").arg(staged);

@@ -512,7 +512,7 @@ async fn scratch_schema(bin: &Path) -> anyhow::Result<Scratch> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
     let scratch = Scratch { db: dir.join("opencode.db"), dir };
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = trek_core::procs::async_command(bin);
     command.args(["session", "list", "--pure"]).current_dir(&scratch.dir).env("PATH", trek_core::detect::login_path());
     for var in ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"] {
         command.env_remove(var);

@@ -45,7 +45,7 @@ async fn ask_small_model(system: &str, prompt: &str) -> Result<String> {
         bail!("no model calls in an isolated (test) process");
     }
     let bin = detect::which("claude").context("Claude Code isn't installed")?;
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = trek_core::procs::async_command(bin);
     // No tools: a small model handed "map the codebase" would otherwise start mapping it.
     command
         .args(["-p", "--model", "claude-haiku-4-5", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--system-prompt", system])

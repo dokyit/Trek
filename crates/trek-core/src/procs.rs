@@ -54,6 +54,42 @@ pub fn live() -> Vec<i32> {
     LIVE.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|g| g.id).collect()
 }
 
+/// A `Command` for `program`, for every process Trek starts. On Windows it has no console window:
+/// Trek is a GUI program with no console to share, so a child started without
+/// `CREATE_NO_WINDOW` gets a console of its own, a visible window that takes the foreground.
+/// Elsewhere it's `Command::new`.
+///
+/// `CREATE_NO_WINDOW` and not `DETACHED_PROCESS`: a child detached from consoles has none, so
+/// whatever it starts in turn (a `.cmd` wrapper's `node.exe`, `git`'s helpers) opens a window each,
+/// where with `CREATE_NO_WINDOW` they all share its one hidden console. Nor does it touch the
+/// child's stdio, so pipes and nulls behave as on macOS. A caller that sets more flags (a new
+/// process group, say) sets `CREATE_NO_WINDOW` with them: `creation_flags` replaces.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program); // spawn: the helper
+    quiet(&mut command);
+    command
+}
+
+/// [`command`] for tokio. Its `Child` is tokio's, and the group and job object a caller wants
+/// (`trek_agents::spawn_group`) are its own.
+pub fn async_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program); // spawn: the helper
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command
+}
+
+/// Make an existing `command` windowless, as [`command`] does: for one built elsewhere (a
+/// `UpdateCommand`, a `Command` handed in by a caller). Replaces its creation flags.
+pub fn quiet(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// End every tracked group: TERM, up to `grace` for them to go, then KILL whatever is left.
 /// Blocks the caller for at most `grace`. For quitting.
 #[cfg(not(windows))]

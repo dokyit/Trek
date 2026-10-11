@@ -99,7 +99,7 @@ impl Agent {
         if let Some(problem) = detect::batch_args_problem(&bin, &args) {
             bail!("{name} can't start: {problem}");
         }
-        let mut command = tokio::process::Command::new(&bin);
+        let mut command = trek_core::procs::async_command(&bin);
         command
             .args(&args)
             .envs(env)
@@ -1473,7 +1473,7 @@ async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
     let Some(bin) = bin else { return };
     // Held until it's done: the session is in the file this names.
     let db = crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await;
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = trek_core::procs::async_command(bin);
     command.args(args).arg(session).current_dir(cwd).envs(db.env).env("PATH", detect::login_path());
     match crate::output_group(&mut command, None, Duration::from_secs(20)).await {
         Ok(out) if out.status.success() => {}
@@ -2603,7 +2603,7 @@ fn launch_flags(config: &SessionConfig) -> Vec<String> {
 /// Copilot doesn't list models over ACP; its `help config` does.
 async fn copilot_models() -> Vec<ModelInfo> {
     let Some(bin) = detect::which("copilot") else { return vec![] };
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = trek_core::procs::async_command(bin);
     command.args(["help", "config"]).env("PATH", detect::login_path());
     let Ok(out) = crate::output_group(&mut command, None, Duration::from_secs(20)).await else {
         return vec![];

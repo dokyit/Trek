@@ -415,7 +415,7 @@ impl BackgroundStrip {
                 .tooltip(file.display().to_string())
                 .on_click(move |_, _, _| {
                     // A text editor, as `open -t` is: output files have no extension Windows knows.
-                    let mut editor = std::process::Command::new(if cfg!(windows) { "notepad.exe" } else { "/usr/bin/open" });
+                    let mut editor = trek_core::procs::command(if cfg!(windows) { "notepad.exe" } else { "/usr/bin/open" });
                     if !cfg!(windows) {
                         editor.arg("-t");
                     }

@@ -299,7 +299,9 @@ pub fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 fn command(install: &Path, args: &[OsString]) -> Command {
-    let mut cmd = Command::new(install.join("trek.exe"));
+    // Not `trek_core::procs::command` (this helper has no trek-core): the program is Trek, a GUI
+    // program that opens no console, started from this one, which has none either.
+    let mut cmd = Command::new(install.join("trek.exe")); // spawn: ok
     // Not the install itself: a process working in a folder keeps it from being renamed, and
     // the next update renames it.
     cmd.args(args).current_dir(install.parent().unwrap_or(install));

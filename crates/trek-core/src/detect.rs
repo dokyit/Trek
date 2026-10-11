@@ -47,7 +47,7 @@ pub fn login_path() -> &'static str {
 #[cfg(unix)]
 fn base_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    shell_output(std::process::Command::new(shell).args(["-ilc", "printf %s \"$PATH\""]), LOGIN_SHELL_TIMEOUT)
+    shell_output(crate::procs::command(shell).args(["-ilc", "printf %s \"$PATH\""]), LOGIN_SHELL_TIMEOUT)
         .and_then(|o| String::from_utf8(o).ok())
         .map(|s| s.lines().last().unwrap_or_default().to_string())
         .filter(|s| !s.is_empty())
@@ -320,7 +320,7 @@ pub fn opencode() -> Option<PathBuf> {
 pub async fn version_of(path: &Path) -> Option<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(4),
-        tokio::process::Command::new(path)
+        crate::procs::async_command(path)
             .arg("--version")
             .env("PATH", login_path())
             .stdin(std::process::Stdio::null())
@@ -366,7 +366,7 @@ async fn cli_agent(agent: AgentId, binary: &str, hint: &str) -> DetectedAgent {
 async fn codex_logged_in(path: &Path) -> bool {
     let out = tokio::time::timeout(
         Duration::from_secs(4),
-        tokio::process::Command::new(path)
+        crate::procs::async_command(path)
             .args(["login", "status"])
             .env("PATH", login_path())
             .stdin(std::process::Stdio::null())
