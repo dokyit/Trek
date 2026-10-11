@@ -27,6 +27,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, Ge
 const PROBE: &str = "TREK_QUIET_SPAWNS_PROBE";
 /// How long a lingering child is watched: "within a second".
 const WATCH: Duration = Duration::from_secs(1);
+/// How many seconds a lingering program runs: longer than `WATCH`, short enough that one left
+/// behind soon ends.
+const LINGER: &str = "4";
 
 #[derive(Debug, Clone, PartialEq)]
 struct Window {
@@ -144,11 +147,11 @@ fn cases(way: Way, fixture: &str, wrapper: &str) -> Vec<(&'static str, Command)>
     let mut git_waiting = way.command("git");
     git_waiting.args(["hash-object", "--stdin"]);
     let mut script = way.command(wrapper);
-    script.arg("30");
+    script.arg(LINGER);
     let mut cmd = way.command("cmd");
-    cmd.args(["/c", fixture, "sleep", "30"]);
+    cmd.args(["/c", fixture, "sleep", LINGER]);
     let mut program = way.command(fixture);
-    program.args(["sleep", "30"]);
+    program.args(["sleep", LINGER]);
     vec![("git --version", git), ("git waiting on stdin", git_waiting), ("a .cmd wrapper", script), ("cmd /c", cmd), ("a program that lingers", program)]
 }
 
@@ -192,7 +195,7 @@ fn probe_without_console() {
     let windows = runtime.block_on(async {
         let before = known_windows();
         let mut command = trek_core::procs::async_command(&fixture);
-        let mut child = command.args(["sleep", "30"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
+        let mut child = command.args(["sleep", LINGER]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
         let start = Instant::now();
         let mut found: Vec<Window> = Vec::new();
         while start.elapsed() < WATCH {
@@ -219,15 +222,34 @@ fn trek_spawns_open_no_console_window() {
     if std::env::var_os(PROBE).is_some() {
         return;
     }
-    let out = Command::new(std::env::current_exe().unwrap())
+    // Its output goes to a file, not a pipe: a console window that opened (in Windows Terminal, a
+    // process of Terminal's) can hold a pipe's write end long after the probe is gone, and
+    // reading to the end of the pipe would then wait for it.
+    let log = std::env::temp_dir().join(format!("trek-quiet-spawns-probe-{}.log", std::process::id()));
+    let file = std::fs::File::create(&log).unwrap();
+    let mut probe = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "probe_without_console", "--nocapture", "--test-threads=1"])
         .env(PROBE, "1")
         .stdin(Stdio::null())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
         .creation_flags(DETACHED_PROCESS)
-        .output()
+        .spawn()
         .unwrap();
-    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = probe.try_wait().unwrap() {
+            break Some(status);
+        }
+        if start.elapsed() > Duration::from_secs(120) {
+            let _ = probe.kill();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
     println!("{said}");
-    assert!(out.status.success(), "the probe in a process with no console failed:\n{said}");
+    assert!(status.is_some_and(|s| s.success()), "the probe in a process with no console failed or hung ({status:?}):\n{said}");
     assert!(said.contains("1 passed"), "the probe didn't run:\n{said}");
 }
