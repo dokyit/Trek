@@ -377,32 +377,113 @@ fn expand_env(s: &str, var: impl Fn(&str) -> Option<String>) -> String {
     out
 }
 
-/// Whether Controlled folder access is on (blocking, not only auditing), from the registry value
-/// Defender keeps and its Group Policy twin, which wins. `None`: Trek can't read it.
-/// (On this laptop, both read without administrator rights; the list of folders a user added
-/// doesn't.)
+/// Whether Controlled folder access is keeping programs out of the guarded folders right now:
+/// `Some(true)` when it's on and Defender is scanning in real time (it enforces nothing
+/// otherwise), `Some(false)` when it's off, only auditing, or Defender isn't scanning, `None` when
+/// Trek can't tell. (On this laptop everything it reads is readable without administrator
+/// rights; the list of folders a user added to it isn't.)
 #[cfg(windows)]
 fn controlled_folder_access() -> Option<bool> {
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
     const KEY: &str = r"Windows Defender\Windows Defender Exploit Guard\Controlled Folder Access";
-    let read = |path: String| -> Result<Option<u32>, ()> {
-        let key = match winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) {
-            Ok(k) => k,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(()),
-        };
-        match key.get_value::<u32, _>("EnableControlledFolderAccess") {
-            Ok(v) => Ok(Some(v)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(()),
-        }
-    };
-    cfa_setting(read(format!(r"SOFTWARE\Policies\Microsoft\{KEY}")), read(format!(r"SOFTWARE\Microsoft\{KEY}")))
+    let setting = cfa_setting(
+        registry_dword(&format!(r"SOFTWARE\Policies\Microsoft\{KEY}"), "EnableControlledFolderAccess"),
+        registry_dword(&format!(r"SOFTWARE\Microsoft\{KEY}"), "EnableControlledFolderAccess"),
+    );
+    cfa_enforced(setting, real_time_protection)
 }
 
 #[cfg(not(windows))]
 fn controlled_folder_access() -> Option<bool> {
     None
+}
+
+/// A `REG_DWORD` under `HKLM`, in the 64-bit view where Defender keeps its own (`Err`: it
+/// couldn't be read; `Ok(None)`: not set).
+#[cfg(windows)]
+fn registry_dword(key: &str, name: &str) -> Result<Option<u32>, ()> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+    let key = match winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(key, KEY_READ | KEY_WOW64_64KEY) {
+        Ok(k) => k,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    match key.get_value::<u32, _>(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+/// Whether Defender is scanning in real time: from the switches that turn it off (Windows
+/// Security's, and Group Policy's) and from Windows Security's own account of the antivirus
+/// products (`Provider\Av`, which Windows Security keeps for its page). `None`: can't tell.
+#[cfg(windows)]
+fn real_time_protection() -> Option<bool> {
+    const DEFENDER: &str = r"SOFTWARE\Microsoft\Windows Defender";
+    const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows Defender";
+    let off = [
+        registry_dword(&format!(r"{DEFENDER}\Real-Time Protection"), "DisableRealtimeMonitoring"),
+        registry_dword(&format!(r"{POLICY}\Real-Time Protection"), "DisableRealtimeMonitoring"),
+        registry_dword(DEFENDER, "DisableAntiSpyware"),
+        registry_dword(POLICY, "DisableAntiSpyware"),
+        registry_dword(DEFENDER, "DisableAntiVirus"),
+        registry_dword(POLICY, "DisableAntiVirus"),
+    ];
+    real_time_state(&off, antivirus_products())
+}
+
+/// Windows Security's list of antivirus products and their states: `(GUID, state)`.
+#[cfg(windows)]
+fn antivirus_products() -> Result<Vec<(String, u32)>, ()> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+    let list = winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(r"SOFTWARE\Microsoft\Security Center\Provider\Av", KEY_READ | KEY_WOW64_64KEY).map_err(|_| ())?;
+    let mut products = vec![];
+    for name in list.enum_keys().flatten() {
+        // A product whose state can't be read is one Trek can't say anything about.
+        let state = list.open_subkey_with_flags(&name, KEY_READ).and_then(|k| k.get_value::<u32, _>("STATE")).map_err(|_| ())?;
+        products.push((name, state));
+    }
+    Ok(products)
+}
+
+/// Defender's own entry in Windows Security's list of antivirus products.
+#[cfg_attr(not(windows), allow(dead_code))]
+const DEFENDER_PRODUCT: &str = "{D68DDC3A-831F-4fae-9E44-DA132C1ACF46}";
+
+/// Whether an antivirus product's state (`STATE`, Windows Security's `productState`: 0x61100 for
+/// Defender on and up to date, 0x60100 off) says it's switched on.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn product_is_on(state: u32) -> bool {
+    state & 0xF000 == 0x1000
+}
+
+/// Is Defender scanning in real time? `off` are the values that switch it off (`Err`: couldn't be
+/// read), `products` Windows Security's antivirus list. Off if anything says so. On only if
+/// nothing is unreadable, Windows Security lists Defender as on and no other product claims to be
+/// on too (Defender then runs passively under it, and enforces nothing). Anything else: `None`,
+/// and a refused write decides.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn real_time_state(off: &[Result<Option<u32>, ()>], products: Result<Vec<(String, u32)>, ()>) -> Option<bool> {
+    if off.iter().any(|v| *v == Ok(Some(1))) {
+        return Some(false);
+    }
+    let products = products.ok()?;
+    let (defender, others): (Vec<_>, Vec<_>) = products.iter().partition(|(guid, _)| guid.eq_ignore_ascii_case(DEFENDER_PRODUCT));
+    match defender.first() {
+        Some(&&(_, state)) if !product_is_on(state) => Some(false),
+        Some(_) if off.iter().all(Result::is_ok) && !others.iter().any(|&&(_, state)| product_is_on(state)) => Some(true),
+        _ => None,
+    }
+}
+
+/// `setting` (`cfa_setting`) turned into whether it enforces anything: only if it's on does
+/// `real_time` (asked then) matter.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cfa_enforced(setting: Option<bool>, real_time: impl FnOnce() -> Option<bool>) -> Option<bool> {
+    match setting {
+        Some(true) => real_time(),
+        other => other,
+    }
 }
 
 /// `EnableControlledFolderAccess` from the policy and from Defender's own setting (`Err`: it
@@ -1870,12 +1951,80 @@ mod tests {
         assert_eq!(expand_env(r"%NOPE%\x %", |_| None), r"%NOPE%\x %");
     }
 
+    #[test]
+    fn controlled_folder_access_enforces_nothing_while_defender_isnt_scanning() {
+        // Tobias's laptop, 2026-10-11: the setting says on, real-time protection was switched off.
+        let defender = |state: u32| (DEFENDER_PRODUCT.to_lowercase(), state);
+        let (on, off_state) = (0x61100, 0x60100);
+        assert!(product_is_on(on) && !product_is_on(off_state));
+        let no_switches = [Ok(None), Ok(None), Ok(Some(0)), Ok(None), Ok(Some(0)), Ok(None)];
+        let third_party = ("{00000000-0000-0000-0000-000000000001}".to_string(), on);
+
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on)])), Some(true));
+        // Switched off in Windows Security: its switch, or its entry in the antivirus list.
+        let switched = [Ok(Some(1)), Ok(None), Ok(None), Ok(None), Ok(None), Ok(None)];
+        assert_eq!(real_time_state(&switched, Ok(vec![defender(on)])), Some(false));
+        assert_eq!(real_time_state(&switched, Err(())), Some(false), "whatever else can't be read");
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(off_state)])), Some(false));
+        // Group Policy, or an antispyware switch an old installer left behind.
+        for at in 0..no_switches.len() {
+            let mut one = no_switches.clone();
+            one[at] = Ok(Some(1));
+            assert_eq!(real_time_state(&one, Ok(vec![defender(on)])), Some(false), "switch {at}");
+        }
+        // Can't tell: a value or the list unreadable, Defender not in it, or another product on
+        // beside it (Defender runs passively under it).
+        let mut unreadable = no_switches.clone();
+        unreadable[3] = Err(());
+        assert_eq!(real_time_state(&unreadable, Ok(vec![defender(on)])), None);
+        assert_eq!(real_time_state(&no_switches, Err(())), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![])), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![third_party.clone()])), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on), third_party.clone()])), None);
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on), (third_party.0.clone(), off_state)])), Some(true), "a product that's off beside it changes nothing");
+        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(off_state), third_party])), Some(false), "primary elsewhere, Defender off");
+
+        // The setting only matters when it's on, and then only while Defender is scanning.
+        let asked = std::cell::Cell::new(0);
+        let enforced = |setting, real_time: Option<bool>| {
+            asked.set(0);
+            let answer = cfa_enforced(setting, || {
+                asked.set(asked.get() + 1);
+                real_time
+            });
+            (answer, asked.get())
+        };
+        assert_eq!(enforced(Some(true), Some(true)), (Some(true), 1));
+        assert_eq!(enforced(Some(true), Some(false)), (Some(false), 1), "on, but nothing scans: nothing is guarded");
+        assert_eq!(enforced(Some(true), None), (None, 1), "can't tell: a refused write decides");
+        assert_eq!(enforced(Some(false), Some(true)), (Some(false), 0), "off or auditing: real-time protection isn't asked");
+        assert_eq!(enforced(None, Some(true)), (None, 0));
+    }
+
+    /// `trek-update` can't use Trek's list (it has no dependency on it), so it keeps its own: they
+    /// must name the same folders, or the helper's words and Settings would disagree.
+    #[cfg(windows)]
+    #[test]
+    fn the_helper_and_trek_guard_the_same_folders() {
+        let same = |a: &Path, b: &Path| inside(a, b) && inside(b, a);
+        let trek: Vec<(&str, PathBuf)> = guarded_folders().into_iter().map(|(f, p)| (f.name(), p)).collect();
+        let helper = trek_update::guarded_folders();
+        assert!(!helper.is_empty());
+        for (name, path) in &helper {
+            assert!(trek.iter().any(|(n, p)| n == name && same(p, path)), "Trek doesn't guard {name} {}: {trek:?}", path.display());
+        }
+        for (name, path) in &trek {
+            assert!(helper.iter().any(|(n, p)| n == name && same(p, path)), "the helper doesn't guard {name} {}: {helper:?}", path.display());
+        }
+    }
+
     /// What this laptop says, for the record: run with `--ignored --nocapture`.
     #[cfg(windows)]
     #[test]
     #[ignore = "reads this machine's settings"]
     fn print_this_machines_guarded_folders() {
-        println!("controlled folder access: {:?}", controlled_folder_access());
+        println!("controlled folder access enforced: {:?}", controlled_folder_access());
+        println!("real-time protection: {:?}, antivirus products {:x?}", real_time_protection(), antivirus_products());
         for (f, p) in guarded_folders() {
             println!("{f:?}: {}", p.display());
         }

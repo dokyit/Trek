@@ -256,8 +256,14 @@ The steps above, with these differences:
   `SHGetKnownFolderPath` says they are, OneDrive included, and in OneDrive either way) while Controlled
   folder access is on (`EnableControlledFolderAccess` = 1 under `HKLM\SOFTWARE\Microsoft\Windows
   Defender\Windows Defender Exploit Guard\Controlled Folder Access`, or its twin under
-  `HKLM\SOFTWARE\Policies\…`, which wins; both read without administrator rights), Settings → Updates
-  says to move Trek out. If the value can't be read, a refused write there decides. A refused write
+  `HKLM\SOFTWARE\Policies\…`, which wins; both read without administrator rights) **and** Defender is
+  scanning in real time (the setting enforces nothing otherwise: `DisableRealtimeMonitoring`,
+  `DisableAntiSpyware` and `DisableAntiVirus`, setting and policy, aren't 1, and Windows Security's
+  list of antivirus products, `HKLM\SOFTWARE\Microsoft\Security Center\Provider\Av`, has Defender on
+  and no other product on beside it), Settings → Updates says to move Trek out. With real-time
+  protection switched off, nothing is guarded, whatever the setting says. If any of that can't be read
+  or is ambiguous (Defender passive under another antivirus, say), a refused write there decides, and
+  no refused write means no blocker. A refused write
   (this, or a folder Trek can't write to) is asked again on **Check now**: Defender judges each program
   as it runs, and the user may turn it off. If the helper is still turned away (access denied bringing
   the update next to the install), its toast says the same.
