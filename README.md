@@ -136,6 +136,8 @@ Windows differs from the Mac in these ways:
 
 - **Tray and taskbar.** A system tray icon in place of the menu bar icon, and a taskbar badge in place of the
   Dock badge.
+- **No menu bar.** Every command the Mac's menus have is in the command palette (Ctrl+K), Settings, the context
+  menus or a shortcut.
 - **Notifications** are Windows toasts, under Trek's name.
 - **Dictation** has no Dictate button. Press Win+H, which is Windows' own dictation.
 - **Snapshots** go through Snipping Tool: you pick the window, area or screen in its overlay, and Trek attaches
