@@ -12,6 +12,10 @@
 //!
 //! The probe runs in a copy of this test binary, because the test's own process has the terminal's
 //! console (or doesn't, depending on who ran it); the copy never has one.
+//!
+//! The control (the plain way does open windows from such a process, so the check has power) runs
+//! only with `TREK_QUIET_SPAWNS_CONTROL=1`, as CI sets it: on a desktop it flashes a window per
+//! case, and where Windows Terminal hosts consoles it leaves Terminal running behind.
 #![cfg(windows)]
 
 use std::collections::HashSet;
@@ -25,6 +29,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, Ge
 
 /// Set in the copy that runs the probe.
 const PROBE: &str = "TREK_QUIET_SPAWNS_PROBE";
+/// Set to run the control too.
+const CONTROL: &str = "TREK_QUIET_SPAWNS_CONTROL";
 /// How long a lingering child is watched: "within a second".
 const WATCH: Duration = Duration::from_secs(1);
 /// How many seconds a lingering program runs: longer than `WATCH`, short enough that one left
@@ -131,10 +137,16 @@ fn watch(mut command: Command) -> Opened {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("the program starts");
     let opened = opened_during(&mut child, &before);
     drop(child.stdin.take());
-    trek_core::procs::end_tree(child.id() as i32);
+    end_tree(&mut child);
+    opened
+}
+
+/// End `child` and what it started (the program under `cmd /c` or a wrapper). `taskkill`, started
+/// Trek's way: the plain way it would open a window of its own.
+fn end_tree(child: &mut Child) {
+    let _ = trek_core::procs::command("taskkill").args(["/PID", &child.id().to_string(), "/T", "/F"]).output();
     let _ = child.kill();
     let _ = child.wait();
-    opened
 }
 
 /// What the probe starts, each a way Trek starts things: git, a `.cmd` wrapper (npm's
@@ -169,17 +181,28 @@ fn probe_without_console() {
     std::fs::write(&wrapper, format!("@echo off\r\n\"{fixture}\" sleep %1\r\n")).unwrap();
     let wrapper = wrapper.to_string_lossy().into_owned();
 
-    // The control: the plain way does open windows from a process like this one. (If it didn't on
-    // some machine, the check below would prove nothing there, and it says so.)
-    let mut control = false;
-    for (name, command) in cases(Way::Plain, &fixture, &wrapper) {
-        let opened = watch(command);
-        eprintln!("plain Command::new, {name}: {} console window(s); other new windows: {:?}", opened.consoles.len(), opened.others);
-        control |= !opened.consoles.is_empty();
+    // The control: the plain way does open windows from a process like this one. Without it the
+    // check below could pass on a machine where nothing would have opened a window anyway.
+    if std::env::var_os(CONTROL).is_some() {
+        let mut control = false;
+        for (name, command) in cases(Way::Plain, &fixture, &wrapper) {
+            let opened = watch(command);
+            eprintln!("plain Command::new, {name}: {} console window(s); other new windows: {:?}", opened.consoles.len(), opened.others);
+            control |= !opened.consoles.is_empty();
+        }
+        assert!(control, "the plain way opened no console window from a process with no console, so the check below would prove nothing here");
+    } else {
+        eprintln!("(the control runs with {CONTROL}=1)");
     }
-    if !control {
-        eprintln!("WARNING: the plain way opened no console window on this machine, so this check proves nothing here");
-    }
+
+    // Windowless changes nothing else: a `.cmd` run through `cmd.exe` still hands back what it
+    // printed on each stream and its exit code.
+    let says = dir.join("says.cmd");
+    std::fs::write(&says, "@echo off\r\necho out %1\r\necho err 1>&2\r\nexit /b 3\r\n").unwrap();
+    let out = trek_core::procs::command(&says).arg("there").stdin(Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out there");
+    assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "err");
+    assert_eq!(out.status.code(), Some(3));
 
     let mut wrong = Vec::new();
     for (name, command) in cases(Way::Trek, &fixture, &wrapper) {
