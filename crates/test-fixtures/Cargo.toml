@@ -8,3 +8,10 @@ description = "Binaries the test suite spawns in place of Perl scripts and shell
 
 [dependencies]
 serde_json.workspace = true
+# A test update-signing key (src/minisign.rs): Ed25519 from the ring reqwest already builds, base64
+# for minisign's text format.
+ring = "0.17"
+base64 = "0.22"
+
+[dev-dependencies]
+minisign-verify = "0.2"

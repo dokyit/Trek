@@ -817,6 +817,8 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
+        #[cfg(test)]
+        super::shown::text(&view.line);
         let pending = ws.pending_changes();
         // The release history: what this channel has published up to the update on offer.
         let ceiling = ws.updater.offer.as_ref().map(|o| o.version.clone()).filter(|_| pending.is_some()).unwrap_or_else(trek_core::update::current_version);
@@ -873,34 +875,30 @@ impl SettingsView {
             );
             page.push(div().pb(px(28.)).max_w(px(560.)).child(ui::releases_notes("update-notes", &changes.releases, px(360.), cx)).into_any_element());
         }
-        // Where Trek can't update itself yet (Windows) the line under its name says so, and the
-        // channel and the two automatic steps have nothing to act on: they are left out.
-        if !crate::words::is_windows() {
-            page.push(ui::group(
-                vec![
-                    Self::row(
-                        "Channel",
-                        "Stable gets finished releases. Beta and Nightly get new things first, with the occasional rough edge, and every stable release too.",
-                        ui::segmented(
-                            "channel",
-                            vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
-                            s.updates.channel,
-                            self.setter(|s, v| s.updates.channel = v),
-                            cx,
-                        ),
+        page.push(ui::group(
+            vec![
+                Self::row(
+                    "Channel",
+                    "Stable gets finished releases. Beta and Nightly get new things first, with the occasional rough edge, and every stable release too.",
+                    ui::segmented(
+                        "channel",
+                        vec![(Channel::Stable, "Stable"), (Channel::Beta, "Beta"), (Channel::Nightly, "Nightly")],
+                        s.updates.channel,
+                        self.setter(|s, v| s.updates.channel = v),
                         cx,
                     ),
-                    Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
-                    Self::row(
-                        "Download automatically",
-                        "Gets the update ready in the background. It installs when you restart or quit Trek, never while an agent is working.",
-                        self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
-                        cx,
-                    ),
-                ],
-                cx,
-            ));
-        }
+                    cx,
+                ),
+                Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
+                Self::row(
+                    "Download automatically",
+                    "Gets the update ready in the background. It installs when you restart or quit Trek, never while an agent is working.",
+                    self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
+                    cx,
+                ),
+            ],
+            cx,
+        ));
         if !history.is_empty() {
             page.push(
                 h_flex()

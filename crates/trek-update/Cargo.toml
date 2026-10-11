@@ -1,0 +1,18 @@
+[package]
+name = "trek-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Trek's Windows updater: once Trek has quit, swaps its folder for the update it staged, and puts the old one back if that fails."
+
+[[bin]]
+name = "trek-update"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+# Waiting for Trek's process to exit.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+trek-test-fixtures.workspace = true
