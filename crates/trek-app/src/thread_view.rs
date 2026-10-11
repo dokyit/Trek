@@ -157,14 +157,6 @@ fn split_long_answers(rows: Vec<Row>, item_row: Vec<usize>, items: &[Item]) -> R
     Rows { rows: out, item_row, split }
 }
 
-/// How many parts the answer at item `ix` is drawn in.
-fn parts_of(items: &[Item], ix: usize) -> usize {
-    match items.get(ix) {
-        Some(Item::Assistant { text }) => answer_parts(text).len() + 1,
-        _ => 1,
-    }
-}
-
 /// Part `n` of `text` cut at `cuts`, or `None` past the last.
 fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
     let start = if n == 0 { 0 } else { *cuts.get(n - 1)? };
@@ -592,13 +584,18 @@ impl ThreadView {
         // revision stand for this one (building them reads every item, and this runs for each
         // batch of tokens).
         // Unless the answer streaming in has just grown a part (`answer_parts`): that's a row.
+        // Where the latest answer is cut, worked out once here for both.
+        let tail_cuts: Option<(usize, Vec<usize>)> = live.filter(|_| !switched && revision != self.revision).and_then(|l| {
+            let ix = l.items.iter().rposition(|i| matches!(i, Item::Assistant { .. }))?;
+            match &l.items[ix] {
+                Item::Assistant { text } => Some((ix, answer_parts(text))),
+                _ => None,
+            }
+        });
         if appended && !switched && end == self.end {
             if let Some((key, rows)) = self.rows_cache.borrow_mut().as_mut() {
-                let same_parts = |l: &crate::workspace::LiveThread| {
-                    let Some(ix) = l.items.iter().rposition(|i| matches!(i, Item::Assistant { .. })) else { return true };
-                    parts_of(&l.items, ix) == rows.split.iter().find(|(i, _)| *i == ix).map_or(1, |(_, n)| *n)
-                };
-                if key.0 == self.current && key.1 == self.revision && live.is_some_and(|l| l.items.len() == rows.item_row.len() && same_parts(l)) {
+                let same_parts = tail_cuts.as_ref().is_none_or(|(ix, cuts)| cuts.len() + 1 == rows.split.iter().find(|(i, _)| i == ix).map_or(1, |(_, n)| *n));
+                if key.0 == self.current && key.1 == self.revision && same_parts && live.is_some_and(|l| l.items.len() == rows.item_row.len()) {
                     key.1 = revision;
                 }
             }
@@ -610,7 +607,7 @@ impl ThreadView {
         let mut docs: Vec<(String, Option<(usize, Option<String>)>)> = Vec::new();
         if let Some(l) = live.filter(|_| !switched && revision != self.revision) {
             // Each answer is cut once, however many of its parts have documents.
-            let mut cuts: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut cuts: HashMap<usize, Vec<usize>> = tail_cuts.into_iter().collect();
             for (key, m) in &self.md {
                 let ix = if l.items.id_at(m.ix) == Some(m.item.as_str()) { Some(m.ix) } else { l.items.position(&m.item) };
                 let now = ix.and_then(|ix| match &l.items[ix] {
@@ -1020,7 +1017,12 @@ impl ThreadView {
             _ => None,
         };
         let cx: &App = cx;
-        let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).cloned() else {
+        // An answer's row draws its document, not the item's text: that isn't copied each frame
+        // (a long answer's is megabytes, and each of its parts on screen would copy all of it).
+        let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).map(|i| match i {
+            Item::Assistant { .. } => Item::Assistant { text: String::new() },
+            i => i.clone(),
+        }) else {
             return div().into_any_element();
         };
         let theme = cx.theme();
@@ -2677,7 +2679,7 @@ impl ThreadView {
 
 #[cfg(test)]
 mod tests {
-    use super::{PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, part_of, parts_of, row_of, split_long_answers};
+    use super::{PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, part_of, row_of, split_long_answers};
     use trek_core::AgentId;
     use trek_core::store::{Item, ToolStatus};
 
@@ -2853,7 +2855,5 @@ mod tests {
         assert_eq!(shape[parts], (4, 0, true), "the short answer stays whole");
         // The long answer maps to its first part; what follows to where it went.
         assert_eq!(rows.item_row, [0, 1, 1 + parts, 2 + parts, 3 + parts]);
-        assert_eq!(parts_of(&items, 1), parts);
-        assert_eq!(parts_of(&items, 4), 1);
     }
 }
