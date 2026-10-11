@@ -45,6 +45,7 @@ mod remote;
 mod root;
 mod screenclip;
 mod settings_view;
+mod shortcuts;
 #[cfg(feature = "shots")]
 mod shots;
 mod sidebar;

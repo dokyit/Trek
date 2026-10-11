@@ -333,6 +333,15 @@ pub fn register_protocol(root: &str, exe: &std::path::Path) -> std::io::Result<R
     Ok(Registered::Written)
 }
 
+/// Whether a process with these settings (`TREK_SHOT_DIR`, `TREK_DATA_DIR`) is the user's own Trek,
+/// which takes the links: not a capture run or a process with a data folder of its own. The Trek
+/// that moved starts its copy with neither (`relocate::mover_command` drops what a restart
+/// doesn't keep), so the copy registers itself at its first launch.
+#[cfg(any(windows, test))]
+fn takes_over_links(shot_dir: Option<&std::ffi::OsStr>, data_dir: Option<&std::ffi::OsStr>) -> bool {
+    shot_dir.is_none() && data_dir.is_none_or(|d| d.is_empty())
+}
+
 /// Register the protocol for the running Trek, in the user's classes. Once a launch; a failure
 /// is logged and nothing else: links then keep going where they went. Not for a process with a
 /// data folder of its own (a test, a capture run, a trial build): it mustn't take over the links
@@ -340,7 +349,7 @@ pub fn register_protocol(root: &str, exe: &std::path::Path) -> std::io::Result<R
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn register_trek_protocol() {
-    if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty()) {
+    if !takes_over_links(std::env::var_os("TREK_SHOT_DIR").as_deref(), std::env::var_os("TREK_DATA_DIR").as_deref()) {
         return;
     }
     let exe = match std::env::current_exe() {
@@ -678,6 +687,15 @@ mod tests {
         assert_eq!(super::protocol_command(exe), r#""C:\Program Files\Trek\trek.exe" --link "%1""#);
     }
 
+    #[test]
+    fn only_a_trek_with_no_data_folder_of_its_own_takes_the_links() {
+        use std::ffi::OsStr;
+        assert!(super::takes_over_links(None, None), "the user's Trek, a moved one included");
+        assert!(super::takes_over_links(None, Some(OsStr::new(""))), "an empty setting is none");
+        assert!(!super::takes_over_links(None, Some(OsStr::new(r"D:\scratch"))), "a trial build or test");
+        assert!(!super::takes_over_links(Some(OsStr::new(r"D:\shots")), None), "a capture run");
+    }
+
     /// The command as Windows runs it for a link (the link put in for `%1` as it came) and splits
     /// it (`CommandLineToArgvW`, whose rules `std::env::args` follows), then as Trek reads it.
     #[cfg(windows)]
@@ -758,6 +776,20 @@ mod tests {
             assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Written);
             assert_eq!(reg_read(&format!(r"{}\trek\shell\open\command", root.0), "").as_deref(), Some(protocol_command(new).as_str()));
             assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Already);
+        }
+
+        /// Trek moved out of Documents to its programs folder: the links go to the copy, and so
+        /// does the icon Windows shows for them.
+        #[test]
+        fn a_trek_that_moved_takes_the_links_and_their_icon_with_it() {
+            let root = TestKey::new("relocated");
+            let old = Path::new(r"C:\Users\me\Documents\Trek\trek.exe");
+            let new = Path::new(r"C:\Users\me\AppData\Local\Programs\Trek\trek.exe");
+            register_protocol(&root.0, old).unwrap();
+            assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Written);
+            let key = format!(r"{}\trek", root.0);
+            assert_eq!(reg_read(&format!(r"{key}\DefaultIcon"), "").as_deref(), Some(format!("\"{}\",0", new.display()).as_str()));
+            assert_eq!(reg_read(&format!(r"{key}\shell\open\command"), "").as_deref(), Some(protocol_command(new).as_str()));
         }
     }
 }

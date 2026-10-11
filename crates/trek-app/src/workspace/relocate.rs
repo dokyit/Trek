@@ -4,10 +4,12 @@
 //! are running finish first.
 
 use super::{RESTART_GRACE, UndoAction, UpdateAction, UpdateView, Workspace, WorkspaceEvent};
+use crate::shortcuts::{self, Report};
+use crate::updater::{OldCopy, with_shortcuts};
 use gpui_kit::{Context, Task};
 use std::path::{Path, PathBuf};
 use trek_core::update::Blocker;
-use trek_core::update::relocate::{self, Moved, Prepared, Removal};
+use trek_core::update::relocate::{self, Moved, Prepared, Relocated, Removal};
 
 /// Where a move is.
 #[derive(Default)]
@@ -22,18 +24,30 @@ pub(crate) enum Moving {
     Starting(Prepared, #[allow(dead_code)] Task<()>),
 }
 
-/// The two steps of a move that touch the machine, which tests replace.
+/// The steps of a move (and what follows it) that touch the machine, which tests replace.
 #[derive(Clone, Copy)]
 pub(crate) struct Mover {
     /// Copy Trek's files to their new folder and check them.
     pub copy: fn() -> anyhow::Result<Prepared>,
     /// Start the copy (in front or not) once this Trek has quit.
     pub start: fn(&Prepared, bool) -> anyhow::Result<()>,
+    /// Delete the copy Trek left in the folder it moved out of.
+    pub remove: fn(&Path) -> Removal,
+    /// Point the user's shortcuts that start the old `trek.exe` at the new one.
+    pub shortcuts: fn(&Path, &Path) -> Report,
 }
 
 impl Default for Mover {
     fn default() -> Self {
-        Mover { copy: relocate::copy_out, start: relocate::start_copy }
+        Mover { copy: relocate::copy_out, start: relocate::start_copy, remove: remove_here, shortcuts: shortcuts::retarget_user_shortcuts }
+    }
+}
+
+/// `relocate::remove_old_copy`, for the Trek that runs from the copy it moved to.
+fn remove_here(old: &Path) -> Removal {
+    match relocate::running_from() {
+        Some(here) => relocate::remove_old_copy(old, &here),
+        None => Removal::Kept("Trek can't tell which folder it runs from, so it left the old copy alone.".into()),
     }
 }
 
@@ -42,15 +56,77 @@ impl Workspace {
     pub(super) fn moving_view(&self, view: UpdateView) -> UpdateView {
         match &self.moving {
             Moving::No => view,
-            Moving::Copying => {
-                UpdateView { line: format!("Copying Trek to {}…", relocate::destination_hint()), action: None, busy: true, progress: None }
-            }
+            Moving::Copying => UpdateView { line: format!("Copying Trek to {}…", relocate::destination_hint()), action: None, secondary: None, busy: true, progress: None },
             Moving::Waiting(p) | Moving::Starting(p, _) => UpdateView {
                 line: format!("Trek moves to {} when your agents finish their turns. Moving now stops them.", p.to.display()),
                 action: Some(UpdateAction::MoveNow),
+                secondary: None,
                 busy: false,
                 progress: None,
             },
+        }
+    }
+
+    /// The Updates page's offer to remove the copy Trek left behind in its last folder, while it
+    /// stands.
+    pub fn old_copy_view(&self) -> Option<UpdateView> {
+        self.old_copy.as_ref().map(crate::updater::describe_old_copy)
+    }
+
+    /// At launch, from the copy of a Trek that moved: say where it runs now (a toast, with the
+    /// button to remove the old copy when there is one), put the same offer on the Updates page
+    /// until it's dealt with, and, if the move was just now, point the user's shortcuts here.
+    pub(crate) fn arrived(&mut self, relocated: Relocated, cx: &mut Context<Self>) {
+        let Relocated { moved, fresh } = relocated;
+        // The page has it at once; the toast follows once the shortcuts have been looked through.
+        self.old_copy = relocate::old_copy_remains(&moved.from).then(|| OldCopy { from: moved.from.clone(), to: moved.to.clone(), shortcuts: Report::default(), refused: false });
+        let shortcuts = self.mover.shortcuts;
+        let (old_exe, new_exe) = (relocate::exe_in(&moved.from), relocate::exe_in(&moved.to));
+        let task = cx.spawn(async move |this, cx| {
+            let report = if fresh { cx.background_executor().spawn(async move { shortcuts(&old_exe, &new_exe) }).await } else { Report::default() };
+            let _ = this.update(cx, |this, cx| {
+                let (message, undo) = moved_note(&moved, &report);
+                if let Some(old) = this.old_copy.as_mut().filter(|o| o.from == moved.from) {
+                    old.shortcuts = report;
+                }
+                cx.emit(WorkspaceEvent::Toast { message, undo });
+                cx.notify();
+            });
+        });
+        self.keep(task);
+    }
+
+    /// Opening the Updates page: the old copy may have been deleted by hand since Trek last looked.
+    pub(super) fn recheck_old_copy(&mut self, cx: &mut Context<Self>) {
+        let Some(from) = self.old_copy.as_ref().map(|o| o.from.clone()) else { return };
+        let task = cx.spawn(async move |this, cx| {
+            let checked = from.clone();
+            let remains = cx.background_executor().spawn(async move { relocate::old_copy_remains(&checked) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if !remains && this.old_copy.as_ref().is_some_and(|o| o.from == from) {
+                    this.forget_old_copy(cx);
+                }
+            });
+        });
+        self.keep(task);
+    }
+
+    /// Nothing more to offer about the old copy: the page drops it and so does the next launch.
+    fn forget_old_copy(&mut self, cx: &mut Context<Self>) {
+        self.old_copy = None;
+        relocate::forget_old_copy();
+        cx.notify();
+    }
+
+    /// "Dismiss" on the Updates page: the old copy stays where it is, and isn't offered again.
+    pub(super) fn dismiss_old_copy(&mut self, cx: &mut Context<Self>) {
+        self.forget_old_copy(cx);
+    }
+
+    /// "Remove old copy" on the Updates page.
+    pub(super) fn remove_offered_old_copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(old) = self.old_copy.as_ref().filter(|o| !o.refused).map(|o| o.from.clone()) {
+            self.remove_old_copy(old, cx);
         }
     }
 
@@ -143,22 +219,31 @@ impl Workspace {
         cx.quit();
     }
 
-    /// "Remove old copy" on the toast after a move.
+    /// "Remove old copy", on the toast after a move and on the Updates page.
     pub(super) fn remove_old_copy(&mut self, old: PathBuf, cx: &mut Context<Self>) {
+        let remove = self.mover.remove;
         let task = cx.spawn(async move |this, cx| {
             let shown = old.clone();
-            let removal = cx
-                .background_executor()
-                .spawn(async move {
-                    match relocate::running_from() {
-                        Some(here) => relocate::remove_old_copy(&old, &here),
-                        None => Removal::Kept("Trek can't tell which folder it runs from, so it left the old copy alone.".into()),
-                    }
-                })
-                .await;
-            let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: removal_message(&shown, &removal), undo: None }));
+            let removal = cx.background_executor().spawn(async move { remove(&old) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.old_copy_dealt_with(&shown, &removal, cx);
+                cx.emit(WorkspaceEvent::Toast { message: removal_message(&shown, &removal), undo: None });
+            });
         });
         self.keep(task);
+    }
+
+    /// What the page offers follows what became of the old copy: gone (or not Trek's to delete) is
+    /// done with; what Windows refused is the user's, and says so.
+    fn old_copy_dealt_with(&mut self, old: &Path, removal: &Removal, cx: &mut Context<Self>) {
+        let Some(offer) = self.old_copy.as_mut().filter(|o| o.from == old) else { return };
+        match removal {
+            Removal::Refused => {
+                offer.refused = true;
+                cx.notify();
+            }
+            Removal::Removed | Removal::Gone | Removal::Kept(_) => self.forget_old_copy(cx),
+        }
     }
 }
 
@@ -173,12 +258,14 @@ pub(crate) fn removal_message(old: &Path, removal: &Removal) -> String {
     }
 }
 
-/// At launch, from the copy of a Trek that moved: where Trek runs now, and the old copy to remove.
-pub(crate) fn moved_note(moved: &Moved) -> (String, Option<UndoAction>) {
-    if !moved.from.exists() {
-        return (format!("Trek now runs from {}.", moved.to.display()), None);
+/// At launch, from the copy of a Trek that moved: where Trek runs now, the old copy to remove, and
+/// what became of the user's shortcuts.
+pub(crate) fn moved_note(moved: &Moved, shortcuts: &Report) -> (String, Option<UndoAction>) {
+    let runs = format!("Trek now runs from {}", moved.to.display());
+    if !relocate::old_copy_remains(&moved.from) {
+        return (with_shortcuts(&runs, shortcuts), None);
     }
-    let message = format!("Trek now runs from {}. The copy in {} isn't needed any more.", moved.to.display(), moved.from.display());
+    let message = with_shortcuts(&format!("{runs}. The copy in {} isn't needed any more", moved.from.display()), shortcuts);
     (message, Some(UndoAction::RemoveOldCopy(moved.from.clone())))
 }
 

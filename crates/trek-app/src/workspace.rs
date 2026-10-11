@@ -1159,9 +1159,14 @@ pub struct Workspace {
     pub(crate) moving: relocate::Moving,
     /// What a move does to the machine; tests replace it.
     pub(crate) mover: relocate::Mover,
+    /// The copy Trek left in the folder it moved out of, while the Updates page offers to remove it.
+    pub(crate) old_copy: Option<crate::updater::OldCopy>,
     /// What a test says keeps Trek from updating itself, instead of where the test binary is.
     #[cfg(test)]
     pub(crate) blocked: Option<Option<trek_core::update::Blocker>>,
+    /// Each check a test's `blocked` answered for: whether the user asked (`blocker_now`) or not.
+    #[cfg(test)]
+    pub(crate) checks_asked: Vec<bool>,
     /// Why Trek's database couldn't be opened, until the main window has said so: this session
     /// runs on an in-memory copy and nothing is saved.
     pub store_error: Option<String>,
@@ -1276,12 +1281,11 @@ impl Workspace {
         // Toasts with a button: a move out of where Trek is, and the old copy it left.
         let mut launch_actions: Vec<(String, UndoAction)> = vec![];
         let windows = crate::words::is_windows();
-        if windows && let Some(moved) = trek_core::update::relocate::take_relocation() {
-            tracing::info!("relocation: now running from {}, moved from {}", moved.to.display(), moved.from.display());
-            match relocate::moved_note(&moved) {
-                (message, Some(undo)) => launch_actions.push((message, undo)),
-                (message, None) => launch_toasts.push(message),
-            }
+        // Where Trek runs now, and the old copy: told by a toast and the Updates page (`arrived`),
+        // once the user's shortcuts have been looked through.
+        if windows && let Some(relocated) = trek_core::update::relocate::at_launch() {
+            tracing::info!("relocation: now running from {}, moved from {}", relocated.moved.to.display(), relocated.moved.from.display());
+            this.arrived(relocated, cx);
         }
         if trek_core::update::blocker().is_none() {
             // Windows: trek-update couldn't swap the update in, and put this version back.
@@ -1479,8 +1483,11 @@ impl Workspace {
             restart_countdown: None,
             moving: relocate::Moving::default(),
             mover: relocate::Mover::default(),
+            old_copy: None,
             #[cfg(test)]
             blocked: None,
+            #[cfg(test)]
+            checks_asked: vec![],
             store_error: None,
             clock: Clock::default(),
             limit_timer: None,
@@ -2100,6 +2107,10 @@ impl Workspace {
         if route == Route::Settings(SettingsPage::Project) && self.route != route {
             // Shown as last recorded until the look through every project is back.
             self.refresh_all_verification(cx);
+        }
+        if route == Route::Settings(SettingsPage::Updates) && self.route != route {
+            // The old copy of Trek may have been deleted by hand since it was last looked at.
+            self.recheck_old_copy(cx);
         }
         if route == Route::Basecamp && self.route != Route::Basecamp {
             self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
@@ -5899,6 +5910,8 @@ impl Workspace {
         match action {
             UpdateAction::Move => self.move_trek(cx),
             UpdateAction::MoveNow => self.move_now(cx),
+            UpdateAction::RemoveOldCopy => self.remove_offered_old_copy(cx),
+            UpdateAction::DismissOldCopy => self.dismiss_old_copy(cx),
             UpdateAction::Check => self.check_for_updates(true, cx),
             UpdateAction::Download => self.download_update(cx),
             UpdateAction::Restart => self.restart_to_update(cx),
@@ -5917,7 +5930,11 @@ impl Workspace {
     pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
         // A dev build (or one macOS runs from a read-only copy) can't replace itself: don't ask.
         // The user asking asks Windows again whether Trek may write where it is.
-        let blocked = if user_initiated { trek_core::update::blocker_now() } else { trek_core::update::blocker() };
+        #[cfg(test)]
+        let said = self.blocked.inspect(|_| self.checks_asked.push(user_initiated));
+        #[cfg(not(test))]
+        let said: Option<Option<trek_core::update::Blocker>> = None;
+        let blocked = said.unwrap_or_else(|| if user_initiated { trek_core::update::blocker_now() } else { trek_core::update::blocker() });
         if blocked.is_some() {
             cx.notify();
             return;
