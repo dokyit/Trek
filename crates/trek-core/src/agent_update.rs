@@ -965,11 +965,8 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
     let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else {
         return Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() };
     };
-    let mut run = tokio::process::Command::new(&program);
+    let mut run = crate::procs::async_command(&program);
     run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").stdin(std::process::Stdio::null()).kill_on_drop(true);
-    // Trek has no console to share: without this each `.cmd` and PowerShell opens one.
-    #[cfg(windows)]
-    run.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let run = run.output();
     let out = match tokio::time::timeout(UPDATE_TIMEOUT, run).await {
         Ok(Ok(out)) => out,

@@ -317,7 +317,7 @@ impl Cli {
     fn spawn(bin: &std::path::Path, config: &SessionConfig, mcp_file: Option<&TempFile>) -> Result<Cli> {
         let mut args = cli_args(config);
         let notes = if detect::runs_through_cmd(bin) { notes_in_file(&mut args)? } else { None };
-        let mut cmd = tokio::process::Command::new(bin);
+        let mut cmd = trek_core::procs::async_command(bin);
         cmd.args(args);
         if let Some(file) = mcp_file {
             cmd.arg("--mcp-config").arg(&file.0);

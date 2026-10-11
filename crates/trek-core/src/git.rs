@@ -85,7 +85,7 @@ fn no_hooks() -> &'static str {
 /// pointing it at another repository. Add the subcommand and its arguments; use
 /// `tokio::process::Command::from` for an async one.
 pub fn read_only(dir: &Path) -> Command {
-    let mut c = Command::new(git_program());
+    let mut c = crate::procs::command(git_program());
     c.current_dir(dir)
         .env("PATH", crate::detect::login_path())
         .env("GIT_OPTIONAL_LOCKS", "0")
