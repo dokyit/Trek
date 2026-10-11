@@ -5,9 +5,12 @@
 //! Channels: npm (and Bun, pnpm) global packages are asked of the npm registry and updated with
 //! the package manager that installed them; Homebrew formulae and casks (macOS only) are asked of
 //! formulae.brew.sh (a third-party tap's formula of its GitHub repository) and updated with
-//! `brew upgrade`; WinGet packages (Windows: Claude Code's and Copilot CLI's) with `winget
-//! upgrade`; anything else came from the vendor's own installer, whose release feed says what's
-//! newest and whose CLI updates itself (`claude update`, `grok update`, …).
+//! `brew upgrade`; WinGet packages (Windows: Claude Code's and Copilot CLI's) are asked of
+//! winget-pkgs and updated with `winget upgrade`, Chocolatey's of its repository with `choco
+//! upgrade` (as an administrator: Windows asks the user first, `elevated`); anything else came
+//! from the vendor's own installer, whose release feed says what's newest and whose CLI updates
+//! itself (`claude update`, `grok update`, …), or, where it doesn't (Devin on Windows), Trek
+//! installs the vendor's release bundle itself. Nothing is left for the user to type.
 //!
 //! On Windows the layouts differ, not the channels: npm's global prefix has no `lib` folder
 //! (`%APPDATA%\npm\node_modules\<package>`), a package's shim is a `.cmd` (read for the package it
@@ -147,20 +150,19 @@ impl Harness {
         crate::catalog::agent_setup(self.agent.strip_prefix("acp:").unwrap_or(self.agent)).map(|s| s.install)
     }
 
-    /// The installer line that is how a Windows install of `binary` updates, when the CLI's own
-    /// `update` doesn't: Devin's `irm … | iex` install marks itself (`distribution`, beside its
-    /// `bin` folder), and its `devin update` only says to run that line again, then exits 0.
-    /// That installer ends by starting Devin's interactive setup wizard (sign-in, MCP servers),
-    /// which Trek leaves out (`unattended`).
+    /// A Windows install of `binary` that its CLI's own `update` doesn't update, so Trek installs
+    /// its release bundle (`Builtin::DevinBundle`): Devin's `irm … | iex` install marks itself
+    /// (`distribution`, beside its `bin` folder), and its `devin update` only says to run that
+    /// line again, then exits 0. That line ends by starting Devin's interactive setup wizard
+    /// (sign-in, MCP servers), unfit to run unattended; and a script downloaded and run is code
+    /// Trek has no way to check, where the bundle comes with a checksum.
     ///
     /// The other Windows installers Trek runs end without asking anything (Factory's prints "Run
     /// 'droid' to get started!"; Cursor's, Claude Code's and Grok's CLIs update themselves).
-    fn installer_only(&self, binary: &Path) -> Option<&'static str> {
-        if !cfg!(windows) || self.agent != "acp:devin" {
-            return None;
-        }
-        let marker = std::fs::read_to_string(binary.parent()?.parent()?.join("distribution")).ok()?;
-        if marker.trim() == "irm-iex" { self.windows_installer() } else { None }
+    fn bundle_install(&self, binary: &Path) -> bool {
+        cfg!(windows)
+            && self.agent == "acp:devin"
+            && binary.parent().and_then(Path::parent).and_then(|cli| std::fs::read_to_string(cli.join("distribution")).ok()).is_some_and(|m| m.trim() == "irm-iex")
     }
 }
 
@@ -573,14 +575,14 @@ pub enum Source {
     Formula(String),
     TapFormula { tap: String, formula: String },
     Cask(String),
-    Feed(Feed),
-}
     /// A WinGet package: the versions WinGet's community source (winget-pkgs) has manifests for.
     /// The vendor's release reaches it hours or days later, and `winget upgrade` installs only
     /// what's there.
     Winget(String),
     /// A Chocolatey package: the community repository's latest, which may lag the vendor's too.
     Chocolatey(String),
+    Feed(Feed),
+}
 
 /// Where to ask for `h`'s newest version, installed as `install` (at version `installed`);
 /// `None` when its vendor publishes nowhere Trek can read.
@@ -620,14 +622,14 @@ pub fn urls(source: &Source) -> Vec<String> {
             vec![format!("{base}/Formula/{formula}.rb"), format!("{base}/{formula}.rb")]
         }
         Source::Cask(c) => vec![format!("https://formulae.brew.sh/api/cask/{c}.json")],
-        // The feeds name a version, not a download: the same on every platform. Cursor's and
-        // Factory's are their install scripts, and each has a Windows one that names it too.
         // `Publisher.Package` is `manifests/p/Publisher/Package`, a folder per version.
         Source::Winget(id) => {
             let first = id.chars().next().map(|c| c.to_ascii_lowercase()).unwrap_or_default();
             vec![format!("https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/{first}/{}", id.replace('.', "/"))]
         }
         Source::Chocolatey(p) => vec![format!("https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'{p}'%20and%20IsLatestVersion&$select=Version")],
+        // The feeds name a version, not a download: the same on every platform. Cursor's and
+        // Factory's are their install scripts, and each has a Windows one that names it too.
         Source::Feed(feed) => match feed {
             Feed::Npm => vec![],
             Feed::ClaudeReleases => vec!["https://downloads.claude.ai/claude-code-releases/latest".into()],
@@ -656,8 +658,6 @@ fn between<'a>(text: &'a str, start: &str, end: char) -> Option<&'a str> {
     Some(&rest[..rest.find(end)?])
 }
 
-/// Read the newest version out of `body`, a response from one of `source`'s URLs.
-pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
 /// The newest of `versions`, as a feed that lists several.
 fn newest(versions: impl Iterator<Item = String>) -> Option<Latest> {
     versions.reduce(|a, b| if is_newer(&b, &a) { b } else { a }).map(|version| Latest { version, auto_updates: false })
@@ -668,6 +668,8 @@ fn package_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
+/// Read the newest version out of `body`, a response from one of `source`'s URLs.
+pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
     let json = || serde_json::from_str::<serde_json::Value>(body).ok();
     let plain = |v: Option<String>| v.and_then(|v| parse_version(&v)).map(|version| Latest { version, auto_updates: false });
     match source {
@@ -680,8 +682,6 @@ fn package_name(name: &str) -> bool {
             Some(Latest { version, auto_updates: v["auto_updates"].as_bool().unwrap_or(false) })
         }
         Source::TapFormula { .. } => plain(body.lines().find_map(|l| l.trim().strip_prefix("version ").map(|v| v.trim().trim_matches('"').to_string()))),
-        Source::Feed(feed) => match feed {
-            Feed::Npm => None,
         // A version's folder is named as the version ("2.1.292", Copilot's "v1.0.95"); a folder
         // of another name is another package (`GitHub.Copilot.Prerelease`).
         Source::Winget(_) => newest(json()?.as_array()?.iter().filter(|e| e["type"] == "dir").filter_map(|e| {
@@ -690,6 +690,8 @@ fn package_name(name: &str) -> bool {
         })),
         // An OData feed: `<d:Version>1.19.0</d:Version>` in its one entry.
         Source::Chocolatey(_) => newest(body.split("<d:Version>").skip(1).filter_map(|rest| parse_version(rest.split('<').next()?))),
+        Source::Feed(feed) => match feed {
+            Feed::Npm => None,
             Feed::ClaudeReleases | Feed::ClaudeStable | Feed::GrokStable => plain(body.lines().next().map(|l| l.trim().to_string())),
             Feed::DevinManifest => plain(json()?["version"].as_str().map(String::from)),
             Feed::CursorInstaller => plain(between(body, "downloads.cursor.com/lab/", '/').map(String::from)),
@@ -728,16 +730,25 @@ pub struct UpdateCommand {
     /// elevated. Windows asks the user to allow it. Never on macOS.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub elevated: bool,
-    /// The vendor's install script, fetched from this URL when the update runs and run unattended
-    /// (`unattended`): Devin's `irm … | iex`, which ends by starting its setup wizard. The script's
-    /// file is the command's last argument, written as it runs.
+    /// Done by Trek itself rather than by running `program`: what the vendor's installer does,
+    /// without what makes it unfit to run unattended. `program` is then the binary it installs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installer: Option<String>,
+    pub builtin: Option<Builtin>,
     /// An older Trek's: why it left this command to the user to run. Read only so that
     /// `Snapshot::load` can drop such a command (this Trek runs it another way, as an
     /// administrator); never written.
     #[serde(default, skip_serializing)]
     pub manual: Option<String>,
+}
+
+/// An update Trek carries out itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Builtin {
+    /// Devin's `irm … | iex` install on Windows, whose `devin update` only says to run that line
+    /// again: its release bundle (manifest, SHA-256, zip) installed as the line installs it, short
+    /// of the PATH change it already made and the setup wizard it ends with (`install_devin_bundle`).
+    DevinBundle,
 }
 
 /// The extensions `CreateProcess` can run, in the order `PATHEXT` gives them (its own default
@@ -784,7 +795,7 @@ impl UpdateCommand {
             on_exit: vec![],
             display: None,
             elevated: false,
-            installer: None,
+            builtin: None,
             manual: None,
         }
     }
@@ -798,16 +809,6 @@ impl UpdateCommand {
     /// package move run where there's no `/bin/sh`. Shown as `shown`.
     pub fn powershell(script: &str, shown: &str) -> Self {
         Self { display: Some(shown.to_string()), ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]) }
-    }
-
-    /// The vendor's install script at `url`, fetched when the update runs and run unattended by
-    /// PowerShell (`installer`). Shown as `shown`, the line the vendor documents.
-    pub fn installer(url: &str, shown: &str) -> Self {
-        Self {
-            display: Some(shown.to_string()),
-            installer: Some(url.to_string()),
-            ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
-        }
     }
 
     /// The PATH it runs with.
@@ -931,33 +932,17 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
             let upgrade = UpdateCommand::new("choco", &["upgrade", package, "-y", "--no-progress"]);
             Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
         }
-        Install::Native => match h.installer_only(binary) {
-            // The vendor's installer, the way `irm … | iex` runs it, without the setup wizard it ends in.
-            Some(line) => installer_url(line).map(|url| UpdateCommand::installer(url, line)),
-            None => own().or_else(|| {
-                h.installer_line().map(|line| if cfg!(windows) { UpdateCommand::powershell(line, line) } else { UpdateCommand::new("/bin/sh", &["-c", line]) })
-            }),
-        },
+        // Devin's `irm … | iex` install, which Trek does itself: its release bundle, checked, put
+        // where that installer puts it; no script is run, and no wizard started.
+        Install::Native if h.bundle_install(binary) => Some(UpdateCommand {
+            builtin: Some(Builtin::DevinBundle),
+            display: Some(format!("{}'s installer steps, without its setup wizard", h.name())),
+            ..UpdateCommand::new(binary, &[])
+        }),
+        Install::Native => own().or_else(|| {
+            h.installer_line().map(|line| if cfg!(windows) { UpdateCommand::powershell(line, line) } else { UpdateCommand::new("/bin/sh", &["-c", line]) })
+        }),
     }
-}
-
-/// The URL of an `irm <url> | iex` line (quoted or not).
-fn installer_url(line: &str) -> Option<&str> {
-    let url = line.strip_prefix("irm ")?.split(" | ").next()?.trim().trim_matches(['\'', '"']);
-    url.starts_with("https://").then_some(url)
-}
-
-/// A vendor's install script without what makes it interactive, so Trek can run it with no one
-/// to answer: Devin's installs, then ends with `& $EntryExe setup`, its setup wizard (sign-in, MCP
-/// servers). Everything before that line is unattended, and stays (the PATH it adds to is the
-/// user's, harmless). `None` when the script doesn't end that way: its vendor changed it, and
-/// what it does last is unknown (`run_installer` runs it as it is, and watches).
-pub fn unattended(script: &str) -> Option<String> {
-    let body = script.trim_end();
-    let (rest, last) = body.rsplit_once('\n').unwrap_or(("", body));
-    let words: Vec<&str> = last.split_whitespace().collect();
-    let setup = matches!(words.as_slice(), ["&", exe, verb] if exe.eq_ignore_ascii_case("$EntryExe") && verb.eq_ignore_ascii_case("setup"));
-    setup.then(|| format!("{}\n", rest.trim_end()))
 }
 
 /// `path` is in a folder only an administrator can write to: Program Files, or ProgramData
@@ -1220,11 +1205,16 @@ async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outco
     if cmd.elevated {
         return not_trek_command(v);
     }
-    let path = cmd.search_path();
-    let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else { return not_installed(cmd) };
-    let ran = match &cmd.installer {
-        Some(url) => run_installer(v, cmd, &program, &path, url).await,
-        None => run_command(cmd, &program, &path).await,
+    let ran = match cmd.builtin {
+        Some(Builtin::DevinBundle) => match tokio::time::timeout(UPDATE_TIMEOUT, install_devin_bundle(&cmd.program, &devin_manifest_url(), DEVIN_HOST)).await {
+            Ok(done) => done.map(|said| (Some(0), said)).map_err(|summary| Outcome::Failed { summary, output: String::new() }),
+            Err(_) => Err(timed_out(cmd)),
+        },
+        None => {
+            let path = cmd.search_path();
+            let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else { return not_installed(cmd) };
+            run_command(cmd, &program, &path).await
+        }
     };
     match ran {
         Ok((code, output)) => conclude(v, cmd, code, output, settle).await,
@@ -1244,8 +1234,12 @@ fn not_installed(cmd: &UpdateCommand) -> Outcome {
 /// and all it printed.
 async fn run_command(cmd: &UpdateCommand, program: &Path, path: &str) -> Result<(Option<i32>, String), Outcome> {
     let mut run = crate::procs::async_command(program);
-    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").kill_on_drop(true);
-    run_command_line(cmd, run).await
+    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    match tokio::time::timeout(UPDATE_TIMEOUT, run.output()).await {
+        Ok(Ok(out)) => Ok((out.status.code(), all_output(&out.stdout, &out.stderr))),
+        Ok(Err(e)) => Err(Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() }),
+        Err(_) => Err(timed_out(cmd)),
+    }
 }
 
 fn timed_out(cmd: &UpdateCommand) -> Outcome {
@@ -1289,144 +1283,134 @@ async fn settled_version(v: &AgentVersion, h: &Harness, binary: &Path, polls: u3
     now
 }
 
-/// A folder of its own for one run's files (a script, its output), under Trek's data folder.
-fn scratch_dir(kind: &str) -> std::io::Result<PathBuf> {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let dir = crate::paths::data_dir().join("tmp").join(format!("{kind}-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// The release bundle Devin's manifest names for a platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Bundle {
+    version: String,
+    url: String,
+    sha256: String,
 }
 
-async fn fetch_text(url: &str) -> Result<String, String> {
-    match client().get(url).send().await {
-        Ok(r) if r.status().is_success() => r.text().await.map_err(|e| format!("couldn't read {url}: {e}")),
-        Ok(r) => Err(format!("{url} answered {}", r.status())),
-        Err(e) if e.is_connect() || e.is_timeout() => Err(format!("{url} didn't answer (offline?)")),
-        Err(e) => Err(format!("couldn't reach {url}: {e}")),
-    }
+/// Where Devin's release bundles are served from; no bundle from anywhere else is installed.
+const DEVIN_HOST: &str = "https://static.devin.ai/";
+
+fn devin_manifest_url() -> String {
+    urls(&Source::Feed(Feed::DevinManifest)).remove(0)
 }
 
-/// What Trek adds to an installer's output when it ended the installer itself.
-fn ended_note(v: &AgentVersion, version: &str) -> String {
-    format!("Trek ended the installer once {} {version} was in place: the installer no longer ends the way Trek knows, and may have gone on to ask for something.", v.name)
+/// The bundle `manifest` (Devin's `manifest.json`) names for `target`. Only what's safe to use as
+/// it is: a version fit for a folder name, a download from `host`, a SHA-256. A manifest without
+/// the checksum has no bundle: it isn't installed unchecked, nor by running the vendor's script.
+fn devin_bundle(manifest: &str, target: &str, host: &str) -> Option<Bundle> {
+    let v: serde_json::Value = serde_json::from_str(manifest).ok()?;
+    let version = v["version"].as_str().filter(|s| parse_version(s).as_deref() == Some(*s))?;
+    let platform = &v["platforms"][target];
+    let url = platform["url"].as_str().filter(|u| u.starts_with(host) && !u.contains(".."))?;
+    let sha256 = platform["sha256"].as_str().filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    Some(Bundle { version: version.into(), url: url.into(), sha256: sha256.to_ascii_lowercase() })
 }
 
-/// The vendor's install script from `url`, run unattended: fetched now, its interactive end
-/// (Devin's setup wizard) cut off (`unattended`), written to a file of its own and run by
-/// PowerShell (`program`, with `cmd`'s arguments, the file last) with nothing on its stdin. A
-/// script that no longer ends the way Trek knows is run as it is, and ended once the CLI it
-/// installs is in place at its new version and running (`watch_installer`): a wizard it starts
-/// can't sit there waiting.
-async fn run_installer(v: &AgentVersion, cmd: &UpdateCommand, program: &Path, path: &str, url: &str) -> Result<(Option<i32>, String), Outcome> {
-    let failed = |summary: String| Outcome::Failed { summary, output: String::new() };
-    let text = fetch_text(url).await.map_err(|e| failed(format!("Couldn't download {}'s installer: {e}.", v.name)))?;
-    let (script, trimmed) = match unattended(&text) {
-        Some(script) => (script, true),
-        None => (text, false),
-    };
-    let dir = scratch_dir("installer").map_err(|e| failed(format!("Couldn't save {}'s installer: {e}", v.name)))?;
-    let file = dir.join("install.ps1");
-    // With a byte-order mark: Windows PowerShell reads a file without one in the ANSI code page.
-    if let Err(e) = std::fs::write(&file, [b"\xEF\xBB\xBF".as_slice(), script.as_bytes()].concat()) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(failed(format!("Couldn't save {}'s installer: {e}", v.name)));
-    }
-    let mut run = crate::procs::async_command(program);
-    run.args(&cmd.args).arg(&file).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").kill_on_drop(true);
-    let ran = if trimmed {
-        run_command_line(cmd, run).await
+/// The Windows platform Devin's manifest names this computer by, as its installer picks it. An
+/// x64 Trek on an Arm computer sees its own architecture in `PROCESSOR_ARCHITECTURE`, the
+/// computer's in `PROCESSOR_ARCHITEW6432`.
+fn windows_target() -> &'static str {
+    let arm = ["PROCESSOR_ARCHITEW6432", "PROCESSOR_ARCHITECTURE"].iter().any(|v| std::env::var(v).is_ok_and(|a| a.eq_ignore_ascii_case("ARM64")));
+    if arm { "aarch64-pc-windows" } else { "x86_64-pc-windows" }
+}
+
+/// Larger than any CLI's bundle: a download past it isn't one.
+const MAX_BUNDLE_BYTES: u64 = 1 << 30;
+
+/// Install Devin's newest release for the install whose entry point is `entry`
+/// (`…\devin\cli\bin\devin.exe`), as its `install.ps1` does for an `irm-iex` install: the bundle
+/// `manifest_url` names (from `host`) checked against the manifest's SHA-256, unpacked into
+/// `_versions\<version>`, and copied over the entry point. The installer's other steps are done
+/// already (its `distribution` marker is what makes this Devin's install; its folder is on the
+/// user's PATH) or aren't for this kind of install (`devin-updater.exe` is the enterprise
+/// portal's), and its last, the setup wizard, is the one not wanted. All in Trek: nothing
+/// downloaded is run. What it did, a line a step, or why it couldn't.
+async fn install_devin_bundle(entry: &Path, manifest_url: &str, host: &str) -> Result<String, String> {
+    use sha2::Digest as _;
+    use tokio::io::AsyncWriteExt as _;
+    let cli = entry.parent().and_then(Path::parent).ok_or_else(|| format!("{} isn't in Devin's install folder.", entry.display()))?;
+    let client = reqwest::Client::builder().user_agent(format!("Trek/{}", crate::VERSION)).connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
+    let manifest = async { client.get(manifest_url).send().await?.error_for_status()?.text().await }.await.map_err(|e| format!("Couldn't read Devin's release manifest: {e}"))?;
+    let target = windows_target();
+    let bundle = devin_bundle(&manifest, target, host).ok_or_else(|| format!("Devin's release manifest names no bundle for {target} that Trek can check (a download from {host} with its SHA-256), so Trek didn't install it."))?;
+    let mut said = vec![format!("Devin {} for {target}", bundle.version)];
+    let versions = cli.join("_versions");
+    let dir = versions.join(&bundle.version);
+    let exe = dir.join("bin").join("devin.exe");
+    if exe.is_file() {
+        said.push(format!("Already unpacked in {}", dir.display()));
     } else {
-        let binary = v.binary.clone();
-        let h = harness(&v.id);
-        watch_installer(v, cmd, run, UPDATE_TIMEOUT, Duration::from_secs(2), move |pid| {
-            let binary = binary.clone();
-            async move {
-                // Only once the installer runs the CLI itself (its copying is done): asking its
-                // version while the file is being replaced could make the copy fail.
-                match h.filter(|_| crate::procs::runs_under(pid, &binary)) {
-                    Some(h) => installed_version(h, &binary).await,
-                    None => None,
+        std::fs::create_dir_all(&versions).map_err(|e| format!("Couldn't make {}: {e}", versions.display()))?;
+        let (download, staging) = (versions.join(format!(".download-{}", std::process::id())), versions.join(format!(".unpack-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&staging);
+        let fetched = async {
+            let mut resp = client.get(&bundle.url).send().await.and_then(|r| r.error_for_status()).map_err(|e| format!("Couldn't download {}: {e}", bundle.url))?;
+            let mut file = tokio::fs::File::create(&download).await.map_err(|e| e.to_string())?;
+            let (mut hasher, mut done) = (sha2::Sha256::new(), 0u64);
+            while let Some(chunk) = resp.chunk().await.map_err(|e| format!("The download of {} was cut off: {e}", bundle.url))? {
+                done += chunk.len() as u64;
+                if done > MAX_BUNDLE_BYTES {
+                    return Err(format!("{} is larger than 1 GB, so it wasn't installed.", bundle.url));
                 }
+                hasher.update(&chunk);
+                file.write_all(&chunk).await.map_err(|e| e.to_string())?;
             }
-        })
-        .await
-    };
-    let _ = std::fs::remove_dir_all(&dir);
-    ran
-}
-
-/// `run`, set up for `cmd`, run with nothing on its stdin: its exit code and all it printed.
-async fn run_command_line(cmd: &UpdateCommand, mut run: tokio::process::Command) -> Result<(Option<i32>, String), Outcome> {
-    run.stdin(std::process::Stdio::null());
-    match tokio::time::timeout(UPDATE_TIMEOUT, run.output()).await {
-        Ok(Ok(out)) => Ok((out.status.code(), all_output(&out.stdout, &out.stderr))),
-        Ok(Err(e)) => Err(Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() }),
-        Err(_) => Err(timed_out(cmd)),
-    }
-}
-
-/// Run an installer whose end is unknown, asking `arrived` every `every` (given the installer's
-/// process id) for the version now in place. Once that's what the update is for, the installer
-/// and all it started are ended, and it counts as done (exit 0), with that said in its output.
-async fn watch_installer<F, Fut>(v: &AgentVersion, cmd: &UpdateCommand, mut run: tokio::process::Command, limit: Duration, every: Duration, mut arrived: F) -> Result<(Option<i32>, String), Outcome>
-where
-    F: FnMut(u32) -> Fut,
-    Fut: std::future::Future<Output = Option<String>>,
-{
-    use tokio::io::AsyncReadExt as _;
-    run.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = run.spawn().map_err(|e| Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() })?;
-    let pid = child.id().unwrap_or_default();
-    fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) -> tokio::task::JoinHandle<Vec<u8>> {
-        tokio::spawn(async move {
-            let mut out = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut out).await;
+            file.flush().await.map_err(|e| e.to_string())?;
+            drop(file);
+            if hex::encode(hasher.finalize()) != bundle.sha256 {
+                return Err(format!("{} doesn't match the SHA-256 in Devin's manifest, so it wasn't installed.", bundle.url));
             }
-            out
-        })
-    }
-    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
-    let deadline = tokio::time::Instant::now() + limit;
-    let mut ended = None;
-    let code = loop {
-        tokio::select! {
-            status = child.wait() => break status.ok().and_then(|s| s.code()),
-            _ = tokio::time::sleep(every) => {
-                if tokio::time::Instant::now() >= deadline {
-                    end_installer(&mut child, pid).await;
-                    return Err(timed_out(cmd));
-                }
-                if let Some(now) = arrived(pid).await.filter(|now| v.installed.as_ref() != Some(now) && v.latest.as_ref().is_none_or(|l| !is_newer(l, now))) {
-                    end_installer(&mut child, pid).await;
-                    ended = Some(now);
-                    break Some(0);
-                }
+            let (zip, into) = (download.clone(), staging.clone());
+            tokio::task::spawn_blocking(move || crate::registry::unpack_zip(&zip, &into)).await.map_err(|e| e.to_string())?.map_err(|e| format!("Couldn't unpack {}: {e:#}", bundle.url))?;
+            if !staging.join("bin").join("devin.exe").is_file() {
+                return Err(format!("{} has no bin\\devin.exe.", bundle.url));
             }
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::rename(&staging, &dir).map_err(|e| format!("Couldn't move Devin {} into {}: {e}", bundle.version, dir.display()))?;
+            Ok(done)
         }
-    };
-    // What it started may hold its output open: once it's ended, what was read is what there is.
-    let read = |task: tokio::task::JoinHandle<Vec<u8>>| async move { tokio::time::timeout(Duration::from_secs(5), task).await.ok().and_then(Result::ok).unwrap_or_default() };
-    let (out, err) = (read(stdout).await, read(stderr).await);
-    let mut output = all_output(&out, &err);
-    if let Some(now) = ended {
-        output = [output, ended_note(v, &now)].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n");
+        .await;
+        let _ = std::fs::remove_file(&download);
+        let _ = std::fs::remove_dir_all(&staging);
+        let bytes = fetched?;
+        said.push(format!("Downloaded {} ({} MB); its SHA-256 matches the manifest's", bundle.url, bytes / (1 << 20)));
+        said.push(format!("Unpacked into {}", dir.display()));
     }
-    Ok((code, output))
+    replace_entry(&exe, entry)?;
+    said.push(format!("Copied it to {}", entry.display()));
+    Ok(said.join("\n"))
 }
 
-/// End the installer with the process id `pid` and everything it started.
-async fn end_installer(child: &mut tokio::process::Child, pid: u32) {
-    #[cfg(windows)]
-    {
-        crate::procs::register(pid as i32);
-        crate::procs::end_tree(pid as i32);
-        crate::procs::unregister(pid as i32);
+/// Put `new` in place of `entry`, which may be running (Devin open in a terminal): Windows lets a
+/// running program be renamed but not overwritten, so it's moved aside first, and put back
+/// should the copy fail. The copy moved aside goes now if it can, or at the next update.
+fn replace_entry(new: &Path, entry: &Path) -> Result<(), String> {
+    let (Some(dir), Some(name)) = (entry.parent(), entry.file_name().map(|n| n.to_string_lossy().into_owned())) else {
+        return Err(format!("{} isn't a file.", entry.display()));
+    };
+    let old = format!("{name}.old-");
+    for left in std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&old)) {
+        let _ = std::fs::remove_file(left.path());
     }
-    #[cfg(not(windows))]
-    let _ = pid;
-    let _ = child.start_kill();
-    let _ = child.wait().await;
+    let aside = dir.join(format!("{old}{}", crate::store::now_ms()));
+    let moved = entry.exists();
+    if moved {
+        std::fs::rename(entry, &aside).map_err(|e| format!("Couldn't move the old {} aside: {e}", entry.display()))?;
+    }
+    if let Err(e) = std::fs::copy(new, entry) {
+        if moved {
+            let _ = std::fs::rename(&aside, entry);
+        }
+        return Err(format!("Couldn't copy the new version to {}: {e}", entry.display()));
+    }
+    if moved {
+        let _ = std::fs::remove_file(&aside);
+    }
+    Ok(())
 }
 
 /// Run the updates of `vs` that are run as an administrator (`UpdateCommand::elevated`), together:
@@ -1523,7 +1507,7 @@ fn is_what_trek_would_run(v: &AgentVersion) -> bool {
     let (Some(cmd), Some(h)) = (&v.command, harness(&v.id)) else { return false };
     h.owns(&v.install)
         && update_command(h, &v.install, &v.binary, false, v.installed.as_deref())
-            .is_some_and(|own| own.elevated == cmd.elevated && own.program == cmd.program && own.args == cmd.args && own.env == cmd.env && own.path == cmd.path && own.installer == cmd.installer)
+            .is_some_and(|own| own.elevated == cmd.elevated && own.program == cmd.program && own.args == cmd.args && own.env == cmd.env && own.path == cmd.path && own.builtin == cmd.builtin)
 }
 
 fn not_trek_command(v: &AgentVersion) -> Outcome {
@@ -2255,15 +2239,15 @@ mod tests {
         let winget = update_command(h("claude-code"), &Install::Winget { id: "Anthropic.ClaudeCode".into() }, Path::new("/Program Files/WinGet/Links/claude"), false, None).unwrap();
         assert_eq!((choco.elevated, winget.elevated), (cfg!(windows), cfg!(windows)));
         let brew = update_command(h("opencode"), &Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None }, Path::new("/opt/homebrew/bin/opencode"), false, None).unwrap();
-        assert!(!brew.elevated && brew.installer.is_none());
+        assert!(!brew.elevated && brew.builtin.is_none());
     }
 
     #[test]
     #[cfg(windows)]
-    fn devin_on_windows_updates_from_its_installer_run_unattended() {
+    fn devin_on_windows_is_updated_from_its_release_bundle_by_trek() {
         // `devin update` on an `irm | iex` install exits 0 having done nothing, printing
         // "To update, run: irm https://cli.devin.ai/install.ps1 | iex"; that installer ends in
-        // Devin's interactive setup wizard, which Trek leaves out.
+        // Devin's interactive setup wizard. Trek installs the bundle the installer would.
         let root = std::env::temp_dir().join(format!("trek-devin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let cli = root.join(r"devin\cli");
@@ -2347,8 +2331,8 @@ mod tests {
         assert_eq!(snap.agents[1].command.as_ref().map(|c| c.shown()).as_deref(), Some("npm install -g @openai/codex@latest"), "others stay");
         // Round trips with the new fields.
         let elevated = AgentVersion { command: Some(UpdateCommand::new("choco", &["upgrade", "opencode", "-y"]).as_admin()), ..version("opencode", "1.2.27", Some("1.3.0")) };
-        let installer = AgentVersion { command: Some(UpdateCommand::installer("https://cli.devin.ai/install.ps1", "irm https://cli.devin.ai/install.ps1 | iex")), ..version("devin", "1", Some("2")) };
-        for v in [elevated, installer] {
+        let bundle = AgentVersion { command: Some(UpdateCommand { builtin: Some(Builtin::DevinBundle), ..UpdateCommand::new(r"C:\x\devin.exe", &[]) }), ..version("devin", "1", Some("2")) };
+        for v in [elevated, bundle] {
             let back: AgentVersion = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
             assert_eq!(back, v);
         }
@@ -2356,29 +2340,127 @@ mod tests {
     }
 
     #[test]
-    fn devins_installer_is_run_without_its_setup_wizard() {
-        // The vendor's script as `https://cli.devin.ai/install.ps1` served it on 2026-10-11 (the
-        // same bytes as the `static.devin.ai/cli/install.ps1` copy fetched that morning, which
-        // now answers 403): it ends by running `devin setup`.
-        let vendor = include_str!("../fixtures/devin-install.ps1");
-        assert!(vendor.trim_end().ends_with("& $EntryExe setup"));
-        let trimmed = unattended(vendor).unwrap();
-        assert!(!trimmed.contains("& $EntryExe setup") && !trimmed.contains(" setup\n"), "the wizard is gone");
-        // Everything before it stays: the download, the copy, the marker, the PATH.
-        assert_eq!(trimmed.trim_end(), vendor.trim_end().strip_suffix("& $EntryExe setup").unwrap().trim_end());
-        for kept in ["Invoke-WebRequest -Uri $BundleUrl", "Copy-Item -LiteralPath $InstalledExe -Destination $EntryExe -Force", "Set-Content -LiteralPath $MarkerPath", "$env:Path = \"$EntryBinDir;$env:Path\""] {
-            assert!(trimmed.contains(kept), "{kept}");
+    fn devins_manifest_names_the_bundle_to_install_and_nothing_unsafe() {
+        let sha = "dded69a40dc54012612eda47e0935f2fb394b97cd38cb4d7d84b1e1d71c5f7ea";
+        let manifest = |version: &str, url: &str, sha: &str| serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": { "url": url, "sha256": sha } } }).to_string();
+        let url = "https://static.devin.ai/cli/3000.11.3/devin-3000.11.3-x86_64-pc-windows.zip";
+        let bundle = |m: &str| devin_bundle(m, "x86_64-pc-windows", DEVIN_HOST);
+        assert_eq!(bundle(&manifest("3000.11.3", url, sha)), Some(Bundle { version: "3000.11.3".into(), url: url.into(), sha256: sha.into() }));
+        assert_eq!(devin_bundle(&manifest("3000.11.3", url, sha), "aarch64-pc-windows", DEVIN_HOST), None, "no bundle for that platform");
+        assert_eq!(bundle(&manifest(r"..\..\x", url, sha)), None, "a version is a folder name");
+        assert_eq!(bundle(&manifest("3000.11.3", "https://example.com/devin.zip", sha)), None, "Devin's own host only");
+        assert_eq!(bundle(&manifest("3000.11.3", "https://static.devin.ai/../evil.zip", sha)), None);
+        assert_eq!(bundle(&manifest("3000.11.3", url, "abc")), None, "a SHA-256");
+        // Without its checksum a bundle isn't installed, nor is the vendor's script run in its place.
+        assert_eq!(bundle(&serde_json::json!({ "version": "3000.11.3", "platforms": { "x86_64-pc-windows": { "url": url } } }).to_string()), None);
+        assert_eq!(bundle("not json"), None);
+        assert_eq!(bundle(&manifest("3000.11.3", url, &sha.to_uppercase())).map(|b| b.sha256).as_deref(), Some(sha), "compared in lower case");
+    }
+
+    /// A zip with `files` in it, and the manifest naming it (as `url`) for both Windows platforms.
+    #[cfg(windows)]
+    fn serve_bundle(dir: &Path, version: &str, files: &[(&str, &[u8])], sha256: Option<&str>) -> String {
+        use std::io::Write as _;
+        use sha2::Digest as _;
+        std::fs::create_dir_all(dir).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(dir.join("devin.zip")).unwrap());
+        for (name, bytes) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
         }
-        // Spacing, letter case and Windows line ends don't matter.
-        assert_eq!(unattended("a\r\nb\r\n  &   $entryexe   SETUP  \r\n\r\n").as_deref(), Some("a\r\nb\n"));
-        // A script that ends any other way is the vendor's changed one: not trimmed (`run_installer`
-        // runs it as it is, and watches it).
-        for changed in ["a\n& $EntryExe setup --yes\n", "a\n& $EntryExe login\n", "a\n& $EntryExe setup\nWrite-Host done\n", "& $Exe setup", ""] {
-            assert_eq!(unattended(changed), None, "{changed:?}");
+        zip.finish().unwrap();
+        let sha = hex::encode(sha2::Sha256::digest(std::fs::read(dir.join("devin.zip")).unwrap()));
+        let base = serve(dir);
+        let platform = serde_json::json!({ "url": format!("{base}/devin.zip"), "sha256": sha256.unwrap_or(&sha) });
+        std::fs::write(dir.join("manifest.json"), serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": platform, "aarch64-pc-windows": platform } }).to_string()).unwrap();
+        base
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_devin_bundle_is_checked_unpacked_and_put_where_the_installer_puts_it() {
+        let root = std::env::temp_dir().join(format!("trek-devin-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = root.join(r"devin\cli");
+        std::fs::create_dir_all(cli.join("bin")).unwrap();
+        std::fs::write(cli.join("distribution"), "irm-iex\n").unwrap();
+        // The install as it is: a running program of the old version, the vendor's real shape
+        // (the fixture binary stands in, and answers `sleep`).
+        let entry = cli.join(r"bin\devin.exe");
+        let program = std::fs::read(trek_test_fixtures::bin("fixture")).unwrap();
+        std::fs::write(&entry, &program).unwrap();
+        let mut running = KillOnDrop(crate::procs::command(&entry).args(["sleep", "60"]).stdin(std::process::Stdio::null()).spawn().unwrap());
+        // The new version's bundle: the program with a byte more, and a file beside it.
+        let new_program = [program.as_slice(), b"\0"].concat();
+        let base = serve_bundle(&root.join("served"), "9000.1.2", &[("bin/devin.exe", &new_program), ("bin/readme.txt", b"hi")], None);
+        let manifest = format!("{base}/manifest.json");
+        let said = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:")).unwrap();
+        assert!(said.contains("SHA-256 matches") && said.contains("Copied it to"), "{said}");
+        // Where the installer puts it: `_versions\<version>\bin\devin.exe`, copied over the entry
+        // point (which was running, and is replaced all the same); nothing left over.
+        assert_eq!(std::fs::read(cli.join(r"_versions\9000.1.2\bin\devin.exe")).unwrap(), new_program);
+        assert_eq!(std::fs::read(cli.join(r"_versions\9000.1.2\bin\readme.txt")).unwrap(), b"hi");
+        assert_eq!(std::fs::read(&entry).unwrap(), new_program);
+        assert!(running.0.try_wait().unwrap().is_none(), "the old one runs on");
+        let names = |dir: PathBuf| std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
+        assert_eq!(std::fs::read_to_string(cli.join("distribution")).unwrap(), "irm-iex\n", "its marker is left as it is");
+        // Once more (the same version, unpacked already): the entry point is made again from it.
+        std::fs::write(&entry, b"damaged").unwrap();
+        let said = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:")).unwrap();
+        assert!(said.contains("Already unpacked"), "{said}");
+        assert_eq!(std::fs::read(&entry).unwrap(), new_program);
+        // A bundle that isn't the one the manifest says isn't installed, and leaves nothing behind.
+        std::fs::write(&entry, &program).unwrap();
+        let base = serve_bundle(&root.join("bad"), "9000.1.3", &[("bin/devin.exe", &new_program)], Some(&"0".repeat(64)));
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &format!("{base}/manifest.json"), "http://127.0.0.1:")) else { panic!("installed") };
+        assert!(why.contains("doesn't match the SHA-256"), "{why}");
+        assert_eq!(std::fs::read(&entry).unwrap(), program, "the install is as it was");
+        assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
+        // One from another host isn't downloaded at all; nor is one with no program in it.
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "https://static.devin.ai/")) else { panic!("installed") };
+        assert!(why.contains("names no bundle"), "{why}");
+        let base = serve_bundle(&root.join("empty"), "9000.1.4", &[("readme.txt", b"hi")], None);
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &format!("{base}/manifest.json"), "http://127.0.0.1:")) else { panic!("installed") };
+        assert!(why.contains("has no bin\\devin.exe"), "{why}");
+        assert_eq!(std::fs::read(&entry).unwrap(), program);
+        assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
+        drop(running);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A child process, killed (and waited for) when it goes.
+    #[cfg(windows)]
+    struct KillOnDrop(std::process::Child);
+
+    #[cfg(windows)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
-        assert_eq!(installer_url("irm https://cli.devin.ai/install.ps1 | iex"), Some("https://cli.devin.ai/install.ps1"));
-        assert_eq!(installer_url("irm 'https://cursor.com/install?win32=true' | iex"), Some("https://cursor.com/install?win32=true"));
-        assert_eq!(installer_url("curl -fsSL https://x | sh"), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_running_program_is_moved_aside_to_be_replaced() {
+        let root = std::env::temp_dir().join(format!("trek-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let (new, entry) = (root.join("new.exe"), root.join(r"bin\devin.exe"));
+        std::fs::write(&new, "new").unwrap();
+        std::fs::write(&entry, "old").unwrap();
+        // One an earlier update couldn't remove while it ran.
+        std::fs::write(root.join(r"bin\devin.exe.old-1"), "older").unwrap();
+        replace_entry(&new, &entry).unwrap();
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
+        let left: Vec<_> = std::fs::read_dir(root.join("bin")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["devin.exe"], "nothing left aside");
+        // Nothing to copy: the old one is put back.
+        let Err(e) = replace_entry(&root.join("missing.exe"), &entry) else { panic!() };
+        assert!(e.starts_with("Couldn't copy the new version"), "{e}");
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A fake CLI at `dir\claude.cmd` that says the version in `dir\version.txt`, as `claude --version`
@@ -2563,93 +2645,6 @@ mod tests {
         let dir = dir.to_path_buf();
         std::thread::spawn(move || trek_test_fixtures::serve::serve(listener, dir));
         format!("http://127.0.0.1:{port}")
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn an_installer_is_fetched_and_run_without_its_wizard() {
-        let root = std::env::temp_dir().join(format!("trek-installer-run-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        crate::paths::isolate_thread(root.join("data"));
-        // The installed CLI, which notes when its setup wizard is started.
-        let bin = root.join(r"cli\bin");
-        let cli = fake_cli(&bin, "3000.11.1");
-        std::fs::write(&cli, "@echo off\r\nif \"%1\"==\"setup\" (\r\n  echo started> \"%~dp0setup-ran.txt\"\r\n  exit /b 0\r\n)\r\ntype \"%~dp0version.txt\"\r\n").unwrap();
-        // An installer in the vendor's shape: it installs the new version, then starts the wizard.
-        let served = root.join("served");
-        std::fs::create_dir_all(&served).unwrap();
-        let installer = format!(
-            "$ErrorActionPreference = \"Stop\"\n$EntryExe = '{}'\nSet-Content -LiteralPath '{}' -Value '3000.11.3'\nWrite-Host \"Installed devin v3000.11.3\"\n\n& $EntryExe setup\n",
-            cli.display(),
-            bin.join("version.txt").display()
-        );
-        std::fs::write(served.join("install.ps1"), installer).unwrap();
-        let url = format!("{}/install.ps1", serve(&served));
-        let shown = format!("irm {url} | iex");
-        let v = AgentVersion { id: "claude".into(), binary: cli, command: Some(UpdateCommand::installer(&url, &shown)), ..version("claude", "3000.11.1", Some("3000.11.3")) };
-        let outcome = crate::runtime().block_on(run_update_settling(&v, (0, Duration::ZERO)));
-        assert_eq!(outcome, Outcome::Updated { version: "3000.11.3".into(), output: "Installed devin v3000.11.3".into() });
-        assert!(!bin.join("setup-ran.txt").exists(), "the wizard never started");
-        // An installer that isn't there is said so, with nothing run.
-        let gone = AgentVersion { command: Some(UpdateCommand::installer(&format!("{}/gone.ps1", serve(&served)), &shown)), ..v.clone() };
-        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update_settling(&gone, (0, Duration::ZERO))) else { panic!() };
-        assert!(summary.starts_with("Couldn't download claude's installer:") && summary.contains("404"), "{summary}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Process `pid` hasn't exited.
-    #[cfg(windows)]
-    fn running(pid: u32) -> bool {
-        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
-        // SAFETY: a handle this opens and closes; a wait of 0 only asks.
-        unsafe {
-            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-            if h.is_null() {
-                return false;
-            }
-            let alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-            CloseHandle(h);
-            alive
-        }
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn an_installer_that_ends_another_way_is_ended_once_the_new_version_is_in() {
-        // The vendor's script changed: what it does after installing is unknown, and here it waits
-        // forever (a wizard). Once the new version answers, it and all it started are ended.
-        let fixture = trek_test_fixtures::bin("fixture");
-        let v = version("claude", "3000.11.1", Some("3000.11.3"));
-        let cmd = UpdateCommand::installer("https://example.invalid/install.ps1", "irm https://example.invalid/install.ps1 | iex");
-        let started = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
-        let seen = started.clone();
-        let mut run = crate::procs::async_command(super::powershell());
-        run.args(["-NoProfile", "-NonInteractive", "-Command", &format!("Write-Host 'Installed v3000.11.3'; & '{}' sleep 600", fixture.display())]);
-        let at = std::time::Instant::now();
-        let wizard = fixture.clone();
-        let ran = crate::runtime().block_on(watch_installer(&v, &cmd, run, Duration::from_secs(120), Duration::from_millis(200), move |pid| {
-            // The new version answers once the installer runs the program (its "wizard").
-            let found = crate::procs::runs_under(pid, &wizard);
-            if found {
-                seen.lock().unwrap().extend(crate::procs::children(pid));
-            }
-            async move { found.then(|| "3000.11.3".to_string()) }
-        }));
-        let (code, output) = ran.unwrap();
-        assert!(at.elapsed() < Duration::from_secs(60), "ended, not waited out: {:?}", at.elapsed());
-        assert_eq!(code, Some(0));
-        assert!(output.starts_with("Installed v3000.11.3\n") && output.ends_with(&ended_note(&v, "3000.11.3")), "{output}");
-        let started = started.lock().unwrap().clone();
-        assert!(!started.is_empty());
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(started.iter().all(|p| !running(*p)), "what it started is ended too");
-        // An answer that isn't the version the update is for doesn't end it; its time running out does.
-        let mut run = crate::procs::async_command(super::powershell());
-        run.args(["-NoProfile", "-NonInteractive", "-Command", &format!("& '{}' sleep 600", fixture.display())]);
-        let ran = crate::runtime().block_on(watch_installer(&v, &cmd, run, Duration::from_secs(3), Duration::from_millis(200), |_| async { Some("3000.11.1".to_string()) }));
-        let Err(Outcome::Failed { summary, .. }) = ran else { panic!("{ran:?}") };
-        assert!(summary.ends_with("took longer than 15 minutes, so Trek stopped it."), "{summary}");
     }
 
     #[test]
@@ -3010,5 +3005,24 @@ mod tests {
             let cmd = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
             println!("{:<16} {:<10} {:>22} -> {:<22} update: {:<5} via `{cmd}`{}", v.name, v.install.label(), v.installed.as_deref().unwrap_or("?"), v.latest.as_deref().unwrap_or("?"), v.update_available(), v.error.as_ref().map(|e| format!("  ({e})")).unwrap_or_default());
         }
+    }
+
+    /// Devin's real bundle, installed into a scratch install of its own (never the one on PATH):
+    /// `cargo test -p trek-core live_devin_bundle -- --ignored --nocapture`.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "downloads Devin's release (about 60 MB)"]
+    fn live_devin_bundle() {
+        let root = std::env::temp_dir().join(format!("trek-live-devin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let entry = root.join(r"devin\cli\bin\devin.exe");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(entry.parent().unwrap().parent().unwrap().join("distribution"), "irm-iex\n").unwrap();
+        let said = crate::runtime().block_on(install_devin_bundle(&entry, &devin_manifest_url(), DEVIN_HOST)).unwrap();
+        println!("{said}");
+        let version = crate::runtime().block_on(installed_version(h("acp:devin"), &entry));
+        println!("installed: {version:?}");
+        assert!(version.is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
