@@ -460,8 +460,13 @@ impl Jobs {
 
     /// Add one that writes its whole output to a file, as well: where.
     fn add_logged(&self, task: BackgroundTask) -> std::path::PathBuf {
+        // Task ids count up from 1 in every session, so the name carries the process and a
+        // count too: two sessions (tests in a process, or two processes) must not share a file,
+        // or one's end removes the other's.
+        static LOGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join("trek-mock-output");
-        let file = dir.join(format!("{}.output", task.id));
+        let n = LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file = dir.join(format!("{}-{n}-{}.output", std::process::id(), task.id));
         let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, ""));
         self.0.lock().unwrap().push(Job { task, output: String::new(), file: Some(file.clone()) });
         file
@@ -2414,6 +2419,22 @@ mod tests {
             m.prompt("hello").await;
             assert!(!m.turn().await.iter().any(|e| matches!(e, AgentEvent::TaskOutput { .. })));
         });
+    }
+
+    #[test]
+    fn two_sessions_servers_never_share_an_output_file() {
+        // Both are task "mock-shell-1" in their own session; one ending mustn't take the other's file.
+        let task = || BackgroundTask { id: "mock-shell-1".into(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: None, readable: true, stoppable: true };
+        let (a, b) = (Jobs::default(), Jobs::default());
+        let (fa, fb) = (a.add_logged(task()), b.add_logged(task()));
+        assert_ne!(fa, fb);
+        a.print("mock-shell-1", "one");
+        b.print("mock-shell-1", "two");
+        drop(EndJobs(a));
+        assert!(!fa.exists());
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), "two\n");
+        drop(EndJobs(b));
+        assert!(!fb.exists());
     }
 
     #[test]
