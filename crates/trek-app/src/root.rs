@@ -686,6 +686,14 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         if !focus {
             crate::system::order_back(window);
         }
+        // The window Windows' permission prompt (an agent's update that needs an administrator)
+        // is put in front of.
+        if cfg!(windows)
+            && let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(&*window)
+            && let raw_window_handle::RawWindowHandle::Win32(win) = handle.as_raw()
+        {
+            trek_core::elevated::set_owner_window(win.hwnd.get());
+        }
         if let Some(error) = workspace.update(cx, |ws, _| ws.store_error.take()) {
             window.on_next_frame(move |window, cx| database_error(&error, window, cx));
         }
