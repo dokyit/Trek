@@ -79,7 +79,10 @@ Reading the numbers:
 `pwsh script/perf.ps1 stress`: the 200-thread profile, three threads streaming `mock:stream 30m`
 at once (each answer passes 1 MB) and a fourth with two sub-agents reporting back after 28
 minutes. Once a minute it looks round as someone would (Basecamp, the long thread, one of the
-streaming threads) and times 3 s of frames on the streaming thread.
+streaming threads) and times 3 s of frames on the streaming thread. (These runs saved at most
+every ten seconds; the cap is now five. A save's cost doesn't depend on the cap, only how often
+it comes, so the lag figures below can be a little higher late in a run, when two streams'
+saves land together. The 30-minute run wasn't repeated.)
 
 | | Before | After |
 |---|---|---|
