@@ -276,14 +276,16 @@ fn keycap(text: impl Into<SharedString>, cx: &App) -> Div {
 const FOLDER_HINT: usize = 30;
 
 /// `path` cut to its last folders, to fit in about `max` characters: projects side by side in one
-/// parent differ only at the end. A last folder that's too long on its own is kept whole.
+/// parent differ only at the end. A last folder that's too long on its own is kept whole. Cut
+/// at `/` or, in a Windows path (`~\Code\trek`), at `\`, and joined with the one it has.
 fn path_tail(path: &str, max: usize) -> String {
     if path.chars().count() <= max {
         return path.to_string();
     }
     let mut tail: Vec<&str> = vec![];
     let mut len = 2;
-    for part in path.rsplit('/').filter(|p| !p.is_empty()) {
+    let sep = if path.contains('\\') { "\\" } else { "/" };
+    for part in path.rsplit(['/', '\\']).filter(|p| !p.is_empty()) {
         let n = part.chars().count() + 1;
         if !tail.is_empty() && len + n > max {
             break;
@@ -292,7 +294,7 @@ fn path_tail(path: &str, max: usize) -> String {
         tail.push(part);
     }
     tail.reverse();
-    format!("…/{}", tail.join("/"))
+    format!("…{sep}{}", tail.join(sep))
 }
 
 /// The search results the Threads group shows: title matches, then message matches (one per
@@ -1147,6 +1149,10 @@ mod tests {
         // Children: [Threads label, t0, t1, Projects label, p0, Commands label, c0, c1].
         let up: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i, true).unwrap()).collect();
         assert_eq!(up, [0, 2, 3, 5, 7]);
+        // A Windows path is cut at its own separator, and keeps it.
+        assert_eq!(path_tail("~\\Code\\trek", 30), "~\\Code\\trek");
+        assert_eq!(path_tail("~\\Documents\\Projects\\Clients\\acme\\web", 30), "…\\Projects\\Clients\\acme\\web");
+        assert_eq!(path_tail("C:\\Users\\me\\OneDrive\\Documents\\FC 24 LE v24.1.1.0", 30), "…\\FC 24 LE v24.1.1.0");
         // Going down, a group's first row is the target, not the label above it (the top row
         // still brings the list's first label).
         let down: Vec<usize> = (0..groups.len()).map(|i| scroll_target(&groups, i, false).unwrap()).collect();
