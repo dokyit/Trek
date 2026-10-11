@@ -73,10 +73,14 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
 /// [`command`] for tokio. Its `Child` is tokio's, and the group and job object a caller wants
 /// (`trek_agents::spawn_group`) are its own.
 pub fn async_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(program); // spawn: the helper
     #[cfg(windows)]
-    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    command
+    {
+        let mut command = tokio::process::Command::new(program); // spawn: the helper
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    tokio::process::Command::new(program) // spawn: the helper
 }
 
 /// Make an existing `command` windowless, as [`command`] does: for one built elsewhere (a
