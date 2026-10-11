@@ -1,7 +1,8 @@
 //! Binaries the test suite spawns where it once used Perl scripts and shell tools, so the same
 //! tests run on macOS and Windows: `fake-acp` (an ACP agent), `fake-mcp` (a stdio MCP server)
 //! and `fixture` (small utilities: `sleep`, `cat`, `echo`, `print`, `stderr`, `exit`, and the
-//! two fakes as verbs). Tests get them through `bin`.
+//! two fakes as verbs; and for updater end-to-end runs, `serve` and a test `minisign` key). Tests
+//! get them through `bin`.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -9,6 +10,8 @@ use std::sync::OnceLock;
 pub mod fake_acp;
 pub mod fake_mcp;
 pub mod fixture;
+pub mod minisign;
+pub mod serve;
 
 /// The built `name` fixture binary (`fake-acp`, `fake-mcp`, `fixture`), ready for
 /// `std::process::Command::new` or `tokio::process::Command::new` on either platform.
@@ -117,6 +120,36 @@ mod tests {
         assert!(child.try_wait().unwrap().is_none(), "it waits for the end of stdin");
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn the_fixture_serves_a_folders_files_on_localhost() {
+        use std::io::Read as _;
+        let dir = std::env::temp_dir().join(format!("trek-fixture-serve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("stable.json"), "{}").unwrap();
+        std::fs::write(dir.join("sub/secret"), "x").unwrap();
+        // In this process: the built `fixture` may be another checkout's (one target folder).
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn({
+            let dir = dir.clone();
+            move || serve::serve(listener, dir)
+        });
+        let get = |path: &str| {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut answer = String::new();
+            s.read_to_string(&mut answer).unwrap();
+            answer
+        };
+        let ok = get("/stable.json");
+        assert!(ok.starts_with("HTTP/1.1 200") && ok.contains("Content-Length: 2\r\n") && ok.ends_with("\r\n\r\n{}"), "{ok}");
+        for outside in ["/sub/secret", "/../Cargo.toml", "/missing", "/"] {
+            assert!(get(outside).starts_with("HTTP/1.1 404"), "{outside}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Send `input`, one message a line, then collect every line the fake agent answered.

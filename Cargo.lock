@@ -9129,7 +9129,18 @@ dependencies = [
 name = "trek-test-fixtures"
 version = "0.4.0"
 dependencies = [
+ "base64 0.22.1",
+ "minisign-verify",
+ "ring",
  "serde_json",
+]
+
+[[package]]
+name = "trek-update"
+version = "0.4.0"
+dependencies = [
+ "trek-test-fixtures",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
