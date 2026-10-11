@@ -341,6 +341,38 @@ pub fn exe_in(folder: &Path) -> PathBuf {
     folder.join(TREK_EXE)
 }
 
+/// A folder where a user's shortcuts to Trek may be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutFolder {
+    /// Where it is, as a sentence says it ("on your Desktop").
+    pub place: &'static str,
+    pub dir: PathBuf,
+    /// How many levels of folders inside it hold shortcuts too.
+    pub depth: u32,
+}
+
+/// The user's own Start menu, Desktop and taskbar pins, where Windows says they are. (Not the
+/// ones every user shares: those are the administrator's to change.)
+pub fn shortcut_folders() -> Vec<ShortcutFolder> {
+    // The same way the guarded folders are found (`SHGetKnownFolderPath`, through `directories`).
+    let roaming = directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf());
+    let desktop = directories::UserDirs::new().and_then(|d| d.desktop_dir().map(Path::to_path_buf));
+    shortcut_folders_in(roaming, desktop)
+}
+
+fn shortcut_folders_in(roaming: Option<PathBuf>, desktop: Option<PathBuf>) -> Vec<ShortcutFolder> {
+    let mut folders = vec![];
+    if let Some(roaming) = roaming.filter(|p| p.is_absolute()) {
+        let microsoft = roaming.join("Microsoft");
+        folders.push(ShortcutFolder { place: "in your Start menu", dir: microsoft.join("Windows").join("Start Menu").join("Programs"), depth: 2 });
+        folders.push(ShortcutFolder { place: "pinned to your taskbar", dir: microsoft.join("Internet Explorer").join("Quick Launch").join("User Pinned").join("TaskBar"), depth: 0 });
+    }
+    if let Some(desktop) = desktop.filter(|p| p.is_absolute()) {
+        folders.push(ShortcutFolder { place: "on your Desktop", dir: desktop, depth: 1 });
+    }
+    folders
+}
+
 /// What became of the old copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
@@ -651,6 +683,12 @@ mod tests {
         assert_eq!(env_of(&cmd, "TREK_BACKGROUND"), Some(Some("1".into())), "behind other windows, as this one was");
         assert_eq!(mover_command(&prepared, 1, &dir, true, &env).get_envs().find(|(k, _)| *k == "TREK_BACKGROUND"), None);
 
+        // An ordinary install's move: the copy starts with none of Trek's own settings, so it is
+        // the user's Trek that registers `trek://` for itself at its launch (`register_trek_protocol`
+        // leaves it to a process that has a data folder or a capture folder of its own).
+        let plain = mover_command(&prepared, 1, &dir, true, &vars(&[("PATH", "x"), ("USERPROFILE", "C:/Users/me")]));
+        assert!(plain.get_envs().all(|(k, _)| !k.to_string_lossy().starts_with("TREK_")), "{:?}", plain.get_envs().collect::<Vec<_>>());
+
         // A capture run asks for its variables to follow it.
         let kept = mover_command(&prepared, 1, &dir, true, &vars(&[("TREK_SHOT_DIR", "D:/shots"), ("TREK_RELOCATE_KEEP", "TREK_SHOT_DIR, PATH, TREK_NOT_SET"), ("PATH", "x")]));
         assert_eq!(env_of(&kept, "TREK_SHOT_DIR"), Some(Some("D:/shots".into())));
@@ -769,6 +807,19 @@ mod tests {
         assert!(!updates.join(OLD_COPY_NOTE).exists());
         assert!(old_copy_remains(&from) && !old_copy_remains(&dir.join("nowhere")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_users_own_shortcut_folders_are_the_start_menu_the_desktop_and_the_taskbar_pins() {
+        let (roaming, desktop) = (std::env::temp_dir().join("Roaming"), std::env::temp_dir().join("OneDrive").join("Desktop"));
+        let folders = shortcut_folders_in(Some(roaming.clone()), Some(desktop.clone()));
+        let found: Vec<_> = folders.iter().map(|f| (f.place, f.dir.clone(), f.depth)).collect();
+        let start = roaming.join("Microsoft").join("Windows").join("Start Menu").join("Programs");
+        let pinned = roaming.join("Microsoft").join("Internet Explorer").join("Quick Launch").join("User Pinned").join("TaskBar");
+        assert_eq!(found, [("in your Start menu", start, 2), ("pinned to your taskbar", pinned, 0), ("on your Desktop", desktop, 1)]);
+        // What Windows doesn't say, or says without a full path, isn't searched.
+        assert!(shortcut_folders_in(None, Some(PathBuf::from("Desktop"))).is_empty());
+        assert!(shortcut_folders_in(None, None).is_empty());
     }
 
     #[test]
