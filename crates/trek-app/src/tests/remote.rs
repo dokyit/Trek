@@ -17,7 +17,7 @@ fn ask<T>(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, make: 
 async fn ask_later<T>(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, make: impl FnOnce(tr::Reply<T>) -> tr::HostRequest) -> tr::HostResult<T> {
     let (reply, mut rx) = tokio::sync::oneshot::channel();
     trek.update(cx, |ws, cx| ws.remote_request(make(reply), cx));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         if let Ok(answer) = rx.try_recv() {
@@ -491,7 +491,7 @@ fn git_from_the_phone_reviews_commits_and_switches_as_the_panel_does() {
         });
         assert_eq!(blocked.as_deref(), Some("Switching branches…"));
         assert_eq!(refused.try_recv().unwrap().unwrap_err().code, tr::ErrorCode::Conflict);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
         let done = loop {
             cx.run_until_parked();
             if let Ok(done) = switched.try_recv() {

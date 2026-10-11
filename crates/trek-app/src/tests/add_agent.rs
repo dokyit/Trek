@@ -107,7 +107,7 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
         let (ws2, _, _) = launch(cx, Store::in_memory().unwrap(), Settings::load());
         cx.run_until_parked();
         assert_eq!(agent.display_name(), "Local Bot");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
         while !ws2.read_with(cx, |ws, _| ws.agents.iter().any(|a| a.agent == agent)) {
             assert!(std::time::Instant::now() < deadline, "the restarted Trek finds it");
             cx.run_until_parked();
