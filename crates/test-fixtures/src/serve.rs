@@ -60,5 +60,12 @@ fn answer(mut stream: TcpStream, dir: &Path) -> Option<String> {
     stream.write_all(head.as_bytes()).ok()?;
     stream.write_all(&body).ok()?;
     stream.flush().ok()?;
+    // Say the answer is complete, then wait for the client to finish before closing: a socket
+    // closed while bytes from the peer are still unread is torn down with a reset, and a client
+    // mid-`read_to_string` then sees "connection reset" (os error 10054 on GitHub's Windows
+    // runner) instead of the end of the body.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let _ = std::io::copy(&mut reader, &mut std::io::sink());
     Some(format!("{method} {target} {}", &status[..3]))
 }
