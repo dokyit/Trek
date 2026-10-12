@@ -6,8 +6,9 @@
 //! where the call is.
 
 use super::harness::*;
-use gpui_kit::{AnyWindowHandle, TestAppContext};
-use std::cell::RefCell;
+use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{AnyWindowHandle, PlatformInput, TestAppContext, point};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// What Windows does on a call about a window of this thread: GPUI's callback updates the window
@@ -17,6 +18,92 @@ fn windows_calls_back(window: AnyWindowHandle, cx: &TestAppContext) -> (Rc<dyn F
     let async_cx = cx.to_async();
     let log = heard.clone();
     (Rc::new(move || log.borrow_mut().push(window.update(&mut async_cx.clone(), |_, _, _| ()).is_ok())), heard)
+}
+
+/// The tests' answer to "where is the cursor", until dropped.
+struct Cursor;
+
+impl Cursor {
+    fn answers(ask: impl Fn() -> Option<bool> + 'static) -> Cursor {
+        crate::chrome::CURSOR_IN_TESTS.with(|c| *c.borrow_mut() = Some(Rc::new(ask)));
+        Cursor
+    }
+}
+
+impl Drop for Cursor {
+    fn drop(&mut self) {
+        crate::chrome::CURSOR_IN_TESTS.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// The pointer in the middle of the window, which hasn't been told it's over it (the test
+/// platform never says so): as after Windows' `WM_MOUSELEAVE`, or a window that came up under a
+/// cursor that hasn't moved since.
+fn pointer_in_the_middle(trek: &Trek, cx: &mut TestAppContext) {
+    trek.window(cx, |window, cx| {
+        let at = point(window.viewport_size().width / 2., window.viewport_size().height / 2.);
+        window.dispatch_event(PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position: at, pressed_button: None, modifiers: Default::default() }), cx)
+    });
+    cx.run_until_parked();
+}
+
+/// Beta 2 and 3 logged "RefCell already borrowed" by the burst: the window asked where the cursor
+/// was (`WindowFromPoint`) as it was drawn, and Windows asked the window under it, Trek's own,
+/// which couldn't answer mid-draw. Asked after the draw, the window hears it, and a cursor over
+/// another window still lets the pointer go.
+#[test]
+fn the_cursor_is_asked_where_after_the_draw() {
+    run(async |cx| {
+        let trek = open(cx);
+        // What opening asked is answered first (by no one: the test platform has no cursor).
+        cx.run_until_parked();
+        let (call_back, heard) = windows_calls_back(trek.window, cx);
+        let asked = Rc::new(Cell::new(0));
+        let a = asked.clone();
+        let _cursor = Cursor::answers(move || {
+            a.set(a.get() + 1);
+            call_back();
+            Some(false)
+        });
+        pointer_in_the_middle(&trek, cx);
+        trek.render(cx);
+        cx.run_until_parked();
+        assert!(!heard.borrow().is_empty() && heard.borrow().iter().all(|ran| *ran), "every callback reached the window: {:?}", heard.borrow());
+        assert_eq!(asked.get(), 1, "the system was asked once");
+        assert!(!trek.window(cx, |window, _| crate::chrome::pointer_inside(window)), "the cursor is over another window: the pointer was let go");
+    });
+}
+
+/// A cursor over the window itself (its frame, or a web view in it) keeps the pointer, and the
+/// window is asked once per draw at most, never twice at once.
+#[test]
+fn a_cursor_over_the_window_keeps_the_pointer() {
+    run(async |cx| {
+        let trek = open(cx);
+        cx.run_until_parked();
+        let (call_back, heard) = windows_calls_back(trek.window, cx);
+        let asked = Rc::new(Cell::new(0));
+        let a = asked.clone();
+        let _cursor = Cursor::answers(move || {
+            a.set(a.get() + 1);
+            call_back();
+            Some(true)
+        });
+        pointer_in_the_middle(&trek, cx);
+        // Two draws before the answer comes: one question.
+        trek.window(cx, |window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        });
+        cx.run_until_parked();
+        assert!(heard.borrow().iter().all(|ran| *ran), "every callback reached the window: {:?}", heard.borrow());
+        assert_eq!(asked.get(), 1, "one question out at a time");
+        assert!(trek.window(cx, |window, _| crate::chrome::pointer_inside(window)), "the pointer stays: the cursor is over this window");
+        // The next draw asks again.
+        trek.render(cx);
+        cx.run_until_parked();
+        assert_eq!(asked.get(), 2);
+    });
 }
 
 /// `system::after_update` runs outside the update that asked, where the window hears back;
