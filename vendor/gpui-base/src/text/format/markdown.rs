@@ -19,13 +19,173 @@ use crate::text::{
 /// Parse Markdown into a tree of nodes.
 pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<ParsedDocument, SharedString> {
     let options = cx.markdown_extensions.parse_options();
-    let mut root =
-        markdown::to_mdast(source, &options).map_err(|e| SharedString::from(e.to_string()))?;
+    let mut root = parse_with_latex_delimiters(source, &options)
+        .map_err(|e| SharedString::from(e.to_string()))?;
     let mut prose = options;
     prose.constructs.math_text = false;
     prose.constructs.math_flow = false;
     flatten_unclaimed_math(&mut root, source, &prose, cx);
     Ok(ast_to_document(source, root, cx))
+}
+
+/// Trek: models delimit maths with `\(…\)` and `\[…\]` as often as with
+/// dollars, and Markdown reads those as escaped brackets: the backslashes
+/// vanish and the formula shows as raw LaTeX between plain brackets. Before
+/// the real parse, rewrite each such pair in running text (never in code) to
+/// `$$`, which is the same length, so every position the parser reports still
+/// points at the same byte of the original: source ranges, selection mapping
+/// and copied Markdown keep the author's `\(`, and only the parser sees the
+/// dollars. Two dollars rather than one because a run of two only closes on
+/// another run of two, so a price in the same paragraph ("$5") can't pair
+/// with it.
+///
+/// Each rewritten pair must come out as exactly one math node. A `\[` alone on
+/// its line becomes a `$$` fence, and when its `\]` isn't alone on a line too
+/// that fence would run to the end of the text. Pairs that don't come out
+/// whole are put back as written and the text parsed again.
+fn parse_with_latex_delimiters(source: &str, options: &ParseOptions) -> Result<Node, String> {
+    let root = markdown::to_mdast(source, options).map_err(|e| e.to_string())?;
+    if !source.contains("\\(") && !source.contains("\\[") {
+        return Ok(root);
+    }
+    let mut pairs = Vec::new();
+    latex_delimiter_pairs(&root, source, &mut pairs);
+    for _ in 0..3 {
+        if pairs.is_empty() {
+            break;
+        }
+        let mut bytes = source.as_bytes().to_vec();
+        for &(open, close) in &pairs {
+            bytes[open..open + 2].copy_from_slice(b"$$");
+            bytes[close..close + 2].copy_from_slice(b"$$");
+        }
+        // Only ASCII replaced ASCII, so this can't fail; give up if it does.
+        let Ok(rewritten) = String::from_utf8(bytes) else {
+            break;
+        };
+        let parsed = markdown::to_mdast(&rewritten, options).map_err(|e| e.to_string())?;
+        let mut spans = Vec::new();
+        math_spans(&parsed, &mut spans);
+        let count = pairs.len();
+        pairs.retain(|&(open, close)| {
+            spans
+                .iter()
+                .any(|span| encloses_exactly(source, span, open..close + 2))
+        });
+        if pairs.len() == count {
+            return Ok(parsed);
+        }
+    }
+    Ok(root)
+}
+
+/// The `\(…\)` and `\[…\]` pairs in the text of every paragraph, heading and
+/// table cell: (the opener's backslash, the closer's backslash).
+fn latex_delimiter_pairs(node: &Node, source: &str, pairs: &mut Vec<(usize, usize)>) {
+    match node {
+        Node::Paragraph(_) | Node::Heading(_) | Node::TableCell(_) => {
+            let mut runs = Vec::new();
+            text_runs(node, &mut runs);
+            pair_latex_delimiters(source, &runs, pairs);
+        }
+        _ => {
+            for child in node.children().into_iter().flatten() {
+                latex_delimiter_pairs(child, source, pairs);
+            }
+        }
+    }
+}
+
+/// Where a paragraph's own text lies in the source, in order: its text nodes,
+/// through emphasis and links, but never code, maths or HTML.
+fn text_runs(node: &Node, runs: &mut Vec<Range<usize>>) {
+    if let Node::Text(text) = node {
+        if let Some(position) = &text.position {
+            runs.push(position.start.offset..position.end.offset);
+        }
+        return;
+    }
+    for child in node.children().into_iter().flatten() {
+        text_runs(child, runs);
+    }
+}
+
+fn pair_latex_delimiters(source: &str, runs: &[Range<usize>], pairs: &mut Vec<(usize, usize)>) {
+    let bytes = source.as_bytes();
+    // The open delimiter's backslash, and the bracket that closes it.
+    let mut open: Option<(usize, u8)> = None;
+    for run in runs {
+        // A text node that opens with an escape starts after its backslash
+        // (see `include_preceding_escape`): the escape is still this run's.
+        let mut at = run.start;
+        if at > 0 && bytes.get(at - 1) == Some(&b'\\') {
+            at -= 1;
+        }
+        while at + 1 < run.end.min(bytes.len()) {
+            if bytes[at] != b'\\' {
+                at += 1;
+                continue;
+            }
+            // An escape takes two bytes, so `\\(` is a backslash and a paren.
+            // A second opener of the same kind starts over; the other kind
+            // inside an open pair is part of its formula.
+            match (bytes[at + 1], open) {
+                (b'(', open_now) if open_now.is_none_or(|(_, wanted)| wanted == b')') => {
+                    open = Some((at, b')'))
+                }
+                (b'[', open_now) if open_now.is_none_or(|(_, wanted)| wanted == b']') => {
+                    open = Some((at, b']'))
+                }
+                (closer @ (b')' | b']'), Some((start, wanted))) if closer == wanted => {
+                    if pairable(source, start, at) {
+                        pairs.push((start, at));
+                    }
+                    open = None;
+                }
+                _ => {}
+            }
+            at += 2;
+        }
+    }
+}
+
+/// A pair whose dollars would read as maths: something between them, and no
+/// dollar beside either `$$` to lengthen it into a run that closes elsewhere.
+fn pairable(source: &str, open: usize, close: usize) -> bool {
+    let Some(body) = source.get(open + 2..close) else {
+        return false;
+    };
+    let bytes = source.as_bytes();
+    !body.trim().is_empty()
+        && !body.starts_with('$')
+        && !body.ends_with('$')
+        && !body.contains("$$")
+        && (open == 0 || bytes[open - 1] != b'$')
+        && bytes.get(close + 2) != Some(&b'$')
+}
+
+fn math_spans(node: &Node, spans: &mut Vec<Range<usize>>) {
+    if let Node::InlineMath(mdast::InlineMath { position: Some(position), .. })
+    | Node::Math(mdast::Math { position: Some(position), .. }) = node
+    {
+        spans.push(position.start.offset..position.end.offset);
+    }
+    for child in node.children().into_iter().flatten() {
+        math_spans(child, spans);
+    }
+}
+
+/// `span` is the math node of exactly `pair`: a fence may take the
+/// indentation before it and spaces after it, but nothing else.
+fn encloses_exactly(source: &str, span: &Range<usize>, pair: Range<usize>) -> bool {
+    span.start <= pair.start
+        && span.end >= pair.end
+        && source
+            .get(span.start..pair.start)
+            .is_some_and(|before| before.trim().is_empty())
+        && source
+            .get(pair.end..span.end)
+            .is_some_and(|after| after.trim().is_empty())
 }
 
 /// Math parsing is on by default, so prose that merely contains two dollar
@@ -72,6 +232,10 @@ fn flatten_unclaimed_math(node: &mut Node, source: &str, options: &ParseOptions,
 fn reparse_as_prose(node: &Node, source: &str, options: &ParseOptions) -> Option<Vec<Node>> {
     let position = node.position()?.clone();
     let literal = source.get(position.start.offset..position.end.offset)?;
+    // Trek: a `\(…\)` pair is maths only by the rewrite before parsing (see
+    // `parse_with_latex_delimiters`). Unclaimed, it reads as the escaped
+    // brackets it was written as, even when that's all plain text.
+    let latex_delimited = literal.starts_with('\\');
     if !may_hold_inline_markup(literal) {
         return None;
     }
@@ -81,10 +245,11 @@ fn reparse_as_prose(node: &Node, source: &str, options: &ParseOptions) -> Option
     let [Node::Paragraph(paragraph)] = root.children.as_mut_slice() else {
         return None;
     };
-    if paragraph
-        .children
-        .iter()
-        .all(|child| matches!(child, Node::Text(_)))
+    if !latex_delimited
+        && paragraph
+            .children
+            .iter()
+            .all(|child| matches!(child, Node::Text(_)))
     {
         return None;
     }
@@ -2114,6 +2279,128 @@ mod tests {
         };
         assert_eq!(code.code(), "\\sum_{i=1}^{n} i");
         assert!(document.to_markdown().contains("\\sum_{i=1}^{n} i"));
+    }
+
+    /// A document parsed with a plugin that claims every math node, as `[value]`.
+    fn parse_claiming_math(source: &str) -> ParsedDocument {
+        let extensions = MarkdownExtensions::default().plugin(
+            crate::text::markdown_ext::TestInlinePlugin::new("formula").parse_with(|node, cx| {
+                let Node::InlineMath(math) = node else {
+                    return None;
+                };
+                Some(
+                    MarkdownNode::new("formula", cx.node_source(node).unwrap_or_default().to_string())
+                        .text(format!("[{}]", math.value)),
+                )
+            }),
+        );
+        let mut cx = NodeContext {
+            markdown_extensions: extensions.into(),
+            ..Default::default()
+        };
+        parse(source, &mut cx).unwrap()
+    }
+
+    fn formulas(document: &ParsedDocument) -> Vec<(String, Option<Range<usize>>)> {
+        document
+            .blocks
+            .iter()
+            .filter_map(first_paragraph)
+            .flat_map(|paragraph| paragraph.children.iter())
+            .filter_map(|node| node.custom.as_ref())
+            .map(|custom| (custom.data::<String>().cloned().unwrap_or_default(), custom.source_range()))
+            .collect()
+    }
+
+    #[test]
+    fn latex_delimiters_parse_as_math_and_keep_their_source() {
+        let source = r"area \(x^2\) and \( \frac{a}{b} \) then \[E = mc^2\] costs $5 and $10";
+        let document = parse_claiming_math(source);
+        assert_eq!(
+            document.text(),
+            "area [x^2] and [\\frac{a}{b}] then [E = mc^2] costs [5 and ]10\n",
+            "one padding space comes off each side, as in a code span"
+        );
+        let found = formulas(&document);
+        let at = |needle: &str| {
+            let start = source.find(needle).unwrap();
+            Some(start..start + needle.len())
+        };
+        assert_eq!(
+            found,
+            vec![
+                (r"\(x^2\)".to_string(), at(r"\(x^2\)")),
+                (r"\( \frac{a}{b} \)".to_string(), at(r"\( \frac{a}{b} \)")),
+                (r"\[E = mc^2\]".to_string(), at(r"\[E = mc^2\]")),
+                ("$5 and $".to_string(), at("$5 and $")),
+            ],
+            "every position is the original's, and the plugin reads the source as written"
+        );
+        assert!(document.to_markdown().contains(r"\(x^2\)"));
+    }
+
+    #[test]
+    fn latex_delimiters_in_code_and_unpaired_stay_as_written() {
+        let source = "`\\(x\\)` and \\\\(y\\\\) and \\[ alone\n\n```\n\\[z\\]\n```";
+        let document = parse_claiming_math(source);
+        assert!(formulas(&document).is_empty(), "{:?}", formulas(&document));
+        assert_eq!(
+            document.text(),
+            "\\(x\\) and \\(y\\) and [ alone\n\\[z\\]\n",
+            "code keeps its backslashes, an escaped backslash isn't an opener, a lone \\[ is a bracket"
+        );
+    }
+
+    #[test]
+    fn a_latex_display_block_parses_as_block_math() {
+        let source = "Bayes:\n\n\\[\nP(A \\mid B) = \\frac{a}{b}\n\\]\n\nAfter.";
+        let mut cx = NodeContext::default();
+        let document = parse(source, &mut cx).unwrap();
+        let BlockNode::CodeBlock(code) = &document.blocks[1] else {
+            panic!("expected block math (a code block without a plugin): {:?}", document.blocks)
+        };
+        assert_eq!(code.code(), "P(A \\mid B) = \\frac{a}{b}");
+        assert_eq!(document.blocks.len(), 3, "the paragraph after it is its own");
+    }
+
+    #[test]
+    fn a_latex_display_that_would_never_close_stays_prose() {
+        // `\[` alone on its line becomes a `$$` fence, but this `\]` isn't
+        // alone on its own line: the fence would swallow everything after it.
+        let source = "\\[\nx = 1 \\]\n\nAfter.";
+        let mut cx = NodeContext::default();
+        let document = parse(source, &mut cx).unwrap();
+        assert_eq!(document.blocks.len(), 2, "{:?}", document.blocks);
+        assert!(document.text().ends_with("After.\n"), "{:?}", document.text());
+    }
+
+    #[test]
+    fn unclaimed_latex_delimiters_read_as_escaped_brackets() {
+        let mut cx = NodeContext::default();
+        let document = parse(r"so \(5 and 6\) apples", &mut cx).unwrap();
+        assert_eq!(document.text(), "so (5 and 6) apples\n");
+    }
+
+    #[test]
+    fn selection_maps_through_rewritten_latex_delimiters() {
+        // The rewrite keeps every length, so the text around a `\(…\)`
+        // formula maps to exactly the bytes it would around a `$$…$$` one.
+        let segments = |source: &str| {
+            let document = parse_claiming_math(source);
+            assert_eq!(formulas(&document).len(), 2, "{source}: a paragraph may open with the delimiter");
+            let paragraph = first_paragraph(&document.blocks[0]).unwrap();
+            paragraph
+                .children
+                .iter()
+                .map(|node| (node.text.to_string(), node.source_segments.clone()))
+                .collect::<Vec<_>>()
+        };
+        let latex = segments(r"\(x\) then **bold** after \[y\] end");
+        let dollars = segments(r"$$x$$ then **bold** after \[y\] end");
+        assert_eq!(latex[1..], dollars[1..], "the text after the first formula");
+        // Unclaimed, the escapes read as brackets and map as escapes do.
+        let source = r"so \(5 and 6\) **apples**";
+        assert_eq!(select_rendered_range(source, 13..19), 17..23);
     }
 
     fn bold_runs(paragraph: &Paragraph) -> Vec<String> {
