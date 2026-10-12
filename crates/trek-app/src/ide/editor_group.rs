@@ -339,7 +339,7 @@ impl IdeWorkbench {
 
     /// Close the tab of the file at `path`, if it has one.
     pub fn close_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.tabs.iter().find(|t| t.path(cx).as_deref() == Some(path)).map(|t| t.id()) {
+        if let Some(id) = self.tabs.iter().find(|t| t.file(cx).as_deref() == Some(path)).map(|t| t.id()) {
             self.close(id, window, cx);
         }
     }
@@ -397,7 +397,8 @@ impl IdeWorkbench {
     pub(super) fn remove(&mut self, id: EntityId, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else { return };
         let tab = self.tabs.remove(ix);
-        let file = tab.path(cx);
+        // An editor's file or a preview's: either can be the file shown on its own.
+        let file = tab.file(cx);
         self.forget_file(&tab, cx);
         self.mru.retain(|m| *m != id);
         let front = self.mru.last().and_then(|m| self.tabs.iter().position(|t| t.id() == *m));
