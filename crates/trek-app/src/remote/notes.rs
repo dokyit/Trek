@@ -1,6 +1,9 @@
 //! Notes from the phone: the same markdown files the Notes screen keeps (`trek_core::notes`),
 //! read and written whole. Deleting moves a note to the notes folder's `Deleted/`, as on the
-//! Mac. The Notes screen reads them again when a phone changes one (`notes_epoch`).
+//! Mac. The Notes screen reads them again when a phone changes one (`notes_epoch`). A note's
+//! pictures stay on the Mac: the phone gets their markdown links (`![alt](attachments/…)`) as
+//! text and saves them back untouched, and the list's titles and previews read an image as its
+//! alt text.
 
 use crate::workspace::Workspace;
 use gpui_kit::Context;

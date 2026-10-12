@@ -12,7 +12,7 @@
 //! atomically (a temp file renamed into place) so a half-written batch is never run.
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
-//! `send <prompt>`, `attach <image>` (into the main composer's outbox), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
+//! `send <prompt>`, `attach <image>` (into the main composer's outbox), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `usage-demo` (plans and limits for the Usage card, no real agent asked), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
@@ -673,6 +673,41 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
                 _ => anyhow::bail!("tools: unknown argument {arg:?} (on|off|git|explorer|terminal|browser|sidechat|simulator)"),
+            }
+            Ok(())
+        })??;
+        cx.refresh_windows();
+        return Ok(());
+    }
+    if verb == "note" {
+        // Notes without a pointer: `note text <markdown>` (the note on screen's whole text, `\n`
+        // for a new line; one is started when there's none), `note image <path>…` (image files
+        // put in at the cursor, as dropping them does) and `note mode write|split|preview`.
+        let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
+                anyhow::bail!("note: no Trek window");
+            };
+            let notes = trek.read(cx).notes.clone();
+            match sub {
+                "text" => notes.update(cx, |n, cx| n.set_text(rest.replace("\\n", "\n"), window, cx)),
+                "image" => {
+                    anyhow::ensure!(!rest.is_empty(), "note image <path>…");
+                    let paths: Vec<PathBuf> = rest.split_whitespace().map(PathBuf::from).collect();
+                    notes.update(cx, |n, cx| n.add_files(paths, window, cx));
+                }
+                "mode" => {
+                    let mode = match rest {
+                        "write" => crate::notes::Mode::Write,
+                        "split" => crate::notes::Mode::Split,
+                        "preview" => crate::notes::Mode::Preview,
+                        _ => anyhow::bail!("note mode write|split|preview"),
+                    };
+                    notes.update(cx, |n, cx| n.set_mode(mode, cx));
+                }
+                _ => anyhow::bail!("note text <markdown>|image <path>…|mode write|split|preview"),
             }
             Ok(())
         })??;
