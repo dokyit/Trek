@@ -43,7 +43,7 @@ const MAX_LIVE: usize = 3;
 const NEAR: f32 = 1.;
 const FAR: f32 = 3.;
 /// The corners of the page inside its frame.
-const RADIUS: f32 = 7.;
+pub(crate) const RADIUS: f32 = 7.;
 /// One sweep of the shimmer over a page still being written (the visualization's pace).
 const SHIMMER: Duration = Duration::from_millis(1600);
 /// A link the page follows by itself while it loads isn't the user's: none opens the browser
@@ -1023,6 +1023,26 @@ impl Element for Surface {
             }
         });
     }
+}
+
+/// For `page snap`: each of `window`'s live pages as Windows has it — its host's place in the
+/// window's client area and its view's place in the host, both device pixels — with a capture of
+/// the page on its way. (The pages are native views; a `shot` frame alone doesn't show them.)
+#[cfg(all(windows, feature = "shots"))]
+pub(crate) fn shots_captures(window_id: WindowId, cx: &App) -> Vec<([i32; 4], [i32; 4], async_channel::Receiver<Result<Vec<u8>, String>>)> {
+    LIVE.with(|live| {
+        live.borrow()
+            .iter()
+            .filter(|(w, _)| *w == window_id)
+            .filter_map(|(_, state)| state.upgrade())
+            .filter_map(|state| {
+                let state = state.read(cx);
+                let live = state.live.as_ref()?;
+                let (host, view) = live.host.rects()?;
+                Some((host, view, crate::panels::browser::capture_png(live.view.as_ref()?)))
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
