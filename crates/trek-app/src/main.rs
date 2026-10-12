@@ -37,6 +37,7 @@ mod mascot;
 mod md;
 mod mentions;
 mod motion;
+mod note_images;
 mod notes;
 mod onboarding;
 mod panels;

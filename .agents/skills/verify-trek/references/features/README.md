@@ -7,7 +7,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Threads and composer](threads-and-composer.md) — start, steer, stop, and continue agent work with models, effort, plan mode, mentions, commands, skills, and attachments.
 - [Thread history and inbox](thread-history-and-inbox.md) — search, pin, snooze, rename, settle, retry, rewind, fork, detach, and reopen work.
 - [Projects and worktrees](projects-and-worktrees.md) — organize folders, set project defaults and actions, and isolate work in Git worktrees.
-- [Basecamp and Notes](basecamp-and-notes.md) — review recent work and keep persistent Markdown notes.
+- [Basecamp and Notes](basecamp-and-notes.md) — review recent work and keep persistent Markdown notes, with pictures.
 - [Consulting and delegation](consulting-and-delegation.md) — ask other agents to advise, discuss, or implement as child threads.
 - [Inline visualizations](inline-visualizations.md) — render safe, themed charts, heatmaps, treemaps, and UI treatment previews inside an agent answer.
 

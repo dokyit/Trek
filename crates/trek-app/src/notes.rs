@@ -3,9 +3,16 @@
 //! for bold, italics, underline, strikethrough, headings, bullet, numbered and check lists,
 //! quotes, code, text colour and highlights. Write, Split (writing beside how it reads) or
 //! Preview. Saved as you type, as markdown files (see `trek_core::notes`).
+//!
+//! Pictures go in by pasting one (a screenshot on the clipboard, or image files copied in
+//! Finder), dropping image files on the note, or the toolbar's Add image: each is kept in the
+//! notes folder's `attachments/` (HEIC, TIFF and BMP as a PNG copy) and linked as markdown where
+//! the cursor is. The preview draws them, Write shows them as tiles under the text, and a click
+//! opens the image viewer (see `note_images`).
 
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
+use std::path::PathBuf;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
@@ -155,6 +162,10 @@ pub struct NotesView {
     colors_open: bool,
     /// The toolbar's width as last laid out (0 before): it gives up room below `TOOLBAR_*`.
     toolbar_width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The preview's width as last laid out (0 before): its pictures fit it.
+    preview_width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Batches of pictures still being copied into the notes folder.
+    adding: usize,
     /// The note's text changed and isn't saved yet.
     dirty: bool,
     /// Undo and redo for the note on screen.
@@ -211,6 +222,8 @@ impl NotesView {
             mode: Mode::Split,
             colors_open: false,
             toolbar_width: Default::default(),
+            preview_width: Default::default(),
+            adding: 0,
             dirty: false,
             history: History::default(),
             epoch,
@@ -419,6 +432,100 @@ impl NotesView {
         }
     }
 
+    /// Copy pictures into the notes folder (off the main thread) and link them in the note where
+    /// the cursor is then, one step to undo. What can't be added says why in a toast.
+    fn add_images(&mut self, pictures: Vec<Picture>, window: &mut Window, cx: &mut Context<Self>) {
+        if pictures.is_empty() {
+            return;
+        }
+        self.adding += 1;
+        cx.notify();
+        // Read here: the folder is this thread's (tests isolate it per thread).
+        let dir = notes::notes_dir();
+        cx.spawn_in(window, async move |this, cx| {
+            let added = cx.background_executor().spawn(async move { pictures.into_iter().map(|p| (p.label(), p.keep(&dir))).collect::<Vec<_>>() }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.adding = this.adding.saturating_sub(1);
+                let mut lines = Vec::new();
+                let mut failed = None;
+                for (label, result) in added {
+                    match result {
+                        Ok(markdown) => lines.push(markdown),
+                        Err(e) => _ = failed.get_or_insert(format!("Couldn't add {label}: {e}")),
+                    }
+                }
+                if !lines.is_empty() {
+                    let (text, sel) = Self::read(&this.editor, cx);
+                    this.apply(notes::insert_lines(&text, sel, &lines.join("\n")), window, cx);
+                }
+                if let Some(message) = failed {
+                    this.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message, undo: None }));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Add these files to the note: the pictures among them. Anything else is named in a toast.
+    pub(crate) fn add_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let (pictures, others): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| is_picture(p));
+        if let Some(other) = others.first() {
+            let name = other.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let message = if others.len() == 1 { format!("{name} isn't an image a note can show") } else { format!("{name} and {} more aren't images a note can show", others.len() - 1) };
+            self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message, undo: None }));
+        }
+        self.add_images(pictures.into_iter().map(Picture::File).collect(), window, cx);
+    }
+
+    /// Add image: pick pictures to put in the note.
+    fn pick_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let _ = this.update_in(cx, |this, window, cx| this.add_files(paths, window, cx));
+        })
+        .detach();
+    }
+
+    /// A paste the text box hands over: pictures (image data, or image files copied in Finder)
+    /// go in as images. Returns whether it was taken; anything else pastes as text.
+    pub(crate) fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // Files copied in Finder: a note takes SVGs too, which the composer's paste doesn't.
+        let files: Vec<PathBuf> = item.entries().iter().filter_map(|e| if let ClipboardEntry::ExternalPaths(p) = e { Some(p.paths().to_vec()) } else { None }).flatten().collect();
+        if !files.is_empty() {
+            let (pictures, others): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|p| is_picture(p));
+            if pictures.is_empty() {
+                return false;
+            }
+            self.add_images(pictures.into_iter().map(Picture::File).collect(), window, cx);
+            if !others.is_empty() {
+                let names: Vec<String> = others.iter().map(|p| p.display().to_string()).collect();
+                self.editor.update(cx, |s, cx| s.insert(names.join(" "), window, cx));
+            }
+            return true;
+        }
+        match crate::attachments::pasted(item) {
+            Some(crate::attachments::Pasted::Images(images)) => self.add_images(images.into_iter().map(Picture::Data).collect(), window, cx),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Write, Split or Preview (the driver's `note mode`).
+    #[cfg_attr(not(any(test, feature = "shots")), allow(dead_code))]
+    pub(crate) fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        cx.notify();
+    }
+
+    /// Put `text` in the note on screen, starting one when there's none (the driver's `note text`).
+    #[cfg_attr(not(any(test, feature = "shots")), allow(dead_code))]
+    pub(crate) fn set_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let len = text.len();
+        self.apply(Edit { text, selection: len..len }, window, cx);
+    }
+
     fn tool(&self, id: &'static str, icon: impl Into<Icon>, tip: &'static str, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)) -> AnyElement {
         crate::ui::icon_button(id, icon, crate::keys::shared(tip)).on_click(cx.listener(move |this, _, window, cx| f(this, window, cx))).into_any_element()
     }
@@ -520,6 +627,8 @@ impl NotesView {
             })
             .child(Self::divider(cx))
             .child(colors)
+            .child(self.tool("note-image", crate::assets::Lucide::ImagePlus, "Add image… (or paste or drop one on the note)", cx, |t, w, cx| t.pick_images(w, cx)))
+            .when(self.adding > 0, |el| el.child(div().id("note-adding").test_support().px(px(4.)).child(gpui_kit::component::spinner::Spinner::new().small().color(theme.muted_foreground))))
             .child(div().flex_1().min_w(px(6.)))
             .child(self.modes(mode, width > 0. && width < TOOLBAR_FULL, cx))
             .when(self.current.is_some(), |el| {
@@ -665,20 +774,61 @@ impl Render for NotesView {
         let size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
         let body = self.note().map(|n| n.body.clone()).unwrap_or_default();
         let id = self.current.clone().unwrap_or_default();
-        let write = div()
+        let dir = notes::notes_dir();
+        let me = cx.entity().downgrade();
+        let textarea = Textarea::new(&self.editor).appearance(false).h_full().on_paste(move |item, window, cx| me.update(cx, |this, cx| this.paste(item, window, cx)).unwrap_or(false));
+        // In Write the text shows only the pictures' links: the pictures themselves go under it.
+        let strip = if self.mode == Mode::Write { crate::note_images::strip(&body, &dir, cx) } else { None };
+        let write = v_flex()
+            .id("note-write")
+            .test_support()
             .flex_1()
             .min_w_0()
             .h_full()
-            .px(px(28.))
-            .py(px(20.))
             .text_size(size)
             .line_height(relative(1.6))
-            .child(Textarea::new(&self.editor).appearance(false).h_full());
-        let preview = div().id("note-preview").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(32.)).py(px(22.)).child(if body.trim().is_empty() {
-            div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
-        } else {
-            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, None, None, size, false, false, cx).into_any_element()
-        });
+            .child(div().flex_1().min_h_0().px(px(28.)).py(px(20.)).child(textarea))
+            .children(strip);
+        const PAD: f32 = 32.;
+        // The text's width (a hair less, so a picture's line never runs over it).
+        let line = match self.preview_width.get() {
+            w if w > 2. * PAD + 48. => px(w - 2. * PAD - 1.),
+            _ => px(560.),
+        };
+        let widest = line.min(crate::md::column(size));
+        let pictures = crate::note_images::NoteImages { gallery: std::sync::Arc::new(crate::note_images::gallery(&body, &dir)), dir, widest, line };
+        let preview = div()
+            .id("note-preview")
+            .test_support()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .px(px(PAD))
+            .py(px(22.))
+            .child(if body.trim().is_empty() {
+                div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
+            } else {
+                crate::md::note(SharedString::from(format!("note-md-{id}")), crate::note_images::for_reading(&body).into_owned(), pictures, size, cx).into_any_element()
+            })
+            .child({
+                // Measured after layout: the pictures fit the width, so a new one draws them again.
+                let cell = self.preview_width.clone();
+                canvas(
+                    move |bounds, window, _| {
+                        let w = f32::from(bounds.size.width);
+                        if (cell.replace(w) - w).abs() > 0.5 {
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+            });
         let main = match self.mode {
             Mode::Write => write.into_any_element(),
             Mode::Preview => preview.into_any_element(),
@@ -727,9 +877,68 @@ impl Render for NotesView {
                     .on_action(cx.listener(|t, _: &Quote, w, cx| t.block(Block::Quote, w, cx)))
                     .on_action(cx.listener(|t, _: &ToggleCheck, w, cx| t.toggle_check(w, cx)))
                     .child(self.toolbar(cx))
-                    .child(div().flex_1().min_h_0().flex().child(main)),
+                    .child(
+                        div()
+                            .id("note-drop")
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            // Image files dropped anywhere on the note go into it.
+                            .drag_over::<ExternalPaths>({
+                                let tint = theme.foreground.opacity(0.04);
+                                move |s, _, _, _| s.bg(tint)
+                            })
+                            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.add_files(paths.paths().to_vec(), window, cx)))
+                            .child(main),
+                    ),
             )
     }
+}
+
+/// A picture to put in a note.
+enum Picture {
+    /// A file: kept as it is, or as a PNG copy when it's a HEIC photo, TIFF or BMP.
+    File(PathBuf),
+    /// Image data off the clipboard (a screenshot).
+    Data(Image),
+}
+
+impl Picture {
+    /// How a toast names it.
+    fn label(&self) -> String {
+        match self {
+            Picture::File(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string()),
+            Picture::Data(_) => "the pasted image".into(),
+        }
+    }
+
+    /// Keep it in the notes folder `dir`: the markdown that shows it.
+    fn keep(self, dir: &std::path::Path) -> anyhow::Result<String> {
+        match self {
+            Picture::Data(image) => {
+                let (kind, bytes) = crate::attachments::image_bytes(&image)?;
+                Ok(notes::image_markdown("Pasted image", &notes::add_image(dir, &bytes, kind)?))
+            }
+            Picture::File(path) => {
+                let alt = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let link = if crate::attachments::needs_conversion(&path) {
+                    let tmp = std::env::temp_dir().join(format!("trek-note-image-{}-{}", std::process::id(), chrono::Local::now().format("%H%M%S%f")));
+                    let kept = crate::attachments::convert_file(&path, &tmp).and_then(|png| Ok(notes::add_image_file(dir, &png)?));
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    kept?
+                } else {
+                    notes::add_image_file(dir, &path)?
+                };
+                Ok(notes::image_markdown(&alt, &link))
+            }
+        }
+    }
+}
+
+/// A file a note can show as a picture, as it is or converted.
+fn is_picture(path: &std::path::Path) -> bool {
+    let kind = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    notes::IMAGE_KINDS.contains(&kind.as_str()) || crate::attachments::needs_conversion(path)
 }
 
 #[cfg(test)]

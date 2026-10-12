@@ -123,11 +123,22 @@ fn timestamp() -> String {
 /// Write clipboard image data into `dir` as a file the agents accept. PNG, JPEG, GIF and WebP
 /// are kept as they are; TIFF, BMP and the like (what some apps put on the clipboard) become PNG.
 pub fn save_image(image: &Image, dir: &Path) -> Result<PathBuf> {
+    if image.format() == ImageFormat::Svg {
+        bail!("SVG isn't supported, paste a PNG or JPEG instead");
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("{} couldn't be created", dir.display()))?;
     let stem = format!("pasted-{}-{:08x}", timestamp(), image.id() as u32);
-    let (ext, bytes) = match image.format() {
-        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::Webp => (image.format().extension(), image.bytes().to_vec()),
-        ImageFormat::Svg => bail!("SVG isn't supported, paste a PNG or JPEG instead"),
+    let (ext, bytes) = image_bytes(image)?;
+    let path = dir.join(format!("{stem}.{ext}"));
+    std::fs::write(&path, bytes).with_context(|| format!("{} couldn't be written", path.display()))?;
+    Ok(path)
+}
+
+/// Clipboard image data as a file's kind and bytes: PNG, JPEG, GIF, WebP and SVG as they are,
+/// TIFF, BMP and the like converted to PNG.
+pub fn image_bytes(image: &Image) -> Result<(&'static str, Vec<u8>)> {
+    Ok(match image.format() {
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::Webp | ImageFormat::Svg => (image.format().extension(), image.bytes().to_vec()),
         other => {
             let format = match other {
                 ImageFormat::Tiff => image::ImageFormat::Tiff,
@@ -140,10 +151,7 @@ pub fn save_image(image: &Image, dir: &Path) -> Result<PathBuf> {
             decoded.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).context("it couldn't be converted to PNG")?;
             ("png", png)
         }
-    };
-    let path = dir.join(format!("{stem}.{ext}"));
-    std::fs::write(&path, bytes).with_context(|| format!("{} couldn't be written", path.display()))?;
-    Ok(path)
+    })
 }
 
 /// Copy an image file agents can't read (see `needs_conversion`) into `dir` as PNG, with macOS's
