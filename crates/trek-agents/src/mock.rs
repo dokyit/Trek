@@ -20,6 +20,9 @@
 //! | `mock:visualization stream`  | the same, a few characters at a time, slowly, so the card's   |
 //! | [type]                       | frame and then its marks can be watched arriving              |
 //! | `mock:visualization invalid` | a block that closes but can't be drawn (an unknown field)     |
+//! | `mock:math`                  | a worked probability answer in LaTeX (`\[ … \]`, `$…$`), a    |
+//! |                              | line each of a sum, an integral, a root and a matrix, and a   |
+//! |                              | sentence with prices that must stay prose                     |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `mock:history` [n]           | a long history in one go, at once: `n` rounds (default 100,   |
@@ -173,6 +176,8 @@ enum Script {
     VisualizationStream(Option<&'static str>),
     /// An answer whose visualization block closes invalid.
     VisualizationInvalid,
+    /// An answer in LaTeX maths, as models write it.
+    Math,
     Explore(Duration),
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
@@ -258,6 +263,7 @@ impl Script {
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "prose" if w.starts_with("mock:") => Script::Prose,
+                "math" if w.starts_with("mock:") => Script::Math,
                 "visualization" if w.starts_with("mock:") => {
                     let kind = |j: usize| words.get(j).and_then(|t| VIZ_GALLERY.iter().find(|(kind, _)| *kind == t.as_str())).map(|(kind, _)| *kind);
                     match words.get(i + 1).map(String::as_str) {
@@ -331,6 +337,7 @@ pub fn title(request: &str) -> String {
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
+        Script::Math => "How likely a positive test is right",
         Script::Visualization(_) | Script::VisualizationStream(_) | Script::VisualizationInvalid => "Compare release health dashboards",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
@@ -712,6 +719,7 @@ impl Session {
                 // At reading pace, so the answer can be watched (and captured) as it grows.
                 self.say_at(PROSE, 45).await?;
             }
+            Script::Math => self.say(MATH).await?,
             Script::Visualization(None) => self.say(VISUALIZATION).await?,
             Script::Visualization(Some(kind)) => self.say(VIZ_GALLERY.iter().find(|(k, _)| *k == kind).map_or(VISUALIZATION, |(_, answer)| answer)).await?,
             // Slow enough to watch (and capture) a card's frame and then its marks arrive.
@@ -1801,6 +1809,35 @@ const PROSE_THOUGHT: &str = "**Mapping the startup path**\n\nThe flags are parse
 
 const PROSE: &str = "## How the app starts\n\nStartup lives in `src/main.rs`. It does three things, in order: it **parses the flags**, it **loads the settings**, and only then does it **open the window**, so a bad config fails before anything is drawn.\n\n### Flags and settings\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`. Unknown flags are an error, not a warning.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults in `src/settings.rs`.\n  - Paths in it may start with `~/`.\n  - A setting that fails to parse names its line.\n- The **window** is created last, from `src/app.rs`.\n\n### What each setting does\n\n| Setting | Default | What it does |\n| --- | --- | --- |\n| `theme` | `night` | Night or Paper |\n| `font_size` | `14.5` | Transcript text, in points |\n| `telemetry` | `false` | Never sent unless you turn it on |\n\n## The entry point\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\n> The order matters: a window opened before the settings load would flash the default theme.\n\n1. Read `src/cli.rs` first: it is short.\n2. Then `src/settings.rs`, which is where most changes land.\n3. Finally `src/app.rs`, for the window itself.\n\nThe folder `src/` holds all of it. For the config format itself, see [the TOML spec](https://toml.io).";
 
+/// `mock:math`: maths as models write it, with `\[ … \]` and `\( … \)` as often as dollars (the
+/// first worked example is the one a user's screenshot showed printed raw), and one sentence with
+/// prices in it that must stay prose.
+pub const MATH: &str = r#"A test for a rare condition: the prior is $P(\theta = 1) = 0.001$, the test is right for someone who has it with probability $p = 0.99$, and it's wrong for someone who doesn't $6\%$ of the time.
+
+**(a)** By Bayes' rule, the chance that someone who tests positive has it is
+
+\[
+P(\theta=1\mid T=+) = \frac{P(T=+\mid\theta=1)\,P(\theta=1)}{P(T=+)}
+\]
+
+so
+
+\[ P(\theta=1\mid T=+) =\frac{0.99(0.001)} {0.99(0.001)+0.06(0.999)} \approx \boxed{0.0162482}. \]
+
+**(b)** A second, independent positive takes the first posterior as its prior: with $p' = 0.0162482$, \(P(\theta=1 \mid T_1=+, T_2=+) = \frac{0.99\,p'}{0.99\,p' + 0.06(1-p')} \approx 0.214\).
+
+A few more shapes:
+
+$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$
+
+$$\int_0^1 x^2\,dx = \frac{1}{3}$$
+
+$$\sqrt{2} \approx 1.41421, \qquad \sqrt[3]{27} = 3$$
+
+$$A = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}, \quad \det A = -2$$
+
+The kit costs $5 and $10 buys two."#;
+
 pub const VISUALIZATION: &str = r#"## Release health at a glance
 
 The release is healthy overall: success rate is up and p95 latency fell after Tuesday's deploy. The one hotspot is the worker queue on Thursday, so queue saturation is the first thing to look at—not a broad rollback.
@@ -1920,6 +1957,8 @@ mod tests {
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("mock:prose", false), Script::Prose);
+        assert_eq!(Script::parse("mock:math", false), Script::Math);
+        assert_eq!(Script::parse("what's the math here", false), Script::Answer, "only by its full name");
         assert_eq!(Script::parse("mock:visualization", false), Script::Visualization(None));
         assert_eq!(Script::parse("mock:visualization flow", false), Script::Visualization(Some("flow")));
         assert_eq!(Script::parse("mock:visualization nonsense", false), Script::Visualization(None));
@@ -2031,7 +2070,7 @@ mod tests {
 
     #[test]
     fn tokens_rebuild_the_text() {
-        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, VISUALIZATION, "short", "ünïcödé words stream fine"] {
+        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, VISUALIZATION, MATH, "short", "ünïcödé words stream fine"] {
             assert_eq!(tokens(text).concat(), text);
             assert!(tokens(text).iter().all(|t| !t.is_empty()));
         }
