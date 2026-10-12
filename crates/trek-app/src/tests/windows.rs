@@ -114,6 +114,30 @@ fn trek_window(cx: &mut TestAppContext, window: AnyWindowHandle) -> gpui_kit::En
     .expect("window")
 }
 
+/// The tray's "Open Trek" (on Windows, a left click on its icon) brings the main window forward
+/// from behind a thread window on Windows, where there's no app to activate, and reopens it when
+/// it was closed.
+#[test]
+fn open_trek_in_the_tray_brings_the_main_window() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let own = trek.open_thread_window(cx, &id);
+        cx.update_window(own, |_, window, _| window.activate_window()).expect("thread window");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.active_window()), Some(own));
+        cx.update(|cx| crate::tray::open_trek(&trek.ws, cx));
+        cx.run_until_parked();
+        if cfg!(windows) {
+            assert_eq!(cx.update(|cx| cx.active_window()), Some(trek.window), "the main window came forward");
+        }
+        close_main(&trek, cx);
+        cx.update(|cx| crate::tray::open_trek(&trek.ws, cx));
+        cx.run_until_parked();
+        assert_ne!(main_window(&trek, cx), trek.window, "a new main window");
+    });
+}
+
 #[test]
 fn a_reopened_main_window_takes_the_keys() {
     run(async |cx| {
