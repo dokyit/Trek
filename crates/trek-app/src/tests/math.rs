@@ -3,6 +3,7 @@
 
 use super::harness::{Trek, open, run};
 use gpui_kit::TestAppContext;
+use gpui_kit::test::TestWindowExt as _;
 use trek_core::RunState;
 use trek_core::settings::ThemeChoice;
 
@@ -49,6 +50,18 @@ fn the_mock_answer_sets_its_maths_and_leaves_prices_alone() {
             // "$5 and $10" pairs up as a math span, which nothing claims.
             let price = format!("math-{}", at("$5 and $10"));
             assert!(!ids.contains(&price), "{choice:?}: the prices drew as maths");
+            // `$6\%$` is in the first paragraph, which the answer's scroll pin leaves above
+            // the fold: scroll the answer up for it, then back down for the next theme.
+            trek.window(cx, |window, cx| {
+                window.scroll(("answer-text", 1usize), gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(4000.))), cx)
+            });
+            let ids = on_screen(&trek, cx);
+            let maths: Vec<&String> = ids.iter().filter(|id| id.starts_with("math-")).collect();
+            let id = format!("math-{}", at("$6\\%$"));
+            assert!(ids.contains(&id), "{choice:?}: no {id} for $6\\%$ in {maths:?}");
+            trek.window(cx, |window, cx| {
+                window.scroll(("answer-text", 1usize), gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-4000.))), cx)
+            });
         }
         cx.update(|cx| crate::apply_theme(ThemeChoice::Night, None, cx));
     });
