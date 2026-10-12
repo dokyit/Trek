@@ -26,6 +26,8 @@
 //! show it): `browser go <address>|back|forward|reload`, `browser state` (the page, the native
 //! view's rectangle beside the panel's and which window has the keys, to `browser.json`), and
 //! `browser snap <name>` (the page as its screenshot button captures it, to `<name>.png`; Windows).
+//! Live pages in answers are native views the same way: `page snap <name>` writes `<name>.png`,
+//! the frame with each page composited where Windows has it (Windows).
 //!
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
@@ -83,6 +85,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
+                    "page" => page_snap(&workspace, &dir, arg, cx).await,
                     "editor" if arg.starts_with("snap ") => editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await,
                     "hittest" | "realclick" | "realmove" | "realleave" => hittest(&workspace, &dir, verb, arg, cx).await,
                     "legacy-pointer" => cx.update(|cx| match arg {
@@ -169,14 +172,11 @@ fn park_pointer(window: &mut Window, cx: &mut App) {
     }
 }
 
-async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    if arg.is_empty() {
-        anyhow::bail!("shot needs a name");
-    }
-    // A few frames for whatever the last command changed to be drawn.
+/// A few frames for whatever the last command changed to be drawn, plus the git reads it set
+/// going (the composer's branch chip): a process spawn costs a hundred milliseconds on Windows,
+/// so they can land after those few frames.
+async fn settle(ws: &Entity<Workspace>, cx: &mut AsyncApp) {
     cx.background_executor().timer(Duration::from_millis(400)).await;
-    // And for the git reads the command set going (the composer's branch chip): a process spawn
-    // costs a hundred milliseconds on Windows, so they can land after those few frames.
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut waited = false;
     while cx.update(|cx| ws.read(cx).git_inflight) > 0 && Instant::now() < deadline {
@@ -186,6 +186,13 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
     if waited {
         cx.background_executor().timer(Duration::from_millis(200)).await;
     }
+}
+
+async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    if arg.is_empty() {
+        anyhow::bail!("shot needs a name");
+    }
+    settle(ws, cx).await;
     let path = dir.join(format!("{arg}.png"));
     let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
@@ -205,6 +212,83 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
         .await?;
     tracing::info!("shot: {}", path.display());
     Ok(())
+}
+
+/// `page snap <name>`: the frame as `shot` draws it, with every live page composited where
+/// Windows has it — a page's web view is a native window, so `shot` alone never shows it.
+/// Windows only.
+async fn page_snap(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let Some(name) = arg.strip_prefix("snap ").map(str::trim).filter(|n| !n.is_empty()) else {
+        anyhow::bail!("page snap needs a name (page snap <name>)");
+    };
+    #[cfg(not(windows))]
+    {
+        let _ = (ws, dir, name, cx);
+        anyhow::bail!("page snap: Windows only (WebView2's CapturePreview)")
+    }
+    #[cfg(windows)]
+    {
+        settle(ws, cx).await;
+        // The frame, the pages' places as Windows has them, and a capture of each on its way
+        // (CapturePreview answers on this thread's loop, so the receivers are awaited below).
+        let (mut frame, captures, scale, radius) = cx.update(|cx| -> anyhow::Result<_> {
+            let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+            Ok(main.update(cx, |_, window, cx| {
+                park_pointer(window, cx);
+                let image = window.render_to_image()?;
+                let captures = crate::page::shots_captures(window.window_handle().window_id(), cx);
+                // The render target is the client area in device pixels, which is what Windows's
+                // rectangles are in; the captures are scaled to the frame if it ever isn't.
+                let w = f64::from(f32::from(window.viewport_size().width) * window.scale_factor());
+                let h = f64::from(f32::from(window.viewport_size().height) * window.scale_factor());
+                let scale = (f64::from(image.width()) / w, f64::from(image.height()) / h);
+                let radius = f64::from(crate::page::RADIUS * window.scale_factor());
+                Ok::<_, anyhow::Error>((image, captures, scale, radius))
+            })??)
+        })?;
+        let mut pages = 0;
+        for (host, view, png) in captures {
+            let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("page snap: the page closed"))?.map_err(|e| anyhow::anyhow!("page snap: {e}"))?;
+            let page = image::load_from_memory(&bytes)?.to_rgba8();
+            // Page pixel (x, y) lands at host + view + (x, y) in the frame, kept where that is
+            // inside the host (Windows clips the view to it) and inside the page's corners, which
+            // the host's region rounds.
+            let (pw, ph) = ((view[2] as f64 * scale.0).round().max(1.) as u32, (view[3] as f64 * scale.1).round().max(1.) as u32);
+            let page = if page.dimensions() == (pw, ph) { page } else { image::imageops::resize(&page, pw, ph, image::imageops::FilterType::Triangle) };
+            let (x0, y0) = ((host[0] as f64 + view[0] as f64) * scale.0, (host[1] as f64 + view[1] as f64) * scale.1);
+            let (x0, y0) = (x0.round() as i64, y0.round() as i64);
+            let (hx0, hy0) = ((host[0] as f64 * scale.0).round() as i64, (host[1] as f64 * scale.1).round() as i64);
+            let (hx1, hy1) = (((host[0] + host[2]) as f64 * scale.0).round() as i64, ((host[1] + host[3]) as f64 * scale.1).round() as i64);
+            let (vx1, vy1) = (x0 + i64::from(pw), y0 + i64::from(ph));
+            let r = (radius * scale.0).round() as i64;
+            let (cx0, cx1) = if vx1 - x0 > 2 * r { (x0 + r, vx1 - r) } else { ((x0 + vx1) / 2, (x0 + vx1) / 2) };
+            let (cy0, cy1) = if vy1 - y0 > 2 * r { (y0 + r, vy1 - r) } else { ((y0 + vy1) / 2, (y0 + vy1) / 2) };
+            let (iw, ih) = (i64::from(frame.width()), i64::from(frame.height()));
+            for y in 0..i64::from(ph) {
+                let fy = y0 + y;
+                if fy < hy0 || fy >= hy1 || fy < 0 || fy >= ih {
+                    continue;
+                }
+                for x in 0..i64::from(pw) {
+                    let fx = x0 + x;
+                    if fx < hx0 || fx >= hx1 || fx < 0 || fx >= iw {
+                        continue;
+                    }
+                    let (dx, dy) = (fx - fx.clamp(cx0, cx1), fy - fy.clamp(cy0, cy1));
+                    if dx * dx + dy * dy > r * r {
+                        continue;
+                    }
+                    frame.put_pixel(fx as u32, fy as u32, *page.get_pixel(x as u32, y as u32));
+                }
+            }
+            pages += 1;
+        }
+        let path = dir.join(format!("{name}.png"));
+        let path2 = path.clone();
+        cx.background_executor().spawn(async move { save(frame, &path2) }).await?;
+        tracing::info!("page snap: {pages} page(s) -> {}", path.display());
+        Ok(())
+    }
 }
 
 /// `hittest <element id>|<x> <y> [HTCLIENT|HTCAPTION|HTCLOSE …]` (Windows): what the window answers

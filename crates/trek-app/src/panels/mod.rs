@@ -196,8 +196,8 @@ impl RightPanel {
         cx.notify();
     }
 
-    /// The Browser tool, if it's open (the shots harness's `browser` command).
-    #[cfg(any(test, feature = "shots"))]
+    /// The Browser tool, if it's open (a live page opened in it, the shots harness's `browser`
+    /// command).
     pub fn browser(&self) -> Option<Entity<browser::BrowserPanel>> {
         self.tabs.iter().find_map(|t| match &t.view {
             View::Browser(b) => Some(b.clone()),

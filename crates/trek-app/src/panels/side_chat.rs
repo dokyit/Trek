@@ -215,7 +215,7 @@ impl Render for SideChatPanel {
                                     div()
                                         .id(("side-answer", i))
                                         .test_support()
-                                        .child(crate::md::keyed(SharedString::from(format!("side-{id}-{i}")), text, cwd.clone(), folder, text_size, true, streaming == Some(i), cx))
+                                        .child(crate::md::keyed(SharedString::from(format!("side-{id}-{i}")), text, cwd.clone(), folder, text_size, true, streaming == Some(i), None, cx))
                                         .into_any_element(),
                                 ),
                                 Item::Tool { title, detail, .. } => Some(
