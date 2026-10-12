@@ -51,6 +51,7 @@ mod titlebar;
 mod upkeep;
 mod usage;
 mod visualization;
+mod artifacts;
 mod windows;
 mod words;
 mod worktrees;

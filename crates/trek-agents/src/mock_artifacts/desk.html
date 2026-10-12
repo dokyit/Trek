@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Desk with a monitor clamp</title>
+<style>
+  body { padding: 0; }
+  .stage { position: relative; height: max(380px, 100vh); }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+  canvas.dragging { cursor: grabbing; }
+  .views { position: absolute; left: 12px; top: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .views button { font: 500 12px var(--trek-font); color: var(--trek-fg); background: var(--trek-surface); border: 1px solid var(--trek-border); border-radius: 7px; padding: 4px 10px; cursor: pointer; backdrop-filter: blur(6px); }
+  .views button:hover { border-color: var(--trek-muted); }
+  .views button.on { border-color: var(--trek-accent); color: var(--trek-accent); }
+  .legend { position: absolute; right: 12px; bottom: 12px; display: grid; gap: 4px; font-size: 11.5px; color: var(--trek-muted); background: var(--trek-surface); border: 1px solid var(--trek-border); border-radius: 8px; padding: 7px 10px; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .hint { position: absolute; left: 12px; bottom: 12px; font-size: 11.5px; color: var(--trek-muted); }
+  .nogl { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: var(--trek-muted); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="scene" aria-label="A desk with a monitor arm clamped to its back edge"></canvas>
+  <div class="views">
+    <button data-view="front" class="on">Front</button>
+    <button data-view="clamp">Close-up of clamp</button>
+    <button data-view="under">From underneath</button>
+  </div>
+  <div class="legend" id="legend"></div>
+  <div class="hint">Drag to rotate · scroll to zoom</div>
+  <div class="nogl" id="nogl">WebGL isn't available here.</div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('scene');
+  const gl = canvas.getContext('webgl', { antialias: true, alpha: true, premultipliedAlpha: true });
+  if (!gl) { document.getElementById('nogl').style.display = 'flex'; return; }
+
+  // Colours: the clamp takes Trek's accent; the rest are materials.
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const rgb = (c) => { const m = c.match(/[\d.]+/g); return m ? [m[0] / 255, m[1] / 255, m[2] / 255] : [1, 0.42, 0.24]; };
+  const parts = {
+    desk: { label: 'Desk top (oak)', color: [0.69, 0.53, 0.35] },
+    legs: { label: 'Legs', color: [0.32, 0.33, 0.36] },
+    clamp: { label: 'C-clamp', color: rgb(css('--trek-accent')) },
+    arm: { label: 'Monitor arm', color: [0.62, 0.64, 0.68] },
+    monitor: { label: 'Monitor', color: [0.12, 0.12, 0.14] },
+  };
+  document.getElementById('legend').innerHTML = Object.values(parts).map((p) =>
+    `<div><i style="background: rgb(${p.color.map((v) => Math.round(v * 255)).join(',')})"></i>${p.label}</div>`).join('');
+
+  // Geometry: boxes, flat-shaded.
+  const pos = [], nrm = [], col = [];
+  const box = (part, x, y, z, w, h, d) => {
+    const [x0, x1, y0, y1, z0, z1] = [x - w / 2, x + w / 2, y - h / 2, y + h / 2, z - d / 2, z + d / 2];
+    const faces = [
+      [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], [1, 0, 0]],
+      [[x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], [-1, 0, 0]],
+      [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [0, 1, 0]],
+      [[x0, y0, z1], [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [0, -1, 0]],
+      [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1]],
+      [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1]],
+    ];
+    for (const [a, b, c, e, n] of faces) for (const v of [a, b, c, a, c, e]) { pos.push(...v); nrm.push(...n); col.push(...parts[part].color); }
+  };
+  box('desk', 0, 0.74, 0, 1.6, 0.04, 0.8);
+  for (const [x, z] of [[-0.74, -0.34], [0.74, -0.34], [-0.74, 0.34], [0.74, 0.34]]) box('legs', x, 0.36, z, 0.05, 0.72, 0.05);
+  // The clamp grips the back edge: top jaw, spine behind the edge, bottom jaw and its screw.
+  box('clamp', 0.5, 0.775, -0.36, 0.08, 0.03, 0.1);
+  box('clamp', 0.5, 0.735, -0.415, 0.08, 0.13, 0.03);
+  box('clamp', 0.5, 0.695, -0.36, 0.08, 0.03, 0.1);
+  box('clamp', 0.5, 0.65, -0.34, 0.02, 0.07, 0.02);
+  box('clamp', 0.5, 0.612, -0.34, 0.07, 0.012, 0.035);
+  // The arm: a pole, a reach forward, a head.
+  box('arm', 0.5, 1.02, -0.37, 0.035, 0.5, 0.035);
+  box('arm', 0.38, 1.25, -0.27, 0.3, 0.03, 0.03);
+  box('arm', 0.24, 1.25, -0.2, 0.03, 0.03, 0.14);
+  box('monitor', 0.2, 1.24, -0.12, 0.92, 0.52, 0.025);
+
+  const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, `
+    attribute vec3 p; attribute vec3 n; attribute vec3 c; uniform mat4 m; varying vec3 v;
+    void main() { float l = 0.38 + 0.62 * max(dot(n, normalize(vec3(0.45, 0.8, 0.55))), 0.0) + 0.12 * max(-n.y, 0.0);
+      v = c * l; gl_Position = m * vec4(p, 1.0); }`));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `precision mediump float; varying vec3 v; void main() { gl_FragColor = vec4(v, 1.0); }`));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const attr = (name, data) => {
+    const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+    const at = gl.getAttribLocation(prog, name); gl.enableVertexAttribArray(at); gl.vertexAttribPointer(at, 3, gl.FLOAT, false, 0, 0);
+  };
+  attr('p', pos); attr('n', nrm); attr('c', col);
+  const uM = gl.getUniformLocation(prog, 'm');
+  gl.enable(gl.DEPTH_TEST);
+
+  // Camera: orbit (yaw, pitch, distance) round a target; presets glide.
+  const views = {
+    front: { yaw: 0.55, pitch: 0.32, dist: 3.1, at: [0, 0.85, 0] },
+    clamp: { yaw: 2.35, pitch: 0.18, dist: 0.85, at: [0.5, 0.7, -0.38] },
+    under: { yaw: 0.9, pitch: -0.55, dist: 1.9, at: [0.3, 0.62, -0.2] },
+  };
+  let cam = { ...views.front, at: [...views.front.at] }, from = null, to = null, t0 = 0;
+  const go = (name) => {
+    from = { ...cam, at: [...cam.at] }; to = views[name]; t0 = performance.now();
+    document.querySelectorAll('.views button').forEach((b) => b.classList.toggle('on', b.dataset.view === name));
+    draw();
+  };
+  document.querySelectorAll('.views button').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)));
+
+  const persp = (f, a, n, z) => { const t = 1 / Math.tan(f / 2); return [t / a, 0, 0, 0, 0, t, 0, 0, 0, 0, (z + n) / (n - z), -1, 0, 0, 2 * z * n / (n - z), 0]; };
+  const mul = (a, b) => { const o = new Array(16).fill(0); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 4; k++) o[j * 4 + i] += a[k * 4 + i] * b[j * 4 + k]; return o; };
+  const look = (e, c) => {
+    const sub = (a, b) => a.map((v, i) => v - b[i]), norm = (v) => { const l = Math.hypot(...v); return v.map((x) => x / l); };
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const z = norm(sub(e, c)), x = norm(cross([0, 1, 0], z)), y = cross(z, x);
+    return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1];
+  };
+
+  let queued = false;
+  function draw() { if (!queued) { queued = true; requestAnimationFrame(frame); } }
+  function frame(now) {
+    queued = false;
+    if (to) {
+      const k = Math.min(1, (now - t0) / 650), e = 1 - Math.pow(1 - k, 3);
+      for (const key of ['yaw', 'pitch', 'dist']) cam[key] = from[key] + (to[key] - from[key]) * e;
+      cam.at = from.at.map((v, i) => v + (to.at[i] - v) * e);
+      if (k < 1) draw(); else to = null;
+    }
+    const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const eye = [cam.at[0] + cam.dist * Math.cos(cam.pitch) * Math.sin(cam.yaw), cam.at[1] + cam.dist * Math.sin(cam.pitch), cam.at[2] + cam.dist * Math.cos(cam.pitch) * Math.cos(cam.yaw)];
+    gl.uniformMatrix4fv(uM, false, new Float32Array(mul(persp(0.75, w / Math.max(h, 1), 0.05, 50), look(eye, cam.at))));
+    gl.drawArrays(gl.TRIANGLES, 0, pos.length / 3);
+  }
+
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; to = null; canvas.setPointerCapture(e.pointerId); canvas.classList.add('dragging'); });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    cam.yaw -= (e.clientX - drag.x) * 0.008;
+    cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch + (e.clientY - drag.y) * 0.008));
+    drag = { x: e.clientX, y: e.clientY };
+    draw();
+  });
+  const end = () => { drag = null; canvas.classList.remove('dragging'); };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+  canvas.addEventListener('wheel', (e) => { e.preventDefault(); to = null; cam.dist = Math.max(0.4, Math.min(8, cam.dist * Math.exp(e.deltaY * 0.0015))); draw(); }, { passive: false });
+  new ResizeObserver(draw).observe(canvas);
+  draw();
+})();
+</script>
+</body>
+</html>

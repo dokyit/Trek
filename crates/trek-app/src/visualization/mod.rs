@@ -172,7 +172,7 @@ pub(super) struct VizState {
 pub struct Relayout(pub u64);
 impl Global for Relayout {}
 
-fn relayout(cx: &mut App) {
+pub(crate) fn relayout(cx: &mut App) {
     let n = cx.try_global::<Relayout>().map_or(0, |r| r.0);
     cx.set_global(Relayout(n + 1));
 }
@@ -199,7 +199,7 @@ fn entrance(hash: u64, motion: bool, window: &mut Window) -> f32 {
 }
 
 /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
-fn motion(cx: &App) -> bool {
+pub(crate) fn motion(cx: &App) -> bool {
     match cx.try_global::<crate::workspace::GlobalWorkspace>() {
         Some(ws) => ws.0.read(cx).motion(cx),
         None => !cx.reduce_motion(),
@@ -208,7 +208,7 @@ fn motion(cx: &App) -> bool {
 
 /// The colours every part of an artifact draws with, from the theme.
 #[derive(Clone)]
-pub(super) struct Look {
+pub(crate) struct Look {
     pub dark: bool,
     pub fg: Hsla,
     pub muted: Hsla,
@@ -225,7 +225,7 @@ pub(super) struct Look {
 }
 
 impl Look {
-    fn of(cx: &App) -> Look {
+    pub(crate) fn of(cx: &App) -> Look {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
         Look {
@@ -481,7 +481,7 @@ fn kind_icon_named(kind: &str) -> Lucide {
 
 /// The card every artifact sits in: a hairline edge, raised a step off the column, and the
 /// light a glass pane catches along its top. (Callers add `test_support`, which wraps it.)
-fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
+pub(crate) fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let sheen_top = gpui_kit::white().opacity(if look.dark { 0.07 } else { 0.85 });
     let sheen = gpui_kit::white().opacity(if look.dark { 0.022 } else { 0.0 });
@@ -505,7 +505,7 @@ fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
 
 /// The title row: what it is, its name, and what can be done with it; the summary runs the full
 /// width beneath, so a narrow column doesn't squeeze it beside the actions.
-fn header(icon: Lucide, title: AnyElement, actions: AnyElement, summary: AnyElement, look: &Look) -> Div {
+pub(crate) fn header(icon: Lucide, title: AnyElement, actions: AnyElement, summary: AnyElement, look: &Look) -> Div {
     v_flex()
         .w_full()
         .gap(px(4.))
@@ -536,17 +536,17 @@ fn header(icon: Lucide, title: AnyElement, actions: AnyElement, summary: AnyElem
         .child(div().pl(px(32.)).child(summary))
 }
 
-fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
+pub(crate) fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
     div().line_clamp(2).text_size(px(13.5)).line_height(relative(1.3)).font_semibold().text_color(look.fg).child(title.into()).into_any_element()
 }
 
-fn summary_text(summary: impl Into<SharedString>, look: &Look) -> AnyElement {
+pub(crate) fn summary_text(summary: impl Into<SharedString>, look: &Look) -> AnyElement {
     div().text_size(px(12.)).line_height(relative(1.45)).text_color(look.muted).child(summary.into()).into_any_element()
 }
 
 /// 0 to 1 and round again, once per `SHIMMER`, for everything still being drawn; it keeps
 /// frames coming while anything asks for it. Without motion it holds still at the middle.
-fn shimmer(motion: bool, window: &mut Window) -> f32 {
+pub(crate) fn shimmer(motion: bool, window: &mut Window) -> f32 {
     static START: LazyLock<Instant> = LazyLock::new(Instant::now);
     if !motion {
         return 0.5;
@@ -869,7 +869,7 @@ pub(super) fn readout(look: &Look) -> Div {
 }
 
 /// The inset surface marks sit on.
-pub(super) fn inset(look: &Look) -> Div {
+pub(crate) fn inset(look: &Look) -> Div {
     div().rounded(px(9.)).border_1().border_color(look.fg.opacity(if look.dark { 0.05 } else { 0.06 })).bg(look.inset)
 }
 

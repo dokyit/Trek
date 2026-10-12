@@ -580,6 +580,9 @@ pub struct General {
     /// Ask agents to start an answer that ends work with a recap: Done, Still to do, Found
     /// (`changes::RECAP`).
     pub ask_recap: bool,
+    /// Agents are told they may answer with live HTML (`artifact::AGENT_INSTRUCTIONS`), and
+    /// `trek-html` blocks run in a sandboxed web view in the answer; off, they show as code.
+    pub interactive_artifacts: bool,
 }
 
 impl Default for General {
@@ -597,6 +600,7 @@ impl Default for General {
             on_usage_limit: OnUsageLimit::Ask,
             wrap_up_near_limit: true,
             ask_recap: true,
+            interactive_artifacts: true,
         }
     }
 }

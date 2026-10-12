@@ -34,6 +34,7 @@ mod languages;
 #[cfg(windows)]
 mod job;
 mod mascot;
+mod artifact;
 mod math;
 mod md;
 mod mentions;
@@ -210,7 +211,9 @@ fn menus() -> Vec<Menu> {
 
 /// Trek's key bindings: the table in `keys.rs`, which has each platform's keys.
 fn key_bindings() -> Vec<KeyBinding> {
-    keys::bindings(keys::Group::App)
+    let mut bindings = keys::bindings(keys::Group::App);
+    bindings.extend(artifact::key_bindings());
+    bindings
 }
 
 fn main() {

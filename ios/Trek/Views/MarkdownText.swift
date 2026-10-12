@@ -51,6 +51,8 @@ struct MarkdownText: View, Equatable {
                 RoundedRectangle(cornerRadius: 1).fill(Trek.border).frame(width: 3)
                 RichText(markdown: s, size: size).foregroundStyle(Trek.muted)
             }
+        case .code(let lang, let code) where Markdown.isArtifact(lang):
+            InteractiveArtifactCard(title: Markdown.artifactTitle(code), size: size)
         case .code(_, let code):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
@@ -67,9 +69,64 @@ struct MarkdownText: View, Equatable {
 
 }
 
+/// An interactive artifact (a `trek-html` block): live HTML the Mac runs in the answer. The phone
+/// doesn't run it; it says what it is and where to see it.
+struct InteractiveArtifactCard: View {
+    var title: String?
+    var size: CGFloat
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "cube.transparent")
+                .font(.system(size: size * 1.05, weight: .medium))
+                .foregroundStyle(Trek.ember)
+                .frame(width: 34, height: 34)
+                .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title ?? "Interactive artifact")
+                    .scaledFont(size * 0.95, weight: .semibold)
+                    .foregroundStyle(Trek.foreground)
+                    .lineLimit(2)
+                Text("Interactive — open on your Mac")
+                    .scaledFont(size * 0.8)
+                    .foregroundStyle(Trek.muted)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Trek.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// The Markdown parser behind `MarkdownText`, with a cache: safe off the main thread, so a
 /// transcript's answers can be parsed in the background before they're drawn.
 nonisolated enum Markdown {
+    /// A fence's language says it's an interactive artifact (`trek-html`).
+    static func isArtifact(_ lang: String) -> Bool {
+        lang.trimmingCharacters(in: .whitespaces).lowercased() == "trek-html"
+    }
+
+    /// An artifact's title, as the Mac shows it: its `<title>`, else its first `<h1>`–`<h3>`, as
+    /// plain text.
+    static func artifactTitle(_ html: String) -> String? {
+        for tag in ["title", "h1", "h2", "h3"] {
+            guard let open = html.range(of: "<\(tag)", options: .caseInsensitive),
+                  let start = html.range(of: ">", range: open.upperBound..<html.endIndex),
+                  let close = html.range(of: "</\(tag)", options: .caseInsensitive, range: start.upperBound..<html.endIndex)
+            else { continue }
+            var text = String(html[start.upperBound..<close.lowerBound])
+            text = text.replacingOccurrences(of: "<[^>]*>", with: " ", options: .regularExpression)
+            for (entity, char) in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&nbsp;", " ")] {
+                text = text.replacingOccurrences(of: entity, with: char)
+            }
+            text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            if !text.isEmpty { return text.count > 80 ? String(text.prefix(79)) + "…" : text }
+        }
+        return nil
+    }
+
     enum Align: Equatable, Sendable { case leading, center, trailing }
 
     enum Block: Equatable, Sendable {

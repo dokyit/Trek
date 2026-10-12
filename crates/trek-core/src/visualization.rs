@@ -50,7 +50,7 @@ timeline `events`[{label,start,end?,lane?}], positions numbers, or strings from 
 flow `nodes`[{id,label,detail?,group?}], `edges`[{from,to,label?}]; \
 layers `layers`[{label,detail?,items?:[string]}], top first; \
 mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (placeholder; value wide|square|tall), progress (value 0-100), divider. \
-Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never emit HTML, CSS, URLs, paths or scripts. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
+Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never put HTML, CSS, URLs, paths or scripts in it. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
 TeX math renders typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on its own line.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
