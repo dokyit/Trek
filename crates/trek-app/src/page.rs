@@ -710,8 +710,10 @@ fn make_view<W: raw_window_handle::HasWindowHandle>(parent: &W, html: String, th
     });
     let (on_navigate, on_window) = (open.clone(), open);
     let document: RefCell<Option<String>> = RefCell::new(None);
+    // A profile of the pages' own, beside the Browser panel's and not in it: a page an agent
+    // wrote shares no cookies, logins or storage with the user's own browsing.
     #[cfg(windows)]
-    let mut context = wry::WebContext::new(Some(crate::panels::browser::webview_data_dir()));
+    let mut context = wry::WebContext::new(Some(crate::panels::browser::webview_data_dir().with_file_name("WebView2-pages")));
     // Made without the keys (WebView2 focuses a new view by default): the page gets them when
     // it's clicked. Browser shortcuts (print, find, reload) stay Trek's keys.
     #[cfg(windows)]
