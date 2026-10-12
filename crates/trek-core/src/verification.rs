@@ -188,7 +188,7 @@ pub fn instructions(v: &Verification, project: &Path, cwd: &Path) -> String {
         Some(rel) => (format!("in `{}` in your working folder", rel.display()), v.cli.clone()),
         None => {
             let away = if cwd == project { String::new() } else { " (this working folder has no copy of it yet)".into() };
-            (format!("in {}{away}", crate::paths::tildify_for_agents(skill)),v.cli.as_deref().map(|c| absolute(c, project, cwd)))
+            (format!("in {}{away}", crate::paths::tildify_for_agents(skill)), v.cli.as_deref().map(|c| absolute(c, project, cwd)))
         }
     };
     let cli = cli.map(|c| format!(" and drive and check the app with its CLI (`{c}`, run from your working folder) rather than throwaway scripts")).unwrap_or_default();

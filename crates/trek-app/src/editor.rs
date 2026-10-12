@@ -665,7 +665,7 @@ impl EditorView {
     fn formatted(&mut self, before: &str, caret: usize, scrolled: gpui_kit::Point<Pixels>, result: Result<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         self.formatting = false;
         let after = match result {
-            Ok(after) => after,
+            Ok(after) => crate::format::keep_line_endings(before, after),
             Err(message) => return self.toast(message, cx),
         };
         if self.state.read(cx).value().to_string() != before {

@@ -56,6 +56,18 @@ pub fn resolve(formatter: &Formatter) -> Option<(PathBuf, Vec<String>)> {
     trek_core::detect::which(formatter.program).map(|program| (program, formatter.args.clone()))
 }
 
+/// The formatter `program` with `args`, in `cwd` (the file's folder: `rustfmt` reads its config
+/// from there), on the PATH Trek composes. On Windows a `.cmd` shim (`prettier.cmd`) runs `node`
+/// by its bare name, which cmd.exe looks for in the current folder before the PATH: told not to,
+/// a `node.exe` in a folder someone downloaded isn't what Format document runs.
+fn command(program: &Path, args: &[String], cwd: &Path) -> tokio::process::Command {
+    let mut command = trek_core::procs::async_command(program);
+    command.args(args).current_dir(cwd).env("PATH", trek_core::detect::login_path());
+    #[cfg(windows)]
+    command.env("NoDefaultCurrentDirectoryInExePath", "1");
+    command
+}
+
 /// Run `program` with `args` in `cwd` (where the project's own config is found from), `input` on
 /// its stdin: its stdout when it exits 0 and printed something, else a sentence for a toast.
 pub async fn run(program: &Path, args: &[String], cwd: &Path, input: String, limit: Duration) -> Result<String, String> {
@@ -65,17 +77,19 @@ pub async fn run(program: &Path, args: &[String], cwd: &Path, input: String, lim
     if let Some(problem) = trek_core::detect::batch_args_problem(program, args) {
         return Err(format!("Can't run {name}: {problem}"));
     }
-    let mut command = trek_core::procs::async_command(program);
+    let mut command = command(program, args, cwd);
     command
-        .args(args)
-        .current_dir(cwd)
-        .env("PATH", trek_core::detect::login_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // On the limit the wait is dropped, and the formatter with it.
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(|e| format!("Couldn't run {name}: {e}"))?;
+    // On Windows `prettier` is `prettier.cmd`: cmd.exe running node. Dropping the wait ends
+    // cmd.exe only; the job, dropped with this, ends node too. One that can't be had (Trek runs
+    // in a job that forbids it) leaves the formatter to be ended alone.
+    #[cfg(windows)]
+    let _job = crate::job::hold(&child).map_err(|e| tracing::warn!("couldn't put {name} in a job; what it starts may outlive it: {e}")).ok();
     // Written from a task of its own: a formatter that answers before it has read everything
     // would otherwise block on its full stdout while this blocks on its full stdin.
     if let Some(mut stdin) = child.stdin.take() {
@@ -103,6 +117,15 @@ pub async fn run(program: &Path, args: &[String], cwd: &Path, input: String, lim
         return Err(format!("{name} printed nothing, so the file was left as it is"));
     }
     Ok(text)
+}
+
+/// `formatted` with the line endings of `before`, the text it was made from: a file with Windows
+/// line endings (`\r\n`) keeps them, though `prettier`, `gofmt` and `shfmt` print `\n` whatever
+/// they're given (and the whole file would otherwise change on its next save). Output that has
+/// `\r\n` of its own is the formatter's choice, and kept.
+pub fn keep_line_endings(before: &str, formatted: String) -> String {
+    let crlf = before.find('\n').is_some_and(|at| before[..at].ends_with('\r'));
+    if crlf && !formatted.contains('\r') { formatted.replace('\n', "\r\n") } else { formatted }
 }
 
 /// Where the caret goes in `new`, a formatted `old` it was at byte `caret` of: after the same
@@ -184,6 +207,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_file_with_windows_line_endings_keeps_them() {
+        // `prettier` and `gofmt` print `\n` only.
+        assert_eq!(keep_line_endings("a\r\nb\r\n", "a;\nb;\n".into()), "a;\r\nb;\r\n");
+        // A file with `\n` stays so, and so does one with no line ending at all.
+        assert_eq!(keep_line_endings("a\nb\n", "a;\nb;\n".into()), "a;\nb;\n");
+        assert_eq!(keep_line_endings("a", "a;\n".into()), "a;\n");
+        // `rustfmt` and `black` keep `\r\n` themselves: not doubled.
+        assert_eq!(keep_line_endings("a\r\nb\r\n", "a;\r\nb;\r\n".into()), "a;\r\nb;\r\n");
+    }
+
+    #[test]
     fn the_caret_lands_on_a_character_boundary() {
         let old = "é = 1";
         let new = "é  =  1\n";
@@ -229,6 +263,53 @@ pub(crate) mod tests {
         let err = run_it(&["sleep", "30"], "x", Duration::from_millis(500)).unwrap_err();
         assert_eq!(err, "fixture took too long, so the file was left as it is");
         assert!(started.elapsed() < Duration::from_secs(20), "the wait ended with the limit");
+    }
+
+    /// `prettier` on Windows is `prettier.cmd`, cmd.exe running node: given up on, node goes too,
+    /// not only the cmd.exe in front of it.
+    #[cfg(windows)]
+    #[test]
+    fn a_formatter_behind_a_cmd_shim_that_hangs_is_ended_with_what_it_started() {
+        let dir = std::env::temp_dir().join(format!("trek-format-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("held.txt");
+        let shim = dir.join("slowfmt.cmd");
+        // The program the shim starts has `held.txt` open (its stdout) for as long as it runs.
+        std::fs::write(&shim, format!("@\"{}\" sleep 30 > \"{}\"\r\n", trek_test_fixtures::bin("fixture").display(), marker.display())).unwrap();
+        let err = trek_core::runtime().block_on(run(&shim, &[], &dir, "x".into(), Duration::from_millis(1500))).unwrap_err();
+        assert_eq!(err, "slowfmt took too long, so the file was left as it is");
+        assert!(marker.exists(), "the shim got as far as starting its program");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while let Err(e) = std::fs::remove_file(&marker) {
+            assert!(std::time::Instant::now() < deadline, "what the shim started is still running (it holds its output open: {e})");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `.cmd` shim (`prettier.cmd`) runs `node` by its bare name, which cmd.exe looks for in the
+    /// current folder, the file's, before the PATH: a `node.cmd` in a folder someone downloaded
+    /// must not be what runs.
+    #[cfg(windows)]
+    #[test]
+    fn a_formatter_shim_never_runs_a_program_from_the_files_folder() {
+        let root = std::env::temp_dir().join(format!("trek-format-cwd-{}", std::process::id()));
+        let (bin, project) = (root.join("bin"), root.join("project"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let ran = root.join("ran.txt");
+        let shim = bin.join("fmtshim.cmd");
+        std::fs::write(&shim, "@planted\r\n").unwrap();
+        std::fs::write(project.join("planted.cmd"), format!("@echo ran> \"{}\"\r\n", ran.display())).unwrap();
+        let result = trek_core::runtime().block_on(run(&shim, &[], &project, "x".into(), Duration::from_secs(30)));
+        assert!(!ran.exists(), "the program in the file's folder ran ({result:?})");
+        assert!(result.is_err(), "nothing named `planted` on the PATH: {result:?}");
+        let _ = std::fs::remove_dir_all(&root);
+        // Whatever Trek's own environment says (a terminal may have set it already, which is
+        // all the above can see there): the formatter is told.
+        let command = command(&shim, &[], &project);
+        let told = command.as_std().get_envs().any(|(k, v)| k == "NoDefaultCurrentDirectoryInExePath" && v == Some(std::ffi::OsStr::new("1")));
+        assert!(told, "the formatter's cmd.exe is told not to look in the current folder");
     }
 
     #[test]
