@@ -110,8 +110,11 @@ private struct SearchHitLine: View {
         if result.snippet != nil || result.thread.parentId != nil {
             VStack(alignment: .leading, spacing: 2) {
                 if result.thread.parentId != nil {
-                    Label(parent.map { "Sub-agent of \($0)" } ?? "Sub-agent", systemImage: "person.2")
-                        .font(.ui(.caption)).foregroundStyle(Trek.muted).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Image(systemName: "person.2")
+                        Text(parent.map { "Sub-agent of \($0)" } ?? "Sub-agent")
+                    }
+                    .font(.ui(.caption)).foregroundStyle(Trek.muted).lineLimit(1)
                 }
                 if let snippet = result.snippet {
                     Text(Self.highlighted(snippet, result.ranges ?? []))
