@@ -41,6 +41,10 @@ type MarkdownInlineRenderFn = dyn Fn(&MarkdownNode, &InlineRenderContext, &mut W
     + Send
     + Sync;
 
+/// Trek: rewrites the text the Markdown parser reads, byte for byte the same length (see
+/// [`MarkdownPlugin::mask`]).
+type MarkdownMaskFn = dyn Fn(&str) -> Option<String> + Send + Sync;
+
 /// A reusable Markdown extension that parses and renders one custom node.
 pub trait MarkdownPlugin: Send + Sync + 'static {
     /// Whether this plugin produces block-level nodes.
@@ -55,6 +59,16 @@ pub trait MarkdownPlugin: Send + Sync + 'static {
 
     /// Convert an mdast node into a custom Markdown node.
     fn parse(&self, node: &mdast::Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode>;
+
+    /// Trek: what the Markdown parser should read in place of `source`, so a span Markdown
+    /// would otherwise take apart (a `\[ … \]` formula, whose backslashes are escapes to
+    /// Markdown) reaches [`Self::parse`] whole. It must be exactly as long as `source` and
+    /// change only the spans the plugin claims: positions, and everything rendered from the
+    /// text, still come from the original source, which [`MarkdownParseContext`] hands back.
+    /// `None` (the default) leaves the source alone; a result of another length is ignored.
+    fn mask(&self, _source: &str) -> Option<String> {
+        None
+    }
 
     /// Render a custom Markdown node produced by this plugin.
     fn render(&self, node: &MarkdownNode, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
@@ -250,6 +264,8 @@ pub struct MarkdownExtensions {
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     inline_parsers: Vec<Arc<MarkdownInlineParserFn>>,
     inline_renderers: HashMap<SharedString, Arc<MarkdownInlineRenderFn>>,
+    /// Trek: see [`MarkdownPlugin::mask`].
+    masks: Vec<Arc<MarkdownMaskFn>>,
     revision: u64,
     parser_revision: u64,
 }
@@ -314,17 +330,20 @@ impl MarkdownExtensions {
     {
         let plugin = Arc::new(plugin);
         let name = SharedString::from(plugin.name().to_string());
+        let masker = plugin.clone();
         let parser = plugin.clone();
         let renderer = plugin;
+        let mut this = self;
+        this.masks.push(Arc::new(move |source| masker.mask(source)));
 
         if parser.is_block() {
-            let mut extensions = self.block_parser(move |node, cx| parser.parse(node, cx));
+            let mut extensions = this.block_parser(move |node, cx| parser.parse(node, cx));
             extensions.push_block_renderer(name, move |node, window, cx| {
                 renderer.render(node, window, cx).into_any_element()
             });
             extensions
         } else {
-            let mut extensions = self;
+            let mut extensions = this;
             extensions
                 .inline_parsers
                 .push(Arc::new(move |node, cx| parser.parse(node, cx)));
@@ -356,6 +375,7 @@ impl MarkdownExtensions {
             && self.block_renderers.len() == other.block_renderers.len()
             && self.inline_parsers.len() == other.inline_parsers.len()
             && self.inline_renderers.len() == other.inline_renderers.len()
+            && self.masks.len() == other.masks.len()
             && self
                 .inline_renderers
                 .keys()
@@ -406,6 +426,21 @@ impl MarkdownExtensions {
             options.constructs.mdx_jsx_text = true;
         }
         options
+    }
+
+    /// Trek: the text the Markdown parser reads for `source`, when a plugin masks part of it
+    /// (see [`MarkdownPlugin::mask`]). Each plugin masks what the one before it left.
+    pub(crate) fn mask_source(&self, source: &str) -> Option<String> {
+        let mut masked: Option<String> = None;
+        for mask in &self.masks {
+            let current = masked.as_deref().unwrap_or(source);
+            if let Some(next) = mask(current)
+                && next.len() == source.len()
+            {
+                masked = Some(next);
+            }
+        }
+        masked
     }
 
     pub(crate) fn parse_block(
