@@ -51,15 +51,66 @@ pub fn legacy_pointer() -> bool {
 #[cfg(all(windows, feature = "shots"))]
 pub static SCRIPTED_CURSOR_AWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether the cursor is over the window, as the system has it (`None` where it can't say: a
-/// window with no handle).
-#[cfg(windows)]
-fn cursor_over(window: &Window) -> Option<bool> {
-    #[cfg(feature = "shots")]
+/// Whether the cursor is over the window with handle `hwnd`, as the system has it (`None` where
+/// it can't say: a window with no handle). Never from inside an update: asking
+/// (`WindowFromPoint`) sends the window under the cursor `WM_NCHITTEST` there and then, and when
+/// that's this window GPUI answers it by updating the window, which it can't while the app is
+/// being updated (it logs "RefCell already borrowed" instead).
+#[cfg(any(windows, test))]
+fn cursor_over(hwnd: Option<isize>) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(ask) = CURSOR_IN_TESTS.with(|c| c.borrow().clone()) {
+        return ask();
+    }
+    #[cfg(all(windows, feature = "shots"))]
     if std::env::var_os("TREK_SHOT_DIR").is_some() {
         return Some(!SCRIPTED_CURSOR_AWAY.load(std::sync::atomic::Ordering::Relaxed));
     }
-    crate::winsys::hwnd_of(window).map(crate::winsys::cursor_over_window)
+    #[cfg(windows)]
+    return hwnd.map(crate::winsys::cursor_over_window);
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
+/// The tests' stand-in for the system's answer (`cursor_over`), which may do what asking Windows
+/// does: have the window's own callbacks update it.
+#[cfg(test)]
+pub type AskCursor = std::rc::Rc<dyn Fn() -> Option<bool>>;
+#[cfg(test)]
+thread_local!(pub static CURSOR_IN_TESTS: std::cell::RefCell<Option<AskCursor>> = const { std::cell::RefCell::new(None) });
+
+// The windows whose cursor question is out (`ask_after_draw`): one at a time each.
+#[cfg(any(windows, test))]
+thread_local!(static ASKING: std::cell::RefCell<std::collections::HashSet<WindowId>> = std::cell::RefCell::default());
+
+/// Ask the system where the cursor is once this draw is over, outside any update
+/// (`system::after_update`), and move GPUI's pointer off `window` if it's over another window or
+/// none (`should_let_go`, asked again then: the window may have heard from the pointer since).
+#[cfg(any(windows, test))]
+fn ask_after_draw(window: &mut Window, cx: &mut App) {
+    let id = window.window_handle().window_id();
+    if !ASKING.with(|a| a.borrow_mut().insert(id)) {
+        return;
+    }
+    #[cfg(windows)]
+    let hwnd = crate::winsys::hwnd_of(window);
+    #[cfg(not(windows))]
+    let hwnd = None;
+    let handle = window.window_handle();
+    crate::system::after_update(cx, move |cx| {
+        let over = cursor_over(hwnd);
+        ASKING.with(|a| a.borrow_mut().remove(&id));
+        if over == Some(false) {
+            crate::logging::ran(handle.update(cx, |_, window, cx| {
+                if should_let_go(pointer_inside(window), window.is_window_hovered(), || over) {
+                    pointer_off_window(window, cx);
+                }
+            }));
+        }
+    });
 }
 
 /// Moves GPUI's pointer off the window, as an event past its edge would: nothing is under it, so
@@ -77,19 +128,18 @@ pub fn pointer_off_window(window: &mut Window, cx: &mut App) {
 /// pointer inside and the system has the cursor over another window or none, it moves the pointer
 /// off (`pointer_off_window`). Asking the system, not the window's own notion of it, which is told
 /// as the cursor comes and goes and so can lag a draw either way. A press with the button down
-/// keeps the cursor with the window (it's captured), so a drag past the edge is left alone.
+/// keeps the cursor with the window (it's captured), so a drag past the edge is left alone. The
+/// system is asked after the draw (`ask_after_draw`), never during it.
 pub fn let_go_of_hover(window: &mut Window, cx: &mut App) {
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     {
-        let inside = pointer_inside(window);
-        // The system is asked last, and only when GPUI has been told the pointer left: most frames
-        // cost a comparison.
-        if legacy_pointer() || !should_let_go(inside, window.is_window_hovered(), || cursor_over(window)) {
+        // Only when GPUI has been told the pointer left: most frames cost a comparison.
+        if legacy_pointer() || !should_let_go(pointer_inside(window), window.is_window_hovered(), || Some(false)) {
             return;
         }
-        window.defer(cx, pointer_off_window);
+        ask_after_draw(window, cx);
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, test)))]
     let _ = (window, cx);
 }
 
