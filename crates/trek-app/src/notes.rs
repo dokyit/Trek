@@ -3,8 +3,14 @@
 //! for bold, italics, underline, strikethrough, headings, bullet, numbered and check lists,
 //! quotes, code, text colour and highlights. Write, Split (writing beside how it reads) or
 //! Preview. Saved as you type, as markdown files (see `trek_core::notes`).
+//!
+//! Images go in by paste, by drop, or from the toolbar's picker: each is a file kept in the notes
+//! folder's `assets/`, linked from the note as `![name](assets/file)` on a line of its own, and
+//! drawn in the preview.
 
+use crate::attachments::{self, Pasted};
 use crate::workspace::Workspace;
+use anyhow::{Context as _, Result};
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -12,6 +18,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use trek_core::notes::{self, Block, Edit, Note};
 
@@ -131,7 +138,7 @@ struct Format {
 
 // The tips are written for a Mac; `tool` and the "More formatting" menu localize them.
 // keys: localized where used
-const FORMATS: [Format; 11] = [
+const FORMATS: [Format; 12] = [
     Format { id: "note-bold", icon: crate::assets::Lucide::Bold, tip: "Bold (⌘B)", act: |t, w, cx| t.wrap("**", "**", w, cx), tier: 0, group: 0 },
     Format { id: "note-italic", icon: crate::assets::Lucide::Italic, tip: "Italic (⌘I)", act: |t, w, cx| t.wrap("*", "*", w, cx), tier: 0, group: 0 },
     Format { id: "note-underline", icon: crate::assets::Lucide::Underline, tip: "Underline (⌘U)", act: |t, w, cx| t.wrap("<u>", "</u>", w, cx), tier: 2, group: 0 },
@@ -143,6 +150,7 @@ const FORMATS: [Format; 11] = [
     Format { id: "note-checks", icon: crate::assets::Lucide::ListTodo, tip: "Checklist (⌘⇧9) · tick with ⌘↩", act: |t, w, cx| t.block(Block::Checklist, w, cx), tier: 1, group: 2 },
     Format { id: "note-quote", icon: crate::assets::Lucide::Quote, tip: "Quote (⌘⇧.)", act: |t, w, cx| t.block(Block::Quote, w, cx), tier: 2, group: 2 },
     Format { id: "note-code", icon: crate::assets::Lucide::Code, tip: "Code (⌘E)", act: |t, w, cx| t.wrap("`", "`", w, cx), tier: 2, group: 2 },
+    Format { id: "note-image", icon: crate::assets::Lucide::Image, tip: "Add an image (or paste or drop one)", act: |t, w, cx| t.pick_images(w, cx), tier: 1, group: 3 },
 ];
 // keys: end
 
@@ -316,20 +324,20 @@ impl NotesView {
         self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: format!("Deleted “{title}” (kept in the notes folder's Deleted)"), undo: None }));
     }
 
+    /// A new note on top of the list, in front, for what's about to be written in the editor
+    /// when no note is open.
+    fn start_note(&mut self) -> std::io::Result<()> {
+        let note = notes::create_in(&notes::notes_dir())?;
+        self.current = Some(note.id.clone());
+        self.notes.insert(0, note);
+        Ok(())
+    }
+
     /// The note's text changed: keep it, and save it a moment after typing stops. Typing into
     /// no note at all starts one.
     fn changed(&mut self, body: String, cx: &mut Context<Self>) {
-        if self.current.is_none() {
-            if body.is_empty() {
-                return;
-            }
-            match notes::create_in(&notes::notes_dir()) {
-                Ok(note) => {
-                    self.current = Some(note.id.clone());
-                    self.notes.insert(0, note);
-                }
-                Err(_) => return,
-            }
+        if self.current.is_none() && (body.is_empty() || self.start_note().is_err()) {
+            return;
         }
         let Some(note) = self.notes.iter_mut().find(|n| Some(&n.id) == self.current.as_ref()) else { return };
         if note.body == body {
@@ -416,6 +424,98 @@ impl NotesView {
         let line = text[..sel.start.min(text.len())].matches('\n').count();
         if let Some(new) = notes::toggle_check(&text, line) {
             self.apply(Edit { selection: sel.clone(), text: new }, window, cx);
+        }
+    }
+
+    fn toast(&self, message: String, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message, undo: None }));
+    }
+
+    /// The toolbar's Image button: pick image files to add at the caret.
+    fn pick_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let _ = this.update_in(cx, |this, window, cx| this.add_files(paths, true, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Image files (dropped or picked) go into the note; any other file is left out. `say`:
+    /// tell the user when none of them was an image (a pick can't be limited to images).
+    fn add_files(&mut self, paths: Vec<PathBuf>, say: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (images, _) = attachments::split_files(paths);
+        if images.is_empty() && say {
+            self.toast("That isn't an image: notes take PNG, JPEG, GIF, WebP, HEIC, TIFF and BMP.".into(), cx);
+        }
+        self.add_images(images.into_iter().map(Source::File).collect(), window, cx);
+    }
+
+    /// A paste the editor handed over (see `attachments::pasted`): images go into the note. Other
+    /// files copied along with them are left out, as a drop leaves them.
+    fn paste_images(&mut self, pasted: Pasted, window: &mut Window, cx: &mut Context<Self>) {
+        let sources = match pasted {
+            Pasted::Files { images, .. } => images.into_iter().map(Source::File).collect(),
+            Pasted::Images(images) => images.into_iter().map(Source::Data).collect(),
+        };
+        self.add_images(sources, window, cx);
+    }
+
+    /// Put `sources` in the notes folder's `assets/` off the main thread, then link them from the
+    /// note, at the caret, as one step to undo. With no note open, one is started to hold them.
+    fn add_images(&mut self, sources: Vec<Source>, window: &mut Window, cx: &mut Context<Self>) {
+        if sources.is_empty() {
+            return;
+        }
+        if self.current.is_none()
+            && let Err(e) = self.start_note()
+        {
+            self.toast(format!("Couldn't make a note: {e}"), cx);
+            return;
+        }
+        let Some(note) = self.current.clone() else { return };
+        let assets = notes::assets_dir();
+        cx.spawn_in(window, async move |this, cx| {
+            let (id, dir) = (note.clone(), assets);
+            let results = cx.background_executor().spawn(async move { sources.iter().map(|s| (s.label(), bring_in(s, &id, &dir))).collect::<Vec<_>>() }).await;
+            let _ = this.update_in(cx, |this, window, cx| this.landed(&note, results, window, cx));
+        })
+        .detach();
+    }
+
+    /// Images are in `assets/`: link the ones that made it from note `id`. If the user has opened
+    /// another note meanwhile, they're added at the end of the note they were meant for.
+    fn landed(&mut self, id: &str, results: Vec<(String, Result<String>)>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut links = Vec::new();
+        let mut failed = None;
+        for (label, result) in results {
+            match result {
+                Ok(link) => links.push(link),
+                Err(e) => {
+                    failed.get_or_insert(format!("Couldn't add {label}: {e}."));
+                }
+            }
+        }
+        if let Some(message) = failed {
+            self.toast(message, cx);
+        }
+        if links.is_empty() {
+            return;
+        }
+        let link = links.join("\n");
+        if self.current.as_deref() == Some(id) {
+            let (text, sel) = Self::read(&self.editor, cx);
+            self.apply(notes::insert_image(&text, sel, &link), window, cx);
+        } else if let Some(at) = self.notes.iter().position(|n| n.id == id) {
+            let mut note = self.notes.remove(at);
+            note.body = notes::insert_image(&note.body, note.body.len()..note.body.len(), &link).text;
+            note.modified = trek_core::store::now_ms();
+            if let Err(e) = notes::save(&note) {
+                tracing::warn!("note {}: {e}", note.id);
+            }
+            self.notes.insert(0, note);
+            cx.notify();
         }
     }
 
@@ -673,12 +773,28 @@ impl Render for NotesView {
             .py(px(20.))
             .text_size(size)
             .line_height(relative(1.6))
-            .child(Textarea::new(&self.editor).appearance(false).h_full());
+            .child(
+                Textarea::new(&self.editor)
+                    .appearance(false)
+                    // A screenshot (or an image file) on the clipboard goes into the note as an image;
+                    // anything else pastes as text, as before.
+                    .on_paste({
+                        let me = cx.entity().downgrade();
+                        move |item, window, cx| match attachments::pasted(item) {
+                            Some(p) => me.update(cx, |this, cx| this.paste_images(p, window, cx)).is_ok(),
+                            None => false,
+                        }
+                    })
+                    .h_full(),
+            );
+        // The notes folder is where `assets/…` links start from: the images in them are drawn,
+        // and open in the image preview when clicked.
         let preview = div().id("note-preview").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(32.)).py(px(22.)).child(if body.trim().is_empty() {
             div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
         } else {
-            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, None, None, size, false, false, cx).into_any_element()
+            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, Some(notes::notes_dir()), None, size, false, false, cx).into_any_element()
         });
+        let drop_tint = crate::palette::ember(cx).opacity(0.08);
         let main = match self.mode {
             Mode::Write => write.into_any_element(),
             Mode::Preview => preview.into_any_element(),
@@ -700,10 +816,15 @@ impl Render for NotesView {
             .child(self.list(cx))
             .child(
                 v_flex()
+                    .id("note-pane")
+                    .test_support()
                     .key_context(CONTEXT)
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    // Image files dropped anywhere on the note go into it; other files are left.
+                    .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.add_files(paths.paths().to_vec(), false, window, cx)))
                     // Before the text box's own undo gets them: that one knows nothing of what
                     // the toolbar did, and the two together would lose steps.
                     .capture_action(cx.listener(|t, _: &Undo, w, cx| {
@@ -730,6 +851,90 @@ impl Render for NotesView {
                     .child(div().flex_1().min_h_0().flex().child(main)),
             )
     }
+}
+
+/// An image on its way into a note.
+pub(crate) enum Source {
+    /// Image data off the clipboard (a screenshot).
+    Data(Image),
+    /// An image file, dropped, picked or copied. It's copied: the original stays where it was.
+    File(PathBuf),
+}
+
+impl Source {
+    /// How a failure names it.
+    fn label(&self) -> String {
+        match self {
+            Source::Data(_) => "the pasted image".into(),
+            Source::File(path) => path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string()),
+        }
+    }
+}
+
+/// `name` as the stem of a file a markdown link can point at without escaping: letters, digits,
+/// `-` and `_`, the rest becoming `-`.
+pub(crate) fn file_safe(name: &str) -> String {
+    let cleaned: String = name.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '-' }).collect();
+    let stem: String = cleaned.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-").chars().take(60).collect();
+    if stem.is_empty() { "image".into() } else { stem }
+}
+
+/// `<stem>.<ext>` in `dir`, or `<stem>-2.<ext>`… if that's taken: an image never replaces another.
+pub(crate) fn unused_name(dir: &Path, stem: &str, ext: &str) -> String {
+    (1usize..)
+        .map(|n| if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") })
+        .find(|name| !dir.join(name).exists())
+        .unwrap_or_else(|| format!("{stem}.{ext}"))
+}
+
+/// Make a PNG of `path` at `to`, for an image agents and the preview can't read as it is: with
+/// the same conversion the composer uses (macOS's `sips`, which also reads HEIC), else, where
+/// there is none, with the image crate (TIFF and BMP).
+fn convert_to(path: &Path, to: &Path, assets: &Path) -> Result<()> {
+    match attachments::convert_file(path, assets) {
+        Ok(made) => std::fs::rename(&made, to)
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&made);
+            })
+            .with_context(|| format!("{} couldn't be written", to.display())),
+        Err(e) => {
+            let decoded = image::open(path).map_err(|_| e)?;
+            decoded.save_with_format(to, image::ImageFormat::Png).context("it couldn't be converted to PNG")
+        }
+    }
+}
+
+/// Put `source` in `assets` as an image of note `note`, named `<note id>-<timestamp>-<name>.<ext>`
+/// so a note's images can be found by its id, and give the markdown that shows it:
+/// `![name](assets/file)`, written with `/` on every platform. Nothing is written outside `assets`.
+pub(crate) fn bring_in(source: &Source, note: &str, assets: &Path) -> Result<String> {
+    std::fs::create_dir_all(assets).with_context(|| format!("{} couldn't be created", assets.display()))?;
+    let id = file_safe(note);
+    let (alt, name) = match source {
+        Source::Data(image) => {
+            // Saved as the composer saves a pasted image (the same formats, the same conversions),
+            // then named for its note.
+            let saved = attachments::save_image(image, assets)?;
+            let name = format!("{id}-{}", saved.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+            std::fs::rename(&saved, assets.join(&name)).with_context(|| format!("{} couldn't be written", assets.join(&name).display()))?;
+            ("Pasted image".to_string(), name)
+        }
+        Source::File(path) => {
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let convert = attachments::needs_conversion(path);
+            let ext = if convert { "png".to_string() } else { path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default() };
+            let name = unused_name(assets, &format!("{id}-{}-{}", attachments::timestamp(), file_safe(&stem)), &ext);
+            let to = assets.join(&name);
+            if convert {
+                convert_to(path, &to, assets)?;
+            } else {
+                std::fs::copy(path, &to).with_context(|| format!("it couldn't be copied to {}", to.display()))?;
+            }
+            let alt = stem.replace(['[', ']', '\r', '\n'], " ").trim().to_string();
+            (if alt.is_empty() { "Image".to_string() } else { alt }, name)
+        }
+    };
+    Ok(format!("![{alt}](assets/{name})"))
 }
 
 #[cfg(test)]
