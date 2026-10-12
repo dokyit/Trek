@@ -144,6 +144,9 @@ pub struct Thread {
     pub started_by: Option<String>,
     /// Set for a thread that took over another's work (`handoff`): the thread it continues.
     pub continued_from: Option<String>,
+    /// The agent that started it (`started_by`) hears when it finishes or needs the user
+    /// (`start_thread`'s `notify`).
+    pub notify_starter: bool,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -437,6 +440,7 @@ const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("parent_id", "TEXT"),
     ("started_by", "TEXT"),
     ("continued_from", "TEXT"),
+    ("notify_starter", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
@@ -608,7 +612,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from, notify_starter";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -648,6 +652,7 @@ impl Store {
             parent_id: r.get(32)?,
             started_by: r.get(33)?,
             continued_from: r.get(34)?,
+            notify_starter: r.get::<_, i64>(35)? != 0,
         })
     }
 
@@ -722,6 +727,7 @@ impl Store {
             parent_id: None,
             started_by: None,
             continued_from: None,
+            notify_starter: false,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -791,7 +797,8 @@ impl Store {
                 t.paused.as_ref().and_then(|p| serde_json::to_string(p).ok()),
                 t.parent_id,
                 t.started_by,
-                t.continued_from
+                t.continued_from,
+                t.notify_starter as i64
             ],
         )?;
         Ok(())
@@ -1034,6 +1041,7 @@ impl Store {
             parent_id: None,
             started_by: None,
             continued_from: None,
+            notify_starter: false,
         })
     }
 
@@ -1473,7 +1481,7 @@ mod tests {
         s.await_report(&parent.id, &kid.id).unwrap();
         s.await_report(&parent.id, &kid.id).unwrap();
         assert_eq!(s.held_reports().unwrap(), [(parent.id.clone(), kid.id.clone(), None)], "at work: nothing to say yet");
-        let report = Report { id: kid.id.clone(), title: "Review".into(), model: "Sol".into(), outcome: Outcome::Done("Looks fine.".into()) };
+        let report = Report { id: kid.id.clone(), title: "Review".into(), model: "Sol".into(), outcome: Outcome::Done("Looks fine.".into()), thread: None };
         s.hold_report(&parent.id, &report).unwrap();
         assert_eq!(s.held_reports().unwrap(), [(parent.id.clone(), kid.id.clone(), Some(report.clone()))]);
         s.drop_report(&kid.id).unwrap();
@@ -1546,6 +1554,7 @@ mod tests {
         let mut next = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
         next.started_by = Some("old".into());
         next.continued_from = Some(started.id.clone());
+        next.notify_starter = true;
         s.save_thread(&next).unwrap();
         // The rows standing for the links are transcript items like any other.
         let row = crate::lineage::row(crate::lineage::Link::ContinuedFrom, &started.id, "Fix the cache");
@@ -1553,7 +1562,8 @@ mod tests {
         drop(s);
         let s = Store::open(&path).unwrap();
         let back = s.thread(&next.id).unwrap().unwrap();
-        assert_eq!((back.started_by.as_deref(), back.continued_from.as_deref()), (Some("old"), Some(started.id.as_str())));
+        assert_eq!((back.started_by.as_deref(), back.continued_from.as_deref(), back.notify_starter), (Some("old"), Some(started.id.as_str()), true));
+        assert!(!s.thread("old").unwrap().unwrap().notify_starter, "older threads tell nobody");
         assert_eq!(s.items(&next.id).unwrap(), [row]);
         assert_eq!(back.section(now_ms()), Some(Section::Inbox), "in the sidebar, unlike a sub-agent");
         let _ = std::fs::remove_dir_all(dir);

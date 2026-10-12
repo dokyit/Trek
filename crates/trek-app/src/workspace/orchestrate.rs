@@ -970,6 +970,7 @@ impl Workspace {
                 title: self.thread(child).map(|t| t.title.clone()).unwrap_or_default(),
                 model: self.thread(child).map(|t| self.model_label(t)).unwrap_or_default(),
                 outcome,
+                thread: None,
             };
             if let Err(e) = self.store.hold_report(&parent, &report) {
                 tracing::warn!("keep the sub-agent's report: {e:#}");
@@ -985,7 +986,7 @@ impl Workspace {
 
     /// Wake `parent` with its reports once `GATHER` has passed: sub-agents that finish together
     /// reach it in one message.
-    fn gather_wakes(&mut self, parent: &str, cx: &mut Context<Self>) {
+    pub(super) fn gather_wakes(&mut self, parent: &str, cx: &mut Context<Self>) {
         if self.gathering.contains_key(parent) {
             return;
         }
@@ -1024,6 +1025,7 @@ impl Workspace {
                         title: kid.as_ref().map(|t| t.title.clone()).unwrap_or_default(),
                         model: kid.as_ref().map(|t| self.model_label(t)).unwrap_or_default(),
                         outcome: Outcome::Failed(format!("{} Its thread keeps what it did; start it again if you still need it.", orch::CUT_OFF)),
+                        thread: None,
                     };
                     let _ = self.store.hold_report(&parent, &r);
                     r
@@ -1068,7 +1070,7 @@ impl Workspace {
     /// `parent`'s agent read `child`'s answer itself: no message brings it again, whether it's
     /// in line for the next wake-up or kept for after the user's turn (`parked`). The parked
     /// notice already in the transcript keeps its count.
-    fn heard(&mut self, parent: &str, child: &str) {
+    pub(super) fn heard(&mut self, parent: &str, child: &str) {
         let mut had = false;
         for line in [&mut self.wakes, &mut self.parked] {
             if let Some(w) = line.get_mut(parent).filter(|w| w.iter().any(|r| r.id == child)) {

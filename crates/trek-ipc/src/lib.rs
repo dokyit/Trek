@@ -307,7 +307,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ("cancel_task", "Stop a sub-agent you started. Its thread stays, for the user to read.", id),
         (
             "start_thread",
-            "Start a new thread of the user's own in Trek: it shows in their sidebar like one they started, runs on its own, and is theirs to read, steer and finish. Use it for separate work the user will want to follow by itself (another feature, a long investigation, work in another project), not for a quick answer you need back (use delegate_task for that). It sees only the prompt you give it, so make it self-contained. It runs with this thread's access level at most. Returns its id; follow it with thread_status / read_thread, and send it more with send_to_thread. The user is told when it finishes.",
+            "Start a new thread of the user's own in Trek: it shows in their sidebar like one they started, runs on its own, and is theirs to read, steer and finish. Use it for separate work the user will want to follow by itself (another feature, a long investigation, work in another project), not for a quick answer you need back (use delegate_task for that). It sees only the prompt you give it, so make it self-contained. It runs with this thread's access level at most. Returns its id. With notify (the default) Trek sends you a message when it finishes, fails or needs the user's approval, so end your turn rather than polling; thread_status / read_thread follow it meanwhile, and send_to_thread sends it more. The user is told when it finishes too.",
             json!({
                 "type": "object",
                 "properties": {
@@ -317,7 +317,8 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                     "model": { "type": "string", "description": "Model id or name from list_models. Defaults to this thread's model (the agent's own default when it's another agent)." },
                     "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort; clamped to what the model supports. Defaults to this thread's effort." },
                     "project": { "type": "string", "description": "Another project Trek knows, by name or folder path (list_threads lists them). Defaults to this thread's project." },
-                    "worktree": { "type": "boolean", "description": "Run it in a new git worktree of its own (on a new branch), so its changes stay apart from this checkout's. Default false: it works in the project's folder." }
+                    "worktree": { "type": "boolean", "description": "Run it in a new git worktree of its own (on a new branch), so its changes stay apart from this checkout's. Default false: it works in the project's folder." },
+                    "notify": { "type": "boolean", "description": "Wake you with a message when it finishes, fails or needs the user (true, the default), and again after each send_to_thread. false: follow it yourself with thread_status / read_thread." }
                 },
                 "required": ["prompt"]
             }),
@@ -444,6 +445,7 @@ mod tests {
         let schema = |name: &str| tools.iter().find(|t| t.0 == name).map(|t| t.2.clone()).unwrap();
         assert_eq!(schema("start_thread")["required"], json!(["prompt"]));
         assert_eq!(schema("start_thread")["properties"]["worktree"]["type"], "boolean");
+        assert_eq!(schema("start_thread")["properties"]["notify"]["type"], "boolean");
         assert!(schema("start_thread")["properties"].get("project").is_some());
         assert_eq!(schema("handoff")["required"], json!(["brief"]));
         for name in ["thread_status", "read_thread"] {
