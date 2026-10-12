@@ -209,6 +209,8 @@ pub fn streaming() -> TextViewMotion {
 #[allow(clippy::too_many_arguments)]
 fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, note_images: Option<crate::note_images::NoteImages>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
+    let theme = cx.theme();
+    let ink = Ink::new(theme.foreground, theme.muted_foreground, theme.mode.is_dark(), tone).body;
     let view = view.selectable(true).style(style(size, tone, cx)).text_size(size).line_height(relative(LINE_HEIGHT));
     let view = match note_images {
         Some(images) => view.plugin(images),
@@ -216,6 +218,9 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
     };
     let view = view
         .plugin(PathChips { cwd, folder })
+        // TeX math: `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` on their own, typeset.
+        .plugin(crate::math::InlineMath)
+        .plugin(crate::math::DisplayMath { size, ink })
         .on_link_click(move |url, _, window, cx| {
             // A link to an image on disk previews it here; to another file or folder, opens it
             // with the system; a scheme (https:, mailto:) stays a URL; anything else can't open —

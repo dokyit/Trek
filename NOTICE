@@ -9,7 +9,13 @@ Third-party materials bundled in this repository:
   (crates/trek-app/assets/file-icons/LICENSE).
 * crates/trek-app/assets/fonts — Inter (The Inter Project Authors) and JetBrains Mono
   (The JetBrains Mono Project Authors), both under the SIL Open Font License 1.1
-  (OFL-Inter.txt and OFL-JetBrainsMono.txt in that folder).
+  (OFL-Inter.txt and OFL-JetBrainsMono.txt in that folder), and the KaTeX fonts
+  (Design Science, Inc. and Khan Academy), seven of them modified and renamed TrekMath,
+  SIL Open Font License 1.1 (OFL-KaTeX.txt).
+* crates/trek-app/src/math/tables.rs — glyph metrics and the math symbol table from
+  KaTeX (Khan Academy and other contributors), MIT; the layout rules in
+  crates/trek-app/src/math/layout.rs follow KaTeX's implementation of TeX's
+  (crates/trek-app/src/math/LICENSE-KaTeX).
 * Agent and provider logos under crates/trek-app/assets/logos and
   ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,

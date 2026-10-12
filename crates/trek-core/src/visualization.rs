@@ -35,8 +35,9 @@ pub const MAX_TABS: usize = 8;
 /// Every `type` the schema knows, in the order the instructions list them.
 pub const TYPES: &[&str] = &["bar", "line", "donut", "stats", "table", "heatmap", "treemap", "timeline", "flow", "layers", "mockup"];
 
-/// Instructions suitable for including verbatim in an agent capability prompt. Every session
-/// carries them, so they stay terse (`instructions_stay_compact`).
+/// Instructions suitable for including verbatim in an agent capability prompt: native
+/// visualizations, and that TeX math in an answer is typeset. Every session carries them, so they
+/// stay terse (`instructions_stay_compact`).
 pub const AGENT_INSTRUCTIONS: &str = "Only when a picture clarifies the answer, add a native visualization: strict JSON in a fenced `trek-viz` block, then state its takeaway in prose. Every object: `version`:1, `title`, `summary`, `type`, plus its fields: \
 bar `bars`[{label,value}], `x_label`?, `y_label`?; \
 line `x_labels`, `series`[{label,values}] (≤6, one value per x label), `area`?:bool, `y_label`?, `unit`?; \
@@ -49,7 +50,8 @@ timeline `events`[{label,start,end?,lane?}], positions numbers, or strings from 
 flow `nodes`[{id,label,detail?,group?}], `edges`[{from,to,label?}]; \
 layers `layers`[{label,detail?,items?:[string]}], top first; \
 mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (placeholder; value wide|square|tall), progress (value 0-100), divider. \
-Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never emit HTML, CSS, URLs, paths or scripts. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6.";
+Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never emit HTML, CSS, URLs, paths or scripts. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
+TeX math renders typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on its own line.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Visualization {
@@ -1268,6 +1270,10 @@ mod tests {
         }
         for kind in ["input", "toggle", "progress", "avatar", "image", "list", "tabs", "nav", "frame", "phone", "browser", "window", "tablet"] {
             assert!(AGENT_INSTRUCTIONS.contains(kind), "{kind}");
+        }
+        // Math renders too, with all four delimiters.
+        for delim in ["`$…$`", "`$$…$$`", r"`\(…\)`", r"`\[…\]`"] {
+            assert!(AGENT_INSTRUCTIONS.contains(delim), "{delim}");
         }
     }
 
