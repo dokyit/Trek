@@ -83,6 +83,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
+                    "editor" if arg.starts_with("snap ") => editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await,
                     "hittest" | "realclick" | "realmove" | "realleave" => hittest(&workspace, &dir, verb, arg, cx).await,
                     "legacy-pointer" => cx.update(|cx| match arg {
                         "on" | "off" => {
@@ -322,6 +323,31 @@ async fn hittest(ws: &Entity<Workspace>, dir: &Path, verb: &str, arg: &str, cx: 
 #[cfg(not(windows))]
 async fn hittest(_: &Entity<Workspace>, _: &Path, verb: &str, _: &str, _: &mut AsyncApp) -> anyhow::Result<()> {
     anyhow::bail!("{verb}: Windows only (macOS has no WM_NCHITTEST)")
+}
+
+/// `editor snap <name>`: the editor's preview in front (a PDF, a video), its web view as WebView2
+/// draws it, to `<name>.png` (a native view: `shot` doesn't show it). Windows only.
+async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.is_empty(), "editor snap needs a name");
+    #[cfg(windows)]
+    {
+        let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let png = main.update(cx, |root, _, cx| {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())?;
+            let web = trek.read(cx).ide.read(cx).active_preview()?.read(cx).web_view()?;
+            Some(crate::panels::browser::capture_png(web.read(cx).raw()))
+        })?;
+        let png = png.ok_or_else(|| anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)"))?;
+        let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("editor snap: the view closed"))?.map_err(|e| anyhow::anyhow!("editor snap: {e}"))?;
+        std::fs::write(dir.join(format!("{name}.png")), bytes)?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ws, dir, cx);
+        anyhow::bail!("editor snap: Windows only (WebView2's CapturePreview)")
+    }
 }
 
 async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
@@ -685,7 +711,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // `editor diag <abs-path> <line> <message>` (a problem, as a language server would say),
         // `editor fix` (Fix with Agent on the first problem), `editor term-chat`, and
         // `editor rclick|hover <element id>` (a context menu, a hover, without a pointer; `name#3`
-        // for a row's id).
+        // for a row's id). `editor snap <name>`: the preview's web view (see `editor_snap`).
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {

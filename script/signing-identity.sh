@@ -10,10 +10,13 @@
 # same identity can be imported on another Mac; then they're imported into the login keychain with
 # only /usr/bin/codesign allowed to use the key. Nothing here changes trust settings or needs a
 # password prompt: codesign can sign with an untrusted self-signed certificate.
+#
+# TREK_SIGNING_DIR and TREK_SIGNING_KEYCHAIN put the files and the identity elsewhere: the release
+# workflow's dry run makes a throwaway identity with them, never touching a real one.
 set -euo pipefail
 NAME="Trek Local Signing"
-DIR="$HOME/.trek-signing"
-KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+DIR=${TREK_SIGNING_DIR:-$HOME/.trek-signing}
+KEYCHAIN=${TREK_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}
 
 has_identity() { security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "\"$1\""; }
 
@@ -24,7 +27,7 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 if has_identity "$NAME"; then
-  echo "• \"$NAME\" is already in the login keychain"
+  echo "• \"$NAME\" is already in $KEYCHAIN"
   exit 0
 fi
 
@@ -48,7 +51,7 @@ if [[ ! -f "$DIR/codesign.p12" ]]; then
     -out "$DIR/codesign.p12" -passout "file:$DIR/codesign.p12.password"
 fi
 
-echo "• importing into the login keychain (key usable by /usr/bin/codesign only)"
+echo "• importing into $KEYCHAIN (key usable by /usr/bin/codesign only)"
 security import "$DIR/codesign.p12" -k "$KEYCHAIN" -f pkcs12 \
   -P "$(cat "$DIR/codesign.p12.password")" -T /usr/bin/codesign >/dev/null
 has_identity "$NAME" && echo "• \"$NAME\" ready" || { echo "import finished but no identity found" >&2; exit 1; }
