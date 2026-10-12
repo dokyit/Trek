@@ -155,17 +155,17 @@ private struct ThreadScreen: View {
                             } else {
                                 Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
                             }
-                            if model.serves(MacFeature.snooze) {
+                            if model.serves(.snooze) {
                                 SnoozeMenu(thread: t) { snoozePicking = true }
                             }
                             Button("Rename…", systemImage: "pencil") {
                                 newTitle = t.title
                                 renaming = true
                             }
-                            if model.serves(MacFeature.regenerateTitle) {
+                            if model.serves(.regenerateTitle) {
                                 Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(threadID) }
                             }
-                            if model.serves(MacFeature.markUnread) {
+                            if model.serves(.markUnread) {
                                 Button("Mark unread", systemImage: "circlebadge") { model.markUnread(threadID) }
                             }
                         }
@@ -177,7 +177,7 @@ private struct ThreadScreen: View {
                 }
                 if thread?.parentId == nil {
                     Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
-                    if model.serves(MacFeature.delete), let t = thread {
+                    if model.serves(.delete), let t = thread {
                         Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
                     }
                 }
@@ -464,10 +464,10 @@ private struct BlockRow: View, Equatable {
     @ViewBuilder
     private var content: some View {
         switch block.kind {
-        case .user(let text, let images, let at):
+        case .user(let text, let images, let at, let aside):
             VStack(alignment: .trailing, spacing: 4) {
-                UserBubble(text: text, images: images)
-                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, act: act)
+                UserBubble(text: text, images: images, threadID: threadID, itemID: block.itemID)
+                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, aside: aside, act: act)
             }
         case .assistant(let text, let streaming):
             MarkdownText(text: text, live: streaming)
@@ -534,13 +534,20 @@ private struct ComposerArea: View {
         let query = CommandPicker.query(composer.draft)
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         VStack(spacing: 10) {
-            if let kid = thread?.needsThread, model.serves(MacFeature.subAgents) {
+            if let kid = thread?.needsThread, model.serves(.subAgents) {
                 SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             ForEach(store.pending) { item in
                 PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent") { response in
                     if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction) {
+                QueuedStrip(threadID: threadID, queued: queued) { text in
+                    composer.draft = composer.draft.isEmpty ? text : composer.draft + "\n\n" + text
+                    composer.focusRequest += 1
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -561,6 +568,7 @@ private struct ComposerArea: View {
         .padding(.top, 8)
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
+        .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
             // `/` typed at the start: the picker wants the thread's commands (asked again each

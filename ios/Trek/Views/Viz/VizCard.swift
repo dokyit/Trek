@@ -43,7 +43,7 @@ struct VizLook {
     /// in the data, so switching others off never repaints it).
     static func series(_ i: Int, tone: VizTone? = nil) -> Color {
         if let tone { return Self.tone(tone) }
-        return [Trek.sky, Trek.ember, Trek.done, Trek.question, Trek.approval, pink][i % 6]
+        return [Trek.sky, Trek.ember, Trek.done, Trek.indigo, Trek.approval, pink][i % 6]
     }
 }
 

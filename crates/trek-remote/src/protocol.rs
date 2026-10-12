@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod parity;
+pub use parity::*;
+
 /// The protocol version this crate speaks (`hello`/`pair` carry the phone's, `welcome`/`paired`
 /// the Mac's).
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -152,6 +155,17 @@ pub enum ClientMessage {
     /// Threads whose title or messages match, as the Mac's own search finds them (answered with
     /// `search_results`).
     Search(SearchRequest),
+    // Parity with the Mac (`parity.rs`; the Mac lists them in `features`, see [`feature`]).
+    /// Spend a granted rate-limit reset (answered with `ack` once spent).
+    UseReset { credit_id: String },
+    QueueAction(QueueActionRequest),
+    /// A message's image (answered with `attachment`).
+    Attachment(AttachmentRequest),
+    /// The end of a background task's output (answered with `background_output`).
+    BackgroundOutput { thread_id: String, task_id: String },
+    StopBackground { thread_id: String, task_id: String },
+    /// An added agent's or a project's icon (answered with `icon`).
+    Icon(IconRequest),
 }
 
 impl ClientMessage {
@@ -191,6 +205,12 @@ impl ClientMessage {
             Self::SetSettings(_) => "set_settings",
             Self::Ping => "ping",
             Self::Search(_) => "search",
+            Self::UseReset { .. } => "use_reset",
+            Self::QueueAction(_) => "queue_action",
+            Self::Attachment(_) => "attachment",
+            Self::BackgroundOutput { .. } => "background_output",
+            Self::StopBackground { .. } => "stop_background",
+            Self::Icon(_) => "icon",
         }
     }
 }
@@ -211,6 +231,9 @@ impl ClientMessage {
                 | Self::Settings
                 | Self::TranscriptBefore { .. }
                 | Self::Search(_)
+                | Self::Attachment(_)
+                | Self::BackgroundOutput { .. }
+                | Self::Icon(_)
         )
     }
 }
@@ -410,6 +433,31 @@ pub mod feature {
     pub const DELETE: &str = "delete";
     /// `thread_action` `regenerate_title`.
     pub const REGENERATE_TITLE: &str = "regenerate_title";
+    /// `use_reset`: Codex's "Use reset" (Usage card).
+    pub const USE_RESET: &str = "use_reset";
+    /// `queue_action`: change or drop a queued follow-up.
+    pub const QUEUE_ACTION: &str = "queue_action";
+    /// `attachment`: a message's images.
+    pub const ATTACHMENT: &str = "attachment";
+    /// `background_output` and `stop_background`.
+    pub const BACKGROUND: &str = "background";
+    /// `icon`: an added agent's or a project's icon.
+    pub const ICON: &str = "icon";
+
+    /// Every feature above, for a Mac that serves them all.
+    pub const ALL: &[&str] = &[
+        SEARCH,
+        SUB_AGENTS,
+        SNOOZE,
+        MARK_UNREAD,
+        DELETE,
+        REGENERATE_TITLE,
+        USE_RESET,
+        QUEUE_ACTION,
+        ATTACHMENT,
+        BACKGROUND,
+        ICON,
+    ];
 }
 
 /// `save_note`: a note's new text.
@@ -675,6 +723,12 @@ pub enum ServerMessage {
     Commands { thread_id: String, commands: Vec<CommandInfo> },
     /// The reply to `settings` and `set_settings`.
     Settings(MacSettings),
+    /// The reply to `attachment`.
+    Attachment(Attachment),
+    /// The reply to `background_output`.
+    BackgroundOutput(BackgroundOutput),
+    /// The reply to `icon`.
+    Icon(Icon),
     /// A request failed.
     Error { code: ErrorCode, message: String },
     /// Upsert of a thread the list leaves out: a sub-agent's (its parent's row names it), or one a
@@ -856,6 +910,12 @@ pub struct ThreadSummary {
     /// `needs` is a sub-agent's (at any depth): its thread, opened to answer it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_thread: Option<String>,
+    /// Follow-ups waiting to go, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<QueuedMessage>,
+    /// `background`, in full: what each is, its last line, Stop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTask>,
 }
 
 /// A context window's use.
@@ -884,6 +944,11 @@ pub struct Cost {
     /// "Included in your Claude Max plan", "Billed per token by your API provider".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// How much of its prompts the prompt cache served: "92% cached", and in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -951,6 +1016,9 @@ pub struct ProjectRef {
     /// Degrees 0–359.
     pub hue: u16,
     pub monogram: String,
+    /// The icon chosen for it on the Mac, by hash (`icon` fetches it); none shows the monogram.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A project, as listed in the snapshot.
@@ -964,12 +1032,15 @@ pub struct ProjectSummary {
     pub branch: Option<String>,
     #[serde(default)]
     pub is_repo: bool,
+    /// As in [`ProjectRef::icon`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 impl ProjectSummary {
     /// The reference a thread row carries.
     pub fn to_ref(&self) -> ProjectRef {
-        ProjectRef { id: self.id.clone(), name: self.name.clone(), hue: self.hue, monogram: self.monogram.clone() }
+        ProjectRef { id: self.id.clone(), name: self.name.clone(), hue: self.hue, monogram: self.monogram.clone(), icon: self.icon.clone() }
     }
 }
 
@@ -983,11 +1054,15 @@ pub struct AgentRef {
     /// `assets/logos/{dark,light}/<logo>.png`); `None` draws a neutral glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo: Option<String>,
+    /// An agent without a `logo` that has an icon of its own (an added agent's registry icon),
+    /// by hash: `icon` fetches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 impl AgentRef {
     pub fn new(key: impl Into<String>, name: impl Into<String>, logo: Option<&str>) -> Self {
-        Self { key: key.into(), name: name.into(), logo: logo.map(str::to_string) }
+        Self { key: key.into(), name: name.into(), logo: logo.map(str::to_string), icon: None }
     }
 }
 
@@ -1003,6 +1078,9 @@ pub struct AgentOption {
     pub default_model: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelOption>,
+    /// As in [`AgentRef::icon`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A model an agent offers.
@@ -1139,6 +1217,10 @@ pub enum ItemBody {
         text: String,
         #[serde(default)]
         images: u32,
+        /// Not a prompt (a command Trek answered itself, a typed answer to a question): nothing
+        /// to rewind to or fork from.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        aside: bool,
     },
     Assistant {
         text: String,
@@ -1363,9 +1445,13 @@ pub struct Usage {
     /// The Mac was still asking an agent when it answered (ask again shortly for the rest).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub loading: bool,
+    /// The providers are the Mac's Usage card's (three at most): picked there by the user
+    /// (`true`), or by Trek (`false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picked: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProviderUsage {
     pub agent: AgentRef,
     /// "Claude Max", "ChatGPT Plus".
@@ -1380,6 +1466,18 @@ pub struct ProviderUsage {
     /// Asking it partly failed (what's here may still hold).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// It said it has no plan limits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_limits: bool,
+    /// Kept from an earlier run, read at this time (ms): not read again yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<i64>,
+    /// With no limits to show: what Trek recorded it using today ("Today in Trek: 12K tokens").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub today: Option<String>,
+    /// Granted resets not spent yet (`use_reset`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resets: Vec<ResetCredit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

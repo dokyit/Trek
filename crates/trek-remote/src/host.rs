@@ -7,9 +7,9 @@ use std::future::Future;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    AnswerRequest, Basecamp, BasecampRange, CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest,
-    GitStatus, GitSwitchRequest, GitTarget, Item, MacSettings, NewThreadRequest, Note, NoteSummary, Open, PrefsRequest,
-    SaveNoteRequest, SearchRequest, SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
+    AnswerRequest, Attachment, AttachmentRequest, BackgroundOutput, Basecamp, BasecampRange, CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest,
+    GitStatus, GitSwitchRequest, GitTarget, Icon, IconRequest, Item, MacSettings, NewThreadRequest, Note, NoteSummary, Open, PrefsRequest,
+    QueueActionRequest, SaveNoteRequest, SearchRequest, SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
     TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
 
@@ -184,6 +184,35 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = req;
         unsupported("search")
     }
+    /// Spend a granted rate-limit reset; done once it's spent.
+    fn use_reset(&self, credit_id: &str) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = credit_id;
+        unsupported("use resets")
+    }
+    /// Change or drop a queued follow-up; a dropped one's text comes back.
+    fn queue_action(&self, req: QueueActionRequest) -> impl Future<Output = HostResult<Option<String>>> + Send {
+        let _ = req;
+        unsupported("change queued messages")
+    }
+    /// One of a message's images, scaled down.
+    fn attachment(&self, req: AttachmentRequest) -> impl Future<Output = HostResult<Attachment>> + Send {
+        let _ = req;
+        unsupported("send images")
+    }
+    /// The end of a background task's output.
+    fn background_output(&self, thread_id: &str, task_id: &str) -> impl Future<Output = HostResult<BackgroundOutput>> + Send {
+        let _ = (thread_id, task_id);
+        unsupported("show background tasks")
+    }
+    fn stop_background(&self, thread_id: &str, task_id: &str) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = (thread_id, task_id);
+        unsupported("stop background tasks")
+    }
+    /// An added agent's or a project's icon.
+    fn icon(&self, req: IconRequest) -> impl Future<Output = HostResult<Icon>> + Send {
+        let _ = req;
+        unsupported("send icons")
+    }
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -259,6 +288,12 @@ pub enum HostRequest {
     Settings { reply: Reply<MacSettings> },
     SetSettings { change: SettingsChange, reply: Reply<MacSettings> },
     Search { req: SearchRequest, reply: Reply<SearchResults> },
+    UseReset { credit_id: String, reply: Reply<()> },
+    QueueAction { req: QueueActionRequest, reply: Reply<Option<String>> },
+    Attachment { req: AttachmentRequest, reply: Reply<Attachment> },
+    BackgroundOutput { thread_id: String, task_id: String, reply: Reply<BackgroundOutput> },
+    StopBackground { thread_id: String, task_id: String, reply: Reply<()> },
+    Icon { req: IconRequest, reply: Reply<Icon> },
 }
 
 /// A [`RemoteHost`] that forwards every call as a [`HostRequest`] over an `async_channel`.
@@ -426,5 +461,32 @@ impl RemoteHost for ChannelHost {
 
     async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
         self.call(|reply| HostRequest::Search { req, reply }).await
+    }
+
+    async fn use_reset(&self, credit_id: &str) -> HostResult<()> {
+        let credit_id = credit_id.to_string();
+        self.call(|reply| HostRequest::UseReset { credit_id, reply }).await
+    }
+
+    async fn queue_action(&self, req: QueueActionRequest) -> HostResult<Option<String>> {
+        self.call(|reply| HostRequest::QueueAction { req, reply }).await
+    }
+
+    async fn attachment(&self, req: AttachmentRequest) -> HostResult<Attachment> {
+        self.call(|reply| HostRequest::Attachment { req, reply }).await
+    }
+
+    async fn background_output(&self, thread_id: &str, task_id: &str) -> HostResult<BackgroundOutput> {
+        let (thread_id, task_id) = (thread_id.to_string(), task_id.to_string());
+        self.call(|reply| HostRequest::BackgroundOutput { thread_id, task_id, reply }).await
+    }
+
+    async fn stop_background(&self, thread_id: &str, task_id: &str) -> HostResult<()> {
+        let (thread_id, task_id) = (thread_id.to_string(), task_id.to_string());
+        self.call(|reply| HostRequest::StopBackground { thread_id, task_id, reply }).await
+    }
+
+    async fn icon(&self, req: IconRequest) -> HostResult<Icon> {
+        self.call(|reply| HostRequest::Icon { req, reply }).await
     }
 }

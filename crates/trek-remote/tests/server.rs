@@ -25,7 +25,7 @@ fn thread(id: &str) -> ThreadSummary {
     ThreadSummary {
         id: id.into(),
         title: format!("Thread {id}"),
-        project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into() },
+        project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into(), icon: None },
         agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
         updated_at: 1,
         ..Default::default()
@@ -159,7 +159,7 @@ impl RemoteHost for FakeHost {
     async fn usage(&self) -> HostResult<Usage> {
         self.record("usage".into());
         let limit = UsageLimit { label: "5-hour limit".into(), percent: 42.0, resets_at: Some(9), window: "5h".into() };
-        Ok(Usage { providers: vec![ProviderUsage { agent: thread("x").agent, plan: Some("Claude Max".into()), limits: vec![limit], note: None, error: None }], loading: false })
+        Ok(Usage { providers: vec![ProviderUsage { agent: thread("x").agent, plan: Some("Claude Max".into()), limits: vec![limit], ..Default::default() }], ..Default::default() })
     }
 
     async fn basecamp(&self, range: BasecampRange) -> HostResult<Basecamp> {
@@ -1284,4 +1284,34 @@ async fn the_mac_lists_its_features_and_serves_search_sub_agents_and_the_thread_
     let calls = host.calls();
     assert!(calls.contains(&"search race Some(20)".to_string()), "{calls:?}");
     assert!(calls.contains(&"thread_action t1 Snooze { until: None, preset: Some(Tomorrow) }".to_string()), "{calls:?}");
+}
+
+#[tokio::test]
+async fn welcome_lists_the_features_and_a_host_without_them_says_so() {
+    let (handle, _host) = start_with(|c| c.features = feature::ALL.iter().map(|f| f.to_string()).collect()).await;
+    let offer = handle.pairing_offer();
+    let mut c = connect(&handle).await;
+    send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-f", "device_name": "Test iPhone"})).await;
+    let paired = recv(&mut c).await;
+    assert_eq!(paired["features"], json!(feature::ALL), "{paired}");
+    assert_eq!(recv(&mut c).await["type"], "snapshot");
+    // The fake host does none of them: each is refused, as an older Mac would.
+    for (i, req) in [
+        json!({"type": "use_reset", "credit_id": "rc"}),
+        json!({"type": "icon", "project_id": "p"}),
+        json!({"type": "attachment", "thread_id": "t", "item_id": "i1", "index": 0}),
+        json!({"type": "queue_action", "thread_id": "t", "index": 0, "text": "x", "action": {"kind": "remove"}}),
+        json!({"type": "background_output", "thread_id": "t", "task_id": "b"}),
+        json!({"type": "stop_background", "thread_id": "t", "task_id": "b"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut req = req;
+        req["id"] = json!(format!("q{i}"));
+        send(&mut c, req).await;
+        let reply = recv(&mut c).await;
+        assert_eq!((reply["type"].as_str(), reply["code"].as_str(), reply["re"].as_str()), (Some("error"), Some("bad_request"), Some(format!("q{i}").as_str())), "{reply}");
+        assert!(reply["message"].as_str().unwrap().starts_with("This Mac can't"), "the server knows the type; the host doesn't do it: {reply}");
+    }
 }

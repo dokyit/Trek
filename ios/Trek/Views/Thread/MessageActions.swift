@@ -110,6 +110,8 @@ struct MessageActions: View {
     var latest: Bool
     /// A turn is running: edit and rewind wait for it.
     var busy: Bool
+    /// Not a prompt (a command Trek answered, a typed answer): there's nothing to go back to.
+    var aside = false
     var act: (RowAction) -> Void
 
     var body: some View {
@@ -121,7 +123,9 @@ struct MessageActions: View {
                     .padding(.trailing, 4)
                     .accessibilityLabel("Sent at \(When.clock(at))")
             }
-            if latest {
+            if aside {
+                EmptyView()
+            } else if latest {
                 RowIconButton(systemImage: "pencil", label: "Edit", disabled: busy) { act(.rewind(user: item, edit: true)) }
                 RowIconButton(systemImage: "arrow.uturn.backward", label: "Rewind to here", disabled: busy) { act(.rewind(user: item, edit: false)) }
                 RowIconButton(systemImage: "arrow.triangle.branch", label: "Fork from here") { act(.fork(item: item)) }

@@ -31,26 +31,20 @@ use trek_core::store::{Item, Section, Thread, ToolStatus, now_ms};
 use trek_core::{AgentId, RunState};
 use trek_remote as tr;
 
+mod attachments;
+mod background;
 mod basecamp;
 pub(crate) mod bonjour;
 mod commands;
 mod git;
+mod icons;
 mod notes;
 pub(crate) mod search;
+mod queue;
 mod settings;
 mod sub_agents;
 mod thread_actions;
 mod usage;
-
-/// The optional requests this Mac serves, for phones (`welcome`'s `features`).
-const FEATURES: &[&str] = &[
-    tr::feature::SEARCH,
-    tr::feature::SUB_AGENTS,
-    tr::feature::SNOOZE,
-    tr::feature::MARK_UNREAD,
-    tr::feature::DELETE,
-    tr::feature::REGENERATE_TITLE,
-];
 
 /// How often changes go out to phones.
 const TICK: Duration = Duration::from_millis(250);
@@ -399,7 +393,7 @@ impl Workspace {
                     config.advertise = Some(advertise.clone());
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);
-                    config.features = FEATURES.iter().map(|f| f.to_string()).collect();
+                    config.features = tr::feature::ALL.iter().map(|f| f.to_string()).collect();
                     let (host, requests) = tr::ChannelHost::new();
                     let host = Arc::new(host);
                     let handle = trek_core::runtime()
@@ -601,6 +595,17 @@ impl Workspace {
             tr::HostRequest::SetSettings { change, reply } => {
                 let _ = reply.send(self.remote_set_settings(change, cx));
             }
+            // Parity with the Mac (`tr::feature`).
+            tr::HostRequest::UseReset { credit_id, reply } => self.remote_use_reset(credit_id, reply, cx),
+            tr::HostRequest::QueueAction { req, reply } => {
+                let _ = reply.send(self.remote_queue_action(req, cx));
+            }
+            tr::HostRequest::Attachment { req, reply } => self.remote_attachment(req, reply, cx),
+            tr::HostRequest::BackgroundOutput { thread_id, task_id, reply } => self.remote_background_output(thread_id, task_id, reply, cx),
+            tr::HostRequest::StopBackground { thread_id, task_id, reply } => {
+                let _ = reply.send(self.remote_stop_background(&thread_id, &task_id, cx));
+            }
+            tr::HostRequest::Icon { req, reply } => self.remote_icon(req, reply, cx),
         }
     }
 
@@ -898,10 +903,11 @@ impl Workspace {
     fn remote_project(&self, t: &Thread) -> tr::ProjectRef {
         match t.project_id.as_deref().and_then(|p| self.project(p)) {
             Some(p) => {
-                let hue = tr::project_hue(&p.name, self.project_prefs(&p.path).color);
-                tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue, monogram: tr::monogram(&p.name) }
+                let prefs = self.project_prefs(&p.path);
+                let (hue, icon) = (tr::project_hue(&p.name, prefs.color), icons::project_icon(prefs.icon.as_deref()));
+                tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue, monogram: tr::monogram(&p.name), icon }
             }
-            None => tr::ProjectRef { id: String::new(), name: "No project".into(), hue: 220, monogram: "··".into() },
+            None => tr::ProjectRef { id: String::new(), name: "No project".into(), hue: 220, monogram: "··".into(), icon: None },
         }
     }
 
@@ -949,8 +955,11 @@ impl Workspace {
         });
         let cost = live.and_then(|l| l.spend.as_ref()).and_then(|spend| {
             let billing = self.billing_of(t);
+            let cache = crate::cost::CacheHits::of(spend);
             Some(tr::Cost {
                 label: crate::cost::label(billing.as_ref(), spend)?,
+                cached: cache.map(|c| c.label()),
+                cached_detail: cache.map(|c| c.detail()),
                 detail: crate::cost::billing_note(billing.as_ref()),
                 plan: match &billing {
                     Some(trek_agents::Billing::Plan(plan)) => plan.clone(),
@@ -1013,6 +1022,8 @@ impl Workspace {
             parent_id: t.parent_id.clone(),
             snoozed_until: t.snoozed_until.filter(|at| *at > now),
             needs_thread: None,
+            queued: self.remote_queued(t),
+            background_tasks: self.remote_background(t),
         };
         self.remote_sub_agent_needs(t, &mut row);
         row
@@ -1085,13 +1096,17 @@ impl Workspace {
         let projects = self
             .workspace_projects()
             .into_iter()
-            .map(|p| tr::ProjectSummary {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color),
-                monogram: tr::monogram(&p.name),
-                branch: self.git_info.get(&p.path).and_then(|g| g.branch.clone()),
-                is_repo: p.is_repo,
+            .map(|p| {
+                let prefs = self.project_prefs(&p.path);
+                tr::ProjectSummary {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    hue: tr::project_hue(&p.name, prefs.color),
+                    monogram: tr::monogram(&p.name),
+                    branch: self.git_info.get(&p.path).and_then(|g| g.branch.clone()),
+                    is_repo: p.is_repo,
+                    icon: icons::project_icon(prefs.icon.as_deref()),
+                }
             })
             .collect();
         // What the composer's model picker offers: signed-in agents, API keys, local models.
@@ -1106,7 +1121,7 @@ impl Workspace {
                     .into_iter()
                     .map(|m| tr::ModelOption { id: m.id, label: m.name, efforts: m.efforts.iter().map(|e| e.as_str().to_string()).collect() })
                     .collect();
-                tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models }
+                tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models, icon: icons::agent_icon(&agent) }
             })
             .collect();
         tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked, unlisted }
@@ -1492,7 +1507,7 @@ fn clip_text_to(text: &str, limit: usize) -> String {
 /// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
 fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
     match &live.items[ix] {
-        Item::User { text, images, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32 },
+        Item::User { text, images, aside, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32, aside: *aside },
         Item::Assistant { text } => tr::ItemBody::Assistant { text: clip_text(text), streaming: live.streaming == Some(ix) },
         Item::Reasoning { text } => tr::ItemBody::Reasoning { text: clip_text(text) },
         Item::Tool { id: call, title, detail, output, status } => {
@@ -1633,7 +1648,7 @@ fn changes_item(files: Vec<tr::ChangedFile>) -> tr::ItemBody {
 
 /// An agent as phones see it: its key, name and the logo the Mac draws for it.
 pub(crate) fn agent_ref(agent: &AgentId) -> tr::AgentRef {
-    tr::AgentRef { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(agent).map(str::to_string) }
+    tr::AgentRef { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(agent).map(str::to_string), icon: icons::agent_icon(agent) }
 }
 
 /// An instant as unix ms, the same each time it's asked (`now - elapsed` drifts by the time it

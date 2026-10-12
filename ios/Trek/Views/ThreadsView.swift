@@ -112,12 +112,12 @@ struct ThreadsView: View {
                         .swipeActions(edge: .leading) {
                             if t.unseen {
                                 Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
-                            } else if model.serves(MacFeature.markUnread) {
+                            } else if model.serves(.markUnread) {
                                 Button("Unread", systemImage: "circlebadge.fill") { model.markUnread(t.id) }.tint(Trek.working)
                             }
                         }
                         .swipeActions(edge: .trailing) {
-                            if model.serves(MacFeature.snooze) {
+                            if model.serves(.snooze) {
                                 if t.section == .snoozed {
                                     Button("Wake", systemImage: "sun.max") { model.wake(t.id) }.tint(Trek.approval)
                                 } else {
@@ -130,18 +130,18 @@ struct ThreadsView: View {
                             if t.runState == .working {
                                 Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(t.id) }
                             }
-                            if model.serves(MacFeature.snooze) {
+                            if model.serves(.snooze) {
                                 SnoozeMenu(thread: t) { snoozePicking = t }
                             }
                             if t.unseen {
                                 Button("Mark read", systemImage: "checkmark.circle") { model.markSeen(t.id) }
-                            } else if model.serves(MacFeature.markUnread) {
+                            } else if model.serves(.markUnread) {
                                 Button("Mark unread", systemImage: "circlebadge") { model.markUnread(t.id) }
                             }
-                            if model.serves(MacFeature.regenerateTitle) {
+                            if model.serves(.regenerateTitle) {
                                 Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(t.id) }
                             }
-                            if model.serves(MacFeature.delete) {
+                            if model.serves(.delete) {
                                 Divider()
                                 Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
                             }

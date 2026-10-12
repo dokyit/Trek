@@ -208,7 +208,7 @@ Both may carry `features`, the optional requests this Mac serves; a phone offers
 listed, so an older Mac (no list) simply doesn't show them. The protocol version stays 1:
 
 ```json
-{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title"]}
+{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon"]}
 ```
 
 | Feature | What it adds |
@@ -219,6 +219,13 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `mark_unread` | `thread_action` `mark_unread` |
 | `delete` | `thread_action` `delete` |
 | `regenerate_title` | `thread_action` `regenerate_title` |
+| `use_reset` | `use_reset`: spend a Codex rate-limit reset |
+| `queue_action` | change or drop a queued follow-up (rows carry `queued`) |
+| `attachment` | `attachment`: a message's images |
+| `background` | `background_output` and `stop_background` (rows carry `background_tasks`) |
+| `icon` | `icon`: an added agent's or a project's icon |
+
+The last five are described under "Keeping up with the Mac" below.
 
 Names are added as features are (`trek_remote::feature`, `MacFeature` on the phone); a phone
 ignores names it doesn't know. Failures: `error` with code `unauthorized` (bad or revoked
@@ -476,14 +483,19 @@ Reads (`usage`, `basecamp`, `notes`, `note`, `git_status`, `git_diff`, `git_bran
 `settings`) may be answered out of order with what the phone sends after them; actions keep their
 order. A Mac too old for one answers `bad_request` ("Unknown message type").
 
-**Usage**, as the Mac's Usage popover shows it (asking refreshes it as opening the popover does: the
-agents at most every 30 s, Devin every 10 min; the Mac waits up to 15 s for them, and `loading`
-says one hadn't answered yet):
+**Usage**, as the Mac's Usage card shows it: the providers it shows, in its order (three at most,
+picked on the Mac; `picked` says whether by the user or by Trek). Asking refreshes it as opening
+the card does: the agents at most every 30 s, Devin every 10 min; the Mac waits up to 15 s for
+them, and `loading` says one hadn't answered yet. A provider kept from an earlier run says when
+(`as_of`); one with no limits to show says what Trek recorded today (`today`); `no_limits` when it
+said it has none; `resets` are Codex's granted rate-limit resets, which `use_reset` spends.
 
 ```json
 {"type":"usage","id":"1"}
 {"type":"usage","re":"1","providers":[{"agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"plan":"Claude Max",
-  "limits":[{"label":"5-hour limit","percent":42.0,"resets_at":1791030000000,"window":"5h"},{"label":"Weekly · Opus","percent":64.0,"resets_at":1791370000000,"window":"7d"}]}]}
+  "limits":[{"label":"5-hour limit","percent":42.0,"resets_at":1791030000000,"window":"5h"},{"label":"Weekly · Opus","percent":64.0,"resets_at":1791370000000,"window":"7d"}]},
+  {"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[…],
+   "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791800000000}]}],"picked":false}
 ```
 
 **Basecamp**, worked out off the main thread as the Mac's is, worded as it words it:
@@ -598,6 +610,74 @@ or a sub-agent's, with its whole row, so the phone can open it (`subscribe`; its
 
 A title match has no `snippet`; a message match has an excerpt on one line, `ranges` the matched
 words in it as `[start, end)` in characters (Unicode scalar values).
+### Keeping up with the Mac (optional requests, listed in `features`)
+
+What the Mac's own screens added after the first phones. Each is additive: rows and items carry
+new fields only when there's something in them, and a Mac that doesn't list a feature answers
+its requests `bad_request`.
+
+**`use_reset`**: Codex's "Use reset" on the Usage card (the phone asks first, with the Mac's
+words: "Your rate limits reset right away. The credit is spent and can't be returned."). The
+`ack` comes once it's spent; usage is read again then. `not_found` for a reset that's gone,
+`host_error` with Codex's reason when it fails.
+
+```json
+{"type":"use_reset","id":"1","credit_id":"rc-1"}   → ack
+```
+
+**`queue_action`**: the follow-ups a thread holds ride in its row, in order: those sent while a
+turn runs (they go one a finished turn), then those waiting for a usage limit to reset
+(`reset: true`). Text is cut at 16 KiB. The phone drops one (`remove`: it comes back in
+`ack.text`, for the composer, as the Mac's ✕ hands it back to its own) or changes its words in
+place (`edit`; its photos stay). `index` counts among those with the same `reset`, and `text` is
+the message as shown: if the queue moved on meanwhile, `conflict`.
+
+```json
+row: "queued":[{"text":"then write the docs"},{"text":"","images":1},{"text":"carry on","reset":true}]
+{"type":"queue_action","id":"2","thread_id":"t","index":0,"text":"then write the docs","action":{"kind":"remove"}}   → {"type":"ack","re":"2","text":"then write the docs"}
+{"type":"queue_action","id":"3","thread_id":"t","index":0,"reset":true,"text":"carry on","action":{"kind":"edit","text":"carry on, then stop"}}  → ack
+```
+
+**`attachment`**: a message's images (a `user` item's `images` is how many), one at a time, as a
+JPEG that fits in `max_px` a side (2048 at most, the default) and ~3 MB (a bigger one is sent
+smaller); transparency goes on white. The phone asks for thumbnails at 480 and for its full-screen
+view at 2048, and keeps them in memory.
+
+```json
+{"type":"attachment","id":"4","thread_id":"t","item_id":"i12","index":0,"max_px":480}
+{"type":"attachment","re":"4","thread_id":"t","item_id":"i12","index":0,"mime":"image/jpeg","data":"/9j/…","width":480,"height":160}
+```
+
+**`background`**: what a thread's agent runs in the background, in full in its row
+(`background` still lists their titles): kind (`shell` · `monitor` · `other`), the last line it
+printed, since when, whether its output can be read and whether it can be stopped.
+`background_output` asks the agent for the end of the output (the last 400 lines, 64 KiB at
+most) and answers once that's in (or after 1.5 s, with what was read before); the phone asks
+every 2 s while it shows it, as the Mac's popover does. `stop_background` is the strip's Stop
+(the row says `stopping` until the agent has).
+
+```json
+row: "background_tasks":[{"id":"b1","kind":"shell","title":"pnpm dev","line":"ready on :5173","since":1791020000000,"readable":true,"stoppable":true}]
+{"type":"background_output","id":"5","thread_id":"t","task_id":"b1"}  → {"type":"background_output","re":"5","thread_id":"t","task_id":"b1","output":"…"}
+{"type":"stop_background","id":"6","thread_id":"t","task_id":"b1"}    → ack
+```
+
+**`icon`**: an agent added on the Mac (`acp:<id>`, no `logo`) carries `icon`, a hash of its
+registry icon; a project with an icon chosen on the Mac (a Lucide one, or a picture) carries one
+in its `project` refs and in the snapshot. `icon` sends it as a 96 px PNG; `template` means a
+shape to draw in the phone's colour (the text colour for an agent, the project's ink on its fill),
+otherwise a picture cropped to fill. The phone keeps them on disk by hash, so a new hash (another
+icon, a changed file) fetches it again.
+
+```json
+{"type":"icon","id":"7","agent":"acp:mistral-vibe"}   (or "project_id":"p")
+{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a…","png":"iVBORw0K…","template":true}
+```
+
+**Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
+question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
+doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
+Mac's status line does (`"cached":"92% cached"`, and `cached_detail` in words).
 
 ### Errors
 

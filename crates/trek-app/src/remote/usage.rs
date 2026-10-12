@@ -1,6 +1,7 @@
-//! Plan usage for the phone, as the Mac's Usage popover shows it: each agent's plan and its
-//! 5-hour, weekly and per-model windows. Asking refreshes them as opening the popover does (the
-//! agents are asked at most every 30 seconds, Devin every ten minutes).
+//! Plan usage for the phone, as the Mac's Usage card shows it: the providers it shows (picked
+//! there, three at most), each agent's plan and its 5-hour, weekly and per-model windows, and
+//! Codex's granted resets, which the phone can spend. Asking refreshes them as opening the card
+//! does (the agents are asked at most every 30 seconds, Devin every ten minutes).
 
 use super::agent_ref;
 use crate::workspace::Workspace;
@@ -30,22 +31,46 @@ impl Workspace {
         .detach();
     }
 
-    /// Usage as known now, for the agents the Usage card shows, in its order.
+    /// Usage as known now, as the Usage card shows it: its providers in its order (what was kept
+    /// from an earlier run marked with when, today's tokens for those without limits), and the
+    /// resets Codex granted.
     pub(crate) fn usage_now(&self) -> tr::Usage {
         let providers = self
-            .usage_shown()
+            .usage_rows()
             .into_iter()
-            .filter_map(|agent| {
-                let st = self.usage_status(&agent.key())?;
-                Some(tr::ProviderUsage {
-                    agent: agent_ref(&agent),
-                    plan: st.plan.clone(),
-                    limits: st.limits.iter().map(|l| tr::UsageLimit { label: l.label.clone(), percent: l.percent, resets_at: l.resets_at, window: l.window.clone() }).collect(),
-                    note: st.note.clone(),
-                    error: st.error.clone(),
-                })
+            .map(|u| {
+                // As the card says it: only for a provider with no limits to show.
+                let today = u.limits.is_empty().then(|| match &u.today {
+                    Some((n, spend)) if spend.priced() => Some(format!("Today in Trek: {} tokens · ≈ {}", crate::cost::fmt_tokens(*n), crate::cost::usd(spend.usd()))),
+                    Some((n, _)) => Some(format!("Today in Trek: {} tokens", crate::cost::fmt_tokens(*n))),
+                    None if u.plan.is_none() && !u.no_limits && u.error.is_none() => Some("Nothing used today.".to_string()),
+                    None => None,
+                });
+                tr::ProviderUsage {
+                    agent: agent_ref(&u.agent),
+                    plan: u.plan,
+                    limits: u.limits.iter().map(|l| tr::UsageLimit { label: l.label.clone(), percent: l.percent, resets_at: l.resets_at, window: l.window.clone() }).collect(),
+                    note: u.note,
+                    error: u.error,
+                    no_limits: u.no_limits,
+                    as_of: u.as_of,
+                    today: today.flatten(),
+                    resets: u.resets.into_iter().map(|r| tr::ResetCredit { id: r.id, title: r.title, description: r.description, expires_at: r.expires_at }).collect(),
+                }
             })
             .collect();
-        tr::Usage { providers, loading: self.usage_loading || self.devin_loading }
+        tr::Usage { providers, loading: self.usage_loading || self.devin_loading, picked: Some(self.usage_picked()) }
+    }
+
+    /// "Use reset" from the phone (it asks first, as the Mac's dialog does): answered once the
+    /// reset is spent, or not.
+    pub(super) fn remote_use_reset(&mut self, credit_id: String, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+        if !self.agent_status.values().any(|st| st.resets.iter().any(|r| r.id == credit_id)) {
+            let _ = reply.send(Err(tr::HostError::not_found("That reset isn't available any more")));
+            return;
+        }
+        self.use_reset_credit_then(credit_id, move |done| {
+            let _ = reply.send(done.map_err(tr::HostError::other));
+        }, cx);
     }
 }

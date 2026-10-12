@@ -4,7 +4,7 @@ import SwiftUI
 /// Sub-agents, the rest of the thread menu (snooze, wake, mark unread, regenerate the title,
 /// delete) and search on the Mac. Each is offered only where the Mac lists it (`features`).
 extension AppModel {
-    func serves(_ feature: String) -> Bool { features.contains(feature) }
+    func serves(_ feature: MacFeature) -> Bool { features.contains(feature.rawValue) }
 
     /// A row the list leaves out came (or changed): kept by id, and its open thread follows it.
     func setUnlisted(_ t: ThreadSummary) {

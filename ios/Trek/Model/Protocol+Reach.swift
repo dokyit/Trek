@@ -6,16 +6,26 @@ import os
 
 nonisolated let protocolLog = Logger(subsystem: "dev.trek.TrekMobile", category: "protocol")
 
-/// The optional requests a Mac may serve, as `welcome` lists them. What the Mac doesn't list,
-/// the phone doesn't offer (an older Mac simply doesn't show it).
-nonisolated enum MacFeature {
-    static let search = "search"
+/// The optional requests a Mac may serve, as `welcome` lists them (`trek_remote::feature`). What
+/// the Mac doesn't list, the phone doesn't offer (an older Mac simply doesn't show it).
+nonisolated enum MacFeature: String, CaseIterable {
+    case search
     /// Sub-agents' threads open from their parent.
-    static let subAgents = "sub_agents"
-    static let snooze = "snooze"
-    static let markUnread = "mark_unread"
-    static let delete = "delete"
-    static let regenerateTitle = "regenerate_title"
+    case subAgents = "sub_agents"
+    case snooze
+    case markUnread = "mark_unread"
+    case delete
+    case regenerateTitle = "regenerate_title"
+    /// Codex's "Use reset" on the Usage card.
+    case useReset = "use_reset"
+    /// Change or drop a queued follow-up.
+    case queueAction = "queue_action"
+    /// A message's images.
+    case attachment
+    /// Background tasks' output, and Stop.
+    case background
+    /// Added agents' and projects' icons.
+    case icon
 }
 
 /// The Mac's snooze menu.
