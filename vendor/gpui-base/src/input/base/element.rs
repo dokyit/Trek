@@ -1953,6 +1953,8 @@ impl<M: InputModeKind> TextElement<M> {
         }
 
         let mut lines = Vec::with_capacity(last_layout.visible_buffer_lines.len());
+        // Trek: the font a tab's columns are measured in.
+        let font = window.text_style().font();
         // run_offset tracks position in the runs vec coordinate space (only visible line bytes).
         // This is separate from the visible_text offset because runs from highlight_lines
         // only cover visible (non-folded) lines.
@@ -1988,12 +1990,19 @@ impl<M: InputModeKind> TextElement<M> {
                 let shaped_line = window
                     .text_system()
                     .shape_line(sub_line, font_size, &line_runs, None);
-                // Trek: a tab keeps the width of its stop on Windows too.
-                let shaped_line = crate::input::with_tab_stops(
-                    shaped_line,
-                    state.mode.tab_size().tab_size,
-                    window,
-                );
+                // Trek: a tab keeps the width of its stop on Windows too. Not in soft-wrapped
+                // text: the wrapper measures a tab as DirectWrite does (no width), and a row
+                // wider than it was wrapped for would run past the edge.
+                let shaped_line = if state.soft_wrap {
+                    shaped_line
+                } else {
+                    crate::input::with_tab_stops(
+                        shaped_line,
+                        state.mode.tab_size().tab_size,
+                        &font,
+                        window,
+                    )
+                };
 
                 line_has_background |= has_background(&line_runs);
                 wrapped_lines.push(shaped_line);
@@ -2656,22 +2665,32 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 Some((_, width)) => width,
                 None => {
                     let longest_line: SharedString = longest_line.to_string().into();
-                    window
-                        .text_system()
-                        .shape_line(
-                            longest_line.clone(),
-                            text_size,
-                            &[TextRun {
-                                len: longest_line.len(),
-                                font: key.font.clone(),
-                                color: gpui::black(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            wrap_width,
+                    let shaped = window.text_system().shape_line(
+                        longest_line.clone(),
+                        text_size,
+                        &[TextRun {
+                            len: longest_line.len(),
+                            font: key.font.clone(),
+                            color: gpui::black(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        wrap_width,
+                    );
+                    // Trek: as wide as it's drawn, its tabs to their stops (`layout_lines`), so
+                    // the end of a tab-indented longest line can be scrolled to.
+                    if state.is_single_line() {
+                        shaped.width
+                    } else {
+                        crate::input::with_tab_stops(
+                            shaped,
+                            state.mode.tab_size().tab_size,
+                            &key.font,
+                            window,
                         )
                         .width
+                    }
                 }
             };
             state
