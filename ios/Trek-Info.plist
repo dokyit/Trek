@@ -25,6 +25,12 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Trek connects to Trek on your Mac, on your local network, to show your agents and relay your answers.</string>
+	<!-- Trek on the Mac announces itself as _trek._tcp, so a paired Mac whose address changed is
+	     found again (MacFinder). -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_trek._tcp</string>
+	</array>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Trek asks for Face ID before letting an agent skip approvals for the rest of a session.</string>
 	<key>CFBundleURLTypes</key>

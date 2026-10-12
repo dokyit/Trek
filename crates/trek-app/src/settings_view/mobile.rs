@@ -136,6 +136,7 @@ impl SettingsView {
         let enabled = s.mobile.enabled;
         let running = ws.remote.as_ref().map(|r| (r.offer.clone(), r.addresses.clone(), r.advertise.clone(), r.devices.clone(), r.connected.clone()));
         let starting = enabled && running.is_none();
+        let failed = ws.remote_error.clone().filter(|_| starting);
         let session_approvals = self.switch("mobile-session-approvals", s.mobile.session_approvals, |s, v| s.mobile.session_approvals = v);
         let mut rows = vec![Self::row(
             "Let your iPhone connect",
@@ -158,7 +159,9 @@ impl SettingsView {
             out.push(div().h(px(8.)).into_any_element());
             out.push(Self::note(firewall, cx));
         }
-        if starting {
+        if let Some(why) = failed {
+            out.push(Self::note(&format!("Couldn't start: {why}. Trying again every {} seconds.", crate::remote::RETRY.as_secs()), cx));
+        } else if starting {
             out.push(Self::note("Starting…", cx));
         }
         out.extend(self.push_section(s, cx));

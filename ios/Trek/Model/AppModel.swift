@@ -146,8 +146,15 @@ final class AppModel {
     func startLive(_ paired: PairedMac) {
         UserDefaults.standard.set(false, forKey: "demoMode")
         let transport = paired.transport
-        attach(TrekClient(address: paired.address, auth: .hello(deviceId: Device.id, token: paired.token), transport: transport),
-               mode: .live)
+        let client = TrekClient(address: paired.address, auth: .hello(deviceId: Device.id, token: paired.token), transport: transport,
+                                hostId: paired.hostId)
+        // Found on this network at another address: kept, so the next launch dials it first.
+        client.onMoved = { address in
+            guard var moved = PairedMac.load(), moved.hostId == paired.hostId else { return }
+            moved.address = address
+            moved.save()
+        }
+        attach(client, mode: .live)
         self.transport = transport
     }
 
