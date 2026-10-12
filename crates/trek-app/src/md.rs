@@ -455,7 +455,10 @@ impl MarkdownPlugin for LocalImages {
             .test_support()
             .relative()
             .w(shown.width)
-            .h(shown.height)
+            // A column narrower than the image (a note's preview beside its text) scales it down
+            // rather than cut it off; the height follows from the width.
+            .max_w_full()
+            .aspect_ratio(shown.width.as_f32() / shown.height.as_f32())
             .my(px(4.))
             .rounded(px(8.))
             .overflow_hidden()
