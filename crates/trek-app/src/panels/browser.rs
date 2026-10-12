@@ -962,6 +962,17 @@ impl BrowserPanel {
         self.sync_views(cx);
     }
 
+    /// Show `url` in a tab of its own: the one in front if it's a new tab's start page, else a
+    /// new one (a live page from an answer, opened here).
+    pub(crate) fn open(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().is_some_and(|t| t.page.is_start()) {
+            self.editing = false;
+            self.navigate(url.to_string(), cx);
+        } else {
+            self.new_tab(url, window, cx);
+        }
+    }
+
     fn activate(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.active == id {
             return;

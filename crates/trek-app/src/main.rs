@@ -39,6 +39,7 @@ mod mentions;
 mod motion;
 mod notes;
 mod onboarding;
+mod page;
 mod panels;
 mod palette;
 mod perf;

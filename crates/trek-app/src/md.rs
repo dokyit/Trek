@@ -172,8 +172,9 @@ pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<
     dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, None, cx)
 }
 
-/// `view`, with Trek's native visualization blocks enabled. Assistant answers use this; tool
-/// output, reasoning and secondary previews keep treating the same fence as ordinary code.
+/// `view`, with Trek's native visualization blocks and live pages enabled. Assistant answers use
+/// this; tool output, reasoning and secondary previews keep treating the same fences as ordinary
+/// code.
 /// `live`: the answer is still streaming in, so a visualization block it hasn't closed yet is
 /// drawn as far as it's written (in a finished answer one left open can't be drawn).
 pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, live: bool, cx: &App) -> TextView {
@@ -198,8 +199,8 @@ pub fn streaming() -> TextViewMotion {
     TextViewMotion::default().with_stream_fade(Duration::from_millis(280)).with_stream_fade_stagger(Duration::from_millis(10)).with_stream_fade_easing(Easing::EaseOut)
 }
 
-/// `visualizations`: draw `trek-viz` blocks, and whether the text is still streaming in.
-/// `images_within`: as for `keyed`.
+/// `visualizations`: draw `trek-viz` blocks and `trek-html` pages, and whether the text is still
+/// streaming in. `images_within`: as for `keyed`.
 fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, images_within: Option<Pixels>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
     let view = view.selectable(true)
@@ -227,9 +228,11 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
                 crate::toast::push(window, format!("No file or URL at {url}"), cx);
             }
         });
-    // Liveness is read only when rendering, so the answer finishing doesn't reparse it.
+    // Liveness is read only when rendering, so the answer finishing doesn't reparse it. Live
+    // pages go wherever visualizations do: answers and the side chat, never reasoning, tool
+    // output or notes.
     let view = match visualizations {
-        Some(live) => view.plugin(crate::visualization::VisualizationPlugin { live, size }),
+        Some(live) => view.plugin(crate::visualization::VisualizationPlugin { live, size }).plugin(crate::page::PagePlugin { live, size }),
         None => view,
     };
     view
