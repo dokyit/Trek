@@ -8,6 +8,11 @@
 //! relaunch still delivers it; a parent free to take it gets it within `GATHER`, together with
 //! any that came in alongside. While it waits on sub-agents (Trek's, or its agent's own working
 //! in the background), a parent counts as working (`Workspace::waiting`).
+//!
+//! `start_thread` is the other way an agent hands work out: a thread of the user's own — top-
+//! level, in the sidebar, its first message sent at once — that reports to nobody and doesn't
+//! wake its starter (`start_handoff`). Its row in the starter's transcript, done at once, links
+//! to it; an advising one works read-only like an advising sub-agent, for its first task.
 
 use super::{Scope, Workspace};
 use crate::ipc::{Call, Reply};
@@ -18,7 +23,7 @@ use std::time::Duration;
 use trek_agents::{AgentEvent, Command, Decision, McpServer};
 use trek_core::catalog;
 use trek_core::limit::LimitScope;
-use trek_core::orchestrate::{self as orch, MAX_DEPTH, MAX_PER_REQUEST, MAX_RUNNING, Mode, Outcome, Report};
+use trek_core::orchestrate::{self as orch, MAX_DEPTH, MAX_PER_REQUEST, MAX_RUNNING, MAX_THREADS_PER_REQUEST, Mode, Outcome, Report};
 use trek_core::store::{Item, Thread, ToolStatus, now_ms};
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
@@ -245,6 +250,15 @@ impl Workspace {
                     }
                     Err(e) => Err(e),
                 },
+                "start_thread" => self.start_handoff(&call.thread, &call.params, cx).map(|id| {
+                    let title = self.thread(&id).map(|t| t.title.clone()).unwrap_or_default();
+                    json!({
+                        "id": id,
+                        "title": title,
+                        "link": orch::thread_link(&id),
+                        "note": "It runs on its own, as a thread of the user's: it reports to nobody and nothing it does comes back to you.",
+                    })
+                }),
                 "task_status" => self.task_status(&call.thread, &id()),
                 "task_result" => {
                     let child = id();
@@ -312,10 +326,10 @@ impl Workspace {
         }
     }
 
-    /// Whether `id` is a sub-agent that only advises, still on its task: nothing it does may
-    /// change files.
+    /// Whether `id` works read-only on an agent's say-so: a sub-agent that only advises, still
+    /// on its task, or a thread one started advising (`start_thread`), its first turn not over.
     pub(crate) fn advising(&self, id: &str) -> bool {
-        self.delegations.get(id).is_some_and(|d| d.mode == Mode::Advise && d.outcome.is_none())
+        self.delegations.get(id).is_some_and(|d| d.mode == Mode::Advise && d.outcome.is_none()) || self.advising_handoffs.contains(id)
     }
 
     /// Sub-agents `caller` started since the user's last message (wake-ups don't count).
@@ -327,6 +341,28 @@ impl Workspace {
             })
         });
         self.children(caller).iter().filter(|t| since.is_none_or(|s| t.created_at >= s)).count()
+    }
+
+    /// Threads `caller` started (`start_thread`) since the user's last message, counted like
+    /// `started_since_asked`: their rows in its transcript after that message — wake-ups don't
+    /// count, and a row still waiting for its call does.
+    fn started_threads_since_asked(&self, caller: &str) -> usize {
+        let is_row = |i: &Item| matches!(i, Item::Tool { id, .. } if orch::thread_of_row(id).is_some());
+        let items = match self.live.get(caller).filter(|l| l.loaded) {
+            Some(l) => l.items.to_vec(),
+            None => self.store.items(caller).unwrap_or_default(),
+        };
+        let since = items.iter().rposition(|i| matches!(i, Item::User { text, .. } if !orch::is_wake(text))).map_or(0, |i| i + 1);
+        items[since..].iter().filter(|i| is_row(i)).count()
+            + self
+                .live
+                .get(caller)
+                .map(|l| {
+                    // A row waiting for its call counts, and on a transcript still being read
+                    // (`items` then isn't the store's) so does one already pushed into it.
+                    l.pending_rows.iter().filter(|i| is_row(i)).count() + if l.loaded { 0 } else { l.items.iter().filter(|i| is_row(i)).count() }
+                })
+                .unwrap_or(0)
     }
 
     /// How many sub-agent levels `id` sits under.
@@ -361,11 +397,44 @@ impl Workspace {
         if mode == Mode::Implement && self.advising(caller) {
             return Err("You're advising, read-only, so a sub-agent you start can't change files either: use mode \"advise\".".into());
         }
+        let (agent, model, effort) = self.resolve_agent_model_effort(&parent, params)?;
+        // Advising, it can't change anything: nothing it asks to do is approved (`screen_advice`).
+        let hand_holding = if mode == Mode::Advise { HandHolding::Supervised } else { parent.hand_holding };
+        let mut child = self.store.create_thread(parent.cwd.as_deref(), agent, model, effort, hand_holding).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
+        child.title = title.chars().take(80).collect();
+        // Its parent's folder, worktree and all.
+        child.cwd = parent.cwd.clone();
+        child.worktree = parent.worktree.clone();
+        child.parent_id = Some(caller.to_string());
+        self.store.save_thread(&child).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
+        let id = child.id.clone();
+        self.threads.push(child);
+        self.threads_gen += 1;
+        self.live.entry(id.clone()).or_default().loaded = true;
+        let since = self.now();
+        self.delegations.insert(
+            id.clone(),
+            Delegation { parent: caller.to_string(), mode, plan: None, waiters: vec![], cancelled: false, outcome: None, since, worked: 0, ended: None, limited: false, _stop: None },
+        );
+        // Its report reaches the parent one way or another, after a relaunch too.
+        if let Err(e) = self.store.await_report(caller, &id) {
+            tracing::warn!("keep the sub-agent's report due: {e:#}");
+        }
+        self.push_task_row(caller, &id, title, cx);
+        self.send_to(&id, orch::child_prompt(mode, prompt), vec![], cx);
+        Ok(id)
+    }
+
+    /// The agent, model and effort `params` picks for a thread `parent` starts (a sub-agent, or
+    /// a `start_thread` hand-off): the caller's own when nothing's named, clamped to what the
+    /// model takes; the error if the pick can't run now.
+    fn resolve_agent_model_effort(&self, parent: &Thread, params: &Value) -> Result<(AgentId, Option<String>, Effort), String> {
+        let text = |k: &str| params.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
         let models = self.models_for(&agent);
         let model = match text("model") {
-            // No model picked: the caller's own when the sub-agent is the same agent (a thread on
-            // SWE-2 delegates to SWE-2), else the agent's default.
+            // No model picked: the caller's own when the thread is the same agent (a thread on
+            // SWE-2 hands SWE-2 work), else the agent's default.
             None if agent == parent.agent => parent
                 .model
                 .clone()
@@ -392,31 +461,7 @@ impl Workspace {
         if let Some(why) = self.at_limit(&agent, model.as_deref()) {
             return Err(why);
         }
-        // Advising, it can't change anything: nothing it asks to do is approved (`screen_advice`).
-        let hand_holding = if mode == Mode::Advise { HandHolding::Supervised } else { parent.hand_holding };
-        let mut child = self.store.create_thread(parent.cwd.as_deref(), agent, model, effort, hand_holding).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
-        child.title = title.chars().take(80).collect();
-        // Its parent's folder, worktree and all.
-        child.cwd = parent.cwd.clone();
-        child.worktree = parent.worktree.clone();
-        child.parent_id = Some(caller.to_string());
-        self.store.save_thread(&child).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
-        let id = child.id.clone();
-        self.threads.push(child);
-        self.threads_gen += 1;
-        self.live.entry(id.clone()).or_default().loaded = true;
-        let since = self.now();
-        self.delegations.insert(
-            id.clone(),
-            Delegation { parent: caller.to_string(), mode, plan: None, waiters: vec![], cancelled: false, outcome: None, since, worked: 0, ended: None, limited: false, _stop: None },
-        );
-        // Its report reaches the parent one way or another, after a relaunch too.
-        if let Err(e) = self.store.await_report(caller, &id) {
-            tracing::warn!("keep the sub-agent's report due: {e:#}");
-        }
-        self.push_task_row(caller, &id, title, cx);
-        self.send_to(&id, orch::child_prompt(mode, prompt), vec![], cx);
-        Ok(id)
+        Ok((agent, model, effort))
     }
 
     /// The agent `name` stands for, among those the user can pick (by key or name), else `default`.
@@ -470,6 +515,96 @@ impl Workspace {
         let idle = live.turn_started.is_none();
         live.place_task_rows(idle);
         self.persist_soon(parent, cx);
+        cx.notify();
+    }
+
+    /// Start a thread of the user's on `caller`'s behalf (`start_thread`), as `params` ask: a
+    /// hand-off. It's top-level — no `parent_id`, its own sidebar row, its first message sent at
+    /// once — and it reports to nobody: the caller isn't woken when it ends. Returns its id.
+    pub fn start_handoff(&mut self, caller: &str, params: &Value, cx: &mut Context<Self>) -> Result<String, String> {
+        let parent = self.thread(caller).cloned().ok_or("This thread isn't in Trek any more.")?;
+        if self.started_threads_since_asked(caller) >= MAX_THREADS_PER_REQUEST {
+            return Err(format!(
+                "You've started {MAX_THREADS_PER_REQUEST} threads since the user's last message, the most Trek allows. Report what you have and let the user decide what's next."
+            ));
+        }
+        let text = |k: &str| params.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        let title = text("title").ok_or("start_thread needs a title: a few words naming the thread.")?;
+        let prompt = text("prompt").ok_or("start_thread needs a prompt: the new thread's whole task, complete on its own.")?;
+        let mode = match text("mode") {
+            // It's the user's thread now: like one they'd start.
+            None => Mode::Implement,
+            Some(m) => Mode::parse(m).ok_or_else(|| format!("mode is \"advise\" or \"implement\", not “{m}”."))?,
+        };
+        if mode == Mode::Implement && self.advising(caller) {
+            return Err("You're advising, read-only, so a thread you start can't change files either: use mode \"advise\".".into());
+        }
+        // A worktree of its own, picked as a new thread's is: in the caller's project. The
+        // default is the caller's folder, worktree and all.
+        let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true);
+        let project = worktree.then(|| self.project_dir(&parent)).flatten();
+        if worktree && project.is_none() {
+            return Err("A worktree needs the thread's project, and this one has none.".into());
+        }
+        let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
+        let planned = project
+            .as_deref()
+            .map(|p| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), p, title, &taken).map_err(|e| format!("Couldn't plan the worktree: {e}")))
+            .transpose()?;
+        let (agent, model, effort) = self.resolve_agent_model_effort(&parent, params)?;
+        // Advising, it can't change anything, like an advising sub-agent (`screen_advice`).
+        let hand_holding = if mode == Mode::Advise { HandHolding::Supervised } else { parent.hand_holding };
+        let cwd = if planned.is_some() { project.clone() } else { parent.cwd.clone() };
+        let mut thread = self.store.create_thread(cwd.as_deref(), agent, model, effort, hand_holding).map_err(|e| format!("Couldn't start the thread: {e}"))?;
+        thread.title = title.chars().take(80).collect();
+        match &planned {
+            Some(wt) => {
+                thread.cwd = Some(wt.path.clone());
+                thread.worktree = Some(wt.clone());
+            }
+            None => {
+                thread.cwd = parent.cwd.clone();
+                thread.worktree = parent.worktree.clone();
+                // The caller has no folder (a chat): the thread gets one of its own, as a new
+                // chat does.
+                if thread.cwd.is_none() {
+                    thread.cwd = Some(trek_core::paths::new_chat_dir().map_err(|e| format!("Couldn't make a folder for the thread: {e}"))?);
+                }
+            }
+        }
+        self.store.save_thread(&thread).map_err(|e| format!("Couldn't start the thread: {e}"))?;
+        let id = thread.id.clone();
+        self.threads.push(thread);
+        self.threads_gen += 1;
+        self.live.entry(id.clone()).or_default().loaded = true;
+        if mode == Mode::Advise {
+            self.advising_handoffs.insert(id.clone());
+        }
+        self.push_thread_row(caller, &id, title, cx);
+        if let (Some(project), Some(wt)) = (project, planned) {
+            self.make_worktree(&id, project, wt, cx);
+        }
+        self.send_to(&id, orch::handoff_prompt(mode, &parent.title, prompt), vec![], cx);
+        Ok(id)
+    }
+
+    /// The thread's row in its starter's transcript, where the call was made: done as it's
+    /// pushed (the call has done its work), its output the link that opens the thread.
+    fn push_thread_row(&mut self, caller: &str, thread: &str, title: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(caller) else { return };
+        let text = title.replace('[', "\\[").replace(']', "\\]");
+        let row = Item::Tool {
+            id: orch::thread_row(thread),
+            title: "Thread".into(),
+            detail: title.to_string(),
+            output: format!("[{text}]({})", orch::thread_link(thread)),
+            status: ToolStatus::Done,
+        };
+        live.pending_rows.push_back(row);
+        // Asked outside a turn, there's no call row to wait for.
+        let idle = live.turn_started.is_none();
+        live.place_task_rows(idle);
+        self.persist_soon(caller, cx);
         cx.notify();
     }
 
@@ -802,16 +937,20 @@ impl Workspace {
         self.finish_task(child, Outcome::Cancelled, cx);
     }
 
-    /// Requests an advising sub-agent makes are declined on the spot (it works read-only); a plan
-    /// it offers is kept as its advice. The rest of `events` goes on as usual.
+    /// Requests an advising sub-agent (or thread an agent started advising) makes are declined
+    /// on the spot (it works read-only); a plan it offers is kept as its advice. The rest of
+    /// `events` goes on as usual.
     pub(super) fn screen_advice(&mut self, id: &str, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
         let tx = self.live.get(id).and_then(|l| l.commands.clone());
-        let Some(d) = self.delegations.get_mut(id).filter(|d| d.mode == Mode::Advise && d.outcome.is_none()) else { return events };
+        let mut d = self.delegations.get_mut(id).filter(|d| d.mode == Mode::Advise && d.outcome.is_none());
+        if d.is_none() && !self.advising_handoffs.contains(id) {
+            return events;
+        }
         events
             .into_iter()
             .filter_map(|ev| match ev {
                 AgentEvent::PermissionRequest { request_id, prompt, .. } => {
-                    if let Some(trek_agents::Prompt::Plan(plan)) = prompt {
+                    if let (Some(d), Some(trek_agents::Prompt::Plan(plan))) = (d.as_mut(), prompt) {
                         d.plan = Some(plan);
                     }
                     if let Some(tx) = &tx {
