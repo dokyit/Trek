@@ -34,6 +34,7 @@ mod placement;
 mod preview;
 mod pstack;
 mod readability;
+mod reentry;
 mod relocate;
 mod remote;
 mod render;

@@ -287,11 +287,12 @@ impl EditorView {
         }
         cx.spawn_in(window, async move |this, cx| {
             let (text, problem, instead) = cx.background_executor().spawn(async move { load_or_preview(&path) }).await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            // Not run if the editor has closed; logged if refused, as the file would never show.
+            crate::logging::ran(this.update_in(cx, |this, window, cx| {
                 this.not_text = instead;
                 this.loaded(text, problem, lang, window, cx);
                 cx.notify();
-            });
+            }));
         })
         .detach();
         this

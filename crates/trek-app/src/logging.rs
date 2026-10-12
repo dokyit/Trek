@@ -6,7 +6,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// How many days of log files are kept.
 const KEEP_DAYS: i64 = 7;
@@ -35,12 +34,88 @@ pub fn init() {
         let f: &'static DailyFile = Box::leak(Box::new(f));
         tracing_subscriber::fmt::layer().with_ansi(false).with_writer(move || f.writer())
     });
-    tracing_subscriber::registry()
-        .with(filter())
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(file_layer)
-        .init();
+    let subscriber = tracing_subscriber::registry().with(filter()).with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr)).with(file_layer);
+    // Not `init()`: that hands `log` records to tracing as they are, and GPUI's carry no target.
+    if tracing::subscriber::set_global_default(subscriber).is_ok() && log::set_boxed_logger(Box::new(LogBridge::default())).is_ok() {
+        log::set_max_level(tracing_log::AsLog::as_log(&tracing::level_filters::LevelFilter::current()));
+    }
     install_panic_hook();
+}
+
+/// GPUI's (and other crates') `log` records, handed to tracing. What GPUI logs with `log_err`
+/// names its target from a path under `crates/`, which a crate from the registry hasn't got: its
+/// lines came out as `ERROR : RefCell already borrowed`, saying neither what nor where. Such a
+/// record gets its target from its file (`gpui_pre::window`) and the file and line it was logged
+/// at, which for `log_err` is the call that failed (a window's resize callback, a frame).
+#[derive(Default)]
+struct LogBridge(tracing_log::LogTracer);
+
+impl log::Log for LogBridge {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !record.target().is_empty() {
+            return self.0.log(record);
+        }
+        let Some((target, file)) = record.file().and_then(source_of) else { return self.0.log(record) };
+        let line = record.line().unwrap_or(0);
+        self.0.log(
+            &log::Record::builder()
+                .level(record.level())
+                .target(&target)
+                .module_path(Some(&target))
+                .file(Some(&file))
+                .line(record.line())
+                .args(format_args!("{} (at {file}:{line})", record.args()))
+                .build(),
+        );
+    }
+
+    fn flush(&self) {}
+}
+
+/// What came of an update that may not have run, `None` if it didn't. A window that has closed
+/// meanwhile is nothing to tell; an update GPUI refused because the app was being updated already
+/// ("RefCell already borrowed": it was asked for from inside another, as a Win32 call that has
+/// Windows call back at once does) was lost, and is logged once per place, with where.
+#[track_caller]
+pub fn ran<T>(result: anyhow::Result<T>) -> Option<T> {
+    let error = match result {
+        Ok(value) => return Some(value),
+        Err(e) => e,
+    };
+    if error.chain().any(|e| e.is::<std::cell::BorrowMutError>()) {
+        let at = std::panic::Location::caller();
+        static TOLD: Mutex<Vec<(&str, u32)>> = Mutex::new(Vec::new());
+        let mut told = TOLD.lock().unwrap_or_else(PoisonError::into_inner);
+        if !told.contains(&(at.file(), at.line())) {
+            told.push((at.file(), at.line()));
+            tracing::warn!("an update at {}:{} didn't run: the app was being updated already ({error})", at.file(), at.line());
+        }
+    }
+    None
+}
+
+/// A source file's module and its path from its crate's folder: `…\registry\src\index…\gpui-pre-0.3.7\src\app\async_context.rs`
+/// is `gpui_pre::app::async_context`, in `gpui-pre-0.3.7/src/app/async_context.rs`. Either
+/// separator, as a path built on one system is read on the other; `None` for a path with no `src`.
+fn source_of(path: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let src = parts.iter().rposition(|p| *p == "src").filter(|&i| i > 0 && i + 1 < parts.len())?;
+    let folder = parts[src - 1];
+    // The folder is the package and its version (`gpui-pre-0.3.7`), or the package alone.
+    let package = folder.match_indices('-').find(|(i, _)| folder[i + 1..].starts_with(|c: char| c.is_ascii_digit())).map_or(folder, |(i, _)| &folder[..i]);
+    let mut module = vec![package.replace('-', "_")];
+    for (n, part) in parts[src + 1..].iter().enumerate() {
+        let part = part.strip_suffix(".rs").unwrap_or(part);
+        let last = n + 2 == parts.len() - src;
+        if !(last && matches!(part, "lib" | "main" | "mod")) {
+            module.push(part.to_string());
+        }
+    }
+    Some((module.join("::"), parts[src - 1..].join("/")))
 }
 
 fn install_panic_hook() {
@@ -144,8 +219,88 @@ fn prune(dir: &Path, today: chrono::NaiveDate) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use log::Log as _;
+
+    /// What `f` logs on this thread, as the log file has it (no time, no colour).
+    pub fn captured(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Lines(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).without_time().with_max_level(tracing::Level::TRACE).with_writer(move || writer.clone()).finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8_lossy(&lines.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+    }
+
+    #[test]
+    fn a_source_file_names_its_module_and_where_it_is() {
+        // As a crate from the registry is built on Windows and on a Mac, and with its paths trimmed.
+        let gpui = (String::from("gpui_pre::app::async_context"), String::from("gpui-pre-0.3.7/src/app/async_context.rs"));
+        for path in [
+            r"C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gpui-pre-0.3.7\src\app\async_context.rs",
+            "/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-0.3.7/src/app/async_context.rs",
+            "gpui-pre-0.3.7/src/app/async_context.rs",
+        ] {
+            assert_eq!(source_of(path), Some(gpui.clone()), "{path}");
+        }
+        assert_eq!(source_of(r"D:\a\deps\gpui-pre-windows-0.3.7\src\window.rs").map(|s| s.0).as_deref(), Some("gpui_pre_windows::window"));
+        // A crate's root and a folder's `mod.rs` are the module itself; a folder without a version is the package.
+        assert_eq!(source_of("/src/tree-sitter-json-0.24.8/src/lib.rs").map(|s| s.0).as_deref(), Some("tree_sitter_json"));
+        assert_eq!(source_of("/x/wry/src/webview2/mod.rs").map(|s| s.0).as_deref(), Some("wry::webview2"));
+        // Nothing to go on.
+        assert_eq!(source_of("lib.rs"), None);
+        assert_eq!(source_of("/x/src"), None);
+    }
+
+    /// GPUI's `log_err` from a crate in the registry: no target. It's given one, and where.
+    #[test]
+    fn a_log_record_without_a_target_says_what_and_where() {
+        let said = captured(|| {
+            LogBridge::default().log(
+                &log::Record::builder()
+                    .level(log::Level::Error)
+                    .target("")
+                    .file(Some(r"C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gpui-pre-0.3.7\src\window.rs"))
+                    .line(Some(1959))
+                    .args(format_args!("RefCell already borrowed"))
+                    .build(),
+            );
+            // One with a target is left as it is.
+            LogBridge::default().log(&log::Record::builder().level(log::Level::Warn).target("gpui_windows::directx_devices").args(format_args!("no debug layer")).build());
+        });
+        assert!(said.contains("ERROR gpui_pre::window: RefCell already borrowed (at gpui-pre-0.3.7/src/window.rs:1959)"), "{said}");
+        assert!(said.contains("WARN gpui_windows::directx_devices: no debug layer\n"), "{said}");
+    }
+
+    #[test]
+    fn a_refused_update_is_told_once_per_place() {
+        let cell = std::cell::RefCell::new(());
+        let busy = cell.borrow();
+        let refused = || -> anyhow::Result<()> { Err(cell.try_borrow_mut().map(|_| ()).unwrap_err().into()) };
+        let said = captured(|| {
+            for _ in 0..3 {
+                assert_eq!(ran(refused()), None);
+            }
+            assert_eq!(ran(refused()), None);
+            // A window that's gone is no news.
+            assert_eq!(ran::<()>(Err(anyhow::anyhow!("window not found"))), None);
+            assert_eq!(ran(Ok(5)), Some(5));
+        });
+        drop(busy);
+        assert_eq!(said.matches("didn't run").count(), 2, "once for each of the two places: {said}");
+        assert!(said.contains(file!()) && !said.contains("window not found"), "{said}");
+    }
 
     fn scratch() -> PathBuf {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
