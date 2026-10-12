@@ -359,7 +359,7 @@ impl IdeWorkbench {
     }
 
     /// The preview in front, if the tab in front is one.
-    #[cfg(any(test, all(feature = "shots", windows)))]
+    #[cfg(any(test, feature = "shots"))]
     pub fn active_preview(&self) -> Option<Entity<preview::PreviewView>> {
         self.tabs.get(self.active).and_then(|t| t.preview_view().cloned())
     }
