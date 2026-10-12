@@ -167,6 +167,8 @@ enum Script {
     Stream(Duration),
     /// A long answer with every kind of block, for reviewing how answers read.
     Prose,
+    /// An answer in TeX math, inline and display (`mock:math`); `stream`: at reading pace.
+    Math { slow: bool },
     /// An answer with native visualization blocks: the showcase, or one `type`'s example.
     Visualization(Option<&'static str>),
     /// `Visualization`, slowly: the block arrives over a few seconds.
@@ -258,6 +260,7 @@ impl Script {
                 "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "prose" if w.starts_with("mock:") => Script::Prose,
+                "math" if w.starts_with("mock:") => Script::Math { slow: words.get(i + 1).is_some_and(|w| w == "stream") },
                 "visualization" if w.starts_with("mock:") => {
                     let kind = |j: usize| words.get(j).and_then(|t| VIZ_GALLERY.iter().find(|(kind, _)| *kind == t.as_str())).map(|(kind, _)| *kind);
                     match words.get(i + 1).map(String::as_str) {
@@ -331,6 +334,7 @@ pub fn title(request: &str) -> String {
         Script::Long(_) => "Run the full test suite",
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
+        Script::Math { .. } => "Work out the posterior",
         Script::Visualization(_) | Script::VisualizationStream(_) | Script::VisualizationInvalid => "Compare release health dashboards",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
@@ -711,6 +715,14 @@ impl Session {
                 self.think(PROSE_THOUGHT).await?;
                 // At reading pace, so the answer can be watched (and captured) as it grows.
                 self.say_at(PROSE, 45).await?;
+            }
+            Script::Math { slow } => {
+                self.think(MATH_THOUGHT).await?;
+                if slow {
+                    self.say_at(MATH, 70).await?;
+                } else {
+                    self.say(MATH).await?;
+                }
             }
             Script::Visualization(None) => self.say(VISUALIZATION).await?,
             Script::Visualization(Some(kind)) => self.say(VIZ_GALLERY.iter().find(|(k, _)| *k == kind).map_or(VISUALIZATION, |(_, answer)| answer)).await?,
@@ -1797,6 +1809,47 @@ fn tokens(text: &str) -> Vec<&str> {
 
 const ANSWER: &str = "## How the app starts\n\nStartup happens in `src/main.rs`: it parses the flags, loads the config and opens the window.\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults.\n- The **window** is created last, so a bad config fails fast.\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\nIf you want to change the startup order, `app::run` in `src/app.rs` is the place.";
 
+const MATH_THOUGHT: &str = r"**Setting up Bayes' rule**
+
+The prior is tiny, $P(\theta=1)=0.001$, so even a good test leaves the posterior small: $P(\theta=1\mid T=+) \propto 0.99 \times 0.001$.";
+
+/// Math as agents write it: the four delimiters, fractions, scripts, roots, operators with
+/// limits, environments, and dollars that are money or shell.
+const MATH: &str = r"## The posterior after a positive test
+
+Let $\theta = 1$ mean the condition is present. The prior is $P(\theta=1) = 0.001$, the test's sensitivity is $P(T=+\mid\theta=1) = 0.99$ and its false-positive rate is $P(T=+\mid\theta=0) = 0.06$.
+
+(a) By Bayes' rule, \[ P(\theta=1\mid T=+) =\frac{0.99(0.001)}{0.99(0.001)+0.06(0.999)} \approx \boxed{0.0162482}. \]
+
+So even after a positive test the chance is only about $1.6\%$: the false positives from the $99.9\%$ who are healthy swamp the true ones.
+
+(b) After a second, independent positive test:
+
+$$
+P(\theta=1\mid T_1=+,T_2=+) = \frac{0.99^2 \cdot 0.001}{0.99^2 \cdot 0.001 + 0.06^2 \cdot 0.999} \approx 0.2142
+$$
+
+### A few more shapes
+
+- Inline: \(e^{i\pi} + 1 = 0\), $\sqrt{2} \approx 1.4142$, $x_{n+1} = x_n - \frac{f(x_n)}{f'(x_n)}$, and $\hat\theta$, $\bar{x}$, $\vec{v}$, $\alpha \le \beta \ne \gamma$.
+- Sums and limits: $\sum_{i=1}^{n} i = \tfrac{n(n+1)}{2}$ inline, and on its own
+  $$\lim_{n\to\infty}\left(1+\frac{1}{n}\right)^{n} = e, \qquad \int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}$$
+- Money and shell stay as written: it costs $5 and $10, and `echo $HOME` prints your home folder.
+
+\[
+\begin{aligned}
+\operatorname{Var}(X) &= \mathbb{E}\left[(X-\mu)^2\right] \\
+&= \mathbb{E}[X^2] - \mu^2
+\end{aligned}
+\qquad
+A = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix},\quad
+|x| = \begin{cases} x & x \ge 0 \\ -x & x < 0 \end{cases}
+\]
+
+The binomial coefficient $\binom{n}{k} = \frac{n!}{k!\,(n-k)!}$ and $\sqrt[3]{27} = 3$ round it off. The rarer shapes:
+
+$$\sqrt{\begin{bmatrix} a \\ b \\ c \\ d \end{bmatrix}} \quad \overbrace{x+y+z}^{3\text{ terms}} \quad \widehat{ABC} \quad \overrightarrow{AB} \quad X \xrightarrow{\;f\;} Y \quad \cancel{5x} \quad \left\lVert v \right\rVert \quad \lfloor x \rfloor \quad \left\{ \begin{matrix} 1 \\ 2 \\ 3 \\ 4 \\ 5 \end{matrix} \right.$$";
+
 const PROSE_THOUGHT: &str = "**Mapping the startup path**\n\nThe flags are parsed in `src/cli.rs` before anything else, so a *bad flag* never opens a window. I'll walk through it in order and show the config table.";
 
 const PROSE: &str = "## How the app starts\n\nStartup lives in `src/main.rs`. It does three things, in order: it **parses the flags**, it **loads the settings**, and only then does it **open the window**, so a bad config fails before anything is drawn.\n\n### Flags and settings\n\n- **Flags** are parsed in `src/cli.rs` into a `Config`. Unknown flags are an error, not a warning.\n- **Settings** come from `config.toml`; anything missing falls back to the defaults in `src/settings.rs`.\n  - Paths in it may start with `~/`.\n  - A setting that fails to parse names its line.\n- The **window** is created last, from `src/app.rs`.\n\n### What each setting does\n\n| Setting | Default | What it does |\n| --- | --- | --- |\n| `theme` | `night` | Night or Paper |\n| `font_size` | `14.5` | Transcript text, in points |\n| `telemetry` | `false` | Never sent unless you turn it on |\n\n## The entry point\n\n```rust\nfn main() -> anyhow::Result<()> {\n    let cfg = cli::parse_args();\n    let settings = Settings::load(&cfg.config_path)?;\n    app::run(settings)\n}\n```\n\n> The order matters: a window opened before the settings load would flash the default theme.\n\n1. Read `src/cli.rs` first: it is short.\n2. Then `src/settings.rs`, which is where most changes land.\n3. Finally `src/app.rs`, for the window itself.\n\nThe folder `src/` holds all of it. For the config format itself, see [the TOML spec](https://toml.io).";
@@ -1920,6 +1973,9 @@ mod tests {
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
         assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
         assert_eq!(Script::parse("mock:prose", false), Script::Prose);
+        assert_eq!(Script::parse("mock:math", false), Script::Math { slow: false });
+        assert_eq!(Script::parse("mock:math stream", false), Script::Math { slow: true });
+        assert_eq!(Script::parse("do the math", false), Script::Answer, "only by its full name");
         assert_eq!(Script::parse("mock:visualization", false), Script::Visualization(None));
         assert_eq!(Script::parse("mock:visualization flow", false), Script::Visualization(Some("flow")));
         assert_eq!(Script::parse("mock:visualization nonsense", false), Script::Visualization(None));
@@ -2031,7 +2087,7 @@ mod tests {
 
     #[test]
     fn tokens_rebuild_the_text() {
-        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, VISUALIZATION, "short", "ünïcödé words stream fine"] {
+        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, MATH, MATH_THOUGHT, VISUALIZATION, "short", "ünïcödé words stream fine"] {
             assert_eq!(tokens(text).concat(), text);
             assert!(tokens(text).iter().all(|t| !t.is_empty()));
         }
