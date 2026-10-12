@@ -169,7 +169,7 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
 /// A markdown view of an agent's answer in `cwd`, set at `size`, with Trek's style and path
 /// chips. `folder`: the tint of folder icons in the chips (the project's colour).
 pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, None, cx)
 }
 
 /// `view`, with Trek's native visualization blocks enabled. Assistant answers use this; tool
@@ -177,19 +177,20 @@ pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<
 /// `live`: the answer is still streaming in, so a visualization block it hasn't closed yet is
 /// drawn as far as it's written (in a finished answer one left open can't be drawn).
 pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, live: bool, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, Some(live), cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, Some(live), None, cx)
 }
 
 /// `view`, for the agent's reasoning: the same markdown, a step quieter.
 pub fn thought(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Muted, None, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Muted, None, None, cx)
 }
 
 /// `view` of `text` with its state kept by the window under `id`, for answers shown outside the
 /// transcript (the side chat, which gets visualization blocks; notes, which don't). `live` as
-/// for `answer`.
-pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, visualizations: bool, live: bool, cx: &App) -> TextView {
-    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations.then_some(live), cx)
+/// for `answer`. `images_within`: the column's width, for a column narrower than the widest an
+/// image is drawn (a note's preview beside its text); images are drawn no wider than it.
+pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, visualizations: bool, live: bool, images_within: Option<Pixels>, cx: &App) -> TextView {
+    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations.then_some(live), images_within, cx)
 }
 
 /// Text streaming in fades in, as it arrives.
@@ -198,13 +199,14 @@ pub fn streaming() -> TextViewMotion {
 }
 
 /// `visualizations`: draw `trek-viz` blocks, and whether the text is still streaming in.
-fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, cx: &App) -> TextView {
+/// `images_within`: as for `keyed`.
+fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, images_within: Option<Pixels>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
     let view = view.selectable(true)
         .style(style(size, tone, cx))
         .text_size(size)
         .line_height(relative(LINE_HEIGHT))
-        .plugin(LocalImages { cwd: cwd.clone() })
+        .plugin(LocalImages { cwd: cwd.clone(), within: images_within })
         .plugin(PathChips { cwd, folder })
         .on_link_click(move |url, _, window, cx| {
             // A trek:// link is Trek's own to open (a thread an agent handed work to, a file);
@@ -424,15 +426,21 @@ struct LocalImage {
 /// here. Remote ones, and files Trek can't draw, render as the markdown view does by default.
 struct LocalImages {
     cwd: Option<PathBuf>,
+    /// The column's width, when it may be narrower than `IMAGE_MAX` (a note's preview beside
+    /// its text). The text layer measures an inline image at its own size, before it knows the
+    /// line's width, so the bound has to come from the view that knows it.
+    within: Option<Pixels>,
 }
 
 /// The widest and tallest an answer's image is drawn; the preview shows it whole.
 const IMAGE_MAX: (f32, f32) = (480., 320.);
 
-/// An image `pixels` big drawn in an answer: a point a pixel, down to fit `IMAGE_MAX`.
-fn image_size((w, h): (u32, u32)) -> Size<Pixels> {
+/// An image `pixels` big drawn in an answer: a point a pixel, down to fit `IMAGE_MAX`, and no
+/// wider than `within` when the column is narrower than that.
+fn image_size((w, h): (u32, u32), within: Option<f32>) -> Size<Pixels> {
     let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-    let k = (IMAGE_MAX.0 / w).min(IMAGE_MAX.1 / h).min(1.);
+    let widest = within.filter(|c| *c > 0.).map_or(IMAGE_MAX.0, |c| c.min(IMAGE_MAX.0));
+    let k = (widest / w).min(IMAGE_MAX.1 / h).min(1.);
     size(px(w * k), px(h * k))
 }
 
@@ -452,16 +460,13 @@ impl MarkdownPlugin for LocalImages {
         let data = node.data::<LocalImage>()?;
         let theme = cx.theme();
         let path = data.path.clone();
-        let shown = image_size(data.pixels);
+        let shown = image_size(data.pixels, self.within.map(f32::from));
         let el = div()
             .id(SharedString::from(format!("md-image-{}", path.display())))
             .test_support()
             .relative()
             .w(shown.width)
-            // A column narrower than the image (a note's preview beside its text) scales it down
-            // rather than cut it off; the height follows from the width.
-            .max_w_full()
-            .aspect_ratio(shown.width.as_f32() / shown.height.as_f32())
+            .h(shown.height)
             .my(px(4.))
             .rounded(px(8.))
             .overflow_hidden()
@@ -671,10 +676,17 @@ mod tests {
 
     #[test]
     fn answer_images_are_a_point_a_pixel_up_to_a_bound() {
-        assert_eq!(image_size((64, 32)), gpui_kit::size(px(64.), px(32.)));
-        let shot = image_size((2880, 1800));
+        assert_eq!(image_size((64, 32), None), gpui_kit::size(px(64.), px(32.)));
+        let shot = image_size((2880, 1800), None);
         assert!((shot.width.as_f32() - IMAGE_MAX.0).abs() < 0.01 && shot.height.as_f32() <= IMAGE_MAX.1);
-        let tall = image_size((400, 4000));
+        let tall = image_size((400, 4000), None);
         assert!((tall.height.as_f32() - IMAGE_MAX.1).abs() < 0.01 && (tall.width.as_f32() - 32.).abs() < 0.01);
+        // A narrow column (a note's preview beside its text) bounds the width; a wide one, or
+        // none known yet, changes nothing.
+        let narrow = image_size((2880, 1800), Some(300.));
+        assert!((narrow.width.as_f32() - 300.).abs() < 0.01 && (narrow.height.as_f32() - 187.5).abs() < 0.01);
+        assert_eq!(image_size((64, 32), Some(300.)), gpui_kit::size(px(64.), px(32.)), "never scaled up");
+        assert_eq!(image_size((2880, 1800), Some(900.)), shot);
+        assert_eq!(image_size((2880, 1800), Some(0.)), shot, "unmeasured yet");
     }
 }
