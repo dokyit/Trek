@@ -1,0 +1,2 @@
+- Tidy the notes
+- Add the other thing
