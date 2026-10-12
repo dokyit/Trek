@@ -161,7 +161,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Hide Trek", HideApp),
-                MenuItem::action("Quit Trek", Quit),
+                MenuItem::action(crate::words::words().quit_app, Quit),
             ],
             disabled: false,
         },
