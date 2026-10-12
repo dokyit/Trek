@@ -39,6 +39,12 @@ pub fn notes_dir() -> PathBuf {
     crate::paths::data_dir().join("notes")
 }
 
+/// Where the images in notes are kept, beside them: a note's text links to `assets/<file>`, so
+/// the links read the same whichever folder the notes are in.
+pub fn assets_dir() -> PathBuf {
+    notes_dir().join("assets")
+}
+
 /// Every note in `dir`, the most recently changed first.
 pub fn list_in(dir: &Path) -> Vec<Note> {
     let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
@@ -65,7 +71,9 @@ pub fn create_in(dir: &Path) -> std::io::Result<Note> {
     Ok(Note { id, path, body: String::new(), modified: crate::store::now_ms() })
 }
 
-/// Move `note` out of the list into `Deleted/` beside it, where it can still be got back.
+/// Move `note` out of the list into `Deleted/` beside it, where it can still be got back. Its
+/// images stay in `assets/`: a note that comes back from `Deleted/` has its links intact, and
+/// the images may well be linked from somewhere else by then.
 pub fn delete(note: &Note) -> std::io::Result<PathBuf> {
     let bin = note.path.parent().unwrap_or(Path::new(".")).join("Deleted");
     std::fs::create_dir_all(&bin)?;
@@ -85,10 +93,28 @@ fn title_of(body: &str) -> String {
     body.lines().map(plain).find(|l| !l.is_empty()).map(|l| l.chars().take(80).collect()).unwrap_or_else(|| "Untitled".into())
 }
 
+/// `line` with each `![alt](path)` read as its alt text: a list shows what an image is called,
+/// not where it lives.
+fn image_alt_only(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find("![") {
+        let after = &rest[at + 2..];
+        let image = after.find("](").and_then(|close| after[close + 2..].find(')').map(|end| (close, close + 2 + end)));
+        let Some((alt_end, link_end)) = image else { break };
+        out.push_str(&rest[..at]);
+        out.push_str(&after[..alt_end]);
+        rest = &after[link_end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A line of markdown as text: no heading, list, quote or checkbox marker, no emphasis marks or
-/// inline tags.
+/// inline tags, an image as its alt text.
 fn plain(line: &str) -> String {
-    let mut l = line.trim();
+    let without_images = image_alt_only(line);
+    let mut l = without_images.trim();
     l = l.trim_start_matches('#').trim_start();
     l = l.strip_prefix("> ").unwrap_or(l);
     for marker in ["- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "] {
@@ -311,6 +337,21 @@ pub fn toggle_check(text: &str, line: usize) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// Put `link` (`![alt](assets/…)`, or several of them, a line each) on a line of its own where
+/// the caret is, in place of what's selected: a line break goes before it unless it starts a
+/// line, and one after it unless one is already there. The caret lands on the line below, ready
+/// to go on writing.
+pub fn insert_image(text: &str, sel: Range<usize>, link: &str) -> Edit {
+    let sel = clamp(text, sel);
+    let (before, after) = (&text[..sel.start], &text[sel.end..]);
+    let lead = if before.is_empty() || before.ends_with('\n') { "" } else { "\n" };
+    // A line break already after the caret is the one that ends the image's line.
+    let trail = if after.starts_with('\n') { "" } else { "\n" };
+    let new = format!("{before}{lead}{link}{trail}{after}");
+    let caret = before.len() + lead.len() + link.len() + 1;
+    Edit { text: new, selection: caret..caret }
+}
+
 /// `sel` inside `text` and on character boundaries.
 fn clamp(text: &str, sel: Range<usize>) -> Range<usize> {
     let fix = |mut i: usize| {
@@ -410,6 +451,56 @@ mod tests {
         assert_eq!(n.preview(), "tabs notes");
         let empty = Note { body: "  \n".into(), ..n };
         assert_eq!(empty.title(), "Untitled");
+    }
+
+    #[test]
+    fn an_image_gets_a_line_of_its_own() {
+        let link = "![shot](assets/a-shot.png)";
+        // Mid-line: a line break before and after, the caret on the line below.
+        let e = insert_image("see this now", 8..8, link);
+        assert_eq!(e.text, format!("see this\n{link}\n now"));
+        assert_eq!(e.selection, e.text.len() - 4..e.text.len() - 4);
+        assert_eq!(&e.text[e.selection.start..], " now");
+        // At the start of a line: no break before.
+        let e = insert_image("one\ntwo", 4..4, link);
+        assert_eq!(e.text, format!("one\n{link}\ntwo"));
+        assert_eq!(&e.text[e.selection.start..], "two");
+        // At the end of a line: the break that's there ends the image's line.
+        let e = insert_image("one\ntwo", 3..3, link);
+        assert_eq!(e.text, format!("one\n{link}\ntwo"));
+        assert_eq!(&e.text[e.selection.start..], "two");
+        // An empty note, and the end of a note: the caret has a new line to write on.
+        let e = insert_image("", 0..0, link);
+        assert_eq!((e.text.as_str(), e.selection.clone()), ("![shot](assets/a-shot.png)\n", 27..27));
+        let e = insert_image("end", 3..3, link);
+        assert_eq!(e.text, format!("end\n{link}\n"));
+        assert_eq!(e.selection.start, e.text.len());
+        // What's selected is replaced, a selection backwards or past the end is made sense of.
+        let e = insert_image("a gone b", 2..6, link);
+        assert_eq!(e.text, format!("a \n{link}\n b"));
+        assert_eq!(insert_image("abc", 99..99, link).text, format!("abc\n{link}\n"));
+        // Several images: a line each, as given.
+        let two = format!("{link}\n![b](assets/b.png)");
+        let e = insert_image("x", 0..0, &two);
+        assert_eq!(e.text, format!("{two}\nx"));
+        assert_eq!(&e.text[e.selection.start..], "x");
+        // Characters wider than a byte don't split.
+        let e = insert_image("héllo", 2..2, link);
+        assert_eq!(e.text, format!("h\n{link}\néllo"));
+    }
+
+    #[test]
+    fn an_image_in_the_list_reads_as_its_name() {
+        assert_eq!(plain("![Login screen](assets/abc-login.png)"), "Login screen");
+        assert_eq!(plain("a ![x](p.png) and ![y](q.png) b"), "a x and y b");
+        assert_eq!(plain("- ![**bold** alt](assets/a.png) after"), "bold alt after");
+        assert_eq!(plain("![](assets/a.png)"), "");
+        // Not an image: left as it is (the brackets and all).
+        assert_eq!(plain("![unfinished"), "![unfinished");
+        let n = Note { id: "x".into(), path: PathBuf::new(), body: "Ideas\n![Login screen](assets/abc-login.png)\nmore".into(), modified: 0 };
+        assert_eq!(n.preview(), "Login screen more");
+        let only = Note { body: "![Login screen](assets/abc-login.png)".into(), ..n };
+        assert_eq!(only.title(), "Login screen");
     }
 
     #[test]
