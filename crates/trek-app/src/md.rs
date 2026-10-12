@@ -166,6 +166,13 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
         })
 }
 
+/// Maths in `tone`: in the body's colour, like the text around it.
+fn math_ink(tone: Tone, cx: &App) -> crate::math::MathInk {
+    let theme = cx.theme();
+    let ink = Ink::new(theme.foreground, theme.muted_foreground, theme.mode.is_dark(), tone);
+    crate::math::MathInk::new(ink.body, theme.foreground, theme.muted_foreground)
+}
+
 /// A markdown view of an agent's answer in `cwd`, set at `size`, with Trek's style and path
 /// chips. `folder`: the tint of folder icons in the chips (the project's colour).
 pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
@@ -200,12 +207,16 @@ pub fn streaming() -> TextViewMotion {
 /// `visualizations`: draw `trek-viz` blocks, and whether the text is still streaming in.
 fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
+    let math = math_ink(tone, cx);
     let view = view.selectable(true)
         .style(style(size, tone, cx))
         .text_size(size)
         .line_height(relative(LINE_HEIGHT))
         .plugin(LocalImages { cwd: cwd.clone() })
         .plugin(PathChips { cwd, folder })
+        // Every view draws maths: answers, reasoning, tool output, the side chat, notes.
+        .plugin(crate::math::InlineMath { ink: math })
+        .plugin(crate::math::DisplayMath { size, ink: math })
         .on_link_click(move |url, _, window, cx| {
             // A link to an image on disk previews it here; to another file or folder, opens it
             // with the system; a scheme (https:, mailto:) stays a URL; anything else can't open —
@@ -586,6 +597,10 @@ mod tests {
             // What the inline code and path chips sit on, as `style` and `PathChips` draw them.
             let code_bg = over(t.foreground.opacity(0.075), bg);
             let chip_bg = over(t.foreground.opacity(0.045), bg);
+            // Maths: glyphs, bars and radicals in the body's ink; an unknown command's name on its tint.
+            let math = crate::math::MathInk::new(ink.body, t.foreground, t.muted);
+            let quiet_math = crate::math::MathInk::new(quiet.body, t.foreground, t.muted);
+            let math_tint = over(math.tint, bg);
             for (what, ratio) in [
                 ("body", on(ink.body, bg)),
                 ("bold", on(ink.strong, bg)),
@@ -596,6 +611,9 @@ mod tests {
                 ("inline code", on(t.foreground.opacity(0.92), code_bg)),
                 ("path chip", on(t.foreground.opacity(0.9), chip_bg)),
                 ("link", on(rgb(link).into(), bg)),
+                ("maths", on(math.ink, bg)),
+                ("maths in reasoning", on(quiet_math.ink, bg)),
+                ("unknown maths command", on(math.faint, math_tint)),
             ] {
                 assert!(ratio >= AA, "{name}: {what} {ratio:.2}:1");
             }

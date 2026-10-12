@@ -34,6 +34,7 @@ mod languages;
 #[cfg(windows)]
 mod job;
 mod mascot;
+mod math;
 mod md;
 mod mentions;
 mod motion;

@@ -26,6 +26,7 @@ mod lifecycle;
 mod limits;
 mod long_answers;
 mod look;
+mod math;
 mod mcp;
 mod motion;
 mod orchestrate;
