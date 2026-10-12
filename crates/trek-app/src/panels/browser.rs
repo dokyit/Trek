@@ -14,7 +14,7 @@ use gpui_kit::*;
 use gpui_wry::WebView;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -730,14 +730,14 @@ pub(crate) fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<V
 /// A web view's rectangle as the screen shows it, cropped out of a capture of its window: the
 /// editor's previews, for `shots` (the Browser screenshot's own crop).
 #[cfg(all(not(windows), feature = "shots"))]
-pub(crate) fn view_capture(view: &gpui_wry::WebView, window: &Window) -> Option<impl FnOnce(&Path) -> Result<(), String> + Send + use<>> {
+pub(crate) fn view_capture(view: &gpui_wry::WebView, window: &Window) -> Option<impl FnOnce(&std::path::Path) -> Result<(), String> + Send + use<>> {
     let rect = view.bounds();
     let number = native::window_number(view.raw())?;
     if rect.size.width <= px(0.) || rect.size.height <= px(0.) {
         return None;
     }
     let window_width = f32::from(window.bounds().size.width);
-    Some(move |dest: &Path| capture_window_rect(number, window_width, rect, dest))
+    Some(move |dest: &std::path::Path| capture_window_rect(number, window_width, rect, dest))
 }
 
 /// Where WebView2 keeps its profile (cookies, cache): `%LOCALAPPDATA%\Trek\WebView2`, beside the
