@@ -1377,10 +1377,33 @@ impl TrekWindow {
             Route::Notes => self.notes.clone().into_any_element(),
             Route::Editor { path } => {
                 let ev = self.ide.update(cx, |ide, cx| ide.view_for(&path, window, cx));
+                // An editor draws its own header here, with its ×; a preview (an image, a PDF)
+                // has none, so the way out is drawn over it.
+                let header = self.editor(cx).is_none().then(|| {
+                    let theme = cx.theme().clone();
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let dir = path.parent().map(trek_core::paths::tildify).unwrap_or_default();
+                    h_flex()
+                        .px_3()
+                        .h(px(40.))
+                        .flex_none()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .child(Icon::new(IconName::File).small().text_color(theme.muted_foreground))
+                        .child(div().min_w_0().truncate().font_medium().child(name))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(dir))
+                        .child(
+                            crate::ui::icon_button("editor-close", IconName::Close, format!("Close ({})", crate::keys::hint(crate::keys::Id::CloseTab)))
+                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(EditorCommand::Close))))),
+                        )
+                });
                 v_flex()
                     .size_full()
                     .min_w_0()
                     .children(tabs)
+                    .children(header)
                     .child(div().flex_1().min_h_0().child(ev.cached(fill())))
                     .into_any_element()
             }

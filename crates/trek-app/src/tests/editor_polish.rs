@@ -18,7 +18,7 @@ fn route(trek: &Trek, cx: &TestAppContext) -> Route {
     trek.read(cx, |ws, _| ws.route.clone())
 }
 
-async fn loaded(trek: &Trek, cx: &mut TestAppContext) -> Entity<crate::editor::EditorView> {
+pub(super) async fn loaded(trek: &Trek, cx: &mut TestAppContext) -> Entity<crate::editor::EditorView> {
     let deadline = std::time::Instant::now() + REAL_TIME_LIMIT;
     loop {
         trek.render(cx);
@@ -117,6 +117,39 @@ fn closing_a_file_shown_on_its_own_asks_about_unsaved_edits_and_stays_when_cance
         trek.render(cx);
         assert!(route(&trek, cx) == from);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "[a]\nb = 1\n", "nothing written");
+    });
+}
+
+/// An image (or a PDF, a file that isn't text) shown on its own is a preview, not an editor: it
+/// has the same way out, and closing it goes back as an editor's does instead of the screen
+/// making its tab again.
+#[test]
+fn a_picture_shown_on_its_own_closes_like_a_file_does() {
+    run(async |cx| {
+        let trek = open(cx);
+        let png = trek.project.join("chart.png");
+        image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 80, 40, 255])).save(&png).unwrap();
+        let project = trek.project.clone();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        let from = route(&trek, cx);
+        for close in ["the ×", "⌘W / Ctrl+W", "the palette"] {
+            trek.update(cx, |ws, cx| ws.open_editor(png.clone(), None, cx));
+            trek.render(cx);
+            assert!(matches!(route(&trek, cx), Route::Editor { .. }), "{close}: the picture is on its own");
+            assert!(trek.visible(cx, "ide-preview-image") && trek.visible(cx, "editor-close"), "{close}: the picture, and the way out");
+            match close {
+                "the ×" => trek.click(cx, "editor-close"),
+                "⌘W / Ctrl+W" => trek.press(cx, "secondary-w"),
+                _ => {
+                    trek.press(cx, "secondary-k");
+                    trek.type_text(cx, "Close file");
+                    trek.press(cx, "enter");
+                }
+            }
+            trek.render(cx);
+            assert!(route(&trek, cx) == from, "{close}: back on the draft");
+            assert_eq!(open_tabs(&trek, cx), 0, "{close}: closed, not made again");
+        }
     });
 }
 
