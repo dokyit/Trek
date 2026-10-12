@@ -2,8 +2,9 @@
 //! JetBrains Mono (the no-ligature "NL" cut, as Menlo has none) for code, tool rows, paths and the
 //! transcript's inline code. They're embedded in the binary and registered with the text system at
 //! startup, then named by family in the theme (`assets/themes/trek.json`), which every view reads
-//! (`theme.font_family`, `theme.mono_font_family`). Both are under the SIL Open Font License; the
-//! licences sit beside the files in `assets/fonts`.
+//! (`theme.font_family`, `theme.mono_font_family`). The KaTeX fonts set the math in answers
+//! (`crate::math`). All are under the SIL Open Font License; the licences sit beside the files in
+//! `assets/fonts`.
 
 use std::borrow::Cow;
 
@@ -35,6 +36,25 @@ pub fn files() -> Vec<Cow<'static, [u8]>> {
         font!("JetBrainsMonoNL-Medium.ttf"),
         font!("JetBrainsMonoNL-SemiBold.ttf"),
         font!("JetBrainsMonoNL-Bold.ttf"),
+        // Math in answers (`crate::math`): the KaTeX fonts, Computer Modern's look. GPUI won't
+        // load a font without an `m`, so the faces that have none are given one and renamed
+        // TrekMath, as their licence asks (`script/math-fonts.py`).
+        font!("KaTeX_Main-Regular.ttf"),
+        font!("KaTeX_Main-Bold.ttf"),
+        font!("KaTeX_Main-Italic.ttf"),
+        font!("KaTeX_Main-BoldItalic.ttf"),
+        font!("KaTeX_Math-Italic.ttf"),
+        font!("KaTeX_Math-BoldItalic.ttf"),
+        font!("TrekMath_AMS-Regular.ttf"),
+        font!("TrekMath_Caligraphic-Regular.ttf"),
+        font!("KaTeX_Fraktur-Regular.ttf"),
+        font!("TrekMath_Script-Regular.ttf"),
+        font!("KaTeX_SansSerif-Regular.ttf"),
+        font!("KaTeX_Typewriter-Regular.ttf"),
+        font!("TrekMath_Size1-Regular.ttf"),
+        font!("TrekMath_Size2-Regular.ttf"),
+        font!("TrekMath_Size3-Regular.ttf"),
+        font!("TrekMath_Size4-Regular.ttf"),
     ]
 }
 

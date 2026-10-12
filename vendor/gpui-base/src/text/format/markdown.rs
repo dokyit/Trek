@@ -19,8 +19,12 @@ use crate::text::{
 /// Parse Markdown into a tree of nodes.
 pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<ParsedDocument, SharedString> {
     let options = cx.markdown_extensions.parse_options();
-    let mut root =
-        markdown::to_mdast(source, &options).map_err(|e| SharedString::from(e.to_string()))?;
+    // Trek: a plugin may hide spans from the Markdown parser (math whose backslashes Markdown
+    // would read as escapes). Positions line up byte for byte, and everything else reads the
+    // original source.
+    let masked = cx.markdown_extensions.mask_source(source);
+    let mut root = markdown::to_mdast(masked.as_deref().unwrap_or(source), &options)
+        .map_err(|e| SharedString::from(e.to_string()))?;
     let mut prose = options;
     prose.constructs.math_text = false;
     prose.constructs.math_flow = false;
@@ -46,10 +50,15 @@ fn flatten_unclaimed_math(node: &mut Node, source: &str, options: &ParseOptions,
         let prose = match &children[ix] {
             Node::InlineMath(_) => {
                 let parse_cx = MarkdownParseContext::new(source, cx.offset);
+                // Trek: a block plugin may claim it too (display math in running text).
                 if cx
                     .markdown_extensions
                     .parse_inline(&children[ix], &parse_cx)
                     .is_some()
+                    || cx
+                        .markdown_extensions
+                        .parse_block(&children[ix], &parse_cx)
+                        .is_some()
                 {
                     None
                 } else {
@@ -937,12 +946,118 @@ fn ast_to_document(source: &str, root: mdast::Node, cx: &mut NodeContext) -> Par
     let blocks = root
         .children
         .into_iter()
-        .map(|c| ast_to_node(source, c, cx))
+        .flat_map(|c| ast_to_nodes(source, c, cx))
         .collect();
     ParsedDocument {
         source: source.to_string().into(),
         blocks: Arc::new(blocks),
     }
+}
+
+/// Trek: `ast_to_node`, except that a paragraph holding inline math a block plugin claims —
+/// display math written in running text, `… by Bayes' rule, \[ P = 1 \] so …` — splits around
+/// it: the formula stands on its own as a block, and the text before and after it stay
+/// paragraphs.
+fn ast_to_nodes(source: &str, value: mdast::Node, cx: &mut NodeContext) -> Vec<BlockNode> {
+    let standalone: Vec<bool> = match &value {
+        Node::Paragraph(paragraph) => {
+            let parse_cx = MarkdownParseContext::new(source, cx.offset);
+            paragraph
+                .children
+                .iter()
+                .map(|child| {
+                    matches!(child, Node::InlineMath(_))
+                        && cx
+                            .markdown_extensions
+                            .parse_block(child, &parse_cx)
+                            .is_some()
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    if !standalone.contains(&true) {
+        return vec![ast_to_node(source, value, cx)];
+    }
+    let Node::Paragraph(paragraph) = value else {
+        unreachable!("only paragraphs split")
+    };
+    let mut blocks = Vec::new();
+    let mut run = Vec::new();
+    for (child, standalone) in paragraph.children.into_iter().zip(standalone) {
+        if standalone {
+            if let Some(paragraph) = paragraph_of(std::mem::take(&mut run)) {
+                blocks.push(ast_to_node(source, paragraph, cx));
+            }
+            blocks.push(ast_to_node(source, child, cx));
+        } else {
+            run.push(child);
+        }
+    }
+    if let Some(paragraph) = paragraph_of(run) {
+        blocks.push(ast_to_node(source, paragraph, cx));
+    }
+    blocks
+}
+
+/// The paragraph made of the inline nodes `run`, from a paragraph split around a formula: the
+/// space and line breaks at its ends trimmed, and `None` when nothing else is left.
+fn paragraph_of(mut run: Vec<Node>) -> Option<Node> {
+    loop {
+        match run.first_mut() {
+            Some(Node::Break(_)) => {
+                run.remove(0);
+            }
+            Some(Node::Text(text)) => {
+                let trimmed = text.value.trim_start().len();
+                let cut = text.value.len() - trimmed;
+                if trimmed == 0 {
+                    run.remove(0);
+                    continue;
+                }
+                text.value.drain(..cut);
+                if let Some(position) = text.position.as_mut() {
+                    position.start.offset += cut;
+                    position.start.column += cut;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    loop {
+        match run.last_mut() {
+            Some(Node::Break(_)) => {
+                run.pop();
+            }
+            Some(Node::Text(text)) => {
+                let trimmed = text.value.trim_end().len();
+                if trimmed == 0 {
+                    run.pop();
+                    continue;
+                }
+                let cut = text.value.len() - trimmed;
+                text.value.truncate(trimmed);
+                if let Some(position) = text.position.as_mut() {
+                    position.end.offset -= cut;
+                    position.end.column = position.end.column.saturating_sub(cut);
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    let position = match (run.first()?.position(), run.last()?.position()) {
+        (Some(first), Some(last)) => Some(markdown::unist::Position {
+            start: first.start.clone(),
+            end: last.end.clone(),
+        }),
+        _ => None,
+    };
+    Some(Node::Paragraph(mdast::Paragraph {
+        children: run,
+        position,
+    }))
 }
 
 fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<Span> {
@@ -974,7 +1089,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             let children = val
                 .children
                 .into_iter()
-                .map(|c| ast_to_node(source, c, cx))
+                .flat_map(|c| ast_to_nodes(source, c, cx))
                 .collect();
             BlockNode::Blockquote {
                 children,
@@ -998,7 +1113,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             let children = val
                 .children
                 .into_iter()
-                .map(|c| ast_to_node(source, c, cx))
+                .flat_map(|c| ast_to_nodes(source, c, cx))
                 .collect();
             BlockNode::ListItem {
                 children,

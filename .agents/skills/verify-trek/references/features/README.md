@@ -10,6 +10,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Basecamp and Notes](basecamp-and-notes.md) — review recent work and keep persistent Markdown notes.
 - [Consulting and delegation](consulting-and-delegation.md) — ask other agents to advise, discuss, or implement as child threads.
 - [Inline visualizations](inline-visualizations.md) — render safe, themed charts, heatmaps, treemaps, and UI treatment previews inside an agent answer.
+- [Math rendering](math-rendering.md) — typeset the TeX math in answers, inline and display, while money, shell and code dollars stay as written.
 
 ## Tools
 
